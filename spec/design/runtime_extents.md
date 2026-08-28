@@ -250,9 +250,26 @@ struct RuntimeDynamicAxisOccurrence {
 struct ProvisionalRuntimeDimAuthority {
     origins: Vec<RuntimeOrigin>,
     occurrences: Vec<ProvisionalRuntimeValueOccurrence>,
-    identity_evidence: Vec<RuntimeIdentityEvidence>,
+    identity_evidence: Vec<ProvisionalRuntimeIdentityEvidence>,
     declarations: Vec<ProvisionalRuntimeDimDeclaration>,
     transforms: RuntimeTransformNamespace,
+}
+
+enum ProvisionalRuntimeIdentityEvidence {
+    Unclassed { typed_site: TypedSiteId },
+    ProvedEqual { proof: ProvisionalRuntimeDimProofEvidence },
+    NotProved { typed_site: TypedSiteId },
+}
+
+struct ProvisionalRuntimeDimProofEvidence {
+    typed_site: TypedSiteId,
+    source: ProvisionalRuntimeIdentitySource,
+}
+
+struct ProvisionalRuntimeIdentitySource {
+    class: HygienicRuntimeDim,
+    source: ProvisionalRuntimeDimSourceId,
+    occurrence: ProvisionalRuntimeValueOccurrenceId,
 }
 
 struct ProvisionalRuntimeValueOccurrence {
@@ -360,7 +377,11 @@ occurrence, source, and use IDs. It is
 seeded by typed inference before lowering and is primary state beside, not an
 index reconstructed from, node-local annotations. The annotations point into
 this authority so transforms and finalization can cross-check two independent
-representations.
+representations. Identity proof has the same separation: typed inference stores
+only `ProvisionalRuntimeIdentityEvidence`, whose proved source names the opaque
+provisional class, class-local source edge, and physical occurrence. A
+provisional record never contains or guesses a final numeric class, source,
+use, or occurrence ID.
 `SealedDag` is a module-private newtype with no `DerefMut`, `AsMut<RawDag>`, raw
 constructor, or extraction method. The underlying `RawDag` implementation is
 also module-private: it is not re-exported, has no public constructor or
@@ -482,10 +503,12 @@ target-capacity rejection is allowed.
   independent: the payload selects the physical metadata value, while the
   class/use reference names the destination binder obligation chosen from typed
   identity evidence. They may refer to different hygienic identities.
-  Typed inference gives every binder an opaque provisional
-  `HygienicRuntimeDim` key containing its lexical scope and binder slot. This
-  key, its witness/use role, and a `RuntimeOrigin` travel through lowering on an
-  `AnnotatedDag`; the same key already exists in
+  Typed inference gives every binder instance an opaque provisional
+  `HygienicRuntimeDim` handle. Its declaration's `RuntimeDimOwner` contains the
+  lexical scope, runtime scope instance, and binder slot; none of those fields
+  is recovered from or substituted for the opaque handle. This handle, its
+  witness/use role, and a `RuntimeOrigin` travel through lowering on an
+  `AnnotatedDag`; the same handle already exists in
   `AnnotatedDag.runtime_dims`, independently of the source node or field that
   carries its annotation. Display spelling is never consulted. Source nodes
   and uses
@@ -503,7 +526,27 @@ target-capacity rejection is allowed.
   have different owners. A binder whose declaring lexical-scope instance is
   inside the cloned set moves to the new instance; a captured binder owned by
   an outside instance preserves its owner. Nested clones extend the lineage.
-  The same rule freshens provisional source/use identities. Transform history
+  The same rule freshens the local provisional class, source, use, and
+  occurrence identities. The transaction
+  applies that class/source/use/occurrence mapping to every
+  `ProvisionalRuntimeIdentitySource` atomically with the declaration,
+  occurrence bindings, and annotations: a cloned local proof points only to
+  the cloned local class edge and cloned occurrence, while a proof for a
+  captured outside declaration remains unchanged. Vmap, grad, specialization,
+  and ordinary clone/remap use this rule. Import first maps opaque source DAG
+  handles into fresh destination handles; it then translates every proof
+  triple through that same total map before commit. CSE may remap only the
+  occurrence member of a proof triple to the selected physically equivalent
+  occurrence while preserving its class-local source edge. DCE either
+  preserves the complete reachable proof triple or explicitly discharges the
+  proof together with its axis/use and any now-dead declaration edge. No
+  transaction may update one member of a proof triple, retain an evidence
+  record with a missing endpoint, or infer a replacement proof from equal
+  values.
+
+  Earlier insertion, owner reordering, and canonical vector rebuilding do not
+  rewrite opaque provisional handles at all; only the registered semantic
+  remaps above do. Transform history
   is first-class authority: `issued_through` is a serialized, hashed high-water
   mark for the contiguous local ID range that has ever been allocated. DCE may
   delete a synthesized origin or occurrence only when no provisional/final
@@ -662,6 +705,27 @@ target-capacity rejection is allowed.
   one primary, non-optional `RuntimeDimDeclaration` for every binder instance
   that the provisional authority has not explicitly discharged.
   IDs are assigned from owner and origin order, never from display spelling.
+  Finalization constructs one checked `RuntimeDimFinalizationMap` containing
+  four bijections over the surviving authority:
+
+  ```rust
+  classes: HygienicRuntimeDim <-> RuntimeDimId
+  occurrences: ProvisionalRuntimeValueOccurrenceId <-> RuntimeValueOccurrenceId
+  sources: (HygienicRuntimeDim, ProvisionalRuntimeDimSourceId)
+        <-> (RuntimeDimId, RuntimeDimSourceId)
+  uses: (HygienicRuntimeDim, ProvisionalRuntimeDimUseId)
+        <-> (RuntimeDimId, RuntimeDimUseId)
+  ```
+
+  It translates every `ProvisionalRuntimeIdentityEvidence` through these maps
+  in the same transaction that freezes declarations and occurrence bindings.
+  `ProvedEqual` is accepted only when its class, source edge, and occurrence
+  all map, the mapped source belongs to the mapped class and occurrence, and
+  the typed proof site is still the canonical typed-arena site for that axis.
+  A missing, duplicate, stale, redirected, or non-bijective endpoint aborts
+  finalization before any `FinalizedDag` exists. Final ID assignment therefore
+  cannot change the referent of an earlier proof merely because an owner,
+  source, or occurrence sorts before it.
   Each declaration enumerates the complete ordered `RuntimeDimSourceId`s and
   `RuntimeDimUseId`s plus their typed or synthesized origins. Each source ID is
   a class-local edge to one `RuntimeValueOccurrenceId`; distinct declarations
@@ -672,9 +736,16 @@ target-capacity rejection is allowed.
   executable class manifest.
   `FinalizedDag` has no in-place graph-transform API. A caller that must
   transform a decoded finalized DAG consumes it back into the annotated form,
-  using the final declarations as the new independent provisional baseline and
-  preserving its owner/origin records, history high-water, and transform
-  cursor; it
+  using the final declarations as the new independent provisional baseline.
+  Consume allocates one fresh opaque provisional handle for each final class,
+  occurrence, class-local source, and class-local use in canonical final order,
+  records the checked inverse bijections for the duration of the transaction,
+  and translates each final `RuntimeIdentityEvidence` back to the corresponding
+  provisional proof triple. It never embeds or casts a final numeric ID into a
+  provisional handle. It preserves owner/origin records, history high-water,
+  and transform cursor; a no-op consume/refinalize returns the same canonical
+  final IDs and bytes because final ordering is structural, not because the
+  provisional handles happen to compare equally. The caller
   must refinalize the result.
 
   Each physical literal, rank-zero scalar, or tensor-axis value is assigned one
@@ -1255,12 +1326,15 @@ enum AxisSource {
   second witness. Equality of extent formulas alone never selects
   `ProvedAlias`.
 
-  Typed inference writes the sealed identity evidence into the provisional
-  authority before lowering. Transactions preserve or explicitly remap that
-  evidence; finalization and Wire verification require `ProvedAlias` to carry a
-  valid `ProvedEqual` proof from the canonical typed arena and require
+  Typed inference writes sealed `ProvisionalRuntimeIdentityEvidence` into the
+  provisional authority before lowering. Transactions preserve it or apply the
+  one atomic proof-triple remap above; finalization translates it through the
+  checked provisional-to-final bijections into `RuntimeIdentityEvidence`.
+  Finalization and Wire verification require `ProvedAlias` to carry a valid
+  final `ProvedEqual` proof from the canonical typed arena and require
   `FreshWitness` for `NotProved`. No later pass, lane, or decoder may upgrade
-  `NotProved` by comparing names, value sources, or realized extents.
+  `NotProved` by comparing names, value sources, or realized extents, and no
+  pre-finalization path may guess a final ID.
 
   Phase-4 derivation requires the value rule, identity rule, value/output
   occurrences, both binding vectors, declaration authority, stored axis ID,
@@ -1479,7 +1553,18 @@ axes and windows in one issue.
    scalar-parameter, and scalar-operation-derived Expand/Reshape rows preserve
    their exact value rule, sealed typed identity evidence, proof-sensitive
    identity rule, occurrence, and class-local binding vectors through every
-   transform. The shared-occurrence
+   transform. Provisional-proof rows insert an earlier-sorting owner before
+   finalization and prove that the original opaque proof still maps to its
+   original class/source/occurrence; a mutation that stores an early final
+   numeric ID or redirects the proof to the inserted class fails. Clone and
+   vmap rows freshen all three endpoints for a cloned local proof while leaving
+   a captured outer proof unchanged; mutations that freshen only the class,
+   only the source, or only the occurrence fail atomically. Import rows remap
+   the complete proof triple into the destination namespace. CSE rows remap
+   only a proof's occurrence to the selected equivalent physical occurrence,
+   while DCE rows either retain all endpoints or discharge the complete proof
+   and dependent axis/use. Stale pre-CSE/pre-DCE proof redirections fail.
+   The shared-occurrence
    `a`/`b` rows remain one compute-once producer with two independent class
    edges and guards. Mutations that add a binding to the unclassed literal,
    convert a cross-tensor fresh witness to an alias, drop or change one classed
@@ -1504,7 +1589,11 @@ axes and windows in one issue.
    no-op refinalization byte stability, two post-decode clones of one scope,
    nested post-decode transforms, deterministic ordered DAG import/remapping,
    and rejection of replayed transform IDs, origins, generated paths, malformed
-   scope-instance lineages, or duplicate complete owner identities. The
+   scope-instance lineages, or duplicate complete owner identities. They also
+   prove that consume-to-annotated allocates a complete inverse provisional
+   baseline, translates final proof triples through it, and returns identical
+   bytes on no-op refinalization; embedding or casting a final numeric ID into
+   a provisional proof or omitting one inverse endpoint fails. The
    derived guard schedule is recomputed after every named transform. Mutations
    stale or move a `check_at` event; omit or swap its immediate observable
    predecessor/successor fence; corrupt `ready_after` or `guarded_events`;
@@ -1844,7 +1933,9 @@ APIs and maps, public execution artifacts, operation-defined extents,
 intermediates, and conversion sites; admit exact scalar-operation-output
 sources, the independent provisional authority, sealed annotated graph, and
 closed atomic graph/authority transaction API,
-provisional hygienic annotations, the typed/synthesized origin algebra,
+provisional hygienic annotations, the provisional proof/source algebra and
+atomic proof-triple remapping, the checked provisional-to-final bijections and
+consume-to-annotated inverse baseline, the typed/synthesized origin algebra,
 the exact structural origin comparator, a serialized checked transform cursor
 with retained hashed high-water history and explicit exhaustion, lexical and
 runtime scope-instance ownership,
@@ -1885,7 +1976,9 @@ behind checked physical-capacity conversions; structural tensor-axis and
 scalar input values; the generated semantic-extent transit census over fields,
 artifacts, keys, APIs/maps/intermediates, operation parameters, and conversions;
 the exact `RuntimeExtent` owner matrix; provisional hygienic keys and the
-independent provisional authority, sealed graph, atomic mutation transactions,
+independent provisional authority, opaque provisional proof/source algebra,
+atomic proof-triple remapping, checked provisional-to-final bijections, and
+consume-to-annotated inverse baseline; sealed graph, atomic mutation transactions,
 opaque annotated/finalized public states, finalized-only Eval/backend/cache
 boundaries, and external-crate compile-fail raw construction, mutation,
 deserialization, extraction, and submission boundaries; typed/synthesized origin and
@@ -1920,7 +2013,9 @@ semantic-transit/cross-host rows, generated-origin/clone-lineage rows, sealed
 public
 construction/mutation/deserialization/artifact/backend boundaries,
 and entry-selection rows, same/cross-tensor proof-identity rows,
-shared-occurrence two-class rows, compute-once vmap/fusion trap/effect rows, retained
+earlier-owner proof-redirection, clone/vmap/import/CSE/DCE proof-remap, and
+consume/refinalize inverse-map rows; shared-occurrence two-class rows,
+compute-once vmap/fusion trap/effect rows, retained
 high-water/DCE/hash rows, structural Wire negatives, coherent-replacement
 integrity mismatches, zero, and negative rows owned by this phase, plus the
 composed exact-head #1298 oracle.
