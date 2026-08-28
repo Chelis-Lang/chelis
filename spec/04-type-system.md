@@ -2147,6 +2147,34 @@ Suggestions are structured data in the fitness report JSON, not just strings.
 > name-resolution wire field: these invariants govern the existing
 > `components.names`, `errors`, and `unresolved_names` fields.
 
+### 6.5 Source Identity In Diagnostics
+
+A diagnostic names the entities the user wrote. The checker's internal
+identities for those entities -- `DimVar` and `TypeVar` ordinals, rendered
+`dN` and `?N` -- are inference bookkeeping, and a reader has no way to map
+one back to their source.
+
+> **[04-FIT-9]** Where source provenance exists for a binding, type variable,
+> or dimension variable, a user-facing diagnostic SHALL identify it by its
+> source spelling. A compiler-generated inference identity SHALL NOT be its
+> sole user-facing identity.
+
+Provenance survives resolution, generalization, and instantiation. A checker
+that reports on an instantiated signature therefore recovers the declared
+spelling rather than treating instantiation as the point where the name is
+lost; the fresh variables an instantiation mints are the same entities the
+source declared.
+
+> **[04-FIT-10]** Where provenance genuinely does not exist, a diagnostic
+> SHALL render the inference identity as synthesized, distinguishably from a
+> spelling the user wrote, and SHALL NOT invent a source name for it.
+
+Absent provenance is the only admissible route to [04-FIT-10]. A producer
+that holds a spelling and declines to thread it through is not covered by it.
+
+(The borrow and cast diagnostics do not yet satisfy [04-FIT-9]; chelis#260
+owns that gap.)
+
 ---
 
 ## 7. Effects

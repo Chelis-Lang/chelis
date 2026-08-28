@@ -64,7 +64,14 @@ pub(super) fn infer_fn(
     };
     let body_ty = infer_expr(body, &mut fn_env, vg, subst, adt_reg, errors, product);
 
-    check_declared_dvars_rigid(&declared_dvars, subst, errors);
+    // chelis#260: no recorded names on this path. A dim binder has to be
+    // declared as `def f[n, m]`, which routes through the `Defsig` arm and
+    // then the annotated-def site; an `fn` whose annotation mentions `n`
+    // without such a declaration is rejected earlier as an undeclared
+    // dimension variable. So this call cannot currently reach a named
+    // collapse, and passing an empty map renders the internal id rather
+    // than inventing a name.
+    check_declared_dvars_rigid(&declared_dvars, &UnordMap::new(), subst, errors);
 
     let resolved_params: Vec<Type> = param_types.iter().map(|t| subst.apply(t)).collect();
     let resolved_body = subst.apply(&body_ty);
