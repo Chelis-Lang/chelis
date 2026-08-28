@@ -126,6 +126,22 @@ struct RuntimeExtentClass {
     equals: Vec<RuntimeExtentWitness>,
 }
 
+struct RuntimeEqualityGuard {
+    class: RuntimeDimId,
+    canonical: RuntimeDimSourceId,
+    member: RuntimeDimSourceId,
+    ready_after: Vec<NodeId>,
+    must_precede: Vec<RuntimeGuardedEvent>,
+}
+
+enum RuntimeGuardedEvent {
+    EntryUse(u32),
+    NodeExecution(NodeId),
+    Allocation(NodeId),
+    Access(NodeId),
+    PublicExposure(NodeId),
+}
+
 enum RuntimeExtentWitness {
     Literal { source: RuntimeDimSourceId, value: i64 },
     Scalar { source: RuntimeDimSourceId, node: NodeId },
@@ -301,13 +317,29 @@ remain illegal in `Expand.size`. In executable IR, a named
 `reshape` target also resolves to `Lit`, `InputAxis`, or
 `Node`; `Sym` may exist only in the typed pre-monomorphization
 carrier and must not cross verification or WireDag.
-Phase 2 changes both `RtDim::Lit` and `WireRtDim::Lit` from platform-sized
-`usize` to exact `i64`. Executable literal extents admit only
+Phase 2 changes every semantic static-extent carrier from platform-sized
+`usize` to exact `i64`: `RtDim::Lit`, `DimInfo::Lit`, the known-size member of
+`DimInfo::Named`, `DimExpr::Concrete`, every `TensorType`/output-type copy of
+those values, and their exact Wire equivalents including `WireRtDim`,
+`WireDimInfo`, and `WireDimExpr`. Executable literal extents admit only
 `0..=i64::MAX`; a negative literal is a static type error, and a Wire integer
 outside that range is rejected before IR construction on every host width.
-Allocation/index carriers receive the value only through a checked target
-capacity conversion. Axis literals remain exact `i32` and are not extent
-literals.
+There is no `as usize` lowering or serialization step. Only physical
+allocation sizes, addressing counts, and host container indices receive an
+extent through a checked target-capacity conversion immediately before that
+physical use. Node IDs, input slots, ranks, and axis positions remain index
+carriers rather than semantic extents. Axis literals remain exact `i32` and
+are not extent literals.
+
+A generated static-extent carrier census is bijective with every in-memory and
+Wire field that can copy a semantic tensor extent. Each row names its exact
+`i64` carrier, encode/decode path, and checked physical-conversion boundary.
+Adding or changing a semantic extent field as `usize`, an unsigned Wire
+integer, or another narrower type fails compilation/regeneration. Positive
+cross-host fixtures above `u32::MAX` carry the same value simultaneously in
+the movement bound, `TensorType` output dimensions, every `DimInfo` and
+`DimExpr` occurrence, and Wire payload; every copy must round-trip exactly on
+32- and 64-bit decoders before any target-capacity rejection is allowed.
 
 - **C2.1 Exact representation invariant.** `inputs[0]` is the tensor
   operand. `RtDim::Node(i)` is an absolute slot in the same node's
@@ -628,15 +660,48 @@ literals.
   Load/Load, Load/operation-output, and operation-output/operation-output
   equalities exist even when no movement-bound field owns them.
 
-  Eval, C, HIP, and Metal execute external and scalar members in canonical
-  order at entry. For an operation-computed member, the Phase-2-frozen
-  `OpExtentRule` computes the checked extent before that result is allocated,
-  accessed, or exposed. Each provisional declaration is a control/liveness
-  root before finalization; each final declaration and class manifest is a
-  control/liveness root afterward. Final DCE runs on the annotated graph before
-  final declarations freeze. It consults the independent provisional authority
-  and must prove every explicit discharge; correlated removal of a computation
-  and its annotation alone is invalid. Afterward no pass can remove a declared
+  Canonical class/member order controls identity, equality pairing, and
+  serialization; it does not reorder dynamic evaluation. Finalization derives
+  one non-serialized `RuntimeEqualityGuard` for every noncanonical source and
+  verifies an exact `RuntimeGuardSchedule`. Its `ready_after` set is the
+  complete producer dependency closure for the canonical and compared member;
+  its `must_precede` set contains every allocation, access, public exposure, or
+  other execution event whose correctness relies on that obligation. The
+  schedule follows the graph's source/topological, left-to-right, sequential
+  effect and trap order. Declaration/source order breaks ties only between
+  guards already ready at the same event; it never hoists or reorders a
+  producer. Both lists are duplicate-free and ordered by canonical graph-event
+  order, so every lane consumes identical readiness and precedence data.
+
+  Only actual interface values and declared literals are available for the
+  entry/prologue schedule. Eval, C, HIP, and Metal check those entry members in
+  declared interface order before their first dependent use. A local
+  `ScalarOpOutput`, node-valued-axis read, user-function result, or other local
+  witness remains ordinary dataflow and is checked only after all of its
+  producer dependencies have executed, then before its first dependent
+  allocation, access, or exposure. An `OpComputed` member uses the
+  Phase-2-frozen `OpExtentRule` at its owning operation and checks equality
+  before allocating or exposing that result. Every guard is an explicit
+  control dependency for its `must_precede` events, and every root return waits
+  for all live declaration guards. Thus an earlier effect or trap remains
+  earlier than a later mismatch, while a mismatch already ready before a later
+  effect traps first. No lane may duplicate a producer, evaluate a local
+  scalar in the prologue, delay a guard past a dependent event, or report the
+  failure under a different source origin.
+
+  `derive_runtime_guard_schedule(&FinalizedDag)` is the one checked view used
+  by Eval and every backend. It is invalidated with the finalized carrier and
+  recomputed after consume-to-annotated transformation and refinalization; it
+  is not serialized or cached as a second authority. Verification rejects a
+  missing/duplicate guard, incomplete readiness or precedence set, an entry
+  guard for a local producer, a dependency cycle, or any schedule that crosses
+  source/effect/trap order. Each provisional declaration is a control/liveness
+  root before finalization; each final declaration, class manifest, and guard
+  schedule is a control/liveness root afterward. Final DCE runs on the
+  annotated graph before final declarations freeze. It consults the independent
+  provisional authority and must prove every explicit discharge; correlated
+  removal of a computation and its annotation alone is invalid. Afterward no
+  pass can remove a declared
   input, source
   owner, or guard from `FinalizedDag`. Graph transforms preserve/remap
   provisional binder keys, runtime origins, scope instances, sources, uses,
@@ -675,9 +740,14 @@ literals.
   loop.
 - **C2.3 Static values are an optimization.** A statically proved exact `i64`
   value in `0..=i64::MAX`, including zero, may use `RtDim::Lit(i64)`. One
-  checked static folder is shared or contract-tested across checker and lowering. Failure to
-  fold produces the exact `InputAxis` or `Node` carrier dictated by
-  C2.1; it never rejects the expression or guesses a value.
+  checked static folder is shared or contract-tested across checker and
+  lowering. The same exact `i64` is stored without a host-width cast in every
+  `DimInfo`, `DimExpr`, `TensorType` output dimension, runtime bound, and Wire
+  copy named by the static-extent carrier census. Failure to fold produces the
+  exact `InputAxis` or `Node` carrier dictated by C2.1; it never rejects the
+  expression or guesses a value. A target may reject the resulting physical
+  allocation only at the checked capacity boundary, after language- and
+  Wire-level exactness has been preserved.
 - **C2.4 Every result is constructed.** The checker always constructs an
   `expand` result tensor whose rank is the selected operand rank or
   operand rank plus one. It stamps complete type metadata and checks declared
@@ -1013,8 +1083,18 @@ axes and windows in one issue.
    classes, including a class with no movement-bound consumer. Positive guard
    rows compare a node-valued-axis shape read and a rank-zero arithmetic or
    user-function scalar result against an independently declared literal or
-   named witness. They also prove loud missing/wrong-class failure. Runtime
-   windows are absent from this
+   named witness. The guard schedule crosses interface-only prologue checks,
+   local scalar and dynamic-axis producers, user-function results, and
+   operation-computed axes. One row places an earlier effect or explicit trap
+   before a later mismatch and requires that earlier event to win; the converse
+   places a ready mismatch before a later effect/trap and requires the mismatch
+   to win without executing the later event. Eval and compiled C agree on
+   occurrence count, order, and source attribution. They also prove loud
+   missing/wrong-class failure. Static exactness rows use values above
+   `u32::MAX` and assert identical `i64` bits in the movement bound, every
+   `DimInfo`/`DimExpr`/`TensorType` output copy, and the decoded Wire graph;
+   physical capacity rejection, when applicable, occurs only afterward.
+   Runtime windows are absent from this
    corpus; the composed #1298 oracle owns them.
 2. **GPU build and execution.** The same named rows compile and execute in the
    HIP and Metal correctness suites, not merely through capability-gate
@@ -1031,8 +1111,12 @@ axes and windows in one issue.
    error; runtime negative extents trap `Domain`. Wrong dtype,
    out-of-range axis, rank-contradicting ascription, malformed scalar input,
    named-binder witness mismatch, missing declaration/source/member, split or
-   merged class, wrong binder or source ID, and checked overflow fail for the
-   owning reason on every applicable lane.
+   merged class, wrong binder or source ID, a host-width cast in any semantic
+   static-extent carrier, and checked overflow fail for the owning reason on
+   every applicable lane. Guard mutations that hoist a local producer into the
+   prologue, cross an earlier effect/trap, delay past a dependent allocation or
+   exposure, omit a control edge, duplicate a producer/guard, or change failure
+   attribution are exact negatives across Eval, C, HIP, and Metal.
 4. **Zero positives.** Literal-zero and runtime-zero rows cover positional
    replacement, positional insertion, and named-axis expansion. They assert
    the exact output shape, logical element count zero, no element access, and
@@ -1054,8 +1138,8 @@ axes and windows in one issue.
 7. **Transform integrity.** Positive rows cover `Lit`, expand/reshape
    direct-shape and named-binder `InputAxis`, Pad/Shrink/Stride materialized
    shape `Node`, shared non-tensor `Node`, and arithmetic `Node` dependencies,
-   including dual-use producers,
-   through vmap, grad, specialization, fusion, cloning/remapping, and DCE. They
+   including dual-use producers, through vmap, grad, specialization, fusion,
+   cloning/remapping, and DCE. They
    verify exact rank-zero
    bound scalars, shifted literal and node-valued axes, preserved tensor-axis
    witnesses, absolute input slots, typed and synthesized origins, lexical and
@@ -1081,7 +1165,11 @@ axes and windows in one issue.
    nested post-decode transforms, deterministic ordered DAG import/remapping,
    and rejection of replayed transform IDs, origins, generated paths, malformed
    scope-instance lineages, or duplicate complete owner identities. The
-   generated production-mutation registry covers every workspace production
+   derived guard schedule is recomputed after every named transform. Mutations
+   stale a guard point, readiness set, or precedence edge; classify a local
+   scalar as entry-ready; and reorder the two effect/trap-versus-mismatch
+   controls. Each fails before emission. The generated production-mutation
+   registry covers every workspace production
    graph construction/mutation/import/deserialization capability and reachable
    call site. External-crate compile-fail rows reject raw graph import,
    construction, serde decode, root/node/input/type mutation, raw artifact
@@ -1141,7 +1229,11 @@ axes and windows in one issue.
    They require the history-sensitive hash to change when a transform is issued
    and later wholly erased, while identical graph plus identical history stays
    byte-stable. Literal mutations cover negative and greater-than-`i64::MAX`
-   Wire integers plus 32-bit/64-bit decode parity. Origin-order mutations vary
+   Wire integers plus 32-bit/64-bit decode parity across `WireRtDim`,
+   `WireDimInfo`, `WireDimExpr`, and every output-type copy. Mutations narrow
+   each census row independently to `usize`/`u32`, cast during lowering, or
+   accept an unsigned value above `i64::MAX`; every mutation fails before IR
+   consumption or physical allocation. Origin-order mutations vary
    insertion order, reorder the serialized table, permute imported operands,
    and stale a generated-path component. Insertion order alone cannot change
    bytes, but declared operand order and transform high-water history can.
@@ -1192,6 +1284,13 @@ never reused.
   `WireRtAxis` that is an exact int32 literal or scalar input slot. The `lit`
   tag carries an exact nonnegative `i64`, never `usize` or an unsigned JSON
   value beyond `i64::MAX`;
+- change every static tensor-extent copy in the schema at the same version:
+  `WireDimInfo::Lit`, the known-size value in `WireDimInfo::Named`,
+  `WireDimExpr::Concrete`, and all `WireTensorType` input/output dimensions are
+  exact nonnegative `i64`. Encode takes the exact in-memory `i64` without a
+  host-width cast; decode validates the signed range without converting to
+  `usize`. A checked physical-capacity conversion occurs only when a selected
+  target allocates or indexes storage, never while parsing or constructing IR;
 - encode the primary ordered `WireRuntimeDimDeclaration` list and
   `WireRuntimeTransformNamespace { issued_through: Option<u64>, next:
   available(u64) | exhausted }` at DAG level. `issued_through` is retained
@@ -1280,7 +1379,10 @@ never reused.
   No digest inside the same payload is treated as self-authentication;
 - regenerate and review the typed wire capacity census. Every changed
   descriptor receives a final authority classification; the schema bump does
-  not inherit or create a legacy exemption.
+  not inherit or create a legacy exemption. The static-extent carrier census
+  and Wire census must be bijective over every `RtDim`, `DimInfo`, `DimExpr`,
+  and tensor-type extent copy; a host-sized semantic field in either census is
+  a build failure.
 
 ## Part II: boundary law
 
@@ -1341,7 +1443,9 @@ phase creates them.
 and [05-OP-7] representation to admit `RuntimeExtent` and the structural
 tensor-axis witness with a static-or-node axis for expand/reshape, while
 preserving section 2.4.1's node-valued `Shape` representation for
-Pad/Shrink/Stride; admit exact scalar-operation-output
+Pad/Shrink/Stride; migrate every semantic static-extent `RtDim`, `DimInfo`,
+`DimExpr`, tensor-type, and Wire copy to exact nonnegative `i64` under one
+generated carrier census; admit exact scalar-operation-output
 sources, the independent provisional authority, sealed annotated graph, and
 closed atomic graph/authority transaction API,
 provisional hygienic annotations, the typed/synthesized origin algebra,
@@ -1357,7 +1461,8 @@ Eval, and backend escape routes,
 compute-once `BroadcastScalarRef` adaptation and fusion barriers, source
 witness/alias roles, the complete in-memory owner
 matrix, and the complete graph-level
-`RuntimeExtentClass` manifest, and require named values resolved before
+`RuntimeExtentClass` manifest plus the producer-ready, source-ordered
+`RuntimeGuardSchedule`, and require named values resolved before
 executable IR. Author any missing numbered operation atoms,
 then generate and freeze the one complete `OutputAxisRule`/`OpExtentRule`
 registry used both for pre-allocation operation-output guards here and total
@@ -1365,8 +1470,9 @@ registry used both for pre-allocation operation-output guards here and total
 compute-once dual-use scalar adaptation, and typed rejection of batch-varying
 element-derived extents; and amend `spec/10`
 for the next monotonic WireDag version (v8 from the current v6 baseline).
-Write the derived positive, negative, equality-class, owner-matrix, and
-transform test stubs before implementation. Then deliver C2.1-C2.6 and C6
+Write the derived positive, negative, equality-class/guard-schedule,
+static-carrier/cross-host, owner-matrix, and transform test stubs before
+implementation. Then deliver C2.1-C2.6 and C6
 across all in-memory, target, transform, and wire consumers, followed by C2.7
 deletion. Close
 [#1266], [#569], [#597], and [#609]. [#578] remains open; commits that improve
@@ -1374,8 +1480,10 @@ its mechanism use `Part of #578` until its complete rank-polymorphic
 acceptance reproducer is green under the owning rank-polymorphism work.
 
 **Frozen at exit:** amended `spec/05`/`spec/06` atoms;
-`Expand.size: RuntimeExtent`; exact nonnegative-`i64` literal, structural
-tensor-axis, and scalar input values;
+`Expand.size: RuntimeExtent`; exact nonnegative-`i64` semantic extents in every
+`RtDim`, `DimInfo`, `DimExpr`, tensor-type, and Wire copy, with `usize` only
+behind checked physical-capacity conversions; structural tensor-axis and
+scalar input values; the generated static-extent carrier census;
 the exact `RuntimeExtent` owner matrix; provisional hygienic keys and the
 independent provisional authority, sealed graph, atomic mutation transactions,
 opaque annotated/finalized public states, finalized-only Eval/backend/cache
@@ -1389,6 +1497,9 @@ rules; post-transform primary binder declaration/ownership/source/use
 identities; static-or-node tensor-axis and scalar-operation-output source
 algebras; graph-level dynamic-axis witness placement; stable runtime binder IDs;
 complete ordered equality-class manifests and source/use roles;
+the one final-DAG-derived guard schedule with interface-only prologue checks,
+producer-ready local checks, explicit precedence edges, and source/effect/trap
+order;
 the single generated `OutputAxisRule` and `OpExtentRule` variant/formula sets;
 the complete workspace production mutation/import/deserialization capability
 and callsite registry,
@@ -1400,7 +1511,9 @@ guard placement.
 **Oracle:** `uv run --managed-python --python 3.11 --no-project python
 scripts/runtime_extent_oracle.py --phase 2`, including host, HIP, Metal,
 WireDag, #569 transformation, every transform-bound class, named-dimension
-witness sets and guards, generated-origin/clone-lineage rows, sealed public
+witness sets and producer-ready guard schedules, greater-than-`u32::MAX`
+static-carrier/cross-host rows, generated-origin/clone-lineage rows, sealed
+public
 construction/mutation/deserialization/artifact/backend boundaries,
 and entry-selection rows, compute-once vmap/fusion trap/effect rows, retained
 high-water/DCE/hash rows, structural Wire negatives, coherent-replacement
