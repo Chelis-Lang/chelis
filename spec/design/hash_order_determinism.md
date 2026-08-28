@@ -66,12 +66,15 @@ parallel scheduling. Each has a different authority and oracle.
 
 ### C1 Observable determinism
 
-For fixed source bytes, compiler build, target, flags, and documented environment,
-every observable result of `chelis check`, `eval`, `build`, and compiler library
-entry points is invariant under process hash seeds. Observable results include:
+For fixed source bytes, compiler build, target, flags, and complete declared
+compile-time-input assignment, every observable result of `chelis check`, `eval`,
+`build`, and compiler library entry points is invariant under process hash seeds.
+Observable results include:
 
 - verdict and the complete ordered diagnostic list;
 - evaluated values and traps;
+- ordered build-script directives, generated files, procedural-macro token streams,
+  and compile-time diagnostics;
 - emitted source, object, and artifact bytes;
 - persisted payload and envelope bytes;
 - dispatch choices and ABI-visible ordering.
@@ -146,10 +149,9 @@ predicate.
 Every custom-build target, procedural-macro invocation, and other host-executed
 expansion producer has a checked-in compile-time-input manifest. Cargo- and
 compiler-provided inputs come from a closed runner-owned set derived from the fixture.
-All other environment variables,
-filesystem roots, external commands, native-package probes, and network access must be
-declared with the finite value classes that can affect Rust sources, expansions,
-emitted `cfg`s, compiler flags, or artifacts.
+All other environment variables, filesystem roots, external commands, native-package
+probes, and network access must be declared with the finite value classes that can
+affect Rust sources, expansions, emitted `cfg`s, compiler flags, or artifacts.
 
 The oracle executes build scripts and isolated proc-macro compiler workers under one
 traced sandbox contract. A host API interposer mediates environment lookup,
@@ -164,8 +166,20 @@ Each declared value class, including the absent class, has a fixture. Native dis
 such as `pkg-config` has explicit absent and present fixtures whose sandboxed command
 and filesystem responses are recorded, so an inactive probe is still executable
 evidence. Every proc-macro input fixture uses an isolated expansion cache, or a checked
-cache key containing the complete input assignment and expansion digest; reuse across
-assignments is an oracle failure.
+cache key containing the complete input assignment; reuse across assignments is an
+oracle failure.
+
+Every compile-time executor output is a C1 root. For each complete input assignment,
+the oracle runs build scripts in fresh processes and proc-macro invocations in fresh
+isolated compiler workers with empty expansion caches 24 times. Build-script roots
+hash the exact ordered Cargo directives and every generated file. Procedural-macro
+roots hash a stable encoding of the complete output token stream and ordered emitted
+diagnostics, normalizing only compiler-session identifiers that cannot affect source,
+spans, diagnostics, or downstream HIR. The invocation lookup identity is `(commit,
+toolchain, invocation, build host, compilation target, target kind, profile/codegen
+set, features, complete input assignment)`; its observed output digest is never part
+of that identity. More than one digest for one identity is an oracle failure even
+when no hash carrier survives into expanded Rust.
 
 Each fixture runs Cargo with that complete identity. The enumerator consumes Cargo
 JSON build-script messages, compiler-worker expansion digests, and sandbox access
@@ -264,8 +278,11 @@ The liveness oracle must reject all of these planted changes:
 20. an undeclared environment, filesystem, command, network, or native-package access
     from any compile-time executor, including a parent environment variable that must
     not enter an isolated proc-macro worker;
-21. a new carrier or consumer with no census row; and
-22. an `#[allow(clippy::iter_over_hash_type)]` with no matching row.
+21. an external proc macro that internally uses randomized hash iteration to vary
+    emitted item order or diagnostics for one identical input assignment while
+    emitting no downstream hash carrier;
+22. a new carrier or consumer with no census row; and
+23. an `#[allow(clippy::iter_over_hash_type)]` with no matching row.
 
 The mutation suite is the completeness lock that the lint alone cannot provide.
 
@@ -375,15 +392,18 @@ the final line `HASH ORDER DETERMINISM ORACLE: PASS` require every leg:
    forbidden-order reason.
 3. **Per-row evidence:** every census row's named test or controlled mutation exists,
    resolves to that row, executes, and observes the row's complete consumer chain.
-4. **Canonical boundaries:** ordered/newtyped stores pass insertion/hash-order
+4. **Compile-time roots:** every build-script and proc-macro input assignment produces
+   one exact output digest across 24 fresh processes or isolated workers; the internal
+   hash-order mutation is rejected even without a downstream carrier.
+5. **Canonical boundaries:** ordered/newtyped stores pass insertion/hash-order
    perturbations, and raw access fails to compile.
-5. **Serialized bytes:** every serialization root's exact-byte evidence is green;
+6. **Serialized bytes:** every serialization root's exact-byte evidence is green;
    mandatory complete payloads are byte-identical across insertion permutations and
    24 fresh processes.
-6. **Public surfaces:** the [#1338] reproducer and at least one representative for
+7. **Public surfaces:** the [#1338] reproducer and at least one representative for
    each C1 output class run in 24 fresh processes with identical verdicts,
    diagnostics, values, and bytes.
-7. **Existing regressions and lint:** the backend and CLI byte-determinism tests
+8. **Existing regressions and lint:** the backend and CLI byte-determinism tests
    remain present and green, and every lint allow maps to the census.
 
 The 24-process legs are supporting randomized regressions with a fixed execution
@@ -400,7 +420,8 @@ configuration-manifest generator and fixtures covering Cargo features, target
 triples, platform predicates, target-specific dependencies, required-feature targets,
 profiles/codegen flags, build host versus compilation target, and build-script-emitted
 `cfg`s; compile-time-input manifests, the host API interposer, isolated proc-macro
-workers, and the traced fail-closed build-script/proc-macro sandbox;
+workers, exact compile-time-output roots, and the traced fail-closed
+build-script/proc-macro sandbox;
 exact-commit native-host evidence aggregation;
 expanded type-resolved enumerator, raw-source identity sidecar, macro-expansion
 fixture boundary, serialization-root and Serde graph extractor, census schema, all
