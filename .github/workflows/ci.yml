@@ -855,7 +855,11 @@ jobs:
   macos-smoke:
     name: macOS Smoke
     runs-on: macos-latest
-    timeout-minutes: 20
+    # Successful runs normally finish in 14-16 minutes, but hosted-runner
+    # variance can push the workspace suite past the old 20-minute job cap.
+    # Keep a hard ceiling while leaving measured headroom for the post-test
+    # architecture, manifested-C-ABI, and Metal smoke checks.
+    timeout-minutes: 30
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
     # success. macOS Smoke is the authoritative workspace oracle, so it
     # runs on every code PR and every push; only a pure-prose PR skips it.
