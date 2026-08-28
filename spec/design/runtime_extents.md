@@ -153,6 +153,7 @@ struct RuntimeDimAuthority {
 }
 
 struct RuntimeTransformNamespace {
+    issued_through: Option<u64>,
     next: RuntimeTransformCursor,
 }
 
@@ -182,8 +183,26 @@ struct ProvisionalRuntimeDimDeclaration {
 }
 
 struct AnnotatedDag {
-    dag: Dag,
+    graph: SealedDag, // private; exposes no raw mutable Dag
     runtime_dims: ProvisionalRuntimeDimAuthority,
+}
+
+enum RuntimeGraphMutationSite { // generated
+    LoweringConstruction,
+    SelectRootsAndDce,
+    ReplaceNode,
+    RewriteNodeInputs,
+    RewriteNodeType,
+    Vmap,
+    Grad,
+    Specialize,
+    Fuse,
+    CloneOrRemap,
+    ImportDag,
+    Cse,
+    Dce,
+    EvalBind,
+    HostActualize,
 }
 
 struct RuntimeDimOwner {
@@ -243,6 +262,9 @@ seeded by typed inference before lowering and is primary state beside, not an
 index reconstructed from, node-local annotations. The annotations point into
 this authority so transforms and finalization can cross-check two independent
 representations.
+`SealedDag` is a module-private newtype with no `DerefMut`, `AsMut<Dag>`, raw
+constructor, or extraction method. Only the generated transaction module can
+construct or mutate it; ordinary consumers receive read-only graph queries.
 
 Only `RtDim::Lit` and `RtDim::Node` are legal for
 `Expand.size` ordinary values. A third legal variant is the structural tensor
@@ -318,22 +340,34 @@ literals.
   have different owners. A binder whose declaring lexical-scope instance is
   inside the cloned set moves to the new instance; a captured binder owned by
   an outside instance preserves its owner. Nested clones extend the lineage.
-  The same rule freshens provisional source/use identities. Transform
-  allocation is checked and total: `Available(n)` returns `n` and becomes
-  `Available(n + 1)`, except `Available(u64::MAX)` becomes `Exhausted` after
-  returning the last ID. `Exhausted` rejects any graph-creating transform with
-  `Capacity` before mutating the DAG or authority. No path wraps or reuses an
-  ID. Encode/decode preserves the cursor exactly. Its canonical state is
-  `Available(0)` when no transform exists, `Available(max_id + 1)` when
-  `max_id < u64::MAX`, and `Exhausted` exactly when `u64::MAX` exists. A no-op
-  decode/refinalize therefore preserves bytes, while a later transform cannot
-  reuse an earlier transform instance. Combining
-  annotated DAGs imports them in declared operand order and canonically remaps
-  every imported transform ID, synthesized origin, generated path, and scope
-  lineage through fresh destination IDs before combination. It reserves the
-  entire checked ID range transactionally and fails `Capacity` before mutation
-  if the destination cursor cannot represent every imported ID; accepting raw
-  overlapping namespaces is invalid.
+  The same rule freshens provisional source/use identities. Transform history
+  is first-class authority: `issued_through` is a serialized, hashed high-water
+  mark for the contiguous local ID range that has ever been allocated. DCE may
+  delete a synthesized origin only when no provisional/final declaration,
+  source, use, owner lineage, annotation, or dynamic witness references it, but
+  never lowers this mark.
+  Allocation is checked and total: `Available(n)` returns `n`, sets
+  `issued_through = Some(n)`, and becomes `Available(n + 1)`, except
+  `Available(u64::MAX)` becomes `Exhausted` after returning the last ID.
+  `Exhausted` rejects any graph mutation that needs a fresh transform with
+  `Capacity` before mutating the graph or authority. No path wraps or reuses an
+  ID. Encode/decode preserves both fields exactly. Their canonical pairs are
+  `(None, Available(0))`, `(Some(n), Available(n + 1))` for
+  `n < u64::MAX`, and `(Some(u64::MAX), Exhausted)`. Every live synthesized
+  origin must refer to an ID at or below the high-water mark; gaps are erased
+  transforms, not reusable IDs.
+
+  A no-op decode/refinalize preserves bytes. A transform whose entire output is
+  later removed by DCE intentionally changes the serialized high-water mark and
+  content hash: the hash commits to deterministic transform-ID allocation
+  history, not a full transform audit log or semantic equivalence of optimized
+  graphs. Combining annotated DAGs imports them in declared operand order and remaps every live transform
+  ID, synthesized origin, generated path, and scope lineage into a fresh
+  destination range whose length is the imported history count
+  (zero for `None`, otherwise `issued_through + 1`), including erased IDs. It reserves that entire range
+  transactionally with widened checked arithmetic and fails `Capacity` before
+  mutation if the range does not fit; accepting raw overlapping namespaces is
+  invalid.
 
   Canonical structural ordering is complete. Typed lexical-scope and site IDs
   are assigned by preorder of the canonical typed arena, with child scopes,
@@ -353,12 +387,26 @@ literals.
   decoders reject reordered tables. No hash-map iteration, graph
   hash, allocation address, or display name participates in ordering.
 
-  Typed lowering and every production rewrite, including vmap, grad,
-  specialization, fusion, cloning, remapping, CSE, and DCE, may mutate
+  Typed lowering and every production graph construction or mutation,
+  including vmap, grad, specialization, fusion, cloning, remapping, CSE, and
+  DCE, may mutate
   runtime-dimension state only through a closed authority API:
   register, add, remap, specialize, or discharge. Each operation updates the
   independent provisional declaration and the corresponding annotations as
   one checked transaction; no pass can edit the authority vectors directly.
+  `AnnotatedDag.graph` is sealed: callers receive read-only queries and have no
+  raw `Dag`, mutable-node slice, `set_roots`, `replace_node`, or type/input
+  setter. `RuntimeGraphTransaction` stages the graph mutation, its
+  source/use/origin/liveness edits, and any checked discharges, validates both
+  representations, and commits atomically or leaves both unchanged. Every
+  non-import transaction that actually changes graph or authority state
+  allocates exactly one fresh transform ID before commit; all origins it
+  creates share that ID and have distinct generated paths. `ImportDag` instead
+  reserves the imported history range transactionally as specified above, plus
+  one fresh ID only if combination creates new structure. A proved no-op
+  allocates nothing. Thus an in-place root edit, DCE, fusion pass, or
+  reconstruction remains in the same non-reusing history even when it creates
+  no surviving origin.
   Those transforms preserve annotations on copied nodes and use the frozen
   `OutputAxisRule` to assign roles to generated axes. CSE may combine annotated
   nodes only when their complete runtime-origin/class/source/use identity sets
@@ -367,12 +415,30 @@ literals.
   multi-source stamp carrier and no merge-then-recover alternative. DCE runs
   before authority freezes, but may discharge a binder, source, or use only
   after the authority proves that no public interface, equality obligation,
-  movement bound, alias, or surviving annotation refers to it. A generated
-  registry is bijective with every DAG-returning or DAG-replacing rewrite
-  invoked by the compiler-API and CLI production pipelines; adding or invoking
-  an unregistered rewrite fails the build. Tests cover generated
+  movement bound, alias, or surviving annotation refers to it. Root selection
+  and DCE are one `SelectRootsAndDce` transaction: selecting a result may remove
+  an unreachable internal declaration only through an explicit proven
+  discharge, while a public input/interface witness remains a liveness root.
+
+  A generated registry is bijective with every graph-construction or mutation
+  capability and every reachable call site in compiler-API and CLI production,
+  including in-place root/node/input/type edits and transitive lowering, Eval
+  binding, host actualization, specialization, fusion, CSE, and DCE routes.
+  Every row names its `RuntimeGraphMutationSite`, transaction method, affected
+  authority sets, and focused positive/negative mutation. Adding a capability,
+  exposing a raw mutable graph, or invoking an unregistered call site fails
+  compilation/regeneration. Compile-fail controls attempt direct `set_roots`,
+  `replace_node`, mutable-node access, input mutation, and type mutation through
+  `AnnotatedDag`. Tests cover entry selection that discards a data root whose
+  otherwise-unused public Load still owns a declared witness/class, plus
+  generated
   nonidentity movement bounds, nested vmap, two clones of one lexical scope,
   captured outer binders, CSE, specialization, fusion, and post-transform DCE.
+
+  Lowering construction, entry/root selection, symbolic binding, host
+  actualization, specialization, target fusion, and final DCE all complete as
+  registered annotated transactions before `finalize_runtime_dims`. No Eval or
+  backend route reconstructs or mutates graph structure after finalization.
 
   Only after every graph-creating transform and final DCE does
   `finalize_runtime_dims(AnnotatedDag)` cross-check the independent provisional
@@ -389,7 +455,8 @@ literals.
   `FinalizedDag` has no in-place graph-transform API. A caller that must
   transform a decoded finalized DAG consumes it back into the annotated form,
   using the final declarations as the new independent provisional baseline and
-  preserving its owner/origin records and transform cursor; it
+  preserving its owner/origin records, history high-water, and transform
+  cursor; it
   must refinalize the result.
 
   Every rank-zero scalar or statically selected tensor axis that independently
@@ -578,27 +645,53 @@ literals.
   value.
   Literal axes normalize against the original source rank and then shift;
   node-valued axes perform the same checked normalization and shift at runtime.
-  When one scalar producer has both bound and ordinary value consumers, vmap
-  splits its uses: the bound dependency is cloned as the rank-zero shared
-  slice, while an ordinary result follows `spec/06`'s batched value
-  rule. A direct `shape` use needs no scalar clone for the bound edge;
+  When one scalar producer has both bound and ordinary value consumers, it is
+  evaluated exactly once. The bound edge references that rank-zero value. If
+  the ordinary branch needs a batched value, the amended `spec/06` and its
+  numbered operation atom authorize this adapter:
+
+  ```rust
+  RiscOp::BroadcastScalarRef {
+      scalar: usize, // earlier rank-zero scalar input slot
+      batch_axes: Vec<TensorAxisRef>, // earlier tensor slots + static axes
+  }
+
+  struct TensorAxisRef {
+      tensor: usize,
+      axis: usize,
+  }
+  ```
+
+  All slots are absolute positions in the adapter node's inputs and every
+  referenced node is earlier; each static axis is in range. It outputs one axis
+  per ordered `batch_axes` entry, preserves the scalar's
+  exact dtype, and repeats the already-computed value. Its `OutputAxisRule`
+  structurally forwards those batch axes. It never re-executes the checked
+  arithmetic or user function; nested vmap extends the ordered axis list. A
+  direct `shape` use needs no scalar adapter for the bound edge;
   `InputAxis` reads the vmapped tensor metadata. The amended spec and
   tests cover literal, scalar-parameter, shape, arithmetic, and dual-use slices.
   Grad, specialization, cloning, and remapping preserve or remap every absolute
   input slot and its dtype/rank invariant. A bound computed from vmapped tensor
-  *elements* could vary per example. The same `spec/06` amendment must
-  choose its regular-stack behavior (an equality guard or a typed rejection).
-  Implementation may not batch a bound-only scalar, guess, or silently share a
-  varying value before the numbered rule and its positive/negative tests land.
+  *elements* could vary per example and cannot construct one regular stacked
+  output shape. Phase 2 is pinned to the explicit typed-rejection route: the
+  required `spec/06` amendment must reject that dependency before lowering. If
+  the numbered-spec review chooses guarded equality instead, implementation
+  stops and this design is amended first. Implementation may not batch a
+  bound-only scalar, guess, silently share a varying value, or duplicate a
+  computation before the numbered rule and its positive/negative tests land.
   Production fusion runs on `AnnotatedDag` before finalization. Every scalar,
   axis-selector, tensor-axis-read, guard, alias, or movement-bound node in a
   runtime-dimension control/dependency slice is a fusion barrier and remains an
   explicit node with its origin, source/use identity, dtype/rank, and input
-  slot. For a dual-use producer, the bound/control slice is cloned first and
-  only the ordinary-value branch may fuse. Fusing differently stamped
-  producers, absorbing an `RtDim::Node` producer into `FusedElem`, or running a
-  target fusion pass over `FinalizedDag` is invalid. A decoded final DAG must
+  slot. For a dual-use producer, fusion retains that one producer as an
+  explicit multi-consumer input and may fuse only eligible ordinary nodes
+  downstream of it; no bound/control computation is cloned. Fusing differently
+  stamped producers, absorbing an `RtDim::Node` producer into `FusedElem`, or
+  running a target fusion pass over `FinalizedDag` is invalid. A decoded final DAG must
   consume to annotated form, fuse under the same rule, and refinalize.
+  Overflow, division-by-zero, explicit traps, and effectful user-function rows
+  prove exact occurrence count, order, and attribution across vmap and fusion.
   All graph-creating transforms operate on provisional hygienic annotations,
   create typed or synthesized origins as C2.1 requires, and finalize only after
   their last DCE. Focused tests finalize after each named transform to prove the
@@ -898,7 +991,8 @@ axes and windows in one issue.
    scope-instance owners, source/use/class IDs, witness/alias roles, complete
    manifests, guards, shapes, and values.
    Mutations that
-   prepend a batch axis to a bound scalar, fail to split a dual-use producer,
+   prepend a batch axis to a bound scalar, re-evaluate a dual-use producer
+   instead of referencing it through `BroadcastScalarRef`,
    omit an `Expand` bound from
    grad liveness, lose a source under DCE, fail to shift an axis, or retain a
    stale slot/ID fail before emission. Grad-created movement/output witnesses,
@@ -916,14 +1010,21 @@ axes and windows in one issue.
    nested post-decode transforms, deterministic ordered DAG import/remapping,
    and rejection of replayed transform IDs, origins, generated paths, malformed
    scope-instance lineages, or duplicate complete owner identities. The
-   generated production-rewrite registry covers every compiler-API and CLI DAG
-   rewrite. Fusion positives retain explicit bound-only scalar and dynamic-axis
+   generated production-mutation registry covers every compiler-API and CLI
+   graph construction/mutation capability and reachable call site. Compile-fail
+   rows reject direct root, node, input, and type mutation; entry-selection
+   rows prove `SelectRootsAndDce` cannot lose an otherwise-unused public
+   witness/class with the discarded data root. Fusion positives retain
+   compute-once bound-only/dual-use scalar and dynamic-axis
    nodes while fusing eligible ordinary branches; mutations that absorb an
    `RtDim::Node` chain into `FusedElem`, fuse a dynamic-axis dependency, merge
-   differently stamped producers, omit the dual-use split, or fuse after
-   finalization fail before emission. The
+   differently stamped producers, duplicate checked/effectful work, omit the
+   structural broadcast reference, or fuse after
+   finalization fail before emission. Overflow, division-by-zero, explicit-trap,
+   and effectful user-function negatives assert unchanged occurrence count,
+   order, and attribution through both vmap and fusion. The
    batch-varying element-derived row
-   executes or rejects exactly as the amended `spec/06` decides.
+   rejects exactly under the amended `spec/06` rule.
 8. **Axis-source mutations.** The Phase-2-frozen `OutputAxisRule` bijection
    covers every current `RiscOp` output axis, including external
    `Load`/root axes and non-movement computed-shape operations. Phase 4
@@ -941,9 +1042,10 @@ axes and windows in one issue.
    reference, non-scalar source, wrong dtype, malformed `input_axis` tensor or
    axis slot, wrong axis dtype, missing/duplicate/reordered/stale declaration
    or class member, invalid lexical/scope-instance owner, invalid synthesized
-   origin or clone lineage, a noncanonical transform cursor or allocation after
-   exhaustion,
-   duplicate or replayed transform/origin/generated-path identity, malformed
+   origin or clone lineage, a noncanonical history/cursor pair or allocation
+   after exhaustion,
+   a duplicate complete origin/generated-path identity or conflicting
+   mutation-site tags under one transform ID, malformed
    scope-instance lineage, or duplicate complete owner identity,
    missing source/use ID or stamp, member/stamp
    disagreement, correlated stamp-plus-manifest removal with its declaration
@@ -953,14 +1055,20 @@ axes and windows in one issue.
    vmap source axis, and incompatible axis/rank/output shape. Dynamic-axis
    placement mutations put a node-valued witness on one static axis, omit or
    duplicate its graph-level carrier, or reuse its source in both placements.
-   Namespace mutations cover `available(u64::MAX)`, allocation of the last ID,
-   canonical transition to `exhausted`, another transform after exhaustion,
-   near-exhaustion nested transforms, and an imported namespace requiring more
-   IDs than remain. Literal mutations cover negative and greater-than-`i64::MAX`
+   Namespace mutations cover `(some(u64::MAX - 1),
+   available(u64::MAX))`, allocation of the last ID, canonical transition to
+   `(some(u64::MAX), exhausted)`, mismatched history/cursor pairs, another
+   transform after exhaustion,
+   transform-create/full-DCE/refinalize, highest-live-ID DCE, stable no-op
+   decode/refinalize, near-exhaustion DCE followed by allocation, post-decode
+   allocation, and an imported history range requiring more IDs than remain.
+   They require the history-sensitive hash to change when a transform is issued
+   and later wholly erased, while identical graph plus identical history stays
+   byte-stable. Literal mutations cover negative and greater-than-`i64::MAX`
    Wire integers plus 32-bit/64-bit decode parity. Origin-order mutations vary
    insertion order, reorder the serialized table, permute imported operands,
-   and stale a generated-path component; canonical bytes/hash change only when
-   semantic declared order changes.
+   and stale a generated-path component. Insertion order alone cannot change
+   bytes, but declared operand order and transform high-water history can.
 
    Whole-program integrity is a separate oracle. It coherently removes or
    replaces an internal declaration and every dependent graph/carrier field;
@@ -1009,8 +1117,10 @@ never reused.
   tag carries an exact nonnegative `i64`, never `usize` or an unsigned JSON
   value beyond `i64::MAX`;
 - encode the primary ordered `WireRuntimeDimDeclaration` list and
-  `WireRuntimeTransformNamespace { next: available(u64) | exhausted }` at DAG
-  level.
+  `WireRuntimeTransformNamespace { issued_through: Option<u64>, next:
+  available(u64) | exhausted }` at DAG level. `issued_through` is retained
+  transform-history authority even when DCE removed every origin that used its
+  highest IDs;
   Each non-optional declaration contains its stable local class ID, lexical
   scope, runtime scope-instance/clone lineage, binder slot, and complete
   ordered durable source/use IDs. Encode the canonical `RuntimeOrigin` table:
@@ -1063,15 +1173,18 @@ never reused.
   lineage, typed/synthesized origin, transform instance/path, source/use ID,
   member node/axis, literal, dtype, rank, class ID, uniqueness, canonical
   order, and control/liveness edge is checked before encode and after
-  exact-version decode. The transform cursor must equal the canonical checked
-  successor of the largest serialized transform: `available(0)` for none,
-  `available(max + 1)` below `u64::MAX`, or `exhausted` exactly after
-  `u64::MAX`. Allocation from `exhausted` and any overflowing import fail
-  `Capacity` before mutation. Duplicate transform instances, origins, complete
-  owner identities, and generated-path identities are invalid; distinct binder slots may share
-  one valid scope-instance lineage. Importing another annotated DAG canonically
-  remaps its namespace before combination; decode never accepts an overlapping
-  raw import. A stamp/manifest pair cannot establish or resize a class;
+  exact-version decode. The history/cursor pair must be exactly `(none,
+  available(0))`, `(some(n), available(n + 1))` below `u64::MAX`, or
+  `(some(u64::MAX), exhausted)`. Every live synthesized origin's transform is
+  at or below `issued_through`; an unreferenced origin is omitted, while the
+  high-water mark remains. Allocation from `exhausted` and any overflowing
+  import fail `Capacity` before mutation. Duplicate complete origin/generated
+  path identities, conflicting mutation-site tags under one transform ID, and
+  duplicate complete owner identities are invalid; distinct binder slots may
+  share one valid scope-instance lineage. Importing another annotated DAG
+  canonically remaps its complete history range before combination; decode never accepts
+  an overlapping raw import. A stamp/manifest pair cannot establish or resize
+  a class;
 - reject v6, #1298-only v7, versionless, future, string-size, executable
   `sym`, and owner-illegal `to_end` spellings before IR
   consumption; no legacy
@@ -1079,7 +1192,10 @@ never reused.
   their structural value and declared class/use pair before encoding; display
   strings have no role in class construction or verification;
 - update stable hash/prove/Beacon fixtures and every compiler-API or binding
-  consumer that exposes WireDag bytes or version names;
+  consumer that exposes WireDag bytes or version names. Hashing includes
+  `issued_through` and is intentionally sensitive to transform-ID allocation
+  history: a transform later erased by DCE changes the hash, while identical graph and
+  identical history serialize identically;
 - keep structural decode and artifact integrity distinct. Generic v8 decode
   accepts any internally valid program and rejects carrier inconsistencies.
   Trusted fixture/cache/offline loaders additionally accept an expected hash
@@ -1147,21 +1263,25 @@ phase creates them.
 **Deliver in order:** first amend `spec/05`'s closed `RtDim`
 and [05-OP-7] representation to admit `RuntimeExtent`, the structural
 tensor-axis witness with a static-or-node axis, exact scalar-operation-output
-sources, the independent provisional authority and closed transform/DCE API,
+sources, the independent provisional authority, sealed annotated graph, and
+closed atomic graph/authority transaction API,
 provisional hygienic annotations, the typed/synthesized origin algebra,
 the exact structural origin comparator, a serialized checked transform cursor
-with explicit exhaustion, lexical and runtime scope-instance ownership,
+with retained hashed high-water history and explicit exhaustion, lexical and
+runtime scope-instance ownership,
 post-transform primary binder declarations with durable source/use IDs, stable
 class IDs, static/scalar stamps plus the graph-level dynamic-axis witness
-carrier, the production rewrite registry and fusion barriers, source
+carrier, the complete production mutation-capability/callsite registry,
+compute-once `BroadcastScalarRef` adaptation and fusion barriers, source
 witness/alias roles, the complete in-memory owner
 matrix, and the complete graph-level
 `RuntimeExtentClass` manifest, and require named values resolved before
 executable IR. Author any missing numbered operation atoms,
 then generate and freeze the one complete `OutputAxisRule`/`OpExtentRule`
 registry used both for pre-allocation operation-output guards here and total
-`AxisSource` in Phase 4; amend `spec/06` for
-rank-zero bound slices and batch-varying extents; and amend `spec/10`
+`AxisSource` in Phase 4; amend `spec/06` for rank-zero bound slices,
+compute-once dual-use scalar adaptation, and typed rejection of batch-varying
+element-derived extents; and amend `spec/10`
 for the next monotonic WireDag version (v8 from the current v6 baseline).
 Write the derived positive, negative, equality-class, owner-matrix, and
 transform test stubs before implementation. Then deliver C2.1-C2.6 and C6
@@ -1175,26 +1295,31 @@ acceptance reproducer is green under the owning rank-polymorphism work.
 `Expand.size: RuntimeExtent`; exact nonnegative-`i64` literal, structural
 tensor-axis, and scalar input values;
 the exact `RuntimeExtent` owner matrix; provisional hygienic keys and the
-independent provisional authority; typed/synthesized origin and
+independent provisional authority, sealed graph, atomic mutation transactions,
+and compile-fail raw-mutation boundary; typed/synthesized origin and
 transform-instance algebras and exact structural comparator; the serialized
-checked transform cursor, exhaustion behavior, and post-decode/import collision
-rules; lexical/runtime-scope and clone-lineage
+checked transform cursor, retained history high-water, history-sensitive hash,
+exhaustion behavior, and post-decode/import collision rules;
+lexical/runtime-scope and clone-lineage
 rules; post-transform primary binder declaration/ownership/source/use
 identities; static-or-node tensor-axis and scalar-operation-output source
 algebras; graph-level dynamic-axis witness placement; stable runtime binder IDs;
 complete ordered equality-class manifests and source/use roles;
 the single generated `OutputAxisRule` and `OpExtentRule` variant/formula sets;
-the complete production-rewrite registry and transform/fusion behavior for
-every bound-dependency class;
+the complete production-mutation capability/callsite registry,
+`BroadcastScalarRef`, trap/effect occurrence rules, and transform/fusion
+behavior for every bound-dependency class;
 WireDag v8; no provenance-rejection construct; one static folder; all-lane
 guard placement.
 
 **Oracle:** `uv run --managed-python --python 3.11 --no-project python
 scripts/runtime_extent_oracle.py --phase 2`, including host, HIP, Metal,
 WireDag, #569 transformation, every transform-bound class, named-dimension
-witness sets and guards, generated-origin/clone-lineage rows, structural Wire
-negatives, coherent-replacement integrity mismatches, zero, and negative rows
-owned by this phase, plus the composed exact-head #1298 oracle.
+witness sets and guards, generated-origin/clone-lineage rows, sealed-mutation
+and entry-selection rows, compute-once vmap/fusion trap/effect rows, retained
+high-water/DCE/hash rows, structural Wire negatives, coherent-replacement
+integrity mismatches, zero, and negative rows owned by this phase, plus the
+composed exact-head #1298 oracle.
 
 ### Phase 3 -- deferral totality and deterministic settlement
 
