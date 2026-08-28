@@ -738,8 +738,11 @@ A movement bound (`pad` before/after, `shrink` start/end, `stride` step), an
 - `Node(i)` — a **runtime** extent read from the owning node's `inputs[i]`, a
   rank-0 integer scalar (a `shape()` read or integer arithmetic over one:
   `add`/`mul`/`floor_div`/`neg`/`cast`). The index is absolute: `inputs[0]` is
-  always the tensor operand, and `inputs[1..]` are the bound scalars and any
-  shape-only tensor operands an `InputAxis` names.
+  always the tensor operand, and `inputs[1..]` are the bound scalars, any
+  rank-0 `int32` axis scalar a node-valued `InputAxis` axis names, and any
+  shape-only tensor operand an `InputAxis` names.
+- `Sym(name)` — a symbolic dim declared elsewhere (e.g. a bystander `batch`);
+  legal only as a `reshape` target.
 - `InputAxis(t, a)` — the extent of an earlier tensor node's axis, read
   directly from that tensor's shape metadata: `t` is an absolute index into
   the owning node's `inputs` naming a tensor operand, and `a` is a normalized
@@ -754,14 +757,9 @@ A movement bound (`pad` before/after, `shrink` start/end, `stride` step), an
   name is decided by ordinary type reasoning (spec/04-type-system.md §4.7.3),
   and an unproved identity is a fresh extent under an equality guard.
 
-`expand` and `reshape` admit `Lit`, `Node`, and `InputAxis`; `pad`, `shrink`,
-and `stride` admit `Lit` and `Node`, plus `ToEnd` for a `shrink` end.
-
-A symbolic dimension name is a typed form, not an `RtDim`: no executable owner
-admits it. A `reshape` target that restates a bystander named dimension (e.g.
-`batch`) reads it as `InputAxis` from the tensor whose axis declares it, which
-becomes a shape-only operand when it is not already an input. *(Not fully
-implemented; chelis#1277.)*
+`reshape` admits `Lit`, `Node`, `InputAxis`, and `Sym`; `expand` admits `Lit`,
+`Node`, and `InputAxis`; `pad`, `shrink`, and `stride` admit `Lit` and `Node`,
+plus `ToEnd` for a `shrink` end.
 
 Runtime bounds are validated in every execution mode with matching language
 errors: a negative bound, a shrink range overshoot, a non-positive stride

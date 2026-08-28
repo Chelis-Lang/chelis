@@ -1,27 +1,26 @@
 # Runtime Extents: one resolver for non-literal tensor extents
 
-**Status:** PROPOSED. No phase is implemented. Tracking issue: [#1277].
+**Status:** PROPOSED. No slice is implemented. Tracking issue: [#1277].
 Code evidence in this document was rechecked on `main` at `53607a64`;
 function and type names are the durable anchors and line numbers are a
 convenience of that commit.
 **Owning specs:** `spec/04-type-system.md` §4.7 (admissibility, identity,
 zero and negative extents, the runtime extent guard placement rule, and the
 §4.7.2 settlement order), `spec/05-risc-primitives.md` §2.4.1 (the `RtDim`
-carrier set including `InputAxis`), [05-OP-7] (the folded direct read),
-[05-MOV-1], and [05-DIM-1..3]; `spec/06-transformations.md` §3.7 (runtime
-extents under `vmap`) and §8.6 (`batch_varying_extent`);
+carrier set including `InputAxis`), §2.5.1 and [05-OP-7] (the folded direct
+read), [05-MOV-1], and [05-DIM-1..3]; `spec/06-transformations.md` §3.7
+(runtime extents under `vmap`) and §8.6 (`batch_varying_extent`);
 `spec/10-serialization.md` for the public WireDag encoding. This plan
 implements those decisions and decides no language semantics of its own.
-Where an earlier draft of this plan had to invent a rule, that rule now
-lives in the numbered tier and this document cites it.
 **Class fixed:** [#1277] - a tensor extent that is not a literal (a
 `shape()` read, an `int64` parameter, a record projection, a user-function
 result, checked arithmetic, or an in-scope dimension binder) is admitted by
-the checker according to its syntactic provenance and is recovered by the
-backend by string name. The numbered spec makes every well-typed `int64`
-expression admissible and requires the same value, guard, and trap on every
-lane. The four mechanisms that stand between those two states are
-incomplete in ways that keep producing instances.
+the checker according to its syntactic provenance and its equality guards
+and output-axis sources are recovered by the backend by string name. The
+numbered spec makes every well-typed `int64` expression admissible and
+requires the same value, guard, and trap on every lane. The four mechanisms
+that stand between those two states are incomplete in ways that keep
+producing instances.
 
 **Interlocks, not hidden scope:**
 
@@ -38,8 +37,7 @@ incomplete in ways that keep producing instances.
   receipts.
 - [#1372] (DAG rebuild integrity: side-carried annotations surviving every
   graph rebuild) and [#1373] (exact-`i64` internal extent carriers) are
-  separate work filed from this plan and named in Part IV; neither is a
-  phase here.
+  separate work filed from this plan; neither is a slice here.
 
 ## Summary
 
@@ -47,22 +45,22 @@ The controlling spec is newer than the implementation. `spec/04` §4.7 admits
 a function parameter, local or top-level binding, record projection,
 user-function result, cast, or checked arithmetic expression anywhere an
 `int64` extent is expected, requires Eval, C, HIP, and Metal to execute the
-same value and guards, and now states where a guard is evaluated and in what
-order coupled positional-`expand` defaults settle. `spec/05` §2.4.1 now names
-the carrier every executable extent uses. `spec/06` §3.7 now says what `vmap`
-does with a runtime extent.
+same value and guards, and states where a guard is evaluated and in what
+order coupled positional-`expand` defaults settle. `spec/05` §2.4.1 names the
+carrier every executable extent uses. `spec/06` §3.7 says what `vmap` does
+with a runtime extent.
 
 The implementation still has four separate recovery mechanisms, measured in
-the next section. The fix is ordered around representation: Slice A gives
+the next section. The fix is ordered around representation. Slice A gives
 every accepted `expand` size a real graph carrier (a literal, a folded
 tensor-axis read, or a scalar value edge), migrates every lane and the wire
 format, and only then deletes the provenance rejections. Slice B makes the
 equality guards that `spec/04` requires executable graph structure and gives
-every realized output axis one checked source, so no runtime size is
-recovered by name. Slice C makes the one genuine deferral (positional
-`expand`) total and deterministic. One runner records the baseline and
-enforces the allowed progression from an ICE or lane divergence, through a
-typed implementation receipt, to exact execution.
+every realized output axis one checked source, so no guard or axis source is
+recovered by a string search. Slice C makes the one genuine deferral
+(positional `expand`) total and deterministic. One runner records the
+baseline and enforces the allowed progression from an ICE or lane divergence,
+through a typed implementation receipt, to exact execution.
 
 ## The evidence: four mechanisms, measured
 
@@ -111,20 +109,19 @@ typed implementation receipt, to exact execution.
    which is [#665] and, through grad+vmap, [#592].
 4. **The lanes disagree.** The C lane emits its equality guards in
    `emit_input_shape_preamble` (`crates/chelis-backend-c/src/emit.rs:1230-
-   1274`) before any allocation and inline at op-declared sites; the HIP lane
-   compiles a Load-declared symbolic `expand` (`emit_expand`,
-   `crates/chelis-backend-hip/src/emit.rs:1799`, renders the size through
-   `emit_dim_expr`, `3781-3784`, which prints `DimExpr::Sym` by name) but
-   rejects every
-   `RtDim::Node` bound and the `Shape` read itself
-   (`crates/chelis-compiler-api/src/compiler.rs:4628-4694`); the Metal lane
-   rejects node-valued bounds (`compiler.rs:4238-4259`). `vmap`
-   (`crates/chelis-ir/src/vmap.rs:12`) prepends the batch axis to every node
-   including rank-0 scalars, and the verifier then rejects the rank-1 bound
-   source (`verify.rs:518-522`, `verify.rs:1471-1479`), so `vmap` over any
-   runtime bound is unrepresentable today. The checker rejects a zero size
-   (`infer/app_tensor.rs:985-996` and `1184-1193`) although `spec/04` §4.7.2
-   prohibits only a negative one.
+   1274`) before any allocation, in symbol-name order, and inline at
+   op-declared sites; the HIP lane compiles a Load-declared symbolic
+   `expand` (`emit_expand`, `crates/chelis-backend-hip/src/emit.rs:1799`,
+   renders the size through `emit_dim_expr`, `3781-3784`, which prints
+   `DimExpr::Sym` by name) but rejects every `RtDim::Node` bound and the
+   `Shape` read itself (`crates/chelis-compiler-api/src/compiler.rs:4628-
+   4694`); the Metal lane rejects node-valued bounds (`compiler.rs:4238-
+   4259`). `vmap` (`crates/chelis-ir/src/vmap.rs:12`) prepends the batch axis
+   to every node including rank-0 scalars, and the verifier then rejects the
+   rank-1 bound source (`verify.rs:518-522`, `verify.rs:1471-1479`), so
+   `vmap` over any runtime bound is unrepresentable today. The checker
+   rejects a zero size (`infer/app_tensor.rs:985-996` and `1184-1193`)
+   although `spec/04` §4.7.2 prohibits only a negative one.
 
 Three structural facts explain why fixing instances has not closed the class:
 
@@ -150,56 +147,19 @@ Three structural facts explain why fixing instances has not closed the class:
 
 ### C1 The controlling extent contract
 
-Restated by citation. No clause below is stronger than the sentence it cites,
-and the numbered spec, not this restatement, decides.
+The numbered spec decides every rule below; this table only names where.
+Later sections cite the clause labels.
 
-- **C1.1 Admissibility is typing, not provenance** (`spec/04` §4.7.2,
-  §4.7.3, §4.7.4, §4.7.6). An `expand` size is any expression of exactly
-  type `int64`; a `reshape` target is a `List[int64]` of statically known
-  arity whose elements are arbitrary `int64` expressions. No stage may
-  require a literal, a tensor-name source, or a privileged spelling.
-- **C1.2 Identity is proof-gated; equality is guarded** (`spec/04` §4.7.2,
-  §4.7.3, §4.7.6, and the identity-only movement rule in §4.7). A literal
-  stays a literal; a direct read may keep an input dimension's identity only
-  when ordinary type reasoning proves it; otherwise the result carries a
-  fresh `(d-name {} *)` extent, and a declared literal or name that is not
-  statically proved equal adds a runtime equality guard rather than making
-  the value illegal. Every symbolic `shrink` axis mints a fresh extent,
-  including a full-axis `(0, ToEnd)` slice whose realized extent equals the
-  input's.
-- **C1.3 Guard placement is a partial order** (`spec/04` §4.7, the runtime
-  extent guard paragraph). A guard runs once, after its operands exist and
-  before the first allocation or element access whose shape depends on it;
-  interface-valued guards run at function entry in signature order; a guard
-  over a locally computed value takes the source position of the operation
-  that introduces the guarded extent relative to independent effects and
-  traps; unrelated guards and operations may run in either order. A failing
-  guard traps `Domain` under the introducing operation and names the
-  disagreeing sources.
-- **C1.4 Settlement is source order** (`spec/04` §4.7.2). Coupled positional
-  `expand` defaults settle in the order their `expand` calls appear in the
-  program, never in an implementation's iteration order.
-- **C1.5 Zero is legal** (`spec/04` §4.7.2). A static negative extent is a
-  type error; a runtime negative extent traps `Domain` before allocation or
-  access; zero produces a tensor with the declared shape and logical element
-  count zero.
-- **C1.6 Extents are `int64` and axes are `int32`** ([05-DIM-1..3]). The
-  checker, movement signatures, and C carrier ship this split; the HIP
-  metadata carrier is [#1112]'s.
-- **C1.7 One carrier per owner** (`spec/05` §2.4.1 and §2.5.1). An
-  executable extent is `Lit`, `Node`, `InputAxis`, or `ToEnd`; a symbolic
-  name is a typed form that no executable owner admits. `expand` and
-  `reshape` admit `Lit`, `Node`, and `InputAxis`; `pad`, `shrink`, and
-  `stride` admit `Lit` and `Node` plus `ToEnd` for a `shrink` end. A direct
-  `shape()` extent argument to `expand` or `reshape` is the folded `InputAxis`
-  form; the same read bound to `pad`, `shrink`, or `stride` is a rank-0
-  `Node`; a `reshape` target that restates a bystander named dimension reads
-  it as `InputAxis` from the tensor that declares it.
-- **C1.8 `vmap` shares extents** (`spec/06` §3.7, §8.6). A rank-0 extent
-  value is not batched: it is evaluated once, shared across the batch, and
-  its traps and effects occur once. An `InputAxis` read observes the axis it
-  named before the batch axis was inserted. An extent that depends on the
-  elements of a vmapped tensor is the type error `batch_varying_extent`.
+| clause | rule | where it is decided |
+|---|---|---|
+| C1.1 | Admissibility is typing, not provenance: any `int64` expression is an `expand` size; a `reshape` target is a `List[int64]` of static arity | `spec/04` §4.7.2, §4.7.3, §4.7.4, §4.7.6 |
+| C1.2 | Identity is proof-gated and equality is guarded; an unproved claim adds a guard, never a rejection; every symbolic `shrink` axis is fresh | `spec/04` §4.7, §4.7.2, §4.7.3, §4.7.6 |
+| C1.3 | Guard placement is a partial order: once, after operands, before the first dependent allocation or access; interface guards at entry in signature order; local guards at the introducing operation's source position; an equality guard traps `Domain` under the introducing operation, a non-negativity guard under the owning movement operation | `spec/04` §4.7, the runtime extent guard paragraph |
+| C1.4 | Coupled positional defaults settle in the order their results are introduced into the checked program | `spec/04` §4.7.2 |
+| C1.5 | Zero is legal; a static negative is a type error; a runtime negative traps `Domain` | `spec/04` §4.7.2 |
+| C1.6 | Extents are `int64`, axes are `int32` | [05-DIM-1..3] |
+| C1.7 | One carrier per owner: `expand` admits `Lit`, `Node`, `InputAxis`; `reshape` additionally `Sym` (a bystander named dimension); `pad`/`shrink`/`stride` admit `Lit`, `Node`, and `ToEnd` for a `shrink` end; a direct `shape()` extent argument to `expand`/`reshape` is the folded `InputAxis`, the same read bound elsewhere is a rank-0 `Node` | `spec/05` §2.4.1, §2.5.1 |
+| C1.8 | `vmap` shares a rank-0 extent, evaluates it once, shifts a folded or materialized read's axis, and rejects an element-derived extent as `batch_varying_extent` | `spec/06` §3.7, §8.6 |
 
 ### C2 Representation first, provenance deletion last
 
@@ -212,10 +172,10 @@ RiscOp::Expand {
 }
 
 enum RtDim {
-    Lit(usize),         // exact width is the #729 child's work, not this plan's
+    Lit(usize),         // exact width is #1373's work, not this plan's
     ToEnd,              // Shrink end only
     Node(usize),        // absolute input slot of a rank-0 int64 node
-    Sym(String),        // transitional name-bound reshape target; deleted in Slice B
+    Sym(String),        // reshape targets only (spec/05 §2.4.1); unchanged here
     InputAxis {         // folded tensor-axis read, expand/reshape only
         tensor: usize,  // absolute input slot of an earlier tensor node
         axis: RtAxis,
@@ -223,7 +183,7 @@ enum RtDim {
 }
 
 enum RtAxis {
-    Lit(i32),           // axis-domain literal, [05-DIM-1]
+    Lit(i32),           // normalized axis-domain literal, [05-DIM-1]
     Node(usize),        // absolute input slot of a rank-0 int32 node (#1298)
 }
 
@@ -233,7 +193,7 @@ struct RuntimeDimClass {
 }
 
 enum RuntimeDimMember {
-    LoadAxis { load: NodeId, axis: usize },
+    LoadAxis { load: NodeId, axis: usize, signature_index: u32 },
     TensorAxis { node: NodeId, axis: RtAxis },
     Scalar { node: NodeId },
     OpOutput { node: NodeId, axis: usize },
@@ -254,47 +214,35 @@ struct Dag {
   the read tensor becomes a shape-only input, so the owning node's data
   dependencies and shape dependencies are the same edge kind and DCE cannot
   lose one without the other. The `shape_deps` side vector survives only for
-  uses that no `InputAxis` slot covers, and is deleted once
-  `record_runtime_dim_shape_deps` and `op_declared_output_axes` no longer
-  read it (Slice B). A literal axis is an exact `int32` already normalized into
+  uses that no `InputAxis` slot covers, and is deleted once nothing reads it
+  (Slice B). A literal axis is an exact `int32` already normalized into
   `0..rank(t)` (`spec/04` §4.7.1 normalizes a negative literal statically);
   a node-valued axis is an earlier rank-0 `int32` node and is admitted only
   after [#1298] lands the runtime `Shape.axis` operand. A cast, arithmetic
-  expression, record
-  projection, parameter, or user-function result is ordinary scalar dataflow
-  and reaches every movement node as `RtDim::Node`; `pad`, `shrink`, and
-  `stride` materialize a direct `shape()` read exactly once as a rank-0
-  `RiscOp::Shape` and bind it through `Node`, as `spec/05` §2.4.1 states. A
-  bare in-scope dimension binder such as `a` in `c: tensor[a, f32]` uses the
-  same owner-specific carrier: a tensor witness becomes `InputAxis` for
-  `expand`/`reshape` and a materialized `Node` for the other three; a literal
-  instantiation becomes `Lit`; a scalar witness becomes `Node`. The typed
-  environment maps binder identity, never spelling, to its witnesses.
+  expression, record projection, parameter, or user-function result is
+  ordinary scalar dataflow and reaches every movement node as `RtDim::Node`;
+  `pad`, `shrink`, and `stride` materialize a direct `shape()` read exactly
+  once as a rank-0 `RiscOp::Shape` and bind it through `Node`, as `spec/05`
+  §2.4.1 states. A bare in-scope dimension binder such as `a` in `c:
+  tensor[a, f32]` uses the same owner-specific carrier: a tensor witness
+  becomes `InputAxis` for `expand`/`reshape` and a materialized `Node` for
+  the other three; a literal instantiation becomes `Lit`; a scalar witness
+  becomes `Node`. The typed environment maps binder identity, never
+  spelling, to its witnesses. The reshape-only `Sym` target is the carrier
+  `spec/05` §2.4.1 defines and is not changed by this plan; its runtime
+  binding (`bind_symbolic_dims`, the C prologue variable) stays as it is.
 
   The in-memory owner matrix is exact and matches the wire matrix:
 
   | `RiscOp` field | legal `RtDim` |
   |---|---|
   | `Expand.size` | `Lit`, `InputAxis`, `Node` |
-  | `Reshape.new_shape[*]` | `Lit`, `InputAxis`, `Node`; `Sym` until Slice B |
+  | `Reshape.new_shape[*]` | `Lit`, `InputAxis`, `Node`, `Sym` |
   | `Pad.padding[*].before/after` | `Lit`, `Node` |
   | `Shrink.bounds[*].start` | `Lit`, `Node` |
   | `Shrink.bounds[*].end` | `Lit`, `Node`, `ToEnd` |
   | `Stride.strides[*]` | `Lit`, `Node` |
 
-  `Sym` has no executable owner in the decided rule (`spec/05` §2.4.1).
-  Today lowering (`lower.rs:11777`), the grad adjoint reshape
-  (`grad.rs:2182`), vmap (`vmap.rs:29` through `RtDim::from_dim_info`,
-  `dag.rs:124`), and specialization (`specialize.rs:106`) still produce a
-  name-bound `RtDim::Sym` reshape target that eval (`eval.rs:2214`), the C
-  lane (`emit.rs:6340`), and `WireRtDim::Sym` execute and serialize by name.
-  Slice A leaves that path untouched: `Reshape.new_shape[*]` additionally
-  admits `Sym` as one transitional row, the Slice A verifier and wire decoder
-  admit it there and nowhere else, and Phase 2 freezes the matrix with that
-  row. Slice B migrates every producer to `InputAxis` on the declaring tensor
-  (a shape-only input slot when it is not already an operand), deletes
-  `RtDim::Sym` and `WireRtDim::Sym`, removes the transitional row, and makes
-  `sym` a wire negative everywhere.
 - **C2.2 Static values are an optimization.** A statically proved
   non-negative value, including zero, may use `RtDim::Lit`. One checked
   static folder is shared, or contract-tested for agreement, between the
@@ -319,29 +267,28 @@ struct Dag {
   `optimize.rs:303`, fusion `fuse.rs:203`, vmap `vmap.rs:3`, grad pruning
   `grad.rs:623`, the four specialization passes in `specialize.rs`, copy
   insertion and drop stripping in `lower.rs`, `splice_dag` at
-  `lower.rs:7824`, and `bind_symbolic_dims` at `dag.rs:2352`). A member whose
-  node a pass removes is discharged only when no surviving node depends on
-  the guarded extent; otherwise the pass is invalid and the verifier says
-  so. Two classes may reference one node, each with its own guard. A node
-  that appears twice in one class, which is what `splice_dag` produces for
-  `f(n, n)` because both parameter names map to one `NodeId`
-  (`lower.rs:7830-7838`), keeps one member. The canonical member is the
-  signature-first witness. Interface members carry their declared signature
-  index and order by it: node position is name order today because lowering
-  pre-creates interface `Load`s name-sorted (`lower.rs:1341`), so Slice B
-  either creates them in signature order, which that site's comment permits,
-  or keys members by signature index. Local members follow node position,
-  `(kind, axis)` breaks ties, and classes follow their canonical member. No
-  hash-map iteration and no display name participates. A class whose members
-  are all interface values is never discharged: `spec/04` §4.7 evaluates its
-  guard at entry regardless of data use, so DCE keeps the `Load`s it
-  references even when nothing else does. This is deliberately
-  graph-level: Load/Load, Load/op-output, and op-output/op-output equalities
-  exist even when no movement bound owns them, which is what the C lane's
-  name-grouped `SymbolicDimBinding.others` (`dag.rs:570-574`) approximates
-  today and Slice B replaces. Any node referenced by a class member or by an
-  `RtDim::Node` slot is a fusion barrier: it is never absorbed into a fused
-  chain and keeps its identity; fusion among other nodes is unaffected.
+  `lower.rs:7824`, and `bind_symbolic_dims` at `dag.rs:2322`). Four rules,
+  each from a `spec/04` §4.7 sentence:
+  - the canonical member is the signature-first witness, so interface
+    members carry their declared signature index and order by it (node
+    position is name order on the subexpression-program path,
+    `lower.rs:1341`, and declared order on the `lower_fn` path,
+    `lower.rs:12100-12108`, so it is not a reliable key); local members
+    follow node position; nothing orders by hash iteration or display name;
+  - a class whose members are all interface values is never discharged,
+    because its guard runs at entry regardless of data use, so DCE keeps the
+    `Load`s it references; any other member is discharged only when no
+    surviving node depends on the guarded extent;
+  - two classes may reference one node, each with its own guard, and a node
+    that appears twice in one class (`splice_dag` maps both parameters of
+    `f(n, n)` to one `NodeId`, `lower.rs:7830-7838`) keeps one member;
+  - a node referenced by a class member or by an `RtDim::Node` slot is never
+    absorbed into a fused chain, because the guard must observe the producer
+    exactly once; fusion among other nodes is unaffected.
+  This is deliberately graph-level: Load/Load, Load/op-output, and
+  op-output/op-output equalities exist even when no movement bound owns
+  them, which is what the C lane's name-grouped `SymbolicDimBinding.others`
+  (`dag.rs:570-574`) approximates today and Slice B replaces.
 - **C2.5 Every consumer lands before deletion.** Verification, Eval, C, HIP,
   Metal, specialization, fusion, AD, vmap, CSE, DCE, hashing, and the wire
   encoder and decoder read `RtDim` in every owner and `runtime_dim_classes`
@@ -361,37 +308,38 @@ struct Dag {
     the C5 lattice, and an extent above `INT_MAX` on HIP remains [#1112]'s
     defect exactly as it is now.
   - Wire: `Expand.size` changes from a display string to `WireRtDim`, which
-    gains an `input_axis { tensor, axis }` variant in Slice A and loses `sym`
-    in Slice B; `runtime_dim_classes` is serialized in canonical order. The
-    typed wire capacity census rows for
+    gains an `input_axis { tensor, axis }` variant; `runtime_dim_classes` is
+    serialized in canonical order; the typed wire capacity census rows for
     every changed descriptor are regenerated and classified in the same
     change.
 - **C2.6 Transforms preserve the bound slice.** `vmap` follows `spec/06`
   §3.7: a rank-0 extent scalar keeps rank zero and is shared; an `InputAxis`
   literal axis shifts by one, a node-valued axis is normalized against the
-  unbatched rank and then shifted, and a materialized `shape()` read (the
-  `Node` form) shifts its axis the same way, so `vmap` gains a `Shape` arm;
-  a bound derived from vmapped tensor elements is rejected as
-  `batch_varying_extent` before lowering. When a
-  scalar producer has both a bound consumer and an ordinary batched consumer
-  it is evaluated once; if the ordinary branch needs a batched value, an
-  `Expand` of the rank-0 node over the batch axis is already legal (the
-  checker admits a rank-0 operand, `builtins.rs:1824-1842`, and the compiler
-  emits that shape in `zero_tensor_node`, `lower.rs:7047-7085`), so no new
-  operation is needed. `grad` preserves every absolute input slot and its
-  rank/dtype invariant; bound scalars remain the zero-cotangent boundary
-  `spec/05` §2.4.1 defines. Specialization, cloning, and remapping preserve
-  or remap every slot and every class member through the pass's own `remap`.
+  unbatched rank and then shifted, and a materialized `shape()` read shifts
+  its axis the same way, so `vmap` gains a `Shape` arm; a bound derived from
+  vmapped tensor elements is rejected as `batch_varying_extent` before
+  lowering. When a scalar producer has both a bound consumer and an ordinary
+  batched consumer it is evaluated once; if the ordinary branch needs a
+  batched value, an `Expand` of the rank-0 node over the batch axis is
+  already legal (the checker admits a rank-0 operand, `builtins.rs:1824-
+  1842`, and the compiler emits that shape in `zero_tensor_node`,
+  `lower.rs:7047-7085`), so no new operation is needed. `grad` preserves
+  every absolute input slot and its rank/dtype invariant; bound scalars
+  remain the zero-cotangent boundary `spec/05` §2.4.1 defines.
+  Specialization, cloning, and remapping preserve or remap every slot and
+  every class member through the pass's own `remap`.
 - **C2.7 The deletion is atomic with the usable replacement.** Only after
   C2.1-C2.6 are green for a lane does the slice delete `SizeClass`,
   `classify_expand_size`, `classify_arith_app`,
   `sourceless_expand_size_error`, `Env::size_provenance` and its plumbing,
   and the lowerer's mirror rejections at `lower.rs:9109-9190`. No
   intermediate commit may accept a value the IR cannot carry. Slice B
-  separately removes `SymbolicDimBinding.others` and the name-grouped
-  execution loops once C4 consumes the class list on every lane. Best-effort
-  identity recognition may survive only as refinement whose failure result
-  is a fresh extent plus a guard.
+  separately removes `SymbolicDimBinding.others`, the name-grouped guard
+  loops, `op_declared_output_axes`, and `shape_source_for_axis` once C4
+  consumes the class list on every lane; the `Load` pass of
+  `symbolic_occurrences` that binds a reshape `Sym` target survives, since
+  that carrier is unchanged. Best-effort identity recognition may survive
+  only as refinement whose failure result is a fresh extent plus a guard.
 
 ### C3 Positional expand uses one normative protocol
 
@@ -439,17 +387,12 @@ constrains the earlier pending seed; tuple, record, and ADT projection and
 pattern binding transfer the selected token; record update constrains an
 updated field only when its resolved schema is independent.
 
-The privacy lock is a named later deliverable of the same slice, not an
-entry requirement: recursive expression inference returns an opaque
-`#[must_use]` carrier whose pending tokens have private fields; a child
-enters its parent only through one `consume_pending(site, value, evidence)`
-choke point; the site enum is generated from the builtin registry and the
-Deep expression-form registry so a new builtin or form fails compilation
-until it has a disposition; and compile-fail tests reject a helper that
-bypasses the choke point. Generated semantic tests execute both candidate
-outcomes and a contradictory shape for every `Constrain` row, propagation
-followed by later selection for every `Propagate` row, and the documented
-default for every `Freeze` row.
+One tripwire test walks the builtin registry and asserts that every builtin
+consuming a tensor either unifies its operands against the pending result or
+propagates it; a builtin without a disposition fails that test. The
+semantic tests execute both candidate outcomes and a contradictory shape for
+every `Constrain` context, propagation followed by later selection for every
+`Propagate` context, and the documented default for every `Freeze` context.
 
 ### C4 Every realized output axis has one checked source
 
@@ -457,7 +400,8 @@ An exhaustive match over `RiscOp` variants catches a new operation but not a
 missing flow through an existing operation; [#665] is the proof, since the
 operation is already `Expand` and the missing fact is that an op-declared
 axis on its input must flow through a kept output axis with an index shift.
-The structural interface is therefore a total per-output-axis algebra:
+The structural interface is therefore a per-output-axis source with a
+cardinality check:
 
 ```rust
 enum AxisSource {
@@ -465,68 +409,60 @@ enum AxisSource {
     ExternalAxis { load: NodeId, axis: usize },
     InputAxis { input: usize, axis: RtAxis },
     ScalarInput { input: usize },
-    OpComputed { op: NodeId, axis: usize, rule: OpExtentRule },
+    OpComputed { op: NodeId, axis: usize },
 }
+
+fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource>;
 ```
 
-- **C4.1 Cardinality and ownership.** Every realized node supplies exactly one
-  `AxisSource` per output axis; the vector length equals the output rank, and
-  omission or duplication is invalid. `ExternalAxis` validates that `load` is
-  the exact external-input `Load` and that `axis` exists; downstream nodes
-  retain its `NodeId`, never its string name. `InputAxis` validates the
-  tensor input slot and its literal or node-valued exact-`int32` axis.
-  `ScalarInput` validates the earlier rank-0 exact-`int64` contract of C2.1.
-  `OpComputed` is permitted only for a closed operation-and-axis
-  `OpExtentRule` whose formula is the owning numbered operation atom; it is
-  not a wildcard. The per-op extent table is bijective with the `RiscOp`
-  registry: an operation, output, or rank rule without a row is a build
-  failure, and a row without a governing atom is authored as a numbered-spec
-  change first. Identity is decided separately and only by typed proof: a
-  proved same identity keeps the source dimension's name as type metadata,
-  an unproved cross-tensor read is a fresh extent with a class member and a
-  guard, and equality of extent formulas alone never proves identity.
+- **C4.1 Cardinality and ownership.** `output_axis_sources` is one
+  exhaustive match over `RiscOp`; the verifier requires its result to have
+  exactly the output rank with no omitted or duplicated axis, so a new
+  operation fails to compile and a missing flow through an existing
+  operation fails verification. `ExternalAxis` names the exact external
+  `Load` by `NodeId`, never by string; `InputAxis` validates the tensor slot
+  and its literal or node-valued exact-`int32` axis; `ScalarInput` validates
+  the rank-0 exact-`int64` contract of C2.1; `OpComputed` means the
+  operation computes the extent by its own output-shape rule. Identity is
+  decided separately and only by typed proof: a proved same identity keeps
+  the source dimension's name as type metadata, an unproved cross-tensor read
+  is a fresh extent with a class member and a guard, and equality of extent
+  formulas alone never proves identity.
 - **C4.2 Exact movement mappings.** Same-rank `Expand` maps every unchanged
   output axis to the same input axis and the replaced axis to its literal,
   `InputAxis`, or scalar size. Rank-increasing `Expand` maps axes before the
   insertion unchanged, the inserted axis to its size, and later output axes
   to input axis `output_axis - 1`. Each `Reshape` target maps to its literal,
-  folded `InputAxis`, or scalar input. Only the identity movement axes that
-  `spec/04` §4.7 names, `Stride` with literal step one and `Pad` with literal
-  zero padding, pass an input axis through; every symbolic `Shrink` output
-  axis and every other non-identity movement axis is `OpComputed` with a
-  fresh class member, including a full-axis `(0, ToEnd)` slice. `Load` axes
-  are `ExternalAxis`. Shape-preserving non-movement ops use the exact
-  input-axis map; reductions, concatenation, convolution, and every other
-  computed-shape op use a closed rule citing their own atom.
-- **C4.3 Interim failure is typed.** The algebra first lands as a verifier
-  and property ratchet. A currently unsupported but well-typed mapping yields
-  the registered [#730] `Unsupported` receipt; it never reaches the
+  folded `InputAxis`, scalar input, or reshape-only `Sym`. Only the identity
+  movement axes that `spec/04` §4.7 names, `Stride` with literal step one and
+  `Pad` with literal zero padding, pass an input axis through; every symbolic
+  `Shrink` output axis and every other non-identity movement axis is
+  `OpComputed` with a fresh class member, including a full-axis `(0, ToEnd)`
+  slice. `Load` axes are `ExternalAxis`; shape-preserving non-movement ops
+  use the input-axis map; every computed-shape op is `OpComputed`.
+- **C4.3 Interim failure is typed.** The check first lands as a verifier
+  ratchet. A currently unsupported but well-typed mapping yields the
+  registered [#730] `Unsupported` receipt; it never reaches the
   occurrence-pass ICE and never substitutes an input extent.
-- **C4.4 Target state consumes the algebra.** Eval and all backends consume
-  `AxisSource` and `runtime_dim_classes` directly. Runtime extent flows no
-  longer depend on `shape_source_for_axis`, `op_declared_output_axes`, or a
-  search for a `Load` carrying the same string, and `SymbolicDimBinding.
-  others` is deleted. Static symbolic identities may remain in type
-  metadata, but no runtime size or guard is recovered by name. This closes
-  [#665] and [#592].
-- **C4.5 Sources are a final-DAG derived view.** `AxisSource` is neither
-  stored in the DAG nor serialized nor carried across transforms.
-  `derive_axis_sources(&Dag)` runs after the last rewrite and before final
-  verification and emission, borrowing the immutable DAG so a stale view
-  cannot outlive a mutation. Eval and each backend derive it only after
-  vmap, grad, specialization, fusion, cloning, and DCE finish; focused tests
-  derive it after each transform.
-
-Required mutation tests cover every `RiscOp` row, external `Load` axes, kept
-axes before and after an inserted `Expand` axis, the inserted or replaced axis,
-same-rank versus rank-increasing forms, every `Reshape` target, and omitted,
-duplicate, wrong-shifted, out-of-range, and wrong-node sources.
+- **C4.4 Target state consumes the sources.** Eval and all backends consume
+  `output_axis_sources` and `runtime_dim_classes` directly. Runtime extent
+  flows no longer depend on `shape_source_for_axis`,
+  `op_declared_output_axes`, or a search for a `Load` carrying the same
+  string, and `SymbolicDimBinding.others` is deleted. Static symbolic
+  identities may remain in type metadata and the reshape-only `Sym` target
+  keeps its `spec/05` §2.4.1 binding; no equality guard or output-axis
+  source is recovered by a string search. This closes [#665] and [#592].
+- **C4.5 Sources are derived after the last rewrite.** `output_axis_sources`
+  is neither stored in the DAG nor serialized nor carried across transforms;
+  it is computed from the DAG that Eval or a backend actually consumes, after
+  vmap, grad, specialization, fusion, cloning, and DCE, so a stale `NodeId`
+  cannot outlive a mutation.
 
 ### C5 The class oracle has a reachable boundary
 
 The authoritative named suite is `scripts/runtime_extent_oracle.py` plus its
-two platform execution gates. The runner accepts `--phase 0` through
-`--phase 4` and `--phase final`. Final automatic success exits zero with:
+two platform execution gates. The runner accepts `--phase a`, `--phase b`,
+`--phase c`, and `--phase final`. Final automatic success exits zero with:
 
 ```text
 RUNTIME EXTENT ORACLE: PASS
@@ -537,104 +473,77 @@ evidence cannot be combined across different heads. Rows that need a
 node-valued axis compose the [#1298] oracle at the same commit
 (`scripts/dtype_dynamic_axis_window_oracle.py`, ending
 `DTYPE DYNAMIC AXIS WINDOW ORACLE: PASS`); no other row depends on it, and
-reduction windows stay wholly in that oracle.
+reduction windows stay wholly in that oracle. The corpus is generated from
+the properties below; the generator, not this document, enumerates rows.
 
-1. **Host parity.** A generated legal matrix crosses extent-producing forms
+1. **Lane parity.** Every legal combination of an extent-producing form
    (literal and literal arithmetic, parameter, local and top-level binding,
-   record projection, user-function result, cast, checked arithmetic, a bare
-   in-scope dimension binder with one or several tensor witnesses, and direct
-   or indirect `shape()` reads with literal or, once [#1298] lands, computed
-   axes) with `expand`, `reshape`, `shrink`, `pad`, and `stride` where each
-   form is legal. `check`, `eval`, and compiled-and-executed C agree on
-   acceptance, shape, values, and traps. Named-dimension rows prove literal
-   instantiation, canonical signature-order witness selection, and complete
-   class guards for Load/Load, Load/op-output, and op-output/op-output
-   classes, including a class with no movement-bound consumer, two classes
-   sharing one member node with one execution and two guards, and the
-   `f(n, n)` splice producing one member. Same-tensor direct reads keep their
-   proved identity; unproved cross-tensor reads use the same `InputAxis`
-   carrier and add a guard. A full-axis symbolic `shrink` `(0, ToEnd)` is a
-   dedicated positive: same runtime extent, fresh type identity, fresh class
-   member, and a guard before allocation when a declared equality claims it.
-   Guard-order rows place an earlier independent effect or trap before a
-   later mismatch and require the earlier event to win, and the converse.
-2. **GPU build and execution.** The same named rows compile and execute in the
-   HIP and Metal correctness suites, not merely through capability-gate
+   record projection, user-function result, cast, checked arithmetic, an
+   in-scope dimension binder with one or several tensor witnesses, and a
+   direct or indirect `shape()` read) with `expand`, `reshape`, `shrink`,
+   `pad`, and `stride` gives the same acceptance, shape, values, and traps
+   on `check`, `eval`, and compiled-and-executed C. Named-dimension
+   combinations cover Load/Load, Load/op-output, and op-output/op-output
+   classes, a class with no movement-bound consumer, two classes sharing one
+   member node, the `f(n, n)` splice, a same-tensor read that keeps its
+   proved identity beside a cross-tensor read that gets a guard, and a
+   full-axis symbolic `shrink` `(0, ToEnd)` whose extent equals the input's
+   but whose identity and guard are fresh.
+2. **GPU build and execution.** The same rows compile and execute in the HIP
+   and Metal correctness suites, not merely through capability-gate
    rejection tests:
 
    ```sh
-   scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness --
-   --ignored --test-threads=1
-   PYO3_PYTHON="$(uv python find 3.11)" cargo test -p chelis-backend-metal
-   --test gpu_correctness -- --ignored --test-threads=1
+   scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1
+   PYO3_PYTHON="$(uv python find 3.11)" cargo test -p chelis-backend-metal --test gpu_correctness -- --ignored --test-threads=1
    ```
 
    Each command reports the runtime-extent group at the same commit and
-   corpus digest as the host run. Rows a lane rejects with the [05-MOV-1]
-   receipt sit at `typed_unsupported` in the lattice, never at a silent pass.
-3. **Negative parity.** Static negative extents fail with the owning type
-   error; runtime negative extents trap `Domain`. Wrong dtype, out-of-range
-   axis, rank-contradicting ascription, malformed scalar input, named-binder
-   witness mismatch, a missing class member, a split or merged class, and
-   checked overflow fail for the owning reason on every applicable lane.
-   Guard mutations that hoist a local producer to entry, cross an earlier
-   effect or trap, delay past a dependent allocation, duplicate a producer or
-   guard, or change failure attribution are exact negatives on every lane.
-   A `shrink` mutation that forwards the input class instead of minting a
-   fresh member fails before emission.
-4. **Zero positives.** Literal-zero and runtime-zero rows cover positional
-   replacement, positional insertion, and named-axis expansion; they assert
-   the exact output shape, logical element count zero, no element access, and
-   Eval/C/HIP/Metal agreement, inspecting logical metadata rather than
-   pointer nullness or target-private backing.
+   corpus digest as the host run. A row a lane rejects with the [05-MOV-1]
+   receipt sits at `typed_unsupported`, never at a silent pass.
+3. **Negative parity.** Every C1 rule has a failing control on every
+   applicable lane with the owning diagnostic or trap: static negative
+   extents, runtime negative extents, wrong dtype, out-of-range axis,
+   rank-contradicting ascription, a named-binder witness mismatch, and
+   checked overflow. Guard-order controls place an independent effect or
+   trap on each side of a mismatch and require C1.3's order in both
+   directions, and a `shrink` that forwards its input's class instead of
+   minting a fresh member fails before emission.
+4. **Zero.** Literal-zero and runtime-zero rows cover positional replacement,
+   positional insertion, and named-axis expansion and assert the declared
+   shape, logical element count zero, no element access, and lane agreement
+   on logical metadata.
 5. **Real [#569] transformation.** The runner proves a direct spelling checks,
    evaluates, and compiles; copies it to a task-owned path; runs `chelis lint
    --fix` and `chelis fmt --inplace`; proves formatting is idempotent and
    parseable; runs `chelis lint --check` and the style-gated `check`, `eval`,
    and compiled C path; and compares type, rank, shape, and value with the
    control. A negative fixture proves the typed-pipeline safety gate
-   suppresses a rewrite whose transformed program would not preserve the
-   typed result.
+   suppresses a rewrite that would not preserve the typed result.
 6. **Deferral stability.** Every positional candidate row runs in K fresh
-   processes; [#1338] is named and must settle to the source-order verdict
-   every time. The row set includes [#1338]'s spelling and its
-   operand-swapped form,
+   processes and settles to the source-order verdict every time, including
+   [#1338]'s spelling and its operand-swapped form
    `sub(expand(t1, 0, 3i64), reshape(expand(t0, 0, 6i64), [3i64, 2i64]))`,
    which passes only when `reshape`'s literal target list counts as
-   independent evidence, so the runs exercise `Constrain` before `Freeze`.
-7. **Transform integrity.** Positive rows cover `Lit`, expand/reshape
-   direct-shape and named-binder `InputAxis`, pad/shrink/stride materialized
-   `Node`, shared non-tensor `Node`, and arithmetic `Node` dependencies,
-   including dual-use producers, through vmap, grad, specialization, fusion,
-   CSE, DCE, cloning, and `splice_dag`. After each pass they assert rank-0
-   bound scalars, shifted literal and node-valued axes, absolute input slots,
-   every class member by `NodeId`, class and member order, guards, shapes,
-   and values. The fused-chain row places a runtime-dimension dependency on an
-   elementwise node and proves fusion keeps the edge (the fused-chain branch
-   of `rebuild_with_fusion`, `fuse.rs:222-288`, carries no `shape_deps`
-   today, which is a probe item for the DAG rebuild integrity class).
-   A negative-literal-axis row proves the stored `InputAxis` axis is the
-   §4.7.1-normalized one, so the batch shift never selects the batch axis.
-   Mutations that batch a bound scalar, re-evaluate a dual-use producer,
-   drop a member under DCE, fail to shift an axis, shift an unnormalized
-   axis, retain a stale slot, or merge two classes fail before emission.
-   Overflow, division by zero,
-   explicit traps, and effectful user-function rows prove exact occurrence
-   count, order, and attribution across vmap and fusion, and the
-   element-derived extent row rejects as `batch_varying_extent`.
-8. **Axis-source mutations.** The C4 cardinality and mapping corruptions fail
-   before emission with the registered typed receipt; no cached pre-transform
-   view or stale `NodeId` is accepted.
+   independent evidence.
+7. **Rebuild survival.** After each rebuild pass (vmap, grad, specialization,
+   fusion, CSE, DCE, cloning, `splice_dag`), every class member, bound slot,
+   and shifted axis is still present by `NodeId`, class and member order is
+   unchanged, and shapes and values agree; traps and effects of a bound
+   producer occur exactly once through vmap and fusion; the fused-chain row
+   (an elementwise node carrying a runtime-dimension dependency; the
+   fused-chain branch of `rebuild_with_fusion`, `fuse.rs:222-288`, carries no
+   `shape_deps` today) and the negative-literal-axis row are named
+   instances of this property.
+8. **Axis-source cardinality.** A mutation that omits, duplicates, wrongly
+   shifts, or misdirects an output-axis source fails verification with the
+   registered typed receipt before emission.
 9. **Wire.** Exact JSON round trip, stable bytes and hash, prove and offline
    extraction, compiler-API and binding consumption, and the capacity census
-   are green. Decoder negatives include a missing size, an old or future
-   version, a string-valued `Expand.size`, `sym` in `Expand.size` from Slice
-   A on and `sym` anywhere once Slice B has removed it, `input_axis` in a
-   `pad`/`shrink`/`stride` field, a classed `to_end`, a
-   missing or out-of-range slot, a later-node reference, a non-scalar
-   source, a wrong dtype, a malformed `input_axis` tensor or axis slot, a
-   missing, duplicate, or reordered class or member, and an incompatible
-   axis, rank, or output shape.
+   are green; the decoder rejects any owner/tag pair the C2.1 matrix
+   forbids, a missing or out-of-range slot, a later-node reference, a wrong
+   dtype or rank, an old or future schema version, and a missing, duplicate,
+   or reordered class or member.
 
 Positive rows use this allowed transition lattice:
 
@@ -649,17 +558,17 @@ A positive row may move only right, although it may skip the interim receipt.
 controls remain in the separate terminal state `rejects_exactly` with their
 owning diagnostic or trap. A lane that already accepts a positive row may not
 regress, and an `executes_exactly` row may not change shape, value, trap, or
-serialized meaning. A phase invocation requires its owned rows at their exit
+serialized meaning. A slice invocation requires its owned rows at their exit
 state and rejects unexplained per-lane changes in every other row.
 
 ## Part II: boundary law
 
-- Each phase exit freezes its corpus rows, public type shapes, and exact
+- Each slice exit freezes its corpus rows, public type shapes, and exact
   oracle command. Changing one updates this document and [#1277] together.
 - Controls never move to bless an implementation. A red row becomes green
   only when the tree changes.
-- A discovery mid-phase becomes its own child issue and named corpus row
-  rather than silently widening the phase.
+- A discovery mid-slice becomes its own child issue and named corpus row
+  rather than silently widening the slice.
 - Language behavior is derived from the controlling numbered spec. If the
   three C3 actions do not decide a context, or a guard placement question is
   not answered by `spec/04` §4.7, amend the numbered spec first.
@@ -667,130 +576,96 @@ state and rejects unexplained per-lane changes in every other row.
   rejection-registry regeneration rules. Wire changes also run the typed
   capacity census.
 
-## Part III: phases
+## Part III: slices
 
-Each phase names one authoritative oracle. Phase 1 needs only Phase 0's
-runner; Slice C touches `chelis-types` only and may land before Slice B.
+Each slice names one authoritative oracle. Slice C touches `chelis-types`
+only and may land before Slice B.
 
-### Phase 0 - oracle skeleton and measured baseline
+### Slice A - the value edge and one resolver
 
-**Deliver:** `scripts/runtime_extent_oracle.py`, generated corpus, checked-in
-per-row baseline, allowed-transition validation, exact-head and corpus
-digest, and host/GPU evidence handoff.
+**Entry requirements:** none from [#1298] or [#1112]: the C carrier is
+already `int64`, the HIP lane keeps its Load-declared symbolic `expand`
+through `InputAxis`, and node-valued axes are simply not admitted yet.
 
-**Frozen at exit:** row identities, status vocabulary, mutation set, and
-platform evidence schema.
+**Deliver in order:** the oracle runner with its generated corpus,
+checked-in per-row baseline, allowed-transition validation, and exact-head
+and corpus digest; [#1367]'s diagnostic residue (remove obsolete Form-3 text
+and `cast(N, int32)` extent recommendations while preserving correct `int32`
+axis guidance, without changing typing or closing [#1112]); derived test
+stubs for every C2 clause and every C5 property this slice owns;
+`Expand.size: RtDim` with `InputAxis { tensor, axis: RtAxis::Lit }` and the
+exact owner matrix; the read tensor as a shape-only input slot; one static
+folder; constructed results with rank validation (C2.3); zero-extent
+acceptance (C2.2); the `spec/06` §3.7 vmap rule for rank-0 extent scalars and
+axis shifting, plus the `batch_varying_extent` rejection; every lane,
+transform, and verifier consumer (C2.5, C2.6); the wire change under the
+next monotonic `WIRE_DAG_SCHEMA_VERSION` at landing, coordinated with [#1298]
+so the two migrations use distinct successive versions and both trackers,
+`spec/10`, fixtures, hashes, and rejected-version controls update together;
+the regenerated typed wire capacity census; then C2.7's deletion. Close
+[#1367], [#1266], [#569], [#597], and [#609]. [#578] remains open; commits
+that improve its mechanism use `Part of #578` until its complete
+rank-polymorphic acceptance reproducer is green under the owning
+rank-polymorphism work.
 
-**Oracle:** `uv run --managed-python --python 3.11 --no-project python
-scripts/runtime_extent_oracle.py --phase 0` exits zero with final line
-`RUNTIME EXTENT ORACLE: BASELINE OK` and no unexplained row.
-
-### Phase 1 - diagnostic residue only
-
-**Entry requirements:** Phase 0's runner.
-
-**Deliver:** [#1367]. Remove obsolete Form-3 text and `cast(N, int32)` extent
-recommendations while preserving correct `int32` axis guidance. Do not change
-typing and do not close [#1112].
-
-**Frozen at exit:** the diagnostic and comment census and its axis-domain
-positive controls.
-
-**Oracle:** `uv run --managed-python --python 3.11 --no-project python
-scripts/runtime_extent_oracle.py --phase 1`, which runs `cargo nextest run
--p chelis-types --test issue_1112_extent_dtypes` as a supporting leg plus the
-diagnostic census. The focused test confirms language-level dtype rows only;
-it is not GPU completion evidence.
-
-### Phase 2 (Slice A) - the value edge and one resolver
-
-**Entry requirements:** Phase 0. Nothing from [#1298] or [#1112]: the C
-carrier is already `int64`, the HIP lane keeps its Load-declared symbolic
-`expand` through `InputAxis`, and node-valued axes are simply not admitted
-yet.
-
-**Deliver in order:** derived test stubs for every C2 clause and every C5
-row this slice owns; `Expand.size: RtDim` with `InputAxis { tensor, axis:
-RtAxis::Lit }` and the exact owner matrix; the read tensor as a shape-only
-input slot; one static folder; constructed results with rank validation
-(C2.3); zero-extent acceptance (C2.2); the `spec/06` §3.7 vmap rule for
-rank-0 extent scalars and `InputAxis` axis shifting, plus the
-`batch_varying_extent` rejection; every lane, transform, and verifier
-consumer (C2.5, C2.6); the wire change under the next monotonic
-`WIRE_DAG_SCHEMA_VERSION` at landing, coordinated with [#1298] so the two
-migrations use distinct successive versions and both trackers, `spec/10`,
-fixtures, hashes, and rejected-version controls update together; the
-regenerated typed wire capacity census; then C2.7's deletion. Close
-[#1266], [#569], [#597], and [#609]. [#578] remains open; commits that
-improve its mechanism use `Part of #578` until its complete rank-polymorphic
-acceptance reproducer is green under the owning rank-polymorphism work.
-
-**Frozen at exit:** `Expand.size: RtDim`; the `InputAxis` carrier with a
-literal axis; the owner matrix in memory and on the wire, including the one
-transitional reshape `Sym` row; the single static folder; the `vmap`
-bound-slice rule; the wire schema version; no
-provenance-rejection construct in `chelis-types` or `chelis-ir`.
+**Frozen at exit:** corpus row identities and status vocabulary;
+`Expand.size: RtDim`; the `InputAxis` carrier with a literal axis; the owner
+matrix in memory and on the wire; the single static folder; the `vmap`
+bound-slice rule; the wire schema version; no provenance-rejection construct
+in `chelis-types` or `chelis-ir`.
 
 **Oracle:** `uv run --managed-python --python 3.11 --no-project python
-scripts/runtime_extent_oracle.py --phase 2`: host parity, HIP and Metal
+scripts/runtime_extent_oracle.py --phase a`: lane parity, HIP and Metal
 build-and-execute rows for `Lit` and `InputAxis` (with `Node` rows at
 `typed_unsupported([05-MOV-1])`), zero rows, the [#569] transformation row,
-transform rows, and wire rows this slice owns.
+rebuild-survival rows, and wire rows this slice owns.
 
-### Phase 3 (Slice B) - equality classes, output-axis sources, no name recovery
+### Slice B - equality classes, output-axis sources, no name recovery
 
-**Entry requirements:** Phase 2. [#1112] for the HIP guard rows only: HIP
+**Entry requirements:** Slice A. [#1112] for the HIP guard rows only: HIP
 must carry `int64` extents to compare them exactly, so host, C, and Metal
 rows may exit first with the HIP rows at `typed_unsupported(#1112)`.
 [#1298] for the node-valued `InputAxis` axis rows only.
 
 **Deliver:** `Dag.runtime_dim_classes` seeded by typed inference from binder
-identity, remapped by every rebuild pass, verified after each; guard
-placement per C1.3 on Eval, C, HIP, and Metal; the fusion-barrier rule; the
-`AxisSource` derivation and the per-op extent table (C4.1-C4.3 as a typed
-ratchet first, then C4.4); interface members ordered by declared signature
-index (signature-order `Load` creation or an explicit index); migration of
-every name-bound `RtDim::Sym` reshape target producer (`lower.rs:11777`,
-`grad.rs:2182`, `vmap.rs:29`, `specialize.rs:106`) and consumer
-(`eval.rs:2214`, `emit.rs:6340`, `WireRtDim::Sym`) to `InputAxis` on the
-declaring tensor, then deletion of `RtDim::Sym` and the transitional matrix
-row; deletion of `SymbolicDimBinding.others`, the name-grouped execution
-loops, `shape_source_for_axis`, `op_declared_output_axes`, and, once nothing
-reads it, `shape_deps`. Close
+identity, remapped by every rebuild pass, verified after each; the four
+C2.4 rules; guard placement per C1.3 on Eval, C, HIP, and Metal;
+`output_axis_sources` and its cardinality check (C4.1-C4.3 as a typed
+ratchet first, then C4.4); deletion of `SymbolicDimBinding.others`, the
+name-grouped guard loops, `shape_source_for_axis`,
+`op_declared_output_axes`, and, once nothing reads it, `shape_deps`. Close
 [#665] and [#592].
 
 **Frozen at exit:** the `RuntimeDimClass` and `RuntimeDimMember` shapes,
-canonical class and member order, the `RtDim` variant set without `Sym`, the
-guard placement realization per lane,
-the `AxisSource` variant set, the per-op extent table, the final-DAG
-derivation point, and the removal of runtime-extent name recovery.
+canonical class and member order, the guard placement realization per lane,
+the `AxisSource` variant set, the derivation point, and the removal of guard
+and axis-source name recovery.
 
 **Oracle:** `uv run --managed-python --python 3.11 --no-project python
-scripts/runtime_extent_oracle.py --phase 3`: named-dimension and guard-order
-rows on every lane, axis-source mutations, transform rows asserting class
-membership after every pass, and the class wire rows.
+scripts/runtime_extent_oracle.py --phase b`: named-dimension and guard-order
+rows on every lane, axis-source cardinality, rebuild-survival rows asserting
+class membership after every pass, and the class wire rows.
 
-### Phase 4 (Slice C) - deferral totality and deterministic settlement
+### Slice C - deferral totality and deterministic settlement
 
-**Entry requirements:** Phase 0; the `spec/04` §4.7.2 settlement-order
-rule; [#1341]'s ordered-store mechanism, or, if it has not landed, the two
-deferred stores keyed locally by the result's source-introduction position
-with a citation to [#1341].
+**Entry requirements:** the Slice A oracle runner; the `spec/04` §4.7.2
+settlement-order rule; [#1341]'s ordered-store mechanism, or, if it has not
+landed, the two deferred stores keyed locally by the result's
+source-introduction position with a citation to [#1341].
 
 **Deliver:** the three-action protocol over resolved expected-shape evidence,
 the comparison-family unification route, source-order settlement, the
-recursive composite-carrier rows, and then the privacy lock; where
+recursive composite-carrier rows, and the builtin-consumer tripwire; where
 allocation order implements introduction order, the K-run rows prove the two
-coincide at every freeze point. Close [#1265]
-when its complete reproducer is green. Use `Part of #1338`; close #1338 only
-if every remaining acceptance row owned by that issue is green.
+coincide at every freeze point. Close [#1265] when its complete reproducer
+is green. Use `Part of #1338`; close #1338 only if every remaining
+acceptance row owned by that issue is green.
 
 **Frozen at exit:** the action mapping, evidence variant set, recursive
-composite dispositions, settlement order, carrier privacy boundary, and
-K-run count.
+composite dispositions, settlement order, and K-run count.
 
 **Oracle:** `uv run --managed-python --python 3.11 --no-project python
-scripts/runtime_extent_oracle.py --phase 4`; every action row and K fresh
+scripts/runtime_extent_oracle.py --phase c`; every action row and K fresh
 [#1338] processes produce one exact verdict. The same command with
 `--phase final`, plus both GPU manual commands as platform legs, is the
 class completion oracle and ends with `RUNTIME EXTENT ORACLE: PASS`.
@@ -810,7 +685,7 @@ class completion oracle and ends with `RUNTIME EXTENT ORACLE: PASS`.
   version is reused.
 - **[#1341] / [`hash_order_determinism.md`](hash_order_determinism.md):**
   owns ordered-iteration mechanics, the lint ratchet, and the K-run harness.
-  This plan consumes them in C3 and C5 leg 6 and owns which verdict
+  This plan consumes them in C3 and C5 property 6 and owns which verdict
   determinism settles on. [#1338] keeps [#1277] as its structural parent with
   an `Also part of #1341` cross-link.
 - **[#731]:** owns witnessed checker errors; remaining rejections and the
@@ -822,30 +697,29 @@ class completion oracle and ends with `RUNTIME EXTENT ORACLE: PASS`.
   legal inside a `..r` body; this plan provides the resolution mechanism
   wherever the numbered spec permits the form. [#578] remains open until its
   complete acceptance reproducer is green.
-- **[#1372] DAG rebuild integrity:** owns the invariant that
-  side-carried annotations (`shape_deps`, `merged_spans`, and now
-  `runtime_dim_classes`) survive every graph rebuild. Slice B relies on that
-  invariant through each pass's `remap`; the tracker owns making it
-  structural (a shared rebuild helper, or stronger) and the fused-chain
-  `shape_deps` probe named in C5 leg 7.
-- **[#1373] exact `i64` internal extent carriers (a [#729] child):** owns moving
-  `RtDim::Lit`, `DimInfo`, `DimExpr::Concrete`, the tensor-type copies, and
-  their wire forms from host-sized `usize` to exact `i64`. This plan neither
-  requires nor blocks it.
+- **[#1372] DAG rebuild integrity:** owns the invariant that side-carried
+  annotations (`shape_deps`, `merged_spans`, and now `runtime_dim_classes`)
+  survive every graph rebuild. Slice B relies on that invariant through each
+  pass's `remap`; the tracker owns making it structural and the fused-chain
+  `shape_deps` probe named in C5 property 7.
+- **[#1373] exact `i64` internal extent carriers (a [#729] child):** owns
+  moving `RtDim::Lit`, `DimInfo`, `DimExpr::Concrete`, the tensor-type
+  copies, and their wire forms from host-sized `usize` to exact `i64`. This
+  plan neither requires nor blocks it.
 
 ### Issue map
 
-| issue | owning clause | phase |
+| issue | owning clause | slice |
 |---|---|---|
-| [#1367] | stale `int32` extent and Form-3 guidance | 1 |
-| [#1266] | record projection rejected by provenance walk | 2 (Slice A) |
-| [#569] | real lint/fmt transformation breaks a legal extent | 2 (Slice A) |
-| [#597] | static expand gets no evaluator type metadata | 2 (Slice A) |
-| [#609] | wrong-rank ascription is accepted | 2 (Slice A) |
-| [#665] | movement-op runtime wildcard is lost across Expand | 3 (Slice B) |
-| [#592] | grad/vmap backward Expand reaches the same missing source | 3 (Slice B) |
-| [#1265] | comparison consumer never selects the deferred shape | 4 (Slice C) |
-| [#1338] | coupled defaults settle nondeterministically | 4 (Slice C) / [#1341] mechanism |
+| [#1367] | stale `int32` extent and Form-3 guidance | A |
+| [#1266] | record projection rejected by provenance walk | A |
+| [#569] | real lint/fmt transformation breaks a legal extent | A |
+| [#597] | static expand gets no evaluator type metadata | A |
+| [#609] | wrong-rank ascription is accepted | A |
+| [#665] | movement-op runtime wildcard is lost across Expand | B |
+| [#592] | grad/vmap backward Expand reaches the same missing source | B |
+| [#1265] | comparison consumer never selects the deferred shape | C |
+| [#1338] | coupled defaults settle nondeterministically | C / [#1341] mechanism |
 | [#578] | mechanism evidence only; full rank-polymorphic repro stays open | external rank-polymorphism work |
 | [#1112] | HIP metadata-carrier width; Slice B HIP guard rows | [#729] |
 | [#1298] | runtime axes and windows; `RtAxis::Node` rows and wire ordering | [#729] |
@@ -856,9 +730,40 @@ Data-dependent output ranks or shapes ([#600]), type-level dimension
 arithmetic ([#526]), grad's symbolic-window gaps ([#513]), runtime axes and
 windows ([#1298]), the rank-polymorphic legality half of [#578], the DAG
 rebuild integrity class ([#1372]), exact `i64` internal carriers ([#1373]),
-sibling symbolic-dim defects not yet parented to [#1277], and dtype-semantics decisions.
+sibling symbolic-dim defects not yet parented to [#1277], and
+dtype-semantics decisions.
 
 ## Considered and rejected
+
+### Removed after the trimmed plan's own review
+
+The trimmed plan went through three fresh-context rounds on PR [#1343]
+(heads `3de7b370`, `4cec575c`, `112c3b6f`). Those rounds corrected false
+code claims and spec contradictions and added no mechanism, but a cold
+reread with the stricter question "what is the smallest thing that
+satisfies the citation" removed four items that had survived from the
+earlier draft or entered as repairs:
+
+- **The C3 privacy lock** (an opaque `#[must_use]` inference carrier, a
+  `consume_pending` choke point, a site enum generated from the builtin and
+  Deep expression-form registries, compile-fail bypass tests). It entered as
+  a repair to a hypothetical bypass of the design's own dispatch, not to an
+  instance; [#1265] closes by routing the comparison family through
+  unification. Replaced by the builtin-consumer tripwire test in C3.
+- **The generated `OpExtentRule` registry bijective with `RiscOp`**, with
+  build failure on a missing row and every formula citing an atom. It grew
+  from a review remark that `OpComputed` "could not cover every output axis";
+  the cardinality check on one exhaustive match is what catches a missing
+  flow. Replaced by `output_axis_sources` and the verifier check in C4.1.
+- **The reshape `Sym` migration and its transitional matrix row.** A review
+  found the trimmed plan contradicting `spec/05` §2.4.1, which makes `Sym`
+  legal as a reshape target; the plan was aligned to the spec instead of the
+  spec to the plan's "no name recovery" principle. No instance involves a
+  reshape bystander target, so the carrier and its binding are unchanged.
+- **Enumerated mutation and wire-negative lists in C5.** Replaced by the
+  properties the corpus generator derives rows from.
+
+### Removed from the earlier draft
 
 An earlier draft of this plan, reviewed through twenty-four fresh-context
 red-team rounds on PR [#1343], grew from 455 to 2,762 lines. Rounds through
@@ -896,14 +801,14 @@ decides the underlying rule, and what replaces it.
   `60d595b2`). Sealed every construction and mutation route across 1,424
   `add_node` call sites and every public `Dag` signature. The defect class
   it targets is real but is a class of its own; it is filed as [#1372],
-  whose proportionate first step is a shared
-  rebuild helper that carries every side vector so forgetting one is a type
-  error. `spec/10` requires no hash stability that a sealed graph would buy.
+  whose proportionate first step is a shared rebuild helper that carries
+  every side vector so forgetting one is a type error. `spec/10` requires no
+  hash stability that a sealed graph would buy.
 - **`usize -> i64` semantic-extent transit census** (reviews of `60d595b2`,
   `d5c6fe0b`; repairs `d5c6fe0b`, `a0e74485`). Closes no instance in the
-  issue map and pays off only on 32-bit hosts; it is filed as [#1373], a [#729]
-  child, without the generated census, which an actual defect would have to
-  motivate.
+  issue map and pays off only on 32-bit hosts; it is filed as [#1373], a
+  [#729] child, without the generated census, which an actual defect would
+  have to motivate.
 - **Total observable-event order with adjacent fences** (reviews of
   `60d595b2`, `d5c6fe0b`; repairs `d5c6fe0b`, `a0e74485`). Filled a gap the
   numbered spec left: where a guard runs relative to an independent earlier
@@ -916,7 +821,7 @@ decides the underlying rule, and what replaces it.
   occurrences** (review of `bc9c3a44`, repair `d7782405`). Separated "what
   supplies the value" from "which class the result aliases" through a 3x5
   table over occurrence bindings. The distinction survives as C4.1's two
-  sentences: value source from the op table, identity only from typed proof.
+  sentences: value source from the op, identity only from typed proof.
 - **Closed `RuntimeBoundField` tags and the outer bound/output-axis
   discriminator** (reviews of `c70ae93d`, `2ca98512`; repairs `2ca98512`,
   `d3c8d39a`). Keyed evidence records to their destinations; without

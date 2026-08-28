@@ -1877,8 +1877,8 @@ class ContractValidationTests(unittest.TestCase):
             ),
             (
                 Path("spec/05-risc-primitives.md"),
-                "`expand` and `reshape` admit `Lit`, `Node`, and `InputAxis`",
-                "`expand` and `reshape` admit `Lit` and `Sym`",
+                "`reshape` admits `Lit`, `Node`, `InputAxis`, and `Sym`",
+                "`reshape` admits `Lit` and `Node`",
                 "runtime extent owner admission",
             ),
             (

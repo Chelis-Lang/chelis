@@ -56,7 +56,7 @@ FROZEN_FILE_DIGESTS = {
         "a8fbc1ba5b8e2419844dd41a97bdcd6d1ffe1b5773d4ef263619e11985ab4cfe"
     ),
     "spec/05-risc-primitives.md": (
-        "f44ac883fea7794435377f40662ec94c2b55c3e4f0cc517a33b46c94f1223918"
+        "10ed4c44aab344cff0f20d90ba501b1670d92f292ecc33a92eeab4fb0234277e"
     ),
     "spec/06-transformations.md": (
         "e9057ff43b93e2119ce7adcc12da857d887f77c175a3c55ea78b2dcf00d87e4f"
@@ -1871,7 +1871,7 @@ def validate_normative_contract(
         (
             ("`InputAxis(t, a)`", "folded tensor-axis extent carrier"),
             (
-                "`expand` and `reshape` admit `Lit`, `Node`, and `InputAxis`",
+                "`reshape` admits `Lit`, `Node`, `InputAxis`, and `Sym`",
                 "runtime extent owner admission",
             ),
             (
