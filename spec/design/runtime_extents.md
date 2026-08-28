@@ -99,17 +99,29 @@ execution.
 
 ### C2 Representation first, provenance deletion last
 
-The target `expand` node is:
+The target `expand` node and graph-level equality contract are:
 
 ```rust
 RiscOp::Expand {
     axis: usize,
-    size: GuardedRtDim,
+    size: RuntimeExtent,
 }
 
-struct GuardedRtDim {
+struct RuntimeExtent {
     value: RtDim,
-    equals: Vec<RtDim>,
+    class: Option<RuntimeDimId>,
+}
+
+struct RuntimeExtentClass {
+    id: RuntimeDimId,
+    canonical: RuntimeExtentWitness,
+    equals: Vec<RuntimeExtentWitness>,
+}
+
+enum RuntimeExtentWitness {
+    Literal(i64),
+    Scalar { node: NodeId },
+    Axis { node: NodeId, axis: usize },
 }
 ```
 
@@ -126,9 +138,10 @@ RtDim::InputAxis {
 ```
 
 `tensor` and every `Node` are absolute slots in the owning movement
-node's `inputs`. `GuardedRtDim.value` is the executed extent;
-every entry in `equals` is an additional structural witness that must
-equal it before allocation or access. `RtDim::Sym` and
+node's `inputs`. `RuntimeExtent.value` is the executed extent. A
+`class` is present only when that value instantiates a hygienic dimension
+binder; it links the use to the DAG-level class whose complete witness manifest
+is executed independently of any particular movement node. `RtDim::Sym` and
 `RtDim::ToEnd`
 remain illegal in `Expand.size`. In executable IR, a named
 `reshape` target also resolves to `Lit`, `InputAxis`, or
@@ -157,37 +170,70 @@ carrier and must not cross verification or WireDag.
   typed environment maps binder identity, never spelling, to its runtime
   witnesses. A literal instantiation becomes `Lit`; a tensor witness
   becomes `InputAxis`; and a scalar term witness becomes `Node`.
-  When several tensor axes witness one binder, the first declaration in
-  signature/source order is the canonical carrier and equality guards compare
-  every additional witness before use. The canonical witness is
-  `GuardedRtDim.value`; every additional tensor axis is retained as an
-  `InputAxis` in `GuardedRtDim.equals`. A literal or scalar
-  canonical value uses `Lit` or `Node` with the same explicit
-  equality list. Equality witnesses are appended to the owning node's inputs in
-  signature/source order, are serialized in that order, and remain value/shape
-  dependencies for DCE. A reusable generic may retain the
+  At executable-DAG finalization, each surviving hygienic binder receives a
+  local `RuntimeDimId`. The identity is assigned from binder declaration
+  identity in signature/source order, never from its display spelling. A
+  locally bound class is freshened when its defining subgraph is cloned; a
+  genuinely shared free class preserves its ID. Specialization may replace a
+  class by a literal only after proving every member equal to that literal.
+  Transforms preserve or explicitly remap the IDs before verification.
+
+  Every rank-zero scalar or tensor output axis that independently witnesses the
+  binder is stamped `WitnessOf(id)`; a pass-through occurrence is stamped
+  `AliasOf(id)`. Tensor result metadata carries one such optional stamp per
+  output axis, and rank-zero exact-`int64` scalar producers carry the scalar
+  form. A generated, exhaustive operation/axis table decides
+  witness-versus-alias: external `Load` axes and operation-computed output axes
+  are witnesses, while a structurally forwarded input axis is an alias. A
+  literal binder instantiation is an explicit literal witness. The table is
+  bijective with the current `RiscOp` registry; an unclassified operation or
+  axis is a build failure.
+
+  `derive_runtime_extent_classes(&Dag)` enumerates those stamps and constructs
+  one complete manifest per ID. Classes are ordered by binder declaration
+  identity; within a class, external signature witnesses come first in
+  signature/source order, then literal or scalar declarations, then
+  operation-computed axes in node-topological/axis order. The first member is
+  canonical and every remaining member is an equality obligation. A
+  `RuntimeExtent` that denotes the binder carries the same ID and executes the
+  canonical value; it does not carry a second, losable copy of the member list.
+  A reusable generic may retain the
   binder in typed pre-monomorphization state, but a complete executable DAG
-  must resolve it to one of these three forms. Missing witness, wrong binder,
-  and violated witness equality fail loudly; no pass searches for a matching
-  string.
+  must resolve it to a local ID and one of these three value forms. Missing
+  witness, wrong class, and violated witness equality fail loudly; no pass
+  searches for a matching string.
   Thus the direct read obeys [05-OP-7]'s folded-`DimExpr` rule while every
   scalar value obeys `spec/04` §4.7.4. Both forms are real owning-node input
   dependencies, so DCE cannot lose them; a symbolic name or shape-only side
   table is not an equivalent size carrier.
-- **C2.2 Equality guards are executable structure.** Every movement extent is
-  a `GuardedRtDim`, not a side-table obligation. Verification checks
-  `value` plus every `equals` entry using the same slot, rank,
-  dtype, topological, and owner-specific tag rules. Eval, C, HIP, and Metal
-  evaluate all witnesses in stored order and trap `Domain` on the first
-  mismatch before allocation or element access. WireDag encodes the complete
-  ordered list. DCE treats every referenced node as live; vmap, grad,
-  specialization, cloning, and remapping rewrite every slot; hashing includes
-  the complete carrier. Empty `equals` is the ordinary case. Duplicate,
-  missing, reordered-noncanonical, stale-slot, wrong-axis, and dropped-witness
-  mutations fail the verifier, exact-byte fixture, or a mismatched-witness
-  execution row that must trap. Only after these paths are
-  green may Phase 4 delete `SymbolicBinding.others` and the
-  name-grouped equality loop.
+- **C2.2 Equality classes are executable graph structure.** The DAG stores the
+  canonical class manifest together with the independent `WitnessOf` and
+  `AliasOf` source stamps. Verification re-derives the expected manifest from
+  the stamps and requires an exact bijection: one declared ID, one canonical
+  member, no duplicate member, and no unstamped or cross-class member. It also
+  checks every scalar/axis node, rank, dtype, topological position, literal,
+  and `RuntimeExtent.class` reference. This is deliberately graph-level:
+  Load/Load, Load/operation-output, and operation-output/operation-output
+  equalities exist even when no movement-bound field owns them.
+
+  Eval, C, HIP, and Metal execute external and scalar members in canonical
+  order at entry. An operation-computed axis is compared with its class before
+  that result is allocated, accessed, or exposed. Each class manifest is a
+  control/liveness root: DCE keeps every input or live computed owner needed by
+  an observable guard, and may remove an owner/member only as one proved
+  transformation when the declaring computation and its observable guard are
+  both dead. Vmap, grad, specialization, cloning, and remapping rewrite the
+  source stamps, IDs, nodes, and axes together; hashing covers them all.
+
+  The executable interface separately enumerates declared inputs, so dropping
+  an otherwise-data-unused Load cannot shrink a class. Verification compares
+  that interface, all source stamps, the class manifest, and every classed
+  bound after each transform and after decode. Mutations that remove a member
+  and its data-use edge, substitute an axis from another class, split one class,
+  merge two classes, duplicate or reorder members, stale a node/axis, or drop
+  the guard liveness root fail structurally. A runtime unequal-member mutation
+  traps `Domain`. Only after these exact paths are green may Phase 4 delete
+  `SymbolicBinding.others` and the name-grouped equality loop.
 - **C2.3 Static values are an optimization.** A nonnegative statically proved
   value, including zero, may use `RtDim::Lit`. One checked static
   folder is shared or contract-tested across checker and lowering. Failure to
@@ -200,9 +246,10 @@ carrier and must not cross verification or WireDag.
   [#609] is deleted.
 - **C2.5 Every consumer lands before deletion.** Verification, Eval, C, HIP,
   Metal, specialization, AD, vmap, hashing, and cloning/remapping passes read
-  `GuardedRtDim.value` and every ordered equality witness,
-  including each underlying `Lit`, `InputAxis`, or
-  `Node`, before any provenance rejection is removed. [#1112]'s
+  `RuntimeExtent.value`, its optional class ID, every source stamp, and the
+  complete ordered class manifest before any provenance rejection is removed.
+  Each bound value is still one underlying `Lit`, `InputAxis`, or
+  `Node`. [#1112]'s
   HIP carrier work and Metal audit are Phase 2
   entry requirements because a checker-only `int64` result is not an
   all-lane extent contract. Entry requires their focused width, capacity,
@@ -220,8 +267,8 @@ carrier and must not cross verification or WireDag.
   `InputAxis` reads observe the corresponding original tensor axis after
   the inserted batch-axis shift, and scalar `shape`/integer nodes used only by
   movement bounds remain rank-zero rather than acquiring a batch dimension.
-  Every `GuardedRtDim.equals` witness follows the same axis shift,
-  input-slot remap, liveness, and equality semantics as its canonical value.
+  Every class member and source stamp follows the same axis shift, input-slot
+  remap, liveness, and equality semantics as its canonical value.
   Literal axes normalize against the original source rank and then shift;
   node-valued axes perform the same checked normalization and shift at runtime.
   When one scalar producer has both bound and ordinary value consumers, vmap
@@ -243,7 +290,7 @@ carrier and must not cross verification or WireDag.
   `Env::size_provenance` and its plumbing, plus the lowerer's mirror
   rejections. No intermediate commit may accept a value the IR cannot carry.
   Phase 4 separately removes `SymbolicBinding.others` only after
-  C4 consumes `GuardedRtDim` equality structure. Best-effort
+  C4 consumes the graph-level runtime class structure. Best-effort
   identity recognition may survive only as refinement whose
   failure result is a fresh extent plus guard.
 
@@ -255,9 +302,12 @@ than assigning semantic labels by intuition:
 - **`Constrain(expected)`** is used when the context supplies an
   independently fixed tensor rank or shape equation. A declared result,
   ascription, already-instantiated user-function parameter or generic field,
-  branch join with resolved shape evidence, or builtin relation between tensor
-  operands selects the unique candidate satisfying that equation. Comparisons
-  constrain their operands even though their result is scalar or boolean.
+  branch join with independently resolved shape evidence, or builtin relation
+  with an independently resolved operand equation selects the unique candidate
+  satisfying that equation. A comparison constrains a pending operand only
+  when its other operand or surrounding resolved evidence supplies that
+  independent equation; two pending operands merely link and propagate their
+  shared choice even though the comparison result is scalar or boolean.
 - **`Propagate`** is used when a context can carry the same unresolved
   monomorphic candidate without requiring either rank. It adds no evidence and
   cannot select or clone the choice.
@@ -272,7 +322,7 @@ from a review table. Recursive expression inference returns an opaque,
 `#[must_use]` `Inferred` carrier whose type and pending-expand tokens have
 private fields. A child carrier can enter its parent only through
 `consume_pending(site: PendingUseSite, value: Inferred,
-action: PendingExpandUse)`. Only that module can inspect, clone, unify,
+evidence: ExpectedShapeEvidence)`. Only that module can inspect, clone, unify,
 project, or finalize a pending token; there is no raw-`Type` escape hatch.
 `PendingUseSite` is a closed enum generated bijectively from the builtin
 declaration registry and the Deep expression-form registry, so a new builtin
@@ -285,6 +335,14 @@ Each disposition is an exhaustive decision function over a closed
 `Propagate` unless the numbered freeze rule applies. Adding an evidence
 variant or leaving a site/evidence cell unhandled fails compilation and the
 generated table check.
+
+`PendingExpandAction` is a private implementation detail that only the
+generated exhaustive `decision_for(site, evidence)` function can construct.
+No inference caller can name, import, or pass `Constrain`, `Propagate`, or
+`Freeze`; `consume_pending` must call the generated decision function before
+it can inspect the carrier. A compile-fail privacy test rejects direct action
+construction or a helper that bypasses `decision_for`, and regeneration fails
+if any site/evidence cell is missing or changed without its semantic fixture.
 
 The recursive choke point walks tensor-bearing tuple, List, record, ADT, and
 function fields rather than only a top-level tensor. The action is derived from
@@ -305,8 +363,11 @@ resolved expected-shape evidence, not from container syntax:
   independent, otherwise propagating the generic field along with untouched
   fields.
 
-Branch joins, declared results, ascriptions, independently instantiated
-user-function parameters, and builtin operand relations constrain;
+Branch joins, comparisons, and builtin operand relations with
+`LinkedPending` evidence propagate the shared monomorphic choice; the same
+sites constrain only when `Independent` evidence is present. Declared results,
+ascriptions, and independently instantiated user-function parameters provide
+that independent evidence and constrain;
 an undeclared closure return propagates to the call boundary; and
 complete-program finalization freezes. Generated compile-fail bypass tests
 prove no inference helper outside the module can unwrap or copy the carrier.
@@ -319,6 +380,11 @@ closure-return call fail before a checker result is returned. Generated rows
 cross replacement, insertion, and contradiction with concrete fields, fresh
 and fixed generic fields, singleton/list-seed elements, later concrete and
 pending elements, declared List element types, and nested generic containers.
+The matrix also crosses pending/pending comparison and branch join, those same
+forms followed by independent result evidence, contradictory independent
+evidence, and final freeze with no independent evidence. Mutating either a
+site/evidence disposition or the private dispatch call fails compilation,
+regeneration, or the corresponding exact-verdict row.
 
 Coupled defaults expose settlement order. Before Phase 3 implementation,
 `spec/04` §4.7.2 must state the order. This plan proposes first-deferred
@@ -364,6 +430,11 @@ enum AxisSource {
   a complete row fails regeneration and compilation.
   If an op-computed axis has no governing numbered atom, Phase 4 authors that
   atom before registering or implementing the rule.
+  The same generated row also supplies C2.1's runtime-dimension role for the
+  axis: an external or operation-computed source is `WitnessOf(id)`, while a
+  structurally forwarded source is `AliasOf(id)`. Derivation requires that role
+  to agree with the stored axis ID and the complete runtime-class manifest;
+  `AxisSource` never invents, merges, or recovers a class from a display name.
 - **C4.2 Exact movement mappings.** Same-rank `Expand` maps every
   unchanged output axis to the same input axis and maps the replaced axis to
   its literal or scalar size. Rank-increasing `Expand` maps axes
@@ -384,9 +455,11 @@ enum AxisSource {
 - **C4.4 Target state consumes the algebra.** Eval and all backends consume
   `AxisSource` directly. Runtime extent flows no longer depend on
   `shape_source_for_axis`, `op_declared_output_axes`, or a
-  search for a Load carrying the same string. `GuardedRtDim`
-  supplies every runtime equality witness, so this phase also deletes
-  `SymbolicBinding.others` and its name-grouped execution loops.
+  search for a Load carrying the same string. The graph-level
+  `RuntimeExtentClass` manifest supplies every runtime equality witness,
+  including external axes and operation-computed output axes with no movement
+  consumer, so this phase also deletes `SymbolicBinding.others` and its
+  name-grouped execution loops.
   Static symbolic identities may remain in type metadata, but no runtime size
   or guard is recovered by name. This
   closes [#665] and [#592].
@@ -445,9 +518,11 @@ axes and windows in one issue.
    `stride` where each form is legal. `check`,
    `eval`, and compiled-and-executed C agree on acceptance, shape,
    values, and traps. The named-dimension rows prove literal instantiation,
-   canonical signature-order tensor witness selection, all-witness equality
-   guards, and loud missing/wrong-binder failure. Runtime windows are absent
-   from this corpus; the composed #1298 oracle owns them.
+   canonical signature-order witness selection, and complete class guards for
+   Load/Load, Load/operation-output, and operation-output/operation-output
+   classes, including a class with no movement-bound consumer. They also prove
+   loud missing/wrong-class failure. Runtime windows are absent from this
+   corpus; the composed #1298 oracle owns them.
 2. **GPU build and execution.** The same named rows compile and execute in the
    HIP and Metal correctness suites, not merely through capability-gate
    rejection tests. The exact manual commands are:
@@ -462,8 +537,9 @@ axes and windows in one issue.
 3. **Negative parity.** Static negative extents fail with the owning type
    error; runtime negative extents trap `Domain`. Wrong dtype,
    out-of-range axis, rank-contradicting ascription, malformed scalar input,
-   named-binder witness mismatch, missing equality witness, and checked
-   overflow fail for the owning reason on every applicable lane.
+   named-binder witness mismatch, missing class member, split or merged class,
+   wrong binder ID, and checked overflow fail for the owning reason on every
+   applicable lane.
 4. **Zero positives.** Literal-zero and runtime-zero rows cover positional
    replacement, positional insertion, and named-axis expansion. They assert
    the exact output shape, logical element count zero, no element access, and
@@ -488,11 +564,14 @@ axes and windows in one issue.
    through vmap, grad,
    specialization, cloning/remapping, and DCE. They verify exact rank-zero
    bound scalars, shifted literal and node-valued axes, preserved tensor-axis
-   witnesses, absolute input slots, guards, shapes, and values. Mutations that
+   witnesses, absolute input slots, binder IDs, witness/alias roles, complete
+   manifests, guards, shapes, and values. Mutations that
    prepend a batch axis to a bound scalar, fail to split a dual-use producer,
    omit an `Expand` bound from
    grad liveness, lose a source under DCE, fail to shift an axis, or retain a
-   stale slot fail before emission. The batch-varying element-derived row
+   stale slot/ID fail before emission. Cloning rows prove that locally bound
+   classes freshen while genuinely shared free classes remain shared. The
+   batch-varying element-derived row
    executes or rejects exactly as the amended `spec/06` decides.
 8. **Axis-source mutations.** A generated bijection covers every current
    `RiscOp` output axis, including external `Load`/root axes and
@@ -506,8 +585,10 @@ axes and windows in one issue.
    are green. Missing size, old or future version, illegal bound tag, missing
    or out-of-range input slot, later-node reference, non-scalar source, wrong
    dtype, malformed `input_axis` tensor or axis slot, wrong axis dtype,
-   missing/duplicate/reordered/stale equality witness, owner-illegal tag,
-   nonempty `to_end` equality list, unshifted vmap source axis, and
+   missing/duplicate/reordered/stale class member, missing source stamp,
+   member/stamp disagreement, valid-axis substitution from another class,
+   split/merged class, dropped otherwise-unused Load or guard root,
+   owner-illegal tag, classed `to_end`, unshifted vmap source axis, and
    incompatible axis/rank/output shape are negative controls.
 
 Positive rows use this allowed transition lattice:
@@ -541,12 +622,18 @@ never reused.
 
 - amend `spec/10-serialization.md` and bump
   `WIRE_DAG_SCHEMA_VERSION` monotonically from #1298's v7 to v8;
-- encode `WireRiscOp::Expand { axis, size: WireGuardedRtDim }`
-  and use the same guarded wrapper for every other runtime-extent owner;
-  `WireGuardedRtDim` contains one `value` plus an ordered
-  `equals` list, each a `WireRtDim`. `input_axis`
+- encode `WireRiscOp::Expand { axis, size: WireRuntimeExtent }`
+  and use the same wrapper for every other runtime-extent owner;
+  `WireRuntimeExtent` contains one `value: WireRtDim` plus an optional
+  `class: WireRuntimeDimId`. `input_axis`
   carries a tensor input slot plus a
   `WireRtAxis` that is an exact int32 literal or scalar input slot;
+- encode the complete ordered `WireRuntimeExtentClass` manifest at DAG level,
+  with the stable local ID and `literal`, `scalar`, or `axis` canonical/member
+  witnesses. Encode one optional `witness(id)` or `alias(id)` source stamp per
+  tensor output axis and the corresponding optional stamp on rank-zero
+  exact-`int64` scalar producers. The public input manifest retains every
+  declared Load independently of data uses;
 - interpret `WireRtDim::Node { input }` as an absolute index into the
   owning `WireDagNode.inputs`, then validate that referenced earlier
   node as rank-zero `int64`;
@@ -558,25 +645,30 @@ never reused.
 - apply this exact owner/tag matrix at encode, decode, verification, and
   mutation generation:
 
-  | owning field | legal `value` tags | legal `equals` tags |
+  | owning field | legal `value` tags | class rule |
   |---|---|---|
-  | `Expand.size` | `lit`, `input_axis`, `node` | `lit`, `input_axis`, `node` |
-  | `Reshape.new_shape[*]` | `lit`, `input_axis`, `node` | `lit`, `input_axis`, `node` |
-  | `Pad.padding[*].before/after` | `lit`, `input_axis`, `node` | `lit`, `input_axis`, `node` |
-  | `Shrink.bounds[*].start` | `lit`, `input_axis`, `node` | `lit`, `input_axis`, `node` |
-  | `Shrink.bounds[*].end` | `lit`, `input_axis`, `node`, `to_end` | `lit`, `input_axis`, `node`; empty when value is `to_end` |
-  | `Stride.strides[*]` | `lit`, `input_axis`, `node` | `lit`, `input_axis`, `node` |
+  | `Expand.size` | `lit`, `input_axis`, `node` | optional; required for a surviving binder use |
+  | `Reshape.new_shape[*]` | `lit`, `input_axis`, `node` | optional; required for a surviving binder use |
+  | `Pad.padding[*].before/after` | `lit`, `input_axis`, `node` | optional; required for a surviving binder use |
+  | `Shrink.bounds[*].start` | `lit`, `input_axis`, `node` | optional; required for a surviving binder use |
+  | `Shrink.bounds[*].end` | `lit`, `input_axis`, `node`, `to_end` | optional except `to_end`, which requires absent |
+  | `Stride.strides[*]` | `lit`, `input_axis`, `node` | optional; required for a surviving binder use |
 
   `sym` is illegal in every executable owner. An owner/tag pair absent
   from the table is invalid; there is no generic permissive arm;
 - validate the tensor operand, axis, input/output ranks, and exact output-axis
-  mapping, plus every equality-witness slot, dtype, rank, uniqueness, canonical
-  order, and liveness edge, before encode and after exact-version decode;
+  mapping. Re-derive the expected classes from the binder IDs, source stamps,
+  public input manifest, and generated operation/axis role table, then require
+  exact equality with the serialized class manifest: every member node/axis,
+  literal, dtype, rank, class ID, uniqueness, canonical order, and
+  control/liveness edge is checked before encode and after exact-version
+  decode;
 - reject v6, #1298-only v7, versionless, future, string-size, executable
   `sym`, and owner-illegal `to_end` spellings before IR
   consumption; no legacy
   conversion or default exists. Named values must already be resolved through
-  their structural witness before encoding;
+  their structural value and binder ID before encoding; display strings have
+  no role in class construction or verification;
 - update stable hash/prove/Beacon fixtures and every compiler-API or binding
   consumer that exposes WireDag bytes or version names;
 - regenerate and review the typed wire capacity census. Every changed
@@ -639,12 +731,13 @@ the C5 runtime-extent groups cannot be an entry gate because this
 phase creates them.
 
 **Deliver in order:** first amend `spec/05`'s closed `RtDim`
-and [05-OP-7] representation to admit `GuardedRtDim`, the
-structural tensor-axis witness, and ordered executable equality witnesses, and
-require named values resolved before executable IR; amend `spec/06` for
+and [05-OP-7] representation to admit `RuntimeExtent`, the structural
+tensor-axis witness, stable binder IDs, source witness/alias roles, and the
+complete graph-level `RuntimeExtentClass` manifest, and require named values
+resolved before executable IR; amend `spec/06` for
 rank-zero bound slices and batch-varying extents; and amend `spec/10`
 for the next monotonic WireDag version (v8 from the current v6 baseline).
-Write the derived positive, negative, equality-witness, owner-matrix, and
+Write the derived positive, negative, equality-class, owner-matrix, and
 transform test stubs before implementation. Then deliver C2.1-C2.6 and C6
 across all in-memory, target, transform, and wire consumers, followed by C2.7
 deletion. Close
@@ -653,9 +746,9 @@ its mechanism use `Part of #578` until its complete rank-polymorphic
 acceptance reproducer is green under the owning rank-polymorphism work.
 
 **Frozen at exit:** amended `spec/05`/`spec/06` atoms;
-`Expand.size: GuardedRtDim`; structural tensor-axis, scalar input,
-and ordered equality-witness
-invariants; transform behavior for every bound-dependency class;
+`Expand.size: RuntimeExtent`; structural tensor-axis and scalar input values;
+stable runtime binder IDs; complete ordered equality-class manifests and
+source roles; transform behavior for every bound-dependency class;
 WireDag v8; no provenance-rejection construct; one static folder; all-lane
 guard placement.
 
@@ -673,9 +766,10 @@ amendment; [#1341]'s ordered-store mechanism.
 **Deliver:** the opaque `Inferred` carrier, mandatory
 `consume_pending` choke point, exhaustive generated use-site registry,
 closed `ExpectedShapeEvidence` decision matrix, all recursive
-composite-carrier and non-builtin rows, comparison-family
-constraint routing, source-order stores, compile-fail bypass mutations, and
-generated action tests. Close [#1265] when its complete reproducer is green.
+composite-carrier and non-builtin rows, evidence-qualified comparison/branch
+routing, private action dispatch, source-order stores, compile-fail bypass
+mutations, and generated action tests. Close [#1265] when its complete
+reproducer is green.
 Use `Part of #1338`; close #1338 only if every remaining acceptance row
 owned by that issue is green, otherwise leave it open for its external work.
 
