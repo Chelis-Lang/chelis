@@ -1430,19 +1430,51 @@ for the same binding. If a shape-neutral consumer such as `cast` requires the
 tensor type before any shape-bearing context fixes it, an axis within the
 input rank selects the established same-rank replacement form. `axis ==
 rank(x)` has no replacement form and therefore selects trailing insertion.
-The same default is materialized when no consumer in the complete program
-fixes the shape. A reusable library context carries the unresolved choice to
-its downstream program rather than deciding it early. An axis greater than
-`rank(x)` is a type error.
+An axis greater than `rank(x)` is a type error.
 
-When several positional `expand` results remain unresolved at the same freeze
-point, their defaults settle in source order: the result introduced into the
-checked program first settles first (a result carried out of a reusable
-library context is introduced at its instantiation site), and each later
-settlement observes the shapes fixed by the earlier ones. Settlement order is
-a property of the program text and never of an implementation's storage or
-iteration order, so a program has exactly one checked result across runs and
-implementations.
+When no consumer in the complete program fixes the shape, the same default is
+materialized once every consumer in the complete program, a reusable library
+context and its downstream program together, has been considered; that point
+is the program's freeze point. When several positional `expand` results remain
+unresolved at the same freeze point, their defaults settle in source order:
+the result introduced into the checked program first settles first, one result
+at a time, and each later settlement observes the shapes fixed by the earlier
+ones. Introduction order is the source order of the `expand` expressions in
+the canonical Deep program; Surf inherits that order through desugaring
+(`spec/02-surf-syntax.md` §2 and §5). Within one program, definitions follow
+their written order, and within a definition `expand` applications follow
+their written order: left to right, with an enclosing application before any
+application nested in its arguments, and the children of every node that is
+not an application in their written order. A result carried from a reusable
+library context is introduced at its instantiation site in the downstream
+program, which for a shared monomorphic result is its first reference; a
+carried result the program never references settles after the program's own
+results, in the library's source order, and composed contexts keep their
+composition order. A result that carries several deferred obligations, because
+unification identified the results of several positional `expand` calls, takes
+the position of the earliest of its `expand` expressions and settles to the
+first candidate shape that satisfies every one of its obligations, taking the
+obligations in the source order of their `expand` expressions and, within one
+obligation, the same-rank replacement form before the insertion form; when no
+candidate satisfies every obligation, the program is rejected. A `reshape`
+whose input is a deferred positional-`expand` result has the rank and extents
+that §4.7.3 assigns from its shape list and is therefore shape-bearing for its
+own consumers while its input's choice is open; that input keeps only the
+forms whose element count §4.7.3 admits, so the `reshape` fixes its input when
+exactly one form is admitted and rejects the program when neither is. A
+`shape` read of a result whose choice is open, inside a `reshape` shape list
+or anywhere else, requires the tensor type and therefore selects the form the
+shape-neutral rule above selects; an axis outside that form's rank is a type
+error. Settling one result propagates at once through every consumer of that
+result; a consumer that thereby becomes shape-bearing fixes a later result
+before that result's own default is considered. The element-count relations of
+the `reshape` expressions that consume one settled result resolve in the
+source order of those expressions before the next result settles. Settlement
+order is a property of the program text and never of an implementation's
+storage, allocation, or iteration order, so the selected shapes and the
+resulting acceptance or rejection are the same across runs and
+implementations. A reusable library context carries the unresolved choice to
+its downstream program rather than deciding it early.
 
 When a declared or inferred result dimension claims a literal or named extent
 that is not statically proven equal to `size`, execution checks equality and
