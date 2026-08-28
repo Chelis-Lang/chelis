@@ -1849,6 +1849,62 @@ class ContractValidationTests(unittest.TestCase):
                 finally:
                     path.write_text(original, encoding="utf-8")
 
+    def test_runtime_extent_amendments_are_defended(self) -> None:
+        mutations = (
+            (
+                Path("spec/04-type-system.md"),
+                "access whose shape depends on the guarded extent",
+                "access of the function",
+                "runtime extent guard placement",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "places guards by this rule",
+                "may place guards anywhere",
+                "runtime extent guard placement in every execution mode",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "their defaults settle in source order",
+                "their defaults settle in any order",
+                "positional expand settlement order",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "`InputAxis(t, a)`",
+                "`AxisRead(t, a)`",
+                "folded tensor-axis extent carrier",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "`reshape` admits `Lit`, `Node`, `InputAxis`, and `Sym`",
+                "`reshape` admits `Lit` and `Node`",
+                "runtime extent owner admission",
+            ),
+            (
+                Path("spec/06-transformations.md"),
+                "over these) is not batched",
+                "over these) is batched",
+                "vmap runtime extent non-batching rule",
+            ),
+            (
+                Path("spec/06-transformations.md"),
+                "### 8.6 `batch_varying_extent` (vmap)",
+                "### 8.6 `batch_shared_extent` (vmap)",
+                "vmap batch-varying extent rejection",
+            ),
+        )
+        for relative, old, new, message in mutations:
+            with self.subTest(message=message):
+                path = self.root / relative
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
     def test_spec04_comparison_row_and_surfaces_are_closed(self) -> None:
         path = self.root / "spec/04-type-system.md"
         mutations = (

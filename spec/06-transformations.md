@@ -425,7 +425,7 @@ For each node in the original DAG, the vmap transformation adds the batch dimens
 | `Const(v, D, P)` | Batch-typed `Const(v, {batch} + D, P)` -- broadcast constant |
 | `Load(buf)` | Load with batch dimension added to buffer type |
 
-The key principle: the batch dimension passes through all operations without being touched. Elementwise ops are naturally batched. Reductions reduce over the original axis, not the batch axis. Shape operations preserve the batch dimension.
+The key principle: the batch dimension passes through all operations without being touched. Elementwise ops are naturally batched. Reductions reduce over the original axis, not the batch axis. Shape operations preserve the batch dimension. The rank-0 subgraph that produces a bound, and the bound carrier inside a movement operation, follow §3.7: in the rewritten DAG's numbering a positional `dim` and an `InputAxis` axis shift by the inserted batch axis, and a rank-0 extent value is shared rather than batched.
 
 ### 3.4 Type Rule
 
@@ -478,6 +478,30 @@ These two are distinct concepts:
 - `axis_out_of_bounds`: The integer axis is out of bounds for one of the vmapped tensor
   arguments or results.
 - If `f` has non-tensor arguments, those arguments are broadcast (shared across the batch). They are not vmapped.
+
+### 3.7 Runtime Extents
+
+A rank-0 extent value that feeds a movement bound, an `expand` size, or a
+`reshape` target (a `shape()` read, an integer parameter, a cast, checked
+integer arithmetic, or a user-function result over these) is not batched. It
+is a non-tensor argument in the sense of §3.6: one value is shared by every
+batch element, it is evaluated exactly once, and its traps and effects occur
+exactly once in the order of the unbatched function. A folded tensor-axis read
+(`InputAxis`, spec/05-risc-primitives.md §2.4.1) observes the axis it named in
+the unbatched function: after the batch axis is inserted a literal axis shifts
+by one, and a computed axis is normalized against the unbatched rank and then
+shifted, so the read never selects the batch axis. A materialized `shape()`
+value node (the `Node` form) shifts its axis the same way. A `shape()` read
+used both as an extent and as an ordinary value is still evaluated once and
+the ordinary use sees the shared rank-0 value. The movement operation itself
+follows §3.3: the batch axis passes through untouched and every bound applies
+within each batch element.
+
+An extent whose value depends on the elements of a vmapped tensor argument
+would vary per batch element and cannot describe one stacked result shape.
+Such a program is a type error, `batch_varying_extent` (§8.6): vectorization
+neither shares one element's value across the batch nor produces a ragged
+result.
 
 ---
 
@@ -894,6 +918,14 @@ tuple, or List containing a float scalar or tensor leaf does not.
 ### 8.5 `shape_mismatch_in_jit`
 
 **Trigger:** A jit-compiled function is called with shapes that don't match any cached compilation. This is not an error -- it triggers recompilation -- but may be logged as a performance warning if it happens frequently.
+
+### 8.6 `batch_varying_extent` (vmap)
+
+**Trigger:** `vmap(f)` where a movement bound, `expand` size, or `reshape` target inside `f` depends on the elements of a vmapped tensor argument, so its value could differ between batch elements.
+
+**Message:** `"vmap cannot vectorize an extent that depends on batched tensor elements: the expand size at <site> reads elements of vmapped argument 'x'. Compute the extent from shape() or a scalar argument, or apply the movement outside vmap."`
+
+**Repair:** Suggest deriving the extent from `shape()` or a scalar parameter, or moving the data-dependent movement outside `vmap`.
 
 ---
 

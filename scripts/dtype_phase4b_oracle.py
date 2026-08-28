@@ -53,13 +53,13 @@ FROZEN_FILE_DIGESTS = {
         "5e21649cf61087df1119040a971a60b5b499d40321d8647ce719e91b8571120a"
     ),
     "spec/04-type-system.md": (
-        "c7e825b5d9cc7e0d4bc588504e49612705520b4d63df618be24613fd4bc9b414"
+        "9d4d577b1e36dafe3409ba6a4b4e9106d1f30c79a5f051bc4777b4193df98491"
     ),
     "spec/05-risc-primitives.md": (
-        "577c242de5d43901afb68a0053b8d690d77476f64b24f2003938bf9018b66142"
+        "10d64930ae6d9b3316ac9b0f35892052b2e0b1475c50097dd63ca5c0ba61ef6a"
     ),
     "spec/06-transformations.md": (
-        "faa71c7b4be426d9c6e41fa756998161d96377cf3b5d97ad99d6fda105da18fb"
+        "30a78217103d0a57d63b9e1a3d927d2e1079affa4d1d0641ef36a9afff34e25a"
     ),
     "spec/10-serialization.md": (
         "58f707d4e155d098962db224317061684b2c026816cab234ba026d560510a6da"
@@ -68,7 +68,7 @@ FROZEN_FILE_DIGESTS = {
         "a0ec07d22a5c26e2b81ffd9354dd0b055822a02689ccaed692592ec235ef6f09"
     ),
     "spec/design/dtype_semantics.md": (
-        "c220f74b51ea177c7ade1d78e429a58234afca774afa280a6db355f0e64e1e02"
+        "0d46e2c3561089138755e598474d551b09922414e4424e53b8ac96881b47264e"
     ),
     "spec/design/loud_unsupported.md": (
         "dec76721503b380278124b12448112d3e4bf754f8320f949642d32f7d30d5414"
@@ -866,6 +866,14 @@ def validate_normative_contract(
         spec06,
         (
             (
+                "over these) is not batched",
+                "vmap runtime extent non-batching rule",
+            ),
+            (
+                "### 8.6 `batch_varying_extent` (vmap)",
+                "vmap batch-varying extent rejection",
+            ),
+            (
                 "If `A = List[T]` and `dT` is defined, then `dA = List[dT]`; the "
                 "cotangent\n  list has exactly the primal list's runtime length and "
                 "positional order",
@@ -982,6 +990,18 @@ def validate_normative_contract(
                 "A statically known normalized value outside `0..rank` is a type\n"
                 "error (`DimensionMismatch`)",
                 "shape post-normalization rejection",
+            ),
+            (
+                "access whose shape depends on the guarded extent",
+                "runtime extent guard placement",
+            ),
+            (
+                "places guards by this rule",
+                "runtime extent guard placement in every execution mode",
+            ),
+            (
+                "their defaults settle in source order",
+                "positional expand settlement order",
             ),
             (
                 "| Ordered comparison (`cmplt`, `lt`, `gt`, `gte`, `lte`) | any "
@@ -1849,6 +1869,11 @@ def validate_normative_contract(
     require_all(
         spec05,
         (
+            ("`InputAxis(t, a)`", "folded tensor-axis extent carrier"),
+            (
+                "`reshape` admits `Lit`, `Node`, `InputAxis`, and `Sym`",
+                "runtime extent owner admission",
+            ),
             (
                 "| `cmplt(a, b)` | `cmplt(a, b)` | "
                 "`and(not(nan), cmplt(a, b))` |",

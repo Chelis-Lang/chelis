@@ -1285,6 +1285,23 @@ compatibility exception or change the governing sparse semantic. Static
 checking, host evaluation, generated C, and the HIP execution fixture all lock
 the same rule, while reverse-mode AD remains fail-closed.
 
+[#1343] amends `spec/04-type-system.md` §4.7 (the runtime extent guard
+placement rule and the §4.7.2 settlement order for coupled positional `expand`
+defaults), `spec/05-risc-primitives.md` §2.4.1 and §2.5.1 (an `expand` size is
+an `RtDim`; the `InputAxis` carrier realizes the extent-argument fold; the
+per-operation admission sentence) together with the [05-MOV-1] enumeration,
+which now names `expand` sizes and whose parenthetical links chelis#1277
+beside chelis#1298 (the atom is locked by the file digest only), and
+`spec/06-transformations.md` §3.3,
+§3.7, and §8.6 (runtime extents under `vmap`; `batch_varying_extent`). It
+deliberately moves the complete-file digests for those three chapters and for
+this document; it adds no atom and moves no atom or region digest, and it adds
+seven required-literal anchors with matching mutation tests over the new
+rules (the guard placement rule carries two; the `expand`-size sentence rests
+on the file digest) so the new rules are defended rather than only re-hashed,
+while connective sentences rest on the file digests. The [05-OP-7] blockquote and
+§4.7.1's anchored sentences are byte-identical to their prior state.
+
 ## B2. Invariants that hold across every boundary
 
 1. **Controls never move.** Every green control in the audit test files
@@ -2045,3 +2062,4 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#1306]: https://github.com/Chelis-Lang/chelis/issues/1306
 [#1314]: https://github.com/Chelis-Lang/chelis/issues/1314
 [#1310]: https://github.com/Chelis-Lang/chelis/pull/1310
+[#1343]: https://github.com/Chelis-Lang/chelis/pull/1343

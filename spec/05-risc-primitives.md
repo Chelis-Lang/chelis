@@ -728,18 +728,39 @@ synthesized-arithmetic clause, not by this section.
 
 #### 2.4.1 Runtime (node-valued) bounds and reshape targets
 
-A movement bound (`pad` before/after, `shrink` start/end, `stride` step) and a
-`reshape` target extent are each represented as a `RtDim`:
+A movement bound (`pad` before/after, `shrink` start/end, `stride` step), an
+`expand` size, and a `reshape` target extent are each represented as a
+`RtDim`:
 
 - `Lit(n)` — a compile-time-constant extent.
 - `ToEnd` — the full-axis sentinel; legal only as a `shrink` end (the identity
   slice of a symbolic bystander axis).
 - `Node(i)` — a **runtime** extent read from the owning node's `inputs[i]`, a
-  rank-0 integer scalar (a `shape()` read or integer arithmetic over one:
-  `add`/`mul`/`floor_div`/`neg`/`cast`). The index is absolute: `inputs[0]` is
-  always the tensor operand and `inputs[1..]` are the bound scalars.
+  rank-0 integer scalar. The index is absolute: `inputs[0]` is always the
+  tensor operand, and `inputs[1..]` are the bound scalars, any rank-0 `int32`
+  axis scalar a node-valued `InputAxis` axis names, and any shape-only tensor
+  operand an `InputAxis` names.
 - `Sym(name)` — a symbolic dim declared elsewhere (e.g. a bystander `batch`);
   legal only as a `reshape` target.
+- `InputAxis(t, a)` — the extent of an earlier tensor node's axis, read
+  directly from that tensor's shape metadata: `t` is an absolute index into
+  the owning node's `inputs` naming a tensor operand, and `a` is a normalized
+  `int32` axis literal in `0..rank(t)` (spec/04-type-system.md §4.7.1
+  normalizes a negative literal statically) or an absolute input index naming
+  a rank-0 `int32` scalar (a computed axis under [05-OP-7]). Legal only as an
+  `expand` size or a `reshape` target. It is the folded extent-argument form
+  of §2.5.1 for a direct `shape(x, axis)` extent argument and, in an `expand`
+  size, for an in-scope dimension binder instantiated by a tensor axis; a
+  `reshape` target that restates such a binder is `Sym`, and the same read
+  bound to a `pad`, `shrink`, or `stride` position is the rank-0 `Node` form.
+  The read carries no identity: whether the resulting axis keeps the source
+  dimension's name is decided by ordinary type reasoning
+  (spec/04-type-system.md §4.7.3), and an unproved identity is a fresh extent
+  under an equality guard.
+
+`reshape` admits `Lit`, `Node`, `InputAxis`, and `Sym`; `expand` admits `Lit`,
+`Node`, and `InputAxis`; `pad`, `shrink`, and `stride` admit `Lit` and `Node`,
+plus `ToEnd` for a `shrink` end.
 
 Runtime bounds are validated in every execution mode with matching language
 errors: a negative bound, a shrink range overshoot, a non-positive stride
@@ -780,15 +801,15 @@ they are discrete index math, carry exact zero cotangent, and do not pull their
 producers (for example a window-count `floor_div`) into a structural
 differentiability rejection.
 
-> **[05-MOV-1]** Runtime movement bounds and reshape targets, their validation,
-> and the exact adjoints above SHALL be available in every language execution
-> mode for every active tensor dtype admitted by the owning movement
+> **[05-MOV-1]** Runtime movement bounds, `expand` sizes, and reshape targets,
+> their validation, and the exact adjoints above SHALL be available in every
+> language execution mode for every active tensor dtype admitted by the owning movement
 > operation. Eval, C, HIP, and Metal execute the same runtime values and
 > traps. No lowering may erase a runtime value, substitute a literal bound,
 > require host provenance, emit a statically guessed extent, or turn a backend
 > implementation gap into a language restriction.
 
-*(Not fully implemented; chelis#1298.)*
+*(Not fully implemented; chelis#1277, chelis#1298.)*
 
 ### 2.5 Memory
 
@@ -837,8 +858,8 @@ per [05-DIM-2] — extent-domain out, axis-domain in.
 Two semantic use shapes exist, and they are distinct:
 
 - **As an extent argument** to `expand` / `reshape`, a `shape()` read is folded
-  into the movement node's `DimExpr` (the output dim), not materialized as a
-  value node.
+  into the movement node's `InputAxis` carrier (§2.4.1), not materialized as
+  a value node.
 - **As a scalar VALUE** (used in arithmetic, a `mean` divisor, or any other
   value position), a `shape()` read remains a dedicated typed extent operation
   whose int32 `axis` is an ordinary checked runtime value. It produces a
@@ -863,10 +884,11 @@ values rather than baked at codegen time.
 
 A `shape()` read whose `axis` is data- or metadata-derived remains the same
 operation as a literal-axis read. Using the extent as a runtime movement-op
-bound or reshape target (a `shrink`/`stride`/`pad` bound or window count
-derived from a `shape()` value, and the integer arithmetic feeding it) uses
-§2.4.1's node-valued `RtDim` capability; it does not allocate a second shape
-operation or a compile-time-only alias.
+bound or as a reshape target computed by integer arithmetic over one (a
+`shrink`/`stride`/`pad` bound or window count derived from a `shape()` value,
+and the integer arithmetic feeding it) uses §2.4.1's node-valued `RtDim`
+capability; it does not allocate a second shape operation or a
+compile-time-only alias.
 
 ### 2.6 Effectful Primitive
 
