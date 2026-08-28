@@ -136,9 +136,27 @@ struct RuntimeDimDeclaration {
     uses: Vec<RuntimeDimUseDeclaration>,
 }
 
+struct RuntimeDimAuthority {
+    origins: Vec<RuntimeOrigin>,
+    declarations: Vec<RuntimeDimDeclaration>,
+}
+
 struct RuntimeDimOwner {
-    scope: RuntimeScopeId,
+    lexical_scope: RuntimeScopeId,
+    instance: RuntimeScopeInstanceId,
     binder_slot: u32,
+}
+
+enum RuntimeOrigin {
+    Typed {
+        lexical_scope: RuntimeScopeId,
+        typed_site: TypedSiteId,
+    },
+    Synthesized {
+        transform: TransformInstanceId,
+        parent: RuntimeOriginId,
+        path: GeneratedExtentPath,
+    },
 }
 
 struct RuntimeDimSourceDeclaration {
@@ -149,8 +167,8 @@ struct RuntimeDimSourceDeclaration {
 enum RuntimeDimSourceOrigin {
     InputAxis { parameter: u32, axis: usize },
     ScalarParameter { parameter: u32 },
-    Literal { typed_site: TypedSiteId, value: i64 },
-    OpOutput { typed_op: TypedNodeId, axis: usize },
+    Literal { origin: RuntimeOriginId, value: i64 },
+    OpOutput { origin: RuntimeOriginId, axis: usize },
 }
 
 struct RuntimeDimUseDeclaration {
@@ -159,9 +177,9 @@ struct RuntimeDimUseDeclaration {
 }
 
 enum RuntimeDimUseOrigin {
-    Bound { typed_op: TypedNodeId, field: RuntimeBoundField },
-    AliasAxis { typed_op: TypedNodeId, axis: usize },
-    ScalarAlias { typed_node: TypedNodeId },
+    Bound { origin: RuntimeOriginId, field: RuntimeBoundField },
+    AliasAxis { origin: RuntimeOriginId, axis: usize },
+    ScalarAlias { origin: RuntimeOriginId },
 }
 ```
 
@@ -211,27 +229,46 @@ carrier and must not cross verification or WireDag.
   typed environment maps binder identity, never spelling, to its runtime
   witnesses. A literal instantiation becomes `Lit`; a tensor witness
   becomes `InputAxis`; and a scalar term witness becomes `Node`.
-  Typed inference gives every binder a hygienic identity. After typed
-  dead-code elimination and before executable DAG lowering, finalization emits
-  a primary, non-optional `RuntimeDimDeclaration` for every surviving binder.
-  Its local `RuntimeDimId` is assigned in binder declaration order, never from
-  display spelling. `RuntimeDimOwner` records the declaring hygienic scope and
-  binder slot. Each declaration enumerates the complete ordered set of durable
-  `RuntimeDimSourceId`s and their typed origins: function-input axis, scalar
-  parameter, literal constraint, or typed operation-output axis. It separately
-  enumerates every class-bearing occurrence as a durable `RuntimeDimUseId` with
-  a typed bound-field, forwarded-axis, or scalar-alias origin. This
-  declaration carrier is the authority for class existence and membership; it
-  is not derived from final-DAG stamps or from the executable class manifest.
+  Typed inference gives every binder an opaque provisional
+  `HygienicRuntimeDim` key containing its lexical scope and binder slot. This
+  key, its witness/use role, and a `RuntimeOrigin` travel through lowering on an
+  `AnnotatedDag`; display spelling is never consulted. Source nodes and uses
+  that came from typed input carry `RuntimeOrigin::Typed`. Every graph-creating
+  pass receives a deterministic `TransformInstanceId` from the ordered
+  pipeline and creates `RuntimeOrigin::Synthesized` for each new node or field.
+  Its `GeneratedExtentPath` records transform kind, parent origin, deterministic
+  local path, operation or field, and axis. A generated origin may therefore be
+  remapped and serialized without pretending that it had a `TypedNodeId`.
 
-  A clone records the set of hygienic scopes it duplicates. It freshens the ID
-  and every source ID whose declaration owner is inside that set, while a
-  captured declaration owned by an outside scope keeps its ID. Thus local
-  versus free is decided from stored ownership, not guessed from final graph
-  shape. Specialization may replace a class by a literal only after proving
-  every source in its declaration equal to that literal. Transforms preserve
-  or explicitly remap declarations, source IDs, use IDs, and class IDs
-  together before verification.
+  `RuntimeScopeInstanceId` is distinct from lexical scope. A root instance has
+  an empty lineage; cloning a lexical scope appends the transform instance and
+  deterministic clone ordinal. Two copies of the same lexical scope therefore
+  have different owners. A binder whose declaring lexical-scope instance is
+  inside the cloned set moves to the new instance; a captured binder owned by
+  an outside instance preserves its owner. Nested clones extend the lineage.
+  The same rule freshens provisional source/use identities. No hash-map
+  iteration or display name participates in instance or origin ordering.
+
+  Vmap, grad, specialization, cloning, and remapping preserve annotations on
+  copied nodes and use the frozen `OutputAxisRule` to assign roles to generated
+  axes. CSE may combine annotated nodes only when their complete
+  class/source/use sets match; otherwise it retains both nodes or carries the
+  ordered distinct source identities on the shared result. DCE removes dead
+  annotated computations before authority freezes. Tests cover generated
+  nonidentity movement bounds, nested vmap, two clones of one lexical scope,
+  captured outer binders, CSE, specialization, and post-transform DCE.
+
+  Only after every graph-creating transform and final DCE does
+  `finalize_runtime_dims(AnnotatedDag)` emit a `FinalizedDag` and one primary,
+  non-optional `RuntimeDimDeclaration` for every surviving binder instance.
+  IDs are assigned from owner and origin order, never from display spelling.
+  Each declaration enumerates the complete ordered `RuntimeDimSourceId`s and
+  `RuntimeDimUseId`s plus their typed or synthesized origins. This declaration
+  carrier is the authority for class existence and membership; it is not
+  derived from final-DAG stamps or the executable class manifest.
+  `FinalizedDag` has no in-place graph-transform API. A caller that must
+  transform a decoded finalized DAG consumes it back into the annotated form,
+  preserving its owner/origin records, and must refinalize the result.
 
   Every rank-zero scalar or tensor output axis that independently witnesses the
   binder is stamped `WitnessOf { class, source }`; a pass-through occurrence is
@@ -292,12 +329,13 @@ carrier and must not cross verification or WireDag.
   order at entry. For an operation-computed member, the Phase-2-frozen
   `OpExtentRule` computes the checked extent before that result is allocated,
   accessed, or exposed. Each declaration and class manifest is a
-  control/liveness root. Typed dead-code elimination runs before declarations
-  freeze; afterward DCE cannot remove a declared input, source owner, or guard.
-  A pass that needs a smaller graph must return to the typed authority and
-  refinalize rather than editing the executable class. Vmap, grad,
-  specialization, cloning, and remapping rewrite declarations, source/use
-  stamps, IDs, nodes, fields, and axes together; hashing covers them all.
+  control/liveness root. Final DCE runs on the annotated graph before
+  declarations freeze; afterward no pass can remove a declared input, source
+  owner, or guard from `FinalizedDag`. Graph transforms preserve/remap
+  provisional binder keys, runtime origins, scope instances, sources, uses,
+  nodes, fields, and axes and then refinalize. A decoded graph follows the same
+  consume-to-annotated/refinalize path. Hashing covers the finalized authority
+  and carriers.
 
   The executable interface maps each declared function input and scalar
   parameter to its declaration source IDs, so dropping an otherwise-data-unused
@@ -308,11 +346,21 @@ carrier and must not cross verification or WireDag.
   declaration authority: remove a member and its data-use edge, remove an
   entire Load-only class, substitute an axis from another class, split one
   class, merge two classes, duplicate or reorder members, stale a node/axis, or
-  drop the guard root. Declaration-removal mutations fail the executable
-  interface or typed-origin bijection and exact fixture. A runtime
-  unequal-member mutation traps `Domain`. Only after these exact paths are
-  green may Phase 4 delete `SymbolicBinding.others` and the name-grouped
-  equality loop.
+  drop the guard root while leaving the primary declaration fixed. A runtime
+  unequal-member mutation traps `Domain`.
+
+  Structural validation does not claim to recover a producer's former intent
+  from an arbitrary, coherently rewritten program. Removing an internal
+  declaration together with every dependent operation, stamp, manifest entry,
+  and use may produce a different valid DAG; ordinary decode accepts it if all
+  structural rules hold. The artifact-integrity oracle separately compares the
+  bytes with an expected content hash or exact fixture supplied outside the
+  mutable Wire payload and must reject that replacement. Removing a public
+  input while the out-of-band interface remains fixed is structural failure.
+  A digest stored only inside the same replaceable payload is not integrity
+  authority. Only after both structural and artifact-integrity paths are green
+  may Phase 4 delete `SymbolicBinding.others` and the name-grouped equality
+  loop.
 - **C2.3 Static values are an optimization.** A nonnegative statically proved
   value, including zero, may use `RtDim::Lit`. One checked static
   folder is shared or contract-tested across checker and lowering. Failure to
@@ -364,6 +412,10 @@ carrier and must not cross verification or WireDag.
   choose its regular-stack behavior (an equality guard or a typed rejection).
   Implementation may not batch a bound-only scalar, guess, or silently share a
   varying value before the numbered rule and its positive/negative tests land.
+  All graph-creating transforms operate on provisional hygienic annotations,
+  create typed or synthesized origins as C2.1 requires, and finalize only after
+  their last DCE. Focused tests finalize after each named transform to prove the
+  resulting authority; no generated node borrows a nonexistent typed-site ID.
 - **C2.7 The deletion is atomic with the usable replacement.** Only after
   C2.1-C2.6 and C6 are green does the phase delete `SizeClass`,
   `classify_expand_size`, `classify_arith_app`,
@@ -650,15 +702,18 @@ axes and windows in one issue.
    through vmap, grad,
    specialization, cloning/remapping, and DCE. They verify exact rank-zero
    bound scalars, shifted literal and node-valued axes, preserved tensor-axis
-   witnesses, absolute input slots, declaration owners/source/use IDs, binder
-   IDs, witness/alias roles, complete manifests, guards, shapes, and values.
+   witnesses, absolute input slots, typed and synthesized origins, lexical and
+   scope-instance owners, source/use/class IDs, witness/alias roles, complete
+   manifests, guards, shapes, and values.
    Mutations that
    prepend a batch axis to a bound scalar, fail to split a dual-use producer,
    omit an `Expand` bound from
    grad liveness, lose a source under DCE, fail to shift an axis, or retain a
-   stale slot/ID fail before emission. Cloning rows provide the duplicated
-   hygienic-scope set and prove that declarations owned inside it freshen while
-   declarations owned outside it remain shared. The
+   stale slot/ID fail before emission. Grad-created movement/output witnesses,
+   CSE, specialization, and post-transform DCE finalize exactly. Cloning rows
+   cover nested vmap and two copies of one lexical scope: the clone lineage
+   gives each local declaration a distinct scope instance, while declarations
+   captured from an outside instance remain shared. The
    batch-varying element-derived row
    executes or rejects exactly as the amended `spec/06` decides.
 8. **Axis-source mutations.** The Phase-2-frozen `OutputAxisRule` bijection
@@ -672,17 +727,24 @@ axes and windows in one issue.
    silently repaired, or allowed to reach an ICE.
 9. **WireDag v8.** Exact JSON round-trip, stable bytes/hash, prove and offline
    extraction, compiler-API and binding consumption, and the capacity census
-   are green. Missing size, old or future version, illegal bound tag, missing
-   or out-of-range input slot, later-node reference, non-scalar source, wrong
-   dtype, malformed `input_axis` tensor or axis slot, wrong axis dtype,
-   missing/duplicate/reordered/stale declaration or class member, invalid
-   declaring scope/slot, missing source/use ID or stamp,
-   member/stamp disagreement,
-   correlated stamp-plus-manifest removal, valid-axis substitution from
-   another class, correlated split/merged class, dropped otherwise-unused Load
-   or guard root,
-   owner-illegal tag, classed `to_end`, unshifted vmap source axis, and
-   incompatible axis/rank/output shape are negative controls.
+   are green. Structural decoder negatives include missing size, old or future
+   version, illegal bound tag, missing or out-of-range input slot, later-node
+   reference, non-scalar source, wrong dtype, malformed `input_axis` tensor or
+   axis slot, wrong axis dtype, missing/duplicate/reordered/stale declaration
+   or class member, invalid lexical/scope-instance owner, invalid synthesized
+   origin or clone lineage, missing source/use ID or stamp, member/stamp
+   disagreement, correlated stamp-plus-manifest removal with its declaration
+   fixed, valid-axis substitution from another class, split/merged class
+   carriers that disagree with the declaration, dropped otherwise-unused
+   public Load or guard root, owner-illegal tag, classed `to_end`, unshifted
+   vmap source axis, and incompatible axis/rank/output shape.
+
+   Whole-program integrity is a separate oracle. It coherently removes or
+   replaces an internal declaration and every dependent graph/carrier field;
+   structural decode may succeed because the result is another valid program,
+   but comparison with the caller-supplied expected fixture/content hash must
+   fail. The expected commitment is outside the mutated Wire bytes. Tests never
+   call coherent semantic replacement a structural decoder rejection.
 
 Positive rows use this allowed transition lattice:
 
@@ -722,11 +784,14 @@ never reused.
   carries a tensor input slot plus a
   `WireRtAxis` that is an exact int32 literal or scalar input slot;
 - encode the primary ordered `WireRuntimeDimDeclaration` list at DAG level.
-  Each non-optional declaration contains its stable local class ID, hygienic
-  declaring-scope/binder-slot owner, and complete ordered durable source IDs
-  with typed input-axis, scalar-parameter, literal, or operation-output origins,
-  plus every durable use ID with its bound-field, alias-axis, or scalar-alias
-  origin. Encode the derived `WireRuntimeExtentClass` manifest separately,
+  Each non-optional declaration contains its stable local class ID, lexical
+  scope, runtime scope-instance/clone lineage, binder slot, and complete
+  ordered durable source/use IDs. Encode the canonical `RuntimeOrigin` table:
+  a typed origin carries its lexical scope and typed site; a synthesized origin
+  carries its transform instance, parent origin, and deterministic generated
+  path. Source and use entries select those origins plus their input-axis,
+  scalar-parameter, literal, operation-output, bound-field, alias-axis, or
+  scalar-alias role. Encode the derived `WireRuntimeExtentClass` separately,
   with the same ID and `literal`, `scalar`, or `axis` witnesses carrying their
   source IDs. Encode one optional `witness { class, source }` or
   `alias { class, use_id }` stamp per tensor output axis and the corresponding
@@ -759,10 +824,12 @@ never reused.
   mapping. Start from the non-optional declarations, resolve every durable
   source and use through the public-input map, stamps, or bound references, and
   apply the Phase-2-frozen `OutputAxisRule`; then require exact equality with
-  the serialized class manifest. Every declaring scope/slot, source/use ID, member
-  node/axis, literal, dtype, rank, class ID, uniqueness, canonical order, and
-  control/liveness edge is checked before encode and after exact-version
-  decode. A stamp/manifest pair cannot establish or resize a class;
+  the serialized class manifest. Every lexical scope, scope instance, clone
+  lineage, typed/synthesized origin, transform instance/path, source/use ID,
+  member node/axis, literal, dtype, rank, class ID, uniqueness, canonical
+  order, and control/liveness edge is checked before encode and after
+  exact-version decode. A stamp/manifest pair cannot establish or resize a
+  class;
 - reject v6, #1298-only v7, versionless, future, string-size, executable
   `sym`, and owner-illegal `to_end` spellings before IR
   consumption; no legacy
@@ -771,6 +838,11 @@ never reused.
   strings have no role in class construction or verification;
 - update stable hash/prove/Beacon fixtures and every compiler-API or binding
   consumer that exposes WireDag bytes or version names;
+- keep structural decode and artifact integrity distinct. Generic v8 decode
+  accepts any internally valid program and rejects carrier inconsistencies.
+  Trusted fixture/cache/offline loaders additionally accept an expected hash
+  or exact bytes from outside the Wire payload and reject coherent replacement.
+  No digest inside the same payload is treated as self-authentication;
 - regenerate and review the typed wire capacity census. Every changed
   descriptor receives a final authority classification; the schema bump does
   not inherit or create a legacy exemption.
@@ -832,10 +904,12 @@ phase creates them.
 
 **Deliver in order:** first amend `spec/05`'s closed `RtDim`
 and [05-OP-7] representation to admit `RuntimeExtent`, the structural
-tensor-axis witness, primary hygienic binder declarations with durable source
-IDs and clone ownership, stable class IDs, source witness/alias roles, and the
-complete graph-level `RuntimeExtentClass` manifest, and require named values
-resolved before executable IR. Author any missing numbered operation atoms,
+tensor-axis witness, provisional hygienic annotations, the typed/synthesized
+origin algebra, lexical and runtime scope-instance ownership, post-transform
+primary binder declarations with durable source/use IDs, stable class IDs,
+source witness/alias roles, and the complete graph-level
+`RuntimeExtentClass` manifest, and require named values resolved before
+executable IR. Author any missing numbered operation atoms,
 then generate and freeze the one complete `OutputAxisRule`/`OpExtentRule`
 registry used both for pre-allocation operation-output guards here and total
 `AxisSource` in Phase 4; amend `spec/06` for
@@ -851,8 +925,10 @@ acceptance reproducer is green under the owning rank-polymorphism work.
 
 **Frozen at exit:** amended `spec/05`/`spec/06` atoms;
 `Expand.size: RuntimeExtent`; structural tensor-axis and scalar input values;
-primary binder declaration/ownership/source/use identities; stable runtime
-binder IDs; complete ordered equality-class manifests and source/use roles;
+provisional hygienic keys; typed/synthesized origin and transform-instance
+algebras; lexical/runtime-scope and clone-lineage rules; post-transform primary
+binder declaration/ownership/source/use identities; stable runtime binder IDs;
+complete ordered equality-class manifests and source/use roles;
 the single generated `OutputAxisRule` and `OpExtentRule` variant/formula sets;
 transform
 behavior for every bound-dependency class;
@@ -862,8 +938,9 @@ guard placement.
 **Oracle:** `uv run --managed-python --python 3.11 --no-project python
 scripts/runtime_extent_oracle.py --phase 2`, including host, HIP, Metal,
 WireDag, #569 transformation, every transform-bound class, named-dimension
-witness sets and guards, zero, and negative rows owned by this phase, plus the
-composed exact-head #1298 oracle.
+witness sets and guards, generated-origin/clone-lineage rows, structural Wire
+negatives, coherent-replacement integrity mismatches, zero, and negative rows
+owned by this phase, plus the composed exact-head #1298 oracle.
 
 ### Phase 3 -- deferral totality and deterministic settlement
 
