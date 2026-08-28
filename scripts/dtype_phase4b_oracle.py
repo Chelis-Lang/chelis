@@ -53,13 +53,13 @@ FROZEN_FILE_DIGESTS = {
         "5e21649cf61087df1119040a971a60b5b499d40321d8647ce719e91b8571120a"
     ),
     "spec/04-type-system.md": (
-        "a8fbc1ba5b8e2419844dd41a97bdcd6d1ffe1b5773d4ef263619e11985ab4cfe"
+        "1a4703b82bb0b9e6d89d79619bfa4ad04d617721026b2f6eb9a80a6569d5036e"
     ),
     "spec/05-risc-primitives.md": (
         "fcb6be10c355de3fd5075ebe2ee50dec8e0b9517ed65d699bcb9b53dc5d58a36"
     ),
     "spec/06-transformations.md": (
-        "442bba1bef95f16c2203e0d60a252ec27a6e1b3e6d3e429cd85e09f9b9194251"
+        "30a78217103d0a57d63b9e1a3d927d2e1079affa4d1d0641ef36a9afff34e25a"
     ),
     "spec/10-serialization.md": (
         "58f707d4e155d098962db224317061684b2c026816cab234ba026d560510a6da"

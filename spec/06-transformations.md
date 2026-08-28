@@ -425,7 +425,7 @@ For each node in the original DAG, the vmap transformation adds the batch dimens
 | `Const(v, D, P)` | Batch-typed `Const(v, {batch} + D, P)` -- broadcast constant |
 | `Load(buf)` | Load with batch dimension added to buffer type |
 
-The key principle: the batch dimension passes through all operations without being touched. Elementwise ops are naturally batched. Reductions reduce over the original axis, not the batch axis. Shape operations preserve the batch dimension. The rank-0 subgraph that produces a bound, and the bound carrier inside a movement operation, follow §3.7: a positional `dim` and an `InputAxis` axis shift by the inserted batch axis, and a rank-0 extent value is shared rather than batched.
+The key principle: the batch dimension passes through all operations without being touched. Elementwise ops are naturally batched. Reductions reduce over the original axis, not the batch axis. Shape operations preserve the batch dimension. The rank-0 subgraph that produces a bound, and the bound carrier inside a movement operation, follow §3.7: in the rewritten DAG's numbering a positional `dim` and an `InputAxis` axis shift by the inserted batch axis, and a rank-0 extent value is shared rather than batched.
 
 ### 3.4 Type Rule
 

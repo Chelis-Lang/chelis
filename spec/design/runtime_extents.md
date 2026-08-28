@@ -250,8 +250,7 @@ fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
 - **C2.2 Static values are an optimization.** A statically proved
   non-negative value, including zero, may use `RtDim::Lit`. One checked
   static folder is shared, or contract-tested for agreement, between the
-  checker and lowering, closing the `div` drift between `INT_ARITH` and
-  `fold_static_size`. Failure to fold produces the exact `InputAxis` or
+  checker and lowering. Failure to fold produces the exact `InputAxis` or
   `Node` carrier dictated by C2.1; it never rejects the expression or guesses
   a value. The `size > 0` checks at `app_tensor.rs:985-996` and `1184-1193`
   and the verifier's `size must be > 0` become negative-only rejections; a
@@ -360,15 +359,18 @@ fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
   `sourceless_expand_size_error`, and `Env::size_provenance` and its
   plumbing. No intermediate commit may accept a value the IR cannot carry,
   and no row a lane rejects on `main` may move to an unguarded execution:
-  until Slice B places guards, a `Node`-sized `expand` whose result axis
-  carries a literal or named claim that is not statically proved stays
-  rejected at lowering (the two sites at `lower.rs:9109-9190`, re-emitted as
-  the registered [#730] `Unsupported` receipt rather than a fatal error), so
-  those rows sit at `typed_unsupported` in the C5 lattice; an unclaimed
-  result executes in Slice A. A row `main` already executes without its
-  guard ([#1374], [#1375], [#1376]) keeps that baseline, recorded as
-  `silent_unguarded`, until Slice B places the guard. Slice B deletes that receipt when it
-  separately replaces `symbolic_occurrences`, `op_declared_output_axes`, and
+  until Slice B places guards, an `expand` whose size is not `Lit` and whose
+  declared or ascribed result axis names a literal or a binder other than
+  the identity the size carries stays rejected at lowering (the two sites at
+  `lower.rs:9109-9190`, re-emitted as the registered [#730] `Unsupported`
+  receipt rather than a fatal error, and applied to `InputAxis` as well as
+  `Node`), so those rows sit at `typed_unsupported` in the C5 lattice; an
+  unclaimed or proved result executes in Slice A. That receipt moves
+  [#1374] and [#1376] from `silent_unguarded` to `typed_unsupported`, a
+  rightward move; [#1375] keeps its silent baseline because `main` has no
+  reshape rejection site, until Slice B places the guard. Slice B deletes
+  that receipt when it separately replaces `symbolic_occurrences`,
+  `op_declared_output_axes`, and
   `shape_source_for_axis` with `output_axis_sources`, and
   `symbolic_bindings` with `derive_runtime_dim_classes`, once every lane
   consumes them; a reshape `Sym` target keeps binding to its class's
@@ -594,9 +596,10 @@ nonconforming_rejection | silent_unguarded | ice | lane_divergent
 A positive row may move only right, although it may skip the interim receipt.
 `typed_unsupported` must carry the exact registered issue receipt. Negative
 controls remain in the separate terminal state `rejects_exactly` with their
-owning diagnostic or trap. A lane that already accepts a positive row may not
-regress, and an `executes_exactly` row may not change shape, value, trap, or
-serialized meaning. A slice invocation requires its owned rows at their exit
+owning diagnostic or trap. A row at `executes_exactly` may not regress or
+change shape, value, trap, or serialized meaning; `silent_unguarded` to
+`typed_unsupported` is a rightward move. A slice invocation requires its owned
+rows at their exit
 state and rejects unexplained per-lane changes in every other row.
 
 ## Part II: boundary law
@@ -641,8 +644,9 @@ next monotonic `WIRE_DAG_SCHEMA_VERSION` at landing, coordinated with [#1298]
 so the two migrations use distinct successive versions and both trackers,
 `spec/10`, fixtures, hashes, and rejected-version controls update together;
 the regenerated typed wire capacity census; then C2.7's deletion, with the
-lowering-time [#730] receipt retained for a `Node`-sized `expand` under an
-unproved literal or named claim. Close [#1367], [#1266], [#569], [#597],
+lowering-time [#730] receipt retained for an `expand` whose non-literal size
+sits under a literal or named claim it does not carry. Close [#1367], [#1266],
+[#569], [#597],
 [#609], and [#592] if its reproducer is green once the size carrier lands;
 an instance whose reproducer claims a named result over a `Node` size
 closes in Slice B. [#578] remains open; commits
@@ -654,7 +658,7 @@ rank-polymorphism work.
 `Expand.size: RtDim`; the `InputAxis` carrier with a literal axis; the owner
 matrix in memory and on the wire; the single static folder; the `vmap`
 bound-slice rule; the wire schema version; no provenance-rejection construct
-in `chelis-types`, and in `chelis-ir` only the registered claimed-`Node`
+in `chelis-types`, and in `chelis-ir` only the registered claimed-size
 receipt that Slice B removes.
 
 **Oracle:** `uv run --managed-python --python 3.11 --no-project python
@@ -675,8 +679,11 @@ a typed ratchet first, then C4.4); `derive_runtime_dim_classes` with the
 four C2.4 rules; guard placement per C1.3 on Eval, C, HIP, and Metal;
 replacement of `symbolic_occurrences`, `op_declared_output_axes`,
 `shape_source_for_axis`, and `symbolic_bindings` by those two derivations;
-deletion of the lowering-time claimed-`Node` receipt, and, once nothing
-reads it, of `shape_deps`. Close [#665], [#1374], [#1375], [#1376], and any
+the checker's C4.1 identity rule (an unproved cross-tensor or foreign
+claim stays a claim over a fresh extent rather than rewriting the declared
+binder to the size's identity, which is what closes [#1374] and [#1376]);
+deletion of the lowering-time claimed-size receipt, and, once nothing reads
+it, of `shape_deps`. Close [#665], [#1374], [#1375], [#1376], and any
 residue of [#592].
 
 **Frozen at exit:** the `RuntimeDimClass` and `RuntimeDimMember` shapes,

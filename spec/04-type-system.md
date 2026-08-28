@@ -1373,7 +1373,8 @@ the guard passes. Guards ready at the same source position are evaluated in
 declaration order. These constraints are the complete observable contract; a
 guard and an operation related by neither data dependence nor source order may
 be evaluated in either order. A failing equality guard traps `Domain` under
-the operation that introduces the guarded extent and names the disagreeing
+the operation that introduces the guarded extent, or under the function's
+interface when every operand is an interface value, and names the disagreeing
 sources; a failing non-negativity guard traps `Domain` under the owning
 movement operation. Every execution mode places guards by this rule.
 
