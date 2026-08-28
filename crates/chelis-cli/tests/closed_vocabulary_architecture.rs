@@ -133,15 +133,36 @@ const RUNTIME_DTYPE_CONSUMERS: &[Consumer] = &[
         required: &[".runtime_dtype()", ".c_macro()"],
         forbidden: &["Prim::F32 => \"CHELIS_DTYPE_F32\""],
     },
+    // chelis#1360: this row used to REQUIRE `case CHELIS_DTYPE_F64:` and
+    // `case CHELIS_DTYPE_BOOL:` here, which is to say it required the header
+    // to hold its own copy of the width table. That copy is what broke: when
+    // chelis#1308 narrowed bool to one byte, this file was updated and the
+    // emitter's three other copies were not, so `cmplt` and `cast` went on
+    // dispatching four-byte kernels over a one-byte allocation.
+    //
+    // The header no longer decides anything per dtype - it calls
+    // `chelis_dtype_size`, whose Rust side is `tensor_elem_size`, required by
+    // the `chelis-runtime` row above and implemented as `dtype.byte_width()`.
+    // That is an exhaustive match on `Repr`, so a new dtype breaks the build
+    // there rather than merely missing a string here. Per this file's own
+    // header, rustc exhaustiveness is the authority and the inventory exists
+    // to keep untyped string consumers from sitting outside it; delegating
+    // removes this file from that category instead of keeping it compliant.
+    //
+    // The row therefore inverts: require the delegation, forbid the
+    // restatement.
     Consumer {
         source: ConsumerSource::File("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
         role: "HIP allocation byte width",
         required: &[
             "#include \"chelis_runtime_dtype.h\"",
+            "return (size_t)chelis_dtype_size((chelis_dtype)dtype);",
+        ],
+        forbidden: &[
+            "return sizeof(float);",
             "case CHELIS_DTYPE_F64:",
             "case CHELIS_DTYPE_BOOL:",
         ],
-        forbidden: &["return sizeof(float);"],
     },
     Consumer {
         source: ConsumerSource::File("crates/chelis-backend-metal/src/dtype.rs"),

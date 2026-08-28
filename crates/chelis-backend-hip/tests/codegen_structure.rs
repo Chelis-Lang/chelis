@@ -159,12 +159,29 @@ fn hip_runtime_header_owns_its_rank_cap_and_dtype_sizing_dependencies() {
     let header = hip_runtime_header();
     assert!(header.contains("#include \"chelis_runtime_dtype.h\""));
     assert!(header.contains("CHELIS_GPU_MAX_DIM"));
-    assert!(header.contains("case CHELIS_DTYPE_F64:"));
-    assert!(header.contains("case CHELIS_DTYPE_BOOL:"));
     for removed in ["CHELIS_MAX_DIM", "chelis_runtime_dtype_size_checked"] {
         assert!(
             !header.contains(removed),
             "HIP runtime header still depends on removed host symbol `{removed}`"
+        );
+    }
+
+    // chelis#1360: this used to assert the header CONTAINED
+    // `case CHELIS_DTYPE_F64:` / `case CHELIS_DTYPE_BOOL:`, which pinned a
+    // second copy of the width table in place. The copy is how the defect
+    // happened - chelis#1308 narrowed bool to one byte here while the
+    // emitter went on dispatching four-byte kernels - so the assertion is
+    // inverted: the header must delegate to the runtime's one authority and
+    // must not restate the per-dtype widths at all.
+    assert!(
+        header.contains("return (size_t)chelis_dtype_size((chelis_dtype)dtype);"),
+        "chelis_gpu_dtype_size must delegate to the runtime width authority"
+    );
+    for restated in ["case CHELIS_DTYPE_F64:", "case CHELIS_DTYPE_BOOL:"] {
+        assert!(
+            !header.contains(restated),
+            "HIP runtime header restates the dtype width table (`{restated}`); \
+             delegate to chelis_dtype_size instead (chelis#1360)"
         );
     }
 }
@@ -678,11 +695,23 @@ fn s8_duplicate_load_single_slot() {
 }
 
 // ===========================================================================
-// S9: cmplt kernel emits 1.0f/0.0f (not integer bool)
+// S9: cmplt over a bool result is rejected, not emitted at the operand width
 // ===========================================================================
 
+/// chelis#1360. This test used to assert the opposite: that the `cmplt` kernel
+/// "must produce float `1.0f`/`0.0f`, not integer bool". That was correct
+/// while the HIP runtime stored a bool tensor as a four-byte binary32 payload,
+/// and `chelis_gpu_dtype_size(CHELIS_DTYPE_BOOL)` returned 4 to match.
+///
+/// chelis#1308 replaced that payload with the tagged carrier's one-byte
+/// `Repr::Bool8`. The kernel side did not follow, so the assertion above went
+/// on holding - `1.0f` and `0.0f` were still in the emitted source - while the
+/// emitted program wrote `N * 4` bytes into an `N * 1` byte `hipMalloc` and
+/// read back the low bytes of the float stream. Both halves of the assertion
+/// were true and the program was corrupt, which is why the test is now the
+/// rejection rather than the spelling.
 #[test]
-fn s9_cmplt_float_result() {
+fn s9_cmplt_bool_result_is_rejected() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 1.0),
@@ -706,10 +735,16 @@ fn s9_cmplt_float_result() {
         None,
     );
     dag.add_root(c);
-    let result = codegen_hip(&dag, "test_cmplt").unwrap();
+    let error = match codegen_hip(&dag, "test_cmplt") {
+        Err(error) => error,
+        Ok(_) => panic!(
+            "a bool result is one byte and the cmplt template writes at the \
+             operand width; emitting it overruns the allocation (chelis#1360)"
+        ),
+    };
     assert!(
-        result.c_source.contains("1.0f") && result.c_source.contains("0.0f"),
-        "cmplt kernel must produce float 1.0f/0.0f, not integer bool"
+        format!("{error:?}").contains("bool"),
+        "the rejection must name the offending dtype; got: {error:?}"
     );
 }
 
