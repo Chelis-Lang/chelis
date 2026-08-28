@@ -4,8 +4,6 @@ use predicates::prelude::*;
 use serde_json::Value;
 use std::env;
 use std::fs;
-#[cfg(unix)]
-use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use tempfile::tempdir;
@@ -1517,10 +1515,10 @@ fn build_c_host_tensor_helper_dedups_repeated_inputs_at_callsite() {
 
 int main(void) {
     int64_t shape[2] = {2, 3};
-    chelis_tensor *a = chelis_alloc(2, shape, CHELIS_F32);
+    chelis_tensor *a = chelis_alloc(2, shape, CHELIS_DTYPE_F32);
     float values[6] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
     for (int i = 0; i < 6; ++i) {
-        a->data[i] = values[i];
+        ((float *)a->data)[i] = values[i];
     }
 
     chelis_tensor *out = gram(a);
@@ -1530,8 +1528,8 @@ int main(void) {
         27.0f, 36.0f, 45.0f
     };
     for (int i = 0; i < 9; ++i) {
-        if (fabsf(out->data[i] - expected[i]) > 1e-4f) {
-            fprintf(stderr, "mismatch at %d: got %f expected %f\n", i, out->data[i], expected[i]);
+        if (fabsf(((float *)out->data)[i] - expected[i]) > 1e-4f) {
+            fprintf(stderr, "mismatch at %d: got %f expected %f\n", i, ((float *)out->data)[i], expected[i]);
             return 1;
         }
     }
@@ -1659,24 +1657,28 @@ fn build_c_tuple_return_header_supports_driver_extraction() {
 
 int main(void) {
     chelis_tuple *out = eig_pair();
-    chelis_tensor *lhs = chelis_tuple_get_tensor(out, 0);
-    chelis_tensor *rhs = chelis_tuple_get_tensor(out, 1);
+    chelis_value lhs_value = chelis_tuple_get(out, 0);
+    chelis_value rhs_value = chelis_tuple_get(out, 1);
+    chelis_tensor *lhs = chelis_value_as_tensor(lhs_value);
+    chelis_tensor *rhs = chelis_value_as_tensor(rhs_value);
 
     if (lhs->size != 2 || rhs->size != 2) {
         fprintf(stderr, "unexpected tuple tensor sizes\n");
         return 1;
     }
-    if (fabsf(lhs->data[0] - 1.0f) > 1e-4f || fabsf(lhs->data[1] - 2.0f) > 1e-4f) {
+    if (fabsf(((float *)lhs->data)[0] - 1.0f) > 1e-4f || fabsf(((float *)lhs->data)[1] - 2.0f) > 1e-4f) {
         fprintf(stderr, "lhs mismatch\n");
         return 1;
     }
-    if (fabsf(rhs->data[0] - 3.0f) > 1e-4f || fabsf(rhs->data[1] - 4.0f) > 1e-4f) {
+    if (fabsf(((float *)rhs->data)[0] - 3.0f) > 1e-4f || fabsf(((float *)rhs->data)[1] - 4.0f) > 1e-4f) {
         fprintf(stderr, "rhs mismatch\n");
         return 1;
     }
 
     chelis_free(lhs);
     chelis_free(rhs);
+    chelis_value_release(lhs_value);
+    chelis_value_release(rhs_value);
     chelis_tuple_release(out);
     return 0;
 }
@@ -2095,7 +2097,8 @@ fn build_c_tensor_grad_lm_style_mixed_scalar_tensor_args_builds() {
         "expected an externally linked host wrapper for the gradient row helper:\n{source}"
     );
     assert!(
-        source.contains("__tensor_arg1_") && source.contains("chelis_alloc(0, NULL, CHELIS_F32)"),
+        source.contains("__tensor_arg1_")
+            && source.contains("chelis_alloc(0, NULL, CHELIS_DTYPE_F32)"),
         "expected host scalar dependencies to be boxed as rank-0 tensor helper inputs:\n{source}"
     );
     assert!(
@@ -2145,15 +2148,22 @@ fn build_c_tensor_grad_local_wrapper_over_function_param_builds() {
         source.contains("chelis_tensor* __binding_0_value;"),
         "expected tensor-valued local grad result to stay tensor-typed:\n{source}"
     );
-    // RT-4 F1: the runtime call may be either the legacy untyped
-    // entry point or the new dtype-aware variant (CHELIS_F32 here);
-    // both carry the same shape semantics.
+    // [05-OP-33]: list ingress uses the one exact tagged constructor. There
+    // is no untyped or dtype-named compatibility entry point.
     assert!(
-        (source.contains("chelis_tensor_from_value_list(")
-            || source.contains("chelis_tensor_from_value_list_typed("))
+        source.contains("chelis_tensor_from_values(")
+            && source.contains("CHELIS_DTYPE_F32")
             && source.contains("__host_tensor_arg_1")
             && source.contains("tensor_grad_local_wrapper__global__tensor_0"),
         "expected local-wrapper grad to specialize into a tensor helper with a hoisted tensor arg:\n{source}"
+    );
+    assert!(
+        !source.contains("chelis_tensor_from_value_list("),
+        "retired untyped list ingress must not be emitted:\n{source}"
+    );
+    assert!(
+        !source.contains("chelis_tensor_from_value_list_typed("),
+        "retired typed-by-name list ingress must not be emitted:\n{source}"
     );
     assert!(
         !source.contains("`grad` is not representable")
@@ -3505,7 +3515,7 @@ out = einsum("ij,jk->ik", a, b)
 }
 
 #[test]
-fn check_rejects_static_invalid_phase3h_scatter_duplicate_replace() {
+fn check_accepts_static_scatter_duplicate_replace_as_last_write_wins() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("scatter_dup_replace_bad.ch");
     write_file(
@@ -3520,23 +3530,16 @@ out = scatter(base, idx, updates, 0, "replace")
     );
 
     let json = run_json_check(&path);
-    assert!(json["score"].as_f64().unwrap() < 1.0);
+    assert_eq!(json["score"].as_f64(), Some(1.0));
     let errors = json["errors"].as_array().expect("errors array");
     assert!(
-        !errors.is_empty(),
-        "check should report deterministic scatter duplicate-index error"
+        errors.is_empty(),
+        "duplicate replace-scatter indices follow deterministic last-write-wins: {errors:?}"
     );
-    let messages = errors
-        .iter()
-        .filter_map(|error| error["message"].as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(messages.contains("scatter"));
-    assert!(messages.contains("duplicate target index"));
 }
 
 #[test]
-fn build_c_phase3h_runtime_value_errors_exit_cleanly_instead_of_aborting() {
+fn build_c_scatter_duplicate_replace_is_deterministic_last_write_wins() {
     let dir = tempdir().expect("tempdir");
     let source = dir.path().join("scatter_runtime_bad.ch");
     let out_dir = dir.path().join("scatter-dup-build");
@@ -3570,32 +3573,31 @@ def apply(
         &out_dir.join("runner.c"),
         r#"#include "chelis_runtime.h"
 #include "scatter_runtime_bad.h"
+#include <math.h>
 
 int main(void) {
     int64_t base_shape[2] = {3, 2};
     int64_t idx_shape[1] = {2};
     int64_t updates_shape[2] = {2, 2};
 
-    chelis_tensor *base = chelis_alloc(2, base_shape, CHELIS_F32);
-    chelis_tensor *idx = chelis_alloc(1, idx_shape, CHELIS_I32);
-    chelis_tensor *updates = chelis_alloc(2, updates_shape, CHELIS_F32);
-    /* RT-4 F1 sibling: write through `(int32_t*)` so the slot stores
-     * int32 bytes; the runtime now reads indices at the dtype-correct
-     * width and a float-bit-pattern write would surface as the bit
-     * pattern as an int (e.g. 1065353216 for 1.0f), defeating the
-     * duplicate-index fixture. */
-    ((int32_t*)idx->data)[0] = 1;
-    ((int32_t*)idx->data)[1] = 1;
-    updates->data[0] = 5.0f;
-    updates->data[1] = 5.0f;
-    updates->data[2] = 6.0f;
-    updates->data[3] = 6.0f;
+    chelis_tensor *base = chelis_alloc(2, base_shape, CHELIS_DTYPE_F32);
+    chelis_tensor *idx = chelis_alloc(1, idx_shape, CHELIS_DTYPE_I64);
+    chelis_tensor *updates = chelis_alloc(2, updates_shape, CHELIS_DTYPE_F32);
+    ((int64_t*)idx->data)[0] = 1;
+    ((int64_t*)idx->data)[1] = 1;
+    ((float *)updates->data)[0] = 5.0f;
+    ((float *)updates->data)[1] = 5.0f;
+    ((float *)updates->data)[2] = 6.0f;
+    ((float *)updates->data)[3] = 6.0f;
 
     chelis_tensor *output = apply(base, idx, updates);
-
-    if (output != NULL) {
-        chelis_free(output);
+    const float expected[6] = {0.0f, 0.0f, 6.0f, 6.0f, 0.0f, 0.0f};
+    for (int i = 0; i < 6; i++) {
+        if (fabsf(((float *)output->data)[i] - expected[i]) > 1e-6f) {
+            return 2;
+        }
     }
+    chelis_free(output);
     chelis_free(base);
     chelis_free(idx);
     chelis_free(updates);
@@ -3615,27 +3617,10 @@ int main(void) {
         .output()
         .expect("compiled binary should run");
     assert!(
-        !run_output.status.success(),
-        "compiled binary should fail on duplicate scatter replace"
-    );
-    assert!(
+        run_output.status.success(),
+        "compiled duplicate replace-scatter must observe last-write-wins; status {} stderr: {}",
+        run_output.status,
         String::from_utf8_lossy(&run_output.stderr)
-            .contains("scatter replace mode rejects duplicate target index"),
-        "expected duplicate-index stderr, got {}",
-        String::from_utf8_lossy(&run_output.stderr)
-    );
-    assert_eq!(
-        run_output.status.code(),
-        Some(1),
-        "expected clean runtime failure exit code, got {}",
-        run_output.status
-    );
-    #[cfg(unix)]
-    assert_eq!(
-        run_output.status.signal(),
-        None,
-        "expected normal exit instead of signal, got {}",
-        run_output.status
     );
 }
 
@@ -3841,7 +3826,7 @@ fn build_c_emits_host_function_for_mixed_tensor_scalar_program() {
         "{source}"
     );
     assert!(source.contains("check_loss__tensor_0"));
-    assert!(source.contains("chelis_tensor_to_f64"));
+    assert!(source.contains("chelis_tensor_to_scalar"));
 }
 
 #[test]
@@ -8899,7 +8884,7 @@ fn build_c_higher_order_def_with_unused_fn_param_keeps_its_kernel() {
     // A pure-DAG module emits no `main`, so drive the kernel directly.
     write_file(
         &out_dir.join("driver.c"),
-        "#include <stdio.h>\n         #include <string.h>\n         #include \"chelis_runtime.h\"\n         void only_ho(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);\n         int main(void) {\n         \x20   int64_t shape[1] = {3};\n         \x20   chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32);\n         \x20   float xd[3] = {1.0f, 2.0f, 3.0f};\n         \x20   memcpy(x->data, xd, sizeof(xd));\n         \x20   chelis_tensor* ins[1] = { x };\n         \x20   chelis_tensor* outs[1] = { NULL };\n         \x20   only_ho(ins, 1, outs, 1);\n         \x20   for (int i = 0; i < 3; i++) printf(\"%.1f\\n\", outs[0]->data[i]);\n         \x20   return 0;\n         }\n",
+        "#include <stdio.h>\n         #include <string.h>\n         #include \"chelis_runtime.h\"\n         void only_ho(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);\n         int main(void) {\n         \x20   int64_t shape[1] = {3};\n         \x20   chelis_tensor* x = chelis_alloc(1, shape, CHELIS_DTYPE_F32);\n         \x20   float xd[3] = {1.0f, 2.0f, 3.0f};\n         \x20   memcpy(x->data, xd, sizeof(xd));\n         \x20   chelis_tensor* ins[1] = { x };\n         \x20   chelis_tensor* outs[1] = { NULL };\n         \x20   only_ho(ins, 1, outs, 1);\n         \x20   for (int i = 0; i < 3; i++) printf(\"%.1f\\n\", ((float *)outs[0]->data)[i]);\n         \x20   return 0;\n         }\n",
     );
 
     let status = gcc_link_sources(&out_dir, &["driver.c", "only_ho.c"], "only_ho_driver");
@@ -9432,7 +9417,7 @@ fn build_c_program_using_std_io_serializers_emits_exact_documents() {
 
     let json_text = fs::read_to_string(&json_path).expect("out.json written");
     assert_eq!(
-        json_text, "{\"cap_price\":0.15110743269565682,\"name\":\"a\\\"b\\\\c\",\"n\":3}",
+        json_text, "{\"cap_price\":0.15110743269565682,\"n\":3,\"name\":\"a\\\"b\\\\c\"}",
         "compiled write_json output must be byte-exact"
     );
     let csv_text = fs::read_to_string(&csv_path).expect("out.csv written");

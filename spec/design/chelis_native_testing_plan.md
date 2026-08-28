@@ -16,24 +16,22 @@ Core assertion functions:
 
 ```chelis
 -- Equality
-def assert_eq(actual: f32, expected: f32, label: String) -> unit ! { Test }
-def assert_eq_int(actual: int64, expected: int64, label: String) -> unit ! { Test }
-def assert_eq_bool(actual: bool, expected: bool, label: String) -> unit ! { Test }
-def assert_eq_string(actual: String, expected: String, label: String) -> unit ! { Test }
+def assert_eq[q](actual: q, expected: q, label: string) -> unit ! { Test }
 
 -- Approximate equality (for floating point)
 def assert_close(actual: f32, expected: f32, tol: f32, label: String) -> unit ! { Test }
-def assert_close_tensor(actual: tensor[n, f32], expected: tensor[n, f32], tol: f32, label: String) -> unit ! { Test }
+def assert_close_tensor[n, p](actual: &tensor[n, p], expected: &tensor[n, p], tol: f32, label: string) -> unit ! { Test }
+def assert_eq_tensor[p](actual: &tensor[..r, p], expected: &tensor[..r, p], label: string) -> unit ! { Test }
 
 -- Boolean
-def assert_true(cond: bool, label: String) -> unit ! { Test }
-def assert_false(cond: bool, label: String) -> unit ! { Test }
+def assert_true(cond: bool, label: string) -> unit ! { Test }
+def assert_false(cond: bool, label: string) -> unit ! { Test }
 
 -- Tensor shape / properties
-def assert_shape(t: tensor[n, f32], expected_n: int64, label: String) -> unit ! { Test }
+def assert_shape[p](t: &tensor[..r, p], expected: List[int64], label: string) -> unit ! { Test }
 
 -- Failure (unconditional)
-def fail(msg: String) -> unit ! { Test }
+def fail(msg: string) -> unit ! { Test }
 ```
 
 The `Test` effect is a new algebraic effect. Assertion functions perform the `Test` effect. The `chelis test` CLI command handles `Test` by collecting pass/fail results. This means:
@@ -197,13 +195,13 @@ Currently, the entire test suite is Python (golden generation via pandas, runtim
 
 ```chelis
 import Coral.Frame (from_pairs, get_float_col, filter, nrows, ncols, with_column, columns)
-import Std.Test (assert_eq_int, assert_close_tensor, assert_true)
+import Std.Test (assert_eq, assert_close_tensor, assert_true)
 
 def test_construction() = {
   prices = to_tensor([100.0, 200.0, 300.0])
   df = from_pairs([("price", FloatCol(prices))])
-  assert_eq_int(nrows(df), 3, "nrows = 3")
-  assert_eq_int(ncols(df), 1, "ncols = 1")
+  assert_eq(nrows(df), 3, "nrows = 3")
+  assert_eq(ncols(df), 1, "ncols = 1")
 }
 
 def test_filter_by_mask() = {
@@ -211,7 +209,7 @@ def test_filter_by_mask() = {
   df = from_pairs([("price", FloatCol(prices))])
   mask = gt(get_float_col(df, "price"), 150.0)
   filtered = filter(df, mask)
-  assert_eq_int(nrows(filtered), 2, "filter keeps 2 rows")
+  assert_eq(nrows(filtered), 2, "filter keeps 2 rows")
 }
 
 def test_with_column_preserves_existing() = {
@@ -219,7 +217,7 @@ def test_with_column_preserves_existing() = {
   vols = to_tensor([0.1, 0.2, 0.3])
   df = from_pairs([("price", FloatCol(prices))])
   df2 = with_column(df, "vol", FloatCol(vols))
-  assert_eq_int(ncols(df2), 2, "added column")
+  assert_eq(ncols(df2), 2, "added column")
   -- Original price column unchanged
   assert_close_tensor(get_float_col(df2, "price"), prices, 1e-10, "price preserved")
 }

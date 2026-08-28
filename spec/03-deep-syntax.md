@@ -570,7 +570,7 @@ All operators desugar to `(app {} (var {} op) ...)`. No infix operators in Deep.
 ;; a + b
 (app {} (var {} add) (var {} a) (var {} b))
 
-;; a - b (sub is a derived built-in, lowered to add(a, neg(b)) at IR level)
+;; a - b (sub remains a direct Tier-1 RISC identity after lowering)
 (app {} (var {} sub) (var {} a) (var {} b))
 ```
 

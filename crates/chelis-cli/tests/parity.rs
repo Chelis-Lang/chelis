@@ -163,6 +163,51 @@ fn run_build_c(path: &Path, out_dir: &Path) {
         .success();
 }
 
+fn assert_exact_tagged_c_callers(stem: &str, source: &str) {
+    for retired in [
+        "chelis_option_i64",
+        "chelis_option_f64",
+        "chelis_parse_int64(",
+        "chelis_parse_f64(",
+        "chelis_dict_get_i64(",
+        "chelis_dict_get_f64(",
+    ] {
+        assert!(
+            !source.contains(retired),
+            "[{stem}] generated C restored retired ABI spelling `{retired}`:\n{source}"
+        );
+    }
+
+    let exact_call = |name: &str| {
+        source
+            .lines()
+            .find(|line| line.contains(name))
+            .unwrap_or_else(|| panic!("[{stem}] generated C did not call `{name}`:\n{source}"))
+    };
+    match stem {
+        "dict_foundation" => {
+            let call = exact_call("chelis_dict_get_scalar(");
+            assert!(call.contains("CHELIS_DTYPE_I64"), "{call}");
+        }
+        "scalar_string_foundation" => {
+            let calls = source
+                .lines()
+                .filter(|line| line.contains("chelis_parse_scalar("))
+                .collect::<Vec<_>>();
+            assert!(
+                calls.iter().any(|line| line.contains("CHELIS_DTYPE_I64"))
+                    && calls.iter().any(|line| line.contains("CHELIS_DTYPE_F64")),
+                "[scalar_string_foundation] parse calls must carry both exact result dtypes:\n{source}"
+            );
+        }
+        "tensor_structural_ops" => {
+            let call = exact_call("chelis_tensor_einsum(");
+            assert!(call.contains("CHELIS_DTYPE_F32"), "{call}");
+        }
+        _ => {}
+    }
+}
+
 fn generated_source_needs_blas(out_dir: &Path, source: &str) -> bool {
     fs::read_to_string(out_dir.join(source))
         .map(|text| text.contains("cblas_sgemm(") || text.contains("\"chelis_blas.h\""))
@@ -327,6 +372,8 @@ fn drive_parity(path: &Path, expect_executable: bool) {
     run_build_c(path, &out_dir);
 
     let c_source = format!("{stem}.c");
+    let source = fs::read_to_string(out_dir.join(&c_source)).expect("generated C source");
+    assert_exact_tagged_c_callers(&stem, &source);
     if !expect_executable {
         // Library-only path: prove the C source compiles cleanly and confirm
         // both lanes emit nothing visible.

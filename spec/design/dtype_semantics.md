@@ -867,10 +867,10 @@ Deliverables, with phase homes:
 
    The foundation enforces that landing rule for every new or changed identity
    while the remaining migration proceeds. The primary baseline currently has
-   180 active legacy rows: 39 grandfather seams, three exact #1149 successors,
-   137 permanent plain rows, and the obsolete prelude `Json` row. Its 18 exact
-   nonnumeric rows and `chelis_tensor_shape` have final authority and no legacy
-   disposition. The 84 wire and 17 binding baseline rows remain sealed legacy
+   119 active legacy rows: 21 grandfather seams, 97 permanent plain rows, and
+   the obsolete prelude `Json` row. Its 18 exact nonnumeric rows, its eight
+   tagged-carrier declarations, and its 34 registered numeric operations have
+   final authority and no legacy disposition. The 84 wire and 17 binding baseline rows remain sealed legacy
    cohorts; Count's wire field is separately final-registered. These counts are
    progress evidence, not the zero-exception completion oracle.
 
@@ -1276,6 +1276,14 @@ schema, or a numeric-surface identity. In particular, routing a C-target f64
 root to Host adopts C's existing capability boundary without changing f64
 semantics. The full Phase 4B oracle is nevertheless rerun so that the unchanged
 numeric matrix is executable evidence rather than an inference from scope.
+
+[#1308] corrects the duplicated replace-scatter prose in the primitive-surface
+introduction and [05-OP-33] to cite §3.5's existing deterministic row-major
+last-write-wins rule. This deliberately moves the complete-file digest for
+`spec/05-risc-primitives.md` and the [05-OP-33] atom digest; it does not add a
+compatibility exception or change the governing sparse semantic. Static
+checking, host evaluation, generated C, and the HIP execution fixture all lock
+the same rule, while reverse-mode AD remains fail-closed.
 
 ## B2. Invariants that hold across every boundary
 
@@ -1705,6 +1713,28 @@ callable from bypassing review while the capability tables are built.
    operations, comparison-derived negation, and `where`.
    [#1306] owns replacing the trap- and stored-bit-changing `sub` and
    `min_elem` arithmetic surrogates with direct typed identities in every lane.
+
+**Authoritative direct-arithmetic oracle ([#1306]):**
+`.venv/bin/python scripts/dtype_direct_arithmetic_oracle.py`; exit 0 and final
+line `DTYPE DIRECT ARITHMETIC ORACLE: PASS`. It runs the exact-width typed
+kernels, direct IR lowering/evaluation/AD, constant folding, WireDag v6 and
+target-disposition tests, compiled-C boundary/overflow/stored-bit cases, HIP
+source-generation tests, exhaustive downstream compilation, and its standing
+anti-surrogate mutations. [#1296] consumes this exact child command and success
+line; it does not reconstruct #1306 evidence from prose.
+
+The normal oracle compiles the ignored HIP execution cases but cannot claim
+device execution. The manual hardware gate is:
+
+```text
+scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness direct_ -- --ignored --test-threads=1
+```
+
+Expected success is four tests passed and zero failed: f32/f64 exact extrema
+and adjoints, f32/f64 subtraction agreement, fused direct subtraction followed
+by minimum, and signed-i32 extrema. A host without `hipcc`, the documented ROCm
+wheel paths, or a compatible device records this leg as **BLOCKED**, never as a
+pass; it does not weaken or remove the ignored hardware tests.
 
 **Frozen at exit:** the numbered-spec atoms authored or amended by this slice
 and the capability schema. This is not a claim that every older builtin already

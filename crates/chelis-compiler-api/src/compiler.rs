@@ -4,7 +4,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use chelis_backend_c::CodegenResult;
 use chelis_backend_hip::HipCodegenResult;
 use chelis_deep::Expr as DeepExpr;
-use chelis_ir::dag::{Dag, DimInfo, FusedInput, FusedStepOp, NodeId, RiscOp, RtDim, TensorType};
+use chelis_ir::dag::{
+    Dag, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStepOp, NodeId, RiscOp, RtDim,
+    TensorType,
+};
 use chelis_ir::eval;
 use chelis_surf::ast::{
     BinOp, Decl, Expr, ImportKind, LetBinding, LetPattern, Literal, MatchArm, Param, Pattern,
@@ -34,12 +37,12 @@ use crate::schema::{
     ParseResult, RenameRequest, RenameResult, ReplaceFunctionRequest, ReplaceFunctionResult,
     RootManifestEntryResult, RootManifestResult, SourceKind, Span, ValidateMode, ValidateRequest,
     ValidateResult, WireBinOp, WireDag, WireDagNode, WireDagSchemaError, WireDeepAtom,
-    WireDeepExpr, WireDeepExprKind, WireDimExpr, WireDimInfo, WireFusedInput, WireFusedStep,
-    WireFusedStepOp, WireImportKind, WireLetBinding, WireLetPattern, WireLiteral, WireMatchArm,
-    WireMetaEntry, WireParam, WirePattern, WirePropertyOption, WireRecordExprField,
-    WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireRtDim, WireSurfDecl, WireSurfExpr,
-    WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp, WireVariant,
-    WireVariantFields,
+    WireDeepExpr, WireDeepExprKind, WireDimExpr, WireDimInfo, WireExtremaKind, WireExtremaOperand,
+    WireFusedInput, WireFusedStep, WireFusedStepOp, WireImportKind, WireLetBinding, WireLetPattern,
+    WireLiteral, WireMatchArm, WireMetaEntry, WireParam, WirePattern, WirePropertyOption,
+    WireRecordExprField, WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireRtDim,
+    WireSurfDecl, WireSurfExpr, WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp,
+    WireVariant, WireVariantFields,
 };
 use crate::schema::{stage_error, stage_error_with_span, unsupported_stage_error};
 
@@ -4201,6 +4204,37 @@ pub fn reject_unsupported_metal_ops_in_host_program(
 pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
     guard_count_for_device(dag, "metal")?;
     for node in dag.nodes() {
+        let direct_arithmetic = match &node.op {
+            RiscOp::Sub => Some("sub"),
+            RiscOp::MaxElem => Some("max_elem"),
+            RiscOp::MinElem => Some("min_elem"),
+            RiscOp::ExtremaAdjoint { .. } => Some("extrema adjoint"),
+            RiscOp::FusedElem { ops }
+                if ops.iter().any(|step| {
+                    matches!(
+                        step.op,
+                        FusedStepOp::Sub | FusedStepOp::MaxElem | FusedStepOp::MinElem
+                    )
+                }) =>
+            {
+                Some("fused direct arithmetic")
+            }
+            _ => None,
+        };
+        if let Some(op) = direct_arithmetic {
+            return Err(unsupported_gate_error(
+                format!(
+                    "`chelis build --target metal` does not yet support exact `{op}` at lowered node {}; use `--target c` or `--target hip` for the implemented cells",
+                    node.id.0
+                ),
+                "metal",
+                chelis_types::unimplemented_rejection!(
+                    1306,
+                    "the Metal direct-subtraction/extrema kernel and exact trap/bit-selection cells are not implemented"
+                ),
+            ));
+        }
+
         let node_valued = match &node.op {
             RiscOp::Shrink { bounds } => bounds.iter().any(pair_has_node_bound),
             RiscOp::Pad { padding, .. } => padding.iter().any(pair_has_node_bound),
@@ -4265,7 +4299,10 @@ pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), Compil
 #[cfg(test)]
 mod metal_runtime_dim_reject_tests {
     use super::reject_unsupported_metal_ops;
-    use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtDim, TensorType};
+    use chelis_ir::dag::{
+        Dag, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep, FusedStepOp, NodeId,
+        RiscOp, RtDim, TensorType,
+    };
     use chelis_types::types::Prim;
 
     fn ty(dims: &[usize], precision: Prim) -> TensorType {
@@ -4385,11 +4422,132 @@ mod metal_runtime_dim_reject_tests {
             chelis_vocab::DiagnosticKind::UnsupportedFeature
         );
     }
+
+    fn direct_arithmetic_dag(op: RiscOp) -> Dag {
+        let mut dag = Dag::new();
+        let lhs = dag.add_node(
+            RiscOp::Load { name: "lhs".into() },
+            vec![],
+            ty(&[4], Prim::F32),
+            None,
+        );
+        let rhs = dag.add_node(
+            RiscOp::Load { name: "rhs".into() },
+            vec![],
+            ty(&[4], Prim::F32),
+            None,
+        );
+        let gradient = dag.add_node(
+            RiscOp::Load {
+                name: "gradient".into(),
+            },
+            vec![],
+            ty(&[4], Prim::F32),
+            None,
+        );
+        let inputs = if matches!(op, RiscOp::ExtremaAdjoint { .. }) {
+            vec![lhs, rhs, gradient]
+        } else {
+            vec![lhs, rhs]
+        };
+        dag.add_node(op, inputs, ty(&[4], Prim::F32), None);
+        dag
+    }
+
+    #[test]
+    fn metal_seam_rejects_every_direct_arithmetic_identity_with_issue_1306() {
+        let ops = [
+            RiscOp::Sub,
+            RiscOp::MaxElem,
+            RiscOp::MinElem,
+            RiscOp::ExtremaAdjoint {
+                kind: ExtremaKind::Max,
+                operand: ExtremaOperand::Left,
+            },
+            RiscOp::ExtremaAdjoint {
+                kind: ExtremaKind::Min,
+                operand: ExtremaOperand::Right,
+            },
+            RiscOp::FusedElem {
+                ops: vec![FusedStep {
+                    op: FusedStepOp::Sub,
+                    input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+                }],
+            },
+            RiscOp::FusedElem {
+                ops: vec![FusedStep {
+                    op: FusedStepOp::MinElem,
+                    input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+                }],
+            },
+        ];
+
+        for op in ops {
+            let dag = direct_arithmetic_dag(op);
+            let error = reject_unsupported_metal_ops(&dag)
+                .expect_err("Metal must reject every unimplemented direct arithmetic identity");
+            let message = &error.errors[0].message;
+            assert!(message.contains("unimplemented chelis#1306:"), "{message}");
+        }
+    }
 }
 
 pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
     guard_count_for_device(dag, "hip")?;
     for node in dag.nodes() {
+        let fused_direct_ops = match &node.op {
+            RiscOp::FusedElem { ops } => Some(ops),
+            _ => None,
+        };
+        let has_direct_sub = matches!(node.op, RiscOp::Sub)
+            || fused_direct_ops
+                .is_some_and(|ops| ops.iter().any(|step| matches!(step.op, FusedStepOp::Sub)));
+        let has_direct_arithmetic = matches!(
+            node.op,
+            RiscOp::Sub | RiscOp::MaxElem | RiscOp::MinElem | RiscOp::ExtremaAdjoint { .. }
+        ) || fused_direct_ops.is_some_and(|ops| {
+            ops.iter().any(|step| {
+                matches!(
+                    step.op,
+                    FusedStepOp::Sub | FusedStepOp::MaxElem | FusedStepOp::MinElem
+                )
+            })
+        });
+
+        if has_direct_sub && node.output_type.precision.is_integer() {
+            return Err(unsupported_gate_error(
+                format!(
+                    "`chelis build --target hip` cannot execute checked `{}` subtraction at lowered node {} without a device numeric-trap channel; use `--target c`",
+                    node.output_type.precision.name(),
+                    node.id.0
+                ),
+                "hip",
+                chelis_types::unimplemented_rejection!(
+                    1306,
+                    "checked signed-integer subtraction needs an exact HIP overflow-trap channel; the C target implements this cell"
+                ),
+            ));
+        }
+        if has_direct_arithmetic
+            && matches!(
+                node.output_type.precision,
+                chelis_types::types::Prim::Bf16 | chelis_types::types::Prim::F16
+            )
+        {
+            return Err(unsupported_gate_error(
+                format!(
+                    "`chelis build --target hip` does not yet support exact `{}` direct arithmetic at lowered node {}",
+                    node.output_type.precision.name(),
+                    node.id.0
+                ),
+                "hip",
+                chelis_types::unimplemented_rejection!(
+                    1306,
+                    "the HIP bf16/f16 direct-subtraction/extrema bit-preserving kernels are not implemented"
+                ),
+            ));
+        }
+
         match &node.op {
             // `pad` / `shrink` are now implemented on the HIP backend
             // (typed per-output-element kernels, GPU==eval verified by the
@@ -5564,12 +5722,24 @@ fn wire_bound(b: &RtDim) -> WireRtDim {
 fn wire_op(op: &RiscOp) -> WireRiscOp {
     match op {
         RiscOp::Add => WireRiscOp::Add,
+        RiscOp::Sub => WireRiscOp::Sub,
         RiscOp::Mul => WireRiscOp::Mul,
         RiscOp::Div => WireRiscOp::Div,
         RiscOp::FloorDiv => WireRiscOp::FloorDiv,
         RiscOp::TruncDiv => WireRiscOp::TruncDiv,
         RiscOp::CmpLt => WireRiscOp::CmpLt,
         RiscOp::MaxElem => WireRiscOp::MaxElem,
+        RiscOp::MinElem => WireRiscOp::MinElem,
+        RiscOp::ExtremaAdjoint { kind, operand } => WireRiscOp::ExtremaAdjoint {
+            extrema: match kind {
+                ExtremaKind::Max => WireExtremaKind::Max,
+                ExtremaKind::Min => WireExtremaKind::Min,
+            },
+            operand: match operand {
+                ExtremaOperand::Left => WireExtremaOperand::Left,
+                ExtremaOperand::Right => WireExtremaOperand::Right,
+            },
+        },
         RiscOp::Neg => WireRiscOp::Neg,
         RiscOp::Recip => WireRiscOp::Recip,
         RiscOp::Exp => WireRiscOp::Exp,
@@ -5679,11 +5849,13 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
                 .map(|step| WireFusedStep {
                     op: match step.op {
                         FusedStepOp::Add => WireFusedStepOp::Add,
+                        FusedStepOp::Sub => WireFusedStepOp::Sub,
                         FusedStepOp::Mul => WireFusedStepOp::Mul,
                         FusedStepOp::Div => WireFusedStepOp::Div,
                         FusedStepOp::FloorDiv => WireFusedStepOp::FloorDiv,
                         FusedStepOp::TruncDiv => WireFusedStepOp::TruncDiv,
                         FusedStepOp::MaxElem => WireFusedStepOp::MaxElem,
+                        FusedStepOp::MinElem => WireFusedStepOp::MinElem,
                         FusedStepOp::CmpLt => WireFusedStepOp::CmpLt,
                         FusedStepOp::Neg => WireFusedStepOp::Neg,
                         FusedStepOp::Recip => WireFusedStepOp::Recip,
@@ -5907,6 +6079,145 @@ mod tests {
         TensorType {
             dims: dims.into_iter().map(DimInfo::Lit).collect(),
             precision,
+        }
+    }
+
+    fn hip_direct_arithmetic_dag(op: RiscOp, precision: chelis_types::types::Prim) -> Dag {
+        let mut dag = Dag::new();
+        let lhs = dag.add_node(
+            RiscOp::Load { name: "lhs".into() },
+            vec![],
+            tensor_type(vec![4], precision),
+            None,
+        );
+        let rhs = dag.add_node(
+            RiscOp::Load { name: "rhs".into() },
+            vec![],
+            tensor_type(vec![4], precision),
+            None,
+        );
+        let gradient = dag.add_node(
+            RiscOp::Load {
+                name: "gradient".into(),
+            },
+            vec![],
+            tensor_type(vec![4], precision),
+            None,
+        );
+        let inputs = if matches!(op, RiscOp::ExtremaAdjoint { .. }) {
+            vec![lhs, rhs, gradient]
+        } else {
+            vec![lhs, rhs]
+        };
+        let result = dag.add_node(op, inputs, tensor_type(vec![4], precision), None);
+        dag.add_root(result);
+        dag
+    }
+
+    #[test]
+    fn hip_seam_accepts_supported_direct_arithmetic_cells() {
+        for precision in [
+            chelis_types::types::Prim::F32,
+            chelis_types::types::Prim::F64,
+        ] {
+            for op in [
+                RiscOp::Sub,
+                RiscOp::MaxElem,
+                RiscOp::MinElem,
+                RiscOp::ExtremaAdjoint {
+                    kind: ExtremaKind::Max,
+                    operand: ExtremaOperand::Left,
+                },
+                RiscOp::ExtremaAdjoint {
+                    kind: ExtremaKind::Min,
+                    operand: ExtremaOperand::Right,
+                },
+            ] {
+                reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(op, precision))
+                    .expect("HIP f32/f64 direct arithmetic must reach implemented codegen");
+            }
+        }
+
+        for precision in [
+            chelis_types::types::Prim::Int8,
+            chelis_types::types::Prim::Int16,
+            chelis_types::types::Prim::Int32,
+            chelis_types::types::Prim::Int64,
+        ] {
+            for op in [RiscOp::MaxElem, RiscOp::MinElem] {
+                reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(op, precision))
+                    .expect("HIP signed-integer extrema must reach implemented codegen");
+            }
+        }
+    }
+
+    #[test]
+    fn hip_seam_rejects_unimplemented_direct_arithmetic_cells_with_issue_1306() {
+        for precision in [
+            chelis_types::types::Prim::Int8,
+            chelis_types::types::Prim::Int16,
+            chelis_types::types::Prim::Int32,
+            chelis_types::types::Prim::Int64,
+        ] {
+            let error =
+                reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(RiscOp::Sub, precision))
+                    .expect_err("HIP integer subtraction needs a device trap channel");
+            assert!(
+                error.errors[0]
+                    .message
+                    .contains("unimplemented chelis#1306:"),
+                "{}",
+                error.errors[0].message
+            );
+        }
+
+        for precision in [
+            chelis_types::types::Prim::F16,
+            chelis_types::types::Prim::Bf16,
+        ] {
+            for op in [
+                RiscOp::Sub,
+                RiscOp::MaxElem,
+                RiscOp::MinElem,
+                RiscOp::ExtremaAdjoint {
+                    kind: ExtremaKind::Max,
+                    operand: ExtremaOperand::Left,
+                },
+            ] {
+                let error = reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(op, precision))
+                    .expect_err("HIP narrow-float direct arithmetic is not implemented");
+                assert!(
+                    error.errors[0]
+                        .message
+                        .contains("unimplemented chelis#1306:"),
+                    "{}",
+                    error.errors[0].message
+                );
+            }
+        }
+
+        let fused_sub = RiscOp::FusedElem {
+            ops: vec![chelis_ir::dag::FusedStep {
+                op: FusedStepOp::Sub,
+                input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+            }],
+        };
+        for precision in [
+            chelis_types::types::Prim::Int32,
+            chelis_types::types::Prim::F16,
+        ] {
+            let error = reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(
+                fused_sub.clone(),
+                precision,
+            ))
+            .expect_err("fused subtraction inherits the direct target disposition");
+            assert!(
+                error.errors[0]
+                    .message
+                    .contains("unimplemented chelis#1306:"),
+                "{}",
+                error.errors[0].message
+            );
         }
     }
 

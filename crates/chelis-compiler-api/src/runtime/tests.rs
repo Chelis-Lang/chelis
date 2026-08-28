@@ -235,8 +235,8 @@ fn test_assert_false_returns_err_with_label() {
 }
 
 #[test]
-fn test_assert_eq_f32_mismatch_includes_actual_and_expected() {
-    let checked = checked_surf(r#"x = test_assert_eq_f32(1.0, 2.0, "label")"#);
+fn generic_test_assert_eq_float_mismatch_includes_actual_and_expected() {
+    let checked = checked_surf(r#"x = test_assert_eq(1.0, 2.0, "label")"#);
     let err = evaluate_host_program(&checked, &HashMap::new())
         .expect_err("mismatched f32 assert should surface as host Err");
     assert!(err.contains("1") && err.contains("2"), "got: {err}");
@@ -244,8 +244,8 @@ fn test_assert_eq_f32_mismatch_includes_actual_and_expected() {
 }
 
 #[test]
-fn test_assert_eq_f32_match_returns_unit() {
-    let checked = checked_surf(r#"x = test_assert_eq_f32(1.5, 1.5, "same")"#);
+fn generic_test_assert_eq_float_match_returns_unit() {
+    let checked = checked_surf(r#"x = test_assert_eq(1.5, 1.5, "same")"#);
     let outcome = evaluate_host_program(&checked, &HashMap::new())
         .expect("matched f32 assert should evaluate");
     let value = outcome.host_bindings.get("x").expect("x binding");
@@ -253,15 +253,15 @@ fn test_assert_eq_f32_match_returns_unit() {
 }
 
 #[test]
-fn test_assert_eq_int_match_and_mismatch() {
-    let ok = checked_surf(r#"x = test_assert_eq_int(cast(3, int64), cast(3, int64), "i")"#);
+fn generic_test_assert_eq_int_match_and_mismatch() {
+    let ok = checked_surf(r#"x = test_assert_eq(cast(3, int64), cast(3, int64), "i")"#);
     let outcome = evaluate_host_program(&ok, &HashMap::new()).expect("int match should eval");
     assert!(matches!(
         outcome.host_bindings.get("x"),
         Some(RuntimeValue::Unit)
     ));
 
-    let bad = checked_surf(r#"x = test_assert_eq_int(cast(3, int64), cast(5, int64), "i")"#);
+    let bad = checked_surf(r#"x = test_assert_eq(cast(3, int64), cast(5, int64), "i")"#);
     let err =
         evaluate_host_program(&bad, &HashMap::new()).expect_err("int mismatch should surface Err");
     assert!(
@@ -271,11 +271,11 @@ fn test_assert_eq_int_match_and_mismatch() {
 }
 
 #[test]
-fn test_assert_eq_bool_match_and_mismatch() {
-    let ok = checked_surf(r#"x = test_assert_eq_bool(true, true, "b")"#);
+fn generic_test_assert_eq_bool_match_and_mismatch() {
+    let ok = checked_surf(r#"x = test_assert_eq(true, true, "b")"#);
     evaluate_host_program(&ok, &HashMap::new()).expect("bool match should eval");
 
-    let bad = checked_surf(r#"x = test_assert_eq_bool(true, false, "b")"#);
+    let bad = checked_surf(r#"x = test_assert_eq(true, false, "b")"#);
     let err =
         evaluate_host_program(&bad, &HashMap::new()).expect_err("bool mismatch should surface Err");
     assert!(
@@ -285,11 +285,11 @@ fn test_assert_eq_bool_match_and_mismatch() {
 }
 
 #[test]
-fn test_assert_eq_string_match_and_mismatch() {
-    let ok = checked_surf(r#"x = test_assert_eq_string("hi", "hi", "s")"#);
+fn generic_test_assert_eq_string_match_and_mismatch() {
+    let ok = checked_surf(r#"x = test_assert_eq("hi", "hi", "s")"#);
     evaluate_host_program(&ok, &HashMap::new()).expect("string match should eval");
 
-    let bad = checked_surf(r#"x = test_assert_eq_string("foo", "bar", "s")"#);
+    let bad = checked_surf(r#"x = test_assert_eq("foo", "bar", "s")"#);
     let err = evaluate_host_program(&bad, &HashMap::new())
         .expect_err("string mismatch should surface Err");
     assert!(
@@ -804,100 +804,42 @@ y = sum(seq, cast(0, int32))
     );
 }
 
-/// #170: `trace` (= sum over the diagonal) must use the SAME stride-4 ILP
-/// f32 cascade as `RiscOp::Sum`, so `chelis trace` is bit-exact with
-/// `torch.trace` (== `torch.sum(diagonal)`). The 20-element diagonal below
-/// (torch.rand, manual_seed(7)) is longer than 16, so the cascade and the
-/// prior f32 left-fold differ by 1 ULP: torch trace = `0x4125e023`
-/// (10.367220878601074), the old left-fold = `0x4125e024`. Pinning the
-/// torch bit pattern catches a regression back to a left-fold (or to f64
-/// accumulation, which would also miss torch's f32 rounding).
+/// Trace is diagonal followed by [05-OP-30]'s canonical adjacent-pair tree.
+/// This cancellation sequence distinguishes it from both retired orders.
 #[test]
-fn host_runtime_trace_f32_matches_torch_stride4_cascade() {
-    // Diagonal values as f64 literals that round-trip to the same f32.
-    let diag: [f64; 20] = [
-        0.5349225401878357,
-        0.41317272186279297,
-        0.23315048217773438,
-        0.10808825492858887,
-        0.2942635416984558,
-        0.18491309881210327,
-        0.06628626585006714,
-        0.47317826747894287,
-        0.8760198354721069,
-        0.6712021827697754,
-        0.4092898368835449,
-        0.6157153248786926,
-        0.35706937313079834,
-        0.7855499386787415,
-        0.5738610625267029,
-        0.9782199859619141,
-        0.11917394399642944,
-        0.8441763520240784,
-        0.9919543266296387,
-        0.8370135426521301,
-    ];
-    // Build a 20x20 matrix whose diagonal is `diag` and off-diagonals are 0,
-    // so `trace` sums exactly `diag` in the same order torch does.
-    let mut m = vec![0.0_f64; 20 * 20];
+fn host_runtime_trace_f32_uses_canonical_balanced_tree() {
+    let diag = [1e20_f64, 1.0, -1e20_f64, 1.0, 1.0];
+    let mut m = vec![0.0_f64; 5 * 5];
     for (i, &v) in diag.iter().enumerate() {
-        m[i * 20 + i] = v;
+        m[i * 5 + i] = v;
     }
     let tensor = RuntimeTensorValue {
-        value: IrTensorValue::from_vec(vec![20, 20], m),
+        value: IrTensorValue::from_vec(vec![5, 5], m),
         precision: Prim::F32,
     };
     let out = tensor_trace_value(&tensor, 0, 1).expect("trace must evaluate");
     assert_eq!(out.value.shape, Vec::<usize>::new(), "trace is a scalar");
-    // torch.trace bit pattern (stride-4 cascade in f32).
-    let torch_bits = 0x4125e023_u32;
-    let left_fold_bits = 0x4125e024_u32;
     assert_eq!(
         (out.value.to_f64_lossy_vec()[0] as f32).to_bits(),
-        torch_bits,
-        "trace must be bit-exact with torch.trace (stride-4 cascade, #170); got {} (bits {:#x})",
-        out.value.to_f64_lossy_vec()[0],
-        (out.value.to_f64_lossy_vec()[0] as f32).to_bits(),
-    );
-    assert_ne!(
-        (out.value.to_f64_lossy_vec()[0] as f32).to_bits(),
-        left_fold_bits,
-        "regression: trace matches the old f32 left-fold value the cascade replaced (#170)",
+        1.0_f32.to_bits()
     );
 }
 
-/// #170 eval-vs-compiled parity (eval lane): the f64 `trace` eval reference
-/// sums the diagonal in the stride-4 cascade (it delegates to
-/// `tensor_reduce_host`, whose f64 `Sum` path is a cascade). The catastrophic
-/// diagonal `[2^53.., 1.0x18, -2^53..]` makes the cascade and a strict
-/// left-fold disagree dramatically: the cascade keeps the eighteen `1.0`s
-/// (`-> 12.0`, matching torch and the emitted f64 `sum`), the left-fold gives
-/// `0.0`. The matching compiled-lane assertion lives in `chelis-runtime`
-/// (`chelis_tensor_trace_f64_cascade_matches_eval_not_left_fold`); both lanes
-/// pin `12.0`, so `chelis eval` and the compiled binary agree.
+/// The f64 host lane uses the same canonical tree at f64 arithmetic width.
 #[test]
-fn host_runtime_trace_f64_matches_eval_cascade() {
-    let mut diag = vec![1e16_f64];
-    diag.extend(std::iter::repeat_n(1.0_f64, 18));
-    diag.push(-1e16_f64);
-    let k = diag.len(); // 20
-    let mut m = vec![0.0_f64; k * k];
+fn host_runtime_trace_f64_uses_canonical_balanced_tree() {
+    let diag = [1e300_f64, 1.0, -1e300_f64, 1.0, 1.0];
+    let mut m = vec![0.0_f64; 5 * 5];
     for (i, &v) in diag.iter().enumerate() {
-        m[i * k + i] = v;
+        m[i * 5 + i] = v;
     }
     let tensor = RuntimeTensorValue {
-        value: IrTensorValue::from_vec(vec![k, k], m),
+        value: IrTensorValue::from_vec(vec![5, 5], m),
         precision: Prim::F64,
     };
     let out = tensor_trace_value(&tensor, 0, 1).expect("trace must evaluate");
     assert_eq!(out.value.shape, Vec::<usize>::new(), "trace is a scalar");
-    assert_eq!(
-        out.value.to_f64_lossy_vec()[0],
-        12.0,
-        "f64 trace eval must use the stride-4 cascade (== compiled, == torch); \
-         got {}. A left-fold gives 0.0.",
-        out.value.to_f64_lossy_vec()[0],
-    );
+    assert_eq!(out.value.to_f64_lossy_vec()[0].to_bits(), 1.0_f64.to_bits());
 }
 
 /// #172 sibling (eval lane): windowed Max/Min DROP NaN — Rust `f64::max`/`min`
@@ -1013,6 +955,432 @@ fn host_runtime_einsum_f32_keeps_f64_accumulator_not_strict_f32() {
         vec![40.0_f64],
         "f32 einsum keeps the f64 eval accumulator (#170 decision); got {:?}",
         out.value.to_f64_lossy_vec()
+    );
+}
+
+#[test]
+fn host_runtime_einsum_accepts_the_legal_rank_zero_grammar() {
+    let lhs = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![], vec![2.0]),
+        precision: Prim::F32,
+    };
+    let rhs = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![], vec![3.0]),
+        precision: Prim::F32,
+    };
+    let output = tensor_einsum_value(",->", &lhs, &rhs).expect("rank-zero einsum is legal");
+    assert_eq!(output.value.shape, Vec::<usize>::new());
+    assert_eq!(output.value.to_f64_lossy_vec(), vec![6.0]);
+}
+
+/// A zero extent means zero elements wherever the zero sits, so both shapes
+/// below describe the same empty operand and the derived reduction count is
+/// zero for both. A left-to-right checked fold reaches `BIG * BIG` first,
+/// which is not an int64, and so accepted one permutation while rejecting the
+/// other. The C runtime holds the same invariant in
+/// `crates/chelis-runtime/tests/op33_int64_extent_domain.rs`.
+#[test]
+fn host_runtime_einsum_zero_extent_acceptance_does_not_depend_on_axis_order() {
+    const BIG: usize = 4_000_000_000;
+    // The zero's axis is the only difference between the two cases, and the
+    // equation names it, so diagnostics identify the case by equation rather
+    // than by Debug-printing the extents (faithful_observation.md B2.4: no
+    // third formatter in an observation exit surface).
+    for (shape, equation) in [
+        (vec![BIG, 0, BIG], "abc,def->b"),
+        (vec![BIG, BIG, 0], "abc,def->c"),
+    ] {
+        let operand = RuntimeTensorValue {
+            value: IrTensorValue::from_vec(shape, Vec::new()),
+            precision: Prim::F32,
+        };
+        let output = tensor_einsum_value(equation, &operand, &operand)
+            .unwrap_or_else(|error| panic!("host einsum `{equation}` must evaluate: {error}"));
+        assert_eq!(
+            output.value.shape,
+            vec![0],
+            "host einsum `{equation}` must produce an empty result"
+        );
+    }
+}
+
+/// [05-OP-33]: `diagonal` "keeps source axis order with the second axis
+/// removed", so its output holds one coordinate per RETAINED source axis and
+/// the diagonal's own coordinate sits at axis1's position AFTER that removal.
+/// Reading that vector at the SOURCE axis number picked up a neighbouring
+/// axis's coordinate and panicked when axis1 was the last source axis, and the
+/// remaining coordinates were not shifted past the slot the diagonal occupies.
+/// `trace` then has to reduce the axis the diagonal was written into, which
+/// `min(axis1, axis2)` names only for an adjacent pair.
+///
+/// Every expectation is the closed form of the ramp `in[i][j][k] = 4i + 2j + k`
+/// evaluated at the coordinates the atom names. The C runtime holds the same
+/// invariants in `crates/chelis-runtime/tests/op33_diagonal_axis_mapping.rs`;
+/// this is the host lane's half, and the two lanes agreeing is the point:
+/// before this repair they were bug-compatible, so eval-vs-C parity was green
+/// on a wrong answer.
+#[test]
+fn host_runtime_diagonal_and_trace_map_every_axis_pair_to_source_coordinates() {
+    let ramp = |shape: Vec<usize>| {
+        let count: usize = shape.iter().product();
+        RuntimeTensorValue {
+            value: IrTensorValue::from_vec(
+                shape,
+                (0..count).map(|index| index as f64).collect::<Vec<_>>(),
+            ),
+            precision: Prim::F32,
+        }
+    };
+
+    /// One axis-pair case: source shape, the two axes, and the output shape
+    /// and elements [05-OP-33] requires.
+    struct AxisPairCase {
+        label: &'static str,
+        shape: Vec<usize>,
+        axis1: i64,
+        axis2: i64,
+        out_shape: Vec<usize>,
+        elements: Vec<f64>,
+    }
+    let case =
+        |label, shape: Vec<usize>, axis1, axis2, out_shape: Vec<usize>, elements| AxisPairCase {
+            label,
+            shape,
+            axis1,
+            axis2,
+            out_shape,
+            elements,
+        };
+
+    let diagonal_cases = vec![
+        case("rank2-forward", vec![2, 2], 0, 1, vec![2], vec![0.0, 3.0]),
+        case("rank2-reversed", vec![2, 2], 1, 0, vec![2], vec![0.0, 3.0]),
+        case(
+            "rank2-negative-axes-reversed",
+            vec![2, 2],
+            -1,
+            -2,
+            vec![2],
+            vec![0.0, 3.0],
+        ),
+        case(
+            "rank3-leading-pair",
+            vec![2, 2, 2],
+            0,
+            1,
+            vec![2, 2],
+            vec![0.0, 1.0, 6.0, 7.0],
+        ),
+        case(
+            "rank3-trailing-pair",
+            vec![2, 2, 2],
+            1,
+            2,
+            vec![2, 2],
+            vec![0.0, 3.0, 4.0, 7.0],
+        ),
+        case(
+            "rank3-straddling-forward",
+            vec![2, 2, 2],
+            0,
+            2,
+            vec![2, 2],
+            vec![0.0, 2.0, 5.0, 7.0],
+        ),
+        case(
+            "rank3-straddling-reversed",
+            vec![2, 2, 2],
+            2,
+            0,
+            vec![2, 2],
+            vec![0.0, 5.0, 2.0, 7.0],
+        ),
+        case(
+            "rank4-straddling-reversed",
+            vec![2, 2, 2, 2],
+            2,
+            0,
+            vec![2, 2, 2],
+            vec![0.0, 1.0, 10.0, 11.0, 4.0, 5.0, 14.0, 15.0],
+        ),
+        // Distinct extents everywhere, so a misrouted coordinate changes the
+        // OUTPUT SHAPE and not merely the values. `infer_diagonal_result_type`
+        // derives the declared type the same way, so a disagreement here is a
+        // checked type the interpreter does not honor.
+        case(
+            "rank4-distinct-extents-reversed",
+            vec![2, 3, 2, 5],
+            2,
+            0,
+            vec![3, 2, 5],
+            vec![
+                0.0, 1.0, 2.0, 3.0, 4.0, 35.0, 36.0, 37.0, 38.0, 39.0, 10.0, 11.0, 12.0, 13.0,
+                14.0, 45.0, 46.0, 47.0, 48.0, 49.0, 20.0, 21.0, 22.0, 23.0, 24.0, 55.0, 56.0, 57.0,
+                58.0, 59.0,
+            ],
+        ),
+        case(
+            "non-square-forward",
+            vec![3, 2],
+            0,
+            1,
+            vec![2],
+            vec![0.0, 3.0],
+        ),
+        case(
+            "non-square-reversed",
+            vec![3, 2],
+            1,
+            0,
+            vec![2],
+            vec![0.0, 3.0],
+        ),
+        // A zero selected extent is deliberately absent here and present in
+        // the C runtime's sibling file, because the two lanes disagree on it
+        // and the host half is chelis#1347, not this repair. `tensor_numel`
+        // reports one element for a zero-extent shape, so `linear_to_indices`
+        // divides by that zero: `tensor_diagonal_value(shape [0, 3], 0, 1)`
+        // panics "attempt to calculate the remainder with a divisor of zero"
+        // at host_ops.rs, where `chelis_tensor_diagonal` returns the empty
+        // result [05-OP-33] owes. Nothing in this test's own repair touches
+        // that path.
+    ];
+    for probe in diagonal_cases {
+        let label = probe.label;
+        let output = tensor_diagonal_value(&ramp(probe.shape), probe.axis1, probe.axis2)
+            .unwrap_or_else(|error| panic!("host diagonal `{label}` must evaluate: {error}"));
+        assert_eq!(
+            output.value.shape, probe.out_shape,
+            "host diagonal `{label}` output shape"
+        );
+        assert_eq!(
+            output.value.to_f64_lossy_vec(),
+            probe.elements,
+            "host diagonal `{label}` elements"
+        );
+    }
+
+    let trace_cases = vec![
+        case("rank2-forward", vec![2, 2], 0, 1, Vec::new(), vec![3.0]),
+        case("rank2-reversed", vec![2, 2], 1, 0, Vec::new(), vec![3.0]),
+        case(
+            "rank3-leading-pair",
+            vec![2, 2, 2],
+            0,
+            1,
+            vec![2],
+            vec![6.0, 8.0],
+        ),
+        case(
+            "rank3-leading-pair-reversed",
+            vec![2, 2, 2],
+            1,
+            0,
+            vec![2],
+            vec![6.0, 8.0],
+        ),
+        case(
+            "rank3-trailing-pair",
+            vec![2, 2, 2],
+            1,
+            2,
+            vec![2],
+            vec![3.0, 11.0],
+        ),
+        case(
+            "rank3-straddling-forward",
+            vec![2, 2, 2],
+            0,
+            2,
+            vec![2],
+            vec![5.0, 9.0],
+        ),
+        case(
+            "rank3-straddling-reversed",
+            vec![2, 2, 2],
+            2,
+            0,
+            vec![2],
+            vec![5.0, 9.0],
+        ),
+        case(
+            "rank4-straddling-reversed",
+            vec![2, 2, 2, 2],
+            2,
+            0,
+            vec![2, 2],
+            vec![10.0, 12.0, 18.0, 20.0],
+        ),
+        // `infer_trace_result_type` removes both source axes and declares
+        // [3, 5]; reducing the diagonal's axis 0 instead would yield [2, 5].
+        case(
+            "rank4-distinct-extents-reversed",
+            vec![2, 3, 2, 5],
+            2,
+            0,
+            vec![3, 5],
+            vec![
+                35.0, 37.0, 39.0, 41.0, 43.0, 55.0, 57.0, 59.0, 61.0, 63.0, 75.0, 77.0, 79.0, 81.0,
+                83.0,
+            ],
+        ),
+    ];
+    for probe in trace_cases {
+        let label = probe.label;
+        let output = tensor_trace_value(&ramp(probe.shape), probe.axis1, probe.axis2)
+            .unwrap_or_else(|error| panic!("host trace `{label}` must evaluate: {error}"));
+        assert_eq!(
+            output.value.shape, probe.out_shape,
+            "host trace `{label}` output shape"
+        );
+        assert_eq!(
+            output.value.to_f64_lossy_vec(),
+            probe.elements,
+            "host trace `{label}` elements"
+        );
+    }
+}
+
+/// Negative parity for the case above: the axis domain still fails closed, and
+/// an equal pair is rejected whichever spelling produces it.
+#[test]
+fn host_runtime_diagonal_and_trace_reject_equal_and_out_of_range_axes() {
+    let operand = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![2, 2, 2], (0..8).map(|i| i as f64).collect()),
+        precision: Prim::F32,
+    };
+    for (label, axis1, axis2) in [
+        ("equal-axes", 1_i64, 1_i64),
+        ("equal-axes-normalized", 2, -1),
+        ("axis-out-of-range", 0, 3),
+        ("negative-axis-out-of-range", 0, -4),
+    ] {
+        assert!(
+            tensor_diagonal_value(&operand, axis1, axis2).is_err(),
+            "host diagonal `{label}` must be rejected"
+        );
+        assert!(
+            tensor_trace_value(&operand, axis1, axis2).is_err(),
+            "host trace `{label}` must be rejected"
+        );
+    }
+}
+
+/// An empty operand's axis decomposition is never read, and computing it
+/// anyway overflows `usize` on the prefix product or spins an empty loop. The
+/// C runtime holds the same invariant in
+/// `crates/chelis-runtime/tests/op33_empty_tensor_axis_decomposition.rs`; this
+/// is the host lane's half. The extents are chosen so the prefix product is
+/// `2^64` exactly.
+#[test]
+fn host_runtime_empty_operands_skip_their_axis_decomposition() {
+    const BIG: usize = 1 << 32;
+    let operand = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![BIG, BIG, 0], Vec::new()),
+        precision: Prim::F32,
+    };
+
+    let scanned = tensor_cumsum_value(&operand, 2).expect("empty cumsum must evaluate");
+    assert_eq!(scanned.value.shape, vec![BIG, BIG, 0]);
+    assert_eq!(scanned.value.len(), 0);
+
+    let sorted = tensor_sort_value(&operand, 2).expect("empty sort must evaluate");
+    // Diagnostics name the expectation rather than Debug-printing the value:
+    // this module is an observation exit surface, and
+    // faithful_observation.md B2.4 admits no third formatter.
+    match sorted {
+        RuntimeValue::Tuple(items) => {
+            assert_eq!(items.len(), 2, "sort must return two results");
+            for item in items {
+                match item {
+                    RuntimeValue::Tensor(tensor) => assert_eq!(tensor.value.len(), 0),
+                    _ => panic!("sort must return tensors"),
+                }
+            }
+        }
+        _ => panic!("sort must return a tuple"),
+    }
+}
+
+/// A zero extent means zero elements, so a host operation over one owes an
+/// empty result rather than a panic. `tensor_numel` used to clamp the count to
+/// one, which handed every caller a phantom element: `linear_to_indices` then
+/// divided by the zero extent, and the shorter paths built a `picks` vector one
+/// longer than the storage its own shape declares.
+///
+/// The C runtime returned the empty result correctly throughout, so each case
+/// below was also a lane divergence on a legal program (chelis#1347).
+#[test]
+fn host_runtime_zero_extent_operands_return_empty_results_rather_than_panicking() {
+    fn empty(shape: Vec<usize>) -> RuntimeTensorValue {
+        RuntimeTensorValue {
+            value: IrTensorValue::from_vec(shape, Vec::new()),
+            precision: Prim::F32,
+        }
+    }
+
+    // diagonal: the case that surfaced this, at both zero positions.
+    for (shape, axis1, axis2, expected) in [
+        (vec![0_usize, 3], 0_i64, 1_i64, vec![0_usize]),
+        (vec![3, 0], 0, 1, vec![0]),
+        (vec![2, 0, 3], 0, 2, vec![2, 0]),
+    ] {
+        let out = tensor_diagonal_value(&empty(shape.clone()), axis1, axis2)
+            .unwrap_or_else(|error| panic!("diagonal over a zero extent must evaluate: {error}"));
+        assert_eq!(out.value.shape, expected);
+        assert_eq!(out.value.len(), 0);
+    }
+
+    // trace reduces the diagonal, so it inherits the same path.
+    let traced = tensor_trace_value(&empty(vec![2, 0, 3]), 0, 2)
+        .unwrap_or_else(|error| panic!("trace over a zero extent must evaluate: {error}"));
+    assert_eq!(traced.value.shape, vec![0_usize]);
+    assert_eq!(traced.value.len(), 0);
+
+    // The count short-circuits a zero rather than folding past it, so the
+    // other extents never multiply. Exercised through the operation rather
+    // than the private helper: `diagonal` over axes (0, 1) of these shapes
+    // asks for the count of an output whose remaining extents would reach
+    // 2^64 before reaching the trailing zero.
+    const BIG: usize = 1 << 32;
+    for shape in [
+        vec![BIG, BIG, BIG, 0],
+        vec![BIG, BIG, 0, BIG],
+        vec![0, BIG, BIG, BIG],
+    ] {
+        let out = tensor_diagonal_value(&empty(shape.clone()), 0, 1)
+            .unwrap_or_else(|error| panic!("diagonal over a huge empty shape: {error}"));
+        assert_eq!(out.value.len(), 0);
+        assert!(
+            out.value.shape.contains(&0),
+            "an empty operand owes an empty result"
+        );
+    }
+}
+
+#[test]
+fn host_runtime_einsum_rejects_non_lowercase_labels() {
+    let operand = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![1], vec![1.0]),
+        precision: Prim::F32,
+    };
+    for equation in ["I,I->", "_,i->"] {
+        assert!(
+            tensor_einsum_value(equation, &operand, &operand).is_err(),
+            "host einsum accepted non-lowercase equation `{equation}`"
+        );
+    }
+}
+
+#[test]
+fn host_runtime_einsum_rejects_duplicate_output_labels() {
+    let operand = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![1], vec![1.0]),
+        precision: Prim::F32,
+    };
+    assert!(
+        tensor_einsum_value("i,i->ii", &operand, &operand).is_err(),
+        "host einsum accepted a duplicate output label"
     );
 }
 
@@ -2056,600 +2424,6 @@ fn rt792_render_value_bool_tag_negative_zero_is_false() {
 }
 
 // ---------------------------------------------------------------------------
-// Host-lane JSON I/O (chelis#890): full-pipeline coverage (surf parse ->
-// desugar -> check -> host eval) for parse_json / accessors / constructors /
-// to_json / round_to. The pure core is unit-tested in `runtime/json.rs`;
-// these tests pin the registry wiring: env schemes, the prelude `Json` ADT,
-// `check_json_builtin_signature`, and the eval dispatch arms.
-// ---------------------------------------------------------------------------
-
-/// End-to-end in-memory pipeline: parse a document, read scalars and a
-/// number list through dot-paths, compute, round, assemble nested output,
-/// and serialize. The final string is asserted byte-exactly (insertion
-/// order, shortest-round-trip numbers).
-#[test]
-fn json_pipeline_parse_access_assemble_serialize() {
-    let checked = checked_surf(
-        r#"
-doc = parse_json("{\"instrument\": \"generic\", \"quotes\": {\"mid\": 101.4568}, \"weights\": [0.25, 0.75]}")
-name = json_str(doc, "instrument")
-mid = json_f64(doc, "quotes.mid")
-weights = json_f64s(doc, "weights")
-out = jdict([("instrument", jstr(name))])
-out2 = json_set(out, "results.mid_rounded", jnum(round_to(mid, 2)))
-out3 = json_set(out2, "results.first_weight", jnum(index(weights, 0)))
-text = to_json(out3)
-"#,
-    );
-    let outcome =
-        evaluate_host_program(&checked, &HashMap::new()).expect("pipeline should evaluate");
-    let text = outcome.host_bindings.get("text").expect("text binding");
-    match text {
-        RuntimeValue::String(s) => assert_eq!(
-            s,
-            r#"{"instrument":"generic","results":{"mid_rounded":101.46,"first_weight":0.25}}"#
-        ),
-        other => panic!("expected string, got {other:?}"),
-    }
-}
-
-/// `round_to` accepts a bare int literal for `places` (an int32 per §5.3;
-/// the signature arm admits any integer precision) and preserves the f64
-/// coming out of `json_f64`. 2.675 parses to 2.67499999999999982..., so
-/// correct decimal rounding gives 2.67 (ties-to-even on the exact value,
-/// matching Python's round), NOT 2.68.
-#[test]
-fn json_round_to_exact_binary_value_with_bare_int_places() {
-    let checked = checked_surf(
-        r#"
-x = json_f64(parse_json("{\"v\": 2.675}"), "v")
-rounded = round_to(x, 2)
-"#,
-    );
-    let outcome = evaluate_host_program(&checked, &HashMap::new()).expect("should evaluate");
-    let rounded = outcome.host_bindings.get("rounded").expect("rounded");
-    assert_eq!(rounded.as_f64(), Some(2.67));
-}
-
-/// Power-user surface: matching on the prelude `Json` ADT constructors.
-#[test]
-fn json_adt_match_extracts_variants() {
-    let checked = checked_surf(
-        r#"
-num_or_zero = match parse_json("2.5") with {
-  | JNum(n) => n
-  | _ => cast(0.0, f64)
-}
-flag = match parse_json("true") with {
-  | JBool(b) => b
-  | _ => false
-}
-"#,
-    );
-    let outcome = evaluate_host_program(&checked, &HashMap::new()).expect("should evaluate");
-    assert_eq!(
-        outcome
-            .host_bindings
-            .get("num_or_zero")
-            .and_then(RuntimeValue::as_f64),
-        Some(2.5)
-    );
-    match outcome.host_bindings.get("flag") {
-        Some(RuntimeValue::Bool(true)) => {}
-        other => panic!("expected true, got {other:?}"),
-    }
-}
-
-/// Loud-failure contract at eval time: a missing key names the builtin,
-/// the path, the segment, and the available keys; a type mismatch names
-/// the actual node kind. No silent defaults.
-#[test]
-fn json_accessor_failures_are_loud() {
-    let missing = checked_surf(
-        r#"
-x = json_f64(parse_json("{\"alpha\": 1.5}"), "beta")
-"#,
-    );
-    let err =
-        evaluate_host_program(&missing, &HashMap::new()).expect_err("missing key must fail eval");
-    assert!(err.contains("json_f64"), "got `{err}`");
-    assert!(err.contains("key `beta` not found"), "got `{err}`");
-    assert!(err.contains("`alpha`"), "available keys listed: `{err}`");
-
-    let mismatch = checked_surf(
-        r#"
-x = json_f64(parse_json("{\"alpha\": \"txt\"}"), "alpha")
-"#,
-    );
-    let err = evaluate_host_program(&mismatch, &HashMap::new())
-        .expect_err("type mismatch must fail eval");
-    assert!(err.contains("expected a number, got string"), "got `{err}`");
-
-    let malformed = checked_surf(
-        r#"
-x = parse_json("{\"alpha\": }")
-"#,
-    );
-    let err = evaluate_host_program(&malformed, &HashMap::new())
-        .expect_err("malformed JSON must fail eval");
-    assert!(err.contains("parse_json"), "got `{err}`");
-}
-
-/// Check-time negative parity: the signature arm rejects non-Json /
-/// non-string / non-numeric slots with named diagnostics.
-#[test]
-fn json_builtin_type_errors_reject_at_check() {
-    for (source, fragment) in [
-        (
-            "x = json_f64(1.5, \"a\")\n",
-            "json_f64 expects a Json first argument",
-        ),
-        (
-            "x = parse_json(1.5)\n",
-            "parse_json expects a string argument",
-        ),
-        ("x = to_json(\"raw\")\n", "to_json expects a Json argument"),
-        (
-            "x = round_to(\"s\", 2)\n",
-            "round_to expects an f64 or f32 first argument",
-        ),
-        // [05-OP-1] authors decimal rounding for f64 and f32 only; an
-        // f16 operand is rejected with the remediation, never silently
-        // computed at another width ([04-NUM-8] has no exception
-        // vocabulary).
-        (
-            "x = round_to(cast(1.5, f16), 2)\n",
-            "round_to expects an f64 or f32 first argument",
-        ),
-        // Operand must be f64 (unsuffixed floats default to f32, spec/04
-        // §5.3) so the case reaches the `places` slot it exercises.
-        (
-            "x = round_to(1.5f64, 2.0)\n",
-            "round_to expects an integer `places` second argument",
-        ),
-        (
-            "x = jnum(\"not a number\")\n",
-            "jnum expects an f64 argument",
-        ),
-        // chelis#891 review finding 7: a bare float literal is f32 (§5.3)
-        // and would quantize through the byte-exact serializer, so jnum
-        // rejects it loudly with the suffix/cast guidance.
-        ("x = jnum(0.1)\n", "jnum expects an f64 argument"),
-        (
-            "x = json_set(jdict([(\"a\", jnum(1.0))]), \"a\", 2.0)\n",
-            "json_set expects a Json third argument",
-        ),
-        // Wrong arity is caught by the generic scheme unification before
-        // the signature arm runs; the diagnostic is still loud and typed.
-        ("x = parse_json(\"1\", \"2\")\n", "arity mismatch"),
-    ] {
-        let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-        let exprs = chelis_surf::desugar::desugar_program(&decls);
-        let err = chelis_types::check_ir_program(&exprs)
-            .expect_err(&format!("{source:?} must be a check error"));
-        assert!(
-            err.errors.iter().any(|e| e.message.contains(fragment)),
-            "{source:?}: expected a diagnostic containing `{fragment}`, got: {:?}",
-            err.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
-        );
-    }
-}
-
-/// Constructors compose with `json_list` element-relative access, and
-/// serialization is deterministic (two runs, identical bytes).
-#[test]
-fn json_constructors_and_element_relative_access() {
-    let checked = checked_surf(
-        r#"
-doc = parse_json("{\"rows\": [{\"px\": 1.5}, {\"px\": 2.5}]}")
-rows = json_list(doc, "rows")
-second_px = json_f64(index(rows, 1), "px")
-text = to_json(jlist([jnum(second_px), JNull, JBool(true)]))
-"#,
-    );
-    let run = |checked: &chelis_types::CheckedProgram| {
-        let outcome = evaluate_host_program(checked, &HashMap::new()).expect("should evaluate");
-        match outcome.host_bindings.get("text") {
-            Some(RuntimeValue::String(s)) => s.clone(),
-            other => panic!("expected string, got {other:?}"),
-        }
-    };
-    let first = run(&checked);
-    assert_eq!(first, "[2.5,null,true]");
-    assert_eq!(run(&checked), first, "serialization must be deterministic");
-}
-
-/// chelis#891 review finding 6: the builtin contracts are enforced by
-/// unification, so an un-annotated parameter flowing into a Json/float
-/// slot is pinned to the expected type instead of leaving the contract
-/// vacuous (`forall a. a -> f64`).
-#[test]
-fn json_builtin_slots_unify_unannotated_params() {
-    // The lambda parameter unifies with Json; applying it to a float is
-    // now a check error (previously it checked clean and failed at eval).
-    let source = "f = fn (doc) -> json_f64(doc, \"a\")\nx = f(1.5)\n";
-    let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
-    let err = chelis_types::check_ir_program(&exprs).expect_err("non-Json arg must be rejected");
-    assert!(
-        err.errors.iter().any(|e| e.message.contains("mismatch")),
-        "expected a type mismatch, got: {:?}",
-        err.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
-    );
-
-    // round_to's operand slot pins an unresolved Var to f64, so checker
-    // and eval agree on the result dtype; an f32 application is a check
-    // error rather than a silent f32-in/f64-claimed disagreement.
-    let source = "g = fn (v) -> round_to(v, 2)\nz = g(1.5)\n";
-    let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
-    let err = chelis_types::check_ir_program(&exprs).expect_err("f32 arg must be rejected");
-    assert!(
-        err.errors.iter().any(|e| e.message.contains("mismatch")),
-        "expected a precision mismatch, got: {:?}",
-        err.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
-    );
-
-    // The pinned path works end-to-end with a genuine f64.
-    let checked = checked_surf(
-        r#"
-g = fn (v) -> round_to(v, 2)
-z = g(json_f64(parse_json("{\"v\": 2.675}"), "v"))
-"#,
-    );
-    let outcome = evaluate_host_program(&checked, &HashMap::new()).expect("should evaluate");
-    assert_eq!(
-        outcome
-            .host_bindings
-            .get("z")
-            .and_then(RuntimeValue::as_f64),
-        Some(2.67)
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Host-lane CSV I/O (chelis#903): full-pipeline coverage (surf parse ->
-// desugar -> check -> host eval) for parse_csv / csv_* accessors / to_csv.
-// The pure core is unit-tested in `runtime/csv.rs`; these tests pin the
-// registry wiring: env schemes, `check_csv_builtin_signature`, the eval
-// dispatch arms, and the composition with the #890 JSON surface.
-// ---------------------------------------------------------------------------
-
-/// The QFBench-shaped loop in miniature: parse a CSV, pull numeric columns
-/// through `csv_f64s`, compute in the tensor lane, round, and assemble a
-/// nested JSON output. The bare `0`/`2` literals exercise the any-integer
-/// slots. Asserted byte-exactly.
-#[test]
-fn csv_pipeline_parse_access_compute_assemble() {
-    let checked = checked_surf(
-        r#"
-c = parse_csv("id,qty,px\nalpha,2,101.5\nbeta,4,99.25\n")
-qty = csv_f64s(c, "qty")
-px = csv_f64s(c, "px")
-notional = tensor_to_scalar(sum(mul(to_tensor(qty), to_tensor(px)), 0))
-out = jdict([("first_id", jstr(csv_str(c, 0, "id")))])
-out2 = json_set(out, "results.notional", jnum(round_to(notional, 2)))
-out3 = json_set(out2, "results.rows", jnum(cast(csv_nrows(c), f64)))
-text = to_json(out3)
-"#,
-    );
-    let outcome =
-        evaluate_host_program(&checked, &HashMap::new()).expect("pipeline should evaluate");
-    match outcome.host_bindings.get("text") {
-        Some(RuntimeValue::String(s)) => assert_eq!(
-            s,
-            r#"{"first_id":"alpha","results":{"notional":600.0,"rows":2.0}}"#
-        ),
-        other => panic!("expected string, got {other:?}"),
-    }
-}
-
-/// A Csv document is a Json value: the #890 accessors work on it directly
-/// (`json_list` over `rows`, dot-path reads into row cells, `to_json` for
-/// debugging); this is the payoff of riding the Json ADT instead of
-/// adding a `Csv` prelude type.
-#[test]
-fn csv_document_composes_with_json_accessors() {
-    let checked = checked_surf(
-        r#"
-c = parse_csv("id,px\nalpha,1.5\nbeta,2.5\n")
-rows = json_list(c, "rows")
-first_id = json_str(index(rows, 0), "id")
-second_px_text = json_str(c, "rows.1.px")
-doc_text = to_json(c)
-"#,
-    );
-    let outcome = evaluate_host_program(&checked, &HashMap::new()).expect("should evaluate");
-    match outcome.host_bindings.get("first_id") {
-        Some(RuntimeValue::String(s)) => assert_eq!(s, "alpha"),
-        other => panic!("expected string, got {other:?}"),
-    }
-    match outcome.host_bindings.get("second_px_text") {
-        Some(RuntimeValue::String(s)) => assert_eq!(s, "2.5"),
-        other => panic!("expected string, got {other:?}"),
-    }
-    match outcome.host_bindings.get("doc_text") {
-        Some(RuntimeValue::String(s)) => assert_eq!(
-            s,
-            r#"{"columns":["id","px"],"rows":[{"id":"alpha","px":"1.5"},{"id":"beta","px":"2.5"}]}"#
-        ),
-        other => panic!("expected string, got {other:?}"),
-    }
-}
-
-/// CSV output assembly with the #890 constructors (`jdict`/`jlist`/`jnum`/
-/// `jstr`) feeding `to_csv`, deterministic across runs. `csv_f64` reads an
-/// exact f64 out of the input document; `round_to` fixes the decimals.
-#[test]
-fn csv_output_assembly_via_to_csv() {
-    let checked = checked_surf(
-        r#"
-c = parse_csv("id,px\nalpha,1.23456\nbeta,2.5\n")
-row = jdict([("id", jstr(csv_str(c, 0, "id"))), ("pv", jnum(round_to(csv_f64(c, 0, "px"), 2)))])
-out = jdict([("columns", jlist([jstr("id"), jstr("pv")])), ("rows", jlist([row]))])
-text = to_csv(out)
-"#,
-    );
-    let run = |checked: &chelis_types::CheckedProgram| {
-        let outcome = evaluate_host_program(checked, &HashMap::new()).expect("should evaluate");
-        match outcome.host_bindings.get("text") {
-            Some(RuntimeValue::String(s)) => s.clone(),
-            other => panic!("expected string, got {other:?}"),
-        }
-    };
-    let first = run(&checked);
-    assert_eq!(first, "id,pv\nalpha,1.23\n");
-    assert_eq!(run(&checked), first, "to_csv must be deterministic");
-}
-
-/// Loud-failure contract at eval time: a missing column names the builtin,
-/// the column, and the available columns; a non-numeric cell names the
-/// column, the 0-based data row, and the offending text; a malformed file
-/// names the 1-based row/column position. No silent NaN/defaults.
-#[test]
-fn csv_accessor_failures_are_loud() {
-    let missing = checked_surf(
-        r#"
-xs = csv_f64s(parse_csv("date,mid\n2020-01-02,1.5\n"), "px")
-"#,
-    );
-    let err = evaluate_host_program(&missing, &HashMap::new())
-        .expect_err("missing column must fail eval");
-    assert!(err.contains("csv_f64s"), "got `{err}`");
-    assert!(err.contains("column `px` not found"), "got `{err}`");
-    assert!(
-        err.contains("available columns: `date`, `mid`"),
-        "got `{err}`"
-    );
-
-    let non_numeric = checked_surf(
-        r#"
-xs = csv_f64s(parse_csv("id,px\nalpha,n/a\n"), "px")
-"#,
-    );
-    let err = evaluate_host_program(&non_numeric, &HashMap::new())
-        .expect_err("non-numeric cell must fail eval");
-    assert!(err.contains("column `px`"), "got `{err}`");
-    assert!(err.contains("data row 0"), "got `{err}`");
-    assert!(err.contains("cell `n/a` is not a number"), "got `{err}`");
-
-    let malformed = checked_surf(
-        r#"
-c = parse_csv("a,b\n1,\"oops\n")
-"#,
-    );
-    let err = evaluate_host_program(&malformed, &HashMap::new())
-        .expect_err("malformed CSV must fail eval");
-    assert!(err.contains("parse_csv"), "got `{err}`");
-    assert!(err.contains("row 2, column 2"), "got `{err}`");
-    assert!(err.contains("unclosed quoted field"), "got `{err}`");
-
-    // The json_set seam (chelis#903 review): augmenting a Csv document
-    // with an extra top-level subtree is fine for reads, but to_csv
-    // refuses to silently drop it.
-    let augmented = checked_surf(
-        r#"
-c2 = json_set(parse_csv("id,px\nalpha,1.5\n"), "meta.note", jstr("x"))
-n = csv_nrows(c2)
-text = to_csv(c2)
-"#,
-    );
-    let err = evaluate_host_program(&augmented, &HashMap::new())
-        .expect_err("extra top-level key must fail to_csv");
-    assert!(
-        err.contains("unexpected top-level key `meta`"),
-        "got `{err}`"
-    );
-    assert!(
-        err.contains("refusing to silently drop data"),
-        "got `{err}`"
-    );
-}
-
-/// Check-time negative parity: `check_csv_builtin_signature` rejects
-/// non-document / non-string / non-integer slots with named diagnostics.
-#[test]
-fn csv_builtin_type_errors_reject_at_check() {
-    for (source, fragment) in [
-        (
-            "x = parse_csv(1.5)\n",
-            "parse_csv expects a string argument",
-        ),
-        (
-            "x = to_csv(\"raw\")\n",
-            "to_csv expects a Csv document first argument",
-        ),
-        (
-            "x = csv_f64s(1.5, \"a\")\n",
-            "csv_f64s expects a Csv document first argument",
-        ),
-        (
-            "x = csv_nrows(1.5)\n",
-            "csv_nrows expects a Csv document first argument",
-        ),
-        (
-            "x = csv_f64s(parse_csv(\"a\"), 2)\n",
-            "csv_f64s expects a column-name string second argument",
-        ),
-        (
-            "x = csv_f64(parse_csv(\"a\"), \"zero\", \"a\")\n",
-            "csv_f64 expects an integer row index second argument",
-        ),
-        (
-            "x = csv_str(parse_csv(\"a\"), 0, 1.5)\n",
-            "csv_str expects a column-name string third argument",
-        ),
-        // Wrong arity is caught by the generic scheme unification before
-        // the signature arm runs; the diagnostic is still loud and typed.
-        ("x = parse_csv(\"a\", \"b\")\n", "arity mismatch"),
-    ] {
-        let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-        let exprs = chelis_surf::desugar::desugar_program(&decls);
-        let err = chelis_types::check_ir_program(&exprs)
-            .expect_err(&format!("{source:?} must be a check error"));
-        assert!(
-            err.errors.iter().any(|e| e.message.contains(fragment)),
-            "{source:?}: expected a diagnostic containing `{fragment}`, got: {:?}",
-            err.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
-        );
-    }
-}
-
-/// The integer accessors are exact end-to-end ([05-OP-3] / [04-NUM-11]):
-/// an int64 ID above 2^53 survives parse_json -> json_int/json_ints ->
-/// jint -> to_json bit-exactly, while the float accessors refuse nothing
-/// silently -- json_f64 widens (the named lossy read) and json_ints
-/// refuses a float element loudly.
-#[test]
-fn json_integer_accessors_are_exact_above_2_53() {
-    let checked = checked_surf(
-        r#"
-doc = parse_json("{\"id\": 9007199254740993, \"ids\": [9007199254740993, 7]}")
-exact = json_int(doc, "id")
-exact_list = json_ints(doc, "ids")
-widened = json_f64(doc, "id")
-echoed = to_json(json_set(doc, "out", jint(json_int(doc, "id"))))
-"#,
-    );
-    let outcome = evaluate_host_program(&checked, &HashMap::new()).expect("should evaluate");
-    assert_eq!(
-        outcome
-            .host_bindings
-            .get("exact")
-            .and_then(RuntimeValue::as_i64),
-        Some(9007199254740993)
-    );
-    match outcome.host_bindings.get("exact_list") {
-        Some(RuntimeValue::List(items)) => {
-            assert_eq!(items[0].as_i64(), Some(9007199254740993));
-            assert_eq!(items[1].as_i64(), Some(7));
-        }
-        other => panic!("expected list, got {other:?}"),
-    }
-    // The named lossy widening: 2^53 + 1 is not representable in f64.
-    assert_eq!(
-        outcome
-            .host_bindings
-            .get("widened")
-            .and_then(RuntimeValue::as_f64),
-        Some(9007199254740992.0)
-    );
-    match outcome.host_bindings.get("echoed") {
-        Some(RuntimeValue::String(s)) => assert!(
-            s.contains("\"out\":9007199254740993"),
-            "JInt must serialize exactly, got {s}"
-        ),
-        other => panic!("expected string, got {other:?}"),
-    }
-
-    // Negative parity: a float element in json_ints fails loudly, naming
-    // the float accessor -- no silent truncation.
-    let refused = checked_surf(
-        r#"
-xs = json_ints(parse_json("{\"v\": [1, 2.5]}"), "v")
-"#,
-    );
-    let err =
-        evaluate_host_program(&refused, &HashMap::new()).expect_err("float element must fail");
-    assert!(err.contains("json_ints"), "got `{err}`");
-    assert!(err.contains("element 1 is a float"), "got `{err}`");
-    assert!(err.contains("json_f64s"), "names the remedy: `{err}`");
-}
-
-/// CSV integer columns are first-class ([05-OP-3]): `csv_ints`/`csv_int`
-/// read int64 IDs above 2^53 exactly from cell text, refuse float cells
-/// and float text, and round-trip exactly through jint -> to_csv ->
-/// parse_csv -> csv_int. `csv_f64s` on the same column is the named
-/// lossy widening, not an error.
-#[test]
-fn csv_integer_accessors_are_exact_above_2_53() {
-    let checked = checked_surf(
-        r#"
-c = parse_csv("id,qty\n9007199254740993,2\n12,4\n")
-ids = csv_ints(c, "id")
-first = csv_int(c, 0, "id")
-widened = csv_f64s(c, "id")
-row = jdict([("id", jint(csv_int(c, 0, "id")))])
-out = jdict([("columns", jlist([jstr("id")])), ("rows", jlist([row]))])
-echoed = csv_int(parse_csv(to_csv(out)), 0, "id")
-"#,
-    );
-    let outcome = evaluate_host_program(&checked, &HashMap::new()).expect("should evaluate");
-    match outcome.host_bindings.get("ids") {
-        Some(RuntimeValue::List(items)) => {
-            assert_eq!(items[0].as_i64(), Some(9007199254740993));
-            assert_eq!(items[1].as_i64(), Some(12));
-        }
-        other => panic!("expected list, got {other:?}"),
-    }
-    assert_eq!(
-        outcome
-            .host_bindings
-            .get("first")
-            .and_then(RuntimeValue::as_i64),
-        Some(9007199254740993)
-    );
-    match outcome.host_bindings.get("widened") {
-        Some(RuntimeValue::List(items)) => {
-            assert_eq!(items[0].as_f64(), Some(9007199254740992.0));
-        }
-        other => panic!("expected list, got {other:?}"),
-    }
-    assert_eq!(
-        outcome
-            .host_bindings
-            .get("echoed")
-            .and_then(RuntimeValue::as_i64),
-        Some(9007199254740993),
-        "JInt cell must round-trip to_csv -> parse_csv -> csv_int exactly"
-    );
-
-    // Negative parity: float text refuses the integer read (naming the
-    // float accessor), and int64 overflow is a loud trap-class error,
-    // never an f64 fallback.
-    let float_text = checked_surf(
-        r#"
-xs = csv_ints(parse_csv("id\n1.5\n"), "id")
-"#,
-    );
-    let err =
-        evaluate_host_program(&float_text, &HashMap::new()).expect_err("float text must fail");
-    assert!(err.contains("not an integer"), "got `{err}`");
-    assert!(
-        err.contains("csv_f64/csv_f64s"),
-        "names the remedy: `{err}`"
-    );
-
-    let overflow = checked_surf(
-        r#"
-xs = csv_ints(parse_csv("id\n99999999999999999999\n"), "id")
-"#,
-    );
-    let err = evaluate_host_program(&overflow, &HashMap::new()).expect_err("overflow must fail");
-    assert!(err.contains("overflows int64"), "got `{err}`");
-    assert!(err.contains("Overflow"), "names the trap kind: `{err}`");
-}
-
 /// [05-OP-1]'s f32 lane: an f32 operand rounds at its OWN width and the
 /// result stays f32 -- checker and eval agree on the dtype, and the value
 /// is the correctly-rounded decimal rounding of the f32's exact binary
@@ -2970,280 +2744,4 @@ fn fo_diag_truncation_is_owned_by_the_boundary() {
     let rendered = describe_value(&wide);
     assert!(rendered.ends_with(" more bytes elided)"));
     assert!(rendered.starts_with("string \"\u{1F600}"));
-}
-
-/// The JSON runtime's malformed-shape diagnostics report their payloads
-/// through the boundary. Positive: the exact int64 and the own-width f16
-/// survive. Negative: no derived-`Debug` spelling appears.
-#[test]
-fn fo_diag_json_shape_diagnostics_report_exact_payloads() {
-    // A `JNum` whose field is an integer is malformed; the diagnostic
-    // names the field's dtype, which is the whole reason it was rejected.
-    let bad_num = adt(
-        "JNum",
-        vec![int_scalar_of(Prim::Int64, 9_007_199_254_740_993)],
-    );
-    let doc = adt(
-        "JDict",
-        vec![RuntimeValue::Dict(vec![(
-            RuntimeValue::String("v".to_string()),
-            bad_num,
-        )])],
-    );
-    let err = super::json::json_f64_at(&doc, "v").expect_err("a malformed JNum must fail");
-    assert!(
-        err.contains("malformed JNum fields [int64 9007199254740993]"),
-        "the exact stored integer must reach the diagnostic: {err}"
-    );
-    assert!(
-        !err.contains("9007199254740992"),
-        "no double funnel in the diagnostic channel: {err}"
-    );
-    assert_no_debug_spelling(&err, "the json_f64 shape diagnostic");
-
-    // A `JInt` carrying an f16 is malformed for `json_int`; the f16 is
-    // reported at its own width, not through its f32 image.
-    let bad_int = adt("JInt", vec![scalar_of(Prim::F16, 0.1)]);
-    let doc = adt(
-        "JDict",
-        vec![RuntimeValue::Dict(vec![(
-            RuntimeValue::String("v".to_string()),
-            bad_int,
-        )])],
-    );
-    let err = super::json::json_int_at(&doc, "v").expect_err("a malformed JInt must fail");
-    assert!(
-        err.contains("malformed JInt fields [f16 0.1]"),
-        "own-width f16 digits in the diagnostic: {err}"
-    );
-    assert!(!err.contains(WIDENED_F16_IMAGE), "no widened image: {err}");
-
-    // A non-Json value reaching the serializer names what it actually is.
-    let err = super::json::json_value_to_text(&RuntimeValue::Bool(true))
-        .expect_err("a bare bool is not a Json value");
-    assert!(err.contains("bool true"), "got: {err}");
-    assert_no_debug_spelling(&err, "the to_json shape diagnostic");
-
-    // A non-string JDict key is reported as the value it is.
-    let bad_key = adt(
-        "JDict",
-        vec![RuntimeValue::Dict(vec![(
-            int_scalar_of(Prim::Int32, 1),
-            adt("JNull", vec![]),
-        )])],
-    );
-    let err = super::json::ensure_json_value(&bad_key).expect_err("non-string key must fail");
-    assert!(err.contains("got int32 1"), "got: {err}");
-}
-
-/// The CSV runtime's cell and document diagnostics use the same boundary.
-#[test]
-fn fo_diag_csv_shape_diagnostics_report_exact_payloads() {
-    fn csv_doc(cell: RuntimeValue) -> RuntimeValue {
-        let row = adt(
-            "JDict",
-            vec![RuntimeValue::Dict(vec![(
-                RuntimeValue::String("v".to_string()),
-                cell,
-            )])],
-        );
-        adt(
-            "JDict",
-            vec![RuntimeValue::Dict(vec![
-                (
-                    RuntimeValue::String("columns".to_string()),
-                    adt(
-                        "JList",
-                        vec![RuntimeValue::List(vec![adt(
-                            "JStr",
-                            vec![RuntimeValue::String("v".to_string())],
-                        )])],
-                    ),
-                ),
-                (
-                    RuntimeValue::String("rows".to_string()),
-                    adt("JList", vec![RuntimeValue::List(vec![row])]),
-                ),
-            ])],
-        )
-    }
-
-    // A `JNum` cell holding an int64 above 2^53 is malformed; the exact
-    // digits reach the diagnostic.
-    let err = super::csv::csv_f64_at(
-        &csv_doc(adt(
-            "JNum",
-            vec![int_scalar_of(Prim::Int64, 9_007_199_254_740_993)],
-        )),
-        0,
-        "v",
-    )
-    .expect_err("a malformed JNum cell must fail");
-    assert!(
-        err.contains("malformed JNum cell [int64 9007199254740993]"),
-        "got: {err}"
-    );
-    assert!(!err.contains("9007199254740992"), "got: {err}");
-    assert_no_debug_spelling(&err, "the csv_f64 cell diagnostic");
-
-    // A `JInt` cell holding an f16 is malformed for `csv_int`; own width.
-    let err = super::csv::csv_int_at(
-        &csv_doc(adt("JInt", vec![scalar_of(Prim::F16, 0.1)])),
-        0,
-        "v",
-    )
-    .expect_err("a malformed JInt cell must fail");
-    assert!(err.contains("malformed JInt cell [f16 0.1]"), "got: {err}");
-    assert!(!err.contains(WIDENED_F16_IMAGE), "no widened image: {err}");
-
-    // A non-string top-level key in a document reaching `to_csv`.
-    let bad_doc = adt(
-        "JDict",
-        vec![RuntimeValue::Dict(vec![(
-            int_scalar_of(Prim::Int32, 1),
-            adt("JNull", vec![]),
-        )])],
-    );
-    let err = super::csv::csv_to_text(&bad_doc).expect_err("a non-string key must fail");
-    assert_no_debug_spelling(&err, "the to_csv document diagnostic");
-}
-
-/// Evaluate one Deep expression against hand-supplied runtime bindings.
-///
-/// The seven eval dispatch arms this package migrated are guards behind
-/// the checker: `check_json_builtin_signature` rejects a non-f64 `jnum`
-/// operand, a non-int64 `jint` operand, a non-`(string, Json)` `jdict`
-/// entry, and a non-f32/f64 `round_to` operand, so no CHECKED program
-/// reaches them (pinned below by
-/// `fo_diag_migrated_eval_arms_are_checker_front_run`). They exist for
-/// dynamically-constructed calls, and their whole job is to name the value
-/// they were handed - so the runtime library's own `eval_expr` entry, not
-/// the checked pipeline, is where their text is observable.
-fn eval_deep_with_bindings(
-    surf_expr: &str,
-    args: &[(&str, RuntimeValue)],
-) -> Result<String, String> {
-    let source = format!("probe = {surf_expr}\n");
-    let decls = chelis_surf::parser::parse_str(&source).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
-    let Expr::List(def, _) = &exprs[0] else {
-        panic!("desugaring a top-level binding yields one def form");
-    };
-    // `(def {} <name> <body>)`: the body is the fourth element.
-    let body = def.elements[3].clone();
-
-    let empty_tensors: HashMap<String, RuntimeTensorValue> = HashMap::new();
-    let mut ctx = EvalContext {
-        bindings: HashMap::new(),
-        binding_types: HashMap::new(),
-        named_axis_route_cache: HashMap::new(),
-        named_axis_route_visiting: HashSet::new(),
-        top_level_defs: HashMap::new(),
-        type_env: HashMap::new(),
-        adt_fields: HashMap::new(),
-        adt_grad_rejections: HashMap::new(),
-        tensor_bindings: &empty_tensors,
-        transcript: Vec::new(),
-        resolving_top_levels: Vec::new(),
-        random_seed: None,
-        random_counter: 0,
-        cancel: None,
-    };
-    for (name, value) in args {
-        ctx.bindings.insert((*name).to_string(), value.clone());
-        ctx.binding_types.insert((*name).to_string(), None);
-    }
-    ctx.eval_expr(&body).map(|value| render_value(&value))
-}
-
-/// One migrated-arm probe: a Surf expression, the runtime bindings its
-/// free names take, and the diagnostic fragment the arm must report.
-type DispatchProbe<'a> = (&'a str, &'a [(&'a str, RuntimeValue)], &'a str);
-
-/// The migrated eval dispatch arms name the argument they were handed, at
-/// its own dtype and value.
-///
-/// Every expected fragment below is a rewrite, not an addition: the
-/// pre-migration text rendered `payload.dtype()` through `Debug` (`F32`,
-/// `Int32`, `F16`) or the whole `Option<&RuntimeValue>` through `Debug`
-/// (`Some(Scalar(ScalarPayload { value: ScalarValue { bits: I32(5) } }))`),
-/// so each `contains` here fails against the pre-migration sources.
-#[test]
-fn fo_diag_eval_dispatch_arms_report_the_argument_they_were_handed() {
-    let f32_scalar = scalar_of(Prim::F32, f64::from(0.1f32));
-    let int32_scalar = int_scalar_of(Prim::Int32, 5);
-    let f16_scalar = scalar_of(Prim::F16, 0.1);
-    let text = RuntimeValue::String("x".to_string());
-    let bad_entry = RuntimeValue::List(vec![RuntimeValue::Tuple(vec![
-        int_scalar_of(Prim::Int32, 1),
-        adt("JNull", vec![]),
-    ])]);
-
-    let cases: &[DispatchProbe<'_>] = &[
-        (
-            "jnum(arg)",
-            &[("arg", f32_scalar)],
-            "jnum: expected an f64 value, got f32 0.1",
-        ),
-        (
-            "jnum(arg)",
-            &[("arg", int32_scalar.clone())],
-            "expected f64 arg at index 0, got int32 5",
-        ),
-        (
-            "jint(arg)",
-            &[("arg", int32_scalar)],
-            "jint: expected an int64 value, got int32 5",
-        ),
-        (
-            "round_to(arg, 2)",
-            &[("arg", f16_scalar)],
-            "round_to: unsupported operand dtype f16",
-        ),
-        (
-            "round_to(arg, 2)",
-            &[("arg", text)],
-            "expected float arg at index 0, got string \"x\"",
-        ),
-        (
-            "jdict(arg)",
-            &[("arg", bad_entry)],
-            "jdict keys must be strings, got int32 1 at index 0",
-        ),
-    ];
-
-    for (expr, bindings, expected) in cases {
-        let err = eval_deep_with_bindings(expr, bindings)
-            .expect_err("the dispatch guard must reject this argument");
-        assert!(
-            err.contains(expected),
-            "`{expr}` should report `{expected}`, got: {err}"
-        );
-        assert_no_debug_spelling(&err, "a migrated eval dispatch diagnostic");
-    }
-}
-
-/// Why the cell above drives the runtime library directly: every one of
-/// those arguments is rejected at CHECK time, so the arm's text is not
-/// reachable from a checked program today. If that ever stops being true,
-/// this cell goes red and the arm's wording becomes user-facing output
-/// that owes an end-to-end expectation.
-#[test]
-fn fo_diag_migrated_eval_arms_are_checker_front_run() {
-    for source in [
-        "x = jnum(0.1f32)\n",
-        "x = jnum(1i64)\n",
-        "x = jint(1i32)\n",
-        "x = jint(1.0f64)\n",
-        "x = round_to(cast(1.5f64, f16), 2)\n",
-        "x = round_to(5i32, 2)\n",
-        "x = jdict([(1i64, jnum(1.0f64))])\n",
-    ] {
-        let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-        let exprs = chelis_surf::desugar::desugar_program(&decls);
-        assert!(
-            chelis_types::check_ir_program(&exprs).is_err(),
-            "the checker must reject `{source}` before eval sees the argument"
-        );
-    }
 }

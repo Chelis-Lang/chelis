@@ -567,7 +567,7 @@ fn integer_matmul_stub_carries_meaningful_abort_message() {
 // `sizeof(long) != 8` if the Metal backend ever ran cross-platform.
 //
 // Today Metal only runs on Apple Silicon so `sizeof(long) == 8`
-// matches CHELIS_I64. Pin the assumption in a test so a future
+// matches CHELIS_DTYPE_I64. Pin the assumption in a test so a future
 // cross-platform attempt surfaces the divergence.
 // ===========================================================================
 

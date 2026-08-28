@@ -240,9 +240,12 @@ numeric data, whether or not you have read that document:
   operation registration. The immutable foundation-era universe retains the old 39
   grandfather rows, three successor overrides, and 155 permanent plain rows as
   deletion debt owned by chelis#1288. The active primary baseline has already
-  moved 18 exact structurally nonnumeric rows and `chelis_tensor_shape` to final
-  authority; it therefore retains 39 grandfather rows, three successors, 137
-  permanent plain rows, and the obsolete prelude `Json` row as active debt. The
+  moved 18 exact structurally nonnumeric rows, the eight tagged-carrier
+  declarations, and 123 registered numeric operations (the [05-OP-35]
+  stdlib surface registrations among them) to final authority; it
+  therefore retains no pre-ratchet grandfather rows, no successors, and 63
+  permanent plain rows as active debt, and the obsolete prelude `Json` row
+  is deleted. The
   84 typed-wire and 17 registered-PyO3 baseline rows remain sealed legacy cohorts,
   while Count's wire field is final-registered. Those lists confer no authorization
   for a new, renamed, reclassified, or otherwise changed row, and a change touching one

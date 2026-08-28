@@ -4,7 +4,7 @@
 //! a GPU or HIP runtime. They run in default CI.
 
 use chelis_backend_hip::codegen_hip;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, ExtremaKind, ExtremaOperand, RiscOp, RtDim, TensorType};
 use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
 use std::env;
@@ -154,6 +154,38 @@ fn hip_runtime_header() -> String {
         .expect("read HIP runtime header")
 }
 
+#[test]
+fn hip_runtime_header_owns_its_rank_cap_and_dtype_sizing_dependencies() {
+    let header = hip_runtime_header();
+    assert!(header.contains("#include \"chelis_runtime_dtype.h\""));
+    assert!(header.contains("CHELIS_GPU_MAX_DIM"));
+    for removed in ["CHELIS_MAX_DIM", "chelis_runtime_dtype_size_checked"] {
+        assert!(
+            !header.contains(removed),
+            "HIP runtime header still depends on removed host symbol `{removed}`"
+        );
+    }
+
+    // chelis#1360: this used to assert the header CONTAINED
+    // `case CHELIS_DTYPE_F64:` / `case CHELIS_DTYPE_BOOL:`, which pinned a
+    // second copy of the width table in place. The copy is how the defect
+    // happened - chelis#1308 narrowed bool to one byte here while the
+    // emitter went on dispatching four-byte kernels - so the assertion is
+    // inverted: the header must delegate to the runtime's one authority and
+    // must not restate the per-dtype widths at all.
+    assert!(
+        header.contains("return (size_t)chelis_dtype_size((chelis_dtype)dtype);"),
+        "chelis_gpu_dtype_size must delegate to the runtime width authority"
+    );
+    for restated in ["case CHELIS_DTYPE_F64:", "case CHELIS_DTYPE_BOOL:"] {
+        assert!(
+            !header.contains(restated),
+            "HIP runtime header restates the dtype width table (`{restated}`); \
+             delegate to chelis_dtype_size instead (chelis#1360)"
+        );
+    }
+}
+
 /// Build a simple DAG: const(a) + const(b)
 fn dag_add_consts() -> Dag {
     let mut dag = Dag::new();
@@ -296,8 +328,10 @@ fn s2_neg_const_only_dag_only_fill_kernel() {
 fn s3_all_elementwise_ops_emit_kernels() {
     let ops_and_names: Vec<(RiscOp, &str)> = vec![
         (RiscOp::Add, "add"),
+        (RiscOp::Sub, "sub"),
         (RiscOp::Mul, "mul"),
         (RiscOp::MaxElem, "max_elem"),
+        (RiscOp::MinElem, "min_elem"),
         (RiscOp::CmpLt, "cmplt"),
     ];
     for (op, name) in &ops_and_names {
@@ -320,6 +354,90 @@ fn s3_all_elementwise_ops_emit_kernels() {
         assert!(
             result.c_source.contains("chelis_launch_kernel"),
             "Binary op '{name}' must emit a kernel launch"
+        );
+    }
+}
+
+#[test]
+fn direct_extrema_and_adjoint_emit_bit_preserving_kernels() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(4), None);
+    let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], vec_f32(4), None);
+    let sub = dag.add_node(RiscOp::Sub, vec![a, b], vec_f32(4), None);
+    let max = dag.add_node(RiscOp::MaxElem, vec![a, b], vec_f32(4), None);
+    let min = dag.add_node(RiscOp::MinElem, vec![a, b], vec_f32(4), None);
+    let adjoint = dag.add_node(
+        RiscOp::ExtremaAdjoint {
+            kind: ExtremaKind::Max,
+            operand: ExtremaOperand::Left,
+        },
+        vec![a, b, g],
+        vec_f32(4),
+        None,
+    );
+    for root in [sub, max, min, adjoint] {
+        dag.add_root(root);
+    }
+
+    let source = codegen_hip(&dag, "direct_arithmetic_structure")
+        .unwrap()
+        .c_source;
+    for kernel in [
+        "kernel_sub_f32",
+        "kernel_max_elem",
+        "kernel_min_elem",
+        "kernel_max_adjoint_left_f32",
+    ] {
+        assert!(source.contains(kernel), "missing {kernel}: {source}");
+    }
+    assert!(source.contains("bool select_left = isnan(av) || (!isnan(bv) && av >= bv);"));
+    assert!(source.contains("bool select_left = isnan(av) || (!isnan(bv) && av <= bv);"));
+    assert!(!source.contains("fmaxf(av, bv)"), "{source}");
+    assert!(!source.contains("fminf(av, bv)"), "{source}");
+}
+
+#[test]
+fn direct_signed_integer_extrema_chains_stay_on_typed_hip_kernels() {
+    for (precision, suffix) in [
+        (Prim::Int8, "i8"),
+        (Prim::Int16, "i16"),
+        (Prim::Int32, "i32"),
+        (Prim::Int64, "i64"),
+    ] {
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision,
+        };
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
+        let c = dag.add_node(RiscOp::Load { name: "c".into() }, vec![], ty.clone(), None);
+        let maximum = dag.add_node(RiscOp::MaxElem, vec![a, b], ty.clone(), None);
+        let minimum = dag.add_node(RiscOp::MinElem, vec![maximum, c], ty, None);
+        dag.add_root(minimum);
+
+        let fused = fuse(&dag);
+        assert!(
+            fused
+                .nodes()
+                .iter()
+                .all(|node| !matches!(node.op, RiscOp::FusedElem { .. })),
+            "{precision:?} extrema must not enter the float-only fused HIP family"
+        );
+        let source = codegen_hip(
+            &fused,
+            &format!("direct_integer_extrema_{}", precision.name()),
+        )
+        .unwrap_or_else(|error| panic!("{precision:?} HIP codegen failed: {error}"))
+        .c_source;
+        assert!(
+            source.contains(&format!("kernel_max_elem_{suffix}")),
+            "{precision:?}: missing typed max kernel: {source}"
+        );
+        assert!(
+            source.contains(&format!("kernel_min_elem_{suffix}")),
+            "{precision:?}: missing typed min kernel: {source}"
         );
     }
 }
@@ -545,7 +663,7 @@ fn s5_realize_materializes_with_kernel_not_view() {
     );
     assert!(
         !result.c_source.contains(
-            "chelis_gpu_alloc_view(1, (int[]){ 3 }, CHELIS_F32, d_t1->data, d_t1->storage_size)"
+            "chelis_gpu_alloc_view(1, (int[]){ 3 }, CHELIS_DTYPE_F32, d_t1->data, d_t1->storage_size)"
         ),
         "Realize must not lower to a metadata-only view"
     );
@@ -663,11 +781,23 @@ fn s8_duplicate_load_single_slot() {
 }
 
 // ===========================================================================
-// S9: cmplt kernel emits 1.0f/0.0f (not integer bool)
+// S9: cmplt over a bool result is rejected, not emitted at the operand width
 // ===========================================================================
 
+/// chelis#1360. This test used to assert the opposite: that the `cmplt` kernel
+/// "must produce float `1.0f`/`0.0f`, not integer bool". That was correct
+/// while the HIP runtime stored a bool tensor as a four-byte binary32 payload,
+/// and `chelis_gpu_dtype_size(CHELIS_DTYPE_BOOL)` returned 4 to match.
+///
+/// chelis#1308 replaced that payload with the tagged carrier's one-byte
+/// `Repr::Bool8`. The kernel side did not follow, so the assertion above went
+/// on holding - `1.0f` and `0.0f` were still in the emitted source - while the
+/// emitted program wrote `N * 4` bytes into an `N * 1` byte `hipMalloc` and
+/// read back the low bytes of the float stream. Both halves of the assertion
+/// were true and the program was corrupt, which is why the test is now the
+/// rejection rather than the spelling.
 #[test]
-fn s9_cmplt_float_result() {
+fn s9_cmplt_bool_result_is_rejected() {
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(scalar_f32().precision, 1.0),
@@ -691,10 +821,16 @@ fn s9_cmplt_float_result() {
         None,
     );
     dag.add_root(c);
-    let result = codegen_hip(&dag, "test_cmplt").unwrap();
+    let error = match codegen_hip(&dag, "test_cmplt") {
+        Err(error) => error,
+        Ok(_) => panic!(
+            "a bool result is one byte and the cmplt template writes at the \
+             operand width; emitting it overruns the allocation (chelis#1360)"
+        ),
+    };
     assert!(
-        result.c_source.contains("1.0f") && result.c_source.contains("0.0f"),
-        "cmplt kernel must produce float 1.0f/0.0f, not integer bool"
+        format!("{error:?}").contains("bool"),
+        "the rejection must name the offending dtype; got: {error:?}"
     );
 }
 
@@ -1308,7 +1444,7 @@ fn sparse_gather_i64_emits_typed_hip_kernel_and_runtime_allocation() {
     let result = codegen_hip(&dag, "test_sparse_gather_i64").unwrap();
     assert!(result.c_source.contains("kernel_gather_i64"));
     assert!(result.c_source.contains("const long long *indices"));
-    assert!(result.c_source.contains("CHELIS_I64"));
+    assert!(result.c_source.contains("CHELIS_DTYPE_I64"));
     assert!(
         result
             .c_source

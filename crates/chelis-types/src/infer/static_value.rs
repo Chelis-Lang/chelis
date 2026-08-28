@@ -272,7 +272,7 @@ pub(super) fn static_scatter(
         Some(StaticValue::Tensor(indices)),
         Some(StaticValue::Tensor(updates)),
         Some(StaticValue::Int(axis)),
-        Some(StaticValue::String(mode)),
+        Some(StaticValue::String(_mode)),
     ) = (
         args.first(),
         args.get(1),
@@ -296,7 +296,6 @@ pub(super) fn static_scatter(
         return StaticValue::Unknown;
     }
     if let Some(index_values) = &indices.int_values {
-        let mut seen = HashSet::new();
         for linear in 0..updates_shape_numel(&updates.shape) {
             let update_index = unravel_index(linear, &updates.shape);
             let gather_index = update_index[axis..axis + indices.shape.len()].to_vec();
@@ -310,21 +309,6 @@ pub(super) fn static_scatter(
                 );
                 return StaticValue::Unknown;
             }
-            if mode == "replace" {
-                let mut out_index = Vec::with_capacity(base.shape.len());
-                out_index.extend_from_slice(&update_index[..axis]);
-                out_index.push(gathered as usize);
-                out_index.extend_from_slice(&update_index[axis + indices.shape.len()..]);
-                let out_linear = ravel_index(&out_index, &base.shape);
-                if !seen.insert(out_linear) {
-                    push_static_runtime_error(
-                        expr,
-                        errors,
-                        format!("scatter replace mode rejects duplicate target index {out_linear}"),
-                    );
-                    return StaticValue::Unknown;
-                }
-            }
         }
     }
     StaticValue::Tensor(base.clone())
@@ -333,10 +317,10 @@ pub(super) fn static_scatter(
 /// Static check for the tensor-lane `scatter_replace(base, indices,
 /// updates, axis)` builtin. Mirrors `static_scatter` with `mode ==
 /// "replace"` semantics: validates the updates-shape contract,
-/// rejects out-of-bounds indices when statically knowable, and
-/// rejects duplicate target indices that would resolve via
-/// non-deterministic per-axis collisions. Differs from
-/// `static_scatter` in that there is no `mode` argument.
+/// rejects out-of-bounds indices when statically knowable, and permits
+/// duplicate target indices under [05-SPARSE-2]'s deterministic
+/// last-write-wins rule. Differs from `static_scatter` in that there is no
+/// `mode` argument.
 pub(super) fn static_scatter_replace(
     args: &[StaticValue],
     expr: &deep::Expr,
@@ -364,7 +348,6 @@ pub(super) fn static_scatter_replace(
         return StaticValue::Unknown;
     }
     if let Some(index_values) = &indices.int_values {
-        let mut seen = HashSet::new();
         for linear in 0..updates_shape_numel(&updates.shape) {
             let update_index = unravel_index(linear, &updates.shape);
             let gather_index = update_index[axis..axis + indices.shape.len()].to_vec();
@@ -375,22 +358,6 @@ pub(super) fn static_scatter_replace(
                     expr,
                     errors,
                     format!("scatter_replace index {gathered} out of bounds"),
-                );
-                return StaticValue::Unknown;
-            }
-            let mut out_index = Vec::with_capacity(base.shape.len());
-            out_index.extend_from_slice(&update_index[..axis]);
-            out_index.push(gathered as usize);
-            out_index.extend_from_slice(&update_index[axis + indices.shape.len()..]);
-            let out_linear = ravel_index(&out_index, &base.shape);
-            if !seen.insert(out_linear) {
-                push_static_runtime_error(
-                    expr,
-                    errors,
-                    format!(
-                        "scatter_replace rejects statically-known duplicate target index {out_linear}; \
-                         use scatter_add (or scatter with mode=\"add\") for commutative accumulation"
-                    ),
                 );
                 return StaticValue::Unknown;
             }

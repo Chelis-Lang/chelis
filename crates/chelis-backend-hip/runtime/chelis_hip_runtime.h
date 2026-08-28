@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "chelis_runtime_dtype.h"
 /* WS-A3: route bf16 / f16 matmul through `hipblasGemmEx` per
  * spec/04-type-system.md §5.7.1 (bf16/f16 forward + f32 accumulator).
  * We use the **legacy** hipblasGemmEx signature
@@ -174,10 +175,11 @@ extern hipblasStatus_t hipblasGemmEx(
 } while (0)
 
 /* GPU tensor: device pointer + shape metadata on host. */
+#define CHELIS_GPU_MAX_DIM 8
 typedef struct {
     float *data;                    /* device pointer (hipMalloc) */
-    int shape[CHELIS_MAX_DIM];
-    int strides[CHELIS_MAX_DIM];
+    int shape[CHELIS_GPU_MAX_DIM];
+    int strides[CHELIS_GPU_MAX_DIM];
     int ndim;
     int dtype;
     int size;                       /* total elements */
@@ -186,8 +188,14 @@ typedef struct {
 
 /* ---- Allocation / deallocation ---- */
 
+/* Device element width. This delegates to the runtime's single width
+ * authority rather than restating the table: a second copy is exactly how
+ * chelis#1360 happened, where this function said `bool` was one byte while
+ * the emitter still dispatched four-byte kernels over the buffer it sized.
+ * `chelis_dtype_size` rejects an unknown tag itself, and a HIP link already
+ * pulls in libchelis_runtime.a, so nothing is gained by inlining a copy. */
 static inline size_t chelis_gpu_dtype_size(int dtype) {
-    return chelis_runtime_dtype_size_checked(dtype);
+    return (size_t)chelis_dtype_size((chelis_dtype)dtype);
 }
 
 static inline chelis_gpu_tensor* chelis_gpu_alloc(int ndim, const int *shape, int dtype) {

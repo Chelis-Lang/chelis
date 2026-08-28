@@ -4,7 +4,8 @@
 //! and walks the DAG in topological order launching kernels on GPU.
 
 use chelis_ir::dag::{
-    Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType, symbolic_bindings,
+    Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, NodeId, RiscOp, RtDim, TensorType,
+    symbolic_bindings,
 };
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
@@ -956,6 +957,7 @@ impl HipEmitter {
                 "kernel_add{}",
                 Self::dtype_kernel_suffix(operand_prec())
             )),
+            RiscOp::Sub => Some(format!("kernel_sub_{}", kind_for_node(node)?.suffix())),
             RiscOp::Mul => Some(format!(
                 "kernel_mul{}",
                 Self::dtype_kernel_suffix(operand_prec())
@@ -976,7 +978,28 @@ impl HipEmitter {
                 Self::dtype_kernel_suffix(operand_prec())
             )),
             // WS-A2: float-only kernel templates remain `_<f32|f64>`-suffixed.
-            RiscOp::MaxElem => Some(format!("kernel_max_elem_{}", kind_for_node(node)?.suffix())),
+            RiscOp::MaxElem => Some(format!(
+                "kernel_max_elem{}",
+                Self::dtype_kernel_suffix(operand_prec())
+            )),
+            RiscOp::MinElem => Some(format!(
+                "kernel_min_elem{}",
+                Self::dtype_kernel_suffix(operand_prec())
+            )),
+            RiscOp::ExtremaAdjoint { kind, operand } => {
+                let extrema = match kind {
+                    ExtremaKind::Max => "max",
+                    ExtremaKind::Min => "min",
+                };
+                let selected = match operand {
+                    ExtremaOperand::Left => "left",
+                    ExtremaOperand::Right => "right",
+                };
+                Some(format!(
+                    "kernel_{extrema}_adjoint_{selected}_{}",
+                    kind_for_node(node)?.suffix()
+                ))
+            }
             RiscOp::CmpLt => {
                 // CmpLt has bool output but operand-precision storage;
                 // dispatch on the operand precision so the kernel name
@@ -1178,9 +1201,7 @@ impl HipEmitter {
     /// the in-precision identity kernel; when they differ, it's the
     /// cross-precision conversion kernel.
     fn cast_kernel_name(node: &DagNode, dag: &Dag) -> Result<String, Unsupported> {
-        let src_ty = &dag.get(node.inputs[0]).unwrap().output_type;
-        let dst_kind = Self::elem_kind(&node.output_type)?;
-        let src_kind = Self::elem_kind(src_ty)?;
+        let (src_kind, dst_kind) = Self::cast_elem_kinds(node, dag)?;
         Ok(if src_kind == dst_kind {
             format!("kernel_cast_{}", dst_kind.suffix())
         } else {
@@ -1224,6 +1245,11 @@ impl HipEmitter {
                     kernels::binary_elementwise_typed(name, "+", Self::dtype_c_type(prec))
                 }
             }
+            RiscOp::Sub => kernels::binary_elementwise(
+                name,
+                "-",
+                Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
+            ),
             RiscOp::Mul => {
                 let prec = operand_prec();
                 if matches!(prec, Prim::F32 | Prim::F64) {
@@ -1278,11 +1304,26 @@ impl HipEmitter {
                 );
                 kernels::binary_elementwise_typed(name, "/", Self::dtype_c_type(prec))
             }
-            RiscOp::MaxElem => kernels::binary_func(name, "fmaxf", elem_for_unary()?),
-            RiscOp::CmpLt => kernels::cmplt(
+            RiscOp::MaxElem | RiscOp::MinElem => {
+                let precision = operand_prec();
+                let is_max = matches!(op, RiscOp::MaxElem);
+                if precision.is_integer() {
+                    kernels::binary_extrema_integer(name, is_max, Self::dtype_c_type(precision))
+                } else {
+                    kernels::binary_extrema(name, is_max, elem_for_unary()?)
+                }
+            }
+            RiscOp::ExtremaAdjoint { kind, operand } => kernels::extrema_adjoint(
                 name,
-                Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
+                matches!(kind, ExtremaKind::Max),
+                matches!(operand, ExtremaOperand::Left),
+                elem_for_unary()?,
             ),
+            RiscOp::CmpLt => {
+                let operand_ty = &dag.get(node.inputs[0]).unwrap().output_type;
+                Self::require_result_width_matches_operand(node, operand_ty)?;
+                kernels::cmplt(name, Self::elem_kind(operand_ty)?)
+            }
             RiscOp::Neg => kernels::unary_prefix(name, "-", elem_for_unary()?),
             // IEEE reciprocal kernel.
             RiscOp::Recip => kernels::unary_recip(name, elem_for_unary()?),
@@ -1460,9 +1501,7 @@ impl HipEmitter {
     /// Cast / Realize / Copy kernel source: in-precision identity when
     /// src and dst kinds agree, cross-precision conversion otherwise.
     fn cast_kernel_source(name: &str, node: &DagNode, dag: &Dag) -> Result<String, Unsupported> {
-        let src_ty = &dag.get(node.inputs[0]).unwrap().output_type;
-        let dst_kind = Self::elem_kind(&node.output_type)?;
-        let src_kind = Self::elem_kind(src_ty)?;
+        let (src_kind, dst_kind) = Self::cast_elem_kinds(node, dag)?;
         Ok(if src_kind == dst_kind {
             kernels::cast(name, dst_kind)
         } else {
@@ -1536,6 +1575,12 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
+            RiscOp::Sub => self.emit_binary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
             RiscOp::Mul => self.emit_binary_launch(
                 id,
                 &resolved_kernel_name()?,
@@ -1556,7 +1601,13 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
-            RiscOp::MaxElem => self.emit_binary_launch(
+            RiscOp::MaxElem | RiscOp::MinElem => self.emit_binary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::ExtremaAdjoint { .. } => self.emit_ternary_launch(
                 id,
                 &resolved_kernel_name()?,
                 &node.inputs,
@@ -2141,6 +2192,54 @@ impl HipEmitter {
              &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
             a_stride_refs = self.stride_arg_refs(id, "a"),
             b_stride_refs = self.stride_arg_refs(id, "b"),
+            out_shape_refs = self.shape_arg_refs(id, "out"),
+        ));
+        self.emit_kernel_launch_expr(
+            &format!("mod_{kernel_name}"),
+            kernel_name,
+            &format!("(t{id}_size + 255) / 256"),
+            "256",
+            "args",
+        );
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    // ------------------------------------------------------------------
+    // Ternary elementwise kernel launch
+    // ------------------------------------------------------------------
+
+    fn emit_ternary_launch(
+        &mut self,
+        id: usize,
+        kernel_name: &str,
+        inputs: &[NodeId],
+        ty: &TensorType,
+    ) {
+        let a = inputs[0].0;
+        let b = inputs[1].0;
+        let g = inputs[2].0;
+        self.emit_slot_wrapper(id, ty);
+        self.line("{");
+        self.indent += 1;
+        self.line(&format!("int t{id}_size = d_t{id}->size;"));
+        for (name, source) in [("a", a), ("b", b), ("g", g)] {
+            self.emit_stride_vars(id, name, source);
+            self.line(&format!("int t{id}_{name}_ndim = d_t{source}->ndim;"));
+            self.line(&format!(
+                "int t{id}_{name}_size = d_t{source}->storage_size;"
+            ));
+        }
+        self.emit_shape_vars(id, "out", id);
+        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
+        self.line(&format!(
+            "void *args[] = {{ &d_t{a}->data, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
+             &d_t{b}->data, {b_stride_refs}, &t{id}_b_ndim, &t{id}_b_size, \
+             &d_t{g}->data, {g_stride_refs}, &t{id}_g_ndim, &t{id}_g_size, \
+             &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
+            a_stride_refs = self.stride_arg_refs(id, "a"),
+            b_stride_refs = self.stride_arg_refs(id, "b"),
+            g_stride_refs = self.stride_arg_refs(id, "g"),
             out_shape_refs = self.shape_arg_refs(id, "out"),
         ));
         self.emit_kernel_launch_expr(
@@ -3520,11 +3619,14 @@ impl HipEmitter {
             | RiscOp::Const { .. }
             | RiscOp::ConstTensor { .. }
             | RiscOp::Add
+            | RiscOp::Sub
             | RiscOp::Mul
             | RiscOp::Div
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
             | RiscOp::MaxElem
+            | RiscOp::MinElem
+            | RiscOp::ExtremaAdjoint { .. }
             | RiscOp::CmpLt
             | RiscOp::Neg
             | RiscOp::Recip
@@ -3576,25 +3678,6 @@ impl HipEmitter {
                 Self::node_is_statically_contiguous(dag, dag.get(id).unwrap().inputs[0])
             }
             RiscOp::Permute { .. } | RiscOp::Expand { .. } | RiscOp::Stride { .. } => false,
-        }
-    }
-
-    #[allow(dead_code)]
-    fn bytes_per_element(dtype: Prim) -> usize {
-        match dtype {
-            // WS-A4: i8/i16 element widths.
-            Prim::Int8 => 1,
-            Prim::Int16 => 2,
-            Prim::F32 | Prim::Bool | Prim::Int32 => 4,
-            Prim::F64 | Prim::Int64 => 8,
-            // WS-A3: bf16 / f16 storage is 2 bytes (same as the host
-            // runtime's `chelis_alloc` and the HIP runtime's
-            // `chelis_gpu_dtype_size`).
-            Prim::Bf16 | Prim::F16 => 2,
-            other => panic!(
-                "unsupported HIP dtype in device-memory estimate: {}",
-                other.name()
-            ),
         }
     }
 
@@ -3764,30 +3847,129 @@ impl HipEmitter {
         }
     }
 
+    /// Reject a node whose result is stored at a different width than its
+    /// operands.
+    ///
+    /// [`kernels::cmplt`] and its relatives declare **one** element type and
+    /// use it for both the operand pointers and the result pointer, so the
+    /// emitted kernel writes `result_count * operand_width` bytes into a
+    /// buffer the runtime sized at `result_count * result_width`. That is
+    /// only safe when the two widths agree.
+    ///
+    /// chelis#1360 is what it costs when they stop agreeing silently. `cmplt`
+    /// dispatched on its operand dtype alone and never asked about its bool
+    /// result, which was fine while the HIP runtime stored bool as a four-byte
+    /// `1.0f`/`0.0f` payload. chelis#1308's tagged carrier made bool one byte,
+    /// nothing here noticed, and `x < y` began overrunning its device
+    /// allocation by `3N` bytes while decoding the low bytes of the float
+    /// stream on readback.
+    ///
+    /// Both widths come from [`chelis_vocab::Repr`] rather than a local table,
+    /// so this check cannot drift away from what the allocator actually does.
+    fn require_result_width_matches_operand(
+        node: &DagNode,
+        operand_ty: &TensorType,
+    ) -> Result<(), Unsupported> {
+        let width = |ty: &TensorType| {
+            ty.precision
+                .runtime_dtype()
+                .map(|dtype| dtype.byte_width())
+                .ok()
+        };
+        let (Some(result_width), Some(operand_width)) =
+            (width(&node.output_type), width(operand_ty))
+        else {
+            // A dtype with no runtime representation at all is the ordinary
+            // unsupported-dtype path; let `elem_kind` name it.
+            return Ok(());
+        };
+        if result_width == operand_width {
+            return Ok(());
+        }
+        Err(Unsupported::new(
+            UnsupportedKind::Dtype(node.output_type.precision.name().to_string()),
+            "a HIP kernel template that stores its result at the operand width",
+            Stage::Codegen("hip"),
+            chelis_types::unimplemented_rejection!(
+                1364,
+                "this kernel writes its result at the operand's element width, and the \
+                 result dtype is stored at a different width; emitting it would overrun \
+                 the result allocation (chelis#1360). A typed kernel family for the \
+                 result dtype is chelis#1364"
+            ),
+        ))
+    }
+
+    /// Resolve the two arithmetic families used by the materialization
+    /// template shared by Cast, Copy, and Realize.
+    ///
+    /// A bool source or destination is not part of chelis#689's generic
+    /// float-family fallback class. It needs the exact one-byte read/write and
+    /// checked-cast behavior owned by chelis#1364. Keep that decision at this
+    /// operation-aware seam so unrelated bool arithmetic still receives the
+    /// generic no-typed-kernel rejection from [`Self::elem_kind`].
+    fn cast_elem_kinds(
+        node: &DagNode,
+        dag: &Dag,
+    ) -> Result<(kernels::ElemKind, kernels::ElemKind), Unsupported> {
+        let src_ty = &dag.get(node.inputs[0]).unwrap().output_type;
+        let operation = match &node.op {
+            RiscOp::Cast { .. } => "cast",
+            RiscOp::Copy => "copy",
+            RiscOp::Realize => "realize",
+            _ => unreachable!("cast_elem_kinds is only for Cast, Copy, and Realize"),
+        };
+        if src_ty.precision == Prim::Bool || node.output_type.precision == Prim::Bool {
+            return Err(Unsupported::new(
+                UnsupportedKind::Dtype(Prim::Bool.name().to_string()),
+                format!("HIP {operation} materialization requiring a one-byte bool kernel family"),
+                Stage::Codegen("hip"),
+                chelis_types::unimplemented_rejection!(
+                    1364,
+                    "HIP has no Bool8 materialization family: casts to bool need a checked \
+                     one-byte writer, casts from bool need a one-byte reader, and bool \
+                     Copy/Realize need an exact one-byte identity kernel"
+                ),
+            ));
+        }
+        let dst_kind = Self::elem_kind(&node.output_type)?;
+        let src_kind = Self::elem_kind(src_ty)?;
+        Ok((src_kind, dst_kind))
+    }
+
     /// Map a tensor's precision to a [`kernels::ElemKind`] for kernel
-    /// emission. The HIP runtime stores `bool` tensors as 4-byte values
-    /// (per `chelis_gpu_dtype_size`), so kernels emit them under the
-    /// `f32` path — the cmplt convention is `1.0f`/`0.0f` written into a
-    /// `float *` GPU buffer, and Cast-to-bool likewise materializes a
-    /// 4-byte payload. f64 gets its own variant. Other precisions fall
-    /// outside the WS-A2 scope (bf16/f16 elementwise kernels are
-    /// matmul-only via `hipblasGemmEx` in WS-A3; i8/i16 routes through
-    /// the WS-A4 typed templates via [`Self::dtype_c_type`]) and panic
-    /// so callers see the limit immediately.
+    /// emission. `ElemKind` names an f32/f64 arithmetic kernel family, so
+    /// exactly f32 and f64 map; every other precision is a section C2
+    /// diagnostic. bf16/f16 elementwise kernels are matmul-only via
+    /// `hipblasGemmEx` in WS-A3, and i8/i16 route through the WS-A4 typed
+    /// templates via [`Self::dtype_c_type`].
+    ///
     /// chelis#730 Phase 1 (census row 5, chelis#689): the former `_ =>
     /// ElemKind::F32` wildcard silently dispatched f32 kernels over
     /// non-f32 buffers - runtime-confirmed corrupt on gfx1151 (int64
     /// `neg` read 8-byte lanes as 4-byte floats and left half the output
-    /// buffer unwritten). Every precision without an f32/f64 kernel
-    /// family is now a section C2 diagnostic; the ops with typed WS-A4
-    /// templates (Add/Mul/Div/FloorDiv/TruncDiv, pad/shrink, i8/i16 sum)
-    /// never call this shorthand. Exhaustive per section C4.1 - no
-    /// wildcard arm.
+    /// buffer unwritten). The ops with typed WS-A4 templates
+    /// (Add/Mul/Div/FloorDiv/TruncDiv, pad/shrink, i8/i16 sum) never call
+    /// this shorthand. Exhaustive per section C4.1 - no wildcard arm.
+    ///
+    /// chelis#1360: `bool` used to map here too, because the HIP runtime
+    /// stored bool tensors as 4-byte `1.0f`/`0.0f` payloads and the f32
+    /// family happened to have the right width. chelis#1308 replaced that
+    /// encoding with the tagged carrier's one-byte `Repr::Bool8`, and the
+    /// arm became the same defect chelis#689 closed: `cmplt` and
+    /// `Cast`-to-bool wrote `N * 4` bytes into an `N * 1` byte
+    /// `hipMalloc`, and the one-byte readback decoded the low bytes of the
+    /// float stream. bool now rejects, because HIP has no bool kernel
+    /// family to dispatch to - restoring the f32-encoded payload would
+    /// undo chelis#1308 and put this lane back into chelis#892's shape.
+    /// A real one-byte bool family is chelis#1364; it owes a device-side
+    /// checked cast, which this lane never had even at four bytes.
     fn elem_kind(ty: &TensorType) -> Result<kernels::ElemKind, Unsupported> {
         Ok(match ty.precision {
-            Prim::F32 | Prim::Bool => kernels::ElemKind::F32,
+            Prim::F32 => kernels::ElemKind::F32,
             Prim::F64 => kernels::ElemKind::F64,
-            Prim::F16
+            Prim::Bool
+            | Prim::F16
             | Prim::Bf16
             | Prim::F8e4m3
             | Prim::Int8
@@ -3820,7 +4002,12 @@ impl HipEmitter {
         match p {
             Prim::F32 => "float",
             Prim::F64 => "double",
-            Prim::Bool => "float", /* bool tensors store as float on the GPU lane */
+            /* chelis#1308's tagged carrier stores bool as `Repr::Bool8`:
+             * exactly one byte, holding exactly 0 or 1 (`Bool8::get` is
+             * `== 1`, and `Bool8::from_u8` rejects every other byte). Use
+             * an exact-width unsigned type, never `bool`, whose width C++
+             * does not fix. This said "float" until chelis#1360. */
+            Prim::Bool => "unsigned char",
             Prim::Int8 => "int8_t",
             Prim::Int16 => "int16_t",
             Prim::Int32 => "int32_t",
@@ -3904,6 +4091,117 @@ impl HipEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Width of a C type spelling this backend is allowed to emit.
+    ///
+    /// The list is closed on purpose, and an unrecognised spelling is a test
+    /// failure rather than a skipped row: an allowlist of "known widths" can
+    /// never be complete, so a new spelling has to be classified here before
+    /// it can reach a kernel. Same discipline the capacity census applies to
+    /// C type words.
+    fn c_type_width(spelling: &str) -> usize {
+        match spelling {
+            "unsigned char" | "int8_t" => 1,
+            "uint16_t" | "int16_t" => 2,
+            "float" | "int32_t" => 4,
+            "double" | "int64_t" => 8,
+            other => panic!(
+                "unclassified HIP element type `{other}`: add it to this table with its \
+                 exact width before emitting it (chelis#1360)"
+            ),
+        }
+    }
+
+    /// chelis#1360's tripwire.
+    ///
+    /// Every dtype the emitter is willing to name a device C type for must name
+    /// one whose width equals the width the runtime allocates for it. The
+    /// defect this catches is not a wrong line of code anywhere: it is two
+    /// constants in different files disagreeing, which every individual
+    /// emission site reads as correct.
+    ///
+    /// Before chelis#1308 this passed with `Prim::Bool => "float"`, because
+    /// `Repr::Bool` was four bytes. chelis#1308 made it `Repr::Bool8`, and this
+    /// assertion is what should have gone red that day.
+    ///
+    /// `Prim` is matched exhaustively so that adding a dtype stops this
+    /// compiling until the new dtype is classified, rather than silently
+    /// leaving it unchecked.
+    #[test]
+    fn every_emittable_dtype_c_type_has_the_runtime_storage_width() {
+        for prim in [
+            Prim::F32,
+            Prim::F64,
+            Prim::Bool,
+            Prim::Int8,
+            Prim::Int16,
+            Prim::Int32,
+            Prim::Int64,
+            Prim::F16,
+            Prim::Bf16,
+        ] {
+            // Exhaustive by construction: a new `Prim` variant makes this
+            // match non-exhaustive and fails the build.
+            match prim {
+                Prim::F32
+                | Prim::F64
+                | Prim::Bool
+                | Prim::Int8
+                | Prim::Int16
+                | Prim::Int32
+                | Prim::Int64
+                | Prim::F16
+                | Prim::Bf16
+                | Prim::F8e4m3
+                | Prim::String => {}
+            }
+            let runtime_width = prim
+                .runtime_dtype()
+                .unwrap_or_else(|error| panic!("{} has no runtime dtype: {error}", prim.name()))
+                .byte_width();
+            let emitted = HipEmitter::dtype_c_type(prim);
+            assert_eq!(
+                c_type_width(emitted),
+                runtime_width,
+                "HIP emits `{emitted}` for `{}`, which the runtime stores at {runtime_width} \
+                 byte(s); a kernel over that buffer would read or write the wrong span",
+                prim.name()
+            );
+        }
+    }
+
+    /// The `ElemKind` arithmetic families carry the same obligation: an
+    /// `ElemKind` reached from a dtype must spell a C type of that dtype's
+    /// storage width, or the kernel walks the buffer at the wrong stride.
+    #[test]
+    fn every_elem_kind_family_matches_its_dtype_storage_width() {
+        for prim in [Prim::F32, Prim::F64] {
+            let ty = TensorType {
+                dims: vec![DimInfo::Lit(1)],
+                precision: prim,
+            };
+            let kind = HipEmitter::elem_kind(&ty).expect("f32/f64 have kernel families");
+            let runtime_width = prim.runtime_dtype().expect("runtime dtype").byte_width();
+            assert_eq!(
+                c_type_width(kind.c_type()),
+                runtime_width,
+                "{}",
+                prim.name()
+            );
+        }
+
+        // bool has no arithmetic family. It mapped to `ElemKind::F32` until
+        // chelis#1360, which is exactly the four-versus-one byte mismatch the
+        // test above now forbids at the C-type level.
+        let bool_ty = TensorType {
+            dims: vec![DimInfo::Lit(1)],
+            precision: Prim::Bool,
+        };
+        assert!(
+            HipEmitter::elem_kind(&bool_ty).is_err(),
+            "bool must not resolve to an f32/f64 arithmetic kernel family"
+        );
+    }
 
     #[test]
     fn issue_878_i64_pad_literal_spelling_is_portable_at_signed_min() {

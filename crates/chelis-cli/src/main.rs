@@ -9163,43 +9163,13 @@ fn tensor_manifest_observation_driver(func_name: &str, root_names: &[String]) ->
         r#"
 
 static void chelis_manifest_print_tensor_elem(const chelis_tensor *tensor, int64_t index) {
-    char buffer[CHELIS_FORMAT_SHORTEST_BUF];
-    switch (tensor->dtype) {
-        case CHELIS_F64:
-            chelis_format_shortest(((const double *)tensor->data)[index], CHELIS_F64, buffer, sizeof buffer);
-            fputs(buffer, stdout);
-            break;
-        case CHELIS_F32:
-            chelis_format_shortest((double)((const float *)tensor->data)[index], CHELIS_F32, buffer, sizeof buffer);
-            fputs(buffer, stdout);
-            break;
-        case CHELIS_F16:
-            chelis_format_shortest((double)chelis_f16_to_f32(((const uint16_t *)tensor->data)[index]), CHELIS_F16, buffer, sizeof buffer);
-            fputs(buffer, stdout);
-            break;
-        case CHELIS_BF16:
-            chelis_format_shortest((double)chelis_bf16_to_f32(((const uint16_t *)tensor->data)[index]), CHELIS_BF16, buffer, sizeof buffer);
-            fputs(buffer, stdout);
-            break;
-        case CHELIS_I64:
-            printf("%lld", (long long)((const int64_t *)tensor->data)[index]);
-            break;
-        case CHELIS_I32:
-            printf("%d", (int)((const int32_t *)tensor->data)[index]);
-            break;
-        case CHELIS_I16:
-            printf("%d", (int)((const int16_t *)tensor->data)[index]);
-            break;
-        case CHELIS_I8:
-            printf("%d", (int)((const int8_t *)tensor->data)[index]);
-            break;
-        case CHELIS_BOOL:
-            fputs(((const float *)tensor->data)[index] != 0.0f ? "true" : "false", stdout);
-            break;
-        default:
-            fprintf(stderr, "unsupported: manifest observation of runtime dtype id %d [05-UNS-1]\n", tensor->dtype);
-            exit(1);
-    }
+    uint64_t bits = 0;
+    int64_t width = chelis_dtype_size(tensor->dtype);
+    memcpy(&bits, (const uint8_t *)tensor->data + index * width, (size_t)width);
+    chelis_scalar scalar = chelis_scalar_from_bits(tensor->dtype, bits);
+    chelis_string text = chelis_string_from_scalar(scalar);
+    fputs(chelis_string_data(text), stdout);
+    chelis_string_release(text);
 }
 
 static void chelis_manifest_print_tensor(const chelis_tensor *tensor) {
@@ -9207,12 +9177,12 @@ static void chelis_manifest_print_tensor(const chelis_tensor *tensor) {
         fputs("unsupported: [05-UNS-1] Tensor root returned no tensor\n", stderr);
         exit(1);
     }
-    if (tensor->ndim == 0) {
+    if (tensor->rank == 0) {
         chelis_manifest_print_tensor_elem(tensor, 0);
         return;
     }
     fputs("tensor(shape=[", stdout);
-    for (int64_t dim = 0; dim < tensor->ndim; ++dim) {
+    for (int32_t dim = 0; dim < tensor->rank; ++dim) {
         if (dim > 0) fputs(", ", stdout);
         printf("%lld", (long long)tensor->shape[dim]);
     }
@@ -9240,6 +9210,51 @@ static void chelis_manifest_print_tensor(const chelis_tensor *tensor) {
     }
     source.push_str("    return 0;\n}\n");
     source
+}
+
+#[cfg(test)]
+mod exact_manifest_observation_driver_tests {
+    use super::tensor_manifest_observation_driver;
+
+    #[test]
+    fn manifest_tensor_elements_render_through_exact_tagged_scalars() {
+        let source = tensor_manifest_observation_driver("entry", &["root".to_string()]);
+        for required in [
+            "chelis_scalar_from_bits",
+            "chelis_string_from_scalar",
+            "chelis_string_data",
+            "chelis_string_release",
+            "chelis_dtype_size",
+            "tensor->dtype",
+            "tensor->rank",
+        ] {
+            assert!(
+                source.contains(required),
+                "manifest observation driver is missing `{required}`:\n{source}"
+            );
+        }
+        for retired in [
+            "chelis_format_shortest",
+            "CHELIS_F64",
+            "CHELIS_BOOL",
+            "tensor->ndim",
+        ] {
+            assert!(
+                !source.contains(retired),
+                "manifest observation driver restored retired ABI spelling `{retired}`:\n{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_bool_elements_read_one_byte_storage() {
+        let source = tensor_manifest_observation_driver("entry", &["root".to_string()]);
+        assert!(source.contains("(const uint8_t *)tensor->data"), "{source}");
+        assert!(
+            !source.contains("(const float *)tensor->data)[index] != 0.0f"),
+            "manifest Bool observation retained four-byte float storage:\n{source}"
+        );
+    }
 }
 
 fn tensor_manifest_root_names(

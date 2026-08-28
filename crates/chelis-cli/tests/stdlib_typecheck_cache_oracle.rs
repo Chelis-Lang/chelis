@@ -64,7 +64,6 @@ fn stdlib_corpus(scratch: &Path) -> Vec<PathBuf> {
     let std_root = manifest.join("../../packages/chelis-std");
     let mut paths: Vec<PathBuf> = [
         "src/init/kaiming.ch",
-        "src/init/xavier.ch",
         "src/init/random.ch",
         "src/init/xavierext.ch",
         "src/tensor/construct.ch",

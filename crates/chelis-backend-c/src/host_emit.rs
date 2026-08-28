@@ -193,35 +193,71 @@ use std::collections::{HashMap, HashSet};
 /// function not yet in the summary, an unmodeled `HostExprKind`), so the
 /// emit site over-retains rather than risking a use-after-free.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ReturnsArg {
+enum ParamAlias {
     Indices(HashSet<usize>),
     Any,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReturnsArg {
+    params: ParamAlias,
+    /// chelis#1222: the result may be a value the caller never handed in --
+    /// a top-level binding read as a free variable somewhere in the body
+    /// (issue #352 hoists such a binding to file scope, so the body reads
+    /// it by name). `main` already owns that allocation through the
+    /// binding itself, so a caller that also claimed the call result would
+    /// release one allocation twice. Widened exactly like `params`: any
+    /// arm, any `let` body, or any callee that can hand back an enclosing
+    /// scope's value sets it.
+    outer: bool,
+}
+
 impl ReturnsArg {
     fn empty() -> Self {
-        ReturnsArg::Indices(HashSet::new())
+        ReturnsArg {
+            params: ParamAlias::Indices(HashSet::new()),
+            outer: false,
+        }
+    }
+
+    /// A result that is an enclosing scope's value rather than a fresh
+    /// allocation or one of this function's own parameters (chelis#1222).
+    fn outer() -> Self {
+        ReturnsArg {
+            params: ParamAlias::Indices(HashSet::new()),
+            outer: true,
+        }
     }
 
     /// Join two result-alias summaries (the `if`/`match`-arm union or the
     /// fixpoint widening). `Any` absorbs everything; otherwise the index
-    /// sets are unioned.
+    /// sets are unioned and the outer-alias flags are or-ed.
     fn join(self, other: ReturnsArg) -> ReturnsArg {
-        match (self, other) {
-            (ReturnsArg::Any, _) | (_, ReturnsArg::Any) => ReturnsArg::Any,
-            (ReturnsArg::Indices(mut a), ReturnsArg::Indices(b)) => {
+        let params = match (self.params, other.params) {
+            (ParamAlias::Any, _) | (_, ParamAlias::Any) => ParamAlias::Any,
+            (ParamAlias::Indices(mut a), ParamAlias::Indices(b)) => {
                 a.extend(b);
-                ReturnsArg::Indices(a)
+                ParamAlias::Indices(a)
             }
+        };
+        ReturnsArg {
+            params,
+            outer: self.outer || other.outer,
         }
     }
 
     /// Does the result possibly alias parameter index `i`?
     fn may_return(&self, i: usize) -> bool {
-        match self {
-            ReturnsArg::Any => true,
-            ReturnsArg::Indices(s) => s.contains(&i),
+        match &self.params {
+            ParamAlias::Any => true,
+            ParamAlias::Indices(s) => s.contains(&i),
         }
+    }
+
+    /// Does the result possibly alias a value owned by an enclosing scope
+    /// (chelis#1222)? A caller must not claim ownership of such a result.
+    fn may_return_outer(&self) -> bool {
+        self.outer
     }
 }
 
@@ -259,7 +295,13 @@ fn analyze_returns_arg(program: &HostProgram) -> HashMap<String, ReturnsArg> {
                 .map(|(i, p)| (p.name.as_str(), i))
                 .collect();
             let mut env: HashMap<String, ReturnsArg> = HashMap::new();
-            let computed = result_alias_set(&function.body, &param_index, &summary, &mut env);
+            let computed = result_alias_set(
+                &function.body,
+                &param_index,
+                &summary,
+                &mut env,
+                &function.tensor_helpers,
+            );
             let entry = summary
                 .entry(function.name.clone())
                 .or_insert_with(ReturnsArg::empty);
@@ -292,34 +334,97 @@ fn result_alias_set(
     param_index: &HashMap<&str, usize>,
     summary: &HashMap<String, ReturnsArg>,
     env: &mut HashMap<String, ReturnsArg>,
+    helpers: &[HostTensorHelper],
 ) -> ReturnsArg {
     match &expr.kind {
         HostExprKind::Var(name, _) => {
-            if let Some(&i) = param_index.get(name.as_str()) {
-                ReturnsArg::Indices(HashSet::from([i]))
-            } else if let Some(set) = env.get(name) {
+            // chelis#1222: `env` first, `param_index` second. Parameters are
+            // the function's outermost scope, so any binder currently in
+            // `env` shadows one that reuses its name. Asking `param_index`
+            // first made a `let` binder invisible to the analysis: for
+            // `def f(p) = { p = g  p }` the body reported "returns parameter
+            // 0" instead of `outer`, and the caller then claimed the
+            // captured global `g` and released it a second time. The three
+            // binder arms below already save and restore what they shadow,
+            // so `env` is the authority on what a name means here.
+            if let Some(set) = env.get(name) {
                 set.clone()
-            } else {
-                // An outer-scope / global name: not one of this
-                // function's parameters, so it does not alias any
-                // parameter. (A captured global is owned elsewhere.)
+            } else if let Some(&i) = param_index.get(name.as_str()) {
+                ReturnsArg {
+                    params: ParamAlias::Indices(HashSet::from([i])),
+                    outer: false,
+                }
+            } else if name == "Nil" || name == "None" {
+                // Emitted as a fresh empty list / `None` payload, not as a
+                // read of an enclosing binding.
                 ReturnsArg::empty()
+            } else {
+                // A free variable: a top-level binding this function
+                // captured. The allocation is owned elsewhere (chelis#1222),
+                // so the result is borrowed rather than fresh, and a caller
+                // that released it would release it a second time.
+                ReturnsArg::outer()
             }
         }
         HostExprKind::Let { bindings, body, .. } => {
+            // chelis#1222: save what each binder shadows and put it back at
+            // the end, the way the `MatchOption` and `MatchAdt` arms below
+            // already do. Without this a `let` binder's meaning outlives its
+            // block: a sibling branch reading the same NAME finds the inner
+            // (fresh) set instead of falling through to `outer()`, the
+            // summary reports `may_return_outer() == false` for a function
+            // that does return an outer value, and the caller then claims a
+            // borrowed result and releases it twice.
+            //
+            // The insert stays AFTER the value walk: the initializer is
+            // evaluated in the enclosing scope and may read the outer
+            // meaning of the very name being bound.
+            let mut saved: Vec<(String, Option<ReturnsArg>)> = Vec::new();
             for binding in bindings {
-                let set = result_alias_set(&binding.value, param_index, summary, env);
-                env.insert(binding.name.clone(), set);
+                // A refcount-tracked binding OWNS its allocation: the
+                // emitter retains at the value temp on a bare copy
+                // (whatever the source's provenance) and retains again at
+                // a result leaf naming the binding, so a return THROUGH
+                // such a binding hands the caller an owned reference, not
+                // a borrow of the parameter or captured value it started
+                // from. Its result-alias meaning is therefore `empty`.
+                // Propagating the value's alias set here instead made the
+                // caller's call-escape retain compensate an already-owned
+                // return: for `def f(p) = { d = p  d }`, three retains
+                // against two releases, one leaked allocation per call
+                // (PR #1302 round-2 red-team finding). Non-refcounted
+                // carriers (tensors above all) have no retain machinery
+                // and still return true borrows, so they keep the
+                // propagated set -- blanking those would let a caller
+                // claim a borrowed tensor and restore the chelis#1222
+                // double free.
+                let set = if retain_call(&binding.name, &binding.ty).is_some() {
+                    ReturnsArg::empty()
+                } else {
+                    result_alias_set(&binding.value, param_index, summary, env, helpers)
+                };
+                saved.push((binding.name.clone(), env.insert(binding.name.clone(), set)));
             }
-            result_alias_set(body, param_index, summary, env)
+            let result = result_alias_set(body, param_index, summary, env, helpers);
+            for (name, prev) in saved.into_iter().rev() {
+                match prev {
+                    Some(set) => {
+                        env.insert(name, set);
+                    }
+                    None => {
+                        env.remove(&name);
+                    }
+                }
+            }
+            result
         }
         HostExprKind::If {
             then_expr,
             else_expr,
             ..
         } => {
-            let t = result_alias_set(then_expr, param_index, summary, env);
-            let e = result_alias_set(else_expr, param_index, summary, env);
+            let t = result_alias_set(then_expr, param_index, summary, env, helpers);
+            let e = result_alias_set(else_expr, param_index, summary, env, helpers);
             t.join(e)
         }
         HostExprKind::MatchOption {
@@ -332,7 +437,7 @@ fn result_alias_set(
             // fresh scalar/boxed extraction), not a parameter; shadow any
             // outer entry with the empty set for the `some` arm.
             let prev = env.insert(bind_name.clone(), ReturnsArg::empty());
-            let s = result_alias_set(some_expr, param_index, summary, env);
+            let s = result_alias_set(some_expr, param_index, summary, env, helpers);
             match prev {
                 Some(set) => {
                     env.insert(bind_name.clone(), set);
@@ -341,7 +446,7 @@ fn result_alias_set(
                     env.remove(bind_name);
                 }
             }
-            let n = result_alias_set(none_expr, param_index, summary, env);
+            let n = result_alias_set(none_expr, param_index, summary, env, helpers);
             s.join(n)
         }
         HostExprKind::MatchAdt {
@@ -365,7 +470,13 @@ fn result_alias_set(
                         )
                     })
                     .collect();
-                acc = acc.join(result_alias_set(&arm.expr, param_index, summary, env));
+                acc = acc.join(result_alias_set(
+                    &arm.expr,
+                    param_index,
+                    summary,
+                    env,
+                    helpers,
+                ));
                 for (name, prev) in saved {
                     match prev {
                         Some(set) => {
@@ -378,7 +489,13 @@ fn result_alias_set(
                 }
             }
             if let Some(default) = default_expr {
-                acc = acc.join(result_alias_set(default, param_index, summary, env));
+                acc = acc.join(result_alias_set(
+                    default,
+                    param_index,
+                    summary,
+                    env,
+                    helpers,
+                ));
             }
             acc
         }
@@ -389,22 +506,45 @@ fn result_alias_set(
             // its arguments (conservative top): any argument that itself
             // aliases a parameter then propagates.
             let callee = summary.get(function);
-            let mut acc = ReturnsArg::empty();
+            // chelis#1222: an outer-scope value the callee hands back is
+            // still an outer-scope value here. An unsummarized callee is
+            // conservatively assumed to do so.
+            let mut acc = match callee {
+                Some(s) if !s.may_return_outer() => ReturnsArg::empty(),
+                _ => ReturnsArg::outer(),
+            };
             for (i, arg) in args.iter().enumerate() {
                 let returns_this = match callee {
                     Some(s) => s.may_return(i),
                     None => true,
                 };
                 if returns_this {
-                    acc = acc.join(result_alias_set(arg, param_index, summary, env));
+                    acc = acc.join(result_alias_set(arg, param_index, summary, env, helpers));
                 }
             }
             acc
         }
-        HostExprKind::WithSeed { body, .. } => result_alias_set(body, param_index, summary, env),
-        // Constructors, literals, builtins, field access, the iterator
-        // lanes, and tensor calls all build fresh allocations whose
-        // result does not alias an incoming parameter pointer. (A builtin
+        HostExprKind::WithSeed { body, .. } => {
+            result_alias_set(body, param_index, summary, env, helpers)
+        }
+        // chelis#1222: an identity tensor helper's whole body is
+        // `outputs[0] = inputs[0];` (see `identity_helper_input`), so the
+        // call hands back its argument's pointer rather than allocating.
+        // Its provenance is the argument's. Every other helper writes a
+        // freshly allocated `chelis_contiguous` output, which is why the
+        // catch-all below reports a fresh result for the rest.
+        HostExprKind::TensorCall { helper, args, .. } => {
+            match (
+                helpers.get(*helper).and_then(identity_helper_input),
+                args.first(),
+            ) {
+                (Some(_), Some(arg)) => result_alias_set(arg, param_index, summary, env, helpers),
+                _ => ReturnsArg::empty(),
+            }
+        }
+        // Constructors, literals, builtins, field access, and the iterator
+        // lanes all build fresh allocations whose result does not alias an
+        // incoming parameter pointer. (A builtin
         // like `id` is not a user function call; the few identity-shaped
         // builtins still hand back a retained/independent reference, so
         // treating them as fresh here is sound for the block-release
@@ -434,9 +574,9 @@ pub(crate) fn emit_host_abi_program(
     // no declaration in scope.
     let mut body: Vec<String> = Vec::new();
     let mut helper_requirements = HelperRequirements::default();
-    append_tensor_reshape_helper(&mut body);
-    body.push(String::new());
     append_scalar_conversion_helpers(&mut body);
+    body.push(String::new());
+    append_tensor_reshape_helper(&mut body);
     body.push(String::new());
     append_tensor_print_helper(&mut body);
     body.push(String::new());
@@ -570,10 +710,29 @@ pub(crate) fn emit_host_abi_program(
         emit_main(&mut body, program_name, program, &returns_arg, &hoisted)?;
     }
 
+    // Keep the JSON-only sorting machinery out of unrelated generated
+    // translation units. Detect the structured call emitted above, then
+    // prepend its definition so C never relies on an implicit declaration.
+    let needs_json_canonical_object_helper = body
+        .iter()
+        .any(|line| line.contains(" = chelis_json_canonical_object_entries("));
+    if needs_json_canonical_object_helper {
+        let mut json_helpers = Vec::new();
+        append_json_canonical_object_helpers(&mut json_helpers);
+        json_helpers.push(String::new());
+        json_helpers.extend(body);
+        body = json_helpers;
+    }
+
     let mut out: Vec<String> = vec![
         "#include \"chelis_runtime.h\"".to_string(),
         "#include <assert.h>".to_string(),
         "#include <math.h>".to_string(),
+    ];
+    if needs_json_canonical_object_helper {
+        out.push("#include <stdlib.h>".to_string());
+    }
+    out.extend([
         String::new(),
         // chelis#943: emitter-internal accumulator ABI. Deliberately absent
         // from the published chelis_runtime.h (the capacity census governs
@@ -583,7 +742,7 @@ pub(crate) fn emit_host_abi_program(
         "chelis_list *chelis_list_with_capacity(int64_t capacity);".to_string(),
         "void chelis_list_push(chelis_list *list, chelis_value value);".to_string(),
         "void chelis_list_extend(chelis_list *list, const chelis_list *src);".to_string(),
-    ];
+    ]);
     if helper_requirements.needs_blas_header {
         out.push("#include \"chelis_blas.h\"".to_string());
     }
@@ -722,6 +881,83 @@ fn append_uniform_sample_helper(out: &mut Vec<String>) {
         "#define CHELIS_EFFECTIVE_UNIFORM_SEED(seed) chelis_effective_uniform_seed(seed)"
             .to_string(),
     );
+}
+
+/// Translation-unit-local support for Std.Io.Json's canonical object
+/// observation. Generic Dict iteration remains insertion ordered; this helper
+/// sorts only the private JSON serializer boundary. Comparing one Unicode
+/// scalar slice at a time handles prefixes and embedded U+0000, while UTF-8's
+/// byte order preserves scalar-value order for every nonzero scalar.
+fn append_json_canonical_object_helpers(out: &mut Vec<String>) {
+    for line in [
+        "static int chelis_json_compare_strings(chelis_string lhs, chelis_string rhs) {",
+        "    int64_t lhs_len = chelis_string_len(lhs);",
+        "    int64_t rhs_len = chelis_string_len(rhs);",
+        "    int64_t common = lhs_len < rhs_len ? lhs_len : rhs_len;",
+        "    for (int64_t index = 0; index < common; ++index) {",
+        "        chelis_string lhs_scalar = chelis_string_slice(lhs, index, 1);",
+        "        chelis_string rhs_scalar = chelis_string_slice(rhs, index, 1);",
+        "        const unsigned char *lhs_bytes = (const unsigned char *)chelis_string_data(lhs_scalar);",
+        "        const unsigned char *rhs_bytes = (const unsigned char *)chelis_string_data(rhs_scalar);",
+        "        int result = 0;",
+        "        int64_t byte = 0;",
+        "        while (lhs_bytes[byte] != 0 && rhs_bytes[byte] != 0 && lhs_bytes[byte] == rhs_bytes[byte]) {",
+        "            ++byte;",
+        "        }",
+        "        if (lhs_bytes[byte] < rhs_bytes[byte]) result = -1;",
+        "        if (lhs_bytes[byte] > rhs_bytes[byte]) result = 1;",
+        "        chelis_string_release(lhs_scalar);",
+        "        chelis_string_release(rhs_scalar);",
+        "        if (result != 0) return result;",
+        "    }",
+        "    return lhs_len < rhs_len ? -1 : (lhs_len > rhs_len ? 1 : 0);",
+        "}",
+        "",
+        "static int chelis_json_compare_entry_keys(chelis_value lhs_entry, chelis_value rhs_entry) {",
+        "    chelis_value lhs_key = chelis_tuple_get(chelis_value_as_tuple(lhs_entry), 0);",
+        "    chelis_value rhs_key = chelis_tuple_get(chelis_value_as_tuple(rhs_entry), 0);",
+        "    int result = chelis_json_compare_strings(chelis_value_as_string(lhs_key), chelis_value_as_string(rhs_key));",
+        "    chelis_value_release(lhs_key);",
+        "    chelis_value_release(rhs_key);",
+        "    return result;",
+        "}",
+        "",
+        "static chelis_list *chelis_json_canonical_object_entries(const chelis_dict *dict) {",
+        "    chelis_list *source = chelis_dict_entries(dict);",
+        "    int64_t len = chelis_list_len(source);",
+        "    int64_t *order = len > 0 ? (int64_t *)malloc((size_t)len * sizeof(int64_t)) : NULL;",
+        "    if (len > 0 && order == NULL) {",
+        "        chelis_fail(chelis_string_from_cstr(\"JSON canonical object ordering allocation failed\"));",
+        "    }",
+        "    for (int64_t index = 0; index < len; ++index) {",
+        "        order[index] = index;",
+        "        int64_t cursor = index;",
+        "        while (cursor > 0) {",
+        "            chelis_value lhs = chelis_list_index(source, order[cursor - 1]);",
+        "            chelis_value rhs = chelis_list_index(source, order[cursor]);",
+        "            int comparison = chelis_json_compare_entry_keys(lhs, rhs);",
+        "            chelis_value_release(lhs);",
+        "            chelis_value_release(rhs);",
+        "            if (comparison <= 0) break;",
+        "            int64_t swap = order[cursor - 1];",
+        "            order[cursor - 1] = order[cursor];",
+        "            order[cursor] = swap;",
+        "            --cursor;",
+        "        }",
+        "    }",
+        "    chelis_list *result = chelis_list_with_capacity(len);",
+        "    for (int64_t index = 0; index < len; ++index) {",
+        "        chelis_value entry = chelis_list_index(source, order[index]);",
+        "        chelis_list_push(result, entry);",
+        "        chelis_value_release(entry);",
+        "    }",
+        "    free(order);",
+        "    chelis_list_release(source);",
+        "    return result;",
+        "}",
+    ] {
+        out.push(line.to_string());
+    }
 }
 
 /// Instantiate the scalar host-expression path at each concrete float ABI.
@@ -996,16 +1232,74 @@ fn append_scalar_conversion_helpers(out: &mut Vec<String>) {
     out.push("#define CHELIS_PRIVATE_SCALAR_TENSOR_HELPERS".to_string());
     out.extend(
         [
+            "static uint32_t chelis_host_f32_bits(float value) {",
+            "    uint32_t bits; memcpy(&bits, &value, sizeof bits); return bits;",
+            "}",
+            "",
+            "static uint64_t chelis_host_f64_bits(double value) {",
+            "    uint64_t bits; memcpy(&bits, &value, sizeof bits); return bits;",
+            "}",
+            "",
+            "static chelis_scalar chelis_host_scalar_from_i8(int8_t value) {",
+            "    return chelis_scalar_from_bits(CHELIS_DTYPE_I8, (uint64_t)(uint8_t)value);",
+            "}",
+            "static chelis_scalar chelis_host_scalar_from_i16(int16_t value) {",
+            "    return chelis_scalar_from_bits(CHELIS_DTYPE_I16, (uint64_t)(uint16_t)value);",
+            "}",
+            "static chelis_scalar chelis_host_scalar_from_i32(int32_t value) {",
+            "    return chelis_scalar_from_bits(CHELIS_DTYPE_I32, (uint64_t)(uint32_t)value);",
+            "}",
+            "static chelis_scalar chelis_host_scalar_from_i64(int64_t value) {",
+            "    return chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)value);",
+            "}",
+            "static chelis_scalar chelis_host_scalar_from_f64(double value) {",
+            "    return chelis_scalar_from_bits(CHELIS_DTYPE_F64, chelis_host_f64_bits(value));",
+            "}",
+            "static chelis_scalar chelis_host_scalar_from_f32(float value) {",
+            "    return chelis_scalar_from_bits(CHELIS_DTYPE_F32, (uint64_t)chelis_host_f32_bits(value));",
+            "}",
+            "static chelis_scalar chelis_host_scalar_from_bool(bool value) {",
+            "    return chelis_scalar_from_bits(CHELIS_DTYPE_BOOL, value ? 1u : 0u);",
+            "}",
+            "",
+            "static int64_t chelis_host_scalar_as_i64(chelis_scalar value, chelis_dtype expected) {",
+            "    if (value.dtype != expected) { fprintf(stderr, \"scalar dtype mismatch\\n\"); exit(1); }",
+            "    switch (expected) {",
+            "        case CHELIS_DTYPE_I8: return (int8_t)(uint8_t)value.bits;",
+            "        case CHELIS_DTYPE_I16: return (int16_t)(uint16_t)value.bits;",
+            "        case CHELIS_DTYPE_I32: return (int32_t)(uint32_t)value.bits;",
+            "        case CHELIS_DTYPE_I64: { int64_t out; memcpy(&out, &value.bits, sizeof out); return out; }",
+            "        default: fprintf(stderr, \"expected signed integer scalar\\n\"); exit(1);",
+            "    }",
+            "}",
+            "",
+            "static uint64_t chelis_host_scalar_bits(chelis_scalar value, chelis_dtype expected) {",
+            "    if (value.dtype != expected) { fprintf(stderr, \"scalar dtype mismatch\\n\"); exit(1); }",
+            "    return value.bits;",
+            "}",
+            "",
+            "static double chelis_host_scalar_as_float(chelis_scalar value, chelis_dtype expected) {",
+            "    if (value.dtype != expected) { fprintf(stderr, \"scalar dtype mismatch\\n\"); exit(1); }",
+            "    switch (expected) {",
+            "        case CHELIS_DTYPE_F32: return (double)chelis_f32_from_bits((uint32_t)value.bits);",
+            "        case CHELIS_DTYPE_F64: return chelis_f64_from_bits(value.bits);",
+            "        case CHELIS_DTYPE_F16: return (double)chelis_f16_to_f32((uint16_t)value.bits);",
+            "        case CHELIS_DTYPE_BF16: return (double)chelis_bf16_to_f32((uint16_t)value.bits);",
+            "        default: fprintf(stderr, \"expected float scalar\\n\"); exit(1);",
+            "    }",
+            "}",
+            "",
+            "static bool chelis_host_scalar_as_bool(chelis_scalar value) {",
+            "    if (value.dtype != CHELIS_DTYPE_BOOL) { fprintf(stderr, \"scalar dtype mismatch\\n\"); exit(1); }",
+            "    return value.bits == 1;",
+            "}",
+            "",
             "static chelis_tensor *chelis_host_scalar_tensor_from_f16(uint16_t value) {",
-            "    chelis_tensor *tensor = chelis_alloc(0, NULL, CHELIS_F16);",
-            "    *((uint16_t *)tensor->data) = value;",
-            "    return tensor;",
+            "    return chelis_scalar_tensor(chelis_scalar_from_bits(CHELIS_DTYPE_F16, (uint64_t)value));",
             "}",
             "",
             "static chelis_tensor *chelis_host_scalar_tensor_from_bf16(uint16_t value) {",
-            "    chelis_tensor *tensor = chelis_alloc(0, NULL, CHELIS_BF16);",
-            "    *((uint16_t *)tensor->data) = value;",
-            "    return tensor;",
+            "    return chelis_scalar_tensor(chelis_scalar_from_bits(CHELIS_DTYPE_BF16, (uint64_t)value));",
             "}",
         ]
         .into_iter()
@@ -1246,173 +1540,54 @@ fn cast_prim_c_type(prim: Prim) -> &'static str {
     }
 }
 
-/// One emitted `case` of the per-dtype element printer, or `None` for a
-/// `Prim` that has no runtime tensor storage (`f8e4m3` is rejected at
-/// check time per spec/04 section 1.1.1; `string` payloads are never
-/// tensor elements). Exhaustive over `Prim` with no `_` arm
-/// (`loud_unsupported.md` section C4): adding a primitive is a
-/// compile-error work-list here, never a silent fall-through to the
-/// aborting `default:`. The `CHELIS_*` case labels and format widths come
-/// from the `RuntimeDType` vocabulary declaration, not a local table.
-fn print_helper_elem_case(prim: Prim) -> Option<Vec<String>> {
-    use chelis_vocab::RuntimeDType;
-    let case = |dtype: RuntimeDType, body: Vec<String>| -> Vec<String> {
-        let mut lines = vec![format!("        case {}:", dtype.c_macro())];
-        lines.extend(body.into_iter().map(|line| format!("            {line}")));
-        lines.push("            break;".to_string());
-        lines
-    };
-    // Floats: read at storage width, widen to the exact double image
-    // (lossless for every supported float), format at the value's OWN
-    // width through the runtime's shortest-round-trip routine.
-    let float_case = |dtype: RuntimeDType, image_expr: &str| -> Vec<String> {
-        case(
-            dtype,
-            vec![
-                format!(
-                    "chelis_format_shortest({image_expr}, {}, fmt_buf, sizeof fmt_buf);",
-                    dtype.c_macro()
-                ),
-                "fputs(fmt_buf, stdout);".to_string(),
-            ],
-        )
-    };
-    // Integers: printf at width, all digits exact. int64 goes through
-    // `long long` (>= 64 bits everywhere), NEVER through double
-    // (chelis#723's lie was exactly that funnel).
-    let int_case =
-        |dtype: RuntimeDType, print_expr: String| -> Vec<String> { case(dtype, vec![print_expr]) };
-    match prim {
-        Prim::F64 => Some(float_case(RuntimeDType::F64, "((const double*)t->data)[i]")),
-        Prim::F32 => Some(float_case(
-            RuntimeDType::F32,
-            "(double)((const float*)t->data)[i]",
-        )),
-        // f16/bf16 decode through the same WS-1 conversion helpers the
-        // kernels use; f16 -> f32 -> double widening is exact, so the
-        // routine sees the stored value's true image (chelis#716's fix).
-        Prim::F16 => Some(float_case(
-            RuntimeDType::F16,
-            "(double)chelis_f16_to_f32(((const uint16_t*)t->data)[i])",
-        )),
-        Prim::Bf16 => Some(float_case(
-            RuntimeDType::Bf16,
-            "(double)chelis_bf16_to_f32(((const uint16_t*)t->data)[i])",
-        )),
-        Prim::Int64 => Some(int_case(
-            RuntimeDType::I64,
-            "printf(\"%lld\", (long long)((const int64_t*)t->data)[i]);".to_string(),
-        )),
-        Prim::Int32 => Some(int_case(
-            RuntimeDType::I32,
-            "printf(\"%d\", (int)((const int32_t*)t->data)[i]);".to_string(),
-        )),
-        Prim::Int16 => Some(int_case(
-            RuntimeDType::I16,
-            "printf(\"%d\", (int)((const int16_t*)t->data)[i]);".to_string(),
-        )),
-        Prim::Int8 => Some(int_case(
-            RuntimeDType::I8,
-            "printf(\"%d\", (int)((const int8_t*)t->data)[i]);".to_string(),
-        )),
-        // Bool tensor storage is f32-encoded today (the runtime's
-        // convention); the ELEMENT prints `true`/`false` at every exit
-        // (chelis#726's C half, [05-OBS-2]).
-        Prim::Bool => Some(case(
-            RuntimeDType::Bool,
-            vec![
-                "fputs(((const float*)t->data)[i] != 0.0f ? \"true\" : \"false\", stdout);"
-                    .to_string(),
-            ],
-        )),
-        // Not in the active dtype set (spec/04 section 1.1.1); rejected at
-        // check time, so no tensor can carry one. No runtime dtype id
-        // exists to case on.
-        Prim::F8e4m3 => None,
-        // String values render as themselves at their exits and are never
-        // numeric tensor element payloads.
-        Prim::String => None,
-    }
-}
-
-/// chelis#732 Phase 2 (faithful_observation.md section C3.2): the emitted
-/// print helper is GENERATED from [`print_helper_elem_case`]'s exhaustive
-/// `Prim` match. The hand-written `(double)` funnel this replaces rendered
-/// int64 through double (chelis#723), read f16/bf16 buffers as f32 before
-/// the chelis#730 interim abort (chelis#716), printed bool as `1.0`/`0.0`
-/// against to_list's `true`/`false` (chelis#726), and lost whole value
-/// classes to its near-integer/`%g` format split (chelis#748). No
-/// hand-written dtype switch may return (frozen at Phase 2 exit); the
-/// `default:` arm aborts with the raw dtype id so an unknown runtime
-/// dtype stays loud (loud_unsupported.md section C1).
+/// Render a tensor element by first recovering the exact tagged scalar.
+/// The runtime owns the exhaustive dtype dispatch and public text contract.
 fn append_tensor_print_helper(out: &mut Vec<String>) {
-    // chelis#729 Phase 3 / chelis#734: reduced-float scalar `to_string`
-    // uses the same own-width formatter as tensor/scalar print.  Keep these
-    // helpers private to the generated translation unit: the public runtime
-    // ABI remains on tagged numeric carriers rather than gaining uint16
-    // payload callables.
     out.push("static chelis_string chelis_host_string_from_f16(uint16_t value) {".to_string());
-    out.push("    char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF];".to_string());
     out.push(
-        "    chelis_format_shortest((double)chelis_f16_to_f32(value), CHELIS_F16, fmt_buf, sizeof fmt_buf);"
+        "    return chelis_string_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_F16, (uint64_t)value));"
             .to_string(),
     );
-    out.push("    return chelis_string_from_cstr(fmt_buf);".to_string());
     out.push("}".to_string());
     out.push(String::new());
     out.push("static chelis_string chelis_host_string_from_bf16(uint16_t value) {".to_string());
-    out.push("    char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF];".to_string());
     out.push(
-        "    chelis_format_shortest((double)chelis_bf16_to_f32(value), CHELIS_BF16, fmt_buf, sizeof fmt_buf);"
+        "    return chelis_string_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_BF16, (uint64_t)value));"
             .to_string(),
     );
-    out.push("    return chelis_string_from_cstr(fmt_buf);".to_string());
+    out.push("}".to_string());
+    out.push(String::new());
+    out.push(
+        "static chelis_scalar chelis_host_tensor_scalar_at(const chelis_tensor* t, int64_t i) {"
+            .to_string(),
+    );
+    out.push("    uint64_t bits = 0;".to_string());
+    out.push("    int64_t width = chelis_dtype_size(t->dtype);".to_string());
+    out.push("    memcpy(&bits, (const uint8_t*)t->data + i * width, (size_t)width);".to_string());
+    out.push("    return chelis_scalar_from_bits(t->dtype, bits);".to_string());
     out.push("}".to_string());
     out.push(String::new());
     out.push(
         "static void chelis_print_tensor_elem_stdout(const chelis_tensor* t, int64_t i) {"
             .to_string(),
     );
-    out.push("    char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF];".to_string());
-    out.push("    (void)fmt_buf;".to_string());
-    out.push("    switch (t->dtype) {".to_string());
-    for prim in [
-        Prim::F32,
-        Prim::F64,
-        Prim::F16,
-        Prim::Bf16,
-        Prim::F8e4m3,
-        Prim::Int8,
-        Prim::Int16,
-        Prim::Int32,
-        Prim::Int64,
-        Prim::Bool,
-        Prim::String,
-    ] {
-        if let Some(case_lines) = print_helper_elem_case(prim) {
-            out.extend(case_lines);
-        }
-    }
-    out.push("        default:".to_string());
     out.push(
-        "            fprintf(stderr, \"unsupported: tensor print of dtype id %d on the \
-         emitted C print helper (runtime); the RuntimeDType vocabulary defines no such \
-         id\\n\", (int)t->dtype);"
+        "    chelis_string text = chelis_string_from_scalar(chelis_host_tensor_scalar_at(t, i));"
             .to_string(),
     );
-    out.push("            exit(1);".to_string());
-    out.push("    }".to_string());
+    out.push("    fputs(chelis_string_data(text), stdout);".to_string());
+    out.push("    chelis_string_release(text);".to_string());
     out.push("}".to_string());
     out.push(String::new());
     out.push("static void chelis_print_tensor_stdout(const chelis_tensor* t) {".to_string());
     // [05-OBS-4]: a rank-0 tensor renders as its single element, bare -
     // the `tensor(shape=[], data=[..])` wrapper is not an exit form.
-    out.push("    if (t->ndim == 0) {".to_string());
+    out.push("    if (t->rank == 0) {".to_string());
     out.push("        chelis_print_tensor_elem_stdout(t, 0);".to_string());
     out.push("        return;".to_string());
     out.push("    }".to_string());
     out.push("    printf(\"tensor(shape=[\");".to_string());
-    out.push("    for (int64_t d = 0; d < t->ndim; ++d) {".to_string());
+    out.push("    for (int64_t d = 0; d < t->rank; ++d) {".to_string());
     out.push("        if (d > 0) { printf(\", \"); }".to_string());
     out.push("        printf(\"%lld\", (long long)t->shape[d]);".to_string());
     out.push("    }".to_string());
@@ -1436,24 +1611,23 @@ fn append_tensor_reshape_helper(out: &mut Vec<String>) {
             .to_string(),
     );
     out.push("    int64_t ndim64 = chelis_list_len(shape_values);".to_string());
-    out.push("    if (ndim64 < 0 || ndim64 > CHELIS_MAX_DIM) {".to_string());
+    out.push("    if (ndim64 < 0 || ndim64 > INT32_MAX) {".to_string());
     out.push(
-        "        fprintf(stderr, \"reshape expects between 0 and %d dims, got %lld\\n\", CHELIS_MAX_DIM, (long long)ndim64);"
+        "        fprintf(stderr, \"reshape rank is outside int32: %lld\\n\", (long long)ndim64);"
             .to_string(),
     );
     out.push("        exit(1);".to_string());
     out.push("    }".to_string());
     out.push("    int ndim = (int)ndim64;".to_string());
-    // chelis#1112: the shape buffer IS the ABI's extent carrier, so the
-    // list value is stored at the width it was read at. The retired 32-bit
-    // buffer needed an `(int)` cast here, and that cast needed a companion
-    // trap above INT_MAX because the only other guard (`dim < 0`) ran
-    // before it; both are gone with the narrowing they existed to catch.
-    out.push("    int64_t shape[CHELIS_MAX_DIM] = {0};".to_string());
+    out.push(
+        "    int64_t *shape = (int64_t*)calloc((size_t)(ndim > 0 ? ndim : 1), sizeof(int64_t));"
+            .to_string(),
+    );
+    out.push("    if (shape == NULL) { fprintf(stderr, \"reshape shape allocation failed\\n\"); exit(1); }".to_string());
     out.push("    int64_t expected = 1;".to_string());
     out.push("    for (int i = 0; i < ndim; ++i) {".to_string());
     out.push(
-        "        int64_t dim = chelis_value_as_int64(chelis_list_index(shape_values, i));"
+        "        int64_t dim = chelis_host_scalar_as_i64(chelis_value_as_scalar(chelis_list_index(shape_values, i)), CHELIS_DTYPE_I64);"
             .to_string(),
     );
     out.push("        if (dim < 0) {".to_string());
@@ -1476,6 +1650,7 @@ fn append_tensor_reshape_helper(out: &mut Vec<String>) {
     out.push(
         "    chelis_tensor* out_tensor = chelis_alloc(ndim, shape, input->dtype);".to_string(),
     );
+    out.push("    free(shape);".to_string());
     // RT-4 F2: size the memcpy by the actual dtype element width via
     // chelis_dtype_size, not by hardcoded sizeof(float). Mirrors
     // `chelis_alloc`'s element sizing (crates/chelis-runtime/src/lib.rs::
@@ -1779,12 +1954,24 @@ fn emit_main(
     for (index, binding) in program.globals.iter().enumerate() {
         let binding_var = format!("__binding_{index}_value");
         emitter.emit_expr_to_var(&binding.value, &binding_var, &binding.ty)?;
-        // The binding-value local owns its allocation regardless of how
-        // it was produced (tensor kernel output, list/dict builtin,
-        // literal). Track it here; the alias name (`theta`) is never
-        // tracked, and dedup in `emit_scope_releases` collapses the case
-        // where the binding value *is* a literal already tracked above.
-        emitter.track_owned_alloc(&binding_var, &binding.ty);
+        // The binding-value local owns its allocation when the binding
+        // built one (tensor kernel output, list/dict builtin, literal).
+        // Track it here; the alias name (`theta`) is never tracked, and
+        // dedup in `emit_scope_releases` collapses the case where the
+        // binding value *is* a literal already tracked above.
+        //
+        // chelis#1222: a binding can instead be a second *name* for an
+        // allocation an earlier binding already owns -- `rho = rho_base`,
+        // an `if`/`match` whose arms are existing bindings, a call to a
+        // function that returns one of its arguments or a captured
+        // top-level binding, or an identity tensor helper. `main` frees
+        // one pointer per tracked variable, so claiming such a binding
+        // frees one allocation twice: a `chelis_free` double free for a
+        // tensor, an unearned release for a refcounted container. Leave it
+        // untracked; the owning binding's release reclaims it exactly once.
+        if !emitter.scope_already_owns(&binding_var) {
+            emitter.track_owned_alloc(&binding_var, &binding.ty);
+        }
         if hoisted.contains(binding.name.as_str()) {
             // Declared at file scope (issue #352); assign, don't shadow.
             // #379: reference the same mangled name the file-scope `static`
@@ -1798,6 +1985,13 @@ fn emit_main(
                 "    {} = __binding_{index}_value;",
                 c_decl(&binding.ty, &binding.name)?
             ));
+        }
+        // chelis#1222: the user-facing name is a second slot holding the
+        // same pointer as the value temp. Record it so a later binding
+        // that reads the name resolves back to the temp `main` tracks.
+        if release_call(&binding.name, &binding.ty).is_some() {
+            let name = c_ident(&binding.name).into_owned();
+            emitter.record_alias(&name, &binding_var);
         }
     }
     for binding in &program.globals {
@@ -2115,6 +2309,29 @@ fn host_functions_reachable_from_main(program: &HostProgram) -> HashSet<String> 
     reachable
 }
 
+/// chelis#1222: the spelling of a binder's alias-graph key.
+///
+/// A binder key shares one namespace with every other string
+/// [`HostEmitter::alias_source`] is keyed on, and the other inhabitants of
+/// that namespace are C identifiers: emitter temps, and -- through
+/// [`HostEmitter::resolve_alias_key`]'s fallback -- the `c_ident` spelling
+/// of any name no binder scope introduced (a hoisted top-level binding, a
+/// compiled function's parameter).
+///
+/// The key must therefore be a string no source identifier can produce.
+/// `#` is the discriminator: it is not a Chelis identifier character, so
+/// `c_ident` can never return a name containing one, while the key itself
+/// is only ever a `HashMap` key and never reaches emitted C.
+///
+/// The first cut spelled keys `__bind_N`, on `c_ident`'s premise that
+/// "Surf/Deep identifiers cannot start with `__`". The lexer and checker
+/// accept such identifiers, so `__bind_0 = to_tensor([1.0f32, 2.0f32])`
+/// beside any `let` block overwrote the top-level binding's alias edge and
+/// re-armed the chelis#1222 double free -- reachable only by spelling the
+/// binding a particular way, which is exactly the alpha-dependence this
+/// mechanism exists to remove.
+const BINDER_KEY_PREFIX: &str = "#bind#";
+
 struct HostEmitter<'a> {
     lines: Vec<String>,
     indent: String,
@@ -2161,6 +2378,58 @@ struct HostEmitter<'a> {
     /// tracked block (e.g. `emit_main`, whose alias handling is the distinct
     /// global-binding path above).
     let_scopes: Vec<LetReleaseScope>,
+    /// chelis#1222: C variables whose value is a bare pointer copy of
+    /// another C variable's allocation, mapped to that source variable.
+    ///
+    /// A scope may only release what it allocated. Every emitted
+    /// `target = source;` that hands one allocation to a second slot is
+    /// recorded here, so a slot can be traced back to the variable that
+    /// actually owns its pointer before the scope claims it. Chains are
+    /// resolved by [`HostEmitter::alias_root`].
+    ///
+    /// Only heap-owning types are recorded: a scalar copy owns nothing, so
+    /// tracking it would be noise. `let`-binding *names* are deliberately
+    /// not recorded either -- the block-release ledger tracks the name, not
+    /// its `__let_N` value temp, so a chain through the name would report a
+    /// binding this block genuinely owns as borrowed.
+    alias_source: HashMap<String, String>,
+    /// chelis#1222: C variables holding a pointer this scope did not
+    /// allocate and whose owner it cannot name -- the result of a call
+    /// whose callee may hand back a value it read out of an enclosing
+    /// scope (`may_return_outer`). There is no source variable to record,
+    /// only the fact that claiming ownership would be wrong.
+    foreign: HashSet<String>,
+    /// chelis#1222: a stack of binder scopes, mapping a **raw source name**
+    /// to the alias-graph key that currently means it.
+    ///
+    /// A source name is not a usable key on its own. C identifiers are
+    /// scoped and reusable, so one name can have two live meanings, and a
+    /// name-keyed graph silently conflates them: the outer meaning is the
+    /// one a later reference needs, while the inner one is what the map
+    /// holds. Every binder therefore gets its own [`BINDER_KEY_PREFIX`] key,
+    /// and references resolve through this stack before touching the graph,
+    /// so a bound name's *spelling* never reaches `alias_source` at all.
+    ///
+    /// That is what makes the ownership decision alpha-invariant: renaming
+    /// a bound variable cannot change which allocations get released. The
+    /// key spelling is part of that guarantee, not decoration -- a key a
+    /// source identifier could also spell puts the two back in one slot.
+    ///
+    /// `result_alias_set`'s `env` is the analysis-side counterpart and now
+    /// saves and restores shadowed names in all three of its binder arms.
+    /// The `Let` arm did not until chelis#1222, so an earlier version of
+    /// this comment cited a precedent that did not exist.
+    binder_keys: Vec<HashMap<String, String>>,
+    /// chelis#1222: counter for [`HostEmitter::bind_alias_key`].
+    ///
+    /// Deliberately NOT `temp_counter`. A binder key is a key in
+    /// `alias_source` and never appears in emitted C, so drawing from the
+    /// emitted-temp counter would renumber every later temp in the
+    /// translation unit -- a corpus-wide textual diff that says nothing
+    /// about behaviour and hides the diff that would. Measured: sharing
+    /// the counter changed the emitted C of 21 of 76 corpus files with
+    /// identical release counts in all 21.
+    binder_key_counter: usize,
 }
 
 /// One open release-tracking `let` block; see `HostEmitter::let_scopes`.
@@ -2175,6 +2444,14 @@ struct LetReleaseScope {
     /// temp (a transient arg fed to `chelis_tuple_get`, say) is a borrow and
     /// is not retained.
     owned_destinations: HashSet<String>,
+    /// The subset of `owned_destinations` that are binding value temps.
+    /// Their reference is transferred to the binding name and released at
+    /// this block's close unconditionally, so a bare copy into one must
+    /// retain whatever the source's provenance. The block's result target
+    /// is deliberately NOT in this set: its release path is the caller's
+    /// alias-aware machinery, so it keeps the tracked-binding-source rule
+    /// (see `retain_transferred_result`).
+    value_temps: HashSet<String>,
     /// Heap binding names this block releases at its close.
     bindings: HashSet<String>,
 }
@@ -2199,7 +2476,149 @@ impl<'a> HostEmitter<'a> {
             temp_counter: 0,
             scope_releases: None,
             let_scopes: Vec::new(),
+            alias_source: HashMap::new(),
+            foreign: HashSet::new(),
+            binder_keys: Vec::new(),
+            binder_key_counter: 0,
         }
+    }
+
+    /// chelis#1222: record that `target` now holds `source`'s pointer.
+    /// Self-aliases are dropped so [`HostEmitter::alias_root`] cannot spin.
+    fn record_alias(&mut self, target: &str, source: &str) {
+        if target == source {
+            return;
+        }
+        self.alias_source
+            .insert(target.to_string(), source.to_string());
+    }
+
+    /// chelis#1222: a builtin whose emitted form is `target = <arg temp>;`
+    /// hands the argument's pointer straight through, so `target` owns
+    /// nothing of its own and the receiving scope must trace it back before
+    /// claiming it.
+    ///
+    /// `source` is an emitter temp, never a source name, so it needs no
+    /// [`HostEmitter::resolve_alias_key`] pass. Only heap-owning types are
+    /// recorded, matching the `Var` arm: a scalar copy owns nothing.
+    ///
+    /// Recording is right whether or not the argument was itself borrowed.
+    /// A fresh argument's temp has no outgoing edge, so the chain ends at a
+    /// variable this scope allocated and never tracked and `target` is still
+    /// claimed; a borrowed one reaches its owner and is not. Without this,
+    /// `b = debug(a)` freed `a`'s tensor twice -- the reported chelis#1222
+    /// shape, through a builtin instead of a bare name.
+    ///
+    /// `arg` is the unlowered argument expression. When it is a bare `Var`,
+    /// this is the same transfer the `Var` arm of [`HostEmitter::assign_expr`]
+    /// performs, so it takes the same issue #406 escape retain: a block
+    /// binding that reaches an owned destination through such a builtin is
+    /// released at the block close like any other, and without the retain
+    /// `b = { c = [1i64]  debug(c) }` released one allocation twice.
+    fn record_pointer_copy(&mut self, target: &str, source: &str, arg: &HostExpr, ty: &HostType) {
+        if let HostExprKind::Var(name, _) = &arg.kind {
+            self.retain_transferred_result(target, name, ty);
+        }
+        if release_call(target, ty).is_some() {
+            self.record_alias(target, source);
+        }
+    }
+
+    /// chelis#1222: record that `target` holds a pointer from an enclosing
+    /// scope that this emitter cannot attribute to a local variable.
+    fn mark_foreign(&mut self, target: &str) {
+        self.foreign.insert(target.to_string());
+    }
+
+    /// chelis#1222: the alias-graph key that currently means `name`.
+    ///
+    /// Walks the binder stack innermost-first, exactly as C name lookup
+    /// does, and falls back to the `c_ident`-mapped name for anything no
+    /// binder scope introduced -- a compiled function's parameter, a
+    /// hoisted top-level binding, or a temp. Those are already unique
+    /// within one emitted C function body, so the fallback needs no key of
+    /// its own.
+    fn resolve_alias_key(&self, name: &str) -> String {
+        self.binder_keys
+            .iter()
+            .rev()
+            .find_map(|frame| frame.get(name).cloned())
+            .unwrap_or_else(|| c_ident(name).into_owned())
+    }
+
+    /// chelis#1222: give `name` its own alias-graph key inside the innermost
+    /// binder scope.
+    ///
+    /// Call this only AFTER the binder's initializer has been emitted. The
+    /// initializer is evaluated in the *enclosing* scope and may read the
+    /// outer meaning of this very name (`a = a`); binding the name first
+    /// would make that read resolve to the binder being defined. The
+    /// analysis side already sequences it this way -- `result_alias_set`
+    /// computes a binding's set before inserting the name -- and getting it
+    /// backwards here is precisely the defect that produced a double free
+    /// for `b = { a = a  a }` while `b = { z = a  z }` was correct.
+    ///
+    /// The key is spelled with [`BINDER_KEY_PREFIX`] so no source identifier
+    /// can name one; see that constant for why a `__`-prefixed key was a
+    /// double free waiting to be spelled.
+    fn bind_alias_key(&mut self, name: &str) -> String {
+        let key = format!("{BINDER_KEY_PREFIX}{}", self.binder_key_counter);
+        self.binder_key_counter += 1;
+        if let Some(frame) = self.binder_keys.last_mut() {
+            frame.insert(name.to_string(), key.clone());
+        }
+        key
+    }
+
+    /// chelis#1222: follow `var` back through the recorded pointer copies,
+    /// returning every variable that holds the same allocation, `var`
+    /// first and the owner last. A single-element chain means nothing
+    /// aliased into `var`, so its value is freshly allocated. The `seen`
+    /// set makes the walk total even if a future emit path records a
+    /// cycle.
+    ///
+    /// The whole chain matters, not just its end: a `let` block's result
+    /// reaches an outer binding through the block's own binding name and
+    /// value temp, and which of those links is a slot somebody already
+    /// releases is exactly the ownership question.
+    fn alias_chain(&self, var: &str) -> Vec<String> {
+        let mut chain = vec![var.to_string()];
+        let mut seen: HashSet<String> = HashSet::from([var.to_string()]);
+        while let Some(next) = self.alias_source.get(chain.last().expect("non-empty")) {
+            if !seen.insert(next.clone()) {
+                break;
+            }
+            chain.push(next.clone());
+        }
+        chain
+    }
+
+    /// chelis#1222: the variable at the end of `var`'s alias chain.
+    fn alias_root(&self, var: &str) -> String {
+        self.alias_chain(var)
+            .pop()
+            .expect("alias chain is never empty")
+    }
+
+    /// chelis#1222: is `var`'s allocation already owned by another slot
+    /// this scope releases, or by a scope outside this one?
+    ///
+    /// `main` frees one allocation per tracked variable, so tracking a
+    /// second variable that holds the same pointer frees it twice -- for a
+    /// tensor that is a hard `chelis_free` double free, and for a
+    /// refcounted container a release the ledger never earned. Both are
+    /// heap corruption; the answer here decides whether the value is
+    /// claimed at all.
+    fn scope_already_owns(&self, var: &str) -> bool {
+        let chain = self.alias_chain(var);
+        if chain.iter().any(|link| self.foreign.contains(link)) {
+            return true;
+        }
+        self.scope_releases.as_ref().is_some_and(|tracked| {
+            chain
+                .iter()
+                .any(|link| tracked.iter().any(|(name, _)| name == link))
+        })
     }
 
     /// Record `var` (of `ty`) as a heap-owning allocation this scope must
@@ -2251,35 +2670,62 @@ impl<'a> HostEmitter<'a> {
         }
     }
 
-    /// Retain `target` when a bare pointer-copy `target = source` moves a
-    /// heap `let` binding into a slot that owns an independent reference
-    /// (issue #406). Fires only when `source` is a binding some open block
-    /// frees at its close *and* `target` is one of that block's
-    /// `owned_destinations` (its result target or another binding's value
-    /// temp). The retain cancels the eventual release of the destination so
-    /// every owned slot — the escaping result, and any binding that aliases
-    /// an earlier one — carries exactly one reference.
+    /// Retain `target` when a bare pointer-copy `target = source` lands in
+    /// a slot whose own release path demands an independent reference
+    /// (issue #406, chelis#1286 invariant 2). The two destination classes
+    /// carry different rules, and the difference is the caller's
+    /// compensation, not the emitter's convenience:
+    ///
+    /// * A binding's VALUE TEMP is released (through its binding name) at
+    ///   this block's close, unconditionally. The copy retains whatever
+    ///   the source's provenance: a block binding is released at its own
+    ///   close, a parameter or captured value by its caller or owning
+    ///   scope, and skipping the retain hands two release paths one
+    ///   reference. The earlier tracked-binding-only guard let the
+    ///   stdlib's `digits = if negative then string_slice(text, ..) else
+    ///   text` (`canonical_bigint_text`) free the caller's string through
+    ///   the parameter-aliasing arm, corrupting the heap on every
+    ///   compiled out-of-int64 JSON token (PR #1302 red-team finding
+    ///   P0-1).
+    ///
+    /// * A block's RESULT TARGET is released by the CALLER's machinery,
+    ///   which is alias-aware: `main`'s root ledger (chelis#1222) frees a
+    ///   returned alias once, and a `let`-block caller compensates through
+    ///   the call-escape retain. The result therefore retains only when
+    ///   the source is a binding this block is about to release (the
+    ///   classic escaping-result case). Retaining a returned parameter
+    ///   here would double-count against the caller's compensation and
+    ///   leak once per call
+    ///   (`a_parameter_spelled_like_a_binder_key_takes_no_retain` pins
+    ///   this side).
     ///
     /// A transient read of a binding into an internal arg temp (e.g.
-    /// `__arg0 = p` feeding `chelis_tuple_get`) is not an owned destination,
-    /// so it is left alone: `chelis_tuple_get` does its own element retain
-    /// and the binding's single release still balances its construction. A
-    /// transfer of a parameter or outer-scope value is likewise untouched —
-    /// no open block frees it, so a retain would leak.
+    /// `__arg0 = p` feeding `chelis_tuple_get`) is neither class and is
+    /// left alone: `chelis_tuple_get` does its own element retain and the
+    /// binding's single release still balances its construction.
     fn retain_transferred_result(&mut self, target: &str, source: &str, ty: &HostType) {
-        // `source` may be a binding of an outer block while `target` is an
-        // owned slot of an inner one (a nested `let b = a in ...`), so test
-        // the two conditions independently across all open scopes rather
-        // than within a single scope.
-        let target_is_owned = self
+        let target_is_value_temp = self
             .let_scopes
             .iter()
-            .any(|scope| scope.owned_destinations.contains(target));
-        let source_is_binding = self
-            .let_scopes
-            .iter()
-            .any(|scope| scope.bindings.contains(source));
-        if !(target_is_owned && source_is_binding) {
+            .any(|scope| scope.value_temps.contains(target));
+        let retains = if target_is_value_temp {
+            true
+        } else {
+            let target_is_owned = self
+                .let_scopes
+                .iter()
+                .any(|scope| scope.owned_destinations.contains(target));
+            // chelis#1222: `bindings` holds alias keys, not spellings, so
+            // the incoming source name resolves the same way a reference
+            // does.
+            let source_key = self.resolve_alias_key(source);
+            let source_is_binding = self
+                .let_scopes
+                .iter()
+                .any(|scope| scope.bindings.contains(&source_key));
+            target_is_owned && source_is_binding
+        };
+        if !retains {
             return;
         }
         if let Some(call) = retain_call(target, ty) {
@@ -2381,11 +2827,12 @@ impl<'a> HostEmitter<'a> {
                         .push(format!("{}{target} = chelis_list_empty();", self.indent));
                 } else {
                     // `target = name` is a bare pointer copy that does not
-                    // bump the refcount. When `name` is a heap `let` binding
-                    // freed at its block close (issue #406), retain the
-                    // transferred result to keep the caller's reference
-                    // alive; a parameter or outer-scope `name` is left
-                    // untouched (the block does not free it).
+                    // bump the refcount. A binding value temp retains
+                    // whatever `name`'s provenance; a block result target
+                    // retains only a tracked block binding (issue #406,
+                    // chelis#1286 invariant 2 - see
+                    // `retain_transferred_result` for why the classes
+                    // differ).
                     //
                     // #379: route the referenced name through `c_ident` so a
                     // binding/param/let spelled like a C keyword resolves to
@@ -2393,6 +2840,14 @@ impl<'a> HostEmitter<'a> {
                     self.lines
                         .push(format!("{}{target} = {};", self.indent, c_ident(name)));
                     self.retain_transferred_result(target, name, ty);
+                    // chelis#1222: `target` now holds `name`'s pointer. Only
+                    // a heap-owning type can be released twice, so only
+                    // those are recorded -- and the link is to the key that
+                    // currently means `name`, never to the spelling.
+                    if release_call(target, ty).is_some() {
+                        let source = self.resolve_alias_key(name);
+                        self.record_alias(target, &source);
+                    }
                 }
             }
             HostExprKind::Call {
@@ -2467,9 +2922,19 @@ impl<'a> HostEmitter<'a> {
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
                 let inner_ty = option_inner_type(&option_ty)?;
                 match option_ty {
-                    HostType::Option(inner)
-                        if !matches!(inner.as_ref(), HostType::Int64 | HostType::Float64) =>
-                    {
+                    HostType::Option(inner) if is_scalar_abi(inner.as_ref()) => {
+                        self.lines.push(format!(
+                            "{}{} {} = {};",
+                            self.indent,
+                            c_type(&inner_ty)?,
+                            bind_name,
+                            scalar_carrier_value_expr(
+                                &format!("{option_var}.value"),
+                                inner.as_ref(),
+                            )?
+                        ));
+                    }
+                    HostType::Option(_) => {
                         self.lines.push(format!(
                             "{}{} {};",
                             self.indent,
@@ -2482,17 +2947,24 @@ impl<'a> HostEmitter<'a> {
                             &format!("{option_var}.value"),
                         )?;
                     }
-                    _ => {
-                        self.lines.push(format!(
-                            "{}{} {} = {}.value;",
-                            self.indent,
-                            c_type(&inner_ty)?,
-                            bind_name,
-                            option_var
+                    other => {
+                        return Err(invalid_abi_shape(
+                            format!("option match scrutinee has non-option ABI type `{other:?}`"),
+                            "option match",
                         ));
                     }
                 }
+                // chelis#1222: the binder shadows any enclosing name it
+                // reuses. Its key carries no outgoing edge, because the
+                // value is freshly extracted here rather than copied from
+                // something this scope already owns -- which is also what
+                // keeps emitted C unchanged for every program that does not
+                // shadow: a reference to it dead-ends exactly as it does
+                // today.
+                self.binder_keys.push(HashMap::new());
+                self.bind_alias_key(bind_name);
                 self.assign_expr(target, some_expr, ty)?;
+                self.binder_keys.pop();
                 self.indent = previous.clone();
                 self.lines.push(format!("{}}} else {{", self.indent));
                 let nested_indent = format!("{}    ", self.indent);
@@ -2531,8 +3003,15 @@ impl<'a> HostEmitter<'a> {
                 // each owned slot keeps exactly one reference.
                 self.let_scopes.push(LetReleaseScope {
                     owned_destinations: HashSet::from([target.to_string()]),
+                    value_temps: HashSet::new(),
                     bindings: HashSet::new(),
                 });
+                // chelis#1222: open a binder scope. It starts EMPTY on
+                // purpose -- each name enters only after its own initializer
+                // has been emitted, because that initializer runs in the
+                // enclosing scope and may read the outer meaning of the very
+                // name being bound.
+                self.binder_keys.push(HashMap::new());
                 let mut heap_bindings: Vec<(String, HostType)> = Vec::new();
                 for binding in bindings {
                     // Compute the value into a temp before declaring the binding name.
@@ -2551,6 +3030,7 @@ impl<'a> HostEmitter<'a> {
                         && let Some(scope) = self.let_scopes.last_mut()
                     {
                         scope.owned_destinations.insert(temp.clone());
+                        scope.value_temps.insert(temp.clone());
                     }
                     self.emit_expr_to_var(&binding.value, &temp, &binding.ty)?;
                     self.lines.push(format!(
@@ -2566,16 +3046,44 @@ impl<'a> HostEmitter<'a> {
                         c_ident(&binding.name),
                         temp
                     ));
+                    // chelis#1222: the binding is a second slot on the same
+                    // pointer, and a block whose body is that name hands the
+                    // allocation to the outer scope through it, so the chain
+                    // has to cross it. Give it a key of its own now that the
+                    // initializer has been emitted -- see `bind_alias_key`
+                    // for why the ordering is the whole fix.
+                    let binder_key = self.bind_alias_key(&binding.name);
+                    if release_call(&binding.name, &binding.ty).is_some() {
+                        self.record_alias(&binder_key, &temp);
+                    }
                     // Track the binding name (not its `__let_N` temp: the
                     // two alias the same allocation, so releasing only the
                     // name frees it exactly once). Add it to the scope's
                     // binding set after its value is computed so a binding
                     // whose value reads an *earlier* binding still retains
                     // on that transfer.
+                    //
+                    // chelis#1222 deliberately does NOT gate this on whether
+                    // the value looks borrowed. `emit_main`'s sibling rule
+                    // ("cannot prove ownership, so do not claim") runs once
+                    // per PROGRAM and its residual is bounded by the number
+                    // of top-level bindings. The same rule here would run
+                    // once per CALL, turning every unprovable case into a
+                    // leak that grows with the call count -- measurably, in
+                    // `Std.Io.Json` and `Std.Decimal`. Releasing a reference
+                    // this block never acquired is still wrong, but the fix
+                    // has to establish ownership positively rather than
+                    // infer a borrow from missing evidence. Tracked as the
+                    // block-scope follow-up in the PR.
                     if binding_release(&binding.name, &binding.ty).is_some() {
                         heap_bindings.push((binding.name.clone(), binding.ty.clone()));
                         if let Some(scope) = self.let_scopes.last_mut() {
-                            scope.bindings.insert(binding.name.clone());
+                            // Keyed, not spelled: `retain_transferred_result`
+                            // and `retain_call_escaped_args` resolve a
+                            // reference before testing membership, so a
+                            // shadowing binder elsewhere cannot match this
+                            // block's binding by name alone (chelis#1222).
+                            scope.bindings.insert(binder_key.clone());
                         }
                     }
                 }
@@ -2590,6 +3098,11 @@ impl<'a> HostEmitter<'a> {
                     }
                 }
                 self.let_scopes.pop();
+                // The frame goes; the edges it recorded stay. A value that
+                // escaped this block still reaches its owner through the
+                // popped binder's key, which is why nothing has to be
+                // collapsed or rewritten on the way out (chelis#1222).
+                self.binder_keys.pop();
                 self.indent = previous;
                 self.lines.push(format!("{}}}", self.indent));
             }
@@ -2721,6 +3234,20 @@ impl<'a> HostEmitter<'a> {
             let arg_ty = expected_builtin_arg_ty(name, ty, index).unwrap_or(inferred_ty);
             self.emit_expr_to_var(arg, &arg_name, &arg_ty)?;
             arg_vars.push((arg_name, arg_ty));
+        }
+
+        if name == "__json_canonical_object_entries" {
+            if arg_vars.len() != 1 || !matches!(arg_vars[0].1, HostType::Dict(_, _)) {
+                return Err(invalid_abi_shape(
+                    "JSON canonical object ordering requires one Dict argument".to_string(),
+                    "C host JSON serialization",
+                ));
+            }
+            self.lines.push(format!(
+                "{}{target} = chelis_json_canonical_object_entries({});",
+                self.indent, arg_vars[0].0
+            ));
+            return Ok(());
         }
 
         if name == "cast" {
@@ -2941,7 +3468,7 @@ impl<'a> HostEmitter<'a> {
                         format!(
                             "({})chelis_trunc_float_to_int({}, {}, {domain:?}, {overflow:?})",
                             c_type(target)?,
-                            scalar_float_as_double(&arg_vars[0].0, source),
+                            host_float_as_double(&arg_vars[0].0, source),
                             integer_abi_width(target)?
                         )
                     }
@@ -2962,6 +3489,7 @@ impl<'a> HostEmitter<'a> {
             "copy" => {
                 self.lines
                     .push(format!("{}{target} = {};", self.indent, arg_vars[0].0));
+                self.record_pointer_copy(target, &arg_vars[0].0, &args[0], ty);
                 return Ok(());
             }
             "tuple-get" => {
@@ -3021,14 +3549,22 @@ impl<'a> HostEmitter<'a> {
             }
             "scatter" => {
                 self.lines.push(format!(
-                    "{}{target} = chelis_tensor_scatter({}, {}, {}, {}, {});",
-                    self.indent,
-                    arg_vars[0].0,
-                    arg_vars[1].0,
-                    arg_vars[2].0,
-                    arg_vars[3].0,
-                    arg_vars[4].0
+                    "{}if (strcmp(chelis_string_data({}), \"replace\") == 0) {{",
+                    self.indent, arg_vars[4].0
                 ));
+                self.lines.push(format!(
+                    "{}    {target} = chelis_tensor_scatter_replace({}, {}, {}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0, arg_vars[3].0
+                ));
+                self.lines.push(format!(
+                    "{}}} else if (strcmp(chelis_string_data({}), \"add\") == 0) {{",
+                    self.indent, arg_vars[4].0
+                ));
+                self.lines.push(format!(
+                    "{}    {target} = chelis_tensor_scatter_add({}, {}, {}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0, arg_vars[3].0
+                ));
+                self.lines.push(format!("{}}} else {{ fprintf(stderr, \"scatter mode must be replace or add\\n\"); exit(1); }}", self.indent));
                 return Ok(());
             }
             "where" => {
@@ -3074,9 +3610,39 @@ impl<'a> HostEmitter<'a> {
                 return Ok(());
             }
             "einsum" => {
+                if arg_vars.len() != 3 {
+                    return Err(invalid_abi_shape(
+                        format!(
+                            "einsum reached C emission with {} arguments; expected equation and two operands",
+                            arg_vars.len()
+                        ),
+                        "einsum accumulator selection",
+                    ));
+                }
+                let Some((_, HostType::Tensor(lhs_ty))) = arg_vars.get(1) else {
+                    return Err(invalid_abi_shape(
+                        "einsum lhs does not carry a resolved tensor ABI".to_string(),
+                        "einsum accumulator selection",
+                    ));
+                };
+                // spec/04-type-system.md section 5.7.1 and [05-OP-33]
+                // define einsum's omitted accumulator with the reduce-sum
+                // default table. Materialize that resolved dtype at the
+                // exact runtime boundary.
+                let accumulator = lhs_ty
+                    .precision
+                    .default_reduce_sum_accumulator()
+                    .and_then(|precision| {
+                        precision.runtime_dtype().map_err(|error| error.to_string())
+                    })
+                    .map_err(|error| invalid_abi_shape(error, "einsum accumulator selection"))?;
                 self.lines.push(format!(
-                    "{}{target} = chelis_tensor_einsum({}, {}, {});",
-                    self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0
+                    "{}{target} = chelis_tensor_einsum({}, {}, {}, {});",
+                    self.indent,
+                    arg_vars[0].0,
+                    arg_vars[1].0,
+                    arg_vars[2].0,
+                    accumulator.c_macro()
                 ));
                 return Ok(());
             }
@@ -3134,22 +3700,27 @@ impl<'a> HostEmitter<'a> {
                 return Ok(());
             }
             "dict_get" => {
-                let getter = match ty {
-                    HostType::Option(inner) if matches!(inner.as_ref(), HostType::Int64) => {
-                        "chelis_dict_get_i64"
-                    }
-                    HostType::Option(inner) if matches!(inner.as_ref(), HostType::Float64) => {
-                        "chelis_dict_get_f64"
-                    }
-                    _ => "chelis_dict_get",
+                let HostType::Option(inner) = ty else {
+                    return Err(invalid_abi_shape(
+                        format!("dict_get result has non-option ABI type `{ty:?}`"),
+                        "dict_get result",
+                    ));
                 };
-                self.lines.push(format!(
-                    "{}{target} = {}({}, {});",
-                    self.indent,
-                    getter,
-                    arg_vars[0].0,
-                    self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)?
-                ));
+                let key = self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)?;
+                if is_scalar_abi(inner.as_ref()) {
+                    self.lines.push(format!(
+                        "{}{target} = chelis_dict_get_scalar({}, {}, {});",
+                        self.indent,
+                        arg_vars[0].0,
+                        key,
+                        scalar_dtype_macro(inner.as_ref())?
+                    ));
+                } else {
+                    self.lines.push(format!(
+                        "{}{target} = chelis_dict_get({}, {});",
+                        self.indent, arg_vars[0].0, key
+                    ));
+                }
                 return Ok(());
             }
             "dict_contains" => {
@@ -3209,35 +3780,29 @@ impl<'a> HostEmitter<'a> {
                 return Ok(());
             }
             "to_tensor" => {
-                // RT-4 F1: when the destination tensor's precision is
-                // known at compile time, dispatch through the typed
-                // runtime entry point so the storage width matches
-                // the declared dtype. Without this hint the runtime
-                // would deduce dtype from the value-tag of the first
-                // leaf — but `chelis_value_from_f64` has the same tag
-                // (CHELIS_VALUE_FLOAT64) for both f32 and f64 sources,
-                // so a declared `tensor[3, f64] = [1.0, 2.0, 3.0]`
-                // silently truncated to f32 storage.
-                if let HostType::Tensor(t) = ty
-                    && let Ok(dtype) = t.precision.runtime_dtype()
-                {
-                    self.lines.push(format!(
-                        "{}{target} = chelis_tensor_from_value_list_typed({}, {});",
-                        self.indent,
-                        arg_vars[0].0,
-                        dtype.c_macro()
+                // [05-OP-33]: the checked result dtype selects the exact
+                // tagged list-ingress constructor. A non-tensor or deferred
+                // result is an IR/ABI disagreement, never an untyped fallback.
+                let HostType::Tensor(t) = ty else {
+                    return Err(invalid_abi_shape(
+                        format!("to_tensor result has non-tensor ABI type `{ty:?}`"),
+                        "to_tensor list ingress",
                     ));
-                    return Ok(());
-                }
+                };
+                let dtype = t.precision.runtime_dtype().map_err(|error| {
+                    invalid_abi_shape(error.to_string(), "to_tensor list ingress")
+                })?;
                 self.lines.push(format!(
-                    "{}{target} = chelis_tensor_from_value_list({});",
-                    self.indent, arg_vars[0].0
+                    "{}{target} = chelis_tensor_from_values({}, {});",
+                    self.indent,
+                    arg_vars[0].0,
+                    dtype.c_macro()
                 ));
                 return Ok(());
             }
             "to_list" => {
                 self.lines.push(format!(
-                    "{}{target} = chelis_list_from_tensor({});",
+                    "{}{target} = chelis_tensor_elements({});",
                     self.indent, arg_vars[0].0
                 ));
                 return Ok(());
@@ -3247,7 +3812,7 @@ impl<'a> HostEmitter<'a> {
                     "{}{target} = chelis_pad_sequences({}, {});",
                     self.indent,
                     arg_vars[0].0,
-                    self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)?
+                    scalar_carrier_expr(&arg_vars[1].0, &arg_vars[1].1)?
                 ));
                 return Ok(());
             }
@@ -3257,7 +3822,7 @@ impl<'a> HostEmitter<'a> {
                     self.indent,
                     arg_vars[0].0,
                     arg_vars[1].0,
-                    self.box_value_expr(&arg_vars[2].0, &arg_vars[2].1)?
+                    scalar_carrier_expr(&arg_vars[2].0, &arg_vars[2].1)?
                 ));
                 return Ok(());
             }
@@ -3416,6 +3981,7 @@ impl<'a> HostEmitter<'a> {
                 self.emit_print_value(&arg_vars[0].0, &arg_vars[0].1)?;
                 self.lines
                     .push(format!("{}{target} = {};", self.indent, arg_vars[0].0));
+                self.record_pointer_copy(target, &arg_vars[0].0, &args[0], ty);
                 return Ok(());
             }
             _ => {}
@@ -3431,6 +3997,22 @@ impl<'a> HostEmitter<'a> {
                 |index: usize| scalar_arithmetic_arg_expr(&arg_vars[index].0, &arg_vars[index].1);
             let binary = |operator, lhs, rhs| EmittedExpr::binary(operator, lhs, rhs);
             let unary = |operator, operand| EmittedExpr::unary(operator, operand);
+            let direct_extrema = |comparison| {
+                let lhs = numeric_arg(0);
+                let rhs = numeric_arg(1);
+                let lhs_nan = EmittedExpr::call("isnan", [lhs.clone()]);
+                let rhs_not_nan = EmittedExpr::unary(
+                    UnaryOperator::LogicalNot,
+                    EmittedExpr::call("isnan", [rhs.clone()]),
+                );
+                let ordered = binary(comparison, lhs, rhs);
+                let select_left = binary(
+                    BinaryOperator::LogicalOr,
+                    lhs_nan,
+                    binary(BinaryOperator::LogicalAnd, rhs_not_nan, ordered),
+                );
+                EmittedExpr::conditional(select_left, arg(0), arg(1))
+            };
             let expression_builtin = CExpressionBuiltin::decode(name)?;
             let expr = match expression_builtin {
                 CExpressionBuiltin::Add if is_integer_abi(ty) => integer_checked_binary_expr(
@@ -3627,22 +4209,44 @@ impl<'a> HostEmitter<'a> {
                 }
                 CExpressionBuiltin::StringLen => EmittedExpr::call("chelis_string_len", [arg(0)]),
                 CExpressionBuiltin::ToString => match &arg_vars[0].1 {
-                    HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
-                        EmittedExpr::call("chelis_string_from_int64", [arg(0)])
-                    }
-                    HostType::Float64 => EmittedExpr::call("chelis_string_from_f64", [arg(0)]),
+                    HostType::Int8 => EmittedExpr::call(
+                        "chelis_string_from_scalar",
+                        [EmittedExpr::call("chelis_host_scalar_from_i8", [arg(0)])],
+                    ),
+                    HostType::Int16 => EmittedExpr::call(
+                        "chelis_string_from_scalar",
+                        [EmittedExpr::call("chelis_host_scalar_from_i16", [arg(0)])],
+                    ),
+                    HostType::Int32 => EmittedExpr::call(
+                        "chelis_string_from_scalar",
+                        [EmittedExpr::call("chelis_host_scalar_from_i32", [arg(0)])],
+                    ),
+                    HostType::Int64 => EmittedExpr::call(
+                        "chelis_string_from_scalar",
+                        [EmittedExpr::call("chelis_host_scalar_from_i64", [arg(0)])],
+                    ),
+                    HostType::Float64 => EmittedExpr::call(
+                        "chelis_string_from_scalar",
+                        [EmittedExpr::call("chelis_host_scalar_from_f64", [arg(0)])],
+                    ),
                     // to_string is an observation exit: the f32 scalar
                     // renders at ITS width through the runtime's own-width
                     // formatter ([05-OBS-2]; the former promote-to-double
                     // funnel carried f64-image digits and split this exit
                     // from `print` of the same stored value - PR #863
                     // round-1 F1).
-                    HostType::Float32 => EmittedExpr::call("chelis_string_from_f32", [arg(0)]),
+                    HostType::Float32 => EmittedExpr::call(
+                        "chelis_string_from_scalar",
+                        [EmittedExpr::call("chelis_host_scalar_from_f32", [arg(0)])],
+                    ),
                     HostType::Float16 => EmittedExpr::call("chelis_host_string_from_f16", [arg(0)]),
                     HostType::BFloat16 => {
                         EmittedExpr::call("chelis_host_string_from_bf16", [arg(0)])
                     }
-                    HostType::Bool => EmittedExpr::call("chelis_string_from_bool", [arg(0)]),
+                    HostType::Bool => EmittedExpr::call(
+                        "chelis_string_from_scalar",
+                        [EmittedExpr::call("chelis_host_scalar_from_bool", [arg(0)])],
+                    ),
                     HostType::String => arg(0),
                     // chelis#730 Phase 1 (census row 3, chelis#734): to_string
                     // of a tensor/list/other non-scalar has no C rendering yet;
@@ -3665,11 +4269,82 @@ impl<'a> HostEmitter<'a> {
                         ));
                     }
                 },
-                CExpressionBuiltin::ToInt => EmittedExpr::call("chelis_parse_int64", [arg(0)]),
-                CExpressionBuiltin::ToFloat => EmittedExpr::call("chelis_parse_f64", [arg(0)]),
-                CExpressionBuiltin::TensorToScalar => {
-                    EmittedExpr::call("chelis_tensor_to_f64", [arg(0)])
-                }
+                CExpressionBuiltin::ToInt => EmittedExpr::call(
+                    "chelis_parse_scalar",
+                    [arg(0), EmittedExpr::identifier("CHELIS_DTYPE_I64")],
+                ),
+                CExpressionBuiltin::ToFloat => EmittedExpr::call(
+                    "chelis_parse_scalar",
+                    [arg(0), EmittedExpr::identifier("CHELIS_DTYPE_F64")],
+                ),
+                CExpressionBuiltin::TensorToScalar => match ty {
+                    HostType::Float64 => EmittedExpr::call(
+                        "chelis_host_scalar_as_float",
+                        [
+                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
+                            EmittedExpr::identifier("CHELIS_DTYPE_F64"),
+                        ],
+                    ),
+                    HostType::Float32 => EmittedExpr::call(
+                        "chelis_host_scalar_as_float",
+                        [
+                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
+                            EmittedExpr::identifier("CHELIS_DTYPE_F32"),
+                        ],
+                    ),
+                    HostType::Float16 => EmittedExpr::call(
+                        "chelis_host_scalar_bits",
+                        [
+                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
+                            EmittedExpr::identifier("CHELIS_DTYPE_F16"),
+                        ],
+                    ),
+                    HostType::BFloat16 => EmittedExpr::call(
+                        "chelis_host_scalar_bits",
+                        [
+                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
+                            EmittedExpr::identifier("CHELIS_DTYPE_BF16"),
+                        ],
+                    ),
+                    HostType::Int8 => EmittedExpr::call(
+                        "chelis_host_scalar_as_i64",
+                        [
+                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
+                            EmittedExpr::identifier("CHELIS_DTYPE_I8"),
+                        ],
+                    ),
+                    HostType::Int16 => EmittedExpr::call(
+                        "chelis_host_scalar_as_i64",
+                        [
+                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
+                            EmittedExpr::identifier("CHELIS_DTYPE_I16"),
+                        ],
+                    ),
+                    HostType::Int32 => EmittedExpr::call(
+                        "chelis_host_scalar_as_i64",
+                        [
+                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
+                            EmittedExpr::identifier("CHELIS_DTYPE_I32"),
+                        ],
+                    ),
+                    HostType::Int64 => EmittedExpr::call(
+                        "chelis_host_scalar_as_i64",
+                        [
+                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
+                            EmittedExpr::identifier("CHELIS_DTYPE_I64"),
+                        ],
+                    ),
+                    HostType::Bool => EmittedExpr::call(
+                        "chelis_host_scalar_as_bool",
+                        [EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)])],
+                    ),
+                    other => {
+                        return Err(invalid_abi_shape(
+                            format!("tensor_to_scalar carries non-scalar result type `{other:?}`"),
+                            "tensor_to_scalar C emission",
+                        ));
+                    }
+                },
                 // Issue #300: dispatch on the *result* tensor precision, not just
                 // the (coarse) argument host type. `scalar_to_tensor(cast(c,
                 // f32))` must materialize an f32-backed rank-0 tensor: the f64
@@ -3681,21 +4356,40 @@ impl<'a> HostEmitter<'a> {
                 // `ty` carries the real precision.
                 CExpressionBuiltin::ScalarToTensor => match ty {
                     HostType::Tensor(tensor_ty) => match tensor_ty.precision {
-                        Prim::Int64 => EmittedExpr::call("chelis_scalar_tensor_from_i64", [arg(0)]),
-                        Prim::F64 => EmittedExpr::call("chelis_scalar_tensor_from_f64", [arg(0)]),
-                        Prim::F32 => EmittedExpr::call("chelis_scalar_tensor_from_f32", [arg(0)]),
+                        Prim::Int8 => EmittedExpr::call(
+                            "chelis_scalar_tensor",
+                            [EmittedExpr::call("chelis_host_scalar_from_i8", [arg(0)])],
+                        ),
+                        Prim::Int16 => EmittedExpr::call(
+                            "chelis_scalar_tensor",
+                            [EmittedExpr::call("chelis_host_scalar_from_i16", [arg(0)])],
+                        ),
+                        Prim::Int32 => EmittedExpr::call(
+                            "chelis_scalar_tensor",
+                            [EmittedExpr::call("chelis_host_scalar_from_i32", [arg(0)])],
+                        ),
+                        Prim::Int64 => EmittedExpr::call(
+                            "chelis_scalar_tensor",
+                            [EmittedExpr::call("chelis_host_scalar_from_i64", [arg(0)])],
+                        ),
+                        Prim::F64 => EmittedExpr::call(
+                            "chelis_scalar_tensor",
+                            [EmittedExpr::call("chelis_host_scalar_from_f64", [arg(0)])],
+                        ),
+                        Prim::F32 => EmittedExpr::call(
+                            "chelis_scalar_tensor",
+                            [EmittedExpr::call("chelis_host_scalar_from_f32", [arg(0)])],
+                        ),
                         Prim::F16 => {
                             EmittedExpr::call("chelis_host_scalar_tensor_from_f16", [arg(0)])
                         }
                         Prim::Bf16 => {
                             EmittedExpr::call("chelis_host_scalar_tensor_from_bf16", [arg(0)])
                         }
-                        // chelis#714 asked for the f16/bf16 host-scalar
-                        // representation and is repaired: both dtypes have
-                        // their own constructor arm above. What survives here
-                        // is the general dtype-capability gap chelis#729
-                        // owns, for the precisions that still have no
-                        // scalar-tensor constructor at all.
+                        Prim::Bool => EmittedExpr::call(
+                            "chelis_scalar_tensor",
+                            [EmittedExpr::call("chelis_host_scalar_from_bool", [arg(0)])],
+                        ),
                         precision => {
                             return Err(Unsupported::new(
                                 UnsupportedKind::HostType(format!(
@@ -3938,29 +4632,17 @@ impl<'a> HostEmitter<'a> {
                     ty,
                 ),
                 CExpressionBuiltin::MinElem if is_integer_abi(ty) => EmittedExpr::conditional(
-                    binary(BinaryOperator::Less, arg(0), arg(1)),
+                    binary(BinaryOperator::LessEqual, arg(0), arg(1)),
                     arg(0),
                     arg(1),
                 ),
                 CExpressionBuiltin::MaxElem if is_integer_abi(ty) => EmittedExpr::conditional(
-                    binary(BinaryOperator::Greater, arg(0), arg(1)),
+                    binary(BinaryOperator::GreaterEqual, arg(0), arg(1)),
                     arg(0),
                     arg(1),
                 ),
-                CExpressionBuiltin::MinElem => finalize_scalar_expr(
-                    EmittedExpr::call(
-                        float_math_function(ty, "fmin", "fminf"),
-                        [numeric_arg(0), numeric_arg(1)],
-                    ),
-                    ty,
-                ),
-                CExpressionBuiltin::MaxElem => finalize_scalar_expr(
-                    EmittedExpr::call(
-                        float_math_function(ty, "fmax", "fmaxf"),
-                        [numeric_arg(0), numeric_arg(1)],
-                    ),
-                    ty,
-                ),
+                CExpressionBuiltin::MinElem => direct_extrema(BinaryOperator::LessEqual),
+                CExpressionBuiltin::MaxElem => direct_extrema(BinaryOperator::GreaterEqual),
             };
             Ok(expr)
         };
@@ -3988,9 +4670,9 @@ impl<'a> HostEmitter<'a> {
     // Per `docs/design/compiler_cleanup_0_7_8_spec_lock.md` Contract
     // 2 the supported precisions are f32, f64, i32, i64, and bool.
     // Each arm selects an element type that matches its representation.
-    // CHELIS_F32 and the current CHELIS_BOOL payload use `(float*)`.
-    // CHELIS_I32 uses `(int32_t*)`, CHELIS_F64 uses `(double*)`, and
-    // CHELIS_I64 uses `(int64_t*)`.
+    // CHELIS_DTYPE_BOOL uses the canonical one-byte `uint8_t` payload.
+    // CHELIS_DTYPE_F32 uses `(float*)`, CHELIS_DTYPE_I32 uses `(int32_t*)`,
+    // CHELIS_DTYPE_F64 uses `(double*)`, and CHELIS_DTYPE_I64 uses `(int64_t*)`.
     //
     // The four helpers split into two pairs:
     //
@@ -4000,14 +4682,15 @@ impl<'a> HostEmitter<'a> {
     //     for every supported dtype arm.  All arms are semantically
     //     well-defined for the supported operators.
     //
-    //   * `assign_tensor_binary_func_elementwise` emits f32 libm calls
-    //     for F32 and the current Bool payload. Its I32 arm emits an exact
-    //     integer comparison for max and min. F64 and I64 abort.
+    //   * `assign_tensor_binary_func_elementwise` emits direct operand
+    //     selection for every represented dtype. Float arms preserve the
+    //     first NaN and every lhs equality bit-pattern; integer and Bool arms
+    //     select the lhs on equality.
     //
     //   * `assign_tensor_unary_func_elementwise` takes an f32-only helper
-    //     name (`expf`, `chelis_host_relu_f32`, ...). It accepts F32 and
-    //     the current Bool payload. I32, F64, and I64 abort rather than
-    //     convert through binary32 and lose precision.
+    //     name (`expf`, `chelis_host_relu_f32`, ...). It accepts F32.
+    //     I32, F64, I64, and Bool abort rather than convert through
+    //     binary32 or treat bool storage as a float payload.
     fn assign_checked_tensor_cast(&mut self, target: &str, input: &str, plan: CheckedCastPlan) {
         if plan.kind() == CheckedCastKind::Identity {
             self.lines
@@ -4029,7 +4712,7 @@ impl<'a> HostEmitter<'a> {
         let indices = format!("{target}_cast_indices");
         let source_index = format!("{target}_cast_source_i");
         self.lines.push(format!(
-            "{}{target} = chelis_alloc({input}->ndim, {input}->shape, {});",
+            "{}{target} = chelis_alloc({input}->rank, {input}->shape, {});",
             self.indent,
             sparse_dtype_macro(target_prim)
         ));
@@ -4057,15 +4740,15 @@ impl<'a> HostEmitter<'a> {
             self.indent,
         ));
         self.lines.push(format!(
-            "{}    int64_t {indices}[CHELIS_MAX_DIM];",
+            "{}    int64_t {indices}[{target}->rank > 0 ? {target}->rank : 1];",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}    chelis_flat_to_indices({flat_index}, {target}->shape, {target}->rank, {indices});",
             self.indent,
         ));
         self.lines.push(format!(
-            "{}    chelis_flat_to_indices({flat_index}, {target}->shape, {target}->ndim, {indices});",
-            self.indent,
-        ));
-        self.lines.push(format!(
-            "{}    int64_t {source_index} = chelis_indices_to_flat({indices}, {input}->strides, {input}->ndim);",
+            "{}    int64_t {source_index} = chelis_indices_to_flat({indices}, {input}->strides, {input}->rank);",
             self.indent,
         ));
         let source_value = format!("{source_data}[{source_index}]");
@@ -4079,7 +4762,7 @@ impl<'a> HostEmitter<'a> {
 
     fn assign_tensor_binary_elementwise(&mut self, target: &str, lhs: &str, rhs: &str, op: &str) {
         self.lines.push(format!(
-            "{}{target} = chelis_alloc({lhs}->ndim, {lhs}->shape, {lhs}->dtype);",
+            "{}{target} = chelis_alloc({lhs}->rank, {lhs}->shape, {lhs}->dtype);",
             self.indent
         ));
         self.lines
@@ -4099,29 +4782,24 @@ impl<'a> HostEmitter<'a> {
         func: BinaryElementwiseFunc,
     ) {
         self.lines.push(format!(
-            "{}{target} = chelis_alloc({lhs}->ndim, {lhs}->shape, {lhs}->dtype);",
+            "{}{target} = chelis_alloc({lhs}->rank, {lhs}->shape, {lhs}->dtype);",
             self.indent
         ));
         self.lines
             .push(format!("{}switch ({target}->dtype) {{", self.indent));
-        for arm in DtypeArm::f32_payload_func_arms() {
+        for arm in DtypeArm::all_operator_arms() {
             self.emit_binary_func_elementwise_arm(target, lhs, rhs, func, *arm);
         }
-        self.emit_binary_func_elementwise_arm(target, lhs, rhs, func, DtypeArm::I32);
-        self.emit_dtype_fail_arms(
-            &[DtypeArm::F64, DtypeArm::I64],
-            &format!("binary func elementwise ({})", func.f32_name()),
-        );
         self.emit_default_runtime_fail_arm_for(
             target,
-            &format!("binary func elementwise ({})", func.f32_name()),
+            &format!("binary func elementwise ({})", func.label()),
         );
         self.lines.push(format!("{}}}", self.indent));
     }
 
     fn assign_tensor_unary_elementwise(&mut self, target: &str, input: &str, op: &str) {
         self.lines.push(format!(
-            "{}{target} = chelis_alloc({input}->ndim, {input}->shape, {input}->dtype);",
+            "{}{target} = chelis_alloc({input}->rank, {input}->shape, {input}->dtype);",
             self.indent
         ));
         self.lines
@@ -4135,7 +4813,7 @@ impl<'a> HostEmitter<'a> {
 
     fn assign_tensor_unary_func_elementwise(&mut self, target: &str, input: &str, func: &str) {
         self.lines.push(format!(
-            "{}{target} = chelis_alloc({input}->ndim, {input}->shape, {input}->dtype);",
+            "{}{target} = chelis_alloc({input}->rank, {input}->shape, {input}->dtype);",
             self.indent
         ));
         self.lines
@@ -4144,7 +4822,7 @@ impl<'a> HostEmitter<'a> {
             self.emit_unary_func_elementwise_arm(target, input, func, *arm);
         }
         self.emit_dtype_fail_arms(
-            &[DtypeArm::F64, DtypeArm::I32, DtypeArm::I64],
+            &[DtypeArm::F64, DtypeArm::I32, DtypeArm::I64, DtypeArm::Bool],
             &format!("unary func elementwise ({func})"),
         );
         self.emit_default_runtime_fail_arm_for(target, &format!("unary func elementwise ({func})"));
@@ -4176,16 +4854,17 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{ind}        for (int64_t i = 0; i < {target}->size; i++) {{"
         ));
-        self.lines
-            .push(format!("{ind}            int64_t indices[CHELIS_MAX_DIM];"));
         self.lines.push(format!(
-            "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);"
+            "{ind}            int64_t indices[{target}->rank > 0 ? {target}->rank : 1];"
         ));
         self.lines.push(format!(
-            "{ind}            int64_t idx_lhs = chelis_indices_to_flat(indices, {lhs}->strides, {lhs}->ndim);"
+            "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->rank, indices);"
         ));
         self.lines.push(format!(
-            "{ind}            int64_t idx_rhs = chelis_indices_to_flat(indices, {rhs}->strides, {rhs}->ndim);"
+            "{ind}            int64_t idx_lhs = chelis_indices_to_flat(indices, {lhs}->strides, {lhs}->rank);"
+        ));
+        self.lines.push(format!(
+            "{ind}            int64_t idx_rhs = chelis_indices_to_flat(indices, {rhs}->strides, {rhs}->rank);"
         ));
         self.lines.push(format!(
             "{ind}            __target_data[i] = __lhs_data[idx_lhs] {op} __rhs_data[idx_rhs];"
@@ -4220,29 +4899,27 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{ind}        for (int64_t i = 0; i < {target}->size; i++) {{"
         ));
-        self.lines
-            .push(format!("{ind}            int64_t indices[CHELIS_MAX_DIM];"));
         self.lines.push(format!(
-            "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);"
+            "{ind}            int64_t indices[{target}->rank > 0 ? {target}->rank : 1];"
         ));
         self.lines.push(format!(
-            "{ind}            int64_t idx_lhs = chelis_indices_to_flat(indices, {lhs}->strides, {lhs}->ndim);"
+            "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->rank, indices);"
         ));
         self.lines.push(format!(
-            "{ind}            int64_t idx_rhs = chelis_indices_to_flat(indices, {rhs}->strides, {rhs}->ndim);"
+            "{ind}            int64_t idx_lhs = chelis_indices_to_flat(indices, {lhs}->strides, {lhs}->rank);"
+        ));
+        self.lines.push(format!(
+            "{ind}            int64_t idx_rhs = chelis_indices_to_flat(indices, {rhs}->strides, {rhs}->rank);"
         ));
         let expression = match arm {
-            DtypeArm::F32 | DtypeArm::Bool => format!(
-                "{}(__lhs_data[idx_lhs], __rhs_data[idx_rhs])",
-                func.f32_name()
+            DtypeArm::F32 | DtypeArm::F64 => format!(
+                "isnan(__lhs_data[idx_lhs]) || (!isnan(__rhs_data[idx_rhs]) && __lhs_data[idx_lhs] {} __rhs_data[idx_rhs]) ? __lhs_data[idx_lhs] : __rhs_data[idx_rhs]",
+                func.comparison()
             ),
-            DtypeArm::I32 => format!(
+            DtypeArm::Bool | DtypeArm::I32 | DtypeArm::I64 => format!(
                 "__lhs_data[idx_lhs] {} __rhs_data[idx_rhs] ? __lhs_data[idx_lhs] : __rhs_data[idx_rhs]",
-                func.i32_comparison()
+                func.comparison()
             ),
-            DtypeArm::F64 | DtypeArm::I64 => {
-                unreachable!("binary func arm must reject F64 and I64 before emission")
-            }
         };
         self.lines
             .push(format!("{ind}            __target_data[i] = {expression};"));
@@ -4266,13 +4943,14 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{ind}        for (int64_t i = 0; i < {target}->size; i++) {{"
         ));
-        self.lines
-            .push(format!("{ind}            int64_t indices[CHELIS_MAX_DIM];"));
         self.lines.push(format!(
-            "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);"
+            "{ind}            int64_t indices[{target}->rank > 0 ? {target}->rank : 1];"
         ));
         self.lines.push(format!(
-            "{ind}            int64_t idx = chelis_indices_to_flat(indices, {input}->strides, {input}->ndim);"
+            "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->rank, indices);"
+        ));
+        self.lines.push(format!(
+            "{ind}            int64_t idx = chelis_indices_to_flat(indices, {input}->strides, {input}->rank);"
         ));
         self.lines.push(format!(
             "{ind}            __target_data[i] = {op}__input_data[idx];"
@@ -4303,13 +4981,14 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{ind}        for (int64_t i = 0; i < {target}->size; i++) {{"
         ));
-        self.lines
-            .push(format!("{ind}            int64_t indices[CHELIS_MAX_DIM];"));
         self.lines.push(format!(
-            "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);"
+            "{ind}            int64_t indices[{target}->rank > 0 ? {target}->rank : 1];"
         ));
         self.lines.push(format!(
-            "{ind}            int64_t idx = chelis_indices_to_flat(indices, {input}->strides, {input}->ndim);"
+            "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->rank, indices);"
+        ));
+        self.lines.push(format!(
+            "{ind}            int64_t idx = chelis_indices_to_flat(indices, {input}->strides, {input}->rank);"
         ));
         self.lines.push(format!(
             "{ind}            __target_data[i] = {func}(__input_data[idx]);"
@@ -4409,50 +5088,42 @@ impl<'a> HostEmitter<'a> {
                 self.lines
                     .push(format!("{}chelis_tensor* {};", self.indent, tensor_name));
                 // Scalar inputs to tensor helpers use true rank-0 tensors so
-                // tensor[f32] keeps shape=[] across generated host/DAG calls.
-                //
-                // W2 PR 3 (CRuntime-F32Coupling): every arm casts
-                // `->data` through a typed pointer before writing
-                // the scalar.  The legacy bool / f32 arms wrote
-                // through the public `float *data` declaration in
-                // the C runtime header; mirror the int64 arm's
-                // typed-cast pattern for the bool and f32 cases
-                // so the bug class closes uniformly.  Bool
-                // storage today is 4-byte f32-encoded (per
-                // `docs/investigations/c_runtime_dtype_accessors_diagnosis.md`),
-                // so the bool arm casts to `(float*)` and writes
-                // the 1.0f / 0.0f bit pattern.
+                // the declared dtype keeps shape=[] across generated host/DAG
+                // calls. Every arm writes through its exact storage type;
+                // Bool is the canonical one-byte Bool8 carrier.
                 let (dtype, store) = match inferred_ty {
                     HostType::Int8 => (
-                        "CHELIS_I8",
+                        "CHELIS_DTYPE_I8",
                         format!("((int8_t*){tensor_name}->data)[0] = {value_name};"),
                     ),
                     HostType::Int16 => (
-                        "CHELIS_I16",
+                        "CHELIS_DTYPE_I16",
                         format!("((int16_t*){tensor_name}->data)[0] = {value_name};"),
                     ),
                     HostType::Int64 => (
-                        "CHELIS_I64",
+                        "CHELIS_DTYPE_I64",
                         format!("((int64_t*){tensor_name}->data)[0] = {value_name};"),
                     ),
                     HostType::Bool => (
-                        "CHELIS_BOOL",
-                        format!("((float*){tensor_name}->data)[0] = {value_name} ? 1.0f : 0.0f;"),
+                        "CHELIS_DTYPE_BOOL",
+                        format!(
+                            "((uint8_t*){tensor_name}->data)[0] = {value_name} ? UINT8_C(1) : UINT8_C(0);"
+                        ),
                     ),
                     // #381: an f64 captured scalar (e.g. `cast(1.1, f64)`)
                     // fed to a tensor helper via `scalar_to_tensor` must be
-                    // packed into a `CHELIS_F64` rank-0 tensor and written
+                    // packed into a `CHELIS_DTYPE_F64` rank-0 tensor and written
                     // through a `double*`. The pre-fix catch-all packed it
-                    // as `CHELIS_F32` and stored only the low 4 bytes; the
+                    // as `CHELIS_DTYPE_F32` and stored only the low 4 bytes; the
                     // f64 kernel then read 8 bytes (the high 4 garbage),
                     // collapsing the value to ~0 and silently disagreeing
                     // with the evaluator. Float32 still uses the f32 arm.
                     HostType::Float64 => (
-                        "CHELIS_F64",
+                        "CHELIS_DTYPE_F64",
                         format!("((double*){tensor_name}->data)[0] = (double)({value_name});"),
                     ),
                     _ => (
-                        "CHELIS_F32",
+                        "CHELIS_DTYPE_F32",
                         format!("((float*){tensor_name}->data)[0] = (float)({value_name});"),
                     ),
                 };
@@ -4465,6 +5136,14 @@ impl<'a> HostEmitter<'a> {
             };
             tensor_args.push(entry);
         }
+        // chelis#1222: an identity helper's whole body is
+        // `outputs[0] = inputs[0];` (see `identity_helper_input`), so its
+        // result is its argument's pointer, not a fresh allocation.
+        let identity_source = self
+            .tensor_helpers
+            .get(helper)
+            .and_then(identity_helper_input)
+            .and(tensor_args.first().map(|(name, _)| name.clone()));
         let outputs_name = self.next_temp("outputs");
         // A constant-only tensor helper (e.g. `expand(scalar_to_tensor(c),
         // 0, n)`) has zero inputs. ISO C forbids a zero-length array
@@ -4553,6 +5232,9 @@ impl<'a> HostEmitter<'a> {
         } else {
             self.lines
                 .push(format!("{}{target} = {}[0];", self.indent, outputs_name));
+            if let Some(source) = identity_source {
+                self.record_alias(target, &source);
+            }
         }
         for (_, boxed) in tensor_args {
             if let Some(boxed) = boxed {
@@ -4613,7 +5295,7 @@ impl<'a> HostEmitter<'a> {
             output_dims.join(", ")
         ));
         self.lines.push(format!(
-            "{}{target} = chelis_alloc({}, {shape_name}, CHELIS_F32);",
+            "{}{target} = chelis_alloc({}, {shape_name}, CHELIS_DTYPE_F32);",
             self.indent,
             output_dims.len()
         ));
@@ -4625,7 +5307,7 @@ impl<'a> HostEmitter<'a> {
             self.indent
         ));
         self.lines.push(format!(
-            "{}if (!({lhs_contig}->ndim >= 2 && {lhs_contig}->strides[{lhs_contig}->ndim - 1] == 1 && {lhs_contig}->strides[{lhs_contig}->ndim - 2] == {k_expr})) {{",
+            "{}if (!({lhs_contig}->rank >= 2 && {lhs_contig}->strides[{lhs_contig}->rank - 1] == 1 && {lhs_contig}->strides[{lhs_contig}->rank - 2] == {k_expr})) {{",
             self.indent
         ));
         self.lines.push(format!(
@@ -4638,7 +5320,7 @@ impl<'a> HostEmitter<'a> {
             self.indent
         ));
         self.lines.push(format!(
-            "{}if (!({rhs_contig}->ndim >= 2 && {rhs_contig}->strides[{rhs_contig}->ndim - 1] == 1 && {rhs_contig}->strides[{rhs_contig}->ndim - 2] == {n_expr})) {{",
+            "{}if (!({rhs_contig}->rank >= 2 && {rhs_contig}->strides[{rhs_contig}->rank - 1] == 1 && {rhs_contig}->strides[{rhs_contig}->rank - 2] == {n_expr})) {{",
             self.indent
         ));
         self.lines.push(format!(
@@ -4732,8 +5414,10 @@ impl<'a> HostEmitter<'a> {
             ));
             self.lines.push(format!("{}    abort();", self.indent));
             self.lines.push(format!("{}}}", self.indent));
-            self.lines
-                .push(format!("{}if ({arg}->dtype != CHELIS_F32) {{", self.indent));
+            self.lines.push(format!(
+                "{}if ({arg}->dtype != CHELIS_DTYPE_F32) {{",
+                self.indent
+            ));
             self.lines.push(format!(
                 "{}    fprintf(stderr, \"specialized BLAS call input {input_index} expected f32 tensor\\n\");",
                 self.indent
@@ -4741,12 +5425,12 @@ impl<'a> HostEmitter<'a> {
             self.lines.push(format!("{}    abort();", self.indent));
             self.lines.push(format!("{}}}", self.indent));
             self.lines.push(format!(
-                "{}if ({arg}->ndim != {}) {{",
+                "{}if ({arg}->rank != {}) {{",
                 self.indent,
                 ty.dims.len()
             ));
             self.lines.push(format!(
-                "{}    fprintf(stderr, \"specialized BLAS call input {input_index} expected rank {}, got %d\\n\", {arg}->ndim);",
+                "{}    fprintf(stderr, \"specialized BLAS call input {input_index} expected rank {}, got %d\\n\", {arg}->rank);",
                 self.indent,
                 ty.dims.len()
             ));
@@ -4954,12 +5638,12 @@ impl<'a> HostEmitter<'a> {
             self.lines.push(format!("{}    abort();", self.indent));
             self.lines.push(format!("{}}}", self.indent));
             self.lines.push(format!(
-                "{}if ({arg}->ndim != {}) {{",
+                "{}if ({arg}->rank != {}) {{",
                 self.indent,
                 ty.dims.len()
             ));
             self.lines.push(format!(
-                "{}    fprintf(stderr, \"specialized sparse call input {input_index} expected rank {}, got %d\\n\", {arg}->ndim);",
+                "{}    fprintf(stderr, \"specialized sparse call input {input_index} expected rank {}, got %d\\n\", {arg}->rank);",
                 self.indent,
                 ty.dims.len()
             ));
@@ -5069,7 +5753,7 @@ impl<'a> HostEmitter<'a> {
             self.indent
         ));
         self.lines.push(format!(
-            "{}        int64_t {target}_g = ({indices_ct}->dtype == CHELIS_I64) ? (int64_t)((const int64_t*){indices_ct}->data)[{target}_i] : (int64_t)({indices_ct}_data)[{target}_i];",
+            "{}        int64_t {target}_g = ({indices_ct}->dtype == CHELIS_DTYPE_I64) ? (int64_t)((const int64_t*){indices_ct}->data)[{target}_i] : (int64_t)({indices_ct}_data)[{target}_i];",
             self.indent
         ));
         self.lines.push(format!(
@@ -5187,7 +5871,7 @@ impl<'a> HostEmitter<'a> {
             self.indent
         ));
         self.lines.push(format!(
-            "{}        int64_t {target}_g = ({indices_ct}->dtype == CHELIS_I64) ? (int64_t)((const int64_t*){indices_ct}->data)[{target}_i] : (int64_t)({indices_ct}_data)[{target}_i];",
+            "{}        int64_t {target}_g = ({indices_ct}->dtype == CHELIS_DTYPE_I64) ? (int64_t)((const int64_t*){indices_ct}->data)[{target}_i] : (int64_t)({indices_ct}_data)[{target}_i];",
             self.indent
         ));
         self.lines.push(format!(
@@ -5315,18 +5999,112 @@ impl<'a> HostEmitter<'a> {
                 .unwrap_or_else(|| c_ident(function)),
             arg_vars.join(", ")
         ));
-        self.retain_call_escaped_args(target, function, args, ty);
+        // chelis#1222: these two are halves of ONE judgement about the call
+        // result and must not be decided independently. When the escape
+        // retain fires, `target` owns a reference of its own and its scope
+        // owes the matching release; recording a borrow provenance on top of
+        // that would suppress the release and strand the retain, leaking one
+        // reference per call. Only an un-retained result needs its
+        // provenance traced.
+        if !self.retain_call_escaped_args(target, function, args, ty) {
+            self.record_call_result_provenance(target, function, &arg_vars, ty);
+        }
         Ok(())
     }
 
+    /// chelis#1222: record where a call's result pointer came from, so the
+    /// receiving scope can tell an allocation the callee made from one it
+    /// merely handed back.
+    ///
+    /// Two provenances are unsafe to claim. The callee may return one of
+    /// its arguments, in which case the result is whatever that argument
+    /// already aliased; or it may return a value read out of an enclosing
+    /// scope (a captured top-level binding), in which case there is no
+    /// local variable to name and the result is marked foreign outright.
+    ///
+    /// Precision comes from the same [`analyze_returns_arg`] summary the
+    /// call-escape retain uses: a callee that demonstrably builds a fresh
+    /// result records nothing and the caller claims it as usual. When more
+    /// than one argument may be returned and more than one of them is
+    /// itself an alias, the result is marked foreign rather than pinned to
+    /// an arbitrary one of them: over-conservatism leaks at process exit,
+    /// under-conservatism corrupts the heap.
+    fn record_call_result_provenance(
+        &mut self,
+        target: &str,
+        function: &str,
+        arg_vars: &[String],
+        ty: &HostType,
+    ) {
+        if release_call(target, ty).is_none() {
+            return;
+        }
+        let callee = self.returns_arg.get(function).cloned();
+        // An unsummarized callee (not a user function, or not yet in the
+        // fixpoint) is treated as may-return-anything.
+        if callee.as_ref().is_none_or(ReturnsArg::may_return_outer) {
+            self.mark_foreign(target);
+            return;
+        }
+        let mut aliased_roots: Vec<(String, String)> = Vec::new();
+        for (index, arg_var) in arg_vars.iter().enumerate() {
+            let may_return = callee.as_ref().is_none_or(|s| s.may_return(index));
+            if !may_return {
+                continue;
+            }
+            let root = self.alias_root(arg_var);
+            // An argument temp that aliases nothing is left unrecorded, so
+            // a result that is that same pointer is claimed here.
+            //
+            // That is right when the temp is genuinely untracked, and WRONG
+            // when it is not: a fresh list literal built as an argument at
+            // `main` scope IS tracked and does get its own release, so a
+            // callee returning it leaves one allocation with two releases.
+            // Reported as chelis#1356 with a repro; unchanged from the
+            // parent commit, so it is not this change's regression, but do
+            // not read the line above as a proof of anything.
+            if root != *arg_var {
+                // Keyed by root so two arguments that alias the SAME
+                // allocation count once, but recorded as the argument
+                // variable: `record_alias` must add a link to the chain,
+                // never collapse it. The intermediate links are what a
+                // chain walk reads ownership off, and jumping straight to
+                // the root steps over them (chelis#1222).
+                aliased_roots.push((root, arg_var.clone()));
+            }
+        }
+        aliased_roots.sort();
+        aliased_roots.dedup_by(|a, b| a.0 == b.0);
+        match aliased_roots.as_slice() {
+            [] => {}
+            [(_, only)] => {
+                let only = only.clone();
+                self.record_alias(target, &only);
+            }
+            _ => self.mark_foreign(target),
+        }
+    }
+
     /// Issue #406 (call-escape): when a block result is produced by a call
-    /// whose return may alias one of its arguments, and that argument is a
-    /// bare `Var` naming a heap binding some open `let` block frees at its
-    /// close, the call's result `target` shares the binding's allocation
-    /// and the block release would drop the reference the caller now
-    /// holds. Retain `target` once per such escaping argument so the
-    /// block's release leaves exactly one live reference (the same
-    /// retain-cancels-release balance the bare-`Var` transfer arm uses).
+    /// whose return may alias one of its bare-`Var` arguments, the call's
+    /// result `target` shares that variable's allocation, and the target's
+    /// own release would drop a reference someone else still owns. Retain
+    /// `target` once so the two release paths hold two references (the
+    /// same retain-cancels-release balance the bare-`Var` transfer arm
+    /// uses).
+    ///
+    /// As in [`HostEmitter::retain_transferred_result`], the destination's
+    /// class decides how much the argument's provenance matters
+    /// (chelis#1286 invariant 2). A binding VALUE TEMP is released at the
+    /// block close unconditionally, so any bare-`Var` argument the callee
+    /// may hand back forces the retain whatever owns that argument - the
+    /// earlier tracked-binding-only guard let `d = pass_through(text)`
+    /// release the caller's `text` through `d`'s block close and
+    /// underflow the string refcount (PR #1302 red-team follow-up to
+    /// P0-1). Any other destination keeps the tracked-binding
+    /// requirement: its release path is the caller's alias-aware
+    /// machinery, and retaining a borrowed return there would leak once
+    /// per call.
     ///
     /// Precision: the per-function `returns_arg` summary
     /// ([`analyze_returns_arg`]) determines which argument positions the
@@ -5337,19 +6115,26 @@ impl<'a> HostEmitter<'a> {
     /// then fires, which is use-after-free-safe and at worst leaks one
     /// reference. Tensors and other non-refcounted types have no
     /// `retain_call` and are skipped, keeping them excluded as before.
+    ///
+    /// Returns whether a retain was emitted, so the caller can keep the
+    /// tracking decision consistent with it (chelis#1222).
     fn retain_call_escaped_args(
         &mut self,
         target: &str,
         function: &str,
         args: &[HostExpr],
         ty: &HostType,
-    ) {
+    ) -> bool {
         // Only meaningful for a refcounted result with a retain primitive
         // and at least one open release-tracking `let` block.
         if retain_call(target, ty).is_none() || self.let_scopes.is_empty() {
-            return;
+            return false;
         }
         let callee = self.returns_arg.get(function).cloned();
+        let target_is_value_temp = self
+            .let_scopes
+            .iter()
+            .any(|scope| scope.value_temps.contains(target));
         let mut retained = false;
         for (index, arg) in args.iter().enumerate() {
             // Only a bare `Var` directly aliases a binding's allocation.
@@ -5361,12 +6146,17 @@ impl<'a> HostEmitter<'a> {
             let HostExprKind::Var(name, _) = &arg.kind else {
                 continue;
             };
-            let source_is_binding = self
-                .let_scopes
-                .iter()
-                .any(|scope| scope.bindings.contains(name));
-            if !source_is_binding {
-                continue;
+            if !target_is_value_temp {
+                // chelis#1222: resolve the reference before testing
+                // membership; `bindings` holds alias keys, not spellings.
+                let source_key = self.resolve_alias_key(name);
+                let source_is_binding = self
+                    .let_scopes
+                    .iter()
+                    .any(|scope| scope.bindings.contains(&source_key));
+                if !source_is_binding {
+                    continue;
+                }
             }
             let may_return = match &callee {
                 Some(summary) => summary.may_return(index),
@@ -5378,6 +6168,30 @@ impl<'a> HostEmitter<'a> {
                 retained = true;
             }
         }
+        // A callee that may hand back a CAPTURED top-level binding
+        // returns a borrowed reference through no argument at all
+        // (`def retg() -> string = gcap`). A value temp claiming that
+        // result unretained falsified the owned-binding precondition the
+        // `returns_arg` Let-arm refinement rests on: PR #1302's round-3
+        // red team showed `d = retg()  d` aborting once the owned-return
+        // summary let `main` claim the result of a function whose binding
+        // never owned it. Retain exactly as for an escaping argument; the
+        // block release pairs it. The known cost is chelis#1344's
+        // door-(a) imprecision in retain form: a branch-insensitive outer
+        // verdict over-retains a fresh-branch result into a bounded
+        // per-call leak instead of the borrowed-branch use-after-free.
+        // Non-value-temp targets keep the provenance path: `main` and the
+        // binder ledger abstain from claiming an outer-borrowed result,
+        // so a retain there would strand.
+        if target_is_value_temp {
+            let callee_may_return_outer = match &callee {
+                Some(summary) => summary.may_return_outer(),
+                None => true,
+            };
+            if callee_may_return_outer {
+                retained = true;
+            }
+        }
         // Retain at most once: the result is a single pointer, and one
         // extra reference cancels the one block release that would
         // otherwise drop the escaping allocation. (Even if several
@@ -5385,7 +6199,9 @@ impl<'a> HostEmitter<'a> {
         // binding exactly once, so a single retain restores the balance.)
         if retained && let Some(call) = retain_call(target, ty) {
             self.lines.push(format!("{}{call}", self.indent));
+            return true;
         }
+        false
     }
 
     fn assign_adt_construct(
@@ -5473,6 +6289,12 @@ impl<'a> HostEmitter<'a> {
             ));
             let nested_indent = format!("{}    ", self.indent);
             let previous = std::mem::replace(&mut self.indent, nested_indent);
+            // chelis#1222: one binder scope per arm. Each arm's pattern
+            // bindings shadow any enclosing name they reuse, and their keys
+            // carry no outgoing edge -- `chelis_adt_field` hands back an
+            // independently retained handle, so the arm binding is not a
+            // copy of anything this scope already owns.
+            self.binder_keys.push(HashMap::new());
             for binding in &arm.bindings {
                 let field_var = self.next_temp(&format!("{}_field", binding.name));
                 self.lines.push(format!(
@@ -5486,8 +6308,10 @@ impl<'a> HostEmitter<'a> {
                     binding.name
                 ));
                 self.assign_unboxed_value(&binding.name, &binding.ty, &field_var)?;
+                self.bind_alias_key(&binding.name);
             }
             self.assign_expr(target, &arm.expr, expr_ty)?;
+            self.binder_keys.pop();
             self.indent = previous;
             self.lines.push(format!("{}}}", self.indent));
         }
@@ -6042,6 +6866,14 @@ impl<'a> HostEmitter<'a> {
                 ));
             }
             HostCallbackKind::Inline { params, body } => {
+                // chelis#1222: a lambda parameter shadows any enclosing name
+                // it reuses. Without a scope here, a parameter that happens
+                // to reuse an outer binding's name made the emitter read the
+                // OUTER binding's ownership facts for it -- which decided
+                // whether a retain was emitted inside the loop, so the same
+                // program leaked or did not depending on the parameter's
+                // spelling. Edge-less, like the other extraction binders.
+                self.binder_keys.push(HashMap::new());
                 for (param, arg_var) in params.iter().zip(arg_vars.iter()) {
                     self.lines.push(format!(
                         "{}{} {} = {};",
@@ -6051,7 +6883,11 @@ impl<'a> HostEmitter<'a> {
                         arg_var
                     ));
                 }
+                for param in params {
+                    self.bind_alias_key(&param.name);
+                }
                 self.assign_expr(target, body, &callback.ret_ty)?;
+                self.binder_keys.pop();
             }
         }
         Ok(())
@@ -6059,24 +6895,47 @@ impl<'a> HostEmitter<'a> {
 
     fn box_value_expr(&self, value: &str, ty: &HostType) -> Result<String, Unsupported> {
         Ok(match ty {
-            HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
-                format!("chelis_value_from_int64((int64_t){value})")
-            }
-            HostType::Float64 => format!("chelis_value_from_f64({value})"),
-            HostType::Float32 => format!("chelis_value_from_f32_boxed({value})"),
-            HostType::Float16 => format!("chelis_value_from_f16_bits_boxed({value})"),
-            HostType::BFloat16 => format!("chelis_value_from_bf16_bits_boxed({value})"),
-            HostType::Bool => format!("chelis_value_from_bool({value})"),
+            HostType::Int8 => format!(
+                "chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_I8, (uint64_t)(uint8_t)(int8_t){value}))"
+            ),
+            HostType::Int16 => format!(
+                "chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_I16, (uint64_t)(uint16_t)(int16_t){value}))"
+            ),
+            HostType::Int32 => format!(
+                "chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_I32, (uint64_t)(uint32_t)(int32_t){value}))"
+            ),
+            HostType::Int64 => format!(
+                "chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_t){value}))"
+            ),
+            HostType::Float64 => format!(
+                "chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_F64, chelis_host_f64_bits({value})))"
+            ),
+            HostType::Float32 => format!(
+                "chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_F32, (uint64_t)chelis_host_f32_bits({value})))"
+            ),
+            HostType::Float16 => format!(
+                "chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_F16, (uint64_t)(uint16_t){value}))"
+            ),
+            HostType::BFloat16 => format!(
+                "chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_BF16, (uint64_t)(uint16_t){value}))"
+            ),
+            HostType::Bool => format!(
+                "chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_BOOL, (uint64_t)({value} ? 1 : 0)))"
+            ),
             HostType::String => format!("chelis_value_from_string({value})"),
             HostType::Adt(_, _) => format!("chelis_value_from_adt({value})"),
             HostType::Tensor(_) => format!("chelis_value_from_tensor({value})"),
             HostType::List(_) => format!("chelis_value_from_list({value})"),
             HostType::Tuple(_) => format!("chelis_value_from_tuple({value})"),
             HostType::Dict(_, _) => format!("chelis_value_from_dict({value})"),
-            HostType::Callback(_, _)
-            | HostType::Option(_)
-            | HostType::MappedFile
-            | HostType::Unit => {
+            // Unit has no payload and no dedicated public chelis_value tag.
+            // Its canonical structural runtime image is the empty tuple,
+            // which already renders as `()` and participates in the generic
+            // ADT/list carriers without expanding the public C ABI.
+            HostType::Unit => {
+                "chelis_value_from_tuple(chelis_tuple_from_values(NULL, 0))".to_string()
+            }
+            HostType::Callback(_, _) | HostType::Option(_) | HostType::MappedFile => {
                 return Err(unsupported_value_boxing(ty, "boxing a resolved host value"));
             }
         })
@@ -6089,28 +6948,42 @@ impl<'a> HostEmitter<'a> {
         value_expr: &str,
     ) -> Result<(), Unsupported> {
         let expr = match ty {
-            HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
-                format!("({})chelis_value_as_int64({value_expr})", c_type(ty)?)
+            HostType::Int8 => format!(
+                "(int8_t)chelis_host_scalar_as_i64(chelis_value_as_scalar({value_expr}), CHELIS_DTYPE_I8)"
+            ),
+            HostType::Int16 => format!(
+                "(int16_t)chelis_host_scalar_as_i64(chelis_value_as_scalar({value_expr}), CHELIS_DTYPE_I16)"
+            ),
+            HostType::Int32 => format!(
+                "(int32_t)chelis_host_scalar_as_i64(chelis_value_as_scalar({value_expr}), CHELIS_DTYPE_I32)"
+            ),
+            HostType::Int64 => format!(
+                "chelis_host_scalar_as_i64(chelis_value_as_scalar({value_expr}), CHELIS_DTYPE_I64)"
+            ),
+            HostType::Float64 => format!(
+                "chelis_host_scalar_as_float(chelis_value_as_scalar({value_expr}), CHELIS_DTYPE_F64)"
+            ),
+            HostType::Float32 => format!(
+                "(float)chelis_host_scalar_as_float(chelis_value_as_scalar({value_expr}), CHELIS_DTYPE_F32)"
+            ),
+            HostType::Float16 => format!(
+                "(uint16_t)chelis_host_scalar_bits(chelis_value_as_scalar({value_expr}), CHELIS_DTYPE_F16)"
+            ),
+            HostType::BFloat16 => format!(
+                "(uint16_t)chelis_host_scalar_bits(chelis_value_as_scalar({value_expr}), CHELIS_DTYPE_BF16)"
+            ),
+            HostType::Bool => {
+                format!("chelis_host_scalar_as_bool(chelis_value_as_scalar({value_expr}))")
             }
-            HostType::Float64 => format!("chelis_value_as_f64({value_expr})"),
-            HostType::Float32 => format!("(float)chelis_value_as_f64({value_expr})"),
-            HostType::Float16 => {
-                format!("chelis_f32_to_f16((float)chelis_value_as_f64({value_expr}))")
-            }
-            HostType::BFloat16 => {
-                format!("chelis_f32_to_bf16((float)chelis_value_as_f64({value_expr}))")
-            }
-            HostType::Bool => format!("chelis_value_as_bool({value_expr})"),
             HostType::String => format!("chelis_value_as_string({value_expr})"),
             HostType::Adt(_, _) => format!("chelis_value_as_adt({value_expr})"),
             HostType::Tensor(_) => format!("chelis_value_as_tensor({value_expr})"),
             HostType::List(_) => format!("chelis_value_as_list({value_expr})"),
             HostType::Tuple(_) => format!("chelis_value_as_tuple({value_expr})"),
             HostType::Dict(_, _) => format!("chelis_value_as_dict({value_expr})"),
-            HostType::Callback(_, _)
-            | HostType::Option(_)
-            | HostType::MappedFile
-            | HostType::Unit => {
+            // The empty tuple carrier above has no scalar payload to read.
+            HostType::Unit => "0".to_string(),
+            HostType::Callback(_, _) | HostType::Option(_) | HostType::MappedFile => {
                 return Err(unsupported_value_boxing(
                     ty,
                     "unboxing a resolved host value",
@@ -6139,12 +7012,12 @@ impl<'a> HostEmitter<'a> {
             // (the f32 C value widens to its exact double image), never
             // through a fixed-precision printf (chelis#748).
             HostType::Float64 | HostType::Float32 | HostType::Float16 | HostType::BFloat16 => {
-                let dtype = scalar_float_dtype_macro(ty);
-                let value = scalar_float_as_double(value, ty);
+                let boxed = self.box_value_expr(value, ty)?;
                 self.lines.push(format!(
-                    "{}{{ char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF]; \
-                     chelis_format_shortest({value}, {dtype}, fmt_buf, sizeof fmt_buf); \
-                     printf(\"%s\\n\", fmt_buf); }}",
+                    "{}{{ chelis_value boxed = {boxed}; \
+                     chelis_string text = chelis_string_from_scalar(chelis_value_as_scalar(boxed)); \
+                     printf(\"%s\\n\", chelis_string_data(text)); \
+                     chelis_string_release(text); }}",
                     self.indent
                 ));
             }
@@ -6257,15 +7130,14 @@ impl<'a> HostEmitter<'a> {
                     self.indent, value
                 ))
             }
-            // chelis#732 Phase 2: same own-width routine as
-            // `emit_print_value` (intra-lane exit agreement, [05-OBS-1]).
+            // Same exact tagged-scalar path as `emit_print_value`.
             HostType::Float64 | HostType::Float32 | HostType::Float16 | HostType::BFloat16 => {
-                let dtype = scalar_float_dtype_macro(ty);
-                let value = scalar_float_as_double(value, ty);
+                let boxed = self.box_value_expr(value, ty)?;
                 self.lines.push(format!(
-                    "{}{{ char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF]; \
-                     chelis_format_shortest({value}, {dtype}, fmt_buf, sizeof fmt_buf); \
-                     printf(\"%s\", fmt_buf); }}",
+                    "{}{{ chelis_value boxed = {boxed}; \
+                     chelis_string text = chelis_string_from_scalar(chelis_value_as_scalar(boxed)); \
+                     printf(\"%s\", chelis_string_data(text)); \
+                     chelis_string_release(text); }}",
                     self.indent
                 ));
             }
@@ -6377,35 +7249,39 @@ impl<'a> HostEmitter<'a> {
         self.lines
             .push(format!("{}switch ({value}.tag) {{", self.indent));
         self.lines.push(format!(
-            "{}case CHELIS_VALUE_INT64: printf(\"%lld\", (long long){value}.as.i64); break;",
+            "{}case CHELIS_VALUE_SCALAR: {{ chelis_string text = \
+             chelis_string_from_scalar(chelis_value_as_scalar({value})); \
+             fputs(chelis_string_data(text), stdout); chelis_string_release(text); break; }}",
             self.indent
         ));
         self.lines.push(format!(
-            "{}case CHELIS_VALUE_FLOAT64: {{ char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF]; \
-             chelis_format_shortest({value}.as.f64, CHELIS_F64, fmt_buf, sizeof fmt_buf); \
-             printf(\"%s\", fmt_buf); break; }}",
+            "{}case CHELIS_VALUE_UNIT: printf(\"()\"); break;",
             self.indent
         ));
         self.lines.push(format!(
-            "{}case CHELIS_VALUE_BOOL: printf(\"%s\", {value}.as.boolean ? \"true\" : \"false\"); break;",
+            "{}case CHELIS_VALUE_STRING: printf(\"%s\", chelis_string_data(chelis_value_as_string({value}))); break;",
             self.indent
         ));
-        self.lines.push(format!(
-            "{}case CHELIS_VALUE_STRING: printf(\"%s\", chelis_string_data({value}.as.string)); break;",
-            self.indent
-        ));
-        for (tag, printer, field) in [
-            ("TENSOR", "chelis_print_tensor_stdout", "tensor"),
-            ("LIST", "chelis_print_list", "list"),
-            ("TUPLE", "chelis_print_tuple", "tuple"),
-            ("DICT", "chelis_print_dict", "dict"),
-            ("ADT", "chelis_print_adt", "adt"),
+        for (tag, printer, accessor) in [
+            (
+                "TENSOR",
+                "chelis_print_tensor_stdout",
+                "chelis_value_as_tensor",
+            ),
+            ("LIST", "chelis_print_list", "chelis_value_as_list"),
+            ("TUPLE", "chelis_print_tuple", "chelis_value_as_tuple"),
+            ("DICT", "chelis_print_dict", "chelis_value_as_dict"),
+            ("ADT", "chelis_print_adt", "chelis_value_as_adt"),
         ] {
             self.lines.push(format!(
-                "{}case CHELIS_VALUE_{tag}: {printer}({value}.as.{field}); break;",
+                "{}case CHELIS_VALUE_{tag}: {printer}({accessor}({value})); break;",
                 self.indent
             ));
         }
+        self.lines.push(format!(
+            "{}default: fprintf(stderr, \"invalid chelis_value tag in manifested root\\n\"); abort();",
+            self.indent
+        ));
         self.lines.push(format!("{}}}", self.indent));
         self.lines.push(format!("{}printf(\"\\n\");", self.indent));
     }
@@ -6423,66 +7299,46 @@ impl<'a> HostEmitter<'a> {
         value_var: &str,
         value_ty: &HostType,
     ) -> Result<(), Unsupported> {
-        match ty {
-            HostType::Option(inner) if matches!(inner.as_ref(), HostType::Int64) => {
-                self.lines
-                    .push(format!("{}{target}.is_some = true;", self.indent));
-                self.lines
-                    .push(format!("{}{target}.value = {value_var};", self.indent));
-            }
-            HostType::Option(inner) if matches!(inner.as_ref(), HostType::Float64) => {
-                self.lines
-                    .push(format!("{}{target}.is_some = true;", self.indent));
-                self.lines
-                    .push(format!("{}{target}.value = {value_var};", self.indent));
-            }
-            HostType::Option(_) => {
-                self.lines
-                    .push(format!("{}{target}.is_some = true;", self.indent));
-                self.lines.push(format!(
-                    "{}{target}.value = {};",
-                    self.indent,
-                    self.box_value_expr(value_var, value_ty)?
-                ));
-            }
-            other => {
-                return Err(invalid_abi_shape(
-                    format!("Some constructor carries non-option ABI type `{other:?}`"),
-                    "Some constructor",
-                ));
-            }
+        let HostType::Option(inner) = ty else {
+            return Err(invalid_abi_shape(
+                format!("Some constructor carries non-option ABI type `{ty:?}`"),
+                "Some constructor",
+            ));
+        };
+        require_same_abi_type(inner.as_ref(), value_ty, "Some constructor payload")?;
+        if is_scalar_abi(inner.as_ref()) {
+            self.lines.push(format!(
+                "{}{target} = (chelis_option_scalar){{ .is_some = 1, .reserved = {{0}}, .value = {} }};",
+                self.indent,
+                scalar_carrier_expr(value_var, value_ty)?
+            ));
+        } else {
+            self.lines.push(format!(
+                "{}{target} = (chelis_option_value){{ .is_some = 1, .reserved = {{0}}, .value = {} }};",
+                self.indent,
+                self.box_value_expr(value_var, value_ty)?
+            ));
         }
         Ok(())
     }
 
     fn assign_option_none(&mut self, target: &str, ty: &HostType) -> Result<(), Unsupported> {
-        match ty {
-            HostType::Option(inner) if matches!(inner.as_ref(), HostType::Int64) => {
-                self.lines
-                    .push(format!("{}{target}.is_some = false;", self.indent));
-                self.lines
-                    .push(format!("{}{target}.value = 0;", self.indent));
-            }
-            HostType::Option(inner) if matches!(inner.as_ref(), HostType::Float64) => {
-                self.lines
-                    .push(format!("{}{target}.is_some = false;", self.indent));
-                self.lines
-                    .push(format!("{}{target}.value = 0.0;", self.indent));
-            }
-            HostType::Option(_) => {
-                self.lines
-                    .push(format!("{}{target}.is_some = false;", self.indent));
-                self.lines.push(format!(
-                    "{}{target}.value = chelis_value_from_int64(0);",
-                    self.indent
-                ));
-            }
-            other => {
-                return Err(invalid_abi_shape(
-                    format!("None constructor carries non-option ABI type `{other:?}`"),
-                    "None constructor",
-                ));
-            }
+        let HostType::Option(inner) = ty else {
+            return Err(invalid_abi_shape(
+                format!("None constructor carries non-option ABI type `{ty:?}`"),
+                "None constructor",
+            ));
+        };
+        if is_scalar_abi(inner.as_ref()) {
+            self.lines.push(format!(
+                "{}{target} = (chelis_option_scalar){{ .is_some = 0, .reserved = {{0}}, .value = chelis_scalar_from_bits(CHELIS_DTYPE_F32, UINT64_C(0)) }};",
+                self.indent
+            ));
+        } else {
+            self.lines.push(format!(
+                "{}{target} = (chelis_option_value){{ .is_some = 0, .reserved = {{0}}, .value = (chelis_value){{ .tag = CHELIS_VALUE_UNIT, .reserved = {{0}}, .payload.handle = NULL }} }};",
+                self.indent
+            ));
         }
         Ok(())
     }
@@ -6580,6 +7436,21 @@ fn is_float_abi(ty: &HostAbiType) -> bool {
     matches!(
         ty,
         HostAbiType::Float16 | HostAbiType::BFloat16 | HostAbiType::Float32 | HostAbiType::Float64
+    )
+}
+
+fn is_scalar_abi(ty: &HostAbiType) -> bool {
+    matches!(
+        ty,
+        HostAbiType::Int8
+            | HostAbiType::Int16
+            | HostAbiType::Int32
+            | HostAbiType::Int64
+            | HostAbiType::Float16
+            | HostAbiType::BFloat16
+            | HostAbiType::Float32
+            | HostAbiType::Float64
+            | HostAbiType::Bool
     )
 }
 
@@ -7059,7 +7930,8 @@ fn callback_param(callback: &HostCallback, index: usize) -> &HostParam {
 /// fall through to a quiet wrong-width read.
 fn sparse_elem_type(prim: Prim) -> &'static str {
     match prim {
-        Prim::F32 | Prim::Bool => "float",
+        Prim::F32 => "float",
+        Prim::Bool => "uint8_t",
         Prim::F64 => "double",
         Prim::Int8 => "int8_t",
         Prim::Int16 => "int16_t",
@@ -7078,29 +7950,113 @@ fn sparse_elem_type(prim: Prim) -> &'static str {
     }
 }
 
-/// Width id macro for a scalar float `HostType` handed to
-/// `chelis_format_shortest` (chelis#732 Phase 2).
-/// `CHELIS_<DTYPE>` macro selector for a scalar float print, matching
-/// the sibling `sparse_dtype_macro` naming. It selects a DTYPE, not a
-/// width: spec/04 [04-NUM-8] gives storage and arithmetic width separate
-/// meanings, so a name spelled after "width" would be ambiguous at the
-/// one call site that feeds `chelis_format_shortest`.
-fn scalar_float_dtype_macro(ty: &HostType) -> &'static str {
-    match ty {
-        HostType::Float16 => chelis_vocab::RuntimeDType::F16.c_macro(),
-        HostType::BFloat16 => chelis_vocab::RuntimeDType::Bf16.c_macro(),
-        HostType::Float32 => chelis_vocab::RuntimeDType::F32.c_macro(),
-        HostType::Float64 => chelis_vocab::RuntimeDType::F64.c_macro(),
-        other => unreachable!("scalar float print of non-float host type {other:?}"),
-    }
+/// Project a resolved host scalar to the exact tagged C carrier expected by
+/// scalar-taking runtime calls. Generic `chelis_value` boxing is a distinct
+/// container boundary and must not be used as a compatibility conversion.
+fn scalar_carrier_expr(value: &str, ty: &HostType) -> Result<String, Unsupported> {
+    let expr = match ty {
+        HostType::Int8 => {
+            format!("chelis_scalar_from_bits(CHELIS_DTYPE_I8, (uint64_t)(uint8_t)(int8_t){value})")
+        }
+        HostType::Int16 => format!(
+            "chelis_scalar_from_bits(CHELIS_DTYPE_I16, (uint64_t)(uint16_t)(int16_t){value})"
+        ),
+        HostType::Int32 => format!(
+            "chelis_scalar_from_bits(CHELIS_DTYPE_I32, (uint64_t)(uint32_t)(int32_t){value})"
+        ),
+        HostType::Int64 => {
+            format!("chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_t){value})")
+        }
+        HostType::Float64 => {
+            format!("chelis_scalar_from_bits(CHELIS_DTYPE_F64, chelis_host_f64_bits({value}))")
+        }
+        HostType::Float32 => format!(
+            "chelis_scalar_from_bits(CHELIS_DTYPE_F32, (uint64_t)chelis_host_f32_bits({value}))"
+        ),
+        HostType::Float16 => {
+            format!("chelis_scalar_from_bits(CHELIS_DTYPE_F16, (uint64_t)(uint16_t){value})")
+        }
+        HostType::BFloat16 => {
+            format!("chelis_scalar_from_bits(CHELIS_DTYPE_BF16, (uint64_t)(uint16_t){value})")
+        }
+        HostType::Bool => {
+            format!("chelis_scalar_from_bits(CHELIS_DTYPE_BOOL, (uint64_t)({value} ? 1 : 0))")
+        }
+        other => {
+            return Err(invalid_abi_shape(
+                format!("scalar runtime argument has non-scalar ABI type `{other:?}`"),
+                "exact scalar runtime argument",
+            ));
+        }
+    };
+    Ok(expr)
 }
 
-fn scalar_float_as_double(value: &str, ty: &HostType) -> String {
+/// Project the exact tagged runtime scalar back to the resolved host scalar
+/// type. The expected dtype is always checked before reading the payload.
+fn scalar_carrier_value_expr(value: &str, ty: &HostType) -> Result<String, Unsupported> {
+    let expr = match ty {
+        HostType::Int8 => {
+            format!("(int8_t)chelis_host_scalar_as_i64({value}, CHELIS_DTYPE_I8)")
+        }
+        HostType::Int16 => {
+            format!("(int16_t)chelis_host_scalar_as_i64({value}, CHELIS_DTYPE_I16)")
+        }
+        HostType::Int32 => {
+            format!("(int32_t)chelis_host_scalar_as_i64({value}, CHELIS_DTYPE_I32)")
+        }
+        HostType::Int64 => {
+            format!("chelis_host_scalar_as_i64({value}, CHELIS_DTYPE_I64)")
+        }
+        HostType::Float16 => {
+            format!("(uint16_t)chelis_host_scalar_bits({value}, CHELIS_DTYPE_F16)")
+        }
+        HostType::BFloat16 => {
+            format!("(uint16_t)chelis_host_scalar_bits({value}, CHELIS_DTYPE_BF16)")
+        }
+        HostType::Float32 => {
+            format!("(float)chelis_host_scalar_as_float({value}, CHELIS_DTYPE_F32)")
+        }
+        HostType::Float64 => {
+            format!("chelis_host_scalar_as_float({value}, CHELIS_DTYPE_F64)")
+        }
+        HostType::Bool => format!("chelis_host_scalar_as_bool({value})"),
+        other => {
+            return Err(invalid_abi_shape(
+                format!("scalar runtime result has non-scalar ABI type `{other:?}`"),
+                "exact scalar runtime result",
+            ));
+        }
+    };
+    Ok(expr)
+}
+
+fn scalar_dtype_macro(ty: &HostType) -> Result<&'static str, Unsupported> {
+    Ok(match ty {
+        HostType::Int8 => "CHELIS_DTYPE_I8",
+        HostType::Int16 => "CHELIS_DTYPE_I16",
+        HostType::Int32 => "CHELIS_DTYPE_I32",
+        HostType::Int64 => "CHELIS_DTYPE_I64",
+        HostType::Float16 => "CHELIS_DTYPE_F16",
+        HostType::BFloat16 => "CHELIS_DTYPE_BF16",
+        HostType::Float32 => "CHELIS_DTYPE_F32",
+        HostType::Float64 => "CHELIS_DTYPE_F64",
+        HostType::Bool => "CHELIS_DTYPE_BOOL",
+        other => {
+            return Err(invalid_abi_shape(
+                format!("dtype selection has non-scalar ABI type `{other:?}`"),
+                "exact scalar dtype selection",
+            ));
+        }
+    })
+}
+
+fn host_float_as_double(value: &str, ty: &HostType) -> String {
     match ty {
         HostType::Float16 => format!("(double)chelis_f16_to_f32({value})"),
         HostType::BFloat16 => format!("(double)chelis_bf16_to_f32({value})"),
         HostType::Float32 | HostType::Float64 => format!("(double)({value})"),
-        other => unreachable!("scalar float conversion of non-float host type {other:?}"),
+        other => unreachable!("float conversion of non-float host type {other:?}"),
     }
 }
 
@@ -7164,14 +8120,14 @@ enum BinaryElementwiseFunc {
 }
 
 impl BinaryElementwiseFunc {
-    fn f32_name(self) -> &'static str {
+    fn label(self) -> &'static str {
         match self {
-            Self::Max => "fmaxf",
-            Self::Min => "fminf",
+            Self::Max => "max_elem",
+            Self::Min => "min_elem",
         }
     }
 
-    fn i32_comparison(self) -> &'static str {
+    fn comparison(self) -> &'static str {
         match self {
             Self::Max => ">=",
             Self::Min => "<=",
@@ -7183,8 +8139,8 @@ impl BinaryElementwiseFunc {
 /// host-emit helpers (`assign_tensor_*_elementwise`). Each arm names a
 /// `CHELIS_*` constant and the C element type for tensor buffer access.
 ///
-/// Equal byte widths do not permit a shared element type. Native int32
-/// storage uses `int32_t`. F32 and the current Bool payload use `float`.
+/// Equal byte widths do not permit a shared element type. Bool uses its
+/// canonical one-byte payload and never shares the f32 representation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DtypeArm {
     F32,
@@ -7211,10 +8167,11 @@ impl DtypeArm {
 
     fn elem_t(self) -> &'static str {
         match self {
-            DtypeArm::F32 | DtypeArm::Bool => "float",
+            DtypeArm::F32 => "float",
             DtypeArm::F64 => "double",
             DtypeArm::I32 => "int32_t",
             DtypeArm::I64 => "int64_t",
+            DtypeArm::Bool => "uint8_t",
         }
     }
 
@@ -7234,7 +8191,7 @@ impl DtypeArm {
     /// Representations that can use f32-only helper functions directly.
     /// I32 is excluded because conversion to binary32 loses integer precision.
     fn f32_payload_func_arms() -> &'static [DtypeArm] {
-        &[DtypeArm::F32, DtypeArm::Bool]
+        &[DtypeArm::F32]
     }
 }
 
@@ -7289,6 +8246,102 @@ mod expression_dispatch_tests {
     use super::*;
 
     #[test]
+    fn exact_scalar_argument_projection_never_boxes_through_chelis_value() {
+        for (ty, dtype) in [
+            (HostType::Int8, "CHELIS_DTYPE_I8"),
+            (HostType::Int16, "CHELIS_DTYPE_I16"),
+            (HostType::Int32, "CHELIS_DTYPE_I32"),
+            (HostType::Int64, "CHELIS_DTYPE_I64"),
+            (HostType::Float16, "CHELIS_DTYPE_F16"),
+            (HostType::BFloat16, "CHELIS_DTYPE_BF16"),
+            (HostType::Float32, "CHELIS_DTYPE_F32"),
+            (HostType::Float64, "CHELIS_DTYPE_F64"),
+            (HostType::Bool, "CHELIS_DTYPE_BOOL"),
+        ] {
+            let emitted = scalar_carrier_expr("value", &ty).unwrap();
+            assert!(
+                emitted.contains("chelis_scalar_from_bits") && emitted.contains(dtype),
+                "{ty:?} did not project to its exact tagged scalar: {emitted}"
+            );
+            assert!(
+                !emitted.contains("chelis_value_from_scalar"),
+                "exact scalar argument was unnecessarily boxed: {emitted}"
+            );
+        }
+        assert!(
+            scalar_carrier_expr("value", &HostType::String).is_err(),
+            "a non-scalar host value must not acquire a scalar ABI fallback"
+        );
+    }
+
+    #[test]
+    fn exact_scalar_result_projection_checks_every_active_dtype() {
+        for (ty, dtype) in [
+            (HostType::Int8, "CHELIS_DTYPE_I8"),
+            (HostType::Int16, "CHELIS_DTYPE_I16"),
+            (HostType::Int32, "CHELIS_DTYPE_I32"),
+            (HostType::Int64, "CHELIS_DTYPE_I64"),
+            (HostType::Float16, "CHELIS_DTYPE_F16"),
+            (HostType::BFloat16, "CHELIS_DTYPE_BF16"),
+            (HostType::Float32, "CHELIS_DTYPE_F32"),
+            (HostType::Float64, "CHELIS_DTYPE_F64"),
+            (HostType::Bool, "CHELIS_DTYPE_BOOL"),
+        ] {
+            let emitted = scalar_carrier_value_expr("value", &ty).unwrap();
+            assert!(
+                emitted.contains(dtype) || matches!(ty, HostType::Bool),
+                "{ty:?} did not validate its exact tagged scalar dtype: {emitted}"
+            );
+            assert_eq!(scalar_dtype_macro(&ty).unwrap(), dtype);
+            assert!(
+                !emitted.contains("chelis_value_as_scalar"),
+                "exact scalar result crossed the generic value carrier: {emitted}"
+            );
+        }
+        assert!(scalar_carrier_value_expr("value", &HostType::String).is_err());
+        assert!(scalar_dtype_macro(&HostType::String).is_err());
+    }
+
+    #[test]
+    fn manifested_boxed_roots_use_only_the_exact_value_carrier() {
+        let mut emitter = HostEmitter::new(
+            "    ".to_string(),
+            "manifest",
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            &[],
+        );
+        emitter.emit_labeled_boxed_root("root", "boxed");
+        let emitted = emitter.lines.join("\n");
+
+        for required in [
+            "case CHELIS_VALUE_SCALAR:",
+            "chelis_value_as_scalar(boxed)",
+            "chelis_value_as_string(boxed)",
+            "chelis_value_as_tensor(boxed)",
+            "default:",
+            "abort();",
+        ] {
+            assert!(
+                emitted.contains(required),
+                "boxed-root observation is missing `{required}`:\n{emitted}"
+            );
+        }
+        for retired in [
+            "CHELIS_VALUE_INT64",
+            "CHELIS_VALUE_FLOAT64",
+            "CHELIS_VALUE_BOOL",
+            ".as.",
+        ] {
+            assert!(
+                !emitted.contains(retired),
+                "boxed-root observation restored retired value ABI `{retired}`:\n{emitted}"
+            );
+        }
+    }
+
+    #[test]
     fn open_builtin_name_must_decode_before_expression_construction() {
         assert_eq!(
             CExpressionBuiltin::decode("add"),
@@ -7329,10 +8382,8 @@ mod expression_dispatch_tests {
         assert!(emitted.contains("chelis_host_finalize_bf16"));
     }
 
-    /// chelis#1112: the emitted reshape helper stores the extent it read,
-    /// at the width it read it. `chelis_value_as_int64` returns int64 and
-    /// the shape buffer is the ABI's int64 extent carrier, so no cast sits
-    /// between them.
+    /// chelis#1112: the emitted reshape helper stores the exact tagged
+    /// int64 extent into a dynamically sized int64 shape buffer.
     ///
     /// This replaces `reshape_helper_traps_extent_above_int32_before_the_store`,
     /// which pinned the ordering of a trap against the `(int)` store it
@@ -7347,12 +8398,12 @@ mod expression_dispatch_tests {
         append_tensor_reshape_helper(&mut out);
         let text = out.join("\n");
         assert!(
-            text.contains("int64_t shape[CHELIS_MAX_DIM] = {0};"),
-            "the shape buffer must be the int64 extent carrier:\n{text}"
+            text.contains("int64_t *shape = (int64_t*)calloc("),
+            "the shape buffer must be dynamically sized for the requested rank:\n{text}"
         );
         let read = text
-            .find("int64_t dim = chelis_value_as_int64(")
-            .expect("the extent is read at int64");
+            .find("int64_t dim = chelis_host_scalar_as_i64(chelis_value_as_scalar(")
+            .expect("the extent is read from an exact tagged int64 scalar");
         let store = text
             .find("shape[i] = dim;")
             .expect("the extent is stored without a cast");
@@ -7367,6 +8418,10 @@ mod expression_dispatch_tests {
         assert!(
             !text.contains("2147483647LL"),
             "the int32 extent trap is dead with the cast it guarded:\n{text}"
+        );
+        assert!(
+            !text.contains("CHELIS_MAX_DIM"),
+            "reshape rank must not be capped by a fixed compatibility constant:\n{text}"
         );
         // The negative-extent guard is NOT dead: a negative dim is invalid
         // at every carrier width, so the widening must not have taken it

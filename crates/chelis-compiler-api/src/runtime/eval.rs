@@ -520,6 +520,35 @@ impl<'a> EvalContext<'a> {
             .map(|arg| self.eval_expr(arg))
             .collect::<Result<Vec<_>, _>>()?;
 
+        // Std.Io.Json's private serializer intrinsic. Keep generic
+        // `dict_entries` insertion-ordered for CSV/tokenizer callers; only
+        // the owning JSON boundary canonicalizes string keys. Rust `str` Ord
+        // is UTF-8 lexicographic, which preserves Unicode scalar-value order
+        // for valid Rust strings.
+        if let Some(name) = var_name(func)
+            && self
+                .lookup_top_level_def(name)
+                .is_some_and(|(resolved, _)| {
+                    matches!(
+                        resolved.as_str(),
+                        "Pkg__chelis__std__Std__Io__Json__canonical_object_entries"
+                            | "pkg__chelis__std__Std__Io__Json__canonical_object_entries"
+                    )
+                })
+        {
+            let mut entries = expect_dict_arg(&args, 0)?;
+            entries.sort_by(|(lhs, _), (rhs, _)| match (lhs, rhs) {
+                (RuntimeValue::String(lhs), RuntimeValue::String(rhs)) => lhs.cmp(rhs),
+                _ => std::cmp::Ordering::Equal,
+            });
+            return Ok(RuntimeValue::List(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| RuntimeValue::Tuple(vec![key, value]))
+                    .collect(),
+            ));
+        }
+
         if let Some(name) = var_name(func)
             && name.chars().next().is_some_and(|ch| ch.is_uppercase())
         {
@@ -979,14 +1008,11 @@ impl<'a> EvalContext<'a> {
             // zero divisor with the shared diagnostic.
             "floor_div" => eval_floor_div(args),
             "trunc_div" => eval_trunc_div(args),
-            // Tier-1 `max_elem` and Tier-2 `min_elem` are element-wise
-            // binary ops. The IR evaluator emits
-            // `binary_map(.., f64::max)` for `RiscOp::MaxElem` and
-            // `lower_min_elem` (`crates/chelis-ir/src/tier2.rs:364`)
-            // synthesizes `neg(max_elem(neg a, neg b))`; the host-runtime
-            // closure form fuses that into a direct `f64::min` for the
-            // same observable result. Wired for issue
-            // Chelis-Lang/chelis#185.
+            // Tier-1 `max_elem` and `min_elem` are direct element-wise
+            // selection identities. The integer path compares at the
+            // declared width, and the float path returns the exact operand
+            // selected by [05-OP-40], including its stored NaN payload or
+            // signed-zero bits. Wired for Chelis-Lang/chelis#185/#1306.
             "max_elem" => numeric_binop(args, Some(IntBinOp::Max), Some(FloatBinOp::Max)),
             "min_elem" => numeric_binop(args, Some(IntBinOp::Min), Some(FloatBinOp::Min)),
             "mod" => eval_mod(args),
@@ -1620,186 +1646,6 @@ impl<'a> EvalContext<'a> {
                     .map_err(|err| format!("read_file failed for `{path}`: {err}"))?;
                 Ok(RuntimeValue::String(text))
             }
-            // Host-lane JSON I/O (chelis#890). Eval-only; the build backends
-            // reject these via `find_eval_only_host_builtin`. The core logic
-            // (parser, serializer, path navigation, decimal rounding) lives
-            // in `runtime/json.rs`; every failure is a loud eval error
-            // naming the builtin, the path, and the failing segment -- no
-            // silent defaults ([05-OP-1..5]).
-            "parse_json" => {
-                let text = expect_string_arg(args, 0)?;
-                super::json::parse_json_text(&text)
-            }
-            "to_json" => {
-                let value = args
-                    .first()
-                    .ok_or_else(|| "to_json expects 1 argument".to_string())?;
-                super::json::json_value_to_text(value).map(RuntimeValue::String)
-            }
-            "json_f64" => {
-                let value = args
-                    .first()
-                    .ok_or_else(|| "json_f64 expects 2 arguments".to_string())?;
-                let path = expect_string_arg(args, 1)?;
-                super::json::json_f64_at(value, &path).map(RuntimeValue::float64)
-            }
-            "json_int" => {
-                let value = args
-                    .first()
-                    .ok_or_else(|| "json_int expects 2 arguments".to_string())?;
-                let path = expect_string_arg(args, 1)?;
-                super::json::json_int_at(value, &path).map(RuntimeValue::int64)
-            }
-            "json_str" => {
-                let value = args
-                    .first()
-                    .ok_or_else(|| "json_str expects 2 arguments".to_string())?;
-                let path = expect_string_arg(args, 1)?;
-                super::json::json_str_at(value, &path).map(RuntimeValue::String)
-            }
-            "json_list" => {
-                let value = args
-                    .first()
-                    .ok_or_else(|| "json_list expects 2 arguments".to_string())?;
-                let path = expect_string_arg(args, 1)?;
-                super::json::json_list_at(value, &path).map(RuntimeValue::List)
-            }
-            "json_f64s" => {
-                let value = args
-                    .first()
-                    .ok_or_else(|| "json_f64s expects 2 arguments".to_string())?;
-                let path = expect_string_arg(args, 1)?;
-                super::json::json_f64s_at(value, &path).map(|values| {
-                    RuntimeValue::List(values.into_iter().map(RuntimeValue::float64).collect())
-                })
-            }
-            "json_ints" => {
-                let value = args
-                    .first()
-                    .ok_or_else(|| "json_ints expects 2 arguments".to_string())?;
-                let path = expect_string_arg(args, 1)?;
-                super::json::json_ints_at(value, &path).map(|values| {
-                    RuntimeValue::List(values.into_iter().map(RuntimeValue::int64).collect())
-                })
-            }
-            "jnum" => {
-                // Exactly f64 ([05-OP-4]): the checker rejects other
-                // precisions; this guard keeps the byte-exact serialization
-                // contract even on dynamically-constructed calls -- an f32
-                // widened here would emit `0.10000000149011612` for `0.1f32`.
-                let value = match args.first() {
-                    Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::F64 => {
-                        payload.as_f64_lossy()
-                    }
-                    Some(value @ RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
-                        return Err(format!(
-                            "jnum: expected an f64 value, got {} (suffix the literal, \
-                             `0.1f64`, or use cast(n, f64); an f32 value would quantize \
-                             through the byte-exact serializer)",
-                            describe_value(value)
-                        ));
-                    }
-                    other => {
-                        return Err(format!(
-                            "expected f64 arg at index 0, got {}",
-                            describe_argument(other)
-                        ));
-                    }
-                };
-                Ok(super::json::jnum(value))
-            }
-            "jint" => {
-                // Exactly int64, mirroring `jnum`'s f64-only guard
-                // ([05-OP-4]): a narrower integer widened here would be
-                // indistinguishable in the ADT from an exact int64 the user
-                // meant, and the whole point of the variant is that the
-                // width is honest.
-                let value = match args.first() {
-                    Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::Int64 => {
-                        payload.as_i64()
-                    }
-                    Some(value @ RuntimeValue::Scalar(payload)) if payload.dtype().is_integer() => {
-                        return Err(format!(
-                            "jint: expected an int64 value, got {} (suffix the literal, \
-                             `1i64`, or use cast(n, int64))",
-                            describe_value(value)
-                        ));
-                    }
-                    other => {
-                        return Err(format!(
-                            "expected int64 arg at index 0, got {}",
-                            describe_argument(other)
-                        ));
-                    }
-                };
-                Ok(super::json::jint(value))
-            }
-            "jstr" => {
-                let value = expect_string_arg(args, 0)?;
-                Ok(super::json::jstr(value))
-            }
-            "jlist" => {
-                let items = expect_list_arg(args, 0)?;
-                for (index, item) in items.iter().enumerate() {
-                    super::json::ensure_json_value(item)
-                        .map_err(|err| format!("jlist: element {index}: {err}"))?;
-                }
-                Ok(super::json::jlist(items))
-            }
-            "jdict" => {
-                let entries = expect_list_arg(args, 0)?;
-                let mut out = OrderedStringDictBuilder::new();
-                for (index, entry) in entries.into_iter().enumerate() {
-                    let RuntimeValue::Tuple(items) = entry else {
-                        return Err(format!(
-                            "jdict expects a List of (string, Json) 2-tuples, got \
-                             non-tuple element at index {index}"
-                        ));
-                    };
-                    if items.len() != 2 {
-                        return Err(format!(
-                            "jdict expects (string, Json) 2-tuples, got a {}-tuple \
-                             at index {index}",
-                            items.len()
-                        ));
-                    }
-                    let mut items = items.into_iter();
-                    let key = match items.next() {
-                        Some(RuntimeValue::String(key)) => key,
-                        other => {
-                            return Err(format!(
-                                "jdict keys must be strings, got {} at index {index}",
-                                describe_argument(other.as_ref())
-                            ));
-                        }
-                    };
-                    let value = items.next().expect("length checked above");
-                    super::json::ensure_json_value(&value)
-                        .map_err(|err| format!("jdict: value for key `{key}`: {err}"))?;
-                    // Duplicate keys: first position, last value -- the same
-                    // upsert semantics as `dict_of` and `parse_json`, via
-                    // the shared hash-assisted builder (chelis#891 review
-                    // findings 11 and 15).
-                    out.upsert(key, value);
-                }
-                Ok(RuntimeValue::Adt {
-                    ctor: "JDict".to_string(),
-                    fields: vec![RuntimeValue::Dict(out.into_entries())],
-                    field_names: None,
-                })
-            }
-            "json_set" => {
-                let value = args
-                    .first()
-                    .ok_or_else(|| "json_set expects 3 arguments".to_string())?;
-                let path = expect_string_arg(args, 1)?;
-                let new_value = args
-                    .get(2)
-                    .ok_or_else(|| "json_set expects 3 arguments".to_string())?;
-                super::json::ensure_json_value(new_value)
-                    .map_err(|err| format!("json_set: replacement value: {err}"))?;
-                super::json::json_set_at(value, &path, new_value)
-            }
             "round_to" => {
                 // [05-OP-1]: per-dtype at declared widths, f64 and f32
                 // only, dispatched STRICTLY on the operand's own dtype --
@@ -1810,12 +1656,14 @@ impl<'a> EvalContext<'a> {
                 match args.first() {
                     Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::F64 => {
                         let rounded =
-                            super::json::round_to_f64_impl(payload.as_f64_lossy(), places)?;
+                            super::numeric_text::round_to_f64_impl(payload.as_f64_lossy(), places)?;
                         Ok(RuntimeValue::float64(rounded))
                     }
                     Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::F32 => {
-                        let rounded =
-                            super::json::round_to_f32_impl(payload.as_f64_lossy() as f32, places)?;
+                        let rounded = super::numeric_text::round_to_f32_impl(
+                            payload.as_f64_lossy() as f32,
+                            places,
+                        )?;
                         RuntimeValue::scalar_like_float(Prim::F32, f64::from(rounded))
                     }
                     Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
@@ -1832,13 +1680,8 @@ impl<'a> EvalContext<'a> {
                     )),
                 }
             }
-            // Host-lane CSV I/O (chelis#903). Eval-only, like the JSON
-            // family above. A Csv document rides the prelude `Json` ADT as
-            // the fixed shape `{"columns": .., "rows": ..}` (see
-            // `runtime/csv.rs`), so the `json_*` accessors compose with it;
-            // the `csv_*` builtins are the column-oriented surface. Every
-            // failure is a loud eval error naming the builtin, column, and
-            // row -- no silent NaN/defaults.
+            // Host-lane CSV I/O (chelis#903) over the canonical
+            // List[Dict[string,string]] text-table carrier.
             "parse_csv" => {
                 let text = expect_string_arg(args, 0)?;
                 super::csv::parse_csv_text(&text)
@@ -2214,83 +2057,45 @@ impl<'a> EvalContext<'a> {
                     Err(format!("assert failed: {label}"))
                 }
             }
-            "test_assert_eq_f32" => {
-                let actual = expect_float_arg(args, 0)?;
-                let expected = expect_float_arg(args, 1)?;
+            "test_assert_eq" => {
+                let actual = args
+                    .first()
+                    .ok_or_else(|| "test_assert_eq expects 3 arguments".to_string())?;
+                let expected = args
+                    .get(1)
+                    .ok_or_else(|| "test_assert_eq expects 3 arguments".to_string())?;
                 let label = expect_string_arg(args, 2)?;
-                if actual == expected {
+                if runtime_values_equal(actual, expected)? {
                     Ok(RuntimeValue::Unit)
                 } else {
                     Err(format!(
-                        "assert_eq_f32 ({label}): expected {expected}, got {actual}"
+                        "assert_eq ({label}): expected {}, got {}",
+                        render_value(expected),
+                        render_value(actual)
                     ))
                 }
             }
-            "test_assert_eq_int" => {
-                let actual = expect_int_arg(args, 0)?;
-                let expected = expect_int_arg(args, 1)?;
-                let label = expect_string_arg(args, 2)?;
-                if actual == expected {
-                    Ok(RuntimeValue::Unit)
-                } else {
-                    Err(format!(
-                        "assert_eq_int ({label}): expected {expected}, got {actual}"
-                    ))
-                }
-            }
-            "test_assert_eq_bool" => {
-                let actual = expect_bool_arg(args, 0)?;
-                let expected = expect_bool_arg(args, 1)?;
-                let label = expect_string_arg(args, 2)?;
-                if actual == expected {
-                    Ok(RuntimeValue::Unit)
-                } else {
-                    Err(format!(
-                        "assert_eq_bool ({label}): expected {expected}, got {actual}"
-                    ))
-                }
-            }
-            "test_assert_eq_string" => {
-                let actual = expect_string_arg(args, 0)?;
-                let expected = expect_string_arg(args, 1)?;
-                let label = expect_string_arg(args, 2)?;
-                if actual == expected {
-                    Ok(RuntimeValue::Unit)
-                } else {
-                    Err(format!(
-                        "assert_eq_string ({label}): expected {expected:?}, got {actual:?}"
-                    ))
-                }
-            }
-            "test_assert_eq_tensor_int64" => {
-                // Bit-exact tensor equality for int64 tensors. Std.Test
-                // exposes this as `assert_eq_tensor_int64` because
-                // `assert_close_tensor` types only on f32 tensors and is
-                // tolerance-based — neither fits int64 reduction outputs
-                // (e.g. `argmax`/`argmin` which return int64 indices).
+            "test_assert_eq_tensor" => {
                 let actual = expect_tensor_arg(args, 0)?;
                 let expected = expect_tensor_arg(args, 1)?;
                 let label = expect_string_arg(args, 2)?;
-                let actual_data = actual.value.storage().to_i64_exact_vec().ok_or_else(|| {
-                    format!("assert_eq_tensor_int64 ({label}): actual tensor is not integer-typed")
-                })?;
-                let expected_data =
-                    expected.value.storage().to_i64_exact_vec().ok_or_else(|| {
-                        format!(
-                            "assert_eq_tensor_int64 ({label}): expected tensor is not integer-typed"
-                        )
-                    })?;
-                if actual_data.len() != expected_data.len() {
+                if actual.precision != expected.precision
+                    || actual.value.shape != expected.value.shape
+                {
                     return Err(format!(
-                        "assert_eq_tensor_int64 ({label}): length mismatch, expected {} elements, got {}",
-                        expected_data.len(),
-                        actual_data.len()
+                        "assert_eq_tensor ({label}): expected tensor shape {:?} at {}, got {:?} at {}",
+                        expected.value.shape,
+                        expected.precision.name(),
+                        actual.value.shape,
+                        actual.precision.name()
                     ));
                 }
-                for (i, (&a, &e)) in actual_data.iter().zip(expected_data.iter()).enumerate() {
-                    if a != e {
+                for index in 0..actual.value.storage().len() {
+                    if actual.value.storage().scalar_at(index)
+                        != expected.value.storage().scalar_at(index)
+                    {
                         return Err(format!(
-                            "assert_eq_tensor_int64 ({label}): at index {i} expected {e} got {a}"
+                            "assert_eq_tensor ({label}): first mismatch at row-major index {index}"
                         ));
                     }
                 }
@@ -2583,5 +2388,91 @@ impl<'a> EvalContext<'a> {
             "gelu" => numeric_unop(args, None, Some(FloatUnOp::Gelu)),
             other => Err(format!("unsupported builtin `{other}` in host runtime")),
         }
+    }
+}
+
+fn runtime_values_equal(lhs: &RuntimeValue, rhs: &RuntimeValue) -> Result<bool, String> {
+    match (lhs, rhs) {
+        (RuntimeValue::Scalar(lhs), RuntimeValue::Scalar(rhs)) => Ok(lhs == rhs),
+        (RuntimeValue::Bool(lhs), RuntimeValue::Bool(rhs)) => Ok(lhs == rhs),
+        (RuntimeValue::String(lhs), RuntimeValue::String(rhs)) => Ok(lhs == rhs),
+        (RuntimeValue::Unit, RuntimeValue::Unit) => Ok(true),
+        (RuntimeValue::List(lhs), RuntimeValue::List(rhs))
+        | (RuntimeValue::Tuple(lhs), RuntimeValue::Tuple(rhs)) => {
+            if lhs.len() != rhs.len() {
+                return Ok(false);
+            }
+            for (lhs, rhs) in lhs.iter().zip(rhs) {
+                if !runtime_values_equal(lhs, rhs)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        (RuntimeValue::Dict(lhs), RuntimeValue::Dict(rhs)) => {
+            if lhs.len() != rhs.len() {
+                return Ok(false);
+            }
+            let mut matched = vec![false; rhs.len()];
+            for (lhs_key, lhs_value) in lhs {
+                let mut found = None;
+                for (index, (rhs_key, rhs_value)) in rhs.iter().enumerate() {
+                    if !matched[index]
+                        && runtime_values_equal(lhs_key, rhs_key)?
+                        && runtime_values_equal(lhs_value, rhs_value)?
+                    {
+                        found = Some(index);
+                        break;
+                    }
+                }
+                let Some(index) = found else {
+                    return Ok(false);
+                };
+                matched[index] = true;
+            }
+            Ok(true)
+        }
+        (
+            RuntimeValue::Adt {
+                ctor: lhs_ctor,
+                fields: lhs_fields,
+                ..
+            },
+            RuntimeValue::Adt {
+                ctor: rhs_ctor,
+                fields: rhs_fields,
+                ..
+            },
+        ) => {
+            if lhs_ctor != rhs_ctor || lhs_fields.len() != rhs_fields.len() {
+                return Ok(false);
+            }
+            for (lhs, rhs) in lhs_fields.iter().zip(rhs_fields) {
+                if !runtime_values_equal(lhs, rhs)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        (RuntimeValue::Tensor(lhs), RuntimeValue::Tensor(rhs)) => {
+            if lhs.precision != rhs.precision || lhs.value.shape != rhs.value.shape {
+                return Ok(false);
+            }
+            for index in 0..lhs.value.storage().len() {
+                if lhs.value.storage().scalar_at(index) != rhs.value.storage().scalar_at(index) {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        (RuntimeValue::MappedFile(_), _)
+        | (_, RuntimeValue::MappedFile(_))
+        | (RuntimeValue::Closure { .. }, _)
+        | (_, RuntimeValue::Closure { .. })
+        | (RuntimeValue::Transform { .. }, _)
+        | (_, RuntimeValue::Transform { .. }) => {
+            Err("assert_eq does not admit functions or resource handles".to_string())
+        }
+        _ => Ok(false),
     }
 }

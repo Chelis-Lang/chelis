@@ -34,11 +34,12 @@
 //!   - runtime-dependent constructor (an `if` between constructors) feeding
 //!     a differentiated `match` scrutinee
 //!   - guarded arm reached during static arm selection
-//!   - mixed tensor/non-tensor ADT fields in a grad argument
-//!   - mixed SIBLING variant (float-clean constructed variant of a type
-//!     whose other variant carries a non-tensor field)
-//!   - pure enum (no fields in any variant) as a grad argument
+//!   - explicitly targeting a pure enum (no float leaf in any variant)
 //!   - compiled-lane `out = grad(f)` export over an ADT-typed param
+//!
+//! Recursive cotangent parity also pins mixed tensor/non-tensor ADT fields
+//! and mixed sibling variants as legal: differentiable fields receive their
+//! cotangents while discrete fields remain present as unit.
 //!
 //! Zero-fill parity (unused multi-target argument -> shaped zero slot, the
 //! negative-of-the-bug pinned by output assertions rather than a
@@ -408,12 +409,12 @@ fn issue_520_d1_grad_through_static_match_c_backend_agrees() {
 extern chelis_tensor* out(chelis_tensor* arg0);
 int main(void) {
     int64_t shape[1] = {2};
-    chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32);
+    chelis_tensor* x = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
     float xd[2] = {1.0f, 2.0f};
     memcpy(x->data, xd, sizeof(xd));
     chelis_tensor* g = out(x);
     if (g->size != 2) { printf("FAIL_SIZE %lld\n", (long long)g->size); return 1; }
-    for (int i = 0; i < 2; i++) printf("%.6f\n", g->data[i]);
+    for (int i = 0; i < 2; i++) printf("%.6f\n", ((float *)g->data)[i]);
     return 0;
 }
 "#;
@@ -721,10 +722,10 @@ fn issue_520_d1_guarded_arm_still_rejected() {
     );
 }
 
-/// Mixed tensor/non-tensor fields in an ADT grad argument stay rejected
-/// with a diagnostic naming the non-differentiable field.
+/// Mixed tensor/non-tensor fields are legal recursive cotangents: the float
+/// field receives its gradient and the discrete field remains present as unit.
 #[test]
-fn issue_520_d2_mixed_field_struct_rejected() {
+fn issue_520_d2_mixed_field_struct_replaces_discrete_field_with_unit() {
     let source = format!(
         "module Repro.Neg3\n\n\
          type Mixed =\n\
@@ -736,21 +737,21 @@ fn issue_520_d2_mixed_field_struct_rejected() {
          out = grad(fwd_mixed)(Mixed {{ t: to_tensor([{}]), n: cast(3, int32) }})\n",
         fmt_f32_list(&[1.0, 2.0]),
     );
-    let (_stdout, stderr, ok) = eval_program(&source);
-    assert!(!ok, "mixed-field ADT grad arg must stay rejected");
+    let (stdout, stderr, ok) = eval_program(&source);
     assert!(
-        stderr.contains("`n`") && stderr.contains("float tensor"),
-        "diagnostic must name the non-tensor field: {stderr}"
+        ok,
+        "mixed-field ADT grad must preserve the discrete field as unit: {stderr}"
+    );
+    assert!(
+        stdout.contains("Mixed(tensor(shape=[2], data=[1.0, 1.0]), ())"),
+        "mixed-field cotangent must be Mixed([1,1], ()): {stdout}"
     );
 }
 
-/// A mixed SIBLING variant poisons the whole type: grad over a value of
-/// the float-clean variant of a sum type whose other variant carries a
-/// non-tensor field is rejected. The checker types this gradient as
-/// unit, so the eval lane must not fabricate a gradient struct the
-/// static type does not admit.
+/// A discrete field in a sibling variant does not poison a float-clean
+/// executed variant. The cotangent preserves the executed constructor.
 #[test]
-fn issue_520_d2_mixed_sibling_variant_rejected() {
+fn issue_520_d2_mixed_sibling_variant_preserves_executed_constructor() {
     let source = format!(
         "module Repro.Neg6\n\n\
          type Pick =\n\
@@ -764,20 +765,20 @@ fn issue_520_d2_mixed_sibling_variant_rejected() {
          out = grad(fwd_pick)(A {{ s: to_tensor([{}]) }})\n",
         fmt_f32_list(&[1.0, 2.0]),
     );
-    let (_stdout, stderr, ok) = eval_program(&source);
+    let (stdout, stderr, ok) = eval_program(&source);
     assert!(
-        !ok,
-        "grad over a mixed-sibling-variant type must stay rejected"
+        ok,
+        "mixed sibling variant must not poison the executed constructor: {stderr}"
     );
     assert!(
-        stderr.contains("field `n` of constructor `B`") && stderr.contains("float tensor"),
-        "diagnostic must name the poisoning sibling field: {stderr}"
+        stdout.contains("A(tensor(shape=[2], data=[2.0, 4.0]))"),
+        "executed A cotangent must preserve A and equal 2s: {stdout}"
     );
 }
 
 /// A pure enum (no fields in any variant) has no continuous payload:
-/// the checker keeps its gradient payload unit, and the eval lane names
-/// the reason instead of dying downstream with a bare no-roots error.
+/// explicitly selecting it as `wrt` is a checker error because the target
+/// contains no differentiable float leaf.
 #[test]
 fn issue_520_d2_pure_enum_grad_rejected() {
     let source = "module Repro.Neg7\n\n\
@@ -788,12 +789,12 @@ def fwd_mode(m: Mode) -> f32 = match m with {\n\
     | ModeA => cast(1.0, f32)\n\
     | ModeB => cast(2.0, f32)\n\
 }\n\n\
-out = grad(fwd_mode)(ModeA)\n";
+out = grad(fwd_mode, wrt=m)(ModeA)\n";
     let (_stdout, stderr, ok) = eval_program(source);
     assert!(!ok, "grad over a pure enum must stay rejected");
     assert!(
-        stderr.contains("no fields in any constructor"),
-        "diagnostic must name the empty payload: {stderr}"
+        stderr.contains("grad `wrt` index 0 is not differentiable"),
+        "diagnostic must name the all-unit target: {stderr}"
     );
 }
 

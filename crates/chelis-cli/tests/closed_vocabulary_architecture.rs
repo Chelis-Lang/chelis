@@ -104,7 +104,7 @@ const RUNTIME_DTYPE_CONSUMERS: &[Consumer] = &[
         source: ConsumerSource::File("crates/chelis-runtime/src/lib.rs"),
         role: "runtime ABI decode and semantic dispatch",
         required: &[
-            "decode_runtime_dtype(dtype: c_int)",
+            "decode_runtime_dtype(dtype: chelis_dtype)",
             "tensor_elem_size(dtype: RuntimeDType)",
             "read_index_slot(",
             "dtype: RuntimeDType",
@@ -119,7 +119,7 @@ const RUNTIME_DTYPE_CONSUMERS: &[Consumer] = &[
         source: ConsumerSource::File("crates/chelis-backend-c/src/emit.rs"),
         role: "C codegen dtype macro selection",
         required: &[".runtime_dtype()", ".c_macro()"],
-        forbidden: &["Prim::F32 => \"CHELIS_F32\""],
+        forbidden: &["Prim::F32 => \"CHELIS_DTYPE_F32\""],
     },
     Consumer {
         source: ConsumerSource::File("crates/chelis-backend-c/src/host_emit.rs"),
@@ -131,25 +131,50 @@ const RUNTIME_DTYPE_CONSUMERS: &[Consumer] = &[
         source: ConsumerSource::File("crates/chelis-backend-hip/src/emit.rs"),
         role: "HIP codegen dtype macro selection",
         required: &[".runtime_dtype()", ".c_macro()"],
-        forbidden: &["Prim::F32 => \"CHELIS_F32\""],
+        forbidden: &["Prim::F32 => \"CHELIS_DTYPE_F32\""],
     },
+    // chelis#1360: this row used to REQUIRE `case CHELIS_DTYPE_F64:` and
+    // `case CHELIS_DTYPE_BOOL:` here, which is to say it required the header
+    // to hold its own copy of the width table. That copy is what broke: when
+    // chelis#1308 narrowed bool to one byte, this file was updated and the
+    // emitter's three other copies were not, so `cmplt` and `cast` went on
+    // dispatching four-byte kernels over a one-byte allocation.
+    //
+    // The header no longer decides anything per dtype - it calls
+    // `chelis_dtype_size`, whose Rust side is `tensor_elem_size`, required by
+    // the `chelis-runtime` row above and implemented as `dtype.byte_width()`.
+    // That is an exhaustive match on `Repr`, so a new dtype breaks the build
+    // there rather than merely missing a string here. Per this file's own
+    // header, rustc exhaustiveness is the authority and the inventory exists
+    // to keep untyped string consumers from sitting outside it; delegating
+    // removes this file from that category instead of keeping it compliant.
+    //
+    // The row therefore inverts: require the delegation, forbid the
+    // restatement.
     Consumer {
         source: ConsumerSource::File("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
         role: "HIP allocation byte width",
-        required: &["chelis_runtime_dtype_size_checked(dtype)"],
-        forbidden: &["return sizeof(float);"],
+        required: &[
+            "#include \"chelis_runtime_dtype.h\"",
+            "return (size_t)chelis_dtype_size((chelis_dtype)dtype);",
+        ],
+        forbidden: &[
+            "return sizeof(float);",
+            "case CHELIS_DTYPE_F64:",
+            "case CHELIS_DTYPE_BOOL:",
+        ],
     },
     Consumer {
         source: ConsumerSource::File("crates/chelis-backend-metal/src/dtype.rs"),
         role: "Metal runtime dtype tag selection",
         required: &["prec.runtime_dtype()", ".c_macro()"],
-        forbidden: &["Prim::F32 => \"CHELIS_F32\""],
+        forbidden: &["Prim::F32 => \"CHELIS_DTYPE_F32\""],
     },
     Consumer {
         source: ConsumerSource::File("crates/chelis-python/src/lib.rs"),
         role: "Python FFI dtype constant",
         required: &["RuntimeDType::F32.id()"],
-        forbidden: &["const CHELIS_F32: i32 = 0"],
+        forbidden: &["const CHELIS_DTYPE_F32: i32 = 0"],
     },
 ];
 

@@ -122,7 +122,11 @@ clipped = clamp(running, floor15, ceil30)
 - `xavier_uniform(template, fan_in, fan_out)`, `xavier_normal(template, fan_in, fan_out)`.
 - `trunc_normal(template, mean, std, a, b)` draws a normal tensor clipped to `[a, b]`.
 
-All initializers carry the `Random` effect.
+All initializers carry the `Random` effect. A `with seed(...)` handler advances
+only for draws that actually execute: an untaken conditional branch inside a
+forward call or `grad(...)` consumes no stream positions. This includes
+computed and nested predicates, branches with different numbers of draws, and
+repeated or nested seed handlers.
 
 ### Sorting and scanning
 
@@ -138,6 +142,14 @@ All initializers carry the `Random` effect.
 `Std.Index`:
 
 - `list_index(values, idx)`, `take_list(values, count)`, `drop_list(values, count)`.
+  Their adjoints preserve the input List's runtime length and positions: index
+  routes the cotangent to the selected element, while take/drop fill excluded
+  positions with zeros. Negative indices/counts fail; take/drop counts beyond
+  the length retain their ordinary truncation behavior. Scalar, tensor, empty,
+  nested, and multiple-List targets use the same rule, including runtime
+  selectors/counts reused elsewhere in the differentiated body and selection
+  composed through wrappers. These public `grad(...)` calls run in both the
+  evaluator and generated-C programs.
 
 ### Decimal and time
 
@@ -177,16 +189,20 @@ with `date_lt` and friends; `day_of_week`, `day_of_year`, `is_leap_year`; and
   `Option` twin.
 
 `Std.Io.Json` parses JSON into a `Json` value (`JsonNull`, `JsonBool`, `JsonInt`,
-`JsonFloat`, `JsonString`, `JsonArray`, `JsonObject`; the constructors are
-exported, so documents can be built directly):
+`JsonBigInt`, `JsonFloat`, `JsonString`, `JsonArray`, `JsonObject`; the constructors
+are exported, so documents can be built directly). Integer-form tokens outside
+int64 retain their exact spelling as `JsonBigInt`; float-form tokens whose f64
+image is non-finite are rejected:
 
 - `load_json(path)`, `parse_json(text)` and their `try_` variants.
-- `json_get`, and the typed accessors `json_string`, `json_int`, `json_float`, `json_bool`,
-  `json_array`, `json_object`, plus `json_is_null`.
-- `to_json(value)` renders a `Json` value compactly (object keys in dictionary
-  insertion order, f64 via `to_string`'s shortest-round-trip form — a claim
-  made for **f64 specifically**, the dtype `JsonFloat` carries — escapes for
-  `\" \\ \n \t \r`). Non-finite numbers have no JSON representation: `to_json`
+- `json_get`, and the typed accessors `json_string`, `json_int`, `json_bigint`,
+  `json_float`, `json_bool`, `json_array`, `json_object`, plus `json_is_null`.
+- `to_json(value)` renders a `Json` value compactly (object keys recursively
+  sorted by increasing Unicode scalar-value sequence before escaping, f64 via
+  `to_string`'s shortest-round-trip form — a claim made for **f64
+  specifically**, the dtype `JsonFloat` carries — escapes for `\" \\ \n \t
+  \r`). Equal object mappings therefore produce the same bytes regardless of
+  insertion history. Non-finite numbers have no JSON representation: `to_json`
   fails on them and `try_to_json` returns `None`. `write_json(path, value)`
   writes the rendered text and names the path on failure; `try_write_json` is
   its `Option` twin. Control characters outside the escaped set pass through
@@ -197,12 +213,10 @@ exported, so documents can be built directly):
 
 These IO modules carry the `IO` effect and run in **both lanes**: under
 `chelis eval`/`chelis test` and inside compiled `chelis build` programs alike.
-They are distinct from the eval-only prelude JSON/CSV builtins
-(`parse_json`/`to_json`/`parse_csv`/`to_csv` over the prelude `Json` ADT,
-chelis#890/chelis#903), which `chelis build` rejects whole-program — so for a
-compiled program this module surface is the structured-I/O path. The shared
-names are different callables on different types; reef package name-rewriting
-keeps them apart in both lanes.
+`Std.Io.Json` is the sole public JSON value surface. `Std.Io.Csv` is distinct
+from the eval-only prelude CSV builtins (`parse_csv`/`to_csv`, chelis#903),
+which `chelis build` rejects whole-program; reef package name-rewriting keeps
+the shared CSV names apart in both lanes.
 
 ### Tokenization
 
@@ -217,9 +231,8 @@ keeps them apart in both lanes.
 `Std.Test` provides assertion helpers for `def test_*()` functions discovered by
 `chelis test`. They carry the `Test` effect:
 
-- `assert_true`, `assert_false`, `assert_eq`, `assert_eq_int`, `assert_eq_bool`,
-  `assert_eq_string`, `assert_close`.
-- `assert_close_tensor`, `assert_eq_tensor_int64`, `assert_shape` for tensors.
+- `assert_true`, `assert_false`, generic `assert_eq`, and `assert_close`.
+- `assert_close_tensor`, generic `assert_eq_tensor`, and `assert_shape` for tensors.
 - `fail(msg)`.
 
 ## Process execution

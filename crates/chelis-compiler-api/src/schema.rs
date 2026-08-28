@@ -1777,7 +1777,9 @@ pub struct WireRecordPatternField {
 /// - `6`: chelis#1287 — added the dedicated multi-axis
 ///   `WireRiscOp::Count` form and made the complete WireDag encoding exact:
 ///   the version stamp and all fields are explicit, with no legacy migration
-///   or default-on-read spellings.
+///   or default-on-read spellings. Chelis#1306 added direct `Sub`, `MinElem`,
+///   and `ExtremaAdjoint` identities plus matching fused-step identities to
+///   that exact encoding.
 pub const WIRE_DAG_SCHEMA_VERSION: u32 = 6;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
@@ -2183,11 +2185,13 @@ pub struct WireFusedStep {
 #[serde(rename_all = "snake_case")]
 pub enum WireFusedStepOp {
     Add,
+    Sub,
     Mul,
     Div,
     FloorDiv,
     TruncDiv,
     MaxElem,
+    MinElem,
     CmpLt,
     Neg,
     Recip,
@@ -2211,6 +2215,20 @@ pub enum WireFusedInput {
     PreviousStep { index: usize },
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireExtremaKind {
+    Max,
+    Min,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireExtremaOperand {
+    Left,
+    Right,
+}
+
 /// chelis#616: wire form of `chelis_ir::dag::RtDim` for movement-op bounds
 /// and reshape targets. `Node(i)` indexes the owning op's `inputs` (the
 /// rank-0 integer bound scalars); `to_end` is the full-axis sentinel; `sym`
@@ -2228,12 +2246,18 @@ pub enum WireRtDim {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireRiscOp {
     Add,
+    Sub,
     Mul,
     Div,
     FloorDiv,
     TruncDiv,
     CmpLt,
     MaxElem,
+    MinElem,
+    ExtremaAdjoint {
+        extrema: WireExtremaKind,
+        operand: WireExtremaOperand,
+    },
     Neg,
     Recip,
     Exp,
@@ -2678,6 +2702,70 @@ mod tests {
         match serde_json::from_str::<WireRiscOp>(&one_hot).unwrap() {
             WireRiscOp::OneHot { vocab } => assert_eq!(vocab, 7),
             other => panic!("expected one_hot wire op, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn direct_arithmetic_wire_identities_round_trip_without_surrogates() {
+        let cases = [
+            (WireRiscOp::Sub, r#"{"kind":"sub"}"#),
+            (WireRiscOp::MinElem, r#"{"kind":"min_elem"}"#),
+            (
+                WireRiscOp::ExtremaAdjoint {
+                    extrema: WireExtremaKind::Max,
+                    operand: WireExtremaOperand::Left,
+                },
+                r#"{"kind":"extrema_adjoint","extrema":"max","operand":"left"}"#,
+            ),
+            (
+                WireRiscOp::ExtremaAdjoint {
+                    extrema: WireExtremaKind::Min,
+                    operand: WireExtremaOperand::Right,
+                },
+                r#"{"kind":"extrema_adjoint","extrema":"min","operand":"right"}"#,
+            ),
+        ];
+
+        for (op, expected) in cases {
+            let encoded = serde_json::to_string(&op).expect("serialize direct arithmetic op");
+            assert_eq!(encoded, expected);
+            let decoded: WireRiscOp =
+                serde_json::from_str(&encoded).expect("deserialize direct arithmetic op");
+            assert_eq!(
+                serde_json::to_string(&decoded).expect("re-serialize direct arithmetic op"),
+                expected
+            );
+        }
+
+        for (op, expected) in [
+            (WireFusedStepOp::Sub, r#""sub""#),
+            (WireFusedStepOp::MinElem, r#""min_elem""#),
+        ] {
+            let encoded = serde_json::to_string(&op).expect("serialize fused direct op");
+            assert_eq!(encoded, expected);
+            let decoded: WireFusedStepOp =
+                serde_json::from_str(&encoded).expect("deserialize fused direct op");
+            assert_eq!(
+                serde_json::to_string(&decoded).expect("re-serialize fused direct op"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn direct_arithmetic_wire_schema_has_no_legacy_aliases() {
+        for legacy in [
+            r#"{"kind":"add_neg"}"#,
+            r#"{"kind":"neg_add"}"#,
+            r#"{"kind":"minimum"}"#,
+            r#"{"kind":"min"}"#,
+            r#"{"kind":"max_grad"}"#,
+            r#"{"kind":"min_grad"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<WireRiscOp>(legacy).is_err(),
+                "legacy arithmetic alias must be rejected: {legacy}"
+            );
         }
     }
 

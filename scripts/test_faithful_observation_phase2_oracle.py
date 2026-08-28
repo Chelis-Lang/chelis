@@ -373,19 +373,30 @@ class ObservationDecodeTableTests(unittest.TestCase):
         violations = oracle.observation_decode_violations(source)
         self.assertTrue(any("I16" in v for v in violations), violations)
 
-    def test_bool_is_the_only_declared_f32_view_exception(self) -> None:
+    def test_no_dtype_has_an_untyped_f32_view_exception(self) -> None:
         exceptions = [
             name
             for name, view, _ in oracle.OBSERVATION_DECODE_TABLE
             if view == "data_as_f32_const"
         ]
-        self.assertEqual(exceptions, ["Bool"])
-        why = next(
-            why
-            for name, _, why in oracle.OBSERVATION_DECODE_TABLE
+        self.assertEqual(exceptions, [])
+        view, why = next(
+            (view, why)
+            for name, view, why in oracle.OBSERVATION_DECODE_TABLE
             if name == "Bool"
         )
-        self.assertIn("chelis#894", why, "the exception must name its retirement")
+        self.assertEqual(view, "Bool8::data_ptr_unchecked")
+        self.assertIn("Repr::Bool8", why)
+
+    def test_bool_on_the_removed_f32_view_is_a_violation(self) -> None:
+        source = self._runtime().replace(
+            "let raw = *Bool8::data_ptr_unchecked(tm).add(i);",
+            "let raw = *data_as_f32_const(t).add(i);",
+            1,
+        )
+        violations = oracle.observation_decode_violations(source)
+        self.assertTrue(any("Bool" in v for v in violations), violations)
+        self.assertTrue(any("untyped f32 view" in v for v in violations), violations)
 
     def test_a_deleted_decoder_is_a_violation(self) -> None:
         violations = oracle.observation_decode_violations("fn unrelated() {}\n")
@@ -474,19 +485,21 @@ class DeadExportTests(unittest.TestCase):
         declared = oracle.header_declared_functions(header)
         self.assertGreater(len(exported), 50, "no-mangle exports failed to parse")
         self.assertGreater(len(declared), 50, "header declarations failed to parse")
-        self.assertIn("chelis_format_shortest", exported)
-        self.assertIn("chelis_format_shortest", declared)
+        self.assertIn("chelis_string_from_scalar", exported)
+        self.assertIn("chelis_string_from_scalar", declared)
 
-    def test_the_scan_covers_the_whole_crate_not_only_lib_rs(self) -> None:
-        """`chelis_format_shortest` lives in a sibling module, not lib.rs.
-
-        A retired export re-added in any module is the same public exit
-        returning; scoping the scan to one file would miss it.
-        """
+    def test_the_removed_public_formatter_is_not_an_export(self) -> None:
         lib_only = (oracle.REPO_ROOT / oracle.RUNTIME_SOURCE).read_text(encoding="utf-8")
         crate = oracle.read_runtime_crate_sources(oracle.REPO_ROOT)
         self.assertNotIn("chelis_format_shortest", oracle.rust_exported_symbols(lib_only))
-        self.assertIn("chelis_format_shortest", oracle.rust_exported_symbols(crate))
+        self.assertNotIn("chelis_format_shortest", oracle.rust_exported_symbols(crate))
+
+    def test_readding_the_removed_public_formatter_is_a_violation(self) -> None:
+        violations = oracle.dead_export_violations(
+            '#[no_mangle]\npub extern "C" fn chelis_format_shortest() {}\n',
+            "void chelis_format_shortest(void);\n",
+        )
+        self.assertEqual(len(violations), 2, violations)
 
     def test_the_shipped_crate_and_header_are_clean(self) -> None:
         crate = oracle.read_runtime_crate_sources(oracle.REPO_ROOT)

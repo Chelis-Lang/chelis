@@ -2415,8 +2415,8 @@ pub(super) fn derive_ir_builtin_output_type(
         // operand's type is not derivable and try the second.
         //
         // RT-205 round-3 F-B: `maximum` and `minimum` were the wrong
-        // names. The canonical IR names per spec/05 §2.1 and §3.4 are
-        // `max_elem` (Tier 1) and `min_elem` (Tier 2). The lowerer
+        // names. `max_elem` and `min_elem` are direct Tier-1 identities
+        // governed by [05-OP-40]. The lowerer
         // accepts `max_elem`/`min_elem` (lower.rs:1329-1330);
         // `maximum`/`minimum` do not appear anywhere in the IR
         // vocabulary, so the old allowlist never matched.

@@ -199,12 +199,15 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             // wildcard) so a new variant breaks the build until someone
             // decides whether it carries an f64. ---
             WireRiscOp::Add
+            | WireRiscOp::Sub
             | WireRiscOp::Mul
             | WireRiscOp::Div
             | WireRiscOp::FloorDiv
             | WireRiscOp::TruncDiv
             | WireRiscOp::CmpLt
             | WireRiscOp::MaxElem
+            | WireRiscOp::MinElem
+            | WireRiscOp::ExtremaAdjoint { .. }
             | WireRiscOp::Neg
             | WireRiscOp::Recip
             | WireRiscOp::Exp
@@ -504,9 +507,13 @@ const _: () = {
     // integer constants above 2^53 are now representable on the wire and
     // still enter the real envelope through the same lossy image (the
     // exact-envelope swap is the chelis#688 Phase 2 work).
+    // Moved to `5` for chelis#878: `Pad::fill` became a sealed typed scalar.
     // Moved to `6` for chelis#1287: first-class bool `count` adds the
     // f64-free `WireRiscOp::Count { axes }` payload and exact-only schema
     // decoding. It does not change prove's float-bound extraction contract.
+    // Chelis#1306 adds direct `Sub`, `MinElem`, and `ExtremaAdjoint`
+    // identities plus their fused-step identities to v6. They carry no
+    // embedded float field and are covered by the f64-free operation group.
     assert!(WIRE_DAG_SCHEMA_VERSION == 6);
 };
 

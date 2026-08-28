@@ -65,12 +65,14 @@ pub fn verify(dag: &Dag) -> Vec<String> {
         let arity = node.inputs.len();
         match &node.op {
             RiscOp::Add
+            | RiscOp::Sub
             | RiscOp::Mul
             | RiscOp::Div
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
             | RiscOp::CmpLt
-            | RiscOp::MaxElem => {
+            | RiscOp::MaxElem
+            | RiscOp::MinElem => {
                 if arity != 2 {
                     errors.push(format!(
                         "binary op at node {} has {} inputs (expected 2)",
@@ -123,6 +125,36 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                         "reduce_window_grad at node {} has {} inputs (expected 2)",
                         node.id.0, arity
                     ));
+                }
+            }
+            RiscOp::ExtremaAdjoint { .. } => {
+                if arity != 3 {
+                    errors.push(format!(
+                        "extrema adjoint at node {} has {} inputs (expected 3)",
+                        node.id.0, arity
+                    ));
+                } else {
+                    let inputs = node
+                        .inputs
+                        .iter()
+                        .filter_map(|input| dag.get(*input))
+                        .collect::<Vec<_>>();
+                    if inputs.len() == 3 {
+                        for input in &inputs {
+                            if input.output_type != node.output_type {
+                                errors.push(format!(
+                                    "extrema adjoint at node {} has input type {:?}, expected {:?}",
+                                    node.id.0, input.output_type, node.output_type
+                                ));
+                            }
+                        }
+                        if !node.output_type.precision.is_float() {
+                            errors.push(format!(
+                                "extrema adjoint at node {} requires a float dtype, found {:?}",
+                                node.id.0, node.output_type.precision
+                            ));
+                        }
+                    }
                 }
             }
             RiscOp::BlasMatmul {
@@ -363,7 +395,6 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             | RiscOp::Floor
             | RiscOp::Ceil
             | RiscOp::Round
-            | RiscOp::UniformLike { .. }
             | RiscOp::Dropout { .. }
             | RiscOp::Copy
             | RiscOp::Drop
@@ -385,6 +416,24 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                     errors.push(format!(
                         "unary op at node {} has {} inputs (expected 1)",
                         node.id.0, arity
+                    ));
+                }
+            }
+            RiscOp::UniformLike { .. } => {
+                if !matches!(arity, 1 | 2) {
+                    errors.push(format!(
+                        "op {:?} at node {} expects 1 or 2 inputs, got {}",
+                        node.op, node.id.0, arity
+                    ));
+                }
+                if arity == 2
+                    && let Some(activation) = dag.get(node.inputs[1])
+                    && (activation.output_type.precision != Prim::Bool
+                        || !activation.output_type.dims.is_empty())
+                {
+                    errors.push(format!(
+                        "uniform_like at node {} requires a scalar Bool path activation, got {:?}",
+                        node.id.0, activation.output_type
                     ));
                 }
             }
@@ -666,7 +715,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                 }
             }
             RiscOp::UniformLike { .. } => {
-                if arity == 1
+                if matches!(arity, 1 | 2)
                     && let Some(input) = dag.get(node.inputs[0])
                 {
                     if !input.output_type.precision.is_float() {
@@ -2327,6 +2376,46 @@ mod tests {
             verify(&dag)
                 .iter()
                 .any(|error| error.contains("requires a float template"))
+        );
+    }
+
+    #[test]
+    fn uniform_like_path_activation_requires_scalar_bool() {
+        let mut dag = Dag::new();
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::F32,
+        };
+        let template = dag.add_node(
+            RiscOp::Load {
+                name: "template".into(),
+            },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let wrong_activation = dag.add_node(
+            RiscOp::Load {
+                name: "activation".into(),
+            },
+            vec![],
+            TensorType::scalar_f32(),
+            None,
+        );
+        dag.add_node(
+            RiscOp::UniformLike {
+                low: 0.0,
+                high: 1.0,
+                seed: 7,
+            },
+            vec![template, wrong_activation],
+            ty,
+            None,
+        );
+        assert!(
+            verify(&dag)
+                .iter()
+                .any(|error| error.contains("requires a scalar Bool path activation"))
         );
     }
 

@@ -1150,10 +1150,12 @@ fn grad_over_all_float_field_adt_types_as_same_adt() {
 }
 
 #[test]
-fn grad_over_mixed_field_adt_stays_non_differentiable() {
-    // chelis#520 D2 negative parity: a mixed struct (int field) is not
-    // differentiable, so the default (no `wrt`) gradient payload is
-    // unit, exactly as before the slice.
+fn grad_over_mixed_field_adt_preserves_the_nominal_cotangent_shape() {
+    // spec/06 section 2.1: a mixed struct is differentiable when any
+    // reachable field contains a float leaf. The checker preserves the
+    // nominal constructor type; execution replaces the discrete field's
+    // cotangent with unit in its original position. The adjacent pure-enum
+    // and explicit-bool-wrt tests retain negative parity for all-unit targets.
     let exprs = chelis_deep::parser::parse_str(
         "(deftype {} Mixed ()
             (variant {} Mixed
@@ -1169,7 +1171,7 @@ fn grad_over_mixed_field_adt_stays_non_differentiable() {
     let printed = chelis_deep::printer::print_canonical_flat(std::slice::from_ref(ty))
         .trim()
         .to_string();
-    assert_eq!(printed, "(t-fn {} (t-adt {} Mixed) (t-unit {}))");
+    assert_eq!(printed, "(t-fn {} (t-adt {} Mixed) (t-adt {} Mixed))");
 }
 
 #[test]

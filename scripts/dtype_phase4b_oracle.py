@@ -50,13 +50,13 @@ FROZEN_FILE_DIGESTS = {
         "15e690f490c57d1a5a9629f87901900accb07ae14f7ec83d22195eea1d26904c"
     ),
     "spec/03-deep-syntax.md": (
-        "fc5230f7c06e39f8a17f6f4f856fccdbbfb7a685f1b0edcdaf1c4420d87711dd"
+        "5e21649cf61087df1119040a971a60b5b499d40321d8647ce719e91b8571120a"
     ),
     "spec/04-type-system.md": (
         "c7e825b5d9cc7e0d4bc588504e49612705520b4d63df618be24613fd4bc9b414"
     ),
     "spec/05-risc-primitives.md": (
-        "fbdbca01e5bd5c4df4ad3b8d8f54ae13b7fb52009635a3c4ec80beec98a191d5"
+        "577c242de5d43901afb68a0053b8d690d77476f64b24f2003938bf9018b66142"
     ),
     "spec/06-transformations.md": (
         "faa71c7b4be426d9c6e41fa756998161d96377cf3b5d97ad99d6fda105da18fb"
@@ -68,7 +68,7 @@ FROZEN_FILE_DIGESTS = {
         "a0ec07d22a5c26e2b81ffd9354dd0b055822a02689ccaed692592ec235ef6f09"
     ),
     "spec/design/dtype_semantics.md": (
-        "2d2e541162f2458cbc83c78c8951239ea0ee348455020fd982fc439a43f0155e"
+        "c220f74b51ea177c7ade1d78e429a58234afca774afa280a6db355f0e64e1e02"
     ),
     "spec/design/loud_unsupported.md": (
         "dec76721503b380278124b12448112d3e4bf754f8320f949642d32f7d30d5414"
@@ -373,7 +373,7 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-30": "30c8c04f547161b7c40cbe5659a0c5fee34102f34a6fc605bcde8740221b461b",
     "05-OP-31": "31e1d9d5be4b12496c6a5f9d3ee3cd8f134d9868e2c0e526bb36dea97b813538",
     "05-OP-32": "e8102df69288ef68e023b236ef6e74bd82b327b50fd94f9aa9880cc6c8dfdeeb",
-    "05-OP-33": "fc529223469d814e4b9964bd95e721cd1ceabdd2033e8cbddb9e36151eb72ee1",
+    "05-OP-33": "b0c9cf420f89f9c4c74219a41e55fd2bd36619bba25989a3d06a302424764fca",
     "05-OP-34": "0d2c7d4a051a43dc6b0c93b241434ff1d66bbd7a3e6d47e5c74b669d2fd687bf",
     "05-OP-35": "6eb9a0e1023aeed6dcf43abe8623a9b94dcb38db15224f38915320108c276ef7",
     "05-OP-36": "aeaaf9888f922b31159b8b7536444603897d649c8fb477e77bda659346177ab4",
@@ -395,7 +395,7 @@ FROZEN_REGION_DIGESTS = {
         "AGENTS.md",
         "### Numeric Surface Discipline",
         "### Public-Surface Change Rule",
-        "1b13effce22cc367b9a1e27525e26e049926f2cb9cd6156c4715babc3e3d888f",
+        "de1f56b43a92495cc8a71d7e543b888372f4fb803946a1fed78eb603fb67f917",
     ),
     "numeric value semantics": (
         "spec/04-type-system.md",
@@ -407,7 +407,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/05-risc-primitives.md",
         "### 2.1 Elementwise Binary",
         "### 2.4 Movement",
-        "53fc4eb2ab078b587f18e70fd187671ed4f907277cefa9534e953872324a968f",
+        "90fdc968d6de13e06f0908da4666d98d6e68258195eed3123e30b2c57dda7485",
     ),
     "logical builtin contract": (
         "spec/05-risc-primitives.md",
@@ -455,7 +455,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/dtype_semantics.md",
         "## Phase 4 - the capability table becomes the permanent guard",
         "## I1. Interlock with loud unsupported ([#730])",
-        "9e3f43c16eaa6194e02cb989f6e38fb698214c3cd49dd30af8836622d5f37044",
+        "a43f019ff6e3e0ff7e04bd12b4c4ee30b43f918dea8c5779bc2577221e25d840",
     ),
     "compiled stdlib consumer": (
         "spec/design/loud_unsupported.md",
@@ -473,7 +473,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/remediation_roadmap.md",
         "| **v0.19.0 - grounded dtype storage break",
         "| **v0.20.0 - behavior-preserving permanent guards**",
-        "0a907eb4bb342d38e8643a7008ecf6ec5e6111eab66430ac2088af945ed63c9f",
+        "d072d8df78f937b2b943c08caeaf1a3aa150409cb3aa2db3fa4aa82fe74ca533",
     ),
     "status dtype row": (
         "docs/investigations/remediation_status_2026_08_04.md",

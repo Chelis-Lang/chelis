@@ -1,5 +1,5 @@
 module Std.Scalar
 export (max, min, abs)
-def max(a: f32, b: f32) -> f32 = if gt(a, b) then a else b
-def min(a: f32, b: f32) -> f32 = if lt(a, b) then a else b
-def abs(x: f32) -> f32 = if lt(x, cast(0.0, f32)) then neg(x) else x
+def max[p_numeric](a: p_numeric, b: p_numeric) -> p_numeric = if gt(a, b) then a else b
+def min[p_numeric](a: p_numeric, b: p_numeric) -> p_numeric = if lt(a, b) then a else b
+def abs[p_numeric](x: p_numeric) -> p_numeric = if lt(x, sub(x, x)) then neg(x) else x

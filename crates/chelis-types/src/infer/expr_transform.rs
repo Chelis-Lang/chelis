@@ -176,46 +176,84 @@ pub(super) fn grad_wrt_indices(
 }
 
 pub(super) fn grad_argument_type(arg: &Type, adt_reg: &AdtRegistry) -> Option<Type> {
-    match arg {
-        Type::Prim(prim) if prim.is_float() => Some(Type::Prim(*prim)),
-        // WS-A5: a polymorphic precision (TensorPrec::Var) is not yet
-        // known to be float, so reject it here. Once monomorphization
-        // resolves the precision, the rule re-fires on the concrete
-        // instantiation. `is_float()` returns false for Var precisions.
-        Type::Tensor(dims, prec) if prec.is_float() => {
-            Some(Type::Tensor(dims.clone(), prec.clone()))
+    fn cotangent(arg: &Type, adt_reg: &AdtRegistry, visiting: &mut Vec<Type>) -> (Type, bool) {
+        match arg {
+            Type::Prim(prim) if prim.is_float() => (Type::Prim(*prim), true),
+            Type::Prim(_) => (Type::Unit, false),
+            // WS-A5: a polymorphic precision (TensorPrec::Var) is not yet
+            // known to be float, so reject it here. Once monomorphization
+            // resolves the precision, the rule re-fires on the concrete
+            // instantiation. `is_float()` returns false for Var precisions.
+            Type::Tensor(dims, prec) if prec.is_float() => {
+                (Type::Tensor(dims.clone(), prec.clone()), true)
+            }
+            Type::Tensor(_, _) => (Type::Unit, false),
+            // [06] §2.1: List is a recursive cotangent carrier. Preserve
+            // every container layer, but only admit the argument as a grad
+            // target when its element type recursively contains a float leaf.
+            // A recursively all-discrete List is forward-only.
+            Type::Adt(name, args) if name == "List" && args.len() == 1 => {
+                let (element, has_float) = cotangent(&args[0], adt_reg, visiting);
+                (Type::Adt(name.clone(), vec![element]), has_float)
+            }
+            Type::Tuple(items) => {
+                let mapped = items
+                    .iter()
+                    .map(|item| cotangent(item, adt_reg, visiting))
+                    .collect::<Vec<_>>();
+                let has_float = mapped.iter().any(|(_, has_float)| *has_float);
+                (
+                    Type::Tuple(mapped.into_iter().map(|(ty, _)| ty).collect()),
+                    has_float,
+                )
+            }
+            Type::Adt(name, args) => {
+                // Alias transparency and nominal type-argument substitution
+                // must happen before classifying reachable fields. Without
+                // this, `Wrapper[f32]` appears to contain only its stored
+                // registration-time type variable and is incorrectly
+                // rejected as non-differentiable.
+                if visiting.contains(arg) {
+                    return (arg.clone(), false);
+                }
+                visiting.push(arg.clone());
+                let result = if let Some(expanded) = adt_reg.instantiate_alias(name, args) {
+                    cotangent(&expanded, adt_reg, visiting)
+                } else {
+                    let has_float = adt_reg.defs.get(name).is_some_and(|def| {
+                        let substitutions = def
+                            .param_vars
+                            .iter()
+                            .copied()
+                            .zip(args.iter().cloned())
+                            .collect::<std::collections::HashMap<_, _>>();
+                        def.variants.iter().any(|variant| {
+                            variant.fields.iter().any(|(_, field_ty)| {
+                                let instantiated =
+                                    crate::adt::substitute_alias_type(field_ty, &substitutions);
+                                cotangent(&instantiated, adt_reg, visiting).1
+                            })
+                        })
+                    });
+                    // ADTs are nominal at the checker boundary. The executed
+                    // constructor is preserved at runtime, while recursive
+                    // field cotangents replace discrete leaves with unit as
+                    // required by spec/06 section 2.1.
+                    (Type::Adt(name.clone(), args.clone()), has_float)
+                };
+                debug_assert_eq!(visiting.pop().as_ref(), Some(arg));
+                result
+            }
+            Type::Ref(inner) => {
+                let (inner, has_float) = cotangent(inner, adt_reg, visiting);
+                (inner, has_float)
+            }
+            Type::Fn(_, _) | Type::Unit | Type::Var(_) | Type::Error(_) => (Type::Unit, false),
         }
-        // chelis#520 D2 slice: an ADT whose every variant carries only
-        // float tensors / float scalars gets a field-wise gradient of
-        // the same constructor shape (spec/06-transformations.md
-        // §2.10.1). Mixed or non-tensor payloads stay
-        // non-differentiable, so the arg is skipped (no `wrt`) or
-        // rejected (`wrt`-selected) exactly as before. Generic ADTs
-        // fall out naturally: an uninstantiated param var is not a
-        // float tensor.
-        Type::Adt(name, args) => {
-            let def = adt_reg.defs.get(name)?;
-            let all_float_fields = def.variants.iter().all(|variant| {
-                variant.fields.iter().all(|(_, field_ty)| match field_ty {
-                    Type::Prim(prim) => prim.is_float(),
-                    Type::Tensor(_, prec) => prec.is_float(),
-                    _ => false,
-                })
-            });
-            // A pure enum (no fields in any variant) carries no
-            // continuous payload: there is nothing to differentiate,
-            // and typing its gradient as the enum itself would claim a
-            // gradient value the runtime cannot produce. Keep it
-            // non-differentiable (unit payload), the pre-#520 typing.
-            let has_any_field = def
-                .variants
-                .iter()
-                .any(|variant| !variant.fields.is_empty());
-            (all_float_fields && has_any_field).then(|| Type::Adt(name.clone(), args.clone()))
-        }
-        Type::Ref(inner) => grad_argument_type(inner, adt_reg),
-        _ => None,
     }
+
+    let (result, has_float) = cotangent(arg, adt_reg, &mut Vec::new());
+    has_float.then_some(result)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -392,4 +430,27 @@ pub(super) fn infer_def(
     note_list_literal_binding(env, &name, &kids[1]);
     env.bind(name, scheme);
     body_ty
+}
+
+#[cfg(test)]
+mod grad_argument_type_tests {
+    use super::*;
+
+    #[test]
+    fn list_cotangent_recurses_and_preserves_the_container_shape() {
+        let registry = AdtRegistry::default();
+        let floats = Type::Adt("List".to_string(), vec![Type::Prim(Prim::F32)]);
+        let nested = Type::Adt("List".to_string(), vec![floats.clone()]);
+
+        assert_eq!(grad_argument_type(&floats, &registry), Some(floats));
+        assert_eq!(grad_argument_type(&nested, &registry), Some(nested));
+    }
+
+    #[test]
+    fn recursively_all_discrete_list_is_not_a_gradient_target() {
+        let registry = AdtRegistry::default();
+        let ints = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
+
+        assert_eq!(grad_argument_type(&ints, &registry), None);
+    }
 }

@@ -85,12 +85,9 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "fail",
     "debug",
     "test_assert",
-    "test_assert_eq_f32",
-    "test_assert_eq_int",
-    "test_assert_eq_bool",
-    "test_assert_eq_string",
+    "test_assert_eq",
     "test_assert_close_tensor",
-    "test_assert_eq_tensor_int64",
+    "test_assert_eq_tensor",
     "string_len",
     "string_concat",
     "string_slice",
@@ -147,28 +144,9 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "mmap_read",
     "mmap_len",
     "process_run",
-    // Host-lane JSON I/O (chelis#890): parse/serialize + dot-path
-    // accessors and output constructors over the prelude `Json` ADT,
-    // plus decimal rounding. Eval-only -- the build backends reject
-    // them (`chelis_ir::host::EVAL_ONLY_HOST_BUILTINS`).
-    "parse_json",
-    "to_json",
-    "json_f64",
-    "json_int",
-    "json_str",
-    "json_list",
-    "json_f64s",
-    "json_ints",
-    "jnum",
-    "jint",
-    "jstr",
-    "jlist",
-    "jdict",
-    "json_set",
     "round_to",
     // Host-lane CSV I/O (chelis#903): RFC-4180-ish parse/serialize plus
-    // column accessors. A Csv document rides the `Json` ADT as the fixed
-    // shape `{"columns": .., "rows": ..}` -- no new prelude type.
+    // column accessors over List[Dict[string,string]].
     // Eval-only (`chelis_ir::host::EVAL_ONLY_HOST_BUILTINS`).
     "parse_csv",
     "to_csv",
@@ -376,20 +354,6 @@ const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
     "mmap_read",
     "mmap_len",
     "process_run",
-    "parse_json",
-    "to_json",
-    "json_f64",
-    "json_int",
-    "json_str",
-    "json_list",
-    "json_f64s",
-    "json_ints",
-    "jnum",
-    "jint",
-    "jstr",
-    "jlist",
-    "jdict",
-    "json_set",
     "round_to",
     "parse_csv",
     "to_csv",
@@ -1132,105 +1096,6 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
-    // ─── Host-lane JSON I/O (chelis#890, HostOnly, eval-only) ────────
-    BuiltinDecl {
-        name: "parse_json",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "to_json",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "json_f64",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "json_int",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "json_str",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "json_list",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "json_f64s",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "json_ints",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "jnum",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "jint",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "jstr",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "jlist",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "jdict",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "json_set",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
     BuiltinDecl {
         name: "round_to",
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
@@ -1647,34 +1512,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
-        name: "test_assert_eq_f32",
-        inference: InferenceDisposition::GenericAccepted {
-            reason: "the polymorphic signature fully determines this builtin type",
-        },
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "test_assert_eq_int",
-        inference: InferenceDisposition::GenericAccepted {
-            reason: "the polymorphic signature fully determines this builtin type",
-        },
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "test_assert_eq_bool",
-        inference: InferenceDisposition::GenericAccepted {
-            reason: "the polymorphic signature fully determines this builtin type",
-        },
-        realizability: Realizability::HostOnly,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
-        name: "test_assert_eq_string",
+        name: "test_assert_eq",
         inference: InferenceDisposition::GenericAccepted {
             reason: "the polymorphic signature fully determines this builtin type",
         },
@@ -1692,7 +1530,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
-        name: "test_assert_eq_tensor_int64",
+        name: "test_assert_eq_tensor",
         inference: InferenceDisposition::GenericAccepted {
             reason: "the polymorphic signature fully determines this builtin type",
         },
@@ -1866,13 +1704,18 @@ pub fn builtin_env() -> (Env, VarGen) {
         // The builtin entry just marks it as a 2-arg function.
         let _ = (dv, input_tv);
         let tv = vg.fresh_tvar();
+        let output = vg.fresh_tvar();
         let scheme = Scheme {
-            tvars: vec![tv],
+            tvars: vec![tv, output],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
                 vec![borrowed(Type::Var(tv)), borrowed(Type::Var(tv))],
-                Box::new(Type::Var(tv)), // inference engine overrides for cmplt
+                // The application checker replaces this with bool on the
+                // operand's surface. Keeping the placeholder independent
+                // avoids binding an unresolved operand variable to bool
+                // before that procedural result rule runs.
+                Box::new(Type::Var(output)),
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -2272,6 +2115,7 @@ pub fn builtin_env() -> (Env, VarGen) {
 
     // Tier 1: RISC Primitives
     tensor_binop("add", &mut env, &mut vg);
+    tensor_binop("sub", &mut env, &mut vg);
     tensor_binop("mul", &mut env, &mut vg);
     // `div` and `recip` were promoted from a Tier 2
     // `exp(neg(log(_)))` decomposition to native Tier 1 primitives
@@ -2285,6 +2129,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_binop("floor_div", &mut env, &mut vg);
     tensor_binop("trunc_div", &mut env, &mut vg);
     tensor_binop("max_elem", &mut env, &mut vg);
+    tensor_binop("min_elem", &mut env, &mut vg);
 
     tensor_unop("neg", &mut env, &mut vg);
     tensor_unop("recip", &mut env, &mut vg);
@@ -2304,7 +2149,6 @@ pub fn builtin_env() -> (Env, VarGen) {
     cmplt_sig("cmplt", &mut env, &mut vg);
 
     // Tier 2: Derived built-ins
-    tensor_binop("sub", &mut env, &mut vg);
     generic_binop("mod", &mut env, &mut vg);
     cmplt_sig("eq", &mut env, &mut vg);
     cmplt_sig("neq", &mut env, &mut vg);
@@ -2337,7 +2181,6 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_reduce_to_out("mean", &mut env, &mut vg);
 
     tensor_binop_to_out("matmul", &mut env, &mut vg);
-    tensor_binop("min_elem", &mut env, &mut vg);
     tensor_triop_return_first("layer_norm", &mut env, &mut vg);
     tensor_conv2d("conv2d", &mut env, &mut vg);
     tensor_reduce_to_out("sum", &mut env, &mut vg);
@@ -2389,70 +2232,21 @@ pub fn builtin_env() -> (Env, VarGen) {
             ),
         },
     );
-    env.bind(
-        "test_assert_eq_f32".to_string(),
-        Scheme {
-            tvars: vec![],
-            dvars: vec![],
-            rvars: vec![],
-            body: Type::Fn(
-                vec![
-                    Type::Prim(Prim::F32),
-                    Type::Prim(Prim::F32),
-                    Type::Prim(Prim::String),
-                ],
-                Box::new(Type::Unit),
-            ),
-        },
-    );
-    env.bind(
-        "test_assert_eq_int".to_string(),
-        Scheme {
-            tvars: vec![],
-            dvars: vec![],
-            rvars: vec![],
-            body: Type::Fn(
-                vec![
-                    Type::Prim(Prim::Int64),
-                    Type::Prim(Prim::Int64),
-                    Type::Prim(Prim::String),
-                ],
-                Box::new(Type::Unit),
-            ),
-        },
-    );
-    env.bind(
-        "test_assert_eq_bool".to_string(),
-        Scheme {
-            tvars: vec![],
-            dvars: vec![],
-            rvars: vec![],
-            body: Type::Fn(
-                vec![
-                    Type::Prim(Prim::Bool),
-                    Type::Prim(Prim::Bool),
-                    Type::Prim(Prim::String),
-                ],
-                Box::new(Type::Unit),
-            ),
-        },
-    );
-    env.bind(
-        "test_assert_eq_string".to_string(),
-        Scheme {
-            tvars: vec![],
-            dvars: vec![],
-            rvars: vec![],
-            body: Type::Fn(
-                vec![
-                    Type::Prim(Prim::String),
-                    Type::Prim(Prim::String),
-                    Type::Prim(Prim::String),
-                ],
-                Box::new(Type::Unit),
-            ),
-        },
-    );
+    {
+        let value = vg.fresh_tvar();
+        env.bind(
+            "test_assert_eq".to_string(),
+            Scheme {
+                tvars: vec![value],
+                dvars: vec![],
+                rvars: vec![],
+                body: Type::Fn(
+                    vec![Type::Var(value), Type::Var(value), Type::Prim(Prim::String)],
+                    Box::new(Type::Unit),
+                ),
+            },
+        );
+    }
     {
         // test_assert_close_tensor: (tensor a, tensor a, f32, string) -> unit
         let tensor_tv = vg.fresh_tvar();
@@ -2475,11 +2269,10 @@ pub fn builtin_env() -> (Env, VarGen) {
         );
     }
     {
-        // test_assert_eq_tensor_int64: (tensor a, tensor a, string) -> unit
-        // Bit-exact comparison; the Std.Test wrapper restricts a to int64.
+        // test_assert_eq_tensor: (tensor a, tensor a, string) -> unit
         let tensor_tv = vg.fresh_tvar();
         env.bind(
-            "test_assert_eq_tensor_int64".to_string(),
+            "test_assert_eq_tensor".to_string(),
             Scheme {
                 tvars: vec![tensor_tv],
                 dvars: vec![],
@@ -2649,30 +2442,8 @@ pub fn builtin_env() -> (Env, VarGen) {
     // `infer.rs` and the IO effect is assigned in `chelis-effects`, mirroring
     // how `read_file` acquires IO. Rejected by the C/HIP build backends.
     generic_binop("process_run", &mut env, &mut vg);
-    // Host-lane JSON I/O (chelis#890). The schemes here are the loose
-    // arity-declaring entry points (the same pattern as the string/dict
-    // families); the concrete argument/return contracts -- including
-    // accepting any float/integer precision where a bare literal would
-    // otherwise default to f32/int32 (spec/04-type-system.md §5.3) -- are
-    // enforced by `check_json_builtin_signature` (infer/app_hostio.rs).
-    // Eval-only: `chelis_ir::host::EVAL_ONLY_HOST_BUILTINS`.
-    generic_unop("parse_json", &mut env, &mut vg);
-    generic_unop("to_json", &mut env, &mut vg);
-    generic_binop("json_f64", &mut env, &mut vg);
-    generic_binop("json_int", &mut env, &mut vg);
-    generic_binop("json_str", &mut env, &mut vg);
-    generic_binop("json_list", &mut env, &mut vg);
-    generic_binop("json_f64s", &mut env, &mut vg);
-    generic_binop("json_ints", &mut env, &mut vg);
-    generic_unop("jnum", &mut env, &mut vg);
-    generic_unop("jint", &mut env, &mut vg);
-    generic_unop("jstr", &mut env, &mut vg);
-    generic_unop("jlist", &mut env, &mut vg);
-    generic_unop("jdict", &mut env, &mut vg);
-    generic_triop("json_set", &mut env, &mut vg);
     generic_binop("round_to", &mut env, &mut vg);
-    // Host-lane CSV I/O (chelis#903); same loose-arity pattern as the JSON
-    // family above -- the concrete contracts live in
+    // Host-lane CSV I/O (chelis#903); the concrete contracts live in
     // `check_csv_builtin_signature` (infer/app_hostio.rs).
     generic_unop("parse_csv", &mut env, &mut vg);
     generic_unop("to_csv", &mut env, &mut vg);
@@ -2811,87 +2582,6 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
             defining_module: None,
             variants: Vec::new(),
         });
-
-    // Prelude `Json` ADT (chelis#890): the value type behind the host-lane
-    // JSON builtins (`parse_json`/`to_json`/accessors) and the chelis#903
-    // CSV document. Non-parameterized and recursive through `List`/`Dict`:
-    //
-    //   Json = JNull | JBool bool | JInt int64 | JNum f64 | JStr string
-    //        | JList List[Json] | JDict Dict[string, Json]
-    //
-    // `JInt` carries exact int64 beside the f64 `JNum` ([04-NUM-11]; the
-    // chelis#729 capacity class). JSON has one number production, so
-    // int-vs-float is a parse-time decision -- [05-OP-2] in
-    // spec/05-risc-primitives.md is the normative rule (a token containing
-    // `.`/`e`/`E` becomes `JNum`, anything else `JInt`; the same split
-    // `Std.Io.Json` and Python's `json` use). Without the variant,
-    // `9007199254740993` read back as `9007199254740992.0` silently.
-    //
-    // The dot-path accessors are the primary agent surface; matching on
-    // these constructors stays available, so the variants are registered
-    // openly (not opaque). The capacity census enumerates this registry
-    // through `prelude_adt_defs()` below -- a numeric variant added here is
-    // census-visible, not a blind spot.
-    let json_type = Type::Adt("Json".to_string(), Vec::new());
-    for (ctor, fields) in json_variants() {
-        let body = if fields.is_empty() {
-            json_type.clone()
-        } else {
-            Type::Fn(fields.clone(), Box::new(json_type.clone()))
-        };
-        env.bind(
-            ctor.to_string(),
-            Scheme {
-                tvars: vec![],
-                dvars: vec![],
-                rvars: vec![],
-                body,
-            },
-        );
-    }
-    adt_reg
-        .defs
-        .entry("Json".to_string())
-        .or_insert_with(|| AdtDef {
-            name: "Json".to_string(),
-            type_params: Vec::new(),
-            param_vars: Vec::new(),
-            opaque: false,
-            defining_module: None,
-            variants: json_variants()
-                .into_iter()
-                .map(|(ctor, fields)| VariantInfo {
-                    name: ctor.to_string(),
-                    fields: fields.into_iter().map(|ty| (None, ty)).collect(),
-                })
-                .collect(),
-        });
-}
-
-/// The prelude `Json` variant shapes, in declaration order. Shared by
-/// [`register_prelude_adts`] (env constructor bindings + ADT registry) and
-/// [`prelude_adt_defs`] (the capacity-census enumeration source) so the
-/// registered type and the censused identity cannot drift.
-fn json_variants() -> Vec<(&'static str, Vec<Type>)> {
-    let json_type = Type::Adt("Json".to_string(), Vec::new());
-    vec![
-        ("JNull", vec![]),
-        ("JBool", vec![Type::Prim(Prim::Bool)]),
-        ("JInt", vec![Type::Prim(Prim::Int64)]),
-        ("JNum", vec![Type::Prim(Prim::F64)]),
-        ("JStr", vec![Type::Prim(Prim::String)]),
-        (
-            "JList",
-            vec![Type::Adt("List".to_string(), vec![json_type.clone()])],
-        ),
-        (
-            "JDict",
-            vec![Type::Adt(
-                "Dict".to_string(),
-                vec![Type::Prim(Prim::String), json_type],
-            )],
-        ),
-    ]
 }
 
 /// Capacity-census enumeration source for Rust-registered prelude value
@@ -3205,55 +2895,10 @@ mod tests {
     }
 
     #[test]
-    fn builtin_env_has_json_io_builtins() {
-        // chelis#890 host-lane JSON I/O: every builtin is registered with
-        // the declared arity (the concrete contracts live in
-        // `check_json_builtin_signature`, infer/app_hostio.rs).
-        let (env, _) = builtin_env();
-        for (name, arity) in [
-            ("parse_json", 1),
-            ("to_json", 1),
-            ("json_f64", 2),
-            ("json_int", 2),
-            ("json_str", 2),
-            ("json_list", 2),
-            ("json_f64s", 2),
-            ("json_ints", 2),
-            ("jnum", 1),
-            ("jint", 1),
-            ("jstr", 1),
-            ("jlist", 1),
-            ("jdict", 1),
-            ("json_set", 3),
-            ("round_to", 2),
-        ] {
-            let scheme = env
-                .lookup(name)
-                .unwrap_or_else(|| panic!("`{name}` must be registered"));
-            match &scheme.body {
-                Type::Fn(params, _) => assert_eq!(
-                    params.len(),
-                    arity,
-                    "`{name}` should take {arity} args, got {}",
-                    params.len()
-                ),
-                other => panic!("`{name}` should be a function type, got {other:?}"),
-            }
-            assert!(
-                BUILTIN_NAMES.contains(&name),
-                "`{name}` must be in the closed BUILTIN_NAMES vocabulary"
-            );
-        }
-    }
-
-    #[test]
     fn builtin_env_has_csv_io_builtins() {
         // chelis#903 host-lane CSV I/O: every builtin is registered with
-        // the declared arity (the concrete contracts live in
-        // `check_csv_builtin_signature`, infer/app_hostio.rs). The value
-        // type is the #890 `Json` ADT -- a Csv document is a fixed-shape
-        // Json value -- so there is deliberately no `Csv` prelude ADT to
-        // assert on.
+        // the declared arity; infer/app_hostio.rs pins the canonical
+        // List[Dict[string,string]] table carrier.
         let (env, _) = builtin_env();
         for (name, arity) in [
             ("parse_csv", 1),
@@ -3284,86 +2929,6 @@ mod tests {
                 "`{name}` must be in the closed BUILTIN_NAMES vocabulary"
             );
         }
-    }
-
-    #[test]
-    fn register_prelude_adts_adds_json_adt() {
-        let (mut env, mut vg) = builtin_env();
-        let mut adt_reg = AdtRegistry::new();
-        register_prelude_adts(&mut env, &mut vg, &mut adt_reg);
-
-        assert_eq!(
-            adt_reg.variant_names("Json").expect("Json variants"),
-            vec![
-                "JNull".to_string(),
-                "JBool".to_string(),
-                "JInt".to_string(),
-                "JNum".to_string(),
-                "JStr".to_string(),
-                "JList".to_string(),
-                "JDict".to_string(),
-            ]
-        );
-        // Constructor value bindings: nullary JNull is a bare Json value;
-        // the payload-carrying constructors are functions into Json.
-        let json_ty = Type::Adt("Json".to_string(), Vec::new());
-        assert_eq!(env.lookup("JNull").expect("JNull").body, json_ty);
-        match &env.lookup("JNum").expect("JNum").body {
-            Type::Fn(params, ret) => {
-                assert_eq!(params.as_slice(), &[Type::Prim(Prim::F64)]);
-                assert_eq!(**ret, json_ty);
-            }
-            other => panic!("JNum should be a function type, got {other:?}"),
-        }
-        // [04-NUM-11] / chelis#729: `JInt` carries exact int64 alongside
-        // the f64 `JNum`.
-        match &env.lookup("JInt").expect("JInt").body {
-            Type::Fn(params, ret) => {
-                assert_eq!(params.as_slice(), &[Type::Prim(Prim::Int64)]);
-                assert_eq!(**ret, json_ty);
-            }
-            other => panic!("JInt should be a function type, got {other:?}"),
-        }
-        // The recursive payloads point back at Json through List/Dict.
-        // Looked up by name rather than index: a positional assertion
-        // silently retargets when a variant is inserted.
-        let def = adt_reg.lookup("Json").expect("Json def");
-        let jdict = def
-            .variants
-            .iter()
-            .find(|variant| variant.name == "JDict")
-            .expect("JDict variant");
-        assert_eq!(
-            jdict.fields[0].1,
-            Type::Adt(
-                "Dict".to_string(),
-                vec![Type::Prim(Prim::String), json_ty.clone()]
-            )
-        );
-    }
-
-    #[test]
-    fn prelude_adt_defs_enumerates_json_for_the_census() {
-        // The capacity census's prelude-ADT leg reads this enumeration
-        // (spec/design/dtype_semantics.md §C6): the Json ADT with its
-        // numeric variants must be visible, exactly as registered.
-        let defs = prelude_adt_defs();
-        let names: Vec<&str> = defs.iter().map(|def| def.name.as_str()).collect();
-        assert!(names.contains(&"Json"), "Json enumerated, got {names:?}");
-        assert!(names.contains(&"Option"), "all prelude ADTs enumerated");
-        let json = defs.iter().find(|def| def.name == "Json").expect("Json");
-        let jnum = json
-            .variants
-            .iter()
-            .find(|variant| variant.name == "JNum")
-            .expect("JNum variant visible to the census");
-        assert_eq!(jnum.fields[0].1, Type::Prim(Prim::F64));
-        let jint = json
-            .variants
-            .iter()
-            .find(|variant| variant.name == "JInt")
-            .expect("JInt variant visible to the census");
-        assert_eq!(jint.fields[0].1, Type::Prim(Prim::Int64));
     }
 
     #[test]

@@ -345,7 +345,7 @@ fn max_elem_is_exact_at_two_pow_53_boundary() {
     );
 }
 
-/// Sibling of `max_elem`; `min_elem` lowers via `neg(max_elem(neg, neg))`.
+/// Sibling of `max_elem`; direct `min_elem` compares the stored int64 operands.
 #[test]
 fn min_elem_is_exact_at_two_pow_53_boundary() {
     assert_eq!(

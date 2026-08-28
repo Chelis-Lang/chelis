@@ -1271,7 +1271,7 @@ out = einsum("ij,jk->ik", a, b)
 }
 
 #[test]
-fn surf_scatter_replace_rejects_static_duplicate_indices() {
+fn surf_scatter_replace_accepts_static_duplicate_indices() {
     let result = check_ir_program(&chelis_surf::desugar::desugar_program(
         &chelis_surf::parser::parse_str(
             r#"
@@ -1284,14 +1284,7 @@ out = scatter(base, idx, updates, 0, "replace")
         )
         .expect("surf parse"),
     ));
-    let err = result.expect_err("static scatter duplicate indices should be rejected");
-    assert!(
-        err.errors.iter().any(|error| {
-            error.message.contains("scatter") && error.message.contains("duplicate target index")
-        }),
-        "expected scatter duplicate-index rejection, got {:?}",
-        err.errors
-    );
+    result.expect("static scatter duplicate indices follow deterministic last-write-wins");
 }
 
 #[test]
