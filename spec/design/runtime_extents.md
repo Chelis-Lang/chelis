@@ -404,6 +404,11 @@ enum RuntimeGraphMutationSite { // generated
     HostActualize,
 }
 
+struct RuntimeTypedImportRemap {
+    lexical_scopes: Vec<(RuntimeScopeId, RuntimeScopeId)>,
+    typed_sites: Vec<(TypedSiteId, TypedSiteId)>,
+}
+
 struct RuntimeDimOwner {
     lexical_scope: RuntimeScopeId,
     instance: RuntimeScopeInstanceId,
@@ -469,6 +474,21 @@ enum RuntimeDimUseOrigin {
 }
 ```
 
+`RuntimeIdentityDestination` has its own closed canonical/Wire discriminator,
+outside the nested `RuntimeBoundField` payload:
+
+| variant | tag byte | Wire tag | payload key |
+|---|---:|---|---|
+| `Bound` | `0x00` | `bound` | complete `RuntimeBoundField` key |
+| `OutputAxis` | `0x01` | `output_axis` | exact output-axis number |
+
+The outer tag is always encoded and compared before its payload. In
+particular, `Bound { field: ExpandSize }` and `OutputAxis { axis: 0 }` remain
+distinct when their origin and optional class/use are identical. A generated
+path that selects either destination includes this outer tag before the
+bound-field or output-axis payload; it cannot infer the kind from a numeric
+zero or reuse a payload under the other kind.
+
 `RuntimeBoundField` is closed and its canonical/Wire tag bytes are frozen:
 
 | variant | tag byte | Wire tag | only legal destination |
@@ -501,10 +521,15 @@ uses `Synthesized` and may not borrow a parent or sibling `TypedSiteId`.
 `ProvedEqual` does not use this negative-site algebra: its
 `RuntimeDimProofEvidence.typed_site` always remains the canonical typed proof
 site, even when the proved alias's destination origin is synthesized. Typed
-sites are preserved by transforms; synthesized evidence sites are remapped
-atomically with their `RuntimeOriginId`, generated path, evidence destination,
-and graph annotation. Missing, typed/synthesized-kind mismatched, redirected,
-or rule-incompatible sites fail before finalization and after Wire decode.
+sites are preserved by non-import transforms. `ImportDag` instead translates
+every typed site through the checked `RuntimeTypedImportRemap` described below;
+it may not treat a source-local numeric site ID as already belonging to the
+destination. Every occurrence passes through the map even when the mapped
+number happens to be equal in an otherwise empty destination.
+Synthesized evidence sites are remapped atomically with their
+`RuntimeOriginId`, generated path, evidence destination, and graph annotation.
+Missing, typed/synthesized-kind mismatched, redirected, or rule-incompatible
+sites fail before finalization and after Wire decode.
 
 `ProvisionalRuntimeDimDeclaration` uses the same owner, occurrence,
 many-to-many binding, and complete source/use algebras as the final
@@ -662,8 +687,10 @@ target-capacity rejection is allowed.
   `RuntimeTransformNamespace` and creates `RuntimeOrigin::Synthesized` for each
   new node or field.
   Its `GeneratedExtentPath` records transform kind, parent origin, deterministic
-  local path, operation or field, and axis. A generated origin may therefore be
-  remapped and serialized without pretending that it had a `TypedNodeId`.
+  local path, operation identity, the outer bound-versus-output-axis destination
+  kind, and the complete bound-field or output-axis payload. A generated origin
+  may therefore be remapped and serialized without pretending that it had a
+  `TypedNodeId`, and an `ExpandSize` path cannot collide with output axis zero.
 
   `RuntimeScopeInstanceId` is distinct from lexical scope. A root instance has
   an empty lineage; cloning a lexical scope appends the transform instance and
@@ -681,9 +708,20 @@ target-capacity rejection is allowed.
   for a captured outside declaration remain unchanged. The evidence record and
   its destination annotation are created, remapped, or discharged as one
   non-forgeable pair. Vmap, grad, specialization, and ordinary clone/remap use
-  this rule. Import first maps opaque source DAG
-  handles into fresh destination handles; it then translates every proof
-  triple through that same total map before commit. CSE may remap only the
+  this rule. Import first maps opaque source DAG handles into fresh destination
+  handles and constructs one checked `RuntimeTypedImportRemap` per declared
+  operand. Each map is total and bijective over every referenced source
+  lexical scope and typed site and maps them into disjoint destination ranges
+  in declared operand order. The referenced universe is the union named by
+  owners, `RuntimeOrigin::Typed`, `RuntimeIdentityEvidenceSite::Typed`,
+  provisional and final `RuntimeDimProofEvidence.typed_site`, evidence
+  destinations, bound/output annotations, and generated-path parents; omitting
+  a carrier or mapping two source identities to one destination identity
+  rejects the transaction. The import then translates every owner, typed
+  origin, negative site, proof triple, destination, annotation, and dependent
+  path through the opaque-handle and typed maps together before commit. This
+  rule applies even when every imported transform namespace has zero history;
+  transform remapping is not a substitute for typed-arena remapping. CSE may remap only the
   occurrence member of a proof triple to the selected physically equivalent
   occurrence while preserving its class-local source edge. DCE either
   preserves the complete reachable proof triple or explicitly discharges the
@@ -716,19 +754,29 @@ target-capacity rejection is allowed.
   later removed by DCE intentionally changes the serialized high-water mark and
   content hash: the hash commits to deterministic transform-ID allocation
   history, not a full transform audit log or semantic equivalence of optimized
-  graphs. Combining annotated DAGs imports them in declared operand order and remaps every live transform
-  ID, synthesized origin, generated path, and scope lineage into a fresh
-  destination range whose length is the imported history count
-  (zero for `None`, otherwise `issued_through + 1`), including erased IDs. It reserves that entire range
-  transactionally with widened checked arithmetic and fails `Capacity` before
-  mutation if the range does not fit. After origin remapping, the transaction
+  graphs. Combining annotated DAGs imports them in declared operand order. It
+  remaps every referenced lexical scope and typed site into independent,
+  disjoint destination ranges, then remaps every live transform ID,
+  typed/synthesized origin, negative/proof site, evidence destination,
+  annotation, generated path, and scope lineage through the corresponding
+  maps. The fresh transform range has the imported history count as its length
+  (zero for `None`, otherwise `issued_through + 1`), including erased IDs. The
+  transaction reserves that entire range with widened checked arithmetic and
+  fails `Capacity` before mutation if the range does not fit. Typed scopes and
+  sites are allocated from the unique referenced source IDs in canonical
+  numeric order within each operand. Resident destination IDs remain fixed;
+  the first imported range begins at the checked successor of the greatest
+  occupied destination ID, or at zero when none exists, and later ranges follow
+  declared operand order. A typed-ID or
+  transform-ID capacity failure occurs before either graph or authority state
+  changes. After origin remapping, the transaction
   rebuilds occurrence IDs and class-local source/use bindings in canonical
   destination order while preserving every many-to-many edge; they do not
   consume transform IDs. Accepting raw overlapping namespaces or occurrence
   IDs is invalid.
 
   Canonical structural ordering is complete. Typed lexical-scope and site IDs
-  are assigned by preorder of the canonical typed arena, with child scopes,
+  in a standalone arena are assigned by preorder of the canonical typed arena, with child scopes,
   binders, fields, and axes in declared vector order. Owners sort by
   `(lexical_scope, instance_lineage[(transform, clone_ordinal)], binder_slot)`.
   Origins are topologically sorted with every parent first, then by the tuple:
@@ -736,17 +784,20 @@ target-capacity rejection is allowed.
   synthesized uses `(transform, parent_canonical_index,
   generated_path_key)`. `generated_path_key` is the lexicographic tuple of the
   frozen Wire tag bytes for transform kind, deterministic local vector index,
-  canonical operation identity bytes, bound-field tag bytes, and numeric axis
-  or slot components. Imported IDs are remapped first in declared operand
-  order and then compared by this same rule. Occurrences follow physical origin
+  canonical operation identity bytes, the outer identity-destination kind tag,
+  the complete bound-field key or output-axis number, and numeric axis or slot
+  components. Imported typed scopes/sites and transform/origin IDs are remapped
+  first in declared operand order and then compared by this same rule. Occurrences follow physical origin
   order exactly once, independent of how many declarations reference them.
   Declarations follow owner order; their source/use ordering follows the rule
   below and compares a shared occurrence by that one canonical occurrence
   index. Each occurrence's witness/alias bindings follow declaration order and
   then source/use position. Evidence records follow their destination graph
-  origin, then bound-field tag or output-axis number, then optional declaration
-  and use order; evidence IDs are assigned only from that structural order.
-  The graph-level dynamic-axis occurrence list follows
+  origin, then the outer destination-kind tag, then the complete bound-field
+  key or output-axis number, then optional declaration and use order; evidence
+  IDs are assigned only from that structural order. Thus an `ExpandSize` bound
+  and output axis zero at one origin cannot compare equal. The graph-level
+  dynamic-axis occurrence list follows
   occurrence order, never repeated declaration membership. Encoders regenerate this order and
   decoders reject reordered tables. No hash-map iteration, graph
   hash, allocation address, or display name participates in ordering.
@@ -890,7 +941,8 @@ target-capacity rejection is allowed.
   class/use; every surviving record must have exactly one such destination.
   `ProvedEqual` is accepted only when its class, source edge, and occurrence
   all map, the mapped source belongs to the mapped class and occurrence, and
-  the typed proof site is still the canonical typed-arena site for that axis.
+  the typed proof site is still the canonical typed-arena site for that axis,
+  translated through the transaction's typed-site bijection after import.
   A missing, duplicate, stale, redirected, destination-mismatched, or
   non-bijective endpoint aborts finalization before any `FinalizedDag` exists.
   Final ID assignment therefore cannot change the referent of an earlier bound
@@ -1755,7 +1807,12 @@ axes and windows in one issue.
    bound-field rows independently change the indexed axis, swap `PadBefore`
    with `PadAfter`, swap `ShrinkStart` with `ShrinkEnd`, use a field tag with
    the wrong owning operation, or redirect its class/use; all fail against the
-   exact graph location and seven-tag registry. Clone and
+   exact graph location and seven-tag registry. An exact collision row attaches
+   both `Bound { field: ExpandSize }` and `OutputAxis { axis: 0 }` to the same
+   origin and optional class/use. Both insertion orders produce identical
+   evidence IDs and bytes because the outer `bound`/`output_axis` tag precedes
+   the payload; dropping or swapping that tag, decoding either payload under
+   the other tag, or omitting it from `GeneratedExtentPath` fails. Clone and
    vmap rows freshen all three endpoints for a cloned local proof while leaving
    a captured outer proof unchanged; mutations that freshen only the class,
    only the source, or only the occurrence fail atomically. Import rows remap
@@ -1763,6 +1820,18 @@ axes and windows in one issue.
    only a proof's occurrence to the selected equivalent physical occurrence,
    while DCE rows either retain all endpoints or discharge the complete proof
    and dependent axis/use. Stale pre-CSE/pre-DCE proof redirections fail.
+   Two-artifact import rows give both standalone source arenas lexical scope
+   zero and typed site zero, with zero transform history in each. One carries a
+   proved alias and the other negative evidence. Import in each declared
+   operand order creates disjoint typed scope/site ranges, remaps owners,
+   origins, negative/proof sites, destinations, annotations, and dependent
+   paths atomically, and survives consume/refinalize with deterministic bytes.
+   Mutations preserve a later source-local zero instead of its nonzero mapped
+   ID, remap only one carrier, overlap the destination ranges, collapse the two
+   proof sites, or use transform history as the typed namespace; each fails.
+   Operand permutation may change
+   bytes according to declared order, but insertion order within either source
+   arena may not.
    Grad, vmap, specialization, clone, and import rows create both synthesized
    unclassed axes and synthesized fresh witnesses with
    `RuntimeIdentityEvidenceSite::Synthesized`, while synthesized proved aliases
@@ -1845,7 +1914,9 @@ axes and windows in one issue.
 9. **WireDag v8.** Exact JSON round-trip, stable bytes/hash, prove and offline
    extraction, compiler-API and binding consumption, and the capacity census
    are green. Structural decoder negatives include missing size, old or future
-   version, illegal bound tag, a negative/out-of-range bound-field axis, wrong
+   version, missing/illegal/swapped outer identity-destination tag, decoding an
+   `ExpandSize` payload as output axis zero or the reverse, illegal bound tag,
+   a negative/out-of-range bound-field axis, wrong
    indexed axis, Pad side, Shrink endpoint, or owner-specific field variant,
    missing or out-of-range input slot, later-node
    reference, non-scalar source, wrong dtype, malformed `input_axis` tensor or
@@ -1860,7 +1931,8 @@ axes and windows in one issue.
    output annotation whose evidence destination origin/field/axis/class-use
    differs from its record, a typed/synthesized evidence-site kind mismatch,
    fabricated or borrowed typed site on a synthesized unclassed/fresh axis,
-   redirected synthesized origin/path/rule, a proof/source mismatch, or an attempted
+   redirected synthesized origin/path/rule, an overlapping or partially
+   remapped typed import namespace, a proof/source mismatch, or an attempted
    `NotProved`-to-`ProvedEqual` upgrade,
    missing occurrence/source/use ID, placement, stamp, or binding;
    declaration/occurrence/stamp disagreement; correlated binding-plus-manifest
@@ -1902,8 +1974,10 @@ axes and windows in one issue.
    above `i64::MAX`; every mutation fails before IR
    consumption or physical allocation. Origin-order mutations vary
    insertion order, reorder the serialized table, permute imported operands,
-   and stale a generated-path component. Insertion order alone cannot change
-   bytes, but declared operand order and transform high-water history can.
+   drop the outer destination-kind component, stale a generated-path
+   component, and import two typed arenas whose scope/site IDs both begin at
+   zero. Insertion order alone cannot change bytes, but declared operand order,
+   its deterministic typed-ID remap, and transform high-water history can.
 
    Whole-program integrity is a separate oracle. It coherently removes or
    replaces an internal declaration and every dependent graph/carrier field;
@@ -1977,8 +2051,12 @@ never reused.
   evidence ID, exact bound-field or output-axis destination, optional
   class/use, and the frozen `typed_site` or `synthesized_origin` site tag for
   `Unclassed`/`NotProved`; `ProvedEqual` instead retains the checker's exact
-  canonical typed-proof record. Bound destinations use the seven frozen
-  `RuntimeBoundField` tags and exact nonnegative-`int32` axis payloads above.
+  canonical typed-proof record. The destination first encodes frozen outer tag
+  `0x00`/`bound` or `0x01`/`output_axis`, then the selected payload. Bound
+  destinations use the seven frozen `RuntimeBoundField` tags and exact
+  nonnegative-`int32` axis payloads above; output destinations use their exact
+  output-axis number. The same outer tag participates in canonical comparison
+  and every synthesized generated-path key.
   Each `WireRuntimeExtent.evidence` and output-axis
   evidence ID resolves to exactly one record whose destination repeats that
   graph location and class/use, and each record has exactly one destination;
@@ -2019,6 +2097,14 @@ never reused.
   manifest retains every declared Load independently of data uses and maps each
   input axis/scalar to its value occurrence and complete ordered class-local
   binding edges;
+- keep typed lexical-scope and site IDs artifact-local on standalone Wire. The
+  ephemeral `RuntimeTypedImportRemap` is not another serialized authority:
+  verified decode preserves the artifact's canonical local IDs, and only the
+  explicit consume-to-annotated import boundary remaps the complete referenced
+  typed universe into disjoint destination ranges. Re-encoding the combined
+  DAG persists those remapped destination IDs. Directly concatenating two Wire
+  tables, preserving overlapping local zeros, or applying only part of the map
+  is invalid;
 - interpret `WireRtDim::Node { input }` as an absolute index into the
   owning `WireDagNode.inputs`, then validate that referenced earlier
   node as rank-zero `int64`;
@@ -2065,8 +2151,11 @@ never reused.
   path identities, conflicting mutation-site tags under one transform ID, and
   duplicate complete owner identities are invalid; distinct binder slots may
   share one valid scope-instance lineage. Importing another annotated DAG
-  canonically remaps its complete history range before combination; decode never accepts
-  an overlapping raw import. A stamp/manifest pair cannot establish or resize
+  canonically remaps its complete typed scope/site universe and history range
+  before combination; owners, typed origins, typed negative/proof sites,
+  evidence destinations, annotations, and dependent paths must all use that
+  one map. Decode never accepts an overlapping or partial raw import. A
+  stamp/manifest pair cannot establish or resize
   a class;
 - reject v6, #1298-only v7, versionless, future, string-size, executable
   `sym`, and owner-illegal `to_end` spellings before IR
@@ -2163,9 +2252,11 @@ sources, the independent provisional authority, sealed annotated graph, and
 closed atomic graph/authority transaction API,
 provisional hygienic annotations, the provisional proof/source algebra and
 state-indexed graph bound references, non-forgeable evidence IDs with exact
-destinations, the seven-variant indexed `RuntimeBoundField` algebra and frozen
-tags, typed-versus-synthesized negative/unclassed evidence sites, atomic
-proof/ref/site/attachment remapping, the checked
+destinations, the outer bound-versus-output-axis discriminator, the
+seven-variant indexed `RuntimeBoundField` algebra and frozen tags,
+typed-versus-synthesized negative/unclassed evidence sites, atomic
+proof/ref/site/attachment remapping, checked typed scope/site import
+bijections, the checked
 provisional-to-final bijections and consume-to-annotated inverse baseline, the
 typed/synthesized origin algebra,
 the exact structural origin comparator, a serialized checked transform cursor
@@ -2193,8 +2284,8 @@ element-derived extents; and amend `spec/10`
 for the next monotonic WireDag version (v8 from the current v6 baseline).
 Write the derived positive, negative, proof-sensitive same/cross-tensor,
 shared-occurrence/many-to-many, equality-class/observable-event-schedule,
-same-class CSE exclusion, semantic-transit/cross-host, owner-matrix, and
-bound-destination/evidence-site, and transform test stubs before
+same-class CSE exclusion, semantic-transit/cross-host, owner-matrix,
+bound-destination/evidence-site, typed-arena import, and transform test stubs before
 implementation. Then deliver C2.1-C2.6 and C6
 across all in-memory, target, transform, and wire consumers, followed by C2.7
 deletion. Close
@@ -2212,8 +2303,9 @@ artifacts, keys, APIs/maps/intermediates, operation parameters, and conversions;
 the exact `RuntimeExtent` owner matrix; provisional hygienic keys and the
 independent provisional authority, opaque provisional proof/source algebra,
 state-indexed graph bound references, non-forgeable evidence IDs and exact
-destinations, the closed indexed bound-field tags, typed/synthesized evidence
-site algebra, atomic proof/ref/site/attachment remapping, checked
+destinations, the outer identity-destination kind tags, the closed indexed
+bound-field tags, typed/synthesized evidence site algebra, atomic
+proof/ref/site/attachment remapping, checked typed scope/site import remaps, checked
 provisional-to-final bijections, and consume-to-annotated inverse baseline;
 sealed graph, atomic mutation transactions,
 opaque annotated/finalized public states, finalized-only Eval/backend/cache
@@ -2240,8 +2332,10 @@ and callsite registry,
 `BroadcastScalarRef`, trap/effect occurrence rules, and transform/fusion
 behavior for every bound-dependency class;
 the same-class witness-source CSE exclusion;
-the exact bound-field owner/index/side/endpoint algebra and synthesized
-unclassed/fresh-witness evidence provenance;
+the exact bound-field owner/index/side/endpoint algebra, outer
+bound-versus-output-axis destination kind, synthesized
+unclassed/fresh-witness evidence provenance, and collision-free typed-arena
+import;
 WireDag v8; no provenance-rejection construct; one static folder; all-lane
 guard placement.
 
@@ -2256,9 +2350,10 @@ and entry-selection rows, same/cross-tensor proof-identity rows,
 earlier-owner/source/use/evidence redirection, correlated graph-ref/evidence
 attachment mutations, clone/vmap/import/CSE/DCE proof remap, and
 consume/refinalize inverse-map rows; shared-occurrence two-class and same-class
-CSE-exclusion rows; bound-field axis/side/endpoint/owner mutations and
+CSE-exclusion rows; outer destination-kind collision/reorder mutations,
+bound-field axis/side/endpoint/owner mutations,
 grad/vmap/specialization/clone/import typed-versus-synthesized evidence-site
-rows,
+rows, and two-artifact scope/site-zero import/consume/refinalize permutations,
 compute-once vmap/fusion trap/effect rows, retained
 high-water/DCE/hash rows, structural Wire negatives, coherent-replacement
 integrity mismatches, zero, and negative rows owned by this phase, plus the
