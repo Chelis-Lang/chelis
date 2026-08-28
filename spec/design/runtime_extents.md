@@ -101,7 +101,7 @@ through a typed implementation receipt, to exact execution.
    `DimExpr::from(x.output_type.dims[k])`, a name, and keeps `x` alive only
    through the side vector `DagNode.shape_deps`
    (`dim_expr_from_shape_arg_with_source`, `lower.rs:11385-11391`;
-   `add_shape_dep`, `lower.rs:9155-9157`). Arithmetic over a read fails
+   `add_shape_dep`, `lower.rs:9158`). Arithmetic over a read fails
    closed (`lower.rs:9109-9123`, "cannot materialize as an extent"), and a
    bare `int64` scalar with no tensor name fails after the node is built
    (`lower.rs:9169-9190`). The backend then recovers runtime extents by
@@ -147,13 +147,15 @@ Three structural facts explain why fixing instances has not closed the class:
   call site and "ICE" at another.
 - **The checker-to-backend channel is one `Dim::Name` in annotated type
   metadata.** The classifier's verdict is never serialized. The early
-  return in `check_expand_signature` is simultaneously the [#597] hole (a
-  static-sized expand result stays a type variable and gets no `type`
-  metadata, and lowering's `fallback_expand_type` then inserts an axis, so
-  both lanes silently produce rank 2 under a declared rank 1) and the
-  [#609] hole (the
-  same early return skips validating a declared rank, so a wrong-rank
-  ascription is accepted and eval silently returns a contradicting rank).
+  return in `check_expand_signature` is the [#609] hole (it skips
+  validating a declared rank, so a wrong-rank ascription is accepted and
+  eval silently returns a contradicting rank). The [#597] family is
+  lowering's, not the checker's: `fallback_expand_type`
+  (`lower.rs:9139-9147`, `5413-5428`) discards the checker's stamped type
+  for every `Concrete` or `Sym` size and always inserts an axis, so
+  positional same-rank replacement never executes on any lane today and
+  both lanes silently produce rank 2 under a declared rank 1 even when the
+  checker stamped rank 1.
 
 ## Part I: contracts
 
@@ -165,7 +167,7 @@ Later sections cite the clause labels.
 | clause | rule | where it is decided |
 |---|---|---|
 | C1.1 | Admissibility is typing, not provenance: any `int64` expression is an `expand` size; a `reshape` target is a `List[int64]` of static arity | `spec/04` §4.7.2, §4.7.3, §4.7.4, §4.7.6 |
-| C1.2 | Identity is proof-gated and equality is guarded; an unproved claim adds a guard, never a rejection; every symbolic `shrink` axis is fresh | `spec/04` §4.7, §4.7.2, §4.7.3, §4.7.6 |
+| C1.2 | Identity is proof-gated and equality is guarded; an unproved claim over a runtime extent adds a guard, never a rejection; every symbolic `shrink` axis is fresh | `spec/04` §4.7, §4.7.2, §4.7.3, §4.7.6 |
 | C1.3 | Guard placement is a partial order: once, after operands, before the first dependent allocation or access; interface guards at entry in signature order; local guards at the introducing operation's source position; an equality guard traps `Domain` under the introducing operation, a non-negativity guard under the owning movement operation | `spec/04` §4.7, the runtime extent guard paragraph |
 | C1.4 | Coupled positional defaults settle in the order their results are introduced into the checked program | `spec/04` §4.7.2 |
 | C1.5 | Zero is legal; a static negative is a type error; a runtime negative traps `Domain` | `spec/04` §4.7.2 |
@@ -223,7 +225,7 @@ fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
   a node-valued axis is an earlier rank-0 `int32` node and is admitted only
   after [#1298] lands the runtime `Shape.axis` operand. A `let` alias or a
   same-dtype `cast` of a direct `shape(x, axis)` read resolves as the direct
-  read, as `shape_app_operand_axis_resolved` (`lower.rs:11395`) already
+  read, as `shape_app_operand_axis_resolved` (`lower.rs:11414`) already
   does, so it carries the read tensor's identity; other arithmetic, a record
   projection of a scalar, a parameter, or a user-function result is ordinary
   scalar dataflow and reaches every movement node as `RtDim::Node`;
@@ -366,7 +368,7 @@ fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
   constructed results). Slice B deletes all of them in the same change that
   places the guards on every lane and removes lowering's
   `fallback_expand_type` override of the stamped result type
-  (`lower.rs:9135-9143`), so no intermediate commit may accept a value the
+  (`lower.rs:9139-9147`), so no intermediate commit may accept a value the
   IR cannot carry or execute a claimed extent without its guard, and a row
   `main` already executes without its guard ([#1374], [#1375], [#1376],
   [#1377]) keeps that baseline, recorded as `silent_unguarded` or
@@ -471,7 +473,7 @@ fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource>;
   formulas alone never proves identity. The checker already keeps the
   declared claim (`check --show-inferred` stamps `-> tensor[d0, f32]` beside
   `y: tensor[d1, f32]` for [#1374]); it is lowering's `fallback_expand_type`
-  (`lower.rs:9135-9143`) that overrides the stamped result type with the
+  (`lower.rs:9139-9147`) that overrides the stamped result type with the
   size's identity, and Slice B removes that override so the claim survives
   to derivation.
 - **C4.2 Exact movement mappings.** Same-rank `Expand` maps every unchanged
@@ -561,7 +563,8 @@ the properties below; the generator, not this document, enumerates rows.
 4. **Zero.** Literal-zero and runtime-zero rows cover positional replacement,
    positional insertion, and named-axis expansion and assert the declared
    shape, logical element count zero, no element access, and lane agreement
-   on logical metadata.
+   on logical metadata; the positional-replacement rows are Slice B's,
+   because lowering inserts an axis until Slice B removes its override.
 5. **Real [#569] transformation.** The runner proves a direct spelling checks,
    evaluates, and compiles; copies it to a task-owned path; runs `chelis lint
    --fix` and `chelis fmt --inplace`; proves formatting is idempotent and
@@ -671,10 +674,12 @@ decisions unchanged.
 
 **Oracle:** `uv run --managed-python --python 3.11 --no-project python
 scripts/runtime_extent_oracle.py --phase a`: lane parity for every row
-`main` executes on every lane today, HIP and Metal build-and-execute rows
-for `Lit` and `InputAxis` (with `Node` rows at
-`typed_unsupported([05-MOV-1])`), zero rows, rebuild-survival rows, and wire
-rows this slice owns; every other row stays at its recorded baseline.
+whose recorded `main` baseline is `executes_exactly`, HIP and Metal
+build-and-execute rows for `Lit` and `InputAxis` (with `Node` rows at
+`typed_unsupported([05-MOV-1])`), the insertion and named-axis zero rows,
+rebuild-survival rows, and wire rows this slice owns; every other row,
+including every positional same-rank replacement row (`silent_unguarded`,
+owner [#597]), stays at its recorded baseline.
 
 ### Slice B - one resolver: sources, classes, guards, and the walk's deletion
 
@@ -707,9 +712,11 @@ or `chelis-ir`.
 
 **Oracle:** `uv run --managed-python --python 3.11 --no-project python
 scripts/runtime_extent_oracle.py --phase b`: every parity row including the
-forms the walk rejected, named-dimension and guard-order rows on every lane,
-the [#569] transformation row, axis-source cardinality, and rebuild-survival
-rows asserting the derived classes after every pass.
+forms the walk rejected and the positional same-rank replacement rows,
+named-dimension and guard-order rows on every lane, the [#569]
+transformation row, the positional-replacement zero rows, axis-source
+cardinality, and rebuild-survival rows asserting the derived classes after
+every pass.
 
 ### Slice C - deferral totality and deterministic settlement
 
@@ -779,7 +786,7 @@ class completion oracle and ends with `RUNTIME EXTENT ORACLE: PASS`.
 | [#1367] | stale `int32` extent and Form-3 guidance | A |
 | [#1266] | record projection rejected by provenance walk | B |
 | [#569] | real lint/fmt transformation breaks a legal extent | B |
-| [#597] | static expand gets no type metadata and lowering inserts an axis | B |
+| [#597] | positional same-rank replacement never executes: lowering always inserts | B |
 | [#609] | wrong-rank ascription is accepted | A |
 | [#665] | movement-op runtime wildcard is lost across Expand | B |
 | [#592] | grad-backward Expand size cannot be traced to a Load | A (size carrier); B for any kept-axis residue |

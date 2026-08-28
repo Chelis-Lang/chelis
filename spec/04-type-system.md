@@ -1353,8 +1353,8 @@ Static knowledge improves diagnostics and symbolic dimension propagation; it
 does not define a smaller executable language. A violation proven from
 literals is a type error. A constraint that depends on runtime values is
 checked before allocation or element access and traps `Domain` or `Overflow`
-under the owning operation's atom. Every execution mode observes the same
-values and traps.
+under the owning operation. Every execution mode observes the same values and
+traps.
 
 A runtime extent guard is the check that a declared, named, or otherwise
 claimed extent agrees with the value actually observed, or that a runtime
@@ -1369,15 +1369,15 @@ extent an operation computes) is evaluated after its producers and takes the
 source position of the operation that introduces the guarded extent: an
 independent effect or trap that precedes that operation in source order is
 observed first, and one that follows it is observed only if the guard passes.
-Guards ready at the same source position are evaluated in declaration order.
-These constraints are the complete observable contract; a guard and an
-operation related by neither data dependence nor source order may be evaluated
-in either order. A failing equality guard traps `Domain` under the operation
-that introduces the guarded extent (for a guard whose operands are all
-interface values, the `load` primitive of the later witness in signature
-order, spec/05-risc-primitives.md §2.5) and names the disagreeing sources; a
-failing non-negativity guard traps `Domain` under the owning movement
-operation.
+A `cast` takes the placement of the value it casts. Guards ready at the same
+source position are evaluated in declaration order. These constraints are the
+complete observable contract; a guard and an operation related by neither data
+dependence nor source order may be evaluated in either order. A failing
+equality guard traps `Domain` under the operation that introduces the guarded
+extent (for a guard whose operands are all interface values, the `load`
+primitive of the later witness in signature order, spec/05-risc-primitives.md
+§2.5) and names the disagreeing sources; a failing non-negativity guard traps
+`Domain` under the owning movement operation.
 Every execution mode places guards by this rule.
 
 For the movement primitives, symbolic-dim pass-through is
