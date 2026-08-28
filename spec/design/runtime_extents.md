@@ -261,7 +261,8 @@ fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
 - **C2.3 Every result is constructed.** The checker always constructs an
   `expand` result tensor whose rank is the operand rank or the operand rank
   plus one, stamps complete type metadata, and validates a declared or
-  ascribed rank, and a literal claim against a literal size, against it. The early exit that causes
+  ascribed rank, and a literal claim against a literal size, against it. The
+  early exit that causes
   [#597] and [#609] is deleted.
 - **C2.4 Equality classes are derived, not stored.** Every stamped `Dim`
   claim, a binder name or a literal, that the checker attached to more than

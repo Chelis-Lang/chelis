@@ -884,10 +884,11 @@ values rather than baked at codegen time.
 
 A `shape()` read whose `axis` is data- or metadata-derived remains the same
 operation as a literal-axis read. Using the extent as a runtime movement-op
-bound or reshape target (a `shrink`/`stride`/`pad` bound or window count
-derived from a `shape()` value, and the integer arithmetic feeding it) uses
-§2.4.1's node-valued `RtDim` capability; it does not allocate a second shape
-operation or a compile-time-only alias.
+bound or as a reshape target computed by integer arithmetic over one (a
+`shrink`/`stride`/`pad` bound or window count derived from a `shape()` value,
+and the integer arithmetic feeding it) uses §2.4.1's node-valued `RtDim`
+capability; it does not allocate a second shape operation or a
+compile-time-only alias.
 
 ### 2.6 Effectful Primitive
 
