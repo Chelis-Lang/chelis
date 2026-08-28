@@ -32,6 +32,192 @@ pub enum ChildStampRole {
     ExplicitInferenceBypass,
 }
 
+/// The recursive grammar role expected while stamping a serialized type.
+///
+/// Unlike [`ChildStampRole::Type`], this table distinguishes actual types,
+/// tensor element types, tensor axes, dimensions, and rank spreads. It is the
+/// single structural authority used by the public type-fragment ingress.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TypeSyntaxRole {
+    Type,
+    TensorElement,
+    TensorAxis,
+    Dimension,
+    Rank,
+    Name,
+    Integer,
+}
+
+/// The intrinsic grammar role of a Deep node in a serialized type tree.
+///
+/// This match is deliberately total over the closed vocabulary. Adding a new
+/// Deep tag cannot accidentally make it type syntax: it must be classified
+/// here and in [`type_syntax_child_role`] in the same change.
+pub fn type_syntax_node_role(tag: DeepTag) -> Option<TypeSyntaxRole> {
+    use TypeSyntaxRole::{Dimension, Rank, Type};
+
+    match tag {
+        DeepTag::TPrim
+        | DeepTag::TFn
+        | DeepTag::TTensor
+        | DeepTag::TRef
+        | DeepTag::TAdt
+        | DeepTag::TVar
+        | DeepTag::TUnit
+        | DeepTag::TTuple => Some(Type),
+        DeepTag::DName | DeepTag::DVar | DeepTag::DLit => Some(Dimension),
+        DeepTag::DRank => Some(Rank),
+
+        DeepTag::Module
+        | DeepTag::Import
+        | DeepTag::ImportAll
+        | DeepTag::Export
+        | DeepTag::Def
+        | DeepTag::Defsig
+        | DeepTag::Deftype
+        | DeepTag::Typealias
+        | DeepTag::Variant
+        | DeepTag::Field
+        | DeepTag::Defdim
+        | DeepTag::Fn
+        | DeepTag::App
+        | DeepTag::Let
+        | DeepTag::Match
+        | DeepTag::Arm
+        | DeepTag::If
+        | DeepTag::Var
+        | DeepTag::Lit
+        | DeepTag::Record
+        | DeepTag::Access
+        | DeepTag::Pipe
+        | DeepTag::Block
+        | DeepTag::Tuple
+        | DeepTag::TupleGet
+        | DeepTag::RecordUpdate
+        | DeepTag::Par
+        | DeepTag::HandleEffect
+        | DeepTag::Borrow
+        | DeepTag::PatVar
+        | DeepTag::PatLit
+        | DeepTag::PatCtor
+        | DeepTag::PatTuple
+        | DeepTag::PatRecord
+        | DeepTag::PatWild
+        | DeepTag::PatAs
+        | DeepTag::Grad
+        | DeepTag::Vmap
+        | DeepTag::Jit
+        | DeepTag::Realize
+        | DeepTag::Cast
+        | DeepTag::Copy
+        | DeepTag::Quote
+        | DeepTag::Unquote
+        | DeepTag::Splice
+        | DeepTag::Params
+        | DeepTag::Bind
+        | DeepTag::Kv
+        | DeepTag::Effects
+        | DeepTag::Resource => None,
+    }
+}
+
+/// The grammar role of one child of a type/dimension/rank node.
+///
+/// Callers first prove that `tag` is in [`type_syntax_node_role`]. Returning
+/// `None` for every other vocabulary tag keeps the grammar fail-closed.
+pub fn type_syntax_child_role(tag: DeepTag, index: usize, arity: usize) -> Option<TypeSyntaxRole> {
+    use TypeSyntaxRole::{Integer, Name, TensorAxis, TensorElement, Type};
+
+    match tag {
+        DeepTag::TPrim | DeepTag::TVar => Some(Name),
+        DeepTag::TFn | DeepTag::TRef | DeepTag::TTuple => Some(Type),
+        DeepTag::TTensor => {
+            if index + 1 == arity {
+                Some(TensorElement)
+            } else {
+                Some(TensorAxis)
+            }
+        }
+        DeepTag::TAdt => {
+            if index == 0 {
+                Some(Name)
+            } else {
+                Some(Type)
+            }
+        }
+        // `t-unit` has no legal children. Returning a role lets Node's
+        // ordinary arity gate own any extra-child diagnostic.
+        DeepTag::TUnit => Some(Type),
+        DeepTag::DName | DeepTag::DVar | DeepTag::DRank => Some(Name),
+        DeepTag::DLit => Some(Integer),
+
+        DeepTag::Module
+        | DeepTag::Import
+        | DeepTag::ImportAll
+        | DeepTag::Export
+        | DeepTag::Def
+        | DeepTag::Defsig
+        | DeepTag::Deftype
+        | DeepTag::Typealias
+        | DeepTag::Variant
+        | DeepTag::Field
+        | DeepTag::Defdim
+        | DeepTag::Fn
+        | DeepTag::App
+        | DeepTag::Let
+        | DeepTag::Match
+        | DeepTag::Arm
+        | DeepTag::If
+        | DeepTag::Var
+        | DeepTag::Lit
+        | DeepTag::Record
+        | DeepTag::Access
+        | DeepTag::Pipe
+        | DeepTag::Block
+        | DeepTag::Tuple
+        | DeepTag::TupleGet
+        | DeepTag::RecordUpdate
+        | DeepTag::Par
+        | DeepTag::HandleEffect
+        | DeepTag::Borrow
+        | DeepTag::PatVar
+        | DeepTag::PatLit
+        | DeepTag::PatCtor
+        | DeepTag::PatTuple
+        | DeepTag::PatRecord
+        | DeepTag::PatWild
+        | DeepTag::PatAs
+        | DeepTag::Grad
+        | DeepTag::Vmap
+        | DeepTag::Jit
+        | DeepTag::Realize
+        | DeepTag::Cast
+        | DeepTag::Copy
+        | DeepTag::Quote
+        | DeepTag::Unquote
+        | DeepTag::Splice
+        | DeepTag::Params
+        | DeepTag::Bind
+        | DeepTag::Kv
+        | DeepTag::Effects
+        | DeepTag::Resource => None,
+    }
+}
+
+/// Whether `tag` is legal at the requested recursive type-syntax role.
+pub fn type_syntax_role_accepts_tag(role: TypeSyntaxRole, tag: DeepTag) -> bool {
+    use TypeSyntaxRole::{Dimension, Rank, TensorAxis, TensorElement, Type};
+
+    match role {
+        Type => type_syntax_node_role(tag) == Some(Type),
+        TensorElement => matches!(tag, DeepTag::TPrim | DeepTag::TVar),
+        TensorAxis => matches!(type_syntax_node_role(tag), Some(Dimension | Rank)),
+        Dimension => type_syntax_node_role(tag) == Some(Dimension),
+        Rank => type_syntax_node_role(tag) == Some(Rank),
+        TypeSyntaxRole::Name | TypeSyntaxRole::Integer => false,
+    }
+}
+
 /// Legal child count for a vocabulary tag.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AritySpec {
@@ -582,6 +768,71 @@ mod tests {
                 AritySpec::AtLeast(n) => assert!(n <= 100, "{:?}", tag),
                 AritySpec::Range(lo, hi) => assert!(lo <= hi, "{:?}", tag),
             }
+        }
+    }
+
+    #[test]
+    fn serialized_type_grammar_classifies_the_exact_type_dimension_and_rank_tags() {
+        let classified = DeepTag::ALL
+            .into_iter()
+            .filter_map(|tag| type_syntax_node_role(tag).map(|role| (tag, role)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            classified,
+            vec![
+                (DeepTag::TPrim, TypeSyntaxRole::Type),
+                (DeepTag::TFn, TypeSyntaxRole::Type),
+                (DeepTag::TTensor, TypeSyntaxRole::Type),
+                (DeepTag::TRef, TypeSyntaxRole::Type),
+                (DeepTag::TAdt, TypeSyntaxRole::Type),
+                (DeepTag::TVar, TypeSyntaxRole::Type),
+                (DeepTag::TUnit, TypeSyntaxRole::Type),
+                (DeepTag::TTuple, TypeSyntaxRole::Type),
+                (DeepTag::DName, TypeSyntaxRole::Dimension),
+                (DeepTag::DVar, TypeSyntaxRole::Dimension),
+                (DeepTag::DLit, TypeSyntaxRole::Dimension),
+                (DeepTag::DRank, TypeSyntaxRole::Rank),
+            ]
+        );
+
+        for tag in DeepTag::ALL {
+            assert_eq!(
+                type_syntax_node_role(tag).is_some(),
+                type_syntax_child_role(tag, 0, 1).is_some(),
+                "type grammar node and child tables disagree for {tag:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn serialized_type_grammar_keeps_tensor_axes_and_elements_in_their_namespaces() {
+        assert_eq!(
+            type_syntax_child_role(DeepTag::TTensor, 0, 3),
+            Some(TypeSyntaxRole::TensorAxis)
+        );
+        assert_eq!(
+            type_syntax_child_role(DeepTag::TTensor, 2, 3),
+            Some(TypeSyntaxRole::TensorElement)
+        );
+        for tag in [DeepTag::DName, DeepTag::DVar, DeepTag::DLit, DeepTag::DRank] {
+            assert!(type_syntax_role_accepts_tag(
+                TypeSyntaxRole::TensorAxis,
+                tag
+            ));
+            assert!(!type_syntax_role_accepts_tag(
+                TypeSyntaxRole::TensorElement,
+                tag
+            ));
+        }
+        for tag in [DeepTag::TPrim, DeepTag::TVar] {
+            assert!(type_syntax_role_accepts_tag(
+                TypeSyntaxRole::TensorElement,
+                tag
+            ));
+            assert!(!type_syntax_role_accepts_tag(
+                TypeSyntaxRole::TensorAxis,
+                tag
+            ));
         }
     }
 

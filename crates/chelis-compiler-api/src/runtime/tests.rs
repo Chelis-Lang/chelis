@@ -443,6 +443,281 @@ x = test_assert_close_tensor(actual, expected, nan_tol, "nan-tol")
     );
 }
 
+/// Evaluate one Deep expression against hand-supplied runtime bindings.
+///
+/// The `test_assert_close_tensor` eval arm guards operands the checker has
+/// already constrained: `reject_inadmissible_operand_dtypes` requires the
+/// tolerance to carry the tensor's own float dtype, so no CHECKED program
+/// reaches the arm's own dtype, shape, and tolerance rejections. They exist
+/// for dynamically-constructed calls, and their whole job is to name the value
+/// they were handed, so the runtime library's `eval_expr` entry rather than
+/// the checked pipeline is where their text is observable.
+fn eval_deep_with_bindings(
+    surf_expr: &str,
+    args: &[(&str, RuntimeValue)],
+) -> Result<String, String> {
+    let source = format!("probe = {surf_expr}\n");
+    let decls = chelis_surf::parser::parse_str(&source).expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let Expr::List(def, _) = &exprs[0] else {
+        panic!("desugaring a top-level binding yields one def form");
+    };
+    // `(def {} <name> <body>)`: the body is the fourth element.
+    let body = def.elements[3].clone();
+
+    let empty_tensors: HashMap<String, RuntimeTensorValue> = HashMap::new();
+    let mut ctx = EvalContext {
+        bindings: HashMap::new(),
+        binding_types: HashMap::new(),
+        named_axis_route_cache: HashMap::new(),
+        named_axis_route_visiting: HashSet::new(),
+        top_level_defs: HashMap::new(),
+        type_env: HashMap::new(),
+        adt_fields: HashMap::new(),
+        adt_registry: chelis_types::adt::AdtRegistry::default(),
+        tensor_bindings: &empty_tensors,
+        transcript: Vec::new(),
+        resolving_top_levels: Vec::new(),
+        random_seed: None,
+        random_counter: 0,
+        cancel: None,
+    };
+    for (name, value) in args {
+        ctx.bindings.insert((*name).to_string(), value.clone());
+        ctx.binding_types.insert((*name).to_string(), None);
+    }
+    ctx.eval_expr(&body).map(|value| render_value(&value))
+}
+
+#[test]
+fn test_assert_close_tensor_f32_uses_f32_subtraction() {
+    // These are exact f32 values. Their exact widened difference is
+    // 0.9999999701976741, but f32 subtraction rounds it to the tolerance
+    // 0.9999999403953552. [05-OP-35] therefore accepts the f32 pair; an f64
+    // funnel rejects it.
+    let actual = tensor_value(Prim::F32, vec![1], vec![2.980232594040899e-8]);
+    let expected = tensor_value(Prim::F32, vec![1], vec![1.0]);
+    let tolerance = scalar_of(Prim::F32, 0.9999999403953552);
+    let rendered = eval_deep_with_bindings(
+        r#"test_assert_close_tensor(actual, expected, tolerance, "f32-width")"#,
+        &[
+            ("actual", actual),
+            ("expected", expected),
+            ("tolerance", tolerance),
+        ],
+    )
+    .expect("the f32-width comparison must accept the rounded difference");
+    assert_eq!(rendered, "()");
+}
+
+#[test]
+fn test_assert_close_tensor_f64_keeps_the_f64_boundary_distinct() {
+    let actual = tensor_value(Prim::F64, vec![1], vec![2.980232594040899e-8]);
+    let expected = tensor_value(Prim::F64, vec![1], vec![1.0]);
+    let tolerance = scalar_of(Prim::F64, 0.9999999403953552);
+    let error = eval_deep_with_bindings(
+        r#"test_assert_close_tensor(actual, expected, tolerance, "f64-width")"#,
+        &[
+            ("actual", actual),
+            ("expected", expected),
+            ("tolerance", tolerance),
+        ],
+    )
+    .expect_err("the exact f64 difference is greater than the tolerance");
+    assert!(error.contains("at index 0") && error.contains("f64-width"));
+}
+
+#[test]
+fn test_assert_close_tensor_mismatch_uses_own_width_canonical_digits() {
+    for dtype in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+        let actual = tensor_value(dtype, vec![1], vec![0.1]);
+        let expected = tensor_value(dtype, vec![1], vec![0.2]);
+        let tolerance = scalar_of(dtype, 0.0);
+        let error = eval_deep_with_bindings(
+            r#"test_assert_close_tensor(actual, expected, tolerance, "digits")"#,
+            &[
+                ("actual", actual),
+                ("expected", expected),
+                ("tolerance", tolerance),
+            ],
+        )
+        .expect_err("the values differ with zero tolerance");
+        assert_eq!(
+            error,
+            "assert_close_tensor (digits): at index 0 expected 0.2, got 0.1, tol 0.0",
+            "{} diagnostic must render every value at its stored width",
+            dtype.name()
+        );
+    }
+}
+
+#[test]
+fn test_assert_close_tensor_special_mismatch_uses_canonical_spellings() {
+    let actual = tensor_value(Prim::F32, vec![1], vec![f64::NAN]);
+    let expected = tensor_value(Prim::F32, vec![1], vec![f64::INFINITY]);
+    let tolerance = scalar_of(Prim::F32, 0.0);
+    let error = eval_deep_with_bindings(
+        r#"test_assert_close_tensor(actual, expected, tolerance, "special-digits")"#,
+        &[
+            ("actual", actual),
+            ("expected", expected),
+            ("tolerance", tolerance),
+        ],
+    )
+    .expect_err("NaN is never close");
+    assert_eq!(
+        error,
+        "assert_close_tensor (special-digits): at index 0 expected inf, got NaN, tol 0.0 (NaN is never close)"
+    );
+}
+
+#[test]
+fn test_assert_close_tensor_invalid_tolerance_uses_own_width_canonical_digits() {
+    let actual = tensor_value(Prim::F32, vec![1], vec![1.0]);
+    let expected = tensor_value(Prim::F32, vec![1], vec![1.0]);
+    let tolerance = scalar_of(Prim::F32, -0.1);
+    let error = eval_deep_with_bindings(
+        r#"test_assert_close_tensor(actual, expected, tolerance, "tol-digits")"#,
+        &[
+            ("actual", actual),
+            ("expected", expected),
+            ("tolerance", tolerance),
+        ],
+    )
+    .expect_err("a negative tolerance is invalid");
+    assert_eq!(
+        error,
+        "assert_close_tensor (tol-digits): invalid tolerance -0.1 (must be finite and non-negative)"
+    );
+}
+
+#[test]
+fn test_assert_close_tensor_accepts_each_active_float_dtype() {
+    for dtype in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+        let actual = tensor_value(dtype, vec![2], vec![-0.0, 1.0]);
+        let expected = tensor_value(dtype, vec![2], vec![0.0, 1.001]);
+        let tolerance = scalar_of(dtype, 0.01);
+        eval_deep_with_bindings(
+            r#"test_assert_close_tensor(actual, expected, tolerance, "matrix")"#,
+            &[
+                ("actual", actual),
+                ("expected", expected),
+                ("tolerance", tolerance),
+            ],
+        )
+        .unwrap_or_else(|error| panic!("{} own-width comparison failed: {error}", dtype.name()));
+    }
+}
+
+#[test]
+fn test_assert_close_tensor_rejects_infinite_tolerance() {
+    let actual = tensor_value(Prim::F32, vec![1], vec![1.0]);
+    let expected = tensor_value(Prim::F32, vec![1], vec![1.0]);
+    let tolerance = scalar_of(Prim::F32, f64::INFINITY);
+    let error = eval_deep_with_bindings(
+        r#"test_assert_close_tensor(actual, expected, tolerance, "infinite-tol")"#,
+        &[
+            ("actual", actual),
+            ("expected", expected),
+            ("tolerance", tolerance),
+        ],
+    )
+    .expect_err("the tolerance must be finite");
+    assert!(error.contains("invalid tolerance") && error.contains("infinite-tol"));
+}
+
+#[test]
+fn test_assert_close_tensor_runtime_shape_mismatch_uses_decimal_shape_rendering() {
+    let actual = tensor_value(Prim::F32, vec![2], vec![1.0, 2.0]);
+    let expected = tensor_value(Prim::F32, vec![1], vec![1.0]);
+    let tolerance = scalar_of(Prim::F32, 0.0);
+    let error = eval_deep_with_bindings(
+        r#"test_assert_close_tensor(actual, expected, tolerance, "shape")"#,
+        &[
+            ("actual", actual),
+            ("expected", expected),
+            ("tolerance", tolerance),
+        ],
+    )
+    .expect_err("different tensor shapes must fail before comparison");
+    assert!(error.contains("shape mismatch, expected [1], got [2]"));
+}
+
+#[test]
+fn test_assert_close_tensor_runtime_non_float_tolerance_uses_canonical_renderer() {
+    let actual = tensor_value(Prim::F32, vec![1], vec![1.0]);
+    let expected = tensor_value(Prim::F32, vec![1], vec![1.0]);
+    let tolerance = scalar_of(Prim::Int32, 0.0);
+    let error = eval_deep_with_bindings(
+        r#"test_assert_close_tensor(actual, expected, tolerance, "dtype")"#,
+        &[
+            ("actual", actual),
+            ("expected", expected),
+            ("tolerance", tolerance),
+        ],
+    )
+    .expect_err("a non-float tolerance must fail defensively at runtime");
+    assert!(error.contains("expected float tolerance, got int32 0"));
+}
+
+#[test]
+fn test_assert_close_tensor_infinity_and_signed_zero_contract() {
+    for dtype in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+        let actual = tensor_value(dtype, vec![3], vec![f64::INFINITY, f64::NEG_INFINITY, -0.0]);
+        let expected = tensor_value(dtype, vec![3], vec![f64::INFINITY, f64::NEG_INFINITY, 0.0]);
+        let tolerance = scalar_of(dtype, 0.0);
+        eval_deep_with_bindings(
+            r#"test_assert_close_tensor(actual, expected, tolerance, "special")"#,
+            &[
+                ("actual", actual),
+                ("expected", expected),
+                ("tolerance", tolerance),
+            ],
+        )
+        .unwrap_or_else(|error| panic!("{} equal infinities/zeros failed: {error}", dtype.name()));
+
+        let actual = tensor_value(dtype, vec![2], vec![f64::INFINITY, 1.0]);
+        let expected = tensor_value(dtype, vec![2], vec![f64::NEG_INFINITY, f64::INFINITY]);
+        let finite_tolerance = match dtype {
+            Prim::F16 => 65_504.0,
+            Prim::Bf16 | Prim::F32 => 3.0e38,
+            Prim::F64 => 1.0e300,
+            _ => unreachable!("test loops active float dtypes"),
+        };
+        let tolerance = scalar_of(dtype, finite_tolerance);
+        let error = eval_deep_with_bindings(
+            r#"test_assert_close_tensor(actual, expected, tolerance, "nonfinite")"#,
+            &[
+                ("actual", actual),
+                ("expected", expected),
+                ("tolerance", tolerance),
+            ],
+        )
+        .expect_err("opposite or finite/infinite pairs are never close");
+        assert!(error.contains("at index 0") && error.contains("nonfinite"));
+    }
+}
+
+#[test]
+fn test_assert_close_tensor_arm_has_no_lossy_f64_tensor_funnel() {
+    let source = include_str!("eval.rs");
+    let arm = source
+        .split_once("\"test_assert_close_tensor\" =>")
+        .expect("assert-close dispatch arm")
+        .1
+        .split_once("\n            \"debug\" =>")
+        .expect("next dispatch arm")
+        .0;
+    assert!(arm.contains("StorageView::F32"));
+    assert!(arm.contains("StorageView::F16"));
+    assert!(arm.contains("StorageView::Bf16"));
+    assert!(arm.contains("StorageView::F64"));
+    assert!(
+        !arm.contains("to_f64_lossy_vec"),
+        "[05-OP-35] forbids a whole-tensor f64 comparison funnel"
+    );
+}
+
 // ----- N2 fix: matmul / permute / sum host evaluator coverage -----
 //
 // Pins the closure of the upstream-reported gap: native `chelis test`

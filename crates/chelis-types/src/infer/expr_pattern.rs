@@ -253,7 +253,7 @@ pub(super) fn pattern_bindings(
                         .or_else(|| env.lookup_terminal_unique(ctor_name))
                     {
                         let scheme = scheme.clone();
-                        let ctor_ty = env.instantiate(&scheme, vg);
+                        let ctor_ty = env.instantiate(&scheme, vg, subst);
                         // Unify the result of the constructor with scrutinee type
                         match &ctor_ty {
                             Type::Fn(arg_types, ret) => {
@@ -380,7 +380,7 @@ pub(super) fn pattern_bindings(
                         .or_else(|| env.lookup_terminal_unique(ctor_name))
                     {
                         let scheme = scheme.clone();
-                        let ctor_ty = env.instantiate(&scheme, vg);
+                        let ctor_ty = env.instantiate(&scheme, vg, subst);
                         match ctor_ty {
                             Type::Fn(arg_types, ret) => {
                                 let _ = unify(&ret, scrutinee_ty, subst);

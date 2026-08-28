@@ -967,13 +967,13 @@ pub(super) fn infer_var(
             // instantiation minted for an in-group reference so the group
             // can be validated for uniform recursive instantiation.
             let ty = if super::recursion::should_record_occurrence(name, &scheme) {
-                let (ty, mapping) = env.instantiate_with_tvar_mapping(&scheme, vg);
+                let (ty, mapping) = env.instantiate_with_tvar_mapping(&scheme, vg, subst);
                 let span_id = list_span_id(list).map(str::to_string);
                 let span_offset = span_id.as_deref().and_then(parse_span_offset);
                 super::recursion::record_occurrence(name, &mapping, span_id, span_offset);
                 ty
             } else {
-                env.instantiate(&scheme, vg)
+                env.instantiate(&scheme, vg, subst)
             };
             let resolved = subst.apply(&ty);
             // RFC D-CHECK: a bare reference to an out-of-module

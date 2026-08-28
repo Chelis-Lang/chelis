@@ -191,7 +191,8 @@ class LocalCommandListTests(unittest.TestCase):
         # drives the chelis#731 `ErrorWitness` contracts, the compiler
         # pipeline artifact contracts, the raw-checkpoint fixture, the
         # two cheap pipeline-core boundary guards (dependency + no_std doc),
-        # and the chelis#908 unrepresentable-domain oracle.
+        # the canonical chelis-std generated-artifact currency check, and the
+        # chelis#908 unrepresentable-domain oracle.
         # Assert the exact list so no pre-push stage disappears silently.
         rendered = [gate.render(c) for c in gate.local_command_list([])]
         self.assertEqual(
@@ -201,6 +202,8 @@ class LocalCommandListTests(unittest.TestCase):
                 "cargo fmt --all -- --check",
                 "cargo run -p chelis-cli --bin chelis --quiet -- "
                 "lint --check .",
+                "<managed-python> scripts/regenerate_chelis_std_bundle.py "
+                "--debug --check",
                 "cargo test -p chelis-types --doc",
                 "cargo test -p chelis-compiler-api --doc",
                 "cargo test -p chelis-pipeline-core --doc",

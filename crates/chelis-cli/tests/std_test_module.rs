@@ -413,7 +413,7 @@ ran = test_case()
     assert_eval_fails_with(
         &reef_home,
         &app_pkg,
-        &["assert_close_tensor (close-tensor-fail): at index 1 expected 9, got 2, tol 0.001"],
+        &["assert_close_tensor (close-tensor-fail): at index 1 expected 9.0, got 2.0, tol 0.001"],
     );
 }
 

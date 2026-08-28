@@ -151,6 +151,12 @@ CHELIS_LINT_CHECK: list[str] = [
     "--check",
     ".",
 ]
+CHELIS_STD_BUNDLE_CHECK: list[str] = [
+    MANAGED_PYTHON,
+    "scripts/regenerate_chelis_std_bundle.py",
+    "--debug",
+    "--check",
+]
 # The default profile is the complete developer workspace suite. The `ci`
 # profile writes JUnit XML and delegates two census binaries to the parallel
 # dtype oracle.
@@ -275,6 +281,7 @@ STAGES: dict[str, list[list[str]]] = {
         CLIPPY_WORKSPACE,
         FMT_CHECK,
         CHELIS_LINT_CHECK,
+        CHELIS_STD_BUNDLE_CHECK,
         DOCTEST_TYPES,
         DOCTEST_COMPILER_API,
         DOCTEST_PIPELINE_CORE,
@@ -302,6 +309,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     CLIPPY_WORKSPACE,
     FMT_CHECK,
     CHELIS_LINT_CHECK,
+    CHELIS_STD_BUNDLE_CHECK,
     DOCTEST_TYPES,
     DOCTEST_COMPILER_API,
     DOCTEST_PIPELINE_CORE,

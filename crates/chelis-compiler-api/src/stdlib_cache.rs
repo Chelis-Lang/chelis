@@ -72,13 +72,15 @@ use crate::schema::{Diagnostic, GeneralKind};
 /// Mixed into the content-addressed key. V6 accounts for the serialized
 /// type-checker generalization-level state added to `TypeEnv`; a V5 payload
 /// is a clean miss rather than a positional bincode decode.
+/// V7 adds quantified type-variable restrictions and their live substitution
+/// ledger.
 ///
 /// V5 unified two independent V4
 /// bumps: the pipeline-core `CheckedLibrary`/proof-identity products
 /// (branch) and chelis#942's serialized positional-expand obligations
 /// inside `TypeEnv` (main). Bincode is positional, so a V4 entry from
 /// either side is a clean miss.
-const STDLIB_CACHE_FORMAT_VERSION: u32 = 6;
+const STDLIB_CACHE_FORMAT_VERSION: u32 = 7;
 
 /// The typechecked + lowered chelis-std library sub-context.
 ///
@@ -488,15 +490,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cache_format_version_tracks_typecheck_generalization_levels() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 6);
+    fn cache_format_version_tracks_type_variable_restrictions() {
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 7);
     }
 
     #[test]
     fn preceding_payload_version_is_a_clean_cache_miss() {
         let decls = sample_decls("preceding_version");
         let current_key = stdlib_cache_key(&decls);
-        let preceding_key = stdlib_cache_key_at_version(&decls, 5);
+        let preceding_key = stdlib_cache_key_at_version(&decls, 6);
         assert_ne!(current_key, preceding_key);
 
         let dir = tempfile::tempdir().expect("tempdir");

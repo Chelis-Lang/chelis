@@ -82,6 +82,7 @@ fn take_recursive_abort_observation() -> Option<RecursiveAbortObservation> {
 #[cfg(test)]
 fn schemes_match(left: &Scheme, right: &Scheme) -> bool {
     left.tvars == right.tvars
+        && left.tvar_restrictions == right.tvar_restrictions
         && left.dvars == right.dvars
         && left.rvars == right.rvars
         && left.body == right.body
@@ -1882,6 +1883,7 @@ mod recursive_level_scope_tests {
         assert!(!super::super::recursion::tvar_pinned(pinned));
         let restored = env.lookup("left").expect("shadowed prior binding restored");
         assert_eq!(restored.tvars, prior.tvars);
+        assert_eq!(restored.tvar_restrictions, prior.tvar_restrictions);
         assert_eq!(restored.dvars, prior.dvars);
         assert_eq!(restored.rvars, prior.rvars);
         assert_eq!(restored.body, prior.body);

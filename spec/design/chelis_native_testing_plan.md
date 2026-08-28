@@ -20,7 +20,7 @@ def assert_eq[q](actual: q, expected: q, label: string) -> unit ! { Test }
 
 -- Approximate equality (for floating point)
 def assert_close(actual: f32, expected: f32, tol: f32, label: String) -> unit ! { Test }
-def assert_close_tensor[n, p](actual: &tensor[n, p], expected: &tensor[n, p], tol: f32, label: string) -> unit ! { Test }
+def assert_close_tensor[p_float](actual: &tensor[..r, p_float], expected: &tensor[..r, p_float], tol: p_float, label: string) -> unit ! { Test }
 def assert_eq_tensor[p](actual: &tensor[..r, p], expected: &tensor[..r, p], label: string) -> unit ! { Test }
 
 -- Boolean

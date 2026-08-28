@@ -1,5 +1,7 @@
 use chelis_reef::{install_validated_artifact_pair, verify_artifact_pair};
-use chelis_shell::{PackageId, ShellModule, ShellPackage, encode_shell};
+use chelis_shell::{
+    PackageId, SHELL_FORMAT_VERSION, SHELL_MAGIC, ShellModule, ShellPackage, encode_shell,
+};
 use sha2::{Digest, Sha256};
 use std::fs;
 use tempfile::tempdir;
@@ -10,6 +12,7 @@ fn sha256(bytes: &[u8]) -> String {
 
 fn fixture_shell(archive_sha256: String) -> ShellPackage {
     ShellPackage {
+        format_version: SHELL_FORMAT_VERSION,
         package: PackageId {
             name: "demo".to_string(),
             version: "1.2.3".to_string(),
@@ -30,6 +33,23 @@ fn write_pair(
     let shell_path = dir.path().join("demo-1.2.3.chb");
     fs::write(&archive_path, archive).expect("write archive");
     fs::write(&shell_path, encode_shell(shell).expect("encode shell")).expect("write shell");
+    (dir, archive_path, shell_path)
+}
+
+fn write_unchecked_pair(
+    shell: &ShellPackage,
+    archive: &[u8],
+) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let dir = tempdir().expect("tempdir");
+    let archive_path = dir.path().join("demo-1.2.3.tar.zst");
+    let shell_path = dir.path().join("demo-1.2.3.chb");
+    fs::write(&archive_path, archive).expect("write archive");
+    let payload = bincode::serialize(shell).expect("encode unchecked payload");
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(SHELL_MAGIC);
+    bytes.extend_from_slice(&SHELL_FORMAT_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&payload);
+    fs::write(&shell_path, bytes).expect("write unchecked shell");
     (dir, archive_path, shell_path)
 }
 
@@ -69,7 +89,7 @@ fn artifact_pair_rejects_mismatched_archive_sha() {
 fn artifact_pair_rejects_trailing_and_truncated_chb() {
     let archive = b"opaque archive bytes";
     let shell = fixture_shell(sha256(archive));
-    let (_dir, archive_path, shell_path) = write_pair(&shell, archive);
+    let (_dir, archive_path, shell_path) = write_unchecked_pair(&shell, archive);
     let canonical = fs::read(&shell_path).expect("read shell");
 
     let mut trailing = canonical.clone();
@@ -116,7 +136,7 @@ fn artifact_pair_rejects_noncanonical_metadata_order() {
             exports: Vec::new(),
         },
     ];
-    let (_dir, archive_path, shell_path) = write_pair(&shell, archive);
+    let (_dir, archive_path, shell_path) = write_unchecked_pair(&shell, archive);
 
     let error = verify_artifact_pair(&archive_path, &shell_path).expect_err("module order");
 

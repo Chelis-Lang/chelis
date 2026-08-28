@@ -775,6 +775,9 @@ fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
 /// transition watermarks, lowering overrides, and persisted-context resume
 /// floors. Bincode is positional, so every V9 payload has the old checker
 /// state shape and must be rejected before decode.
+/// V11 adds quantified type-variable restrictions and their live
+/// substitution ledger, so constrained function values retain their domain
+/// through a compiled-context round trip.
 ///
 /// V9 unified two independent V8 formats. The pipeline-core
 /// extraction sealed the lowered-library proof identity into the cached
@@ -788,13 +791,13 @@ fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
 /// bincode is positional and a V8 file of either lineage would decode to a
 /// wrong shape; the magic check rejects it before any decode. A V6, V7, or
 /// either V8 file is stale.
-const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V10\n";
+const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V11\n";
 
 /// On-disk format version for the cache envelope. Bumping this tells
 /// `load_if_fresh` to reject older cache files with
 /// [`CacheError::UnsupportedVersion`] rather than risk a "successful but
 /// wrong" decode.
-const CACHE_FORMAT_VERSION: u32 = 10;
+const CACHE_FORMAT_VERSION: u32 = 11;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -1309,9 +1312,9 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn cache_format_version_tracks_typecheck_generalization_levels() {
-        assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V10\n");
-        assert_eq!(CACHE_FORMAT_VERSION, 10);
+    fn cache_format_version_tracks_type_variable_restrictions() {
+        assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V11\n");
+        assert_eq!(CACHE_FORMAT_VERSION, 11);
     }
 
     /// chelis#1156: the cache identity must distinguish two BUILDS, not

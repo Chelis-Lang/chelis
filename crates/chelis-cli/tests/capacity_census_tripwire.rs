@@ -1814,8 +1814,8 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "test::assert_close_tensor: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p))) (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p))) (t-prim {} f32) (t-prim {} string) (t-unit {}))",
-        &["float-carrier"],
+        "test::assert_close_tensor: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-prim {} string) (t-unit {}))",
+        &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),

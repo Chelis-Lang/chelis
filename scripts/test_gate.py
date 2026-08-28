@@ -626,6 +626,20 @@ class ListOutputTests(unittest.TestCase):
         ):
             self.assertIn(command, rendered)
 
+    def test_chelis_std_generated_artifacts_are_checked_continuously_and_locally(self):
+        command = (
+            "<managed-python> scripts/regenerate_chelis_std_bundle.py --debug --check"
+        )
+        self.assertIn(
+            command,
+            [gate.render(entry) for entry in gate.STAGES["lint-and-unit"]],
+        )
+        self.assertIn(
+            command,
+            [gate.render(entry) for entry in gate.LOCAL_STATIC_COMMANDS],
+        )
+        self.assertIn(command, [gate.render(entry) for entry in gate.full_command_list()])
+
     def test_unrepresentable_domain_oracle_runs_in_the_per_pr_gate(self):
         # chelis#908's "Constraint on every fix in this class": the oracle
         # must run in a continuous job. It was referenced by no workflow and

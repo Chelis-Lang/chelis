@@ -663,7 +663,9 @@ impl<'a> AliasExpansionSession<'a> {
                 let mut renaming = Subst::new();
                 for var in crate::env::free_tvars(&substituted) {
                     if !protected_tvars.contains(&var) {
-                        renaming.insert_type(var, self.vg.fresh_type());
+                        renaming
+                            .insert_type(var, self.vg.fresh_type())
+                            .expect("fresh alias-body type renaming is valid");
                     }
                 }
                 for var in crate::env::free_dvars(&substituted) {
@@ -989,6 +991,17 @@ pub(super) fn build_opacity_meta(
 /// on its own a duplicate definition. `items` is already flattened past
 /// `module` wrappers, and the prelude lives in the builtin env rather than as
 /// `def` nodes here, so only genuine in-program user redefinitions match.
+/// [`report`], lifted into the `Option<Type>` early-return channel that the
+/// post-unification application checks use.
+///
+/// Those checks answer "did this callee reject its arguments?", so they return
+/// `Option<Type>`: `Some(ty)` means rejected, with `ty` recorded as the call's
+/// type, and `None` means the check had nothing to say and the caller
+/// continues to the next one.
+pub(super) fn reject(errors: &mut DiagnosticSink<'_>, error: CheckError) -> Option<Type> {
+    Some(report(errors, error))
+}
+
 pub(super) fn report_duplicate_defs(items: &[&deep::Expr], errors: &mut DiagnosticSink<'_>) {
     let mut seen: HashSet<&str> = HashSet::new();
     for expr in items {
@@ -1556,6 +1569,7 @@ fn install_exact_op35_dependency_contracts(
             "uniform_like".to_string(),
             Scheme {
                 tvars: vec![template, low, high],
+                tvar_restrictions: vec![],
                 dvars: vec![],
                 rvars: vec![],
                 body: Type::Fn(
@@ -1584,6 +1598,7 @@ fn install_exact_op35_dependency_contracts(
             helper.to_string(),
             Scheme {
                 tvars: vec![tensor],
+                tvar_restrictions: vec![],
                 dvars: vec![],
                 rvars: vec![],
                 body: Type::Fn(
@@ -1825,7 +1840,7 @@ pub(super) fn infer_top_level(
             env.lookup(&name).map(|s| {
                 let s = s.clone();
                 if recursion::group_member(&name) {
-                    let (ty, mapping) = env.instantiate_with_tvar_mapping(&s, vg);
+                    let (ty, mapping) = env.instantiate_with_tvar_mapping(&s, vg, subst);
                     recursion_caller_guard = recursion::begin_caller(
                         &name,
                         declared_signatures.get(&name).map(|m| &m.binders),
@@ -1833,7 +1848,7 @@ pub(super) fn infer_top_level(
                     );
                     ty
                 } else {
-                    env.instantiate(&s, vg)
+                    env.instantiate(&s, vg, subst)
                 }
             })
         } else {
@@ -1951,7 +1966,12 @@ pub(super) fn infer_top_level(
                         | CheckErrorKind::CastNonTensor
                 )
             });
-            declared_ty.expect("every exact OP-35 wrapper has a declared signature")
+            let declared_ty =
+                declared_ty.expect("every exact OP-35 wrapper has a declared signature");
+            if let Err(error) = subst.project_tvar_restrictions(&body_ty, &declared_ty) {
+                errors.push(error.into());
+            }
+            declared_ty
         } else if let Some(decl_ty) = declared_ty {
             let unify_result = unify(&body_ty, &decl_ty, subst);
             let resolved_body = subst.apply(&body_ty);

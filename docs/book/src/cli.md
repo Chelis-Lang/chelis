@@ -391,7 +391,8 @@ chelis reef verify-artifact \
 
 Verification strictly consumes the complete CHB, requires its bytes and
 metadata ordering to be canonical, validates structural invariants across the
-envelope, and checks the archive bytes against the CHB's embedded SHA-256.
+versioned `CHELCHB` envelope, including canonical quantified type-variable
+restriction metadata, and checks the archive bytes against the CHB's embedded SHA-256.
 Appended bytes, truncation, malformed metadata, and a mismatched archive fail
 before any registry state is written. `reef install` uses this same verifier.
 

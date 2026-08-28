@@ -298,6 +298,7 @@ const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
     "print",
     "fail",
     "debug",
+    "test_assert_close_tensor",
     "string_len",
     "string_concat",
     "string_slice",
@@ -1522,9 +1523,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "test_assert_close_tensor",
-        inference: InferenceDisposition::GenericAccepted {
-            reason: "the polymorphic signature fully determines this builtin type",
-        },
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1658,6 +1657,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![tv],
+            tvar_restrictions: vec![],
             dvars: vec![dv],
             rvars: vec![],
             body: Type::Fn(
@@ -1674,6 +1674,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![tv],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(vec![borrowed(Type::Var(tv))], Box::new(Type::Var(tv))),
@@ -1707,6 +1708,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![tv, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1727,6 +1729,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![tv],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1742,6 +1745,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![tv],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(vec![borrowed(Type::Var(tv))], Box::new(Type::Var(tv))),
@@ -1755,6 +1759,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let t3 = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![t1, t2, t3],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1775,6 +1780,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let out = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![t1, t2, out],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1790,6 +1796,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let out = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input, out],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1811,6 +1818,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
         let scheme = Scheme {
             tvars: vec![input, out],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1826,6 +1834,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let out = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input, out],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1846,6 +1855,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let input = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1860,6 +1870,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let input = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1880,6 +1891,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input, kernel, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1899,6 +1911,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let input = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1914,6 +1927,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(vec![Type::Var(input)], Box::new(Type::Var(output))),
@@ -1927,6 +1941,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![lhs, rhs, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1944,6 +1959,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![a, b, c, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1961,6 +1977,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![a, b, c, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1978,6 +1995,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![a, b, c, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1995,6 +2013,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![a, b, c, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2016,6 +2035,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![a, b, c, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2035,6 +2055,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![a, b, c, d, e, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2059,6 +2080,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![a, b, c, d, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2074,6 +2096,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![input, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2088,6 +2111,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![tv],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(vec![borrowed(Type::Var(tv))], Box::new(Type::Var(tv))),
@@ -2101,6 +2125,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let output = vg.fresh_tvar();
         let scheme = Scheme {
             tvars: vec![lhs, rhs, output],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2224,6 +2249,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         "test_assert".to_string(),
         Scheme {
             tvars: vec![],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2238,6 +2264,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             "test_assert_eq".to_string(),
             Scheme {
                 tvars: vec![value],
+                tvar_restrictions: vec![],
                 dvars: vec![],
                 rvars: vec![],
                 body: Type::Fn(
@@ -2248,19 +2275,30 @@ pub fn builtin_env() -> (Env, VarGen) {
         );
     }
     {
-        // test_assert_close_tensor: (tensor a, tensor a, f32, string) -> unit
-        let tensor_tv = vg.fresh_tvar();
+        // test_assert_close_tensor:
+        //   (&tensor[..r,p_float], &tensor[..r,p_float], p_float, string) -> unit
+        // One quantified type variable occupies both tensor precision slots
+        // and the scalar tolerance position. This makes same-dtype equality a
+        // structural unification constraint. The quantified variable's
+        // ActiveFloat restriction is part of the function value, so aliases,
+        // polymorphic wrappers, and higher-order calls retain admissibility.
+        // The shared rank variable preserves arbitrary rank and exact shape
+        // equality between the tensors.
+        let precision = vg.fresh_tvar();
+        let rank = vg.fresh_rvar();
+        let tensor = Type::Tensor(vec![Dim::Rank(rank)], TensorPrec::Var(precision));
         env.bind(
             "test_assert_close_tensor".to_string(),
             Scheme {
-                tvars: vec![tensor_tv],
+                tvars: vec![precision],
+                tvar_restrictions: vec![(precision, TypeVarRestriction::ActiveFloat)],
                 dvars: vec![],
-                rvars: vec![],
+                rvars: vec![rank],
                 body: Type::Fn(
                     vec![
-                        borrowed(Type::Var(tensor_tv)),
-                        borrowed(Type::Var(tensor_tv)),
-                        Type::Prim(Prim::F32),
+                        borrowed(tensor.clone()),
+                        borrowed(tensor),
+                        Type::Var(precision),
                         Type::Prim(Prim::String),
                     ],
                     Box::new(Type::Unit),
@@ -2275,6 +2313,7 @@ pub fn builtin_env() -> (Env, VarGen) {
             "test_assert_eq_tensor".to_string(),
             Scheme {
                 tvars: vec![tensor_tv],
+                tvar_restrictions: vec![],
                 dvars: vec![],
                 rvars: vec![],
                 body: Type::Fn(
@@ -2296,6 +2335,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         "string_contains".to_string(),
         Scheme {
             tvars: vec![],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2308,6 +2348,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         "string_starts_with".to_string(),
         Scheme {
             tvars: vec![],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2320,6 +2361,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         "string_ends_with".to_string(),
         Scheme {
             tvars: vec![],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2353,6 +2395,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         "fold".to_string(),
         Scheme {
             tvars: vec![fold_acc, fold_item, fold_ret],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2372,6 +2415,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         "scan".to_string(),
         Scheme {
             tvars: vec![scan_acc, scan_item, scan_ret],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2399,6 +2443,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         "tensor_scan".to_string(),
         Scheme {
             tvars: vec![tensor_scan_a, tensor_scan_b, tensor_scan_c, tensor_scan_ret],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2489,6 +2534,7 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         "Some".to_string(),
         Scheme {
             tvars: vec![option_tvar],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(vec![Type::Var(option_tvar)], Box::new(option_type.clone())),
@@ -2498,6 +2544,7 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         "None".to_string(),
         Scheme {
             tvars: vec![option_tvar],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: option_type.clone(),
@@ -2532,6 +2579,7 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         "Cons".to_string(),
         Scheme {
             tvars: vec![list_tvar],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -2544,6 +2592,7 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         "Nil".to_string(),
         Scheme {
             tvars: vec![list_tvar],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: list_type.clone(),
@@ -2941,7 +2990,8 @@ mod tests {
     fn instantiate_add_produces_fn_type() {
         let (env, mut vg) = builtin_env();
         let scheme = env.lookup("add").unwrap();
-        let ty = env.instantiate(scheme, &mut vg);
+        let subst = crate::unify::Subst::new();
+        let ty = env.instantiate(scheme, &mut vg, &subst);
         match ty {
             Type::Fn(args, _ret) => assert_eq!(args.len(), 2),
             other => panic!("expected Fn, got {other:?}"),
@@ -2954,7 +3004,8 @@ mod tests {
 
         let (env, mut vg) = builtin_env();
         let add_scheme = env.lookup("add").unwrap();
-        let add_ty = env.instantiate(add_scheme, &mut vg);
+        let mut subst = Subst::new();
+        let add_ty = env.instantiate(add_scheme, &mut vg, &subst);
 
         // add should accept two tensors of the same type
         let tensor_f32 = Type::Tensor(
@@ -2969,7 +3020,6 @@ mod tests {
             Box::new(tensor_f32),
         );
 
-        let mut subst = Subst::new();
         assert!(unify(&add_ty, &expected_fn, &mut subst).is_ok());
     }
 
@@ -2979,7 +3029,8 @@ mod tests {
 
         let (env, mut vg) = builtin_env();
         let add_scheme = env.lookup("add").unwrap();
-        let add_ty = env.instantiate(add_scheme, &mut vg);
+        let mut subst = Subst::new();
+        let add_ty = env.instantiate(add_scheme, &mut vg, &subst);
 
         // add(tensor[batch,f32], tensor[batch,bf16]) should fail
         let t1 = Type::Tensor(
@@ -2995,7 +3046,6 @@ mod tests {
             Box::new(Type::Var(vg.fresh_tvar())),
         );
 
-        let mut subst = Subst::new();
         assert!(unify(&add_ty, &bad_fn, &mut subst).is_err());
     }
 
@@ -3005,7 +3055,8 @@ mod tests {
 
         let (env, mut vg) = builtin_env();
         let add_scheme = env.lookup("add").unwrap();
-        let add_ty = env.instantiate(add_scheme, &mut vg);
+        let mut subst = Subst::new();
+        let add_ty = env.instantiate(add_scheme, &mut vg, &subst);
 
         // add(tensor[batch,f32], int32) should fail
         let t1 = Type::Tensor(
@@ -3018,7 +3069,6 @@ mod tests {
             Box::new(Type::Var(vg.fresh_tvar())),
         );
 
-        let mut subst = Subst::new();
         assert!(unify(&add_ty, &bad_fn, &mut subst).is_err());
     }
 

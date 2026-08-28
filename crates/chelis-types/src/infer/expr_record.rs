@@ -391,7 +391,9 @@ pub(super) fn instantiate_variant_of(
 
     let mut renaming = Subst::new();
     for var in type_vars {
-        renaming.insert_type(var, vg.fresh_type());
+        renaming
+            .insert_type(var, vg.fresh_type())
+            .expect("fresh constructor-field type renaming is valid");
     }
     for var in dim_vars {
         renaming.insert_dim(var, vg.fresh_dim());

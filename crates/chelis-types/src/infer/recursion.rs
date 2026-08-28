@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use crate::env::Env;
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::session::DiagnosticSink;
-use crate::types::{Prim, Scheme, Type, TypeVar};
+use crate::types::{Prim, Scheme, Type, TypeVar, TypeVarRestriction};
 use crate::unify::Subst;
 
 thread_local! {
@@ -39,6 +39,7 @@ struct GroupCtx {
 
 struct MemberSnapshot {
     tvars: Vec<TypeVar>,
+    tvar_restrictions: Vec<(TypeVar, TypeVarRestriction)>,
     body: Type,
     /// Whether the member's `def` authored explicit type binders (`[a]`).
     /// Authored parameters take the strict caller's-own-instantiation rule;
@@ -97,6 +98,7 @@ pub(super) fn begin_group<'a>(member_names: impl Iterator<Item = (&'a str, bool)
             name.to_string(),
             MemberSnapshot {
                 tvars: scheme.tvars.clone(),
+                tvar_restrictions: scheme.tvar_restrictions.clone(),
                 body: scheme.body.clone(),
                 authored_generic,
             },
@@ -191,7 +193,9 @@ pub(super) fn should_record_occurrence(name: &str, scheme: &Scheme) -> bool {
         let Some(snapshot) = c.members.get(name) else {
             return false;
         };
-        snapshot.tvars == scheme.tvars && snapshot.body == scheme.body
+        snapshot.tvars == scheme.tvars
+            && snapshot.tvar_restrictions == scheme.tvar_restrictions
+            && snapshot.body == scheme.body
     })
 }
 
