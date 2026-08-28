@@ -109,7 +109,12 @@ RiscOp::Expand {
 
 struct RuntimeExtent {
     value: RtDim,
-    class: Option<RuntimeDimId>,
+    class: Option<RuntimeDimRef>,
+}
+
+struct RuntimeDimRef {
+    class: RuntimeDimId,
+    use_id: RuntimeDimUseId,
 }
 
 struct RuntimeExtentClass {
@@ -119,9 +124,44 @@ struct RuntimeExtentClass {
 }
 
 enum RuntimeExtentWitness {
-    Literal(i64),
-    Scalar { node: NodeId },
-    Axis { node: NodeId, axis: usize },
+    Literal { source: RuntimeDimSourceId, value: i64 },
+    Scalar { source: RuntimeDimSourceId, node: NodeId },
+    Axis { source: RuntimeDimSourceId, node: NodeId, axis: usize },
+}
+
+struct RuntimeDimDeclaration {
+    id: RuntimeDimId,
+    owner: RuntimeDimOwner,
+    sources: Vec<RuntimeDimSourceDeclaration>, // nonempty, canonical order
+    uses: Vec<RuntimeDimUseDeclaration>,
+}
+
+struct RuntimeDimOwner {
+    scope: RuntimeScopeId,
+    binder_slot: u32,
+}
+
+struct RuntimeDimSourceDeclaration {
+    id: RuntimeDimSourceId,
+    origin: RuntimeDimSourceOrigin,
+}
+
+enum RuntimeDimSourceOrigin {
+    InputAxis { parameter: u32, axis: usize },
+    ScalarParameter { parameter: u32 },
+    Literal { typed_site: TypedSiteId, value: i64 },
+    OpOutput { typed_op: TypedNodeId, axis: usize },
+}
+
+struct RuntimeDimUseDeclaration {
+    id: RuntimeDimUseId,
+    origin: RuntimeDimUseOrigin,
+}
+
+enum RuntimeDimUseOrigin {
+    Bound { typed_op: TypedNodeId, field: RuntimeBoundField },
+    AliasAxis { typed_op: TypedNodeId, axis: usize },
+    ScalarAlias { typed_node: TypedNodeId },
 }
 ```
 
@@ -140,8 +180,9 @@ RtDim::InputAxis {
 `tensor` and every `Node` are absolute slots in the owning movement
 node's `inputs`. `RuntimeExtent.value` is the executed extent. A
 `class` is present only when that value instantiates a hygienic dimension
-binder; it links the use to the DAG-level class whose complete witness manifest
-is executed independently of any particular movement node. `RtDim::Sym` and
+binder; its class and durable use ID link the concrete use to the DAG-level
+declaration whose complete witness manifest is executed independently of any
+particular movement node. `RtDim::Sym` and
 `RtDim::ToEnd`
 remain illegal in `Expand.size`. In executable IR, a named
 `reshape` target also resolves to `Lit`, `InputAxis`, or
@@ -170,70 +211,108 @@ carrier and must not cross verification or WireDag.
   typed environment maps binder identity, never spelling, to its runtime
   witnesses. A literal instantiation becomes `Lit`; a tensor witness
   becomes `InputAxis`; and a scalar term witness becomes `Node`.
-  At executable-DAG finalization, each surviving hygienic binder receives a
-  local `RuntimeDimId`. The identity is assigned from binder declaration
-  identity in signature/source order, never from its display spelling. A
-  locally bound class is freshened when its defining subgraph is cloned; a
-  genuinely shared free class preserves its ID. Specialization may replace a
-  class by a literal only after proving every member equal to that literal.
-  Transforms preserve or explicitly remap the IDs before verification.
+  Typed inference gives every binder a hygienic identity. After typed
+  dead-code elimination and before executable DAG lowering, finalization emits
+  a primary, non-optional `RuntimeDimDeclaration` for every surviving binder.
+  Its local `RuntimeDimId` is assigned in binder declaration order, never from
+  display spelling. `RuntimeDimOwner` records the declaring hygienic scope and
+  binder slot. Each declaration enumerates the complete ordered set of durable
+  `RuntimeDimSourceId`s and their typed origins: function-input axis, scalar
+  parameter, literal constraint, or typed operation-output axis. It separately
+  enumerates every class-bearing occurrence as a durable `RuntimeDimUseId` with
+  a typed bound-field, forwarded-axis, or scalar-alias origin. This
+  declaration carrier is the authority for class existence and membership; it
+  is not derived from final-DAG stamps or from the executable class manifest.
+
+  A clone records the set of hygienic scopes it duplicates. It freshens the ID
+  and every source ID whose declaration owner is inside that set, while a
+  captured declaration owned by an outside scope keeps its ID. Thus local
+  versus free is decided from stored ownership, not guessed from final graph
+  shape. Specialization may replace a class by a literal only after proving
+  every source in its declaration equal to that literal. Transforms preserve
+  or explicitly remap declarations, source IDs, use IDs, and class IDs
+  together before verification.
 
   Every rank-zero scalar or tensor output axis that independently witnesses the
-  binder is stamped `WitnessOf(id)`; a pass-through occurrence is stamped
-  `AliasOf(id)`. Tensor result metadata carries one such optional stamp per
-  output axis, and rank-zero exact-`int64` scalar producers carry the scalar
-  form. A generated, exhaustive operation/axis table decides
-  witness-versus-alias: external `Load` axes and operation-computed output axes
-  are witnesses, while a structurally forwarded input axis is an alias. A
-  literal binder instantiation is an explicit literal witness. The table is
-  bijective with the current `RiscOp` registry; an unclassified operation or
-  axis is a build failure.
+  binder is stamped `WitnessOf { class, source }`; a pass-through occurrence is
+  stamped `AliasOf { class, use_id }`. Tensor result metadata carries one
+  optional stamp per output axis, and rank-zero exact-`int64` scalar producers
+  carry the scalar form. Optionality means an axis may be anonymous or
+  concrete; it does not make a declaration source or use optional. Every
+  source ID named by a `RuntimeDimDeclaration` must appear exactly once as a
+  witness stamp or declared literal, and every use ID must appear exactly once
+  as an alias stamp or `RuntimeDimRef`.
 
-  `derive_runtime_extent_classes(&Dag)` enumerates those stamps and constructs
-  one complete manifest per ID. Classes are ordered by binder declaration
-  identity; within a class, external signature witnesses come first in
-  signature/source order, then literal or scalar declarations, then
-  operation-computed axes in node-topological/axis order. The first member is
-  canonical and every remaining member is an equality obligation. A
-  `RuntimeExtent` that denotes the binder carries the same ID and executes the
-  canonical value; it does not carry a second, losable copy of the member list.
+  Phase 2 generates and freezes one `OutputAxisRule` table bijective with the
+  complete current `RiscOp` registry. Each possible output axis is classified
+  as literal, external, structurally forwarded, scalar-derived, or
+  `OpComputed(OpExtentRule)`. The row determines witness-versus-alias and, for
+  an operation-computed witness, the exact pre-allocation extent formula citing
+  the owning numbered operation atom. An unclassified operation, output, rank
+  rule, or formula is a build failure; a missing governing atom is authored in
+  Phase 2 before the row can register. This is the single table Phase 4 later
+  consumes for total `AxisSource`; no second operation/source table exists.
+
+  `derive_runtime_extent_classes(&Dag)` walks the authoritative declarations,
+  resolves each durable source ID through the stamps and typed-origin map, and
+  constructs one executable manifest per ID. It does not discover class
+  membership from optional stamps. Classes follow declaration order; within a
+  class, sources follow the exact order frozen in its declaration: external
+  signature witnesses first in signature/source order, then literal or scalar
+  declarations, then operation-computed axes in typed-source order. The first
+  member is canonical and every remaining member is an equality obligation. A
+  `RuntimeExtent` that denotes the binder carries the declared class/use pair
+  and executes the canonical value; it does not carry a second, losable copy of
+  the member list.
   A reusable generic may retain the
   binder in typed pre-monomorphization state, but a complete executable DAG
-  must resolve it to a local ID and one of these three value forms. Missing
-  witness, wrong class, and violated witness equality fail loudly; no pass
-  searches for a matching string.
+  must resolve it to a local class/use pair and one of these three value forms.
+  Missing witness or use, wrong class, and violated witness equality fail
+  loudly; no pass searches for a matching string.
   Thus the direct read obeys [05-OP-7]'s folded-`DimExpr` rule while every
   scalar value obeys `spec/04` §4.7.4. Both forms are real owning-node input
   dependencies, so DCE cannot lose them; a symbolic name or shape-only side
   table is not an equivalent size carrier.
 - **C2.2 Equality classes are executable graph structure.** The DAG stores the
-  canonical class manifest together with the independent `WitnessOf` and
-  `AliasOf` source stamps. Verification re-derives the expected manifest from
-  the stamps and requires an exact bijection: one declared ID, one canonical
-  member, no duplicate member, and no unstamped or cross-class member. It also
-  checks every scalar/axis node, rank, dtype, topological position, literal,
-  and `RuntimeExtent.class` reference. This is deliberately graph-level:
+  authoritative declarations, the independently mapped `WitnessOf` and
+  `AliasOf` source/use stamps, and the derived canonical class manifest.
+  Verification starts from the declarations and requires two exact
+  bijections: declared source/use IDs to witness stamps, alias stamps,
+  literals, and `RuntimeDimRef`s, then declared ordered classes to executable
+  manifests. It rejects an absent declaration, source, use, stamp, class, or
+  bound reference; a duplicate, unstamped,
+  cross-class, split, or merged member; and any owner/source-ID inconsistency.
+  It also checks every scalar/axis node, rank, dtype, topological position,
+  literal, `OutputAxisRule`, and `RuntimeExtent.class` reference. This is
+  deliberately graph-level:
   Load/Load, Load/operation-output, and operation-output/operation-output
   equalities exist even when no movement-bound field owns them.
 
   Eval, C, HIP, and Metal execute external and scalar members in canonical
-  order at entry. An operation-computed axis is compared with its class before
-  that result is allocated, accessed, or exposed. Each class manifest is a
-  control/liveness root: DCE keeps every input or live computed owner needed by
-  an observable guard, and may remove an owner/member only as one proved
-  transformation when the declaring computation and its observable guard are
-  both dead. Vmap, grad, specialization, cloning, and remapping rewrite the
-  source stamps, IDs, nodes, and axes together; hashing covers them all.
+  order at entry. For an operation-computed member, the Phase-2-frozen
+  `OpExtentRule` computes the checked extent before that result is allocated,
+  accessed, or exposed. Each declaration and class manifest is a
+  control/liveness root. Typed dead-code elimination runs before declarations
+  freeze; afterward DCE cannot remove a declared input, source owner, or guard.
+  A pass that needs a smaller graph must return to the typed authority and
+  refinalize rather than editing the executable class. Vmap, grad,
+  specialization, cloning, and remapping rewrite declarations, source/use
+  stamps, IDs, nodes, fields, and axes together; hashing covers them all.
 
-  The executable interface separately enumerates declared inputs, so dropping
-  an otherwise-data-unused Load cannot shrink a class. Verification compares
-  that interface, all source stamps, the class manifest, and every classed
-  bound after each transform and after decode. Mutations that remove a member
-  and its data-use edge, substitute an axis from another class, split one class,
-  merge two classes, duplicate or reorder members, stale a node/axis, or drop
-  the guard liveness root fail structurally. A runtime unequal-member mutation
-  traps `Domain`. Only after these exact paths are green may Phase 4 delete
-  `SymbolicBinding.others` and the name-grouped equality loop.
+  The executable interface maps each declared function input and scalar
+  parameter to its declaration source IDs, so dropping an otherwise-data-unused
+  Load cannot shrink a class. Verification compares that interface, the
+  primary declarations, all source/use stamps, the derived class manifest,
+  and every classed bound after each transform and after decode. Correlated
+  mutations that change stamps and manifests together still fail against the
+  declaration authority: remove a member and its data-use edge, remove an
+  entire Load-only class, substitute an axis from another class, split one
+  class, merge two classes, duplicate or reorder members, stale a node/axis, or
+  drop the guard root. Declaration-removal mutations fail the executable
+  interface or typed-origin bijection and exact fixture. A runtime
+  unequal-member mutation traps `Domain`. Only after these exact paths are
+  green may Phase 4 delete `SymbolicBinding.others` and the name-grouped
+  equality loop.
 - **C2.3 Static values are an optimization.** A nonnegative statically proved
   value, including zero, may use `RtDim::Lit`. One checked static
   folder is shared or contract-tested across checker and lowering. Failure to
@@ -246,8 +325,9 @@ carrier and must not cross verification or WireDag.
   [#609] is deleted.
 - **C2.5 Every consumer lands before deletion.** Verification, Eval, C, HIP,
   Metal, specialization, AD, vmap, hashing, and cloning/remapping passes read
-  `RuntimeExtent.value`, its optional class ID, every source stamp, and the
-  complete ordered class manifest before any provenance rejection is removed.
+  `RuntimeExtent.value`, its optional declared class/use reference, every
+  source/use stamp, and the complete ordered class manifest before any
+  provenance rejection is removed.
   Each bound value is still one underlying `Lit`, `InputAxis`, or
   `Node`. [#1112]'s
   HIP carrier work and Metal audit are Phase 2
@@ -267,8 +347,9 @@ carrier and must not cross verification or WireDag.
   `InputAxis` reads observe the corresponding original tensor axis after
   the inserted batch-axis shift, and scalar `shape`/integer nodes used only by
   movement bounds remain rank-zero rather than acquiring a batch dimension.
-  Every class member and source stamp follows the same axis shift, input-slot
-  remap, liveness, and equality semantics as its canonical value.
+  Every class member, use reference, and source/use stamp follows the same axis
+  shift, input-slot remap, liveness, and equality semantics as its canonical
+  value.
   Literal axes normalize against the original source rank and then shift;
   node-valued axes perform the same checked normalization and shift at runtime.
   When one scalar producer has both bound and ordinary value consumers, vmap
@@ -424,17 +505,20 @@ enum AxisSource {
   earlier-node, rank-zero, exact-`int64` contract as C2.1.
   `OpComputed` is permitted only for a closed operation-and-axis
   `OpExtentRule` whose formula is the owning numbered operation atom;
-  it is not a wildcard fallback. A generated table is bijective with the
-  complete current `RiscOp` registry and assigns every output axis to
-  one of these five source classes. Adding an op, output, or rank rule without
-  a complete row fails regeneration and compilation.
-  If an op-computed axis has no governing numbered atom, Phase 4 authors that
-  atom before registering or implementing the rule.
-  The same generated row also supplies C2.1's runtime-dimension role for the
-  axis: an external or operation-computed source is `WitnessOf(id)`, while a
-  structurally forwarded source is `AliasOf(id)`. Derivation requires that role
-  to agree with the stored axis ID and the complete runtime-class manifest;
-  `AxisSource` never invents, merges, or recovers a class from a display name.
+  it is not a wildcard fallback. Phase 4 instantiates each source from the
+  single `OutputAxisRule` row already generated, atom-authorized, and frozen by
+  Phase 2. That table is bijective with the complete current `RiscOp` registry
+  and assigns every output axis its source class and formula. Adding an op,
+  output, or rank rule without a complete row has already failed regeneration
+  and compilation before Phase 2 exits.
+  The frozen row also supplies the runtime-dimension role for the axis: an
+  external or operation-computed source is `WitnessOf { class, source }`,
+  while a structurally forwarded source is
+  `AliasOf { class, use_id }`. Phase-4
+  derivation requires that role to agree with the declaration authority, stored
+  axis ID, and complete runtime-class manifest; `AxisSource` never invents,
+  merges, or recovers a class from a display name. There is no Phase-4 sibling
+  registry or target-specific formula match.
 - **C4.2 Exact movement mappings.** Same-rank `Expand` maps every
   unchanged output axis to the same input axis and maps the replaced axis to
   its literal or scalar size. Rank-increasing `Expand` maps axes
@@ -447,7 +531,9 @@ enum AxisSource {
   `OpComputed` rule. `Load` axes use
   `ExternalAxis`. Shape-preserving non-movement ops use the exact
   input-axis map, while reductions, concatenation, convolution, and every other
-  computed-shape op use a closed rule citing their own numbered atom.
+  computed-shape op use a closed rule citing their own numbered atom. These
+  classifications and formulas are Phase-2-frozen `OutputAxisRule` content;
+  Phase 4 consumes them without making a new semantic decision.
 - **C4.3 Interim failure is typed.** The algebra first lands as a verifier and
   property ratchet. A currently unsupported but well-typed mapping yields the
   registered [#730] `Unsupported` receipt. It never reaches the
@@ -537,9 +623,9 @@ axes and windows in one issue.
 3. **Negative parity.** Static negative extents fail with the owning type
    error; runtime negative extents trap `Domain`. Wrong dtype,
    out-of-range axis, rank-contradicting ascription, malformed scalar input,
-   named-binder witness mismatch, missing class member, split or merged class,
-   wrong binder ID, and checked overflow fail for the owning reason on every
-   applicable lane.
+   named-binder witness mismatch, missing declaration/source/member, split or
+   merged class, wrong binder or source ID, and checked overflow fail for the
+   owning reason on every applicable lane.
 4. **Zero positives.** Literal-zero and runtime-zero rows cover positional
    replacement, positional insertion, and named-axis expansion. They assert
    the exact output shape, logical element count zero, no element access, and
@@ -564,19 +650,23 @@ axes and windows in one issue.
    through vmap, grad,
    specialization, cloning/remapping, and DCE. They verify exact rank-zero
    bound scalars, shifted literal and node-valued axes, preserved tensor-axis
-   witnesses, absolute input slots, binder IDs, witness/alias roles, complete
-   manifests, guards, shapes, and values. Mutations that
+   witnesses, absolute input slots, declaration owners/source/use IDs, binder
+   IDs, witness/alias roles, complete manifests, guards, shapes, and values.
+   Mutations that
    prepend a batch axis to a bound scalar, fail to split a dual-use producer,
    omit an `Expand` bound from
    grad liveness, lose a source under DCE, fail to shift an axis, or retain a
-   stale slot/ID fail before emission. Cloning rows prove that locally bound
-   classes freshen while genuinely shared free classes remain shared. The
+   stale slot/ID fail before emission. Cloning rows provide the duplicated
+   hygienic-scope set and prove that declarations owned inside it freshen while
+   declarations owned outside it remain shared. The
    batch-varying element-derived row
    executes or rejects exactly as the amended `spec/06` decides.
-8. **Axis-source mutations.** A generated bijection covers every current
-   `RiscOp` output axis, including external `Load`/root axes and
-   non-movement computed-shape operations. The view is recomputed and validated
-   after vmap, grad, specialization, cloning/remapping, and DCE. C4 cardinality and mapping
+8. **Axis-source mutations.** The Phase-2-frozen `OutputAxisRule` bijection
+   covers every current `RiscOp` output axis, including external
+   `Load`/root axes and non-movement computed-shape operations. Phase 4
+   consumes those exact rows to derive the view, which is recomputed and
+   validated after vmap, grad, specialization, cloning/remapping, and DCE. C4
+   cardinality and mapping
    corruptions fail before emission with the registered typed receipt; no
    mutation, cached pre-transform map, or stale `NodeId` is accepted,
    silently repaired, or allowed to reach an ICE.
@@ -585,9 +675,12 @@ axes and windows in one issue.
    are green. Missing size, old or future version, illegal bound tag, missing
    or out-of-range input slot, later-node reference, non-scalar source, wrong
    dtype, malformed `input_axis` tensor or axis slot, wrong axis dtype,
-   missing/duplicate/reordered/stale class member, missing source stamp,
-   member/stamp disagreement, valid-axis substitution from another class,
-   split/merged class, dropped otherwise-unused Load or guard root,
+   missing/duplicate/reordered/stale declaration or class member, invalid
+   declaring scope/slot, missing source/use ID or stamp,
+   member/stamp disagreement,
+   correlated stamp-plus-manifest removal, valid-axis substitution from
+   another class, correlated split/merged class, dropped otherwise-unused Load
+   or guard root,
    owner-illegal tag, classed `to_end`, unshifted vmap source axis, and
    incompatible axis/rank/output shape are negative controls.
 
@@ -625,15 +718,21 @@ never reused.
 - encode `WireRiscOp::Expand { axis, size: WireRuntimeExtent }`
   and use the same wrapper for every other runtime-extent owner;
   `WireRuntimeExtent` contains one `value: WireRtDim` plus an optional
-  `class: WireRuntimeDimId`. `input_axis`
+  `class: WireRuntimeDimRef { class, use_id }`. `input_axis`
   carries a tensor input slot plus a
   `WireRtAxis` that is an exact int32 literal or scalar input slot;
-- encode the complete ordered `WireRuntimeExtentClass` manifest at DAG level,
-  with the stable local ID and `literal`, `scalar`, or `axis` canonical/member
-  witnesses. Encode one optional `witness(id)` or `alias(id)` source stamp per
-  tensor output axis and the corresponding optional stamp on rank-zero
-  exact-`int64` scalar producers. The public input manifest retains every
-  declared Load independently of data uses;
+- encode the primary ordered `WireRuntimeDimDeclaration` list at DAG level.
+  Each non-optional declaration contains its stable local class ID, hygienic
+  declaring-scope/binder-slot owner, and complete ordered durable source IDs
+  with typed input-axis, scalar-parameter, literal, or operation-output origins,
+  plus every durable use ID with its bound-field, alias-axis, or scalar-alias
+  origin. Encode the derived `WireRuntimeExtentClass` manifest separately,
+  with the same ID and `literal`, `scalar`, or `axis` witnesses carrying their
+  source IDs. Encode one optional `witness { class, source }` or
+  `alias { class, use_id }` stamp per tensor output axis and the corresponding
+  optional stamp on rank-zero exact-`int64` scalar producers. The public input
+  manifest retains every declared Load independently of data uses and maps each
+  input axis/scalar to its declared source ID;
 - interpret `WireRtDim::Node { input }` as an absolute index into the
   owning `WireDagNode.inputs`, then validate that referenced earlier
   node as rank-zero `int64`;
@@ -657,18 +756,19 @@ never reused.
   `sym` is illegal in every executable owner. An owner/tag pair absent
   from the table is invalid; there is no generic permissive arm;
 - validate the tensor operand, axis, input/output ranks, and exact output-axis
-  mapping. Re-derive the expected classes from the binder IDs, source stamps,
-  public input manifest, and generated operation/axis role table, then require
-  exact equality with the serialized class manifest: every member node/axis,
-  literal, dtype, rank, class ID, uniqueness, canonical order, and
+  mapping. Start from the non-optional declarations, resolve every durable
+  source and use through the public-input map, stamps, or bound references, and
+  apply the Phase-2-frozen `OutputAxisRule`; then require exact equality with
+  the serialized class manifest. Every declaring scope/slot, source/use ID, member
+  node/axis, literal, dtype, rank, class ID, uniqueness, canonical order, and
   control/liveness edge is checked before encode and after exact-version
-  decode;
+  decode. A stamp/manifest pair cannot establish or resize a class;
 - reject v6, #1298-only v7, versionless, future, string-size, executable
   `sym`, and owner-illegal `to_end` spellings before IR
   consumption; no legacy
   conversion or default exists. Named values must already be resolved through
-  their structural value and binder ID before encoding; display strings have
-  no role in class construction or verification;
+  their structural value and declared class/use pair before encoding; display
+  strings have no role in class construction or verification;
 - update stable hash/prove/Beacon fixtures and every compiler-API or binding
   consumer that exposes WireDag bytes or version names;
 - regenerate and review the typed wire capacity census. Every changed
@@ -732,9 +832,13 @@ phase creates them.
 
 **Deliver in order:** first amend `spec/05`'s closed `RtDim`
 and [05-OP-7] representation to admit `RuntimeExtent`, the structural
-tensor-axis witness, stable binder IDs, source witness/alias roles, and the
+tensor-axis witness, primary hygienic binder declarations with durable source
+IDs and clone ownership, stable class IDs, source witness/alias roles, and the
 complete graph-level `RuntimeExtentClass` manifest, and require named values
-resolved before executable IR; amend `spec/06` for
+resolved before executable IR. Author any missing numbered operation atoms,
+then generate and freeze the one complete `OutputAxisRule`/`OpExtentRule`
+registry used both for pre-allocation operation-output guards here and total
+`AxisSource` in Phase 4; amend `spec/06` for
 rank-zero bound slices and batch-varying extents; and amend `spec/10`
 for the next monotonic WireDag version (v8 from the current v6 baseline).
 Write the derived positive, negative, equality-class, owner-matrix, and
@@ -747,8 +851,11 @@ acceptance reproducer is green under the owning rank-polymorphism work.
 
 **Frozen at exit:** amended `spec/05`/`spec/06` atoms;
 `Expand.size: RuntimeExtent`; structural tensor-axis and scalar input values;
-stable runtime binder IDs; complete ordered equality-class manifests and
-source roles; transform behavior for every bound-dependency class;
+primary binder declaration/ownership/source/use identities; stable runtime
+binder IDs; complete ordered equality-class manifests and source/use roles;
+the single generated `OutputAxisRule` and `OpExtentRule` variant/formula sets;
+transform
+behavior for every bound-dependency class;
 WireDag v8; no provenance-rejection construct; one static folder; all-lane
 guard placement.
 
@@ -783,13 +890,15 @@ scripts/runtime_extent_oracle.py --phase 3`; every action row and K fresh
 
 ### Phase 4 -- total output-axis sources
 
-**Deliver:** generate the complete `RiscOp`-to-output-axis
-bijection; land C4.1-C4.3 including `ExternalAxis` first as the
-typed interim ratchet; then land C4.4 across Eval/C/HIP/Metal. Close [#665]
+**Deliver:** consume the Phase-2-frozen complete
+`RiscOp`-to-output-axis `OutputAxisRule` bijection to instantiate C4's
+final-DAG `AxisSource` view; land C4.1-C4.3 including
+`ExternalAxis` first as the typed interim ratchet; then land C4.4 across
+Eval/C/HIP/Metal. No new role or formula table is authored here. Close [#665]
 and [#592].
 
-**Frozen at exit:** `AxisSource` and `OpExtentRule`
-variant sets, final-DAG derivation point, one-source-per-output-axis
+**Frozen at exit:** `AxisSource` variant set, final-DAG derivation point,
+one-source-per-output-axis
 cardinality, and removal of runtime-extent name and equality recovery.
 
 **Oracle:** `uv run --managed-python --python 3.11 --no-project python
