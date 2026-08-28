@@ -120,8 +120,9 @@ default host build. A generated, checked-in configuration manifest records:
   input that changes Rust compilation;
 - every `cfg` and `cfg_attr` predicate reachable from a production target, including
   predicates emitted by macro expansion or `cargo::rustc-cfg`; and
-- the exact supported release and CI target triples, their compiler-reported target
-  `cfg` values, and the repository contract that declares each triple supported.
+- the exact supported release and CI host and target triples, every Cargo profile and
+  codegen-flag set used to build them, their compiler-reported `cfg` values, and the
+  repository contract that declares each combination supported.
 
 The manifest generator normalizes those predicates and solves for configuration
 fixtures that exercise both sides of every satisfiable branch on every applicable
@@ -132,13 +133,38 @@ dependencies, and `required-features` targets receive their own satisfying fixtu
 An unsupported or unsatisfiable branch has an explicit manifest row with its checked
 reason; it is never silently absent.
 
-Each fixture runs Cargo with the recorded target and exact feature assignment. The
-enumerator consumes Cargo JSON build-script messages to bind emitted `cfg` values and
-`OUT_DIR` inputs to that fixture, then runs the type-resolved expansion over the
-result. A feature, feature implication, target predicate, target-specific dependency,
-build-script-emitted `cfg`, generated input, or compiler-observed branch without an
-applicable fixture fails closed. A newly supported target enters the manifest and
-census before its release/CI declaration can pass the oracle.
+Each compilation-unit fixture records the exact commit, toolchain, build host,
+compilation target, Cargo target identity and kind, profile and normalized codegen
+flags, feature assignment, and declared build-input assignment. A cross build creates
+separate host fixtures for its build scripts and proc macros and target fixtures for
+target code; it never substitutes `TARGET` for `HOST` when expanding host-compiled
+code. Debug, release, and every repository release/CI profile are included. A profile
+or flag that changes compiler `cfg` state, including `debug_assertions`, receives the
+same both-sides branch coverage as a source `cfg` predicate.
+
+Every custom-build target has a checked-in build-input manifest. Cargo-provided inputs
+come from a closed runner-owned set derived from the fixture. All other environment
+variables, filesystem roots, external commands, native-package probes, and network
+access must be declared with the finite value classes that can affect Rust sources,
+emitted `cfg`s, compiler flags, or artifacts. The oracle runs build scripts in a
+traced sandbox that rejects undeclared access; `rerun-if-changed` and
+`rerun-if-env-changed` outputs are checked against the manifest but are not treated as
+completeness proof. Each declared value class has a fixture. Native discovery such as
+`pkg-config` has explicit absent and present fixtures whose sandboxed command and
+filesystem responses are recorded, so an inactive probe is still executable evidence.
+
+Each fixture runs Cargo with that complete identity. The enumerator consumes Cargo
+JSON build-script messages and sandbox access records to bind emitted `cfg` values and
+`OUT_DIR` inputs to the fixture, then runs the type-resolved expansion over the result.
+A feature, feature implication, target predicate, profile flag, target-specific
+dependency, build-script input or emitted `cfg`, generated input, or
+compiler-observed branch without an applicable fixture fails closed.
+
+Native-host jobs execute the host fixtures on every supported release/CI host. The
+oracle aggregates their evidence only when commit, lockfile, toolchain, configuration
+manifest, and census-schema digests match exactly; mixed-head or missing-host evidence
+fails. A newly supported host, target, profile, or codegen configuration enters this
+exact-head evidence set before its release/CI declaration can pass the oracle.
 
 #### C2.2 Source identities and bijection
 
@@ -161,7 +187,8 @@ expanded carriers and consumers to the same type-resolved enumerator. This appli
 `macro_rules!`, derive and attribute macros, and procedural macros, including macros
 defined outside the audited package. No opaque macro expansion is silently skipped.
 
-An identity is `(crate, target, normalized configuration applicability, module,
+An identity is `(crate, Cargo target identity and kind, build host, compilation target,
+profile/codegen set, normalized feature and build-input applicability, module,
 enclosing item, carrier field or binding, consumer)`. Configuration applicability
 names every manifest fixture that activates the identity and the normalized predicate
 that those fixtures cover. Anonymous or ambiguous carriers must gain a stable census
@@ -212,8 +239,16 @@ The liveness oracle must reject all of these planted changes:
     `required-features`, or build-script-emitted `cfg`;
 16. a new feature, feature implication, target predicate, supported target,
     build-script `cfg`, or generated input with no configuration fixture;
-17. a new carrier or consumer with no census row; and
-18. an `#[allow(clippy::iter_over_hash_type)]` with no matching row.
+17. a direct, indirect, macro-generated, or serialization-root consumer reachable
+    only under a non-default profile or codegen flag such as `debug_assertions`;
+18. a host-only build-script or proc-macro carrier/consumer planted while cross
+    compiling for a different target;
+19. a declared environment, filesystem, command, or native-package input whose
+    inactive and active value classes expose different carriers or consumers;
+20. an undeclared environment, filesystem, command, network, or native-package access
+    from a build script;
+21. a new carrier or consumer with no census row; and
+22. an `#[allow(clippy::iter_over_hash_type)]` with no matching row.
 
 The mutation suite is the completeness lock that the lint alone cannot provide.
 
@@ -313,9 +348,10 @@ The authoritative runner is `scripts/hash_order_determinism_oracle.py`. Exit 0 a
 the final line `HASH ORDER DETERMINISM ORACLE: PASS` require every leg:
 
 1. **Universe and bijection:** Cargo-derived production scope, source identities,
-   configuration manifest and fixtures, serialization roots, and census rows are
-   exact and duplicate-free. Every satisfiable production branch is activated by a
-   typed fixture, and every identity's recorded applicability equals its observed
+   configuration and build-input manifests, exact-head native-host evidence,
+   serialization roots, and census rows are exact and duplicate-free. Every
+   satisfiable production branch is activated by a typed fixture, every build-script
+   access is declared, and every identity's recorded applicability equals its observed
    fixture set.
 2. **Mutation rejection:** all C2.3 mutations fail for the intended missing-row or
    forbidden-order reason.
@@ -344,7 +380,9 @@ the deterministic structural and mutation legs.
 module graph (including custom paths, custom-build targets, and generated inputs),
 configuration-manifest generator and fixtures covering Cargo features, target
 triples, platform predicates, target-specific dependencies, required-feature targets,
-and build-script-emitted `cfg`s,
+profiles/codegen flags, build host versus compilation target, and build-script-emitted
+`cfg`s; build-input manifests and the traced fail-closed build-script sandbox;
+exact-commit native-host evidence aggregation;
 expanded type-resolved enumerator, raw-source identity sidecar, macro-expansion
 fixture boundary, serialization-root and Serde graph extractor, census schema, all
 currently discovered rows with executable evidence, and the C2.3 mutation suite.
@@ -352,13 +390,14 @@ currently discovered rows with executable evidence, and the C2.3 mutation suite.
 **Frozen at exit:** package/target/module and configuration-universe derivation,
 configuration applicability and expanded-to-source identity mapping,
 serialization-root identity, dispositions, executable-evidence schema, and the rule
-that unknown features, predicates, supported targets, target-specific dependencies,
-build-script `cfg`s, generated inputs, syntax, macro expansions, and serialization
-edges fail closed.
+that unknown features, predicates, supported host/target/profile combinations,
+target-specific dependencies, build-script inputs or `cfg`s, generated inputs, syntax,
+macro expansions, and serialization edges fail closed.
 
 **Oracle:** `.venv/bin/python scripts/hash_order_determinism_oracle.py --phase census`
 exits 0 with `HASH ORDER CENSUS: PASS` after every negative mutation is observed and
-every census row's evidence has executed.
+every census row's evidence has executed. The command consumes digest-matched native
+host evidence for the exact reviewed commit and fails if any required host is absent.
 
 ### Phase 1 - specified open sites
 
