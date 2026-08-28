@@ -412,3 +412,99 @@ pub(super) fn validate_numeric_and_reduction_arguments(
 
     None
 }
+
+/// Type an integer binary operation or shift.
+///
+/// Unlike the operand-admissibility checks, these arms decide the call's
+/// result type rather than only rejecting a bad one: `Some(ty)` short-circuits
+/// the rest of application checking with `ty`, and `None` means `func_name` is
+/// not one of these operations.
+pub(super) fn integer_binop_result_type(
+    list: &deep::List,
+    func_name: Option<&str>,
+    arg_tys: &[Type],
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Option<Type> {
+    if let Some(fname) = func_name
+        && INT_BINOPS.contains(&fname)
+    {
+        let lhs = arg_tys
+            .first()
+            .map(|ty| subst.apply(ty))
+            .unwrap_or_else(|| vg.fresh_type());
+        let rhs = arg_tys
+            .get(1)
+            .map(|ty| subst.apply(ty))
+            .unwrap_or_else(|| vg.fresh_type());
+        match (&lhs, &rhs) {
+            (Type::Prim(lhs_prec), Type::Prim(rhs_prec))
+                if lhs_prec.is_integer() && rhs_prec.is_integer() && lhs_prec == rhs_prec =>
+            {
+                return Some(Type::Prim(*lhs_prec));
+            }
+            (Type::Var(_), Type::Prim(rhs_prec)) if rhs_prec.is_integer() => {
+                return Some(lhs);
+            }
+            (Type::Prim(lhs_prec), Type::Var(_)) if lhs_prec.is_integer() => {
+                return Some(lhs);
+            }
+            (Type::Var(_), Type::Var(_)) | (Type::Error(_), _) | (_, Type::Error(_)) => {
+                return Some(lhs);
+            }
+            _ => {
+                return reject(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        with_macro_provenance(
+                            &deep::Expr::List(list.clone(), zero_span()),
+                            format!(
+                                "{} requires matching integer arguments, got {} and {}",
+                                fname, lhs, rhs
+                            ),
+                        ),
+                        vec![],
+                    ),
+                );
+            }
+        }
+    }
+
+    if let Some(fname) = func_name
+        && INT_SHIFT_OPS.contains(&fname)
+    {
+        let lhs = arg_tys
+            .first()
+            .map(|ty| subst.apply(ty))
+            .unwrap_or_else(|| vg.fresh_type());
+        let rhs = arg_tys
+            .get(1)
+            .map(|ty| subst.apply(ty))
+            .unwrap_or_else(|| vg.fresh_type());
+        let lhs_ok = matches!(&lhs, Type::Prim(prec) if prec.is_integer())
+            || matches!(&lhs, Type::Var(_) | Type::Error(_));
+        let rhs_ok = matches!(&rhs, Type::Prim(prec) if prec.is_integer())
+            || matches!(&rhs, Type::Var(_) | Type::Error(_));
+        if lhs_ok && rhs_ok {
+            return Some(lhs);
+        }
+        return reject(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "{} requires integer lhs and shift amount, got {} and {}",
+                        fname, lhs, rhs
+                    ),
+                ),
+                vec![],
+            ),
+        );
+    }
+
+    None
+}

@@ -989,6 +989,17 @@ pub(super) fn build_opacity_meta(
 /// on its own a duplicate definition. `items` is already flattened past
 /// `module` wrappers, and the prelude lives in the builtin env rather than as
 /// `def` nodes here, so only genuine in-program user redefinitions match.
+/// [`report`], lifted into the `Option<Type>` early-return channel that the
+/// post-unification application checks use.
+///
+/// Those checks answer "did this callee reject its arguments?", so they return
+/// `Option<Type>`: `Some(ty)` means rejected, with `ty` recorded as the call's
+/// type, and `None` means the check had nothing to say and the caller
+/// continues to the next one.
+pub(super) fn reject(errors: &mut DiagnosticSink<'_>, error: CheckError) -> Option<Type> {
+    Some(report(errors, error))
+}
+
 pub(super) fn report_duplicate_defs(items: &[&deep::Expr], errors: &mut DiagnosticSink<'_>) {
     let mut seen: HashSet<&str> = HashSet::new();
     for expr in items {
