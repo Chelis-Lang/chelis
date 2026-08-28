@@ -750,12 +750,14 @@ A movement bound (`pad` before/after, `shrink` start/end, `stride` step), an
   normalizes a negative literal statically) or an absolute input index naming
   a rank-0 `int32` scalar (a computed axis under [05-OP-7]). Legal only as an
   `expand` size or a `reshape` target. It is the folded extent-argument form
-  of §2.5.1 for a direct `shape(x, axis)` extent argument and for an in-scope
-  dimension binder instantiated by a tensor axis; the same read bound to a
-  `pad`, `shrink`, or `stride` position is the rank-0 `Node` form. The read
-  carries no identity: whether the resulting axis keeps the source dimension's
-  name is decided by ordinary type reasoning (spec/04-type-system.md §4.7.3),
-  and an unproved identity is a fresh extent under an equality guard.
+  of §2.5.1 for a direct `shape(x, axis)` extent argument and, in an `expand`
+  size, for an in-scope dimension binder instantiated by a tensor axis; a
+  `reshape` target that restates such a binder is `Sym`, and the same read
+  bound to a `pad`, `shrink`, or `stride` position is the rank-0 `Node` form.
+  The read carries no identity: whether the resulting axis keeps the source
+  dimension's name is decided by ordinary type reasoning
+  (spec/04-type-system.md §4.7.3), and an unproved identity is a fresh extent
+  under an equality guard.
 
 `reshape` admits `Lit`, `Node`, `InputAxis`, and `Sym`; `expand` admits `Lit`,
 `Node`, and `InputAxis`; `pad`, `shrink`, and `stride` admit `Lit` and `Node`,

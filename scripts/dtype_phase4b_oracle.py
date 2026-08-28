@@ -56,10 +56,10 @@ FROZEN_FILE_DIGESTS = {
         "a8fbc1ba5b8e2419844dd41a97bdcd6d1ffe1b5773d4ef263619e11985ab4cfe"
     ),
     "spec/05-risc-primitives.md": (
-        "10ed4c44aab344cff0f20d90ba501b1670d92f292ecc33a92eeab4fb0234277e"
+        "06488c7dc4c79fa2ba1b39bccca3e02610f32ebc9e241e2f905bc02fcc766060"
     ),
     "spec/06-transformations.md": (
-        "e9057ff43b93e2119ce7adcc12da857d887f77c175a3c55ea78b2dcf00d87e4f"
+        "442bba1bef95f16c2203e0d60a252ec27a6e1b3e6d3e429cd85e09f9b9194251"
     ),
     "spec/10-serialization.md": (
         "58f707d4e155d098962db224317061684b2c026816cab234ba026d560510a6da"
@@ -68,7 +68,7 @@ FROZEN_FILE_DIGESTS = {
         "a0ec07d22a5c26e2b81ffd9354dd0b055822a02689ccaed692592ec235ef6f09"
     ),
     "spec/design/dtype_semantics.md": (
-        "c220f74b51ea177c7ade1d78e429a58234afca774afa280a6db355f0e64e1e02"
+        "3a38e314098700a479f7d3cda0acc4eea70e358402df25fd69f40f37ff4f6cf6"
     ),
     "spec/design/loud_unsupported.md": (
         "dec76721503b380278124b12448112d3e4bf754f8320f949642d32f7d30d5414"

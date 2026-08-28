@@ -54,10 +54,11 @@ The implementation still has four separate recovery mechanisms, measured in
 the next section. The fix is ordered around representation. Slice A gives
 every accepted `expand` size a real graph carrier (a literal, a folded
 tensor-axis read, or a scalar value edge), migrates every lane and the wire
-format, and only then deletes the provenance rejections. Slice B makes the
-equality guards that `spec/04` requires executable graph structure and gives
-every realized output axis one checked source, so no guard or axis source is
-recovered by a string search. Slice C makes the one genuine deferral
+format, and only then deletes the provenance rejections. Slice B gives
+every realized output axis one checked source and derives the equality
+classes `spec/04` requires from that and the names the checker stamps, so no
+member is located by searching for a `Load` that carries a string. Slice C
+makes the one genuine deferral
 (positional `expand`) total and deterministic. One runner records the
 baseline and enforces the allowed progression from an ICE or lane divergence,
 through a typed implementation receipt, to exact execution.
@@ -106,15 +107,18 @@ through a typed implementation receipt, to exact execution.
    resolve every symbol to a `Load` or an op-declared axis and ICE on an
    undeclared occurrence. The `Expand` arm covers only the expand's own axis;
    an op-declared runtime axis arriving on the expand's input is dropped,
-   which is [#665] and, through grad+vmap, [#592].
+   which is [#665]. [#592] is the same ICE reached through a grad-backward
+   `Expand` whose `DimExpr::Sym` size cannot be traced to a declaring `Load`;
+   its size carrier closes in Slice A and any kept-axis residue in Slice B.
 4. **The lanes disagree.** The C lane emits its equality guards in
    `emit_input_shape_preamble` (`crates/chelis-backend-c/src/emit.rs:1230-
    1274`) before any allocation, in symbol-name order, and inline at
    op-declared sites; the HIP lane compiles a Load-declared symbolic
-   `expand` (`emit_expand`, `crates/chelis-backend-hip/src/emit.rs:1799`,
-   renders the size through `emit_dim_expr`, `3781-3784`, which prints
-   `DimExpr::Sym` by name) but rejects every `RtDim::Node` bound and the
-   `Shape` read itself (`crates/chelis-compiler-api/src/compiler.rs:4628-
+   `expand` because `emit_expand` (`crates/chelis-backend-hip/src/emit.rs:
+   3107-3140`) never reads the size and takes the output shape from the
+   node's type metadata by name (`emit_alias_view`, `1996-2001`), but it
+   rejects every `RtDim::Node` bound and the `Shape` read itself
+   (`crates/chelis-compiler-api/src/compiler.rs:4628-
    4694`); the Metal lane rejects node-valued bounds (`compiler.rs:4238-
    4259`). `vmap` (`crates/chelis-ir/src/vmap.rs:12`) prepends the batch axis
    to every node including rank-0 scalars, and the verifier then rejects the
@@ -158,7 +162,7 @@ Later sections cite the clause labels.
 | C1.4 | Coupled positional defaults settle in the order their results are introduced into the checked program | `spec/04` §4.7.2 |
 | C1.5 | Zero is legal; a static negative is a type error; a runtime negative traps `Domain` | `spec/04` §4.7.2 |
 | C1.6 | Extents are `int64`, axes are `int32` | [05-DIM-1..3] |
-| C1.7 | One carrier per owner: `expand` admits `Lit`, `Node`, `InputAxis`; `reshape` additionally `Sym` (a bystander named dimension); `pad`/`shrink`/`stride` admit `Lit`, `Node`, and `ToEnd` for a `shrink` end; a direct `shape()` extent argument to `expand`/`reshape` is the folded `InputAxis`, the same read bound elsewhere is a rank-0 `Node` | `spec/05` §2.4.1, §2.5.1 |
+| C1.7 | One carrier per owner: `expand` admits `Lit`, `Node`, `InputAxis`; `reshape` additionally `Sym` (a bystander named dimension); `pad`/`shrink`/`stride` admit `Lit`, `Node`, and `ToEnd` for a `shrink` end; a direct `shape()` extent argument to `expand`/`reshape` is the folded `InputAxis`; an in-scope binder instantiated by a tensor axis is `InputAxis` in an `expand` size and `Sym` in a `reshape` target; the same read bound elsewhere is a rank-0 `Node` | `spec/05` §2.4.1, §2.5.1 |
 | C1.8 | `vmap` shares a rank-0 extent, evaluates it once, shifts a folded or materialized read's axis, and rejects an element-derived extent as `batch_varying_extent` | `spec/06` §3.7, §8.6 |
 
 ### C2 Representation first, provenance deletion last
@@ -188,7 +192,7 @@ enum RtAxis {
 }
 
 struct RuntimeDimClass {
-    binder: RuntimeBinderId,          // the hygienic dimension binder
+    name: DimName,                    // the binder name the checker stamped
     members: Vec<RuntimeDimMember>,   // first member is canonical
 }
 
@@ -200,10 +204,9 @@ enum RuntimeDimMember {
     Literal(i64),
 }
 
-struct Dag {
-    // ... existing fields ...
-    runtime_dim_classes: Vec<RuntimeDimClass>,
-}
+// Derived, never stored: computed with `output_axis_sources` from the DAG a
+// lane consumes, after the last rewrite.
+fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
 ```
 
 - **C2.1 Exact representation invariant.** `inputs[0]` is the tensor operand.
@@ -225,9 +228,10 @@ struct Dag {
   once as a rank-0 `RiscOp::Shape` and bind it through `Node`, as `spec/05`
   §2.4.1 states. A bare in-scope dimension binder such as `a` in `c:
   tensor[a, f32]` uses the same owner-specific carrier: a tensor witness
-  becomes `InputAxis` for `expand`/`reshape` and a materialized `Node` for
-  the other three; a literal instantiation becomes `Lit`; a scalar witness
-  becomes `Node`. The typed environment maps binder identity, never
+  becomes `InputAxis` in an `expand` size, stays `Sym` in a `reshape`
+  target, and is a materialized `Node` for the other three; a literal
+  instantiation becomes `Lit`; a scalar witness becomes `Node`. The typed
+  environment maps binder identity, never
   spelling, to its witnesses. The reshape-only `Sym` target is the carrier
   `spec/05` §2.4.1 defines and is not changed by this plan; its runtime
   binding (`bind_symbolic_dims`, the C prologue variable) stays as it is.
@@ -257,59 +261,69 @@ struct Dag {
   plus one, stamps complete type metadata, and validates a declared or
   ascribed rank and dimensions against it. The early exit that causes
   [#597] and [#609] is deleted.
-- **C2.4 Equality classes are executable graph structure.** Every hygienic
-  dimension binder that survives to executable IR with more than one witness
-  is one `RuntimeDimClass` in `Dag.runtime_dim_classes`. The first member is
-  canonical; every other member is exactly one equality guard against it,
-  placed by C1.3. Members reference nodes by `NodeId` and are remapped by the
-  same `remap: HashMap<NodeId, NodeId>` every rebuild pass already threads
-  for `shape_deps` and `merged_spans` (DCE `optimize.rs:185`, CSE
-  `optimize.rs:303`, fusion `fuse.rs:203`, vmap `vmap.rs:3`, grad pruning
-  `grad.rs:623`, the four specialization passes in `specialize.rs`, copy
-  insertion and drop stripping in `lower.rs`, `splice_dag` at
-  `lower.rs:7824`, and `bind_symbolic_dims` at `dag.rs:2322`). Four rules,
-  each from a `spec/04` §4.7 sentence:
+- **C2.4 Equality classes are derived, not stored.** Every binder name that
+  the checker stamped on more than one witness is one `RuntimeDimClass`,
+  computed by `derive_runtime_dim_classes` from the DAG a lane consumes,
+  after the last rewrite, at the same point as `output_axis_sources`
+  (C4.5). Grouping is by the stamped name, which is the output of the typed
+  identity proof (C1.2) and is what `symbolic_bindings` (`dag.rs:2283`)
+  groups by today; location is by source, never by a string search: a
+  `Load` axis carrying the name is an interface member with its declared
+  signature index, an output axis whose `output_axis_sources` entry is
+  `OpComputed` and carries the name is an op-declared member, an axis that
+  maps to an input axis is pass-through and not a member, and a rank-0
+  scalar witness is a `Scalar` member. The first member is canonical; every
+  other member is exactly one equality guard against it, placed by C1.3.
+  Four rules, each from a `spec/04` §4.7 sentence:
   - the canonical member is the signature-first witness, so interface
-    members carry their declared signature index and order by it (node
-    position is name order on the subexpression-program path,
-    `lower.rs:1341`, and declared order on the `lower_fn` path,
-    `lower.rs:12100-12108`, so it is not a reliable key); local members
-    follow node position; nothing orders by hash iteration or display name;
-  - a class whose members are all interface values is never discharged,
-    because its guard runs at entry regardless of data use, so DCE keeps the
-    `Load`s it references; any other member is discharged only when no
-    surviving node depends on the guarded extent;
-  - two classes may reference one node, each with its own guard, and a node
-    that appears twice in one class (`splice_dag` maps both parameters of
-    `f(n, n)` to one `NodeId`, `lower.rs:7830-7838`) keeps one member;
-  - a node referenced by a class member or by an `RtDim::Node` slot is never
-    absorbed into a fused chain, because the guard must observe the producer
-    exactly once; fusion among other nodes is unaffected.
-  This is deliberately graph-level: Load/Load, Load/op-output, and
+    members order by declared signature index (node position is name order
+    on the subexpression-program path, `lower.rs:1341`, and declared order on
+    the `lower_fn` path, `lower.rs:12100-12108`, so it is not a reliable
+    key); local members follow node position; nothing orders by hash
+    iteration or display name;
+  - no guard is ever discharged: an all-interface class runs its guard at
+    entry regardless of data use, and a local member's producer is an
+    observable root under `spec/06` §5.2 because the guard can trap, so DCE
+    keeps every member's operands live;
+  - two classes may share a node, each with its own guard, and derivation
+    yields one member per `(node, axis)`, so `splice_dag` mapping both
+    parameters of `f(n, n)` to one `NodeId` (`lower.rs:7830-7838`) produces
+    one member;
+  - a node an `RtDim::Node` slot or a member references must survive as a
+    node, which C2.1's slot validation already enforces; a fused producer has
+    no observable value, so fusion never absorbs one.
+  Nothing is stored in the DAG or on the wire for classes: a rebuild pass
+  that keeps stamped names and bound slots correct (every pass remaps
+  `RtDim` slots through its own map, or carries them verbatim in the 1:1
+  id-preserving passes `vectorize_axis0`, `vmap.rs:3`, and
+  `bind_symbolic_dims`, `dag.rs:2322`) yields the same derived classes. This
+  is deliberately graph-level: Load/Load, Load/op-output, and
   op-output/op-output equalities exist even when no movement bound owns
-  them, which is what the C lane's name-grouped `SymbolicDimBinding.others`
-  (`dag.rs:570-574`) approximates today and Slice B replaces.
+  them, which is what the C lane's `SymbolicDimBinding.others`
+  (`dag.rs:570-574`) computes today from names alone and Slice B recomputes
+  from names plus sources.
 - **C2.5 Every consumer lands before deletion.** Verification, Eval, C, HIP,
   Metal, specialization, fusion, AD, vmap, CSE, DCE, hashing, and the wire
-  encoder and decoder read `RtDim` in every owner and `runtime_dim_classes`
-  before any provenance rejection is removed. Lane notes:
+  encoder and decoder read `RtDim` in every owner, and every lane derives
+  the classes, before any provenance rejection is removed. Lane notes:
   - C: `emit_input_shape_preamble` already evaluates interface-valued guards
     at entry before any allocation and op-declared guards inline, which is
     the C1.3 placement, though in symbol-name order because
     `symbolic_bindings` groups by `BTreeMap`; it changes from name grouping
-    to the class list and from name order to signature order.
+    to the derived class list and from name order to signature order.
   - Eval: the same placement, expressed as ordinary dataflow plus explicit
     guard steps before the first dependent allocation.
   - HIP and Metal: their gates admit `Lit` and `InputAxis`, which are
-    metadata reads (the same thing the HIP emitter does for `DimExpr::Sym`
-    today), so a Load-declared symbolic `expand` keeps compiling. They reject
+    metadata reads (the same by-name metadata read HIP's `emit_expand`
+    performs today), so a Load-declared symbolic `expand` keeps compiling. They reject
     `Node` with the existing [05-MOV-1] typed receipt until the runtime
     scalar path lands under [#1112]/[#1298]; that is a legal interim state in
     the C5 lattice, and an extent above `INT_MAX` on HIP remains [#1112]'s
     defect exactly as it is now.
   - Wire: `Expand.size` changes from a display string to `WireRtDim`, which
-    gains an `input_axis { tensor, axis }` variant; `runtime_dim_classes` is
-    serialized in canonical order; the typed wire capacity census rows for
+    gains an `input_axis { tensor, axis }` variant; nothing is serialized
+    for classes, since every consumer derives them from the names and
+    sources it already decodes; the typed wire capacity census rows for
     every changed descriptor are regenerated and classified in the same
     change.
 - **C2.6 Transforms preserve the bound slice.** `vmap` follows `spec/06`
@@ -326,19 +340,19 @@ struct Dag {
   `lower.rs:7047-7085`), so no new operation is needed. `grad` preserves
   every absolute input slot and its rank/dtype invariant; bound scalars
   remain the zero-cotangent boundary `spec/05` §2.4.1 defines.
-  Specialization, cloning, and remapping preserve or remap every slot and
-  every class member through the pass's own `remap`.
+  Specialization, cloning, and remapping preserve or remap every `RtDim`
+  slot through the pass's own map.
 - **C2.7 The deletion is atomic with the usable replacement.** Only after
   C2.1-C2.6 are green for a lane does the slice delete `SizeClass`,
   `classify_expand_size`, `classify_arith_app`,
   `sourceless_expand_size_error`, `Env::size_provenance` and its plumbing,
   and the lowerer's mirror rejections at `lower.rs:9109-9190`. No
   intermediate commit may accept a value the IR cannot carry. Slice B
-  separately removes `SymbolicDimBinding.others`, the name-grouped guard
-  loops, `op_declared_output_axes`, and `shape_source_for_axis` once C4
-  consumes the class list on every lane; the `Load` pass of
-  `symbolic_occurrences` that binds a reshape `Sym` target survives, since
-  that carrier is unchanged. Best-effort identity recognition may survive
+  separately replaces `symbolic_occurrences`, `op_declared_output_axes`, and
+  `shape_source_for_axis` with `output_axis_sources`, and
+  `symbolic_bindings` with `derive_runtime_dim_classes`, once every lane
+  consumes them; a reshape `Sym` target keeps binding to its class's
+  canonical value exactly as it does today. Best-effort identity recognition may survive
   only as refinement whose failure result is a fresh extent plus a guard.
 
 ### C3 Positional expand uses one normative protocol
@@ -420,7 +434,9 @@ fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource>;
   exactly the output rank with no omitted or duplicated axis, so a new
   operation fails to compile and a missing flow through an existing
   operation fails verification. `ExternalAxis` names the exact external
-  `Load` by `NodeId`, never by string; `InputAxis` validates the tensor slot
+  `Load` by `NodeId`; no source is located by searching for a `Load` that
+  carries a string, and a stamped name only groups (C2.4); `InputAxis`
+  validates the tensor slot
   and its literal or node-valued exact-`int32` axis; `ScalarInput` validates
   the rank-0 exact-`int64` contract of C2.1; `OpComputed` means the
   operation computes the extent by its own output-shape rule. Identity is
@@ -445,13 +461,12 @@ fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource>;
   registered [#730] `Unsupported` receipt; it never reaches the
   occurrence-pass ICE and never substitutes an input extent.
 - **C4.4 Target state consumes the sources.** Eval and all backends consume
-  `output_axis_sources` and `runtime_dim_classes` directly. Runtime extent
-  flows no longer depend on `shape_source_for_axis`,
+  `output_axis_sources` and `derive_runtime_dim_classes` directly. Runtime
+  extent flows no longer depend on `shape_source_for_axis`,
   `op_declared_output_axes`, or a search for a `Load` carrying the same
-  string, and `SymbolicDimBinding.others` is deleted. Static symbolic
-  identities may remain in type metadata and the reshape-only `Sym` target
-  keeps its `spec/05` §2.4.1 binding; no equality guard or output-axis
-  source is recovered by a string search. This closes [#665] and [#592].
+  string. Stamped names group; sources locate; the reshape-only `Sym`
+  target binds to its class's canonical value as it does today. This closes
+  [#665] and the kept-axis residue of [#592].
 - **C4.5 Sources are derived after the last rewrite.** `output_axis_sources`
   is neither stored in the DAG nor serialized nor carried across transforms;
   it is computed from the DAG that Eval or a backend actually consumes, after
@@ -494,8 +509,10 @@ the properties below; the generator, not this document, enumerates rows.
    rejection tests:
 
    ```sh
-   scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1
-   PYO3_PYTHON="$(uv python find 3.11)" cargo test -p chelis-backend-metal --test gpu_correctness -- --ignored --test-threads=1
+   scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness --
+   --ignored --test-threads=1
+   PYO3_PYTHON="$(uv python find 3.11)" cargo test -p chelis-backend-metal
+   --test gpu_correctness -- --ignored --test-threads=1
    ```
 
    Each command reports the runtime-extent group at the same commit and
@@ -527,9 +544,10 @@ the properties below; the generator, not this document, enumerates rows.
    which passes only when `reshape`'s literal target list counts as
    independent evidence.
 7. **Rebuild survival.** After each rebuild pass (vmap, grad, specialization,
-   fusion, CSE, DCE, cloning, `splice_dag`), every class member, bound slot,
-   and shifted axis is still present by `NodeId`, class and member order is
-   unchanged, and shapes and values agree; traps and effects of a bound
+   fusion, CSE, DCE, cloning, `splice_dag`), every bound slot and shifted
+   axis is still present by `NodeId`, the stamped names survive on the
+   rebuilt nodes so the derived classes are the same set in the same order,
+   and shapes and values agree; traps and effects of a bound
    producer occur exactly once through vmap and fusion; the fused-chain row
    (an elementwise node carrying a runtime-dimension dependency; the
    fused-chain branch of `rebuild_with_fusion`, `fuse.rs:222-288`, carries no
@@ -542,8 +560,7 @@ the properties below; the generator, not this document, enumerates rows.
    extraction, compiler-API and binding consumption, and the capacity census
    are green; the decoder rejects any owner/tag pair the C2.1 matrix
    forbids, a missing or out-of-range slot, a later-node reference, a wrong
-   dtype or rank, an old or future schema version, and a missing, duplicate,
-   or reordered class or member.
+   dtype or rank, and an old or future schema version.
 
 Positive rows use this allowed transition lattice:
 
@@ -603,7 +620,8 @@ next monotonic `WIRE_DAG_SCHEMA_VERSION` at landing, coordinated with [#1298]
 so the two migrations use distinct successive versions and both trackers,
 `spec/10`, fixtures, hashes, and rejected-version controls update together;
 the regenerated typed wire capacity census; then C2.7's deletion. Close
-[#1367], [#1266], [#569], [#597], and [#609]. [#578] remains open; commits
+[#1367], [#1266], [#569], [#597], [#609], and [#592] if its reproducer is
+green once the size carrier lands. [#578] remains open; commits
 that improve its mechanism use `Part of #578` until its complete
 rank-polymorphic acceptance reproducer is green under the owning
 rank-polymorphism work.
@@ -627,24 +645,23 @@ must carry `int64` extents to compare them exactly, so host, C, and Metal
 rows may exit first with the HIP rows at `typed_unsupported(#1112)`.
 [#1298] for the node-valued `InputAxis` axis rows only.
 
-**Deliver:** `Dag.runtime_dim_classes` seeded by typed inference from binder
-identity, remapped by every rebuild pass, verified after each; the four
-C2.4 rules; guard placement per C1.3 on Eval, C, HIP, and Metal;
-`output_axis_sources` and its cardinality check (C4.1-C4.3 as a typed
-ratchet first, then C4.4); deletion of `SymbolicDimBinding.others`, the
-name-grouped guard loops, `shape_source_for_axis`,
-`op_declared_output_axes`, and, once nothing reads it, `shape_deps`. Close
-[#665] and [#592].
+**Deliver:** `output_axis_sources` and its cardinality check (C4.1-C4.3 as
+a typed ratchet first, then C4.4); `derive_runtime_dim_classes` with the
+four C2.4 rules; guard placement per C1.3 on Eval, C, HIP, and Metal;
+replacement of `symbolic_occurrences`, `op_declared_output_axes`,
+`shape_source_for_axis`, and `symbolic_bindings` by those two derivations,
+and, once nothing reads it, deletion of `shape_deps`. Close [#665] and any
+residue of [#592].
 
 **Frozen at exit:** the `RuntimeDimClass` and `RuntimeDimMember` shapes,
 canonical class and member order, the guard placement realization per lane,
-the `AxisSource` variant set, the derivation point, and the removal of guard
-and axis-source name recovery.
+the `AxisSource` variant set, the one derivation point for both, and the
+removal of string searches for a declaring `Load`.
 
 **Oracle:** `uv run --managed-python --python 3.11 --no-project python
 scripts/runtime_extent_oracle.py --phase b`: named-dimension and guard-order
-rows on every lane, axis-source cardinality, rebuild-survival rows asserting
-class membership after every pass, and the class wire rows.
+rows on every lane, axis-source cardinality, and rebuild-survival rows
+asserting the derived classes after every pass.
 
 ### Slice C - deferral totality and deterministic settlement
 
@@ -698,10 +715,10 @@ class completion oracle and ends with `RUNTIME EXTENT ORACLE: PASS`.
   wherever the numbered spec permits the form. [#578] remains open until its
   complete acceptance reproducer is green.
 - **[#1372] DAG rebuild integrity:** owns the invariant that side-carried
-  annotations (`shape_deps`, `merged_spans`, and now `runtime_dim_classes`)
-  survive every graph rebuild. Slice B relies on that invariant through each
-  pass's `remap`; the tracker owns making it structural and the fused-chain
-  `shape_deps` probe named in C5 property 7.
+  annotations (`shape_deps`, `merged_spans`) survive every graph rebuild.
+  This plan stores no class annotation, so it relies on that invariant only
+  for `shape_deps` until Slice B deletes it; the tracker owns making the
+  invariant structural and the fused-chain probe named in C5 property 7.
 - **[#1373] exact `i64` internal extent carriers (a [#729] child):** owns
   moving `RtDim::Lit`, `DimInfo`, `DimExpr::Concrete`, the tensor-type
   copies, and their wire forms from host-sized `usize` to exact `i64`. This
@@ -717,7 +734,7 @@ class completion oracle and ends with `RUNTIME EXTENT ORACLE: PASS`.
 | [#597] | static expand gets no evaluator type metadata | A |
 | [#609] | wrong-rank ascription is accepted | A |
 | [#665] | movement-op runtime wildcard is lost across Expand | B |
-| [#592] | grad/vmap backward Expand reaches the same missing source | B |
+| [#592] | grad-backward Expand size cannot be traced to a Load | A (size carrier); B for any kept-axis residue |
 | [#1265] | comparison consumer never selects the deferred shape | C |
 | [#1338] | coupled defaults settle nondeterministically | C / [#1341] mechanism |
 | [#578] | mechanism evidence only; full rank-polymorphic repro stays open | external rank-polymorphism work |
@@ -762,6 +779,22 @@ earlier draft or entered as repairs:
   reshape bystander target, so the carrier and its binding are unchanged.
 - **Enumerated mutation and wire-negative lists in C5.** Replaced by the
   properties the corpus generator derives rows from.
+- **A stored `Dag.runtime_dim_classes` field with per-pass remaps and wire
+  encoding** (removed after the fourth round). The four `spec/04` §4.7
+  sentences it cited fix placement and order, not storage; deriving the
+  classes at the consumption point from the stamped names and
+  `output_axis_sources`, as C4.5 already does for sources and as
+  `symbolic_bindings` does today from names alone, satisfies them without a
+  DAG field, a remap obligation in every pass, a wire encoding, or a
+  dependence on [#1372].
+- **A discharge clause for local class members** (removed after the fourth
+  round). It contradicted `spec/04` §4.7's "evaluated exactly once" and
+  `spec/06` §5.2's rule that a potentially trapping node is an observable
+  root.
+- **`InputAxis` for a binder-instantiated `reshape` target** (removed after
+  the fourth round). With `Sym` kept as the reshape-only carrier, the binder
+  fold applies to an `expand` size only; two conforming implementations
+  would otherwise have produced different bytes for one program.
 
 ### Removed from the earlier draft
 

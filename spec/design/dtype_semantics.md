@@ -1285,6 +1285,18 @@ compatibility exception or change the governing sparse semantic. Static
 checking, host evaluation, generated C, and the HIP execution fixture all lock
 the same rule, while reverse-mode AD remains fail-closed.
 
+[#1343] amends `spec/04-type-system.md` §4.7 (the runtime extent guard
+placement rule and the §4.7.2 settlement order for coupled positional `expand`
+defaults), `spec/05-risc-primitives.md` §2.4.1 and §2.5.1 (an `expand` size is
+an `RtDim`; the `InputAxis` carrier realizes the extent-argument fold; the
+per-operation admission sentence), and `spec/06-transformations.md` §3.3,
+§3.7, and §8.6 (runtime extents under `vmap`; `batch_varying_extent`). It
+deliberately moves the complete-file digests for those three chapters and for
+this document; it adds no atom and moves no atom or region digest, and it adds
+one required-literal anchor and one mutation test per amendment so the new
+text is defended rather than only re-hashed. The [05-OP-7] blockquote and
+§4.7.1's anchored sentences are byte-identical to their prior state.
+
 ## B2. Invariants that hold across every boundary
 
 1. **Controls never move.** Every green control in the audit test files
@@ -2045,3 +2057,4 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#1306]: https://github.com/Chelis-Lang/chelis/issues/1306
 [#1314]: https://github.com/Chelis-Lang/chelis/issues/1314
 [#1310]: https://github.com/Chelis-Lang/chelis/pull/1310
+[#1343]: https://github.com/Chelis-Lang/chelis/pull/1343
