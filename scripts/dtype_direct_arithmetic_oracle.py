@@ -177,6 +177,62 @@ def source_contracts() -> tuple[SourceContract, ...]:
             ("Tier-1 `max_elem` and `min_elem` are direct element-wise",),
             ("Tier-1 `max_elem` and Tier-2 `min_elem`",),
         ),
+        SourceContract(
+            "current builtin direct arithmetic grouping",
+            "crates/chelis-types/src/builtins.rs",
+            (
+                'tensor_binop("add", &mut env, &mut vg);\n    tensor_binop("sub", &mut env, &mut vg);\n    tensor_binop("mul", &mut env, &mut vg);',
+                'tensor_binop("max_elem", &mut env, &mut vg);\n    tensor_binop("min_elem", &mut env, &mut vg);',
+            ),
+            (
+                '// Tier 2: Derived built-ins\n    tensor_binop("sub", &mut env, &mut vg);',
+                'tensor_binop_to_out("matmul", &mut env, &mut vg);\n    tensor_binop("min_elem", &mut env, &mut vg);',
+            ),
+        ),
+        SourceContract(
+            "current lowering direct arithmetic grouping",
+            "crates/chelis-ir/src/lower.rs",
+            (
+                "// Direct Tier-1 subtraction identity",
+                "// Direct Tier-1 minimum selection identity",
+                "// --- Direct Tier-1 MinElem lowering ---",
+            ),
+            ("// Tier 2 decompositions\n            \"sub\"",),
+        ),
+        SourceContract(
+            "current Tier-2 helper module boundary",
+            "crates/chelis-ir/src/tier2.rs",
+            (
+                "Most functions in this module decompose Tier 2 derived operations",
+                "`lower_sub` and `lower_min_elem` emit direct Tier-1 identities",
+            ),
+            ("These functions decompose Tier 2 (derived) operations",),
+        ),
+        SourceContract(
+            "current gradient direct subtraction narrative",
+            "crates/chelis-ir/src/grad.rs",
+            ("sign = pos - neg_cast (direct Tier-1 Sub)",),
+            ("sign = pos - neg_cast  (tier2 sub)",),
+        ),
+        SourceContract(
+            "current span-survival direct subtraction narrative",
+            "crates/chelis-ir/tests/per_pass_span_propagation.rs",
+            ("direct Tier-1 sub identity",),
+            ("tier-2 sub (decomposes)",),
+        ),
+        SourceContract(
+            "current host-runtime direct extrema narrative",
+            "crates/chelis-compiler-api/tests/issue_185_host_runtime_binary.rs",
+            (
+                "direct Tier-1 extrema identities",
+                "exact stored-operand selection required by [05-OP-40]",
+            ),
+            (
+                "Binary Tier 2",
+                "binary_map(.., f64::max)",
+                "binary_map(.., f64::min)",
+            ),
+        ),
     )
 
 

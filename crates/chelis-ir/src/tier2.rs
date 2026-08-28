@@ -1,16 +1,19 @@
-//! Tier 2 decomposition helpers.
+//! Tier 2 decomposition helpers and direct identity lowerers.
 //!
-//! These functions decompose Tier 2 (derived) operations into Tier 1 RISC DAG nodes.
+//! Most functions in this module decompose Tier 2 derived operations into
+//! Tier 1 RISC DAG nodes. `lower_sub` and `lower_min_elem` emit direct Tier-1 identities
+//! while retaining this module's shared span-propagation path.
 //!
-//! Span propagation per `spec/design/chelis_span_survival.md` §2.3 Tier 2
-//! row: every synthesized sub-node inherits the decomposed parent's
+//! For decomposing helpers, span propagation follows
+//! `spec/design/chelis_span_survival.md` §2.3's Tier 2 row: every synthesized
+//! sub-node inherits the decomposed parent's
 //! `span_id`. If the parent had no span, sub-nodes carry the canonical
 //! `__synthesized_tier2__` marker (defined in
 //! `spec/03-deep-syntax.md` §1.1.1).
 //!
 //! Each public lowerer takes `parent_span: Option<&str>`:
-//!   * `Some(s)` — the operation's source span; sub-nodes inherit `s`.
-//!   * `None` — no source region; sub-nodes carry `__synthesized_tier2__`.
+//!   * `Some(s)` — the operation's source span; emitted nodes inherit `s`.
+//!   * `None` — no source region; emitted nodes carry `__synthesized_tier2__`.
 //!
 //! The internal `add_synth` helper applies the rule once per node so we
 //! don't duplicate it across the ~109 `add_node` callsites.

@@ -177,6 +177,40 @@ class SourceContractMutationTests(unittest.TestCase):
         ):
             oracle.validate_source_contracts(self.repo)
 
+    def test_required_surface_narrative_deletion_fails(self) -> None:
+        self.mutate(
+            "docs/CHELIS_SURFACE.md",
+            "Tier-1 DAG:   add sub mul div floor_div trunc_div max_elem min_elem cmplt",
+            "Tier-1 DAG:   add mul div floor_div trunc_div max_elem cmplt",
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "current direct arithmetic surface narrative"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_obsolete_surface_narrative_restoration_fails_independently(self) -> None:
+        current = "Tier-1 DAG:   add sub mul div floor_div trunc_div max_elem min_elem cmplt"
+        self.mutate(
+            "docs/CHELIS_SURFACE.md",
+            current,
+            current + "\n| `sub` | `add(a, neg(b))` |",
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "current direct arithmetic surface narrative"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_builtin_direct_identity_grouping_mutation_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-types/src/builtins.rs",
+            'tensor_binop("add", &mut env, &mut vg);\n    tensor_binop("sub", &mut env, &mut vg);\n    tensor_binop("mul", &mut env, &mut vg);',
+            'tensor_binop("add", &mut env, &mut vg);\n    tensor_binop("mul", &mut env, &mut vg);\n    tensor_binop("sub", &mut env, &mut vg);',
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "current builtin direct arithmetic grouping"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
 
 class RunnerTests(unittest.TestCase):
     @mock.patch.object(oracle, "validate_source_contracts")

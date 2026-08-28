@@ -8177,7 +8177,7 @@ impl LowerCtx {
                 self.attach_reuse_hint(node, app_span, &[x])
             }
 
-            // Tier 2 decompositions
+            // Direct Tier-1 subtraction identity
             "sub" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "sub lhs");
                 let b = self.lower_expr_node(&args[1], "sub rhs");
@@ -8189,6 +8189,7 @@ impl LowerCtx {
                 let node = tier2::lower_sub(&mut self.dag, a, b, &out_ty, parent_span.as_deref());
                 self.attach_reuse_hint(node, app_span, &[a, b])
             }
+            // Tier 2 decompositions
             "relu" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "relu input");
                 // Elementwise: output dims always come from the lowered
@@ -8505,6 +8506,7 @@ impl LowerCtx {
                 let parent_span = self.current_span_id.clone();
                 tier2::lower_neq(&mut self.dag, a, b, ty, parent_span.as_deref())
             }
+            // Direct Tier-1 minimum selection identity
             "min_elem" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "min_elem lhs");
                 let b = self.lower_expr_node(&args[1], "min_elem rhs");
@@ -14849,6 +14851,8 @@ mod tests {
         // a, b, CmpLt(a,b), CmpLt(b,a), MaxElem, Const(1), CmpLt(or, 1)
         assert_eq!(non_drop_len(&dag), 7);
     }
+
+    // --- Direct Tier-1 MinElem lowering ---
 
     #[test]
     fn lower_min_elem_preserves_direct_identity() {

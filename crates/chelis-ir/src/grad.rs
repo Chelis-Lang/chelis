@@ -946,7 +946,7 @@ fn compute_adjoints(
                 ty.clone(),
                 None,
             );
-            // sign = pos - neg_cast  (tier2 sub)
+            // sign = pos - neg_cast (direct Tier-1 Sub)
             let sign = tier2::lower_sub(dag, pos, neg_cast, &ty, None);
             let dx = dag.add_node(RiscOp::Mul, vec![sign, g], ty, None);
             Some(vec![(x, dx)])

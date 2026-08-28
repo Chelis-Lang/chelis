@@ -2115,6 +2115,7 @@ pub fn builtin_env() -> (Env, VarGen) {
 
     // Tier 1: RISC Primitives
     tensor_binop("add", &mut env, &mut vg);
+    tensor_binop("sub", &mut env, &mut vg);
     tensor_binop("mul", &mut env, &mut vg);
     // `div` and `recip` were promoted from a Tier 2
     // `exp(neg(log(_)))` decomposition to native Tier 1 primitives
@@ -2128,6 +2129,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_binop("floor_div", &mut env, &mut vg);
     tensor_binop("trunc_div", &mut env, &mut vg);
     tensor_binop("max_elem", &mut env, &mut vg);
+    tensor_binop("min_elem", &mut env, &mut vg);
 
     tensor_unop("neg", &mut env, &mut vg);
     tensor_unop("recip", &mut env, &mut vg);
@@ -2147,7 +2149,6 @@ pub fn builtin_env() -> (Env, VarGen) {
     cmplt_sig("cmplt", &mut env, &mut vg);
 
     // Tier 2: Derived built-ins
-    tensor_binop("sub", &mut env, &mut vg);
     generic_binop("mod", &mut env, &mut vg);
     cmplt_sig("eq", &mut env, &mut vg);
     cmplt_sig("neq", &mut env, &mut vg);
@@ -2180,7 +2181,6 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_reduce_to_out("mean", &mut env, &mut vg);
 
     tensor_binop_to_out("matmul", &mut env, &mut vg);
-    tensor_binop("min_elem", &mut env, &mut vg);
     tensor_triop_return_first("layer_norm", &mut env, &mut vg);
     tensor_conv2d("conv2d", &mut env, &mut vg);
     tensor_reduce_to_out("sum", &mut env, &mut vg);

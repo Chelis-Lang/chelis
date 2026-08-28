@@ -1016,7 +1016,7 @@ fn s3_oracle_lowering_then_optimization_passes() {
     use chelis_types::{check_ir_program, check_linearity};
     use std::collections::BTreeSet;
 
-    // A small but rich program: tier-2 sub (decomposes), constants
+    // A small but rich program: direct Tier-1 sub identity, constants
     // (fold-eligible if operands match), repeated subexpression
     // (CSE-eligible). Every node carries its own span.
     let source = r#"
