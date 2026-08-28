@@ -3233,6 +3233,208 @@ int main(void) {{
     );
 }
 
+fn direct_fused_reduction_runtime_shape_guard_case(reduce_kind: &str) {
+    let matrix = |row_name: &str, column_name: &str| TensorType {
+        dims: vec![
+            DimInfo::Named(row_name.into(), None),
+            DimInfo::Named(column_name.into(), None),
+        ],
+        precision: Prim::F32,
+    };
+    let mut dag = Dag::new();
+    let output_matrix_ty = matrix("rows", "columns");
+    let other_matrix_ty = matrix("other_rows", "other_columns");
+    let scalar = dag.add_node(
+        RiscOp::Load {
+            name: "scalar".into(),
+        },
+        vec![],
+        TensorType::scalar_f32(),
+        None,
+    );
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        output_matrix_ty.clone(),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        other_matrix_ty,
+        None,
+    );
+    let shifted = dag.add_node(RiscOp::Add, vec![scalar, a], output_matrix_ty.clone(), None);
+    let product = dag.add_node(RiscOp::Mul, vec![shifted, b], output_matrix_ty, None);
+    let output_ty = TensorType {
+        dims: vec![DimInfo::Named("rows".into(), None)],
+        precision: Prim::F32,
+    };
+    let reduced = match reduce_kind {
+        "sum" => dag.add_node(
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: Prim::F32,
+            },
+            vec![product],
+            output_ty,
+            None,
+        ),
+        "max" => dag.add_node(
+            RiscOp::MaxReduce { axis: 1 },
+            vec![product],
+            output_ty,
+            None,
+        ),
+        _ => unreachable!(),
+    };
+    dag.add_root(reduced);
+
+    let fused = fuse(&dag);
+    let fused_node = fused
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.op, RiscOp::FusedElem { .. }))
+        .expect("Add -> Mul must form a FusedElem before reduction inlining");
+    assert_eq!(
+        fused_node.inputs,
+        vec![scalar, a, b],
+        "the scalar must be first so the guard proves all-pairs tensor comparison"
+    );
+    assert!(
+        chelis_ir::fuse::reduction_inlined_fused_elems(&fused).contains(&fused_node.id),
+        "the regression must exercise the reduction-inlined FusedElem path"
+    );
+
+    let function = format!("direct_fused_{reduce_kind}_runtime_shape_guard");
+    let src = chelis_backend_c::codegen(&fused, &function)
+        .expect("fused reduction runtime-shape codegen")
+        .c_source;
+    let function_body = src
+        .split_once(&format!("void {function}("))
+        .unwrap_or_else(|| panic!("generated C omitted {function}:\n{src}"))
+        .1;
+    let guard_offset = function_body
+        .find("elementwise operand shape mismatch")
+        .unwrap_or_else(|| panic!("inlined {reduce_kind} dropped its shape guard:\n{src}"));
+    let allocation_offset = function_body
+        .find("chelis_alloc(")
+        .unwrap_or_else(|| panic!("inlined {reduce_kind} emitted no output allocation:\n{src}"));
+    assert!(
+        guard_offset < allocation_offset,
+        "inlined {reduce_kind} must guard before allocation or indexing:\n{src}"
+    );
+    assert!(
+        function_body.contains("if (t1->rank == t2->rank)"),
+        "scalar-first ordering must still compare the later tensor pair:\n{src}"
+    );
+    assert_eq!(
+        function_body.matches("chelis_alloc(").count(),
+        1,
+        "reduction-inlined FusedElem must not allocate an intermediate:\n{src}"
+    );
+
+    let expected = if reduce_kind == "sum" {
+        "29.0f, 110.0f"
+    } else {
+        "16.0f, 49.0f"
+    };
+    let harness_support = r#"
+static chelis_tensor make_scalar_view(float *data) {
+    return (chelis_tensor){
+        .data = data, .shape = NULL, .strides = NULL, .size = 1,
+        .byte_capacity = (int64_t)sizeof(float), .rank = 0,
+        .dtype = CHELIS_DTYPE_F32, .owns_data = 0, .reserved = {0, 0},
+    };
+}
+static chelis_tensor make_matrix_view(
+    float *data, int64_t *shape, int64_t *strides, int64_t backing_elements
+) {
+    return (chelis_tensor){
+        .data = data, .shape = shape, .strides = strides,
+        .size = shape[0] * shape[1],
+        .byte_capacity = backing_elements * (int64_t)sizeof(float), .rank = 2,
+        .dtype = CHELIS_DTYPE_F32, .owns_data = 0, .reserved = {0, 0},
+    };
+}
+"#;
+    let positive_harness = format!(
+        r#"{HARNESS_HEADER}{harness_support}
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    float scalar_data[1] = {{1.0f}};
+    float a_data[6] = {{1, 2, 3, 4, 5, 6}};
+    float b_data[7] = {{2, 3, 4, -99, 5, 6, 7}};
+    int64_t a_shape[2] = {{2, 3}}, a_strides[2] = {{3, 1}};
+    int64_t b_shape[2] = {{2, 3}}, b_strides[2] = {{4, 1}};
+    chelis_tensor scalar = make_scalar_view(scalar_data);
+    chelis_tensor a = make_matrix_view(a_data, a_shape, a_strides, 6);
+    chelis_tensor b = make_matrix_view(b_data, b_shape, b_strides, 7);
+    chelis_tensor *inputs[3] = {{&scalar, &a, &b}};
+    chelis_tensor *outputs[1] = {{NULL}};
+    {function}(inputs, 3, outputs, 1);
+    float expected[2] = {{{expected}}};
+    float *got = (float *)outputs[0]->data;
+    for (int i = 0; i < 2; i++) if (fabsf(got[i] - expected[i]) > 1e-6f) return 1;
+    puts("PASS");
+    return 0;
+}}
+"#
+    );
+    let output = compile_and_run_kernel(
+        &format!("direct_fused_{reduce_kind}_shape_positive"),
+        &src,
+        &positive_harness,
+    )
+    .unwrap_or_else(|| panic!("inlined {reduce_kind} positive case failed"));
+    assert!(output.contains("PASS"), "inlined {reduce_kind}: {output}");
+
+    let mismatch_harness = format!(
+        r#"{HARNESS_HEADER}{harness_support}
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    float scalar_data[1] = {{1.0f}};
+    float a_data[6] = {{1, 2, 3, 4, 5, 6}};
+    float b_data[5] = {{2, 3, -99, 5, 6}};
+    int64_t a_shape[2] = {{2, 3}}, a_strides[2] = {{3, 1}};
+    int64_t b_shape[2] = {{2, 2}}, b_strides[2] = {{3, 1}};
+    chelis_tensor scalar = make_scalar_view(scalar_data);
+    chelis_tensor a = make_matrix_view(a_data, a_shape, a_strides, 6);
+    chelis_tensor b = make_matrix_view(b_data, b_shape, b_strides, 5);
+    chelis_tensor *inputs[3] = {{&scalar, &a, &b}};
+    chelis_tensor *outputs[1] = {{NULL}};
+    {function}(inputs, 3, outputs, 1);
+    puts("UNREACHABLE");
+    return 0;
+}}
+"#
+    );
+    let run = compile_and_capture_run(
+        &format!("direct_fused_{reduce_kind}_shape_mismatch"),
+        &src,
+        &mismatch_harness,
+    );
+    assert!(
+        !run.status.success(),
+        "inlined {reduce_kind} mismatch reached allocation/indexing"
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains("elementwise operand shape mismatch"),
+        "inlined {reduce_kind} mismatch emitted the wrong diagnostic: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn direct_fused_sum_runtime_shape_guard_precedes_allocation_and_executes() {
+    direct_fused_reduction_runtime_shape_guard_case("sum");
+}
+
+#[test]
+fn direct_fused_max_reduce_runtime_shape_guard_precedes_allocation_and_executes() {
+    direct_fused_reduction_runtime_shape_guard_case("max");
+}
+
 #[derive(Clone, Copy)]
 struct DirectExtremaBitCase<'a> {
     tag: &'a str,

@@ -170,29 +170,47 @@ pub fn grad_dag_checked(
     // Walk the subgraph of nodes reachable from `output` and look for ops
     // whose adjoint is intentionally undefined.
     //
-    // chelis#616: a movement op's bound-source inputs (`inputs[1..]` — the
-    // rank-0 integer `Shape`/arithmetic scalars that compute a runtime
-    // `shrink`/`stride`/`pad` bound or a runtime `reshape` target extent, e.g.
-    // the window count `m`) are INDEX MATH, not data. They carry no cotangent
-    // (the adjoint routes gradient only to `inputs[0]`), so they are a
-    // stop-gradient boundary and must not pull their producers — which may be
-    // intentionally non-differentiable (e.g. the window-count `floor_div`) —
-    // into the differentiability check. A bound scalar that is ALSO reached via
-    // a genuine data edge stays live through that edge and is still checked.
+    // chelis#616: movement bound sources and indexed-operation indices are
+    // INDEX MATH, not data. They carry no cotangent, so their input edges are a
+    // stop-gradient boundary and must not pull their producers -- which may be
+    // intentionally non-differentiable integer arithmetic -- into this check.
+    // The edge selection here mirrors `compute_adjoints`: movement ops and
+    // `Gather` route only to their values input, while `ScatterAdd` routes to
+    // target and updates but not indices. A control scalar that is ALSO reached
+    // through a genuine data edge stays live through that edge and is checked.
     let mut live = vec![false; forward.len()];
     live[output.0] = true;
     for i in (0..forward.len()).rev() {
         if live[i] {
             let node = &forward.nodes()[i];
-            let differentiable_inputs: &[NodeId] = match &node.op {
+            match &node.op {
                 RiscOp::Shrink { .. }
                 | RiscOp::Stride { .. }
                 | RiscOp::Pad { .. }
-                | RiscOp::Reshape { .. } => &node.inputs[..node.inputs.len().min(1)],
-                _ => &node.inputs,
-            };
-            for input in differentiable_inputs {
-                live[input.0] = true;
+                | RiscOp::Reshape { .. }
+                | RiscOp::Gather { .. } => {
+                    if let Some(values) = node.inputs.first() {
+                        live[values.0] = true;
+                    }
+                }
+                RiscOp::ScatterAdd { .. } => {
+                    if let Some(target) = node.inputs.first() {
+                        live[target.0] = true;
+                    }
+                    if let Some(updates) = node.inputs.get(2) {
+                        live[updates.0] = true;
+                    }
+                }
+                // A comparison contributes an exact zero cotangent to both
+                // operands. Its predicate may control differentiable float
+                // selection, but the arithmetic that formed the predicate is
+                // not itself on the gradient path.
+                RiscOp::CmpLt => {}
+                _ => {
+                    for input in &node.inputs {
+                        live[input.0] = true;
+                    }
+                }
             }
         }
     }

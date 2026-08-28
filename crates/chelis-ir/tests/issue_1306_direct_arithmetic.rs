@@ -225,6 +225,136 @@ fn integer_direct_sub_and_extrema_are_forward_only() {
 }
 
 #[test]
+fn integer_extrema_used_only_as_discrete_indices_do_not_poison_float_ad() {
+    for indexed_op in ["gather", "scatter_add"] {
+        let mut dag = Dag::new();
+        let values_ty = TensorType {
+            dims: vec![chelis_ir::dag::DimInfo::Lit(3)],
+            precision: Prim::F32,
+        };
+        let index_ty = scalar_at(Prim::Int64);
+        let values = dag.add_node(
+            RiscOp::Load {
+                name: "values".into(),
+            },
+            vec![],
+            values_ty.clone(),
+            None,
+        );
+        let left = dag.add_node(
+            RiscOp::Load {
+                name: "left_index".into(),
+            },
+            vec![],
+            index_ty.clone(),
+            None,
+        );
+        let right = dag.add_node(
+            RiscOp::Load {
+                name: "right_index".into(),
+            },
+            vec![],
+            index_ty.clone(),
+            None,
+        );
+        let index = dag.add_node(RiscOp::MaxElem, vec![left, right], index_ty, None);
+
+        let output = if indexed_op == "gather" {
+            dag.add_node(
+                RiscOp::Gather { axis: 0 },
+                vec![values, index],
+                scalar_at(Prim::F32),
+                None,
+            )
+        } else {
+            let update = dag.add_node(
+                RiscOp::Load {
+                    name: "update".into(),
+                },
+                vec![],
+                scalar_at(Prim::F32),
+                None,
+            );
+            let scattered = dag.add_node(
+                RiscOp::ScatterAdd { axis: 0 },
+                vec![values, index, update],
+                values_ty,
+                None,
+            );
+            dag.add_node(
+                RiscOp::Sum {
+                    axis: 0,
+                    accumulator: Prim::F32,
+                },
+                vec![scattered],
+                scalar_at(Prim::F32),
+                None,
+            )
+        };
+
+        let differentiated = grad_dag_checked(&dag, output, &[values]).unwrap_or_else(|error| {
+            panic!("{indexed_op} index control math leaked into float AD: {error}")
+        });
+        assert!(
+            differentiated.grad_nodes.contains_key(&values),
+            "{indexed_op} lost the differentiable values edge"
+        );
+    }
+}
+
+#[test]
+fn integer_extrema_used_only_to_form_a_predicate_do_not_poison_float_ad() {
+    let mut dag = Dag::new();
+    let float_ty = scalar_at(Prim::F32);
+    let int_ty = scalar_at(Prim::Int64);
+    let value = dag.add_node(
+        RiscOp::Load {
+            name: "value".into(),
+        },
+        vec![],
+        float_ty.clone(),
+        None,
+    );
+    let left = dag.add_node(
+        RiscOp::Load {
+            name: "left_index".into(),
+        },
+        vec![],
+        int_ty.clone(),
+        None,
+    );
+    let right = dag.add_node(
+        RiscOp::Load {
+            name: "right_index".into(),
+        },
+        vec![],
+        int_ty.clone(),
+        None,
+    );
+    let maximum = dag.add_node(RiscOp::MaxElem, vec![left, right], int_ty.clone(), None);
+    let zero = dag.add_node(RiscOp::synth_const(Prim::Int64, 0.0), vec![], int_ty, None);
+    let predicate = dag.add_node(
+        RiscOp::CmpLt,
+        vec![maximum, zero],
+        scalar_at(Prim::Bool),
+        None,
+    );
+    let mask = dag.add_node(
+        RiscOp::Cast {
+            new_precision: Prim::F32,
+        },
+        vec![predicate],
+        float_ty.clone(),
+        None,
+    );
+    let output = dag.add_node(RiscOp::Mul, vec![mask, value], float_ty, None);
+
+    let differentiated = grad_dag_checked(&dag, output, &[value])
+        .unwrap_or_else(|error| panic!("predicate control math leaked into float AD: {error}"));
+    assert!(differentiated.grad_nodes.contains_key(&value));
+}
+
+#[test]
 fn signed_integer_extrema_chains_stay_materialized_for_typed_backends() {
     for precision in [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64] {
         let mut dag = Dag::new();
