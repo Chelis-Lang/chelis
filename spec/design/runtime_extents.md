@@ -335,9 +335,9 @@ struct ProvisionalOutputAxisIdentityAnnotation {
 }
 
 enum ProvisionalRuntimeIdentityEvidence {
-    Unclassed { typed_site: TypedSiteId },
+    Unclassed { site: RuntimeIdentityEvidenceSite },
     ProvedEqual { proof: ProvisionalRuntimeDimProofEvidence },
-    NotProved { typed_site: TypedSiteId },
+    NotProved { site: RuntimeIdentityEvidenceSite },
 }
 
 struct ProvisionalRuntimeDimProofEvidence {
@@ -422,6 +422,11 @@ enum RuntimeOrigin {
     },
 }
 
+enum RuntimeIdentityEvidenceSite {
+    Typed { typed_site: TypedSiteId },
+    Synthesized { origin: RuntimeOriginId },
+}
+
 struct RuntimeDimSourceDeclaration {
     id: RuntimeDimSourceId,
     occurrence: RuntimeValueOccurrenceId,
@@ -447,12 +452,59 @@ struct RuntimeDimUseDeclaration {
     origin: RuntimeDimUseOrigin,
 }
 
+enum RuntimeBoundField {
+    ExpandSize,
+    ReshapeNewShape { axis: i32 },
+    PadBefore { axis: i32 },
+    PadAfter { axis: i32 },
+    ShrinkStart { axis: i32 },
+    ShrinkEnd { axis: i32 },
+    Stride { axis: i32 },
+}
+
 enum RuntimeDimUseOrigin {
     Bound { origin: RuntimeOriginId, field: RuntimeBoundField },
     AliasAxis { origin: RuntimeOriginId, axis: usize },
     ScalarAlias { origin: RuntimeOriginId },
 }
 ```
+
+`RuntimeBoundField` is closed and its canonical/Wire tag bytes are frozen:
+
+| variant | tag byte | Wire tag | only legal destination |
+|---|---:|---|---|
+| `ExpandSize` | `0x00` | `expand_size` | `Expand.size` |
+| `ReshapeNewShape { axis }` | `0x01` | `reshape_new_shape` | `Reshape.new_shape[axis]` |
+| `PadBefore { axis }` | `0x02` | `pad_before` | `Pad.padding[axis].before` |
+| `PadAfter { axis }` | `0x03` | `pad_after` | `Pad.padding[axis].after` |
+| `ShrinkStart { axis }` | `0x04` | `shrink_start` | `Shrink.bounds[axis].start` |
+| `ShrinkEnd { axis }` | `0x05` | `shrink_end` | `Shrink.bounds[axis].end` |
+| `Stride { axis }` | `0x06` | `stride` | `Stride.strides[axis]` |
+
+Every indexed payload is an exact nonnegative `int32` and must be within the
+owning vector before any host index conversion. Canonical order is tag byte,
+then numeric axis for indexed variants. A variant used with another operation,
+side, endpoint, or axis is invalid even if a value at that location happens to
+match. The same algebra and tag bytes are used by provisional/final use
+declarations, evidence destinations, graph annotations, canonical comparison,
+Wire encode/decode, and mutations; no target or decoder has a generic
+owner-plus-integer fallback.
+
+`RuntimeIdentityEvidenceSite` is likewise a closed provenance algebra for
+negative and unclassed evidence. `Typed` has frozen Wire tag `0x00`
+(`typed_site`) and must name the exact canonical typed-arena site for the
+destination. `Synthesized` has tag `0x01` (`synthesized_origin`) and must name a
+live `RuntimeOrigin::Synthesized`; that origin's transform, parent, and
+`GeneratedExtentPath` must select the exact frozen `OutputAxisRule` row for the
+destination operation and axis. A generated unclassed axis or fresh witness
+uses `Synthesized` and may not borrow a parent or sibling `TypedSiteId`.
+`ProvedEqual` does not use this negative-site algebra: its
+`RuntimeDimProofEvidence.typed_site` always remains the canonical typed proof
+site, even when the proved alias's destination origin is synthesized. Typed
+sites are preserved by transforms; synthesized evidence sites are remapped
+atomically with their `RuntimeOriginId`, generated path, evidence destination,
+and graph annotation. Missing, typed/synthesized-kind mismatched, redirected,
+or rule-incompatible sites fail before finalization and after Wire decode.
 
 `ProvisionalRuntimeDimDeclaration` uses the same owner, occurrence,
 many-to-many binding, and complete source/use algebras as the final
@@ -1399,9 +1451,9 @@ enum AxisSource {
   }
 
   enum RuntimeIdentityEvidence {
-      Unclassed { typed_site: TypedSiteId },
+      Unclassed { site: RuntimeIdentityEvidenceSite },
       ProvedEqual { proof: RuntimeDimProofEvidence },
-      NotProved { typed_site: TypedSiteId },
+      NotProved { site: RuntimeIdentityEvidenceSite },
   }
 
   struct RuntimeDimProofEvidence {
@@ -1457,7 +1509,12 @@ enum AxisSource {
   the exact provisional bound or output-axis annotation named by the record's
   destination. A synthesized destination keeps its synthesized origin while a
   `ProvedEqual` record keeps the canonical typed site that supplied the proof;
-  destination origin and proof site are deliberately distinct fields.
+  destination origin and proof site are deliberately distinct fields. An
+  `Unclassed` or `NotProved` record instead carries
+  `RuntimeIdentityEvidenceSite::Typed` when inference created it at a typed
+  site, or `Synthesized` when a transform created the destination. The latter
+  points to that exact synthesized origin and its path-selected rule; it never
+  fabricates or inherits a typed site.
   Transactions preserve the record/annotation pair or apply the one atomic
   class/use/proof/evidence remap above; finalization translates it through the
   checked provisional-to-final bijections into a linked
@@ -1694,7 +1751,11 @@ axes and windows in one issue.
    still name their original destination. Mutations replace a provisional
    class/use with a final numeric ref, swap evidence IDs between two axes,
    mismatch a record's origin/field-or-axis/class-use destination, or update
-   only the annotation or record half; each fails before finalization. Clone and
+   only the annotation or record half; each fails before finalization. Closed
+   bound-field rows independently change the indexed axis, swap `PadBefore`
+   with `PadAfter`, swap `ShrinkStart` with `ShrinkEnd`, use a field tag with
+   the wrong owning operation, or redirect its class/use; all fail against the
+   exact graph location and seven-tag registry. Clone and
    vmap rows freshen all three endpoints for a cloned local proof while leaving
    a captured outer proof unchanged; mutations that freshen only the class,
    only the source, or only the occurrence fail atomically. Import rows remap
@@ -1702,6 +1763,14 @@ axes and windows in one issue.
    only a proof's occurrence to the selected equivalent physical occurrence,
    while DCE rows either retain all endpoints or discharge the complete proof
    and dependent axis/use. Stale pre-CSE/pre-DCE proof redirections fail.
+   Grad, vmap, specialization, clone, and import rows create both synthesized
+   unclassed axes and synthesized fresh witnesses with
+   `RuntimeIdentityEvidenceSite::Synthesized`, while synthesized proved aliases
+   retain their real canonical typed proof sites. Mutations fabricate or borrow
+   a typed site for either negative case, redirect the synthesized origin to a
+   sibling, preserve an imported pre-remap origin, change its generated path or
+   selected `OutputAxisRule`, or give a `ProvedEqual` record a synthesized
+   proof site; each fails before finalization and after Wire decode.
    The shared-occurrence
    `a`/`b` rows remain one compute-once producer with two independent class
    edges and guards. Mutations that add a binding to the unclassed literal,
@@ -1776,7 +1845,9 @@ axes and windows in one issue.
 9. **WireDag v8.** Exact JSON round-trip, stable bytes/hash, prove and offline
    extraction, compiler-API and binding consumption, and the capacity census
    are green. Structural decoder negatives include missing size, old or future
-   version, illegal bound tag, missing or out-of-range input slot, later-node
+   version, illegal bound tag, a negative/out-of-range bound-field axis, wrong
+   indexed axis, Pad side, Shrink endpoint, or owner-specific field variant,
+   missing or out-of-range input slot, later-node
    reference, non-scalar source, wrong dtype, malformed `input_axis` tensor or
    axis slot, wrong axis dtype, missing/duplicate/reordered/stale declaration
    or class member, invalid lexical/scope-instance owner, invalid synthesized
@@ -1785,9 +1856,11 @@ axes and windows in one issue.
    a duplicate complete origin/generated-path identity or conflicting
    mutation-site tags under one transform ID, malformed
    scope-instance lineage, duplicate complete owner identity, malformed or
-   missing typed identity evidence, a missing/duplicate evidence ID, a bound or
+   missing identity evidence, a missing/duplicate evidence ID, a bound or
    output annotation whose evidence destination origin/field/axis/class-use
-   differs from its record, a proof/source mismatch, or an attempted
+   differs from its record, a typed/synthesized evidence-site kind mismatch,
+   fabricated or borrowed typed site on a synthesized unclassed/fresh axis,
+   redirected synthesized origin/path/rule, a proof/source mismatch, or an attempted
    `NotProved`-to-`ProvedEqual` upgrade,
    missing occurrence/source/use ID, placement, stamp, or binding;
    declaration/occurrence/stamp disagreement; correlated binding-plus-manifest
@@ -1902,8 +1975,11 @@ never reused.
   `RuntimeOrigin`, `RuntimeIdentityEvidenceRecord`, and
   `WireRuntimeValueOccurrence` tables. Identity evidence retains the canonical
   evidence ID, exact bound-field or output-axis destination, optional
-  class/use, canonical typed site and, for `ProvedEqual`, the checker's exact
-  typed-proof record. Each `WireRuntimeExtent.evidence` and output-axis
+  class/use, and the frozen `typed_site` or `synthesized_origin` site tag for
+  `Unclassed`/`NotProved`; `ProvedEqual` instead retains the checker's exact
+  canonical typed-proof record. Bound destinations use the seven frozen
+  `RuntimeBoundField` tags and exact nonnegative-`int32` axis payloads above.
+  Each `WireRuntimeExtent.evidence` and output-axis
   evidence ID resolves to exactly one record whose destination repeats that
   graph location and class/use, and each record has exactly one destination;
   `NotProved` can never decode as `ProvedEqual`. The finalized evidence is
@@ -2087,7 +2163,9 @@ sources, the independent provisional authority, sealed annotated graph, and
 closed atomic graph/authority transaction API,
 provisional hygienic annotations, the provisional proof/source algebra and
 state-indexed graph bound references, non-forgeable evidence IDs with exact
-destinations, atomic proof/ref/attachment remapping, the checked
+destinations, the seven-variant indexed `RuntimeBoundField` algebra and frozen
+tags, typed-versus-synthesized negative/unclassed evidence sites, atomic
+proof/ref/site/attachment remapping, the checked
 provisional-to-final bijections and consume-to-annotated inverse baseline, the
 typed/synthesized origin algebra,
 the exact structural origin comparator, a serialized checked transform cursor
@@ -2116,7 +2194,7 @@ for the next monotonic WireDag version (v8 from the current v6 baseline).
 Write the derived positive, negative, proof-sensitive same/cross-tensor,
 shared-occurrence/many-to-many, equality-class/observable-event-schedule,
 same-class CSE exclusion, semantic-transit/cross-host, owner-matrix, and
-transform test stubs before
+bound-destination/evidence-site, and transform test stubs before
 implementation. Then deliver C2.1-C2.6 and C6
 across all in-memory, target, transform, and wire consumers, followed by C2.7
 deletion. Close
@@ -2134,7 +2212,8 @@ artifacts, keys, APIs/maps/intermediates, operation parameters, and conversions;
 the exact `RuntimeExtent` owner matrix; provisional hygienic keys and the
 independent provisional authority, opaque provisional proof/source algebra,
 state-indexed graph bound references, non-forgeable evidence IDs and exact
-destinations, atomic proof/ref/attachment remapping, checked
+destinations, the closed indexed bound-field tags, typed/synthesized evidence
+site algebra, atomic proof/ref/site/attachment remapping, checked
 provisional-to-final bijections, and consume-to-annotated inverse baseline;
 sealed graph, atomic mutation transactions,
 opaque annotated/finalized public states, finalized-only Eval/backend/cache
@@ -2161,6 +2240,8 @@ and callsite registry,
 `BroadcastScalarRef`, trap/effect occurrence rules, and transform/fusion
 behavior for every bound-dependency class;
 the same-class witness-source CSE exclusion;
+the exact bound-field owner/index/side/endpoint algebra and synthesized
+unclassed/fresh-witness evidence provenance;
 WireDag v8; no provenance-rejection construct; one static folder; all-lane
 guard placement.
 
@@ -2175,7 +2256,9 @@ and entry-selection rows, same/cross-tensor proof-identity rows,
 earlier-owner/source/use/evidence redirection, correlated graph-ref/evidence
 attachment mutations, clone/vmap/import/CSE/DCE proof remap, and
 consume/refinalize inverse-map rows; shared-occurrence two-class and same-class
-CSE-exclusion rows,
+CSE-exclusion rows; bound-field axis/side/endpoint/owner mutations and
+grad/vmap/specialization/clone/import typed-versus-synthesized evidence-site
+rows,
 compute-once vmap/fusion trap/effect rows, retained
 high-water/DCE/hash rows, structural Wire negatives, coherent-replacement
 integrity mismatches, zero, and negative rows owned by this phase, plus the
