@@ -1293,8 +1293,9 @@ per-operation admission sentence), and `spec/06-transformations.md` §3.3,
 §3.7, and §8.6 (runtime extents under `vmap`; `batch_varying_extent`). It
 deliberately moves the complete-file digests for those three chapters and for
 this document; it adds no atom and moves no atom or region digest, and it adds
-one required-literal anchor and one mutation test per amendment so the new
-text is defended rather than only re-hashed. The [05-OP-7] blockquote and
+one required-literal anchor and one mutation test for each new rule (seven in
+all) so the new rules are defended rather than only re-hashed, while
+connective sentences rest on the file digests. The [05-OP-7] blockquote and
 §4.7.1's anchored sentences are byte-identical to their prior state.
 
 ## B2. Invariants that hold across every boundary

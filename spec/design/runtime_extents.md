@@ -192,7 +192,7 @@ enum RtAxis {
 }
 
 struct RuntimeDimClass {
-    name: DimName,                    // the binder name the checker stamped
+    claim: Dim,                       // the stamped binder name or literal
     members: Vec<RuntimeDimMember>,   // first member is canonical
 }
 
@@ -261,19 +261,28 @@ fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
   plus one, stamps complete type metadata, and validates a declared or
   ascribed rank and dimensions against it. The early exit that causes
   [#597] and [#609] is deleted.
-- **C2.4 Equality classes are derived, not stored.** Every binder name that
-  the checker stamped on more than one witness is one `RuntimeDimClass`,
-  computed by `derive_runtime_dim_classes` from the DAG a lane consumes,
-  after the last rewrite, at the same point as `output_axis_sources`
-  (C4.5). Grouping is by the stamped name, which is the output of the typed
-  identity proof (C1.2) and is what `symbolic_bindings` (`dag.rs:2283`)
-  groups by today; location is by source, never by a string search: a
-  `Load` axis carrying the name is an interface member with its declared
-  signature index, an output axis whose `output_axis_sources` entry is
-  `OpComputed` and carries the name is an op-declared member, an axis that
-  maps to an input axis is pass-through and not a member, and a rank-0
-  scalar witness is a `Scalar` member. The first member is canonical; every
-  other member is exactly one equality guard against it, placed by C1.3.
+- **C2.4 Equality classes are derived, not stored.** Every stamped `Dim`
+  claim, a binder name or a literal, that the checker attached to more than
+  one witness is one `RuntimeDimClass`, computed by
+  `derive_runtime_dim_classes` from the DAG a lane consumes, after the last
+  rewrite, at the same point as `output_axis_sources` (C4.5). Grouping is by
+  the stamped claim, which is the output of the typed identity proof (C1.2)
+  and is what `symbolic_bindings` (`dag.rs:2283`) groups by today for names;
+  location is by source, never by a string search: a `Load` axis carrying
+  the claim is an interface member with its declared signature index; an
+  output axis carrying the claim whose `output_axis_sources` entry is
+  `OpComputed` is an op-declared member, whose entry is `InputAxis` from a
+  shape-only slot (a folded read of another tensor) is a `TensorAxis`
+  member, whose entry is `ScalarInput` is a `Scalar` member, and whose entry
+  is `Literal` is a `Literal` member; an axis whose entry is `InputAxis` from
+  the tensor operand is pass-through and not a member. A literal claim on an
+  anonymous runtime extent (`-> tensor[8, f32]` over `expand(b, 0,
+  mul(shape(x, 0), 2i64))`) is therefore a class whose canonical member is
+  the literal and whose other member is the scalar, and a cross-tensor
+  folded read under a name is a class with the declaring `Load` axis and the
+  `TensorAxis` member, exactly the two guards `spec/04` §4.7.2 and §4.7.3
+  require. The first member is canonical; every other member is exactly one
+  equality guard against it, placed by C1.3.
   Four rules, each from a `spec/04` §4.7 sentence:
   - the canonical member is the signature-first witness, so interface
     members order by declared signature index (node position is name order
@@ -345,9 +354,15 @@ fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
 - **C2.7 The deletion is atomic with the usable replacement.** Only after
   C2.1-C2.6 are green for a lane does the slice delete `SizeClass`,
   `classify_expand_size`, `classify_arith_app`,
-  `sourceless_expand_size_error`, `Env::size_provenance` and its plumbing,
-  and the lowerer's mirror rejections at `lower.rs:9109-9190`. No
-  intermediate commit may accept a value the IR cannot carry. Slice B
+  `sourceless_expand_size_error`, and `Env::size_provenance` and its
+  plumbing. No intermediate commit may accept a value the IR cannot carry,
+  and none may execute a claimed extent without its guard: until Slice B
+  places guards, a `Node`-sized `expand` or `reshape` whose result axis
+  carries a literal or named claim that is not statically proved stays
+  rejected at lowering (the two sites at `lower.rs:9109-9190`, re-emitted as
+  the registered [#730] `Unsupported` receipt rather than a fatal error), so
+  those rows sit at `typed_unsupported` in the C5 lattice; an unclaimed
+  result executes in Slice A. Slice B deletes that receipt when it
   separately replaces `symbolic_occurrences`, `op_declared_output_axes`, and
   `shape_source_for_axis` with `output_axis_sources`, and
   `symbolic_bindings` with `derive_runtime_dim_classes`, once every lane
@@ -619,9 +634,12 @@ transform, and verifier consumer (C2.5, C2.6); the wire change under the
 next monotonic `WIRE_DAG_SCHEMA_VERSION` at landing, coordinated with [#1298]
 so the two migrations use distinct successive versions and both trackers,
 `spec/10`, fixtures, hashes, and rejected-version controls update together;
-the regenerated typed wire capacity census; then C2.7's deletion. Close
-[#1367], [#1266], [#569], [#597], [#609], and [#592] if its reproducer is
-green once the size carrier lands. [#578] remains open; commits
+the regenerated typed wire capacity census; then C2.7's deletion, with the
+lowering-time [#730] receipt retained for a `Node`-sized owner under an
+unproved literal or named claim. Close [#1367], [#1266], [#569], [#597],
+[#609], and [#592] if its reproducer is green once the size carrier lands;
+an instance whose reproducer claims a named result over a `Node` size
+closes in Slice B. [#578] remains open; commits
 that improve its mechanism use `Part of #578` until its complete
 rank-polymorphic acceptance reproducer is green under the owning
 rank-polymorphism work.
@@ -630,7 +648,8 @@ rank-polymorphism work.
 `Expand.size: RtDim`; the `InputAxis` carrier with a literal axis; the owner
 matrix in memory and on the wire; the single static folder; the `vmap`
 bound-slice rule; the wire schema version; no provenance-rejection construct
-in `chelis-types` or `chelis-ir`.
+in `chelis-types`, and in `chelis-ir` only the registered claimed-`Node`
+receipt that Slice B removes.
 
 **Oracle:** `uv run --managed-python --python 3.11 --no-project python
 scripts/runtime_extent_oracle.py --phase a`: lane parity, HIP and Metal
@@ -649,9 +668,9 @@ rows may exit first with the HIP rows at `typed_unsupported(#1112)`.
 a typed ratchet first, then C4.4); `derive_runtime_dim_classes` with the
 four C2.4 rules; guard placement per C1.3 on Eval, C, HIP, and Metal;
 replacement of `symbolic_occurrences`, `op_declared_output_axes`,
-`shape_source_for_axis`, and `symbolic_bindings` by those two derivations,
-and, once nothing reads it, deletion of `shape_deps`. Close [#665] and any
-residue of [#592].
+`shape_source_for_axis`, and `symbolic_bindings` by those two derivations;
+deletion of the lowering-time claimed-`Node` receipt, and, once nothing
+reads it, of `shape_deps`. Close [#665] and any residue of [#592].
 
 **Frozen at exit:** the `RuntimeDimClass` and `RuntimeDimMember` shapes,
 canonical class and member order, the guard placement realization per lane,
@@ -821,14 +840,14 @@ decides the underlying rule, and what replaces it.
   `37914d77`, `d6abd362`, `c70ae93d`). Existed because final IDs were
   assigned by canonical sort order after transforms had already stored them,
   so an earlier-sorting insertion staled every stored ID. Replaced by:
-  classes are a `Dag` field whose members are never renumbered except by a
-  pass's own remap; canonical order is computed at serialization.
+  classes are derived at the consumption point, so there is nothing to
+  renumber; canonical order is computed where they are derived.
 - **Transform namespace with a `u64` cursor, exhaustion, and history-sensitive
   hashing** (reviews of `3496f159`, `37914d77`, `4215f760`; repairs
   `37914d77`, `4215f760`, `3d6d4746`). Existed to keep synthesized origins
   collision-free under a self-imposed no-ID-reuse rule, and made the artifact
   hash depend on which passes had run. Replaced by: no transform IDs; the
-  hash covers the graph and its classes in canonical order.
+  hash covers the graph, and classes are derived rather than hashed.
 - **Workspace-wide generated transaction registry and module-private
   `RawDag`** (reviews of `4215f760`, `3d6d4746`; repairs `3d6d4746`,
   `60d595b2`). Sealed every construction and mutation route across 1,424

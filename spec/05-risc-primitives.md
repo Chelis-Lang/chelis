@@ -736,11 +736,10 @@ A movement bound (`pad` before/after, `shrink` start/end, `stride` step), an
 - `ToEnd` — the full-axis sentinel; legal only as a `shrink` end (the identity
   slice of a symbolic bystander axis).
 - `Node(i)` — a **runtime** extent read from the owning node's `inputs[i]`, a
-  rank-0 integer scalar (a `shape()` read or integer arithmetic over one:
-  `add`/`mul`/`floor_div`/`neg`/`cast`). The index is absolute: `inputs[0]` is
-  always the tensor operand, and `inputs[1..]` are the bound scalars, any
-  rank-0 `int32` axis scalar a node-valued `InputAxis` axis names, and any
-  shape-only tensor operand an `InputAxis` names.
+  rank-0 integer scalar. The index is absolute: `inputs[0]` is always the
+  tensor operand, and `inputs[1..]` are the bound scalars, any rank-0 `int32`
+  axis scalar a node-valued `InputAxis` axis names, and any shape-only tensor
+  operand an `InputAxis` names.
 - `Sym(name)` — a symbolic dim declared elsewhere (e.g. a bystander `batch`);
   legal only as a `reshape` target.
 - `InputAxis(t, a)` — the extent of an earlier tensor node's axis, read
