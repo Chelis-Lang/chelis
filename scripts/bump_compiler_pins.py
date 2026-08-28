@@ -139,6 +139,17 @@ PINNED_REAL_LOCK_DIRS: list[Path] = [
     REPO_ROOT / "examples/nautilus_quantile_contract/fixtures/nautilus",
 ]
 
+# The canonical bundle pipeline regenerates chelis-std's own lock in a
+# temporary staging tree after rebuilding the CLI with the final artifact
+# bytes. Rebuilding that package here would overwrite one side of the
+# byte-identical dist pair. The remaining package locks still need this
+# release-bump follow-up.
+FOLLOWUP_LOCK_REBUILD_DIRS: list[Path] = [
+    package_root
+    for package_root in PINNED_REAL_LOCK_DIRS
+    if package_root != CHELIS_STD_DIR
+]
+
 # Manifests of the out-of-workspace compile-fail fixtures (category 7).
 # Each is its own one-crate workspace depending on the real crates by path,
 # so its committed sibling `Cargo.lock` records them at the workspace
@@ -355,11 +366,11 @@ def rebuild_chelis_std_dist(dry_run: bool) -> None:
       1. `cargo build -p chelis-cli --release`
       2. `chelis reef build packages/chelis-std/`  (-> category 3)
       3. copy the result into `crates/chelis-std-bundle/dist/` (category 4)
-    Then this function rebuilds the CLI a second time so the binary embeds
-    the freshly-copied bundle bytes, and regenerates the committed
-    `reef.lock` files (category 5) with that binary so their synthesized
-    `chelis-std` pin and `archive_sha256`/`shell_sha256` match the new
-    bundle.
+    The canonical pipeline now also rebuilds the CLI and regenerates
+    `packages/chelis-std/reef.lock` in a temporary staging tree so its hashes
+    name the final dist pair without overwriting those artifacts. This
+    function then regenerates the remaining committed `reef.lock` files
+    (category 5) with that current binary.
     """
     if dry_run:
         print(f"[dry-run] would regenerate {CHELIS_STD_DIST.relative_to(REPO_ROOT)}/")
@@ -382,19 +393,6 @@ def rebuild_chelis_std_dist(dry_run: bool) -> None:
             "then re-run this script (without --no-rebuild-dist)."
         )
 
-    # The regen script built the CLI BEFORE copying the new bundle bytes,
-    # so its binary still embeds the prior bundle. Rebuild once more so the
-    # binary's `include_bytes!()` picks up the freshly-copied bytes; the
-    # lockfile sha256s come from those embedded bytes, so the binary must be
-    # current before it writes a lock.
-    print("Rebuilding chelis-cli so the binary embeds the new bundle ...")
-    rc = subprocess.run(
-        ["cargo", "build", "-p", "chelis-cli", "--release"],
-        cwd=REPO_ROOT,
-    ).returncode
-    if rc != 0:
-        sys.exit("error: cargo build -p chelis-cli --release failed after bundle copy")
-
     chelis = find_chelis_binary()
     if chelis is None:
         sys.exit(
@@ -402,10 +400,12 @@ def rebuild_chelis_std_dist(dry_run: bool) -> None:
             "after rebuild."
         )
 
-    # Step 5: regenerate the committed reef.lock files. `chelis reef build`
+    # Step 5: regenerate the remaining committed reef.lock files. The
+    # canonical generator already refreshed chelis-std's own lock without
+    # replacing its final dist bytes. `chelis reef build`
     # writes `reef.lock` at the package root, synthesizing the chelis-std
     # bundled dependency from the now-current embedded bundle.
-    for pkg_dir in PINNED_REAL_LOCK_DIRS:
+    for pkg_dir in FOLLOWUP_LOCK_REBUILD_DIRS:
         lock = pkg_dir / "reef.lock"
         print(f"Regenerating {lock.relative_to(REPO_ROOT)} via {chelis} reef build ...")
         rc = subprocess.run(

@@ -663,7 +663,9 @@ impl<'a> AliasExpansionSession<'a> {
                 let mut renaming = Subst::new();
                 for var in crate::env::free_tvars(&substituted) {
                     if !protected_tvars.contains(&var) {
-                        renaming.insert_type(var, self.vg.fresh_type());
+                        renaming
+                            .insert_type(var, self.vg.fresh_type())
+                            .expect("fresh alias-body type renaming is valid");
                     }
                 }
                 for var in crate::env::free_dvars(&substituted) {
@@ -1964,7 +1966,12 @@ pub(super) fn infer_top_level(
                         | CheckErrorKind::CastNonTensor
                 )
             });
-            declared_ty.expect("every exact OP-35 wrapper has a declared signature")
+            let declared_ty =
+                declared_ty.expect("every exact OP-35 wrapper has a declared signature");
+            if let Err(error) = subst.project_tvar_restrictions(&body_ty, &declared_ty) {
+                errors.push(error.into());
+            }
+            declared_ty
         } else if let Some(decl_ty) = declared_ty {
             let unify_result = unify(&body_ty, &decl_ty, subst);
             let resolved_body = subst.apply(&body_ty);

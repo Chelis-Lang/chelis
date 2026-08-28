@@ -39,9 +39,97 @@
 
 use assert_cmd::Command;
 use chelis_reef::{LockSource, ReefLock};
+use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tempfile::tempdir;
+use walkdir::WalkDir;
+
+fn runtime_package_files(root: &Path) -> BTreeMap<PathBuf, String> {
+    let mut files = BTreeMap::new();
+    let manifest = PathBuf::from("reef.toml");
+    files.insert(
+        manifest.clone(),
+        fs::read_to_string(root.join(&manifest)).unwrap_or_else(|error| {
+            panic!("read runtime package file {}: {error}", manifest.display())
+        }),
+    );
+    for entry in WalkDir::new(root.join("src")) {
+        let entry = entry.expect("walk runtime package src tree");
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let relative = entry
+            .path()
+            .strip_prefix(root)
+            .expect("runtime package entry stays below root")
+            .to_path_buf();
+        files.insert(
+            relative,
+            fs::read_to_string(entry.path()).expect("read runtime package source file"),
+        );
+    }
+    files
+}
+
+#[test]
+fn bundled_chelis_std_sources_match_the_checked_in_runtime_package() {
+    let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = crate_root
+        .parent()
+        .and_then(Path::parent)
+        .expect("chelis-cli is a workspace crate");
+    let package_root = repo_root.join("packages/chelis-std");
+    let extracted = tempdir().expect("bundle extraction tempdir");
+    chelis_std_bundle::extract_into(extracted.path()).expect("extract embedded chelis-std");
+
+    let embedded_files = runtime_package_files(extracted.path());
+    let checked_in_files = runtime_package_files(&package_root);
+    assert_eq!(
+        embedded_files.keys().collect::<Vec<_>>(),
+        checked_in_files.keys().collect::<Vec<_>>(),
+        "embedded chelis-std file inventory differs from packages/chelis-std"
+    );
+    for (path, checked_in) in &checked_in_files {
+        assert!(
+            embedded_files.get(path) == Some(checked_in),
+            "embedded chelis-std source drift at {}; rerun scripts/regenerate_chelis_std_bundle.py and commit every generated distribution artifact",
+            path.display()
+        );
+    }
+
+    let version = chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION;
+    let package_dist = package_root.join("dist");
+    assert!(
+        fs::read(package_dist.join(format!("chelis-std-{version}.tar.zst")))
+            .expect("read package archive artifact")
+            == chelis_std_bundle::CHELIS_STD_ARCHIVE,
+        "packages/chelis-std and the compile-time bundle must carry one archive"
+    );
+    assert!(
+        fs::read(package_dist.join(format!("chelis-std-{version}.chb")))
+            .expect("read package shell artifact")
+            == chelis_std_bundle::CHELIS_STD_SHELL,
+        "packages/chelis-std and the compile-time bundle must carry one shell"
+    );
+
+    let lock = read_lockfile(&package_root);
+    let bundled = lock
+        .dependencies
+        .iter()
+        .find(|dependency| dependency.name == "chelis-std")
+        .expect("the runtime package lock carries its bundled self-dependency");
+    assert_eq!(
+        bundled.archive_sha256,
+        chelis_std_bundle::archive_sha256(),
+        "the runtime package lock must pin the shipped archive bytes"
+    );
+    assert_eq!(
+        bundled.shell_sha256,
+        chelis_std_bundle::shell_sha256(),
+        "the runtime package lock must pin the shipped shell bytes"
+    );
+}
 
 fn write_implicit_runtime_project(root: &Path, module_prefix: &str) {
     fs::create_dir_all(root.join("src")).expect("mkdir src");

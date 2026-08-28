@@ -428,8 +428,19 @@ impl Subst {
         self.dims.lock().expect("subst.dims poisoned").len()
     }
 
-    /// Record a new type-variable binding.
-    pub fn insert_type(&mut self, v: TypeVar, ty: Type) {
+    /// Record a type-variable binding through ordinary unification.
+    ///
+    /// This public mutation seam enforces occurs checks, semantic domains,
+    /// deferred constraints, and restriction transfer exactly like every
+    /// checker-created binding. It must never write the map directly.
+    pub fn insert_type(&mut self, v: TypeVar, ty: Type) -> Result<(), TypeError> {
+        unify(&Type::Var(v), &ty, self)
+    }
+
+    /// Publish a type binding after [`bind_tvar`] has validated the complete
+    /// transaction. Keeping the raw map write private prevents callers from
+    /// bypassing semantic domains through the public API.
+    fn record_validated_type_binding(&mut self, v: TypeVar, ty: Type) {
         self.types
             .lock()
             .expect("subst.types poisoned")
@@ -440,7 +451,7 @@ impl Subst {
     /// Currently domains have one member, so merging is idempotent. Keeping
     /// the operation explicit makes incompatible future domains fail at the
     /// unification seam rather than silently choosing one.
-    pub fn install_tvar_restriction(&self, v: TypeVar, restriction: TypeVarRestriction) {
+    pub(crate) fn install_tvar_restriction(&self, v: TypeVar, restriction: TypeVarRestriction) {
         let mut restrictions = self
             .tvar_restrictions
             .lock()
@@ -460,6 +471,13 @@ impl Subst {
             .expect("subst.tvar_restrictions poisoned")
             .get(&v)
             .copied()
+    }
+
+    fn tvar_restrictions_snapshot(&self) -> HashMap<TypeVar, TypeVarRestriction> {
+        self.tvar_restrictions
+            .lock()
+            .expect("subst.tvar_restrictions poisoned")
+            .clone()
     }
 
     fn remove_tvar_restriction(&self, v: TypeVar) {
@@ -1466,10 +1484,139 @@ impl Subst {
     }
 
     /// Compose: apply `other` to all bindings in self, then merge.
-    pub fn compose(&mut self, other: &Subst) {
+    ///
+    /// Composition is transactional because independent substitutions can
+    /// carry a binding and a semantic restriction for the same variable.
+    /// Restrictions from both operands are canonicalized through the merged
+    /// binding graph; a forbidden concrete resolution rejects the complete
+    /// compose and leaves `self` unchanged.
+    pub fn compose(&mut self, other: &Subst) -> Result<(), TypeError> {
+        let mut trial = self.clone();
+        trial.compose_bindings(other);
+
+        let mut restrictions = self.tvar_restrictions_snapshot();
+        for (var, incoming) in other.tvar_restrictions_snapshot() {
+            if let Some(existing) = restrictions.get(&var).copied() {
+                merge_tvar_restrictions(existing, incoming)?;
+            } else {
+                restrictions.insert(var, incoming);
+            }
+        }
+
+        trial
+            .tvar_restrictions
+            .lock()
+            .expect("subst.tvar_restrictions poisoned")
+            .clear();
+        let mut ordered = restrictions.into_iter().collect::<Vec<_>>();
+        ordered.sort_by_key(|(var, _)| var.0);
+        for (source, restriction) in ordered {
+            let resolved = trial.resolve_tvar(source);
+            ensure_tvar_restriction(restriction, &resolved)?;
+            if let Type::Var(target) = resolved {
+                if let Some(existing) = trial.tvar_restriction(target) {
+                    merge_tvar_restrictions(existing, restriction)?;
+                } else {
+                    trial.install_tvar_restriction(target, restriction);
+                }
+            }
+        }
+
+        *self = trial;
+        Ok(())
+    }
+
+    /// Project semantic domains from an inferred implementation type onto a
+    /// structurally corresponding declared type.
+    ///
+    /// Most declared definitions use ordinary unification, which transfers
+    /// restrictions while binding matching variables. A small set of exact
+    /// stdlib contracts deliberately retains its declared type when unrelated
+    /// shape relations are not yet procedurally inferable. This projection
+    /// preserves the semantic domains learned while checking those bodies
+    /// without weakening them into an unconstrained exported function value.
+    /// The operation is transactional so a later conflicting slot cannot
+    /// publish an earlier partial transfer.
+    pub(crate) fn project_tvar_restrictions(
+        &mut self,
+        inferred: &Type,
+        declared: &Type,
+    ) -> Result<(), TypeError> {
+        let mut trial = self.clone();
+        trial.project_tvar_restrictions_inner(inferred, declared)?;
+        *self = trial;
+        Ok(())
+    }
+
+    fn project_tvar_restrictions_inner(
+        &mut self,
+        inferred: &Type,
+        declared: &Type,
+    ) -> Result<(), TypeError> {
+        let inferred = self.apply(inferred);
+        let declared = self.apply(declared);
+        match (&inferred, &declared) {
+            (Type::Var(source), target) => {
+                let Some(restriction) = self.tvar_restriction(*source) else {
+                    return Ok(());
+                };
+                ensure_tvar_restriction(restriction, target)?;
+                if let Type::Var(target) = target {
+                    if let Some(existing) = self.tvar_restriction(*target) {
+                        merge_tvar_restrictions(existing, restriction)?;
+                    } else {
+                        self.install_tvar_restriction(*target, restriction);
+                    }
+                }
+                Ok(())
+            }
+            (Type::Fn(inferred_args, inferred_ret), Type::Fn(declared_args, declared_ret))
+                if inferred_args.len() == declared_args.len() =>
+            {
+                for (inferred, declared) in inferred_args.iter().zip(declared_args) {
+                    self.project_tvar_restrictions_inner(inferred, declared)?;
+                }
+                self.project_tvar_restrictions_inner(inferred_ret, declared_ret)
+            }
+            (Type::Ref(inferred), Type::Ref(declared)) => {
+                self.project_tvar_restrictions_inner(inferred, declared)
+            }
+            (
+                Type::Tensor(inferred_dims, inferred_prec),
+                Type::Tensor(declared_dims, declared_prec),
+            ) if inferred_dims.len() == declared_dims.len() => {
+                let inferred = match inferred_prec {
+                    TensorPrec::Concrete(prim) => Type::Prim(*prim),
+                    TensorPrec::Var(var) => Type::Var(*var),
+                };
+                let declared = match declared_prec {
+                    TensorPrec::Concrete(prim) => Type::Prim(*prim),
+                    TensorPrec::Var(var) => Type::Var(*var),
+                };
+                self.project_tvar_restrictions_inner(&inferred, &declared)
+            }
+            (Type::Adt(inferred_name, inferred_args), Type::Adt(declared_name, declared_args))
+                if inferred_name == declared_name && inferred_args.len() == declared_args.len() =>
+            {
+                for (inferred, declared) in inferred_args.iter().zip(declared_args) {
+                    self.project_tvar_restrictions_inner(inferred, declared)?;
+                }
+                Ok(())
+            }
+            (Type::Tuple(inferred), Type::Tuple(declared)) if inferred.len() == declared.len() => {
+                for (inferred, declared) in inferred.iter().zip(declared) {
+                    self.project_tvar_restrictions_inner(inferred, declared)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn compose_bindings(&mut self, other: &Subst) {
         // Note: `other.apply` / `other.apply_dim` lock `other`'s maps;
-        // we must not be holding a lock on `other` simultaneously
-        // (which we never do — `self` and `other` are distinct).
+        // we must not be holding a lock on `other` simultaneously. This
+        // helper runs on a clone, so it is distinct even for `s.compose(&s)`.
         {
             let mut self_types = self.types.lock().expect("subst.types poisoned");
             for val in self_types.values_mut() {
@@ -1516,6 +1663,22 @@ impl Subst {
         // `deferred_borrow_vars` is intentionally NOT merged: it is a transient
         // per-def ledger (issue #256), drained after each body's inference, not
         // part of the substitution's logical content.
+    }
+}
+
+fn merge_tvar_restrictions(
+    existing: TypeVarRestriction,
+    incoming: TypeVarRestriction,
+) -> Result<TypeVarRestriction, TypeError> {
+    if existing == incoming {
+        Ok(existing)
+    } else {
+        Err(TypeError {
+            kind: TypeErrorKind::TypeMismatch,
+            message: format!(
+                "incompatible type-variable restrictions during substitution composition: {existing:?} vs {incoming:?}"
+            ),
+        })
     }
 }
 
@@ -1892,7 +2055,7 @@ fn bind_tvar(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeError> 
     // so lowering here cannot expose a rejected candidate's level overrides.
     let target_level = subst.level_of_tvar(v);
     subst.lower_type_to(ty, target_level);
-    subst.insert_type(v, ty.clone());
+    subst.record_validated_type_binding(v, ty.clone());
     subst.remove_tvar_restriction(v);
     if let (Some(restriction), Type::Var(target)) = (merged_restriction, ty) {
         subst.install_tvar_restriction(*target, restriction);
@@ -2514,6 +2677,215 @@ mod tests {
         .expect_err("instantiated alias must retain its active-float domain");
         assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
         assert!(error.message.contains("active float dtype"));
+    }
+
+    #[test]
+    fn compose_preserves_active_float_restrictions_from_both_operands() {
+        let receiver_var = TypeVar(80_001);
+        let other_var = TypeVar(80_002);
+        let shared_var = TypeVar(80_003);
+        let mut receiver = Subst::new();
+        receiver.install_tvar_restriction(receiver_var, TypeVarRestriction::ActiveFloat);
+        receiver.install_tvar_restriction(shared_var, TypeVarRestriction::ActiveFloat);
+        let other = Subst::new();
+        other.install_tvar_restriction(other_var, TypeVarRestriction::ActiveFloat);
+        other.install_tvar_restriction(shared_var, TypeVarRestriction::ActiveFloat);
+
+        receiver
+            .compose(&other)
+            .expect("identical and independent restrictions compose");
+
+        assert_eq!(
+            receiver.tvar_restriction(receiver_var),
+            Some(TypeVarRestriction::ActiveFloat),
+            "compose must retain the receiver's restriction"
+        );
+        assert_eq!(
+            receiver.tvar_restriction(other_var),
+            Some(TypeVarRestriction::ActiveFloat),
+            "compose must merge the right operand's restriction"
+        );
+        assert_eq!(
+            receiver.tvar_restriction(shared_var),
+            Some(TypeVarRestriction::ActiveFloat),
+            "the same restriction on a shared key must compose idempotently"
+        );
+    }
+
+    #[test]
+    fn compose_canonicalizes_active_float_restrictions_through_alias_chains() {
+        let source = TypeVar(80_004);
+        let middle = TypeVar(80_005);
+        let terminal = TypeVar(80_006);
+        let mut receiver = Subst::new();
+        receiver.install_tvar_restriction(source, TypeVarRestriction::ActiveFloat);
+        receiver
+            .insert_type(source, Type::Var(middle))
+            .expect("restricted source aliases an unresolved variable");
+        let mut other = Subst::new();
+        other
+            .insert_type(middle, Type::Var(terminal))
+            .expect("unrestricted alias chain is valid");
+
+        receiver
+            .compose(&other)
+            .expect("a restriction follows the composed alias chain");
+        assert_eq!(receiver.apply(&Type::Var(source)), Type::Var(terminal));
+        assert_eq!(
+            receiver.tvar_restriction(terminal),
+            Some(TypeVarRestriction::ActiveFloat)
+        );
+
+        receiver
+            .insert_type(terminal, Type::Prim(Prim::F64))
+            .expect("the composed restriction accepts an active float");
+        assert_eq!(receiver.apply(&Type::Var(source)), Type::Prim(Prim::F64));
+        assert_eq!(receiver.tvar_restriction(terminal), None);
+    }
+
+    #[test]
+    fn compose_rejects_forbidden_bindings_transactionally_in_either_operand() {
+        let restricted_in_receiver = TypeVar(80_007);
+        let mut receiver = Subst::new();
+        receiver.install_tvar_restriction(restricted_in_receiver, TypeVarRestriction::ActiveFloat);
+        let mut other = Subst::new();
+        other
+            .insert_type(restricted_in_receiver, Type::Prim(Prim::Int64))
+            .expect("the independent substitution does not know the restriction");
+        let receiver_types_before = receiver.types_snapshot();
+        let receiver_restrictions_before = receiver.tvar_restrictions_snapshot();
+
+        let error = receiver
+            .compose(&other)
+            .expect_err("the merged substitution must enforce the receiver restriction");
+        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert!(error.message.contains("active float dtype"));
+        assert_eq!(receiver.types_snapshot(), receiver_types_before);
+        assert_eq!(
+            receiver.tvar_restrictions_snapshot(),
+            receiver_restrictions_before
+        );
+
+        let restricted_in_other = TypeVar(80_008);
+        let mut receiver = Subst::new();
+        receiver
+            .insert_type(restricted_in_other, Type::Prim(Prim::Int16))
+            .expect("the receiver does not yet know the restriction");
+        let other = Subst::new();
+        other.install_tvar_restriction(restricted_in_other, TypeVarRestriction::ActiveFloat);
+        let receiver_types_before = receiver.types_snapshot();
+        let receiver_restrictions_before = receiver.tvar_restrictions_snapshot();
+
+        let error = receiver
+            .compose(&other)
+            .expect_err("the merged substitution must enforce the right restriction");
+        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert!(error.message.contains("active float dtype"));
+        assert_eq!(receiver.types_snapshot(), receiver_types_before);
+        assert_eq!(
+            receiver.tvar_restrictions_snapshot(),
+            receiver_restrictions_before
+        );
+    }
+
+    #[test]
+    fn direct_type_insertion_cannot_bypass_active_float_restrictions() {
+        let restricted = TypeVar(80_009);
+        let mut subst = Subst::new();
+        subst.install_tvar_restriction(restricted, TypeVarRestriction::ActiveFloat);
+
+        let error = subst
+            .insert_type(restricted, Type::Prim(Prim::Int32))
+            .expect_err("a forbidden direct insertion must fail explicitly");
+
+        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert!(error.message.contains("active float dtype"));
+        assert!(error.message.contains("int32"));
+        assert_eq!(subst.apply(&Type::Var(restricted)), Type::Var(restricted));
+        assert_eq!(
+            subst.tvar_restriction(restricted),
+            Some(TypeVarRestriction::ActiveFloat),
+            "a rejected direct binding must preserve the restriction ledger"
+        );
+    }
+
+    #[test]
+    fn direct_type_insertion_transfers_and_resolves_active_float_restrictions() {
+        let restricted = TypeVar(80_010);
+        let alias = TypeVar(80_011);
+        let mut subst = Subst::new();
+        subst.install_tvar_restriction(restricted, TypeVarRestriction::ActiveFloat);
+
+        subst
+            .insert_type(restricted, Type::Var(alias))
+            .expect("an unresolved alias preserves the semantic domain");
+        assert_eq!(subst.tvar_restriction(restricted), None);
+        assert_eq!(
+            subst.tvar_restriction(alias),
+            Some(TypeVarRestriction::ActiveFloat)
+        );
+
+        subst
+            .insert_type(alias, Type::Prim(Prim::F16))
+            .expect("an active float satisfies the transferred restriction");
+        assert_eq!(subst.apply(&Type::Var(restricted)), Type::Prim(Prim::F16));
+        assert_eq!(subst.tvar_restriction(alias), None);
+    }
+
+    #[test]
+    fn structural_projection_preserves_domains_across_an_exact_signature_boundary() {
+        let inferred_precision = TypeVar(80_012);
+        let declared_precision = TypeVar(80_013);
+        let mut subst = Subst::new();
+        subst.install_tvar_restriction(inferred_precision, TypeVarRestriction::ActiveFloat);
+        let inferred_tensor = Type::Tensor(vec![Dim::Lit(2)], TensorPrec::Var(inferred_precision));
+        let declared_tensor = Type::Tensor(vec![Dim::Lit(2)], TensorPrec::Var(declared_precision));
+        let inferred = Type::Fn(
+            vec![
+                Type::Ref(Box::new(inferred_tensor)),
+                Type::Var(inferred_precision),
+            ],
+            Box::new(Type::Unit),
+        );
+        let declared = Type::Fn(
+            vec![
+                Type::Ref(Box::new(declared_tensor)),
+                Type::Var(declared_precision),
+            ],
+            Box::new(Type::Unit),
+        );
+
+        subst
+            .project_tvar_restrictions(&inferred, &declared)
+            .expect("matching signature positions carry the inferred domain");
+        assert_eq!(
+            subst.tvar_restriction(declared_precision),
+            Some(TypeVarRestriction::ActiveFloat)
+        );
+        let error = subst
+            .insert_type(declared_precision, Type::Prim(Prim::Bool))
+            .expect_err("the projected declaration must reject a non-float");
+        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+    }
+
+    #[test]
+    fn structural_projection_is_transactional_when_a_later_slot_conflicts() {
+        let first_source = TypeVar(80_014);
+        let second_source = TypeVar(80_015);
+        let first_target = TypeVar(80_016);
+        let mut subst = Subst::new();
+        subst.install_tvar_restriction(first_source, TypeVarRestriction::ActiveFloat);
+        subst.install_tvar_restriction(second_source, TypeVarRestriction::ActiveFloat);
+        let inferred = Type::Tuple(vec![Type::Var(first_source), Type::Var(second_source)]);
+        let declared = Type::Tuple(vec![Type::Var(first_target), Type::Prim(Prim::Int32)]);
+        let restrictions_before = subst.tvar_restrictions_snapshot();
+
+        let error = subst
+            .project_tvar_restrictions(&inferred, &declared)
+            .expect_err("a forbidden declared slot rejects the whole projection");
+        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert_eq!(subst.tvar_restrictions_snapshot(), restrictions_before);
+        assert_eq!(subst.tvar_restriction(first_target), None);
     }
 
     #[test]

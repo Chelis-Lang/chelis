@@ -270,6 +270,18 @@ class LockRegenerationWiringTests(unittest.TestCase):
                 f"{pkg_dir} must ship a reef.lock to regenerate",
             )
 
+    def test_followup_lock_builds_do_not_overwrite_the_final_std_artifacts(self):
+        self.assertNotIn(
+            bump_mod.CHELIS_STD_DIR,
+            bump_mod.FOLLOWUP_LOCK_REBUILD_DIRS,
+            "the canonical bundle generator already refreshes the std root lock; "
+            "building it again would overwrite the final artifact bytes",
+        )
+        self.assertEqual(
+            set(bump_mod.FOLLOWUP_LOCK_REBUILD_DIRS),
+            set(bump_mod.PINNED_REAL_LOCK_DIRS) - {bump_mod.CHELIS_STD_DIR},
+        )
+
     def test_pinned_toml_inventory_covers_executable_package_examples(self):
         relative = {
             path.relative_to(bump_mod.REPO_ROOT).as_posix()

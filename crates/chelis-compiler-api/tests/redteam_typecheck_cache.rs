@@ -20,9 +20,10 @@
 //!   the running binary; a mismatch is a clean miss (`Ok(None)`), never a
 //!   stale hit. A belt-and-braces inner-vs-envelope check rejects a
 //!   tampered identity as `CacheError::IdentityMismatch`.
-//! - The cache format version and magic are now 10. The current format adds
-//!   serialized type-checker generalization levels to the V9 merged cache
-//!   shape. A stale V9-shaped file is rejected, never decoded.
+//! - The cache format version and magic are now 11. The current format adds
+//!   quantified type-variable restrictions and the live substitution restriction
+//!   ledger to the V10 generalization-level shape. A stale V10-shaped file is
+//!   rejected, never decoded.
 //! - `stdlib_cache_key` folds `COMPILER_VERSION` directly, so a binary
 //!   built from different compiler source does not stale-hit an older
 //!   binary's `StdLibContext`.
@@ -37,8 +38,8 @@
 //! canonicalization equivalence (a wrong-canonicalization regression
 //! would be a NEW collision class), the `IdentityMismatch`
 //! envelope-vs-inner tamper guard, fingerprint sensitivity to every
-//! identity component, the format-version-10 magic rejection of a forged
-//! V9 file, and adversarial corruption shapes against the recompute
+//! identity component, the format-version-11 magic rejection of a forged
+//! V10 file, and adversarial corruption shapes against the recompute
 //! fall-through.
 //!
 //! Kept on the per-PR `ci` profile: every test is cache-key / identity /

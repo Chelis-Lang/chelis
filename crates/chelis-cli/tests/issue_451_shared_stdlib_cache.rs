@@ -37,6 +37,7 @@
 //! never set in production CI.
 
 use assert_cmd::Command;
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::{TempDir, tempdir};
@@ -317,6 +318,95 @@ fn run_check(file: &Path, cache_home: &Path, extra_env: &[(&str, &str)]) -> Vec<
     }
     cmd.arg("check").arg(file);
     cmd.assert().get_output().stdout.clone()
+}
+
+fn check_errors(output: &[u8]) -> Vec<Value> {
+    let report: Value = serde_json::from_slice(output).unwrap_or_else(|error| {
+        panic!(
+            "`chelis check` output must be JSON ({error}); got:\n{}",
+            String::from_utf8_lossy(output)
+        )
+    });
+    report
+        .get("errors")
+        .and_then(Value::as_array)
+        .cloned()
+        .expect("check report carries an errors array")
+}
+
+#[test]
+fn public_std_test_active_float_rank_matrix_is_identical_cold_and_reused() {
+    let (guard, cache_home) = fresh_cache_home();
+    let pkg = stage_fixture(guard.path());
+    let probe = pkg.join("src/assertclosematrix.ch");
+    let mut source = String::from(
+        "module PseudoNautilus.AssertCloseMatrix\nimport Std.Test (assert_close_tensor)\n\n",
+    );
+    for dtype in ["f16", "bf16", "f32", "f64"] {
+        for (rank, tensor_type) in [
+            (0, format!("tensor[{dtype}]")),
+            (1, format!("tensor[2, {dtype}]")),
+            (3, format!("tensor[2, 3, 4, {dtype}]")),
+        ] {
+            source.push_str(&format!(
+                "def accept_{dtype}_r{rank}(actual: &{tensor_type}, expected: &{tensor_type}, tol: {dtype}) -> unit ! {{ Test }} = assert_close_tensor(actual, expected, tol, \"{dtype}/r{rank}\")\n"
+            ));
+        }
+    }
+    fs::write(&probe, source).expect("write public Std.Test positive matrix");
+
+    let cold = run_check(&probe, &cache_home, &[]);
+    let warm = run_check(&probe, &cache_home, &[]);
+    assert_eq!(
+        cold, warm,
+        "a reused compiled/stdlib context must preserve the public Std.Test signature byte-for-byte"
+    );
+    assert!(
+        check_errors(&cold).is_empty(),
+        "the shipped Std.Test must accept every active float at ranks 0, 1, and 3; got:\n{}",
+        String::from_utf8_lossy(&cold)
+    );
+}
+
+#[test]
+fn public_std_test_non_float_rejections_are_structural_cold_and_reused() {
+    let (guard, cache_home) = fresh_cache_home();
+    let pkg = stage_fixture(guard.path());
+    let probe = pkg.join("src/assertclosenonfloat.ch");
+
+    for dtype in ["int8", "int16", "int32", "int64", "bool"] {
+        fs::write(
+            &probe,
+            format!(
+                "module PseudoNautilus.AssertCloseNonFloat\nimport Std.Test (assert_close_tensor)\n\ndef reject(actual: &tensor[2, {dtype}], expected: &tensor[2, {dtype}], tol: {dtype}) -> unit ! {{ Test }} = assert_close_tensor(actual, expected, tol, \"{dtype}\")\n"
+            ),
+        )
+        .expect("write public Std.Test non-float probe");
+
+        let cold = run_check(&probe, &cache_home, &[]);
+        let warm = run_check(&probe, &cache_home, &[]);
+        assert_eq!(
+            cold, warm,
+            "cold/reused public diagnostic diverged for {dtype}"
+        );
+        let errors = check_errors(&cold);
+        assert_eq!(
+            errors.len(),
+            1,
+            "{dtype} must produce exactly one diagnostic, never an empty fallback or cascade: {errors:#?}"
+        );
+        let error = &errors[0];
+        assert_eq!(
+            error.get("kind").and_then(Value::as_str),
+            Some("PrecisionMismatch"),
+            "{dtype} must reject structurally: {error:#?}"
+        );
+        let message = error.get("message").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            message.contains("active float dtype") && message.contains(dtype),
+            "{dtype} diagnostic must name the active-float restriction and concrete dtype: {message:?}"
+        );
+    }
 }
 
 #[test]

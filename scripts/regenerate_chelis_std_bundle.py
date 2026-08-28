@@ -12,7 +12,10 @@ Pipeline:
   2. (release-binary) chelis reef build packages/chelis-std/
      produces packages/chelis-std/dist/chelis-std-<version>.{tar.zst,chb}
   3. copy those into crates/chelis-std-bundle/dist/
-  4. git diff --stat to show what changed
+  4. rebuild chelis so the binary embeds those final artifact bytes
+  5. regenerate packages/chelis-std/reef.lock in a temporary source staging
+     tree, retaining the lock but not the staging build's incidental artifacts
+  6. git diff --stat to show what changed
 
 Invocation:
   python3 scripts/regenerate_chelis_std_bundle.py [--debug]
@@ -36,6 +39,7 @@ import argparse
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -53,6 +57,48 @@ def chelis_std_version(repo: Path) -> str:
     with manifest_path.open("rb") as f:
         manifest = tomllib.load(f)
     return manifest["package"]["version"]
+
+
+def stage_runtime_package_for_lock(package_root: Path, staged_root: Path) -> None:
+    """Stage only the chelis-std inputs needed to regenerate its root lock.
+
+    The final dist artifacts must not be overwritten after they have been
+    copied into the compile-time bundle: the rebuilt CLI synthesizes the lock
+    hashes from those exact embedded bytes. A temporary package build gives us
+    that generated lock while its newly emitted dist directory remains
+    disposable.
+    """
+    manifest_path = package_root / "reef.toml"
+    with manifest_path.open("rb") as file:
+        manifest = tomllib.load(file)
+    source_roots = ["src", *manifest["package"].get("additional_sources", [])]
+
+    staged_root.mkdir(parents=True)
+    shutil.copy2(manifest_path, staged_root / "reef.toml")
+    for source_root in source_roots:
+        shutil.copytree(package_root / source_root, staged_root / source_root)
+
+
+def regenerate_runtime_lock(
+    chelis_bin: Path,
+    package_root: Path,
+    *,
+    repository_root: Path,
+) -> None:
+    """Regenerate only ``package_root/reef.lock`` with the final embedded bundle."""
+    with tempfile.TemporaryDirectory(prefix="chelis-std-lock-") as temp:
+        staged_root = Path(temp) / "chelis-std"
+        stage_runtime_package_for_lock(package_root, staged_root)
+        rc = subprocess.run(
+            [str(chelis_bin), "reef", "build", str(staged_root)],
+            cwd=repository_root,
+        ).returncode
+        if rc != 0:
+            raise RuntimeError("chelis reef build failed while regenerating chelis-std lock")
+        staged_lock = staged_root / "reef.lock"
+        if not staged_lock.is_file():
+            raise RuntimeError(f"expected regenerated lock missing: {staged_lock}")
+        shutil.copy2(staged_lock, package_root / "reef.lock")
 
 
 def main() -> int:
@@ -77,7 +123,7 @@ def main() -> int:
     profile_dir = "debug" if args.debug else "release"
 
     # Step 1: build the chelis CLI.
-    print(f"[1/4] cargo build -p chelis-cli {' '.join(profile_flag)}", file=sys.stderr)
+    print(f"[1/6] cargo build -p chelis-cli {' '.join(profile_flag)}", file=sys.stderr)
     rc = subprocess.run(
         ["cargo", "build", "-p", "chelis-cli", *profile_flag],
         cwd=repo,
@@ -97,7 +143,7 @@ def main() -> int:
     # Step 2: build chelis-std as a reef package. The build emits
     # packages/chelis-std/dist/chelis-std-<version>.{tar.zst,chb}.
     print(
-        f"[2/4] {chelis_bin.relative_to(repo)} reef build packages/chelis-std/",
+        f"[2/6] {chelis_bin.relative_to(repo)} reef build packages/chelis-std/",
         file=sys.stderr,
     )
     rc = subprocess.run(
@@ -122,30 +168,56 @@ def main() -> int:
     # the chelis-std reef.toml's version. If they ever diverge, fail
     # loudly here rather than silently embedding a wrong file.
     print(
-        f"[3/4] copy artifacts into crates/chelis-std-bundle/dist/",
+        f"[3/6] copy artifacts into crates/chelis-std-bundle/dist/",
         file=sys.stderr,
     )
     for src in (archive_src, shell_src):
         dst = bundle_dist / src.name
         shutil.copy2(src, dst)
 
-    # Step 4: show what changed under the bundle crate's dist/. Helps
+    # Step 4: rebuild the CLI so its include_bytes! values are the final
+    # artifacts just copied above. The root lock synthesized by the next step
+    # must name these bytes, not the predecessor embedded by step 1.
+    print(
+        f"[4/6] rebuild chelis-cli with the refreshed embedded bundle",
+        file=sys.stderr,
+    )
+    rc = subprocess.run(
+        ["cargo", "build", "-p", "chelis-cli", *profile_flag],
+        cwd=repo,
+    ).returncode
+    if rc != 0:
+        print("ERROR: cargo rebuild failed after bundle copy", file=sys.stderr)
+        return 1
+
+    # Step 5: generate the committed root lock from the now-current embedded
+    # bytes without letting another package build replace the final dist pair.
+    print("[5/6] regenerate packages/chelis-std/reef.lock", file=sys.stderr)
+    try:
+        regenerate_runtime_lock(chelis_bin, repo / "packages/chelis-std", repository_root=repo)
+    except RuntimeError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 1
+
+    # Step 6: show what changed under every owned generated surface. Helps
     # the user confirm that their commit will pick up the right bytes.
-    print("[4/4] git diff --stat crates/chelis-std-bundle/dist/", file=sys.stderr)
+    print("[6/6] git diff --stat for owned chelis-std outputs", file=sys.stderr)
     subprocess.run(
         [
             "git",
             "diff",
             "--stat",
             "--",
-            str((bundle_dist).relative_to(repo)),
+            str(pkg_dist.relative_to(repo)),
+            str((repo / "packages/chelis-std/reef.lock").relative_to(repo)),
+            str(bundle_dist.relative_to(repo)),
         ],
         cwd=repo,
     )
 
     print("OK: chelis-std bundle regenerated.", file=sys.stderr)
     print(
-        "Next: `git add crates/chelis-std-bundle/dist/` and commit.",
+        "Next: commit both dist pairs and packages/chelis-std/reef.lock.",
         file=sys.stderr,
     )
     return 0

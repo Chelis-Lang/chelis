@@ -254,7 +254,9 @@ impl Env {
         let mut mapping = Vec::with_capacity(scheme.tvars.len());
         for &tv in &scheme.tvars {
             let fresh = var_gen.fresh_type();
-            subst.insert_type(tv, fresh.clone());
+            subst
+                .insert_type(tv, fresh.clone())
+                .expect("a fresh quantified type-variable renaming is valid");
             if let Type::Var(fresh_var) = fresh
                 && let Some((_, restriction)) = scheme
                     .tvar_restrictions
@@ -649,7 +651,9 @@ mod tests {
         let mut env = Env::new();
         env.bind("generic".to_string(), scheme);
         let mut subst = Subst::new();
-        subst.insert_type(quantified_type, Type::Prim(Prim::F32));
+        subst
+            .insert_type(quantified_type, Type::Prim(Prim::F32))
+            .expect("unrestricted test substitution accepts f32");
         subst.insert_dim(quantified_dim, Dim::Lit(3));
         subst.insert_rank(quantified_rank, vec![Dim::Lit(4)]);
 
@@ -682,8 +686,12 @@ mod tests {
         let mut env = Env::new();
         env.bind("generic".to_string(), scheme);
         let mut subst = Subst::new();
-        subst.insert_type(outer_type, Type::Var(quantified_type));
-        subst.insert_type(quantified_type, Type::Prim(Prim::F64));
+        subst
+            .insert_type(outer_type, Type::Var(quantified_type))
+            .expect("unrestricted test substitution accepts an alias");
+        subst
+            .insert_type(quantified_type, Type::Prim(Prim::F64))
+            .expect("unrestricted test substitution accepts f64");
         subst.insert_dim(outer_dim, Dim::Var(quantified_dim));
         subst.insert_dim(quantified_dim, Dim::Lit(5));
         subst.insert_rank(outer_rank, vec![Dim::Rank(quantified_rank)]);
@@ -718,7 +726,9 @@ mod tests {
         let mut env = Env::new();
         env.bind("monomorphic".to_string(), scheme);
         let mut subst = Subst::new();
-        subst.insert_type(source_type, Type::Var(target_type));
+        subst
+            .insert_type(source_type, Type::Var(target_type))
+            .expect("unrestricted test substitution accepts an alias");
         subst.insert_dim(source_dim, Dim::Var(target_dim));
         subst.insert_rank(source_rank, vec![Dim::Rank(target_rank)]);
 
