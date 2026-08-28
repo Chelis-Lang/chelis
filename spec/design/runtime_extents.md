@@ -173,7 +173,7 @@ struct RuntimeObservableEvent {
 }
 
 enum RuntimeObservableEventKind {
-    InterfaceBind(u32),
+    InterfaceBind(RuntimeInterfaceInputId),
     Effect(NodeId),
     ExplicitTrap(NodeId),
     CheckedArithmetic(NodeId),
@@ -404,9 +404,24 @@ enum RuntimeGraphMutationSite { // generated
     HostActualize,
 }
 
-struct RuntimeTypedImportRemap {
+struct RuntimeInterfaceInputId(u32);
+
+struct RuntimeArtifactImportRemap {
     lexical_scopes: Vec<(RuntimeScopeId, RuntimeScopeId)>,
     typed_sites: Vec<(TypedSiteId, TypedSiteId)>,
+    interface_inputs: Vec<(RuntimeInterfaceInputId, RuntimeInterfaceInputId)>,
+}
+
+struct ProvisionalRuntimeInterfaceActualSubstitution {
+    parameter: RuntimeInterfaceInputId, // must select a scalar-parameter row
+    occurrence: ProvisionalRuntimeValueOccurrenceId,
+    readiness: RuntimeInterfaceActualReadiness,
+}
+
+enum RuntimeInterfaceActualReadiness {
+    InterfaceBind(RuntimeInterfaceInputId),
+    DeclaredLiteral(RuntimeOriginId),
+    ProducerClosure(Vec<NodeId>),
 }
 
 struct RuntimeDimOwner {
@@ -442,7 +457,7 @@ enum RuntimeDimSourceOrigin {
         tensor: RuntimeOriginId,
         axis: RuntimeAxisOrigin,
     },
-    ScalarParameter { parameter: u32 },
+    ScalarParameter { parameter: RuntimeInterfaceInputId },
     Literal { origin: RuntimeOriginId, value: i64 },
     ScalarOpOutput { origin: RuntimeOriginId },
 }
@@ -522,7 +537,7 @@ uses `Synthesized` and may not borrow a parent or sibling `TypedSiteId`.
 `RuntimeDimProofEvidence.typed_site` always remains the canonical typed proof
 site, even when the proved alias's destination origin is synthesized. Typed
 sites are preserved by non-import transforms. `ImportDag` instead translates
-every typed site through the checked `RuntimeTypedImportRemap` described below;
+every typed site through the checked `RuntimeArtifactImportRemap` described below;
 it may not treat a source-local numeric site ID as already belonging to the
 destination. Every occurrence passes through the map even when the mapped
 number happens to be equal in an otherwise empty destination.
@@ -530,6 +545,42 @@ Synthesized evidence sites are remapped atomically with their
 `RuntimeOriginId`, generated path, evidence destination, and graph annotation.
 Missing, typed/synthesized-kind mismatched, redirected, or rule-incompatible
 sites fail before finalization and after Wire decode.
+
+`RuntimeInterfaceInputId` is the structural identity of one public tensor or
+scalar interface position, not a bare ordinal that may be compared across
+artifacts. A standalone DAG assigns the IDs in declared signature order. An
+import that retains the source interface includes every referenced input in the
+per-operand `RuntimeArtifactImportRemap`; the interface-input projection is a
+total bijection into a fresh destination range. It is applied atomically to
+public `Load`/scalar manifest rows, `RuntimeDimSourceOrigin::ScalarParameter`,
+the physical occurrence origin, declaration/source links, `InterfaceBind`,
+guard readiness/order edges, generated dependent paths, and every in-memory or
+Wire copy. Two independently valid scalar-parameter-zero artifacts therefore
+remain two physical inputs and two occurrences after combination, while tensor
+inputs use the same collision-free bind identity.
+
+An import that consumes a callee scalar-parameter interface position does not
+retain or silently renumber that parameter. Tensor `Load` actuals continue to
+use the registered graph-input mapping; the caller supplies one explicit,
+total `ProvisionalRuntimeInterfaceActualSubstitution` per callee scalar
+parameter, naming an existing destination provisional occurrence and its exact
+derived readiness fact. Retention and substitution are mutually exclusive for
+that parameter. The transaction validates
+that the interface bind or canonical producer closure makes the named
+occurrence ready, redirects every callee
+source/declaration/class edge to that occurrence, removes the callee manifest
+and `InterfaceBind` rows, and splices dependent guard edges at the supplied
+readiness point without duplicating evaluation. A caller interface actual names
+its already-remapped `InterfaceBind`; a declared literal names its canonical
+literal origin; and a local actual names its duplicate-free
+canonical-topological producer closure.
+Missing, duplicate, stale, partially applied, or origin/readiness-mismatched
+substitutions fail before graph or authority mutation. Successful substitutions
+flow through the ordinary occurrence bijection at finalization; they never
+embed a final numeric occurrence ID into annotated state. Distinct callee
+scalar parameters may intentionally name one actual occurrence, but their class-local
+source/use identities remain distinct and the resulting bindings must still
+satisfy the one-witness-source-per-class-per-occurrence rule.
 
 `ProvisionalRuntimeDimDeclaration` uses the same owner, occurrence,
 many-to-many binding, and complete source/use algebras as the final
@@ -709,19 +760,25 @@ target-capacity rejection is allowed.
   its destination annotation are created, remapped, or discharged as one
   non-forgeable pair. Vmap, grad, specialization, and ordinary clone/remap use
   this rule. Import first maps opaque source DAG handles into fresh destination
-  handles and constructs one checked `RuntimeTypedImportRemap` per declared
-  operand. Each map is total and bijective over every referenced source
-  lexical scope and typed site and maps them into disjoint destination ranges
-  in declared operand order. The referenced universe is the union named by
-  owners, `RuntimeOrigin::Typed`, `RuntimeIdentityEvidenceSite::Typed`,
+  handles and constructs one checked `RuntimeArtifactImportRemap` per declared
+  operand. Each retained-interface map is total and bijective over every
+  referenced source lexical scope, typed site, and interface input and maps
+  them into independent disjoint destination ranges in declared operand order.
+  The referenced universe is the union named by owners,
+  `RuntimeOrigin::Typed`, `RuntimeIdentityEvidenceSite::Typed`,
   provisional and final `RuntimeDimProofEvidence.typed_site`, evidence
-  destinations, bound/output annotations, and generated-path parents; omitting
-  a carrier or mapping two source identities to one destination identity
-  rejects the transaction. The import then translates every owner, typed
-  origin, negative site, proof triple, destination, annotation, and dependent
-  path through the opaque-handle and typed maps together before commit. This
-  rule applies even when every imported transform namespace has zero history;
-  transform remapping is not a substitute for typed-arena remapping. CSE may remap only the
+  destinations, bound/output annotations, generated-path parents, public
+  `Load` and scalar manifest rows,
+  `ScalarParameter` origins and occurrences, public-input manifests,
+  `InterfaceBind` events, and their guard/dependent-path references; omitting a
+  carrier or mapping two source identities to one destination identity rejects
+  the transaction. The import then translates every owner, typed origin,
+  negative site, proof triple, destination, annotation, retained interface input,
+  manifest/event/guard reference, and dependent path through the opaque-handle
+  and artifact maps together before commit. A consuming import instead applies
+  its total actual substitutions as specified above. These rules apply even
+  when every imported transform namespace has zero history; transform
+  remapping is not a substitute for typed-arena or interface remapping. CSE may remap only the
   occurrence member of a proof triple to the selected physically equivalent
   occurrence while preserving its class-local source edge. DCE either
   preserves the complete reachable proof triple or explicitly discharges the
@@ -755,21 +812,22 @@ target-capacity rejection is allowed.
   content hash: the hash commits to deterministic transform-ID allocation
   history, not a full transform audit log or semantic equivalence of optimized
   graphs. Combining annotated DAGs imports them in declared operand order. It
-  remaps every referenced lexical scope and typed site into independent,
-  disjoint destination ranges, then remaps every live transform ID,
-  typed/synthesized origin, negative/proof site, evidence destination,
-  annotation, generated path, and scope lineage through the corresponding
-  maps. The fresh transform range has the imported history count as its length
+  remaps every referenced lexical scope, typed site, and retained interface
+  input into independent, disjoint destination ranges, then remaps every
+  live transform ID, typed/synthesized origin, scalar-parameter occurrence,
+  negative/proof site, evidence destination, annotation, manifest/event/guard
+  reference, generated path, and scope lineage through the corresponding maps.
+  The fresh transform range has the imported history count as its length
   (zero for `None`, otherwise `issued_through + 1`), including erased IDs. The
   transaction reserves that entire range with widened checked arithmetic and
-  fails `Capacity` before mutation if the range does not fit. Typed scopes and
-  sites are allocated from the unique referenced source IDs in canonical
-  numeric order within each operand. Resident destination IDs remain fixed;
-  the first imported range begins at the checked successor of the greatest
-  occupied destination ID, or at zero when none exists, and later ranges follow
-  declared operand order. A typed-ID or
-  transform-ID capacity failure occurs before either graph or authority state
-  changes. After origin remapping, the transaction
+  fails `Capacity` before mutation if the range does not fit. Typed scopes,
+  typed sites, and retained interface inputs are allocated independently from the
+  unique referenced source IDs in canonical numeric order within each operand.
+  Resident destination IDs remain fixed; each first imported range begins at
+  the checked successor of the greatest occupied ID in its own namespace, or
+  at zero when none exists, and later ranges follow declared operand order. A
+  scope, site, parameter, or transform capacity failure occurs before either
+  graph or authority state changes. After origin remapping, the transaction
   rebuilds occurrence IDs and class-local source/use bindings in canonical
   destination order while preserving every many-to-many edge; they do not
   consume transform IDs. Accepting raw overlapping namespaces or occurrence
@@ -787,7 +845,11 @@ target-capacity rejection is allowed.
   canonical operation identity bytes, the outer identity-destination kind tag,
   the complete bound-field key or output-axis number, and numeric axis or slot
   components. Imported typed scopes/sites and transform/origin IDs are remapped
-  first in declared operand order and then compared by this same rule. Occurrences follow physical origin
+  first in declared operand order and then compared by this same rule.
+  Standalone interface inputs follow declared signature order; imported
+  retained inputs use their checked destination IDs, and scalar-parameter
+  origins compare by that structural ID. `InterfaceBind` uses the same ID while
+  retaining its exact position in total semantic event order. Occurrences follow physical origin
   order exactly once, independent of how many declarations reference them.
   Declarations follow owner order; their source/use ordering follows the rule
   below and compares a shared occurrence by that one canonical occurrence
@@ -1198,9 +1260,10 @@ target-capacity rejection is allowed.
   consume-to-annotated/refinalize path. Hashing covers the finalized authority
   and carriers.
 
-  The executable interface maps each declared function input and scalar
-  parameter to its value occurrence and complete class-local source edges, so
-  dropping an otherwise-data-unused Load cannot shrink a class. Verification
+  The executable interface assigns every declared function input one
+  `RuntimeInterfaceInputId` and maps each tensor-axis or scalar-parameter value
+  to its occurrence and complete class-local source edges, so dropping an
+  otherwise-data-unused Load cannot shrink a class. Verification
   compares that interface, the primary declarations, occurrence table,
   occurrence stamps/binding vectors and dynamic-axis occurrences, the
   derived class manifest, and every classed bound after each transform and
@@ -1820,16 +1883,23 @@ axes and windows in one issue.
    only a proof's occurrence to the selected equivalent physical occurrence,
    while DCE rows either retain all endpoints or discharge the complete proof
    and dependent axis/use. Stale pre-CSE/pre-DCE proof redirections fail.
-   Two-artifact import rows give both standalone source arenas lexical scope
-   zero and typed site zero, with zero transform history in each. One carries a
-   proved alias and the other negative evidence. Import in each declared
-   operand order creates disjoint typed scope/site ranges, remaps owners,
-   origins, negative/proof sites, destinations, annotations, and dependent
-   paths atomically, and survives consume/refinalize with deterministic bytes.
-   Mutations preserve a later source-local zero instead of its nonzero mapped
-   ID, remap only one carrier, overlap the destination ranges, collapse the two
-   proof sites, or use transform history as the typed namespace; each fails.
-   Operand permutation may change
+   Two-artifact import rows give both standalone source arenas lexical scope,
+   typed site, and scalar interface parameter zero, with zero transform history
+   in each. One carries a proved alias and the other negative evidence. Import
+   beside an already-resident parameter and in each declared operand order
+   creates independent disjoint scope/site/interface-input ranges; keeps the two
+   parameter-zero values, physical origins, occurrences, manifest rows, and
+   `InterfaceBind` events distinct; remaps owners, origins, negative/proof
+   sites, destinations, annotations, guards, and dependent paths atomically;
+   and survives consume/refinalize with deterministic bytes. Mutations preserve
+   a later source-local zero instead of its nonzero mapped ID, remap only an
+   occurrence/manifest/event/guard carrier, overlap a destination range,
+   exceed interface-ID capacity, collapse the parameter origins or two proof
+   sites, or use transform history as another namespace; each fails. A callee
+   consumption row substitutes every parameter with an explicit actual
+   occurrence/readiness fact and removes the callee manifest/bind rows;
+   missing, duplicate, stale, partial, readiness-mismatched, or final-ID-bearing
+   substitutions fail without mutation. Operand permutation may change
    bytes according to declared order, but insertion order within either source
    arena may not.
    Grad, vmap, specialization, clone, and import rows create both synthesized
@@ -1932,7 +2002,10 @@ axes and windows in one issue.
    differs from its record, a typed/synthesized evidence-site kind mismatch,
    fabricated or borrowed typed site on a synthesized unclassed/fresh axis,
    redirected synthesized origin/path/rule, an overlapping or partially
-   remapped typed import namespace, a proof/source mismatch, or an attempted
+   remapped scope/site/interface-input import namespace, duplicate scalar-parameter
+   origin, one parameter origin with multiple occurrences, inconsistent
+   manifest/`InterfaceBind`/guard interface IDs, an invalid callee actual
+   substitution, a proof/source mismatch, or an attempted
    `NotProved`-to-`ProvedEqual` upgrade,
    missing occurrence/source/use ID, placement, stamp, or binding;
    declaration/occurrence/stamp disagreement; correlated binding-plus-manifest
@@ -1962,7 +2035,10 @@ axes and windows in one issue.
    transform after exhaustion,
    transform-create/full-DCE/refinalize, highest-live-ID DCE, stable no-op
    decode/refinalize, near-exhaustion DCE followed by allocation, post-decode
-   allocation, and an imported history range requiring more IDs than remain.
+   allocation, imported scope/site/interface-input ranges requiring more IDs than
+   remain, two retained parameter-zero artifacts beside resident IDs, and a
+   consuming import whose actual substitution names the wrong interface bind
+   or producer closure.
    They require the history-sensitive hash to change when a transform is issued
    and later wholly erased, while identical graph plus identical history stays
    byte-stable. Literal mutations cover negative and greater-than-`i64::MAX`
@@ -1975,9 +2051,10 @@ axes and windows in one issue.
    consumption or physical allocation. Origin-order mutations vary
    insertion order, reorder the serialized table, permute imported operands,
    drop the outer destination-kind component, stale a generated-path
-   component, and import two typed arenas whose scope/site IDs both begin at
-   zero. Insertion order alone cannot change bytes, but declared operand order,
-   its deterministic typed-ID remap, and transform high-water history can.
+   component, and import two typed arenas whose scope/site/interface IDs all
+   begin at zero. Insertion order alone cannot change bytes, but declared
+   operand order, its deterministic artifact-ID remap, and transform high-water
+   history can.
 
    Whole-program integrity is a separate oracle. It coherently removes or
    replaces an internal declaration and every dependent graph/carrier field;
@@ -2072,7 +2149,10 @@ never reused.
   `literal_axis(int32)` or `scalar_axis(origin)`; the latter makes that exact
   rank-zero `int32` producer a liveness dependency. Other source/use entries
   select scalar-parameter, literal, scalar-operation-output, bound-field,
-  alias-axis, or scalar-alias roles. Encode the derived
+  alias-axis, or scalar-alias roles. A scalar-parameter row carries its
+  structural `RuntimeInterfaceInputId`, which must match exactly one public
+  manifest entry and the derived `InterfaceBind` event; a bare artifact-local
+  ordinal is not compared across imports. Encode the derived
   `WireRuntimeExtentClass` separately, with the same ID and `literal`,
   `scalar`, or `tensor_axis` witnesses carrying their class-local source and
   shared occurrence IDs; a
@@ -2094,17 +2174,21 @@ never reused.
   occurrence once in a separate ordered
   `WireRuntimeDynamicAxisOccurrence { stamp, tensor, axis }` list; no static axis
   stamp may repeat that occurrence. The public input
-  manifest retains every declared Load independently of data uses and maps each
-  input axis/scalar to its value occurrence and complete ordered class-local
+  manifest retains every declared Load and scalar parameter independently of
+  data uses and maps each input axis/scalar to its value occurrence, structural
+  interface-input ID, and complete ordered class-local
   binding edges;
-- keep typed lexical-scope and site IDs artifact-local on standalone Wire. The
-  ephemeral `RuntimeTypedImportRemap` is not another serialized authority:
-  verified decode preserves the artifact's canonical local IDs, and only the
-  explicit consume-to-annotated import boundary remaps the complete referenced
-  typed universe into disjoint destination ranges. Re-encoding the combined
-  DAG persists those remapped destination IDs. Directly concatenating two Wire
-  tables, preserving overlapping local zeros, or applying only part of the map
-  is invalid;
+- keep typed lexical-scope, typed-site, and interface-input IDs
+  artifact-local on standalone Wire. The ephemeral
+  `RuntimeArtifactImportRemap` is not another serialized authority: verified
+  decode preserves the artifact's canonical local IDs, and only the explicit
+  consume-to-annotated import boundary remaps the complete referenced typed and
+  retained-interface universes into independent disjoint destination ranges.
+  Re-encoding the combined DAG persists those remapped destination IDs.
+  Directly concatenating two Wire tables, preserving overlapping local zeros,
+  or applying only part of any map is invalid. A consuming import uses the
+  explicit scalar-actual-substitution path and emits no retained callee scalar
+  parameter or corresponding `InterfaceBind` row;
 - interpret `WireRtDim::Node { input }` as an absolute index into the
   owning `WireDagNode.inputs`, then validate that referenced earlier
   node as rank-zero `int64`;
@@ -2151,10 +2235,13 @@ never reused.
   path identities, conflicting mutation-site tags under one transform ID, and
   duplicate complete owner identities are invalid; distinct binder slots may
   share one valid scope-instance lineage. Importing another annotated DAG
-  canonically remaps its complete typed scope/site universe and history range
-  before combination; owners, typed origins, typed negative/proof sites,
-  evidence destinations, annotations, and dependent paths must all use that
-  one map. Decode never accepts an overlapping or partial raw import. A
+  canonically remaps its complete typed scope/site universe, retained interface
+  parameters, and history range before combination; owners, typed origins,
+  typed negative/proof sites, scalar-parameter occurrence origins, public
+  manifests, derived interface-bind/guard references, evidence destinations,
+  annotations, and dependent paths must all use that one map. Decode never
+  accepts duplicate parameter origins, one parameter origin with multiple
+  physical occurrences, or an overlapping or partial raw import. A
   stamp/manifest pair cannot establish or resize
   a class;
 - reject v6, #1298-only v7, versionless, future, string-size, executable
@@ -2254,9 +2341,10 @@ provisional hygienic annotations, the provisional proof/source algebra and
 state-indexed graph bound references, non-forgeable evidence IDs with exact
 destinations, the outer bound-versus-output-axis discriminator, the
 seven-variant indexed `RuntimeBoundField` algebra and frozen tags,
-typed-versus-synthesized negative/unclassed evidence sites, atomic
-proof/ref/site/attachment remapping, checked typed scope/site import
-bijections, the checked
+typed-versus-synthesized negative/unclassed evidence sites, structural
+interface-input IDs, atomic proof/ref/site/attachment remapping, checked
+scope/site/retained-input import bijections, explicit callee-actual
+substitution, the checked
 provisional-to-final bijections and consume-to-annotated inverse baseline, the
 typed/synthesized origin algebra,
 the exact structural origin comparator, a serialized checked transform cursor
@@ -2285,7 +2373,7 @@ for the next monotonic WireDag version (v8 from the current v6 baseline).
 Write the derived positive, negative, proof-sensitive same/cross-tensor,
 shared-occurrence/many-to-many, equality-class/observable-event-schedule,
 same-class CSE exclusion, semantic-transit/cross-host, owner-matrix,
-bound-destination/evidence-site, typed-arena import, and transform test stubs before
+bound-destination/evidence-site, typed/interface import, and transform test stubs before
 implementation. Then deliver C2.1-C2.6 and C6
 across all in-memory, target, transform, and wire consumers, followed by C2.7
 deletion. Close
@@ -2304,8 +2392,10 @@ the exact `RuntimeExtent` owner matrix; provisional hygienic keys and the
 independent provisional authority, opaque provisional proof/source algebra,
 state-indexed graph bound references, non-forgeable evidence IDs and exact
 destinations, the outer identity-destination kind tags, the closed indexed
-bound-field tags, typed/synthesized evidence site algebra, atomic
-proof/ref/site/attachment remapping, checked typed scope/site import remaps, checked
+bound-field tags, typed/synthesized evidence site algebra, structural
+interface-input IDs and occurrence/bind/manifest identity, atomic
+proof/ref/site/attachment remapping, checked scope/site/interface import
+remaps, explicit callee-actual substitution, checked
 provisional-to-final bijections, and consume-to-annotated inverse baseline;
 sealed graph, atomic mutation transactions,
 opaque annotated/finalized public states, finalized-only Eval/backend/cache
@@ -2334,8 +2424,8 @@ behavior for every bound-dependency class;
 the same-class witness-source CSE exclusion;
 the exact bound-field owner/index/side/endpoint algebra, outer
 bound-versus-output-axis destination kind, synthesized
-unclassed/fresh-witness evidence provenance, and collision-free typed-arena
-import;
+unclassed/fresh-witness evidence provenance, collision-free typed/interface
+import, and explicit interface-actual substitution;
 WireDag v8; no provenance-rejection construct; one static folder; all-lane
 guard placement.
 
@@ -2353,7 +2443,8 @@ consume/refinalize inverse-map rows; shared-occurrence two-class and same-class
 CSE-exclusion rows; outer destination-kind collision/reorder mutations,
 bound-field axis/side/endpoint/owner mutations,
 grad/vmap/specialization/clone/import typed-versus-synthesized evidence-site
-rows, and two-artifact scope/site-zero import/consume/refinalize permutations,
+rows, and two-artifact scope/site/parameter-zero retained-interface
+import/consume/refinalize permutations plus callee-actual substitutions,
 compute-once vmap/fusion trap/effect rows, retained
 high-water/DCE/hash rows, structural Wire negatives, coherent-replacement
 integrity mismatches, zero, and negative rows owned by this phase, plus the
