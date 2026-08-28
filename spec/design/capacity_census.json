@@ -1220,10 +1220,8 @@
     },
     {
       "kind": "std-def-numeric",
-      "id": "test::assert_close_tensor: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p))) (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p))) (t-prim {} f32) (t-prim {} string) (t-unit {}))",
-      "flags": [
-        "float-carrier"
-      ]
+      "id": "test::assert_close_tensor: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-prim {} string) (t-unit {}))",
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
