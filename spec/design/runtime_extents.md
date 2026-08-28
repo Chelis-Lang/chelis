@@ -271,11 +271,14 @@ fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
   location is by source, never by a string search: a `Load` axis carrying
   the claim is an interface member with its declared signature index; an
   output axis carrying the claim whose `output_axis_sources` entry is
-  `OpComputed` is an op-declared member, whose entry is `InputAxis` from a
-  shape-only slot (a folded read of another tensor) is a `TensorAxis`
-  member, whose entry is `ScalarInput` is a `Scalar` member, and whose entry
-  is `Literal` is a `Literal` member; an axis whose entry is `InputAxis` from
-  the tensor operand is pass-through and not a member. A literal claim on an
+  `OpComputed` is an op-declared member, whose entry is `InputAxis` is a
+  `TensorAxis` member, and whose entry is `ScalarInput` is a `Scalar`
+  member; a literal claim is itself the canonical `Literal` member. Only an
+  output axis that C4.2 maps to an unchanged input axis is pass-through and
+  not a member; the axis an operation sets or inserts is a member whatever
+  slot its `InputAxis` names, so a same-tensor read under a foreign claim
+  ([#1376]) is guarded, while a same-tensor read under a proved identity
+  costs no guard because C1.2's static proof leaves no claim. A literal claim on an
   anonymous runtime extent (`-> tensor[8, f32]` over `expand(b, 0,
   mul(shape(x, 0), 2i64))`) is therefore a class whose canonical member is
   the literal and whose other member is the scalar, and a cross-tensor
@@ -356,13 +359,15 @@ fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
   `classify_expand_size`, `classify_arith_app`,
   `sourceless_expand_size_error`, and `Env::size_provenance` and its
   plumbing. No intermediate commit may accept a value the IR cannot carry,
-  and none may execute a claimed extent without its guard: until Slice B
-  places guards, a `Node`-sized `expand` or `reshape` whose result axis
+  and no row a lane rejects on `main` may move to an unguarded execution:
+  until Slice B places guards, a `Node`-sized `expand` whose result axis
   carries a literal or named claim that is not statically proved stays
   rejected at lowering (the two sites at `lower.rs:9109-9190`, re-emitted as
   the registered [#730] `Unsupported` receipt rather than a fatal error), so
   those rows sit at `typed_unsupported` in the C5 lattice; an unclaimed
-  result executes in Slice A. Slice B deletes that receipt when it
+  result executes in Slice A. A row `main` already executes without its
+  guard ([#1374], [#1375], [#1376]) keeps that baseline, recorded as
+  `silent_unguarded`, until Slice B places the guard. Slice B deletes that receipt when it
   separately replaces `symbolic_occurrences`, `op_declared_output_axes`, and
   `shape_source_for_axis` with `output_axis_sources`, and
   `symbolic_bindings` with `derive_runtime_dim_classes`, once every lane
@@ -518,7 +523,8 @@ the properties below; the generator, not this document, enumerates rows.
    member node, the `f(n, n)` splice, a same-tensor read that keeps its
    proved identity beside a cross-tensor read that gets a guard, and a
    full-axis symbolic `shrink` `(0, ToEnd)` whose extent equals the input's
-   but whose identity and guard are fresh.
+   but whose identity and guard are fresh; [#1374], [#1375], and [#1376] are
+   the three named rows that start at `silent_unguarded`.
 2. **GPU build and execution.** The same rows compile and execute in the HIP
    and Metal correctness suites, not merely through capability-gate
    rejection tests:
@@ -580,7 +586,7 @@ the properties below; the generator, not this document, enumerates rows.
 Positive rows use this allowed transition lattice:
 
 ```text
-nonconforming_rejection | ice | lane_divergent
+nonconforming_rejection | silent_unguarded | ice | lane_divergent
     -> typed_unsupported(issue)
     -> executes_exactly
 ```
@@ -635,7 +641,7 @@ next monotonic `WIRE_DAG_SCHEMA_VERSION` at landing, coordinated with [#1298]
 so the two migrations use distinct successive versions and both trackers,
 `spec/10`, fixtures, hashes, and rejected-version controls update together;
 the regenerated typed wire capacity census; then C2.7's deletion, with the
-lowering-time [#730] receipt retained for a `Node`-sized owner under an
+lowering-time [#730] receipt retained for a `Node`-sized `expand` under an
 unproved literal or named claim. Close [#1367], [#1266], [#569], [#597],
 [#609], and [#592] if its reproducer is green once the size carrier lands;
 an instance whose reproducer claims a named result over a `Node` size
@@ -670,7 +676,8 @@ four C2.4 rules; guard placement per C1.3 on Eval, C, HIP, and Metal;
 replacement of `symbolic_occurrences`, `op_declared_output_axes`,
 `shape_source_for_axis`, and `symbolic_bindings` by those two derivations;
 deletion of the lowering-time claimed-`Node` receipt, and, once nothing
-reads it, of `shape_deps`. Close [#665] and any residue of [#592].
+reads it, of `shape_deps`. Close [#665], [#1374], [#1375], [#1376], and any
+residue of [#592].
 
 **Frozen at exit:** the `RuntimeDimClass` and `RuntimeDimMember` shapes,
 canonical class and member order, the guard placement realization per lane,
@@ -754,6 +761,9 @@ class completion oracle and ends with `RUNTIME EXTENT ORACLE: PASS`.
 | [#609] | wrong-rank ascription is accepted | A |
 | [#665] | movement-op runtime wildcard is lost across Expand | B |
 | [#592] | grad-backward Expand size cannot be traced to a Load | A (size carrier); B for any kept-axis residue |
+| [#1374] | cross-tensor read under a named claim is silently identified, no guard | B |
+| [#1375] | node-valued reshape target under a named claim executes unguarded | B |
+| [#1376] | same-tensor read on the set axis under a foreign claim, no guard | B |
 | [#1265] | comparison consumer never selects the deferred shape | C |
 | [#1338] | coupled defaults settle nondeterministically | C / [#1341] mechanism |
 | [#578] | mechanism evidence only; full rank-polymorphic repro stays open | external rank-polymorphism work |
@@ -918,3 +928,6 @@ decides the underlying rule, and what replaces it.
 [#1367]: https://github.com/Chelis-Lang/chelis/issues/1367
 [#1372]: https://github.com/Chelis-Lang/chelis/issues/1372
 [#1373]: https://github.com/Chelis-Lang/chelis/issues/1373
+[#1374]: https://github.com/Chelis-Lang/chelis/issues/1374
+[#1375]: https://github.com/Chelis-Lang/chelis/issues/1375
+[#1376]: https://github.com/Chelis-Lang/chelis/issues/1376

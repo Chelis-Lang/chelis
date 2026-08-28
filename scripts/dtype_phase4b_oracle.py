@@ -68,7 +68,7 @@ FROZEN_FILE_DIGESTS = {
         "a0ec07d22a5c26e2b81ffd9354dd0b055822a02689ccaed692592ec235ef6f09"
     ),
     "spec/design/dtype_semantics.md": (
-        "c24e255e9168b9c48bd6d80561d1cc4fcea47120d88d046ee8704cd3e4b1d8ba"
+        "388cf76e700c728c1302dbea59254e534194b56ca35f12e1dc145650304fa4f1"
     ),
     "spec/design/loud_unsupported.md": (
         "dec76721503b380278124b12448112d3e4bf754f8320f949642d32f7d30d5414"
