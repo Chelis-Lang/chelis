@@ -660,7 +660,7 @@ pub fn parse_and_stamp_type(source: &str) -> Result<Expr, StampOrParseError> {
         }
         .into());
     }
-    Ok(crate::stamp_to_typed::stamp_type(
+    Ok(crate::stamp_to_typed::stamp_serialized_type(
         raw_exprs.pop().expect("length checked above"),
     )?)
 }

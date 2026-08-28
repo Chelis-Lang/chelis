@@ -33,6 +33,10 @@ pub struct ShellModule {
 pub struct ShellSymbol {
     pub name: String,
     pub kind: SymbolKind,
+    /// Canonical serialized type for a value export. Values always carry
+    /// `Some` (including signature-only exports with `has_body == false`);
+    /// type, macro, and dimension exports may use `None`. An empty string is
+    /// never a representation.
     pub type_repr: Option<String>,
     pub type_variable_restrictions: Vec<TypeVariableRestriction>,
     pub effects: Vec<String>,
@@ -147,16 +151,16 @@ pub fn validate_shell(shell: &ShellPackage) -> Result<(), bincode::Error> {
         )?;
         for symbol in &module.exports {
             validate_nonempty_trimmed("export name", &symbol.name)?;
-            if symbol
-                .type_repr
-                .as_ref()
-                .is_some_and(|repr| repr.is_empty())
-            {
-                return Err(validation_error(&format!(
-                    "export `{}` in module `{}` has an empty type representation",
-                    symbol.name, module.module
-                )));
-            }
+            let type_variables = match &symbol.type_repr {
+                Some(type_repr) => Some(canonical_type_variables(type_repr)?),
+                None if symbol.kind == SymbolKind::Value => {
+                    return Err(validation_error(&format!(
+                        "value export `{}` in module `{}` requires a type representation",
+                        symbol.name, module.module
+                    )));
+                }
+                None => None,
+            };
             validate_type_variable_restrictions(
                 &format!(
                     "type-variable restrictions for export `{}` in module `{}`",
@@ -170,10 +174,7 @@ pub fn validate_shell(shell: &ShellPackage) -> Result<(), bincode::Error> {
                     symbol.name, module.module
                 )));
             }
-            if !symbol.type_variable_restrictions.is_empty()
-                && let Some(type_repr) = &symbol.type_repr
-            {
-                let type_variables = canonical_type_variables(type_repr)?;
+            if let Some(type_variables) = type_variables {
                 for restriction in &symbol.type_variable_restrictions {
                     let index = canonical_type_variable_index(&restriction.variable)?;
                     if !type_variables.contains(&index) {
@@ -267,17 +268,6 @@ fn canonical_type_variables(type_repr: &str) -> Result<BTreeSet<u32>, bincode::E
 
         match expr {
             Expr::Atom(..) => {}
-            Expr::Map(meta, _) => {
-                for (_, value) in &meta.entries {
-                    visit(value, variables)?;
-                }
-            }
-            Expr::MetaExpr(meta, _) => {
-                for (_, value) in &meta.entries {
-                    visit(value, variables)?;
-                }
-                visit(&meta.expr, variables)?;
-            }
             Expr::Node(node, _) => {
                 if node.tag() == DeepTag::TVar {
                     let Some(Expr::Atom(Atom::Name(name), _)) = node.children_slice().first()
@@ -291,27 +281,15 @@ fn canonical_type_variables(type_repr: &str) -> Result<BTreeSet<u32>, bincode::E
                 for child in node.children_slice() {
                     visit(child, variables)?;
                 }
-                for (_, value) in &node.meta().entries {
-                    visit(value, variables)?;
-                }
             }
-            Expr::List(list, _) => {
-                for child in &list.elements {
-                    visit(child, variables)?;
-                }
-            }
-            Expr::BareList(children, _) => {
-                for child in children {
-                    visit(child, variables)?;
-                }
-            }
-            Expr::UnknownForm(data) => {
-                for (_, value) in &data.meta.entries {
-                    visit(value, variables)?;
-                }
-                for child in &data.children {
-                    visit(child, variables)?;
-                }
+            Expr::Map(..)
+            | Expr::MetaExpr(..)
+            | Expr::List(..)
+            | Expr::BareList(..)
+            | Expr::UnknownForm(..) => {
+                return Err(validation_error(
+                    "type representation contains a non-type carrier",
+                ));
             }
         }
         Ok(())
@@ -456,6 +434,141 @@ mod tests {
             ),
             "unexpected diagnostic: {error}"
         );
+
+        let mut metadata_only = fixture_shell();
+        let symbol = &mut metadata_only.modules[0].exports[0];
+        symbol.type_repr = Some("(t-prim {type: (t-var {} t0)} f32)".to_string());
+        symbol.type_variable_restrictions = vec![TypeVariableRestriction {
+            variable: "t0".to_string(),
+            domain: TypeVariableDomain::ActiveFloat,
+        }];
+        let error = validate_shell(&metadata_only)
+            .expect_err("a metadata-only variable is not part of the quantified type");
+        assert!(
+            error.to_string().contains(
+                "restricts `t0` but that canonical variable is absent from its type representation"
+            ),
+            "unexpected diagnostic: {error}"
+        );
+    }
+
+    #[test]
+    fn shell_validation_rejects_malformed_type_representations_for_every_scheme_shape() {
+        let malformed = [
+            ("invalid syntax", "(t-unit {}"),
+            ("multiple expressions", "(t-unit {}) (t-unit {})"),
+            ("unknown root", "(not-a-type {} f32)"),
+            ("bare atom", "f32"),
+            ("bare list", "()"),
+            ("bare map", "{type: (t-prim {} f32)}"),
+            (
+                "legacy metadata-expression wrapper",
+                "^{:doc \"legacy\"} (t-prim {} f32)",
+            ),
+            ("runtime root", "(lit {type: (t-var {} t0)} 1)"),
+            (
+                "nested runtime node",
+                "(t-fn {} (lit {type: (t-var {} t0)} 1) (t-var {} t0))",
+            ),
+            (
+                "tensor namespace swap",
+                "(t-tensor {} (t-var {} t0) (d-rank {} r0))",
+            ),
+        ];
+
+        for has_body in [false, true] {
+            for restricted in [false, true] {
+                for (label, source) in malformed {
+                    let mut shell = fixture_shell();
+                    let symbol = &mut shell.modules[0].exports[0];
+                    symbol.has_body = has_body;
+                    symbol.type_repr = Some(source.to_string());
+                    symbol.type_variable_restrictions = restricted
+                        .then(|| TypeVariableRestriction {
+                            variable: "t0".to_string(),
+                            domain: TypeVariableDomain::ActiveFloat,
+                        })
+                        .into_iter()
+                        .collect();
+
+                    let shape = format!("{label}, has_body={has_body}, restricted={restricted}");
+                    assert!(
+                        validate_shell(&shell).is_err(),
+                        "validate_shell admitted {shape}"
+                    );
+                    assert!(
+                        encode_shell(&shell).is_err(),
+                        "encode_shell admitted {shape}"
+                    );
+                    assert!(
+                        decode_shell(&encode_unvalidated(&shell)).is_err(),
+                        "decode_shell admitted {shape}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shell_validation_requires_value_signatures_and_accepts_valid_authored_fallbacks() {
+        for has_body in [false, true] {
+            for restricted in [false, true] {
+                let mut shell = fixture_shell();
+                let symbol = &mut shell.modules[0].exports[0];
+                symbol.has_body = has_body;
+                symbol.type_repr = Some(if restricted {
+                    "(t-fn {} (t-var {} t0) (t-var {} t0))".to_string()
+                } else {
+                    "(t-fn {} (t-prim {} f32) (t-prim {} f32))".to_string()
+                });
+                symbol.type_variable_restrictions = restricted
+                    .then(|| TypeVariableRestriction {
+                        variable: "t0".to_string(),
+                        domain: TypeVariableDomain::ActiveFloat,
+                    })
+                    .into_iter()
+                    .collect();
+
+                validate_shell(&shell).unwrap_or_else(|error| {
+                    panic!(
+                        "valid signature rejected for has_body={has_body}, restricted={restricted}: {error}"
+                    )
+                });
+                decode_shell(&encode_shell(&shell).expect("encode valid shell"))
+                    .expect("decode valid shell");
+            }
+        }
+
+        for has_body in [false, true] {
+            let mut shell = fixture_shell();
+            let symbol = &mut shell.modules[0].exports[0];
+            symbol.has_body = has_body;
+            symbol.type_repr = None;
+            assert!(
+                validate_shell(&shell).is_err(),
+                "value export without a type representation was admitted (has_body={has_body})"
+            );
+        }
+
+        for kind in [SymbolKind::Type, SymbolKind::Macro, SymbolKind::Dim] {
+            let mut shell = fixture_shell();
+            let symbol = &mut shell.modules[0].exports[0];
+            symbol.kind = kind;
+            symbol.type_repr = None;
+            symbol.has_body = false;
+            validate_shell(&shell).unwrap_or_else(|error| {
+                panic!("{kind:?} export without a value type failed: {error}")
+            });
+        }
+    }
+
+    fn encode_unvalidated(shell: &ShellPackage) -> Vec<u8> {
+        let payload = bincode::serialize(shell).expect("serialize malformed test payload");
+        let mut bytes = Vec::with_capacity(SHELL_MAGIC.len() + 4 + payload.len());
+        bytes.extend_from_slice(SHELL_MAGIC);
+        bytes.extend_from_slice(&SHELL_FORMAT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        bytes
     }
 
     fn fixture_shell() -> ShellPackage {
