@@ -801,9 +801,9 @@ they are discrete index math, carry exact zero cotangent, and do not pull their
 producers (for example a window-count `floor_div`) into a structural
 differentiability rejection.
 
-> **[05-MOV-1]** Runtime movement bounds and reshape targets, their validation,
-> and the exact adjoints above SHALL be available in every language execution
-> mode for every active tensor dtype admitted by the owning movement
+> **[05-MOV-1]** Runtime movement bounds, `expand` sizes, and reshape targets,
+> their validation, and the exact adjoints above SHALL be available in every
+> language execution mode for every active tensor dtype admitted by the owning movement
 > operation. Eval, C, HIP, and Metal execute the same runtime values and
 > traps. No lowering may erase a runtime value, substitute a literal bound,
 > require host provenance, emit a statically guessed extent, or turn a backend

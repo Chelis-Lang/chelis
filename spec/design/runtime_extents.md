@@ -119,11 +119,16 @@ through a typed implementation receipt, to exact execution.
    op-declared sites; the HIP lane compiles a Load-declared symbolic
    `expand` because `emit_expand` (`crates/chelis-backend-hip/src/emit.rs:
    3107-3140`) never reads the size and takes the output shape from the
-   node's type metadata by name (`emit_alias_view`, `1996-2001`), but it
-   rejects every `RtDim::Node` bound and the `Shape` read itself
-   (`crates/chelis-compiler-api/src/compiler.rs:4628-
-   4694`); the Metal lane rejects node-valued bounds (`compiler.rs:4238-
-   4259`). `vmap` (`crates/chelis-ir/src/vmap.rs:12`) prepends the batch axis
+   node's type metadata by name (`emit_alias_view`, `1996-2001`). Both GPU
+   gates run only on the device-DAG path (`reject_unsupported_hip_ops`,
+   `crates/chelis-compiler-api/src/compiler.rs:4495`, called at `2079`;
+   `reject_unsupported_metal_ops`, `4201`): there HIP rejects every
+   `RtDim::Node` bound and the `Shape` read itself (`4628-4694`) and Metal
+   rejects node-valued bounds (`4238-4259`), while a program whose roots
+   manifest to the host lane (`compiler.rs:2049-2066`,
+   `codegen_host_program`) executes `Node` bounds and `Shape` reads today
+   under `--target hip` and `--target metal` through the C emitter. `vmap`
+   (`crates/chelis-ir/src/vmap.rs:12`) prepends the batch axis
    to every node including rank-0 scalars and has no `Shape` arm;
    `chelis_ir::verify::verify`, which would reject the rank-1 bound source
    (`verify.rs:518-522`, `verify.rs:1471-1479`), runs only in tests and at
@@ -264,8 +269,7 @@ fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
   `expand` result tensor whose rank is the operand rank or the operand rank
   plus one, stamps complete type metadata, and validates a declared or
   ascribed rank, and a literal claim against a literal size, against it. The
-  early exit that causes
-  [#597] and [#609] is deleted.
+  early exit that causes [#609] is deleted.
 - **C2.4 Equality classes are derived, not stored.** Every stamped `Dim`
   claim, a binder name or a literal, that the checker attached to more than
   one witness is one `RuntimeDimClass`, computed by
@@ -331,11 +335,13 @@ fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
     guard steps before the first dependent allocation.
   - HIP and Metal: their gates admit `Lit` and `InputAxis`, which are
     metadata reads (the same by-name metadata read HIP's `emit_expand`
-    performs today), so a Load-declared symbolic `expand` keeps compiling. They reject
-    `Node` with the existing [05-MOV-1] typed receipt until the runtime
-    scalar path lands under [#1112]/[#1298]; that is a legal interim state in
-    the C5 lattice, and an extent above `INT_MAX` on HIP remains [#1112]'s
-    defect exactly as it is now.
+    performs today), so a Load-declared symbolic `expand` keeps compiling.
+    On the device-DAG path they reject `Node` with the existing [05-MOV-1]
+    typed receipt until the device scalar path lands under
+    [#1112]/[#1298]; that is a legal interim state in the C5 lattice. On the
+    host-program path both targets already execute `Node` bounds through
+    the C emitter, and those rows keep executing. An extent above `INT_MAX`
+    on HIP remains [#1112]'s defect exactly as it is now.
   - Wire: `Expand.size` changes from a display string to `WireRtDim`, which
     gains an `input_axis { tensor, axis }` variant; nothing is serialized
     for classes, since every consumer derives them from the names and
@@ -362,7 +368,8 @@ fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
   changes no acceptance decision of the provenance walk: `SizeClass`,
   `classify_expand_size`, `classify_arith_app`,
   `sourceless_expand_size_error`, `Env::size_provenance`, and the lowerer's
-  two rejection sites at `lower.rs:9109-9190` stay exactly as they are, so
+  two rejection sites at `lower.rs:9109-9190` keep their acceptance
+  decisions (only their wording changes under [#1367]), so
   every row keeps its `main` baseline through Slice A except the
   spec-conformance rows Slice A itself owns (zero extents, the `vmap` rule,
   constructed results). Slice B deletes all of them in the same change that
@@ -675,8 +682,9 @@ decisions unchanged.
 **Oracle:** `uv run --managed-python --python 3.11 --no-project python
 scripts/runtime_extent_oracle.py --phase a`: lane parity for every row
 whose recorded `main` baseline is `executes_exactly`, HIP and Metal
-build-and-execute rows for `Lit` and `InputAxis` (with `Node` rows at
-`typed_unsupported([05-MOV-1])`), the insertion and named-axis zero rows,
+build-and-execute rows for `Lit` and `InputAxis` (with device-path `Node`
+rows at `typed_unsupported([05-MOV-1])` and host-path `Node` rows at their
+executing baseline), the insertion and named-axis zero rows,
 rebuild-survival rows, and wire rows this slice owns; every other row,
 including every positional same-rank replacement row (`silent_unguarded`,
 owner [#597]), stays at its recorded baseline.
@@ -685,8 +693,10 @@ owner [#597]), stays at its recorded baseline.
 
 **Entry requirements:** Slice A. [#1112] for the HIP guard rows over
 device-resident extents only: HIP must carry `int64` device extents to
-compare them exactly, so host, C, Metal, and host-emitted HIP rows may exit
-first with the device-resident HIP rows at `typed_unsupported(#1112)`.
+compare them exactly, so host, C, host-path Metal, and host-path HIP rows
+may exit first with the device-resident HIP rows at
+`typed_unsupported(#1112)` and device-path Metal `Node` rows at the
+[05-MOV-1] receipt until the Metal device scalar path lands.
 [#1298] for the node-valued `InputAxis` axis rows only, which sit at
 `typed_unsupported(#1298)` on every lane until then.
 
