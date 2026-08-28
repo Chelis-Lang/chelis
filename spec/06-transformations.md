@@ -490,11 +490,12 @@ exactly once in the order of the unbatched function. A folded tensor-axis read
 (`InputAxis`, spec/05-risc-primitives.md §2.4.1) observes the axis it named in
 the unbatched function: after the batch axis is inserted a literal axis shifts
 by one, and a computed axis is normalized against the unbatched rank and then
-shifted, so the read never selects the batch axis. A `shape()` read used both
-as an extent and as an ordinary value is still evaluated once and the ordinary
-use sees the shared rank-0 value. The movement operation itself follows §3.3:
-the batch axis passes through untouched and every bound applies within each
-batch element.
+shifted, so the read never selects the batch axis. A materialized `shape()`
+value node (the `Node` form) shifts its axis the same way. A `shape()` read
+used both as an extent and as an ordinary value is still evaluated once and
+the ordinary use sees the shared rank-0 value. The movement operation itself
+follows §3.3: the batch axis passes through untouched and every bound applies
+within each batch element.
 
 An extent whose value depends on the elements of a vmapped tensor argument
 would vary per batch element and cannot describe one stacked result shape.
