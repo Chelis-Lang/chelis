@@ -67,12 +67,16 @@ fn build_consumer_counts(dag: &Dag) -> Vec<usize> {
 
 /// Returns true if the op is an elementwise op that can participate in fusion.
 fn is_fusible_elementwise(node: &DagNode) -> bool {
-    // chelis#729 Phase 3 / chelis#699: the C backend now has a typed,
-    // trapping direct integer-Abs kernel, while its general fused integer
-    // kernel is still deliberately unavailable. Keep integer Abs
-    // materialized so ordinary source programs cannot be optimized back
-    // onto the float-only fused path. Float Abs remains fusible.
-    if matches!(node.op, RiscOp::Abs | RiscOp::Sub) && node.output_type.precision.is_integer() {
+    // chelis#729 Phase 3 / chelis#699: the typed backends now have trapping
+    // direct integer Abs/Sub/extrema kernels, while their general fused
+    // integer kernels are still deliberately unavailable. Keep those integer
+    // identities materialized so ordinary source programs cannot be optimized
+    // back onto a float-only fused path. Their float forms remain fusible.
+    if matches!(
+        node.op,
+        RiscOp::Abs | RiscOp::Sub | RiscOp::MaxElem | RiscOp::MinElem
+    ) && node.output_type.precision.is_integer()
+    {
         return false;
     }
     matches!(

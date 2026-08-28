@@ -201,8 +201,6 @@ and float precisions as their tensor forms and use the same adjoint rule.
 > `string`, reserved dtype spellings, mixed dtypes or surfaces, and mismatched
 > tensor dimensions are type errors.
 
-*(Not fully implemented; chelis#1306.)*
-
 ### 2.2 Elementwise Unary
 
 | Name | Signature | Semantics | AD Adjoint |
@@ -988,8 +986,6 @@ program did not request.
 > Signed-integer forms are forward-only and `grad` rejects them. The operation
 > has no accumulator. `bool`, `string`, reserved dtype spellings, mixed dtypes
 > or surfaces, and mismatched tensor dimensions are type errors.
-
-*(Not fully implemented; chelis#1306.)*
 
 ### 3.2 Comparison and Logical Operations
 

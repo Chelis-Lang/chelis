@@ -436,13 +436,15 @@ impl CEmitter {
     /// out when a movement-op runtime wildcard is involved (wildcards
     /// unify permissively, spec §4.5).
     ///
-    /// Scope: operands are compared pairwise against `inputs[0]` at
-    /// EQUAL rank only — a rank-0 operand against a rank-N one is the
-    /// backend's established scalar-broadcast idiom on the strided path
-    /// (`chelis_indices_to_flat` with `ndim 0` resolves to element 0)
-    /// and must not abort. Skipped entirely when every extent of the
-    /// output and all inputs is a static literal: the checker proved
-    /// those equal, and fully static codegen stays byte-identical.
+    /// Scope: every operand pair is compared at EQUAL rank only — a rank-0
+    /// operand against a rank-N one is the backend's established
+    /// scalar-broadcast idiom on the strided path (`chelis_indices_to_flat`
+    /// with rank 0 resolves to element 0) and must not abort. The all-pairs
+    /// form matters for `FusedElem`: its first external input can be scalar,
+    /// so comparing only against that input would miss disagreement between
+    /// later tensor inputs. Skipped entirely when every extent of the output
+    /// and all inputs is a static literal: the checker proved those equal, and
+    /// fully static codegen stays byte-identical.
     fn emit_elementwise_operand_guard(&mut self, node: &DagNode, dag: &Dag) {
         let dims_static = |dims: &[DimInfo]| dims.iter().all(|d| matches!(d, DimInfo::Lit(_)));
         let all_static = dims_static(&node.output_type.dims)
@@ -454,15 +456,17 @@ impl CEmitter {
             return;
         }
         let id = node.id.0;
-        let a = node.inputs[0].0;
-        for input in &node.inputs[1..] {
-            let b = input.0;
-            self.line(&format!(
-                "if (t{a}->rank == t{b}->rank) {{ for (int __d = 0; __d < t{a}->rank; __d++) {{ \
-                 if (t{a}->shape[__d] != t{b}->shape[__d]) {{ fprintf(stderr, \"chelis: \
-                 elementwise operand shape mismatch at node {id} axis %d\\n\", __d); abort(); \
-                 }} }} }}"
-            ));
+        for (left_index, left) in node.inputs.iter().enumerate() {
+            let a = left.0;
+            for right in &node.inputs[left_index + 1..] {
+                let b = right.0;
+                self.line(&format!(
+                    "if (t{a}->rank == t{b}->rank) {{ for (int __d = 0; __d < t{a}->rank; __d++) {{ \
+                     if (t{a}->shape[__d] != t{b}->shape[__d]) {{ fprintf(stderr, \"chelis: \
+                     elementwise operand shape mismatch at node {id} axis %d\\n\", __d); abort(); \
+                     }} }} }}"
+                ));
+            }
         }
     }
 
@@ -483,6 +487,7 @@ impl CEmitter {
                 | RiscOp::MinElem
                 | RiscOp::ExtremaAdjoint { .. }
                 | RiscOp::CmpLt
+                | RiscOp::FusedElem { .. }
         ) {
             self.emit_elementwise_operand_guard(node, dag);
         }

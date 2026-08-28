@@ -223,3 +223,59 @@ fn integer_direct_sub_and_extrema_are_forward_only() {
         );
     }
 }
+
+#[test]
+fn signed_integer_extrema_chains_stay_materialized_for_typed_backends() {
+    for precision in [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64] {
+        let mut dag = Dag::new();
+        let ty = scalar_at(precision);
+        let left = dag.add_node(
+            RiscOp::Load {
+                name: "left".into(),
+            },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let right = dag.add_node(
+            RiscOp::Load {
+                name: "right".into(),
+            },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let cap = dag.add_node(
+            RiscOp::Load { name: "cap".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let maximum = dag.add_node(RiscOp::MaxElem, vec![left, right], ty.clone(), None);
+        let minimum = dag.add_node(RiscOp::MinElem, vec![maximum, cap], ty, None);
+        dag.add_root(minimum);
+
+        let fused = chelis_ir::fuse::fuse(&dag);
+        assert!(
+            fused
+                .nodes()
+                .iter()
+                .all(|node| !matches!(node.op, RiscOp::FusedElem { .. })),
+            "{precision:?} extrema must stay on the exact typed direct kernels"
+        );
+        assert!(
+            fused
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::MaxElem)),
+            "{precision:?} max_elem disappeared during fusion"
+        );
+        assert!(
+            fused
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::MinElem)),
+            "{precision:?} min_elem disappeared during fusion"
+        );
+    }
+}

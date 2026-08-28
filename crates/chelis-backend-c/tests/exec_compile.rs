@@ -3089,6 +3089,150 @@ int main(void) {{
     }
 }
 
+#[test]
+fn direct_signed_integer_extrema_chains_survive_fusion_and_execute_at_every_width() {
+    for (tag, prim, c_type, c_dtype) in [
+        ("i8", Prim::Int8, "int8_t", "CHELIS_DTYPE_I8"),
+        ("i16", Prim::Int16, "int16_t", "CHELIS_DTYPE_I16"),
+        ("i32", Prim::Int32, "int32_t", "CHELIS_DTYPE_I32"),
+        ("i64", Prim::Int64, "int64_t", "CHELIS_DTYPE_I64"),
+    ] {
+        let mut dag = Dag::new();
+        let ty = vec_prim(4, prim);
+        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
+        let c = dag.add_node(RiscOp::Load { name: "c".into() }, vec![], ty.clone(), None);
+        let maximum = dag.add_node(RiscOp::MaxElem, vec![a, b], ty.clone(), None);
+        let minimum = dag.add_node(RiscOp::MinElem, vec![maximum, c], ty, None);
+        dag.add_root(minimum);
+
+        let fused = fuse(&dag);
+        assert!(
+            fused
+                .nodes()
+                .iter()
+                .all(|node| !matches!(node.op, RiscOp::FusedElem { .. })),
+            "{tag}: signed-integer extrema must stay materialized"
+        );
+        let function = format!("direct_integer_extrema_chain_{tag}");
+        let src = chelis_backend_c::codegen(&fused, &function)
+            .unwrap_or_else(|error| panic!("{tag}: fused direct extrema codegen failed: {error}"))
+            .c_source;
+        let harness = format!(
+            r#"{HARNESS_HEADER}
+#include <stdint.h>
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    {c_type} a_data[4] = {{ -5, 7, 3, 0 }};
+    {c_type} b_data[4] = {{ -4, 7, -9, 5 }};
+    {c_type} c_data[4] = {{ -6, 6, 4, 5 }};
+    {c_type} expected[4] = {{ -6, 6, 3, 5 }};
+    chelis_tensor a = make_view_typed_1d(a_data, 4, {c_dtype});
+    chelis_tensor b = make_view_typed_1d(b_data, 4, {c_dtype});
+    chelis_tensor c = make_view_typed_1d(c_data, 4, {c_dtype});
+    chelis_tensor *inputs[3] = {{ &a, &b, &c }};
+    chelis_tensor *outputs[1] = {{ NULL }};
+    {function}(inputs, 3, outputs, 1);
+    {c_type} *got = ({c_type} *)outputs[0]->data;
+    for (int i = 0; i < 4; i++) if (got[i] != expected[i]) return 1;
+    puts("PASS");
+    return 0;
+}}
+"#
+        );
+        let output = compile_and_run_kernel(&function, &src, &harness)
+            .unwrap_or_else(|| panic!("{tag}: integer extrema chain did not compile and run"));
+        assert!(output.contains("PASS"), "{tag}: {output}");
+    }
+}
+
+#[test]
+fn direct_fused_runtime_shape_mismatch_traps_before_indexing() {
+    let runtime_vec = |name: &str| TensorType {
+        dims: vec![DimInfo::Named(name.into(), None)],
+        precision: Prim::F32,
+    };
+    let mut dag = Dag::new();
+    let n_ty = runtime_vec("n");
+    let m_ty = runtime_vec("m");
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        n_ty.clone(),
+        None,
+    );
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], m_ty, None);
+    let c = dag.add_node(
+        RiscOp::Load { name: "c".into() },
+        vec![],
+        n_ty.clone(),
+        None,
+    );
+    let difference = dag.add_node(RiscOp::Sub, vec![a, b], n_ty.clone(), None);
+    let minimum = dag.add_node(RiscOp::MinElem, vec![difference, c], n_ty, None);
+    dag.add_root(minimum);
+
+    let fused = fuse(&dag);
+    assert!(
+        fused
+            .nodes()
+            .iter()
+            .any(|node| matches!(node.op, RiscOp::FusedElem { .. })),
+        "float Sub -> MinElem must exercise the fused path"
+    );
+    let function = "direct_fused_runtime_shape_guard";
+    let src = chelis_backend_c::codegen(&fused, function)
+        .expect("fused runtime-shape codegen")
+        .c_source;
+    assert!(
+        src.contains("elementwise operand shape mismatch"),
+        "fused codegen dropped the deferred operand-shape guard:\n{src}"
+    );
+    assert!(
+        src.contains("if (t1->rank == t2->rank)"),
+        "fused codegen must compare every equal-rank external-input pair:\n{src}"
+    );
+
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+static chelis_tensor make_distinct_view(float *data, int64_t *shape) {{
+    static const int64_t strides[1] = {{1}};
+    return (chelis_tensor){{
+        .data = data, .shape = shape, .strides = strides, .size = shape[0],
+        .byte_capacity = shape[0] * (int64_t)sizeof(float), .rank = 1,
+        .dtype = CHELIS_DTYPE_F32, .owns_data = 0, .reserved = {{0, 0}},
+    }};
+}}
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    float a_data[3] = {{ 1, 2, 3 }};
+    float b_data[2] = {{ 1, 2 }};
+    float c_data[3] = {{ 4, 5, 6 }};
+    int64_t a_shape[1] = {{3}}, b_shape[1] = {{2}}, c_shape[1] = {{3}};
+    chelis_tensor a = make_distinct_view(a_data, a_shape);
+    chelis_tensor b = make_distinct_view(b_data, b_shape);
+    chelis_tensor c = make_distinct_view(c_data, c_shape);
+    chelis_tensor *inputs[3] = {{ &a, &b, &c }};
+    chelis_tensor *outputs[1] = {{ NULL }};
+    {function}(inputs, 3, outputs, 1);
+    puts("UNREACHABLE");
+    return 0;
+}}
+"#
+    );
+    let run = compile_and_capture_run("direct_fused_runtime_shape_guard", &src, &harness);
+    assert!(
+        !run.status.success(),
+        "mismatched deferred dimensions reached the fused loop; stdout={}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains("elementwise operand shape mismatch"),
+        "fused runtime-shape trap emitted the wrong diagnostic: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
 #[derive(Clone, Copy)]
 struct DirectExtremaBitCase<'a> {
     tag: &'a str,

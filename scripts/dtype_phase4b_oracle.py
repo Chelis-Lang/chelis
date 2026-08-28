@@ -56,7 +56,7 @@ FROZEN_FILE_DIGESTS = {
         "c7e825b5d9cc7e0d4bc588504e49612705520b4d63df618be24613fd4bc9b414"
     ),
     "spec/05-risc-primitives.md": (
-        "ea9ad8f67f645ff5b835a83c0a18290a4bc7336c9022af2386ebcbee75a5fb78"
+        "577c242de5d43901afb68a0053b8d690d77476f64b24f2003938bf9018b66142"
     ),
     "spec/06-transformations.md": (
         "faa71c7b4be426d9c6e41fa756998161d96377cf3b5d97ad99d6fda105da18fb"
@@ -407,7 +407,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/05-risc-primitives.md",
         "### 2.1 Elementwise Binary",
         "### 2.4 Movement",
-        "53fc4eb2ab078b587f18e70fd187671ed4f907277cefa9534e953872324a968f",
+        "90fdc968d6de13e06f0908da4666d98d6e68258195eed3123e30b2c57dda7485",
     ),
     "logical builtin contract": (
         "spec/05-risc-primitives.md",

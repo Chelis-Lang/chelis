@@ -397,6 +397,51 @@ fn direct_extrema_and_adjoint_emit_bit_preserving_kernels() {
     assert!(!source.contains("fminf(av, bv)"), "{source}");
 }
 
+#[test]
+fn direct_signed_integer_extrema_chains_stay_on_typed_hip_kernels() {
+    for (precision, suffix) in [
+        (Prim::Int8, "i8"),
+        (Prim::Int16, "i16"),
+        (Prim::Int32, "i32"),
+        (Prim::Int64, "i64"),
+    ] {
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision,
+        };
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
+        let c = dag.add_node(RiscOp::Load { name: "c".into() }, vec![], ty.clone(), None);
+        let maximum = dag.add_node(RiscOp::MaxElem, vec![a, b], ty.clone(), None);
+        let minimum = dag.add_node(RiscOp::MinElem, vec![maximum, c], ty, None);
+        dag.add_root(minimum);
+
+        let fused = fuse(&dag);
+        assert!(
+            fused
+                .nodes()
+                .iter()
+                .all(|node| !matches!(node.op, RiscOp::FusedElem { .. })),
+            "{precision:?} extrema must not enter the float-only fused HIP family"
+        );
+        let source = codegen_hip(
+            &fused,
+            &format!("direct_integer_extrema_{}", precision.name()),
+        )
+        .unwrap_or_else(|error| panic!("{precision:?} HIP codegen failed: {error}"))
+        .c_source;
+        assert!(
+            source.contains(&format!("kernel_max_elem_{suffix}")),
+            "{precision:?}: missing typed max kernel: {source}"
+        );
+        assert!(
+            source.contains(&format!("kernel_min_elem_{suffix}")),
+            "{precision:?}: missing typed min kernel: {source}"
+        );
+    }
+}
+
 // chelis#178: floor_div / trunc_div emit correctly-shaped HIP kernels.
 // `trunc_div` on integers is the native C `/` quotient (guarded);
 // `floor_div` on integers carries the remainder-sign correction; on
