@@ -57,9 +57,34 @@ validation pass.
 - Do not treat a remote 404 / deployment error as a successful spawn. Stop or interrupt
   and retire that handle, then retry or report the red team blocked.
 
+## Pull Request Finding Discipline
+
+- Classify every finding against the pull request's stated scope. It is in scope only
+  when the pull request introduces it, worsens it, or claims to correct it. Mere
+  discovery, including an unrelated pre-existing spec/implementation mismatch, does not
+  bring it into scope.
+- For documentation and design reviews, a wrong normative rule or a plan that cannot
+  close a named in-scope instance or acceptance requirement is P1. A design document
+  that misdescribes current `main`, or exposes a sequencing seam between delivery slices
+  while leaving the normative contract and named deliverable achievable, is P2 residual
+  work rather than a merge blocker.
+- Only confirmed in-scope P0/P1 findings block the pull request and require repair plus
+  another fresh exact-head review. Do not repair an out-of-scope finding in the pull
+  request; link its existing issue or file one when it is not already tracked.
+- A gate repair may correct, remove, or narrow existing pull-request content. It must not
+  add design scope, implementation responsibilities, inventories, mechanisms, or
+  promises merely to absorb a finding. Reduce the claim and track additional work
+  separately when correction would otherwise expand scope.
+- Treat the underlying defect category or unmet obligation as the finding class, not its
+  file, line, or wording instance. If consecutive rounds replace a repaired finding with
+  a different class, stop the repair loop and correct or narrow the review brief before
+  another round. Do not keep expanding the pull request to satisfy a moving brief.
+
 ## Minimum Deliverable
 
 - findings ordered by severity
+- an in-scope or out-of-scope classification for every finding, with linked issue status
+  for every out-of-scope defect
 - exact commands run
 - coverage against the active spec and acceptance oracle
 - exact reviewed commit and final worktree status

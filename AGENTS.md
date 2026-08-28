@@ -93,6 +93,12 @@ not drift.
   only when the pull request introduces it, worsens it, or claims to correct it. Mere
   discovery during review, including a pre-existing spec/implementation mismatch in an
   unrelated surface, does not bring a finding into scope.
+- For documentation and design reviews, assign severity by the contract impact rather
+  than by the mere presence of an inaccurate sentence. A wrong normative rule, or a
+  plan that cannot close a named in-scope instance or acceptance requirement, is P1. A
+  design document that misdescribes current `main`, or exposes a sequencing seam between
+  delivery slices while leaving the normative contract and named deliverable achievable,
+  is P2 and must be recorded as residual work rather than promoted to a merge blocker.
 - Only a confirmed in-scope P0 (critical) or P1 (high/major) finding blocks merge. Fix
   that finding in the pull request, push the updated head, and run another fresh-context
   red-team review against that exact head.
@@ -100,6 +106,16 @@ not drift.
   reports no in-scope P0 or P1 findings. A review of an earlier head does not satisfy
   this gate. An out-of-scope P0 or P1 finding does not require a change to the pull
   request or another red-team review.
+- Repairs under this gate may correct, remove, or narrow the pull request's existing
+  content. They must not add new design scope, implementation responsibilities,
+  inventories, mechanisms, or promises merely to absorb a finding. When a correction
+  would require that expansion, reduce the claim and track the additional work outside
+  the pull request.
+- A finding class is the underlying defect category or unmet obligation, not its file,
+  line, or wording instance. If consecutive review rounds replace a repaired finding
+  with a different class of finding, stop the repair loop and correct or narrow the
+  review brief before running another round. Do not keep expanding the pull request to
+  satisfy a moving brief.
 - Route confirmed in-scope findings back to the original implementation agent when it
   is still available so the fix retains its build context. Do not fix out-of-scope
   findings in the pull request; link an existing issue or file one if the defect is not
