@@ -53,13 +53,13 @@ FROZEN_FILE_DIGESTS = {
         "5e21649cf61087df1119040a971a60b5b499d40321d8647ce719e91b8571120a"
     ),
     "spec/04-type-system.md": (
-        "745284a83a20a3a4c081c725e11f8fed67d012bc6878cb1db422c45668167082"
+        "a8fbc1ba5b8e2419844dd41a97bdcd6d1ffe1b5773d4ef263619e11985ab4cfe"
     ),
     "spec/05-risc-primitives.md": (
-        "d2fdf7308cc9038b5e39f447417fd29066ae85466347fc78727cbf67cd040c38"
+        "ead07578292e44b73da55adc255c334fd2b56b00b12b69bd707184745e420bf5"
     ),
     "spec/06-transformations.md": (
-        "ddc42ddc3d09adc80af1b1f8a8a66b2ec112404689c489eed6542a95d1ee1ed6"
+        "72b0b24a50da0499b6e0daecc431e767dbea009c95d63ac49285ad525697f980"
     ),
     "spec/10-serialization.md": (
         "58f707d4e155d098962db224317061684b2c026816cab234ba026d560510a6da"
@@ -1871,7 +1871,7 @@ def validate_normative_contract(
         (
             ("`InputAxis(t, a)`", "folded tensor-axis extent carrier"),
             (
-                "`expand` admits `Lit`, `Node`, and `InputAxis`",
+                "`expand` and `reshape` admit `Lit`, `Node`, and `InputAxis`",
                 "runtime extent owner admission",
             ),
             (

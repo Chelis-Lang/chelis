@@ -739,24 +739,28 @@ A movement bound (`pad` before/after, `shrink` start/end, `stride` step), an
   rank-0 integer scalar (a `shape()` read or integer arithmetic over one:
   `add`/`mul`/`floor_div`/`neg`/`cast`). The index is absolute: `inputs[0]` is
   always the tensor operand and `inputs[1..]` are the bound scalars.
-- `Sym(name)` — a symbolic dim declared elsewhere (e.g. a bystander `batch`);
-  legal only as a `reshape` target.
+- `Sym(name)` — a symbolic dimension name is a typed form, not an executable
+  carrier: no executable owner admits it. A `reshape` target that restates a
+  bystander named dimension (e.g. `batch`) reads it as `InputAxis` from the
+  tensor whose axis declares it, which becomes a shape-only operand when it is
+  not already an input. *(The name-bound `Sym` reshape target is not yet
+  removed; chelis#1277.)*
 - `InputAxis(t, a)` — the extent of an earlier tensor node's axis, read
   directly from that tensor's shape metadata: `t` is an absolute index into
-  the owning node's `inputs` naming a tensor operand, and `a` is an `int32`
-  axis literal or an absolute input index naming a rank-0 `int32` scalar (a
-  computed axis under [05-OP-7]). Legal only as an `expand` size or a
-  `reshape` target. It is the folded form [05-OP-7] requires for a direct
-  `shape(x, axis)` extent argument and for an in-scope dimension binder
-  instantiated by a tensor axis; the same read bound to a `pad`, `shrink`, or
-  `stride` position is the rank-0 `Node` form. The read carries no identity:
-  whether the resulting axis keeps the source dimension's name is decided by
-  ordinary type reasoning (spec/04-type-system.md §4.7.3), and an unproved
-  identity is a fresh extent under an equality guard.
+  the owning node's `inputs` naming a tensor operand, and `a` is a normalized
+  `int32` axis literal in `0..rank(t)` (spec/04-type-system.md §4.7.1
+  normalizes a negative literal statically) or an absolute input index naming
+  a rank-0 `int32` scalar (a computed axis under [05-OP-7]). Legal only as an
+  `expand` size or a `reshape` target. It is the folded extent-argument form
+  of §2.5.1 for a direct `shape(x, axis)` extent argument and for an in-scope
+  dimension binder instantiated by a tensor axis; the same read bound to a
+  `pad`, `shrink`, or `stride` position is the rank-0 `Node` form. The read
+  carries no identity: whether the resulting axis keeps the source dimension's
+  name is decided by ordinary type reasoning (spec/04-type-system.md §4.7.3),
+  and an unproved identity is a fresh extent under an equality guard.
 
-`expand` admits `Lit`, `Node`, and `InputAxis`; `reshape` admits every form;
-`pad`, `shrink`, and `stride` admit `Lit` and `Node`, plus `ToEnd` for a
-`shrink` end.
+`expand` and `reshape` admit `Lit`, `Node`, and `InputAxis`; `pad`, `shrink`,
+and `stride` admit `Lit` and `Node`, plus `ToEnd` for a `shrink` end.
 
 Runtime bounds are validated in every execution mode with matching language
 errors: a negative bound, a shrink range overshoot, a non-positive stride
@@ -854,8 +858,8 @@ per [05-DIM-2] — extent-domain out, axis-domain in.
 Two semantic use shapes exist, and they are distinct:
 
 - **As an extent argument** to `expand` / `reshape`, a `shape()` read is folded
-  into the movement node's `DimExpr` (the output dim), not materialized as a
-  value node.
+  into the movement node's `InputAxis` carrier (§2.4.1), not materialized as
+  a value node.
 - **As a scalar VALUE** (used in arithmetic, a `mean` divisor, or any other
   value position), a `shape()` read remains a dedicated typed extent operation
   whose int32 `axis` is an ordinary checked runtime value. It produces a

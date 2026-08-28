@@ -1433,11 +1433,13 @@ its downstream program rather than deciding it early. An axis greater than
 `rank(x)` is a type error.
 
 When several positional `expand` results remain unresolved at the same freeze
-point, their defaults settle in source order: the result whose `expand` call
-appears first in the program settles first, and each later settlement observes
-the shapes fixed by the earlier ones. Settlement order is a property of the
-program text and never of an implementation's storage or iteration order, so a
-program has exactly one checked result across runs and implementations.
+point, their defaults settle in source order: the result introduced into the
+checked program first settles first (a result carried out of a reusable
+library context is introduced at its instantiation site), and each later
+settlement observes the shapes fixed by the earlier ones. Settlement order is
+a property of the program text and never of an implementation's storage or
+iteration order, so a program has exactly one checked result across runs and
+implementations.
 
 When a declared or inferred result dimension claims a literal or named extent
 that is not statically proven equal to `size`, execution checks equality and
