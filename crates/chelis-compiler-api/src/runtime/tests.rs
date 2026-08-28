@@ -528,6 +528,70 @@ fn test_assert_close_tensor_f64_keeps_the_f64_boundary_distinct() {
 }
 
 #[test]
+fn test_assert_close_tensor_mismatch_uses_own_width_canonical_digits() {
+    for dtype in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+        let actual = tensor_value(dtype, vec![1], vec![0.1]);
+        let expected = tensor_value(dtype, vec![1], vec![0.2]);
+        let tolerance = scalar_of(dtype, 0.0);
+        let error = eval_deep_with_bindings(
+            r#"test_assert_close_tensor(actual, expected, tolerance, "digits")"#,
+            &[
+                ("actual", actual),
+                ("expected", expected),
+                ("tolerance", tolerance),
+            ],
+        )
+        .expect_err("the values differ with zero tolerance");
+        assert_eq!(
+            error,
+            "assert_close_tensor (digits): at index 0 expected 0.2, got 0.1, tol 0.0",
+            "{} diagnostic must render every value at its stored width",
+            dtype.name()
+        );
+    }
+}
+
+#[test]
+fn test_assert_close_tensor_special_mismatch_uses_canonical_spellings() {
+    let actual = tensor_value(Prim::F32, vec![1], vec![f64::NAN]);
+    let expected = tensor_value(Prim::F32, vec![1], vec![f64::INFINITY]);
+    let tolerance = scalar_of(Prim::F32, 0.0);
+    let error = eval_deep_with_bindings(
+        r#"test_assert_close_tensor(actual, expected, tolerance, "special-digits")"#,
+        &[
+            ("actual", actual),
+            ("expected", expected),
+            ("tolerance", tolerance),
+        ],
+    )
+    .expect_err("NaN is never close");
+    assert_eq!(
+        error,
+        "assert_close_tensor (special-digits): at index 0 expected inf, got NaN, tol 0.0 (NaN is never close)"
+    );
+}
+
+#[test]
+fn test_assert_close_tensor_invalid_tolerance_uses_own_width_canonical_digits() {
+    let actual = tensor_value(Prim::F32, vec![1], vec![1.0]);
+    let expected = tensor_value(Prim::F32, vec![1], vec![1.0]);
+    let tolerance = scalar_of(Prim::F32, -0.1);
+    let error = eval_deep_with_bindings(
+        r#"test_assert_close_tensor(actual, expected, tolerance, "tol-digits")"#,
+        &[
+            ("actual", actual),
+            ("expected", expected),
+            ("tolerance", tolerance),
+        ],
+    )
+    .expect_err("a negative tolerance is invalid");
+    assert_eq!(
+        error,
+        "assert_close_tensor (tol-digits): invalid tolerance -0.1 (must be finite and non-negative)"
+    );
+}
+
+#[test]
 fn test_assert_close_tensor_accepts_each_active_float_dtype() {
     for dtype in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
         let actual = tensor_value(dtype, vec![2], vec![-0.0, 1.0]);

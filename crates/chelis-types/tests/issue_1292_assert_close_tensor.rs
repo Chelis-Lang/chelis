@@ -45,6 +45,108 @@ def check(actual: &tensor[2, {dtype}], expected: &tensor[2, {dtype}], tol: {dtyp
 }
 
 #[test]
+fn shared_precision_generic_wrapper_is_accepted_for_every_active_float_dtype() {
+    for dtype in FLOAT_DTYPES {
+        let source = format!(
+            r#"
+def close[p](actual: &tensor[2, p], expected: &tensor[2, p], tol: p) -> unit ! {{ Test }} =
+  test_assert_close_tensor(actual, expected, tol, "generic")
+
+def check(actual: &tensor[2, {dtype}], expected: &tensor[2, {dtype}], tol: {dtype}) -> unit ! {{ Test }} =
+  close(actual, expected, tol)
+"#,
+        );
+        let errors = diagnostics(&source);
+        assert!(
+            errors.is_empty(),
+            "shared-precision generic wrapper must accept {dtype}; got:\n{}",
+            rendered(&errors)
+        );
+    }
+}
+
+#[test]
+fn arbitrary_tensor_ranks_are_accepted_with_one_shared_shape() {
+    for tensor_type in ["tensor[f32]", "tensor[2, 3, f32]", "tensor[2, 3, 4, f64]"] {
+        let tolerance_type = if tensor_type.ends_with("f64]") {
+            "f64"
+        } else {
+            "f32"
+        };
+        let source = format!(
+            r#"
+def check(actual: &{tensor_type}, expected: &{tensor_type}, tol: {tolerance_type}) -> unit ! {{ Test }} =
+  test_assert_close_tensor(actual, expected, tol, "rank")
+"#,
+        );
+        let errors = diagnostics(&source);
+        assert!(
+            errors.is_empty(),
+            "{tensor_type} must satisfy the arbitrary-rank signature; got:\n{}",
+            rendered(&errors)
+        );
+    }
+}
+
+#[test]
+fn independently_polymorphic_tolerance_cannot_bypass_same_dtype_constraint() {
+    for (tensor_dtype, tolerance_dtype) in [
+        ("f16", "bf16"),
+        ("bf16", "f32"),
+        ("f32", "f64"),
+        ("f64", "f32"),
+    ] {
+        let source = format!(
+            r#"
+def unsafe_close[p, q](
+  actual: &tensor[2, p],
+  expected: &tensor[2, p],
+  tol: q
+) -> unit ! {{ Test }} =
+  test_assert_close_tensor(actual, expected, tol, "generic")
+
+def bad(
+  actual: &tensor[2, {tensor_dtype}],
+  expected: &tensor[2, {tensor_dtype}],
+  tol: {tolerance_dtype}
+) -> unit ! {{ Test }} =
+  unsafe_close(actual, expected, tol)
+"#,
+        );
+        let errors = diagnostics(&source);
+        assert!(
+            !errors.is_empty(),
+            "an independently-polymorphic {tolerance_dtype} tolerance must not bypass the {tensor_dtype} tensor constraint"
+        );
+    }
+}
+
+#[test]
+fn shared_precision_generic_wrapper_rejects_non_float_instantiations() {
+    for dtype in REJECTED_DTYPES {
+        let source = format!(
+            r#"
+def close[p](actual: &tensor[2, p], expected: &tensor[2, p], tol: p) -> unit ! {{ Test }} =
+  test_assert_close_tensor(actual, expected, tol, "generic")
+
+def bad(actual: &tensor[2, {dtype}], expected: &tensor[2, {dtype}], tol: {dtype}) -> unit ! {{ Test }} =
+  close(actual, expected, tol)
+"#,
+        );
+        let errors = diagnostics(&source);
+        assert!(
+            errors.iter().any(|error| {
+                matches!(error.kind, CheckErrorKind::PrecisionMismatch)
+                    && error.message.contains("active float dtype")
+                    && error.message.contains(dtype)
+            }),
+            "generic {dtype} instantiation must receive the float-domain diagnostic; got:\n{}",
+            rendered(&errors)
+        );
+    }
+}
+
+#[test]
 fn every_non_float_tensor_dtype_is_rejected_at_check_time() {
     for dtype in REJECTED_DTYPES {
         let source = format!(
@@ -117,6 +219,10 @@ def bad(actual: &tensor[2, f32], expected: &tensor[3, f32]) -> unit =
         r#"
 def bad(actual: &tensor[2, f32], expected: &tensor[2, f64]) -> unit =
   test_assert_close_tensor(actual, expected, cast(0.0, f32), "dtype")
+"#,
+        r#"
+def bad(actual: &tensor[2, f32], expected: &tensor[2, 1, f32]) -> unit =
+  test_assert_close_tensor(actual, expected, cast(0.0, f32), "rank")
 "#,
     ] {
         let errors = diagnostics(source);

@@ -194,6 +194,18 @@ pub(super) fn infer_app(
         return Type::Unit;
     }
 
+    // The builtin signature structurally shares one precision variable across
+    // both tensors and the tolerance. Preserve the operation-specific direct
+    // mismatch diagnostics by inspecting concrete operands before generic
+    // unification reports its lower-level precision pair. Unresolved generic
+    // wrappers pass this precheck and are constrained by the shared variable.
+    if matches!(func_name.as_deref(), Some("test_assert_close_tensor"))
+        && let Some(rejected) =
+            reject_test_assert_close_tensor_operand_dtypes(list, &arg_tys, subst, errors)
+    {
+        return rejected;
+    }
+
     // [05-DIM-3]: the semantic registry owns axis dtype slots. `concat`
     // is overloaded with ordinary list concatenation and therefore runs
     // the same shared gate only after its tensor-list arm is identified in

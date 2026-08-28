@@ -6,7 +6,9 @@ use chelis_deep::ast::{Atom, Expr, List};
 use chelis_deep::{Span, decode_effect_kind};
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::tier2;
-use chelis_types::{CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, StorageView, types::Prim};
+use chelis_types::{
+    CompareOp, ElementRef, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, StorageView, types::Prim,
+};
 use chelis_vocab::EffectKind;
 
 use super::host_ops::*;
@@ -44,16 +46,12 @@ fn first_f32_mismatch(
     actual: impl Iterator<Item = f32>,
     expected: impl Iterator<Item = f32>,
     tolerance: f32,
-) -> Option<(usize, f64, f64)> {
+) -> Option<usize> {
     actual
         .zip(expected)
         .enumerate()
         .find_map(|(index, (actual, expected))| {
-            (!close_at_f32_width(actual, expected, tolerance)).then_some((
-                index,
-                f64::from(actual),
-                f64::from(expected),
-            ))
+            (!close_at_f32_width(actual, expected, tolerance)).then_some(index)
         })
 }
 
@@ -61,13 +59,27 @@ fn first_f64_mismatch(
     actual: impl Iterator<Item = f64>,
     expected: impl Iterator<Item = f64>,
     tolerance: f64,
-) -> Option<(usize, f64, f64)> {
+) -> Option<usize> {
     actual
         .zip(expected)
         .enumerate()
         .find_map(|(index, (actual, expected))| {
-            (!close_at_f64_width(actual, expected, tolerance)).then_some((index, actual, expected))
+            (!close_at_f64_width(actual, expected, tolerance)).then_some(index)
         })
+}
+
+fn float_element_is_nan(value: ElementRef) -> bool {
+    match value {
+        ElementRef::F16(value) => value.is_nan(),
+        ElementRef::Bf16(value) => value.is_nan(),
+        ElementRef::F32(value) => value.is_nan(),
+        ElementRef::F64(value) => value.is_nan(),
+        ElementRef::I8(_)
+        | ElementRef::I16(_)
+        | ElementRef::I32(_)
+        | ElementRef::I64(_)
+        | ElementRef::Bool(_) => false,
+    }
 }
 
 fn render_shape(shape: &[usize]) -> String {
@@ -2203,8 +2215,12 @@ impl<'a> EvalContext<'a> {
                 }
                 let tolerance_f64 = tolerance.as_f64_lossy();
                 if !tolerance_f64.is_finite() || tolerance_f64 < 0.0 {
+                    let rendered_tolerance = chelis_types::format_element(
+                        tolerance.dtype(),
+                        tolerance.value().element_ref(),
+                    );
                     return Err(format!(
-                        "assert_close_tensor ({label}): invalid tolerance {tolerance_f64} (must be finite and non-negative)"
+                        "assert_close_tensor ({label}): invalid tolerance {rendered_tolerance} (must be finite and non-negative)"
                     ));
                 }
                 if actual.value.len() != expected.value.len() {
@@ -2241,14 +2257,24 @@ impl<'a> EvalContext<'a> {
                     ),
                     _ => unreachable!("common active-float dtype check makes storage exhaustive"),
                 };
-                if let Some((index, actual, expected)) = mismatch {
-                    let nan_suffix = if actual.is_nan() || expected.is_nan() {
+                if let Some(index) = mismatch {
+                    let actual = actual.value.storage().scalar_at(index);
+                    let expected = expected.value.storage().scalar_at(index);
+                    let nan_suffix = if float_element_is_nan(actual.element_ref())
+                        || float_element_is_nan(expected.element_ref())
+                    {
                         " (NaN is never close)"
                     } else {
                         ""
                     };
+                    let rendered_actual =
+                        chelis_types::format_element(tensor_prim, actual.element_ref());
+                    let rendered_expected =
+                        chelis_types::format_element(tensor_prim, expected.element_ref());
+                    let rendered_tolerance =
+                        chelis_types::format_element(tensor_prim, tolerance.value().element_ref());
                     return Err(format!(
-                        "assert_close_tensor ({label}): at index {index} expected {expected}, got {actual}, tol {tolerance_f64}{nan_suffix}"
+                        "assert_close_tensor ({label}): at index {index} expected {rendered_expected}, got {rendered_actual}, tol {rendered_tolerance}{nan_suffix}"
                     ));
                 }
                 Ok(RuntimeValue::Unit)

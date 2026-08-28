@@ -2247,23 +2247,28 @@ pub fn builtin_env() -> (Env, VarGen) {
         );
     }
     {
-        // test_assert_close_tensor: (tensor[D,p_float], tensor[D,p_float],
-        //                            p_float, string) -> unit
-        // The whole-tensor variable preserves arbitrary rank and exact shape;
-        // the specialized checker links its element dtype to the tolerance.
-        let tensor_tv = vg.fresh_tvar();
-        let tolerance_tv = vg.fresh_tvar();
+        // test_assert_close_tensor:
+        //   (&tensor[..r,p_float], &tensor[..r,p_float], p_float, string) -> unit
+        // One quantified type variable occupies both tensor precision slots
+        // and the scalar tolerance position. This makes same-dtype equality a
+        // structural unification constraint, including through polymorphic
+        // wrappers; the specialized checker adds the float-only admissibility
+        // diagnostic. The shared rank variable preserves arbitrary rank and
+        // exact shape equality between the tensors.
+        let precision = vg.fresh_tvar();
+        let rank = vg.fresh_rvar();
+        let tensor = Type::Tensor(vec![Dim::Rank(rank)], TensorPrec::Var(precision));
         env.bind(
             "test_assert_close_tensor".to_string(),
             Scheme {
-                tvars: vec![tensor_tv, tolerance_tv],
+                tvars: vec![precision],
                 dvars: vec![],
-                rvars: vec![],
+                rvars: vec![rank],
                 body: Type::Fn(
                     vec![
-                        borrowed(Type::Var(tensor_tv)),
-                        borrowed(Type::Var(tensor_tv)),
-                        Type::Var(tolerance_tv),
+                        borrowed(tensor.clone()),
+                        borrowed(tensor),
+                        Type::Var(precision),
                         Type::Prim(Prim::String),
                     ],
                     Box::new(Type::Unit),
