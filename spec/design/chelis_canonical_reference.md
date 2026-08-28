@@ -462,7 +462,8 @@ Core transforms remain first-class:
 
 Implementation-surface note:
 
-- `min_elem` is part of the specified derived built-in surface.
+- `sub` and `min_elem` are direct Tier-1 RISC identities governed by
+  [05-OP-41] and [05-OP-40], respectively.
 - `block` is part of the Deep syntax vocabulary and Surf block desugaring.
 - `normalize` currently exists in the type checker built-in environment, but it is not
   yet a stable specified/lowered built-in.

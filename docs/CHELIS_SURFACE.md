@@ -80,11 +80,13 @@ inputs are borrow-typed (`&tensor`, auto-borrowed at call sites).
 | Name | Signature | AD adjoint (given upstream `g`) |
 |---|---|---|
 | `add` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | `(g, g)` |
+| `sub` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | `(g, -g)` on floats; signed-integer forms are forward-only |
 | `mul` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | `(g*y, g*x)` |
 | `div` | `(&tensor[D,p_float], &tensor[D,p_float]) -> tensor[D,p_float]` | `(g/b, -g*y/b)`; IEEE-754, **float operands only** (chelis#178) |
 | `floor_div` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | **non-differentiable** — `grad` rejects; round quotient toward −∞ (Python `//`); ints and floats |
 | `trunc_div` | `(&tensor[D,p_int], &tensor[D,p_int]) -> tensor[D,p_int]` | **non-differentiable** — `grad` rejects; round toward zero (C `/`); **integer operands only** |
-| `max_elem` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | `(g*(x>=y), g*(x<y))` |
+| `max_elem` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | complete `g` to the exact operand selected by [05-OP-40]; signed-integer forms are forward-only |
+| `min_elem` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | complete `g` to the exact operand selected by [05-OP-40]; signed-integer forms are forward-only |
 | `cmplt` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,bool]` | zero gradient (by design) |
 
 `div`/`recip` are native Tier-1 (IEEE-754, correct on the full real line) — **not** an
@@ -204,7 +206,6 @@ all backends and differentiate via their decomposition. `spec/05` §3–4.
 
 | Name | Lowering | AD |
 |---|---|---|
-| `sub` | `add(a, neg(b))` | differentiable |
 | `eq`,`neq`,`gt`,`gte`,`lte`,`lt` | `cmplt` compositions (`spec/05` §3.2) | zero-grad (bool out) |
 | `and`,`or`,`not` | Spec: bool-only truth tables ([05-OP-26..28]); the pre-v0.19 IR still uses numeric aliases, tracked by #1284 | `grad` rejects |
 | `relu` | `max_elem(x, 0)` | differentiable (subgradient) |
@@ -213,7 +214,6 @@ all backends and differentiate via their decomposition. `spec/05` §3–4.
 | `matmul` | `expand`+`mul`+`sum`, pattern-matched to BLAS (`spec/05` §4.1); optional `accumulator` | differentiable |
 | `mean` | `div(sum(x,axis), axis extent)` | differentiable |
 | `softmax` | max-shift + `exp` + `sum` + `div` (`spec/05` §4.2) | differentiable |
-| `min_elem` | `neg(max_elem(neg(a), neg(b)))` | differentiable |
 | `layer_norm` | mean/var normalize + affine (`spec/05` §4.4) | differentiable |
 | `conv2d` | `im2col` → `matmul` → `reshape` (`spec/05` §4.5) | differentiable |
 
@@ -363,13 +363,13 @@ is not in the block, it is not a builtin (it's `chelis-std`, a shell library, or
 undefined).
 
 ```
-Tier-1 DAG:   add mul div floor_div trunc_div max_elem cmplt neg recip exp log sin cos tan atan sqrt
+Tier-1 DAG:   add sub mul div floor_div trunc_div max_elem min_elem cmplt neg recip exp log sin cos tan atan sqrt
               abs floor ceil round sum count max_reduce min_reduce prod_reduce argmax_reduce
               argmin_reduce reduce_window_max reduce_window_min reduce_window_sum
               reduce_window_mean reshape permute expand pad shrink stride
               uniform_like gather scatter_replace scatter_elements
-Tier-2 DAG:   sub eq neq lt gt lte gte and or not relu sigmoid tanh silu gelu
-              softmax normalize mean matmul min_elem layer_norm conv2d
+Tier-2 DAG:   eq neq lt gt lte gte and or not relu sigmoid tanh silu gelu
+              softmax normalize mean matmul layer_norm conv2d
 Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
               pad_sequences pad_sequences_to tensor_scan
               map filter fold scan partition flat_map flatten zip enumerate chunk
@@ -409,7 +409,8 @@ primitives (Tier-2 inherit via decomposition).
 - **Non-differentiable — `grad` rejects with a structured `AdError`:** `floor`, `ceil`,
   `round`, `cast_trunc` ([05-OP-6], `PiecewiseConstant`); `argmax_reduce`,
   `argmin_reduce` (index output); `scatter_replace`, `scatter_elements`
-  (`NonDeterministicAtDuplicateIndices`).
+  (`NonDeterministicAtDuplicateIndices`); signed-integer `sub`, `max_elem`, and
+  `min_elem` (`IntegerArithmeticOutput`).
 - **No AD (host lane):** every op in §3 — `cumsum`, `sort`, `einsum`, `fold`, `scan`,
   `tensor_scan`, etc. A differentiable path must stay in the DAG lane.
 - `if/then/else` differentiates (chosen branch); loops/recursion do not differentiate

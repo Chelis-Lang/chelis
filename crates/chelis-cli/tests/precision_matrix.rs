@@ -475,8 +475,7 @@ fn int64_eq_at_mantissa_boundary_is_exact() {
     );
 }
 
-/// Verified: returns the SMALLER operand. `max_elem` routes through
-/// `numeric_binop(args, f64::max)` (`eval.rs:843`).
+/// Direct `max_elem` compares both int64 operands at their declared width.
 #[test]
 fn int64_max_elem_at_mantissa_boundary_is_exact() {
     check_row(
@@ -486,16 +485,13 @@ fn int64_max_elem_at_mantissa_boundary_is_exact() {
             expected: "9007199254740993",
             status: Status::Locked,
             lanes: Lanes::Both,
-            note: "Returns the SMALLER value today: both operands collapse to \
-                   the same f64 and f64::max returns the first.",
+            note: "Direct int64 selection preserves the distinct operands above 2^53.",
         },
         "int64",
     );
 }
 
-/// `min_elem` passes today BY LUCK: both operands collapse to the same f64, and
-/// `min` of two equal values happens to be the expected answer. Kept as a lock
-/// and documented so nobody reads the green as evidence the lane is sound.
+/// Direct `min_elem` compares both int64 operands at their declared width.
 #[test]
 fn int64_min_elem_at_mantissa_boundary_is_exact() {
     check_row(
@@ -505,9 +501,7 @@ fn int64_min_elem_at_mantissa_boundary_is_exact() {
             expected: "9007199254740992",
             status: Status::Locked,
             lanes: Lanes::Both,
-            note: "PASSES BY LUCK: operands collapse to one f64 and min of two \
-                   equal values is coincidentally right. Not evidence of \
-                   soundness. Its sibling max_elem is wrong on the same inputs.",
+            note: "Direct int64 selection preserves the distinct operands above 2^53.",
         },
         "int64",
     );

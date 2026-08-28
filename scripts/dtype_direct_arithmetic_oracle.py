@@ -36,6 +36,7 @@ class SourceContract:
     name: str
     path: str
     required: tuple[str, ...]
+    forbidden: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,74 @@ def source_contracts() -> tuple[SourceContract, ...]:
                 'r#"{\"kind\":\"extrema_adjoint\",\"extrema\":\"max\",\"operand\":\"left\"}"#',
             ),
         ),
+        SourceContract(
+            "current direct arithmetic surface narrative",
+            "docs/CHELIS_SURFACE.md",
+            (
+                "complete `g` to the exact operand selected by [05-OP-40]",
+                "Tier-1 DAG:   add sub mul div floor_div trunc_div max_elem min_elem cmplt",
+            ),
+            (
+                "(g*(x>=y), g*(x<y))",
+                "| `sub` | `add(a, neg(b))` |",
+                "| `min_elem` | `neg(max_elem(neg(a), neg(b)))` |",
+            ),
+        ),
+        SourceContract(
+            "current Deep direct subtraction narrative",
+            "spec/03-deep-syntax.md",
+            ("sub remains a direct Tier-1 RISC identity after lowering",),
+            ("sub is a derived built-in, lowered to add(a, neg(b))",),
+        ),
+        SourceContract(
+            "current captured direct arithmetic narrative",
+            "openspec/changes/capture-risc-primitives/specs/risc-primitives/spec.md",
+            (
+                "it remains a direct `RiscOp::Sub` identity during IR construction",
+                "it remains a direct `RiscOp::MinElem` selection identity",
+            ),
+            (
+                "it becomes `add(a, neg(b))` during IR construction",
+                "with `sub` decomposed rather than present as a node",
+            ),
+        ),
+        SourceContract(
+            "current canonical direct arithmetic narrative",
+            "spec/design/chelis_canonical_reference.md",
+            ("`sub` and `min_elem` are direct Tier-1 RISC identities",),
+            ("`min_elem` is part of the specified derived built-in surface",),
+        ),
+        SourceContract(
+            "current exactness regression narrative",
+            "crates/chelis-cli/tests/issue_680_int_exactness.rs",
+            ("direct `min_elem` compares the stored int64 operands",),
+            ("`min_elem` lowers via `neg(max_elem(neg, neg))`",),
+        ),
+        SourceContract(
+            "current precision matrix narrative",
+            "crates/chelis-cli/tests/precision_matrix.rs",
+            (
+                "Direct `max_elem` compares both int64 operands at their declared width",
+                "Direct `min_elem` compares both int64 operands at their declared width",
+            ),
+            (
+                "Verified: returns the SMALLER operand",
+                "`min_elem` passes today BY LUCK",
+                "PASSES BY LUCK: operands collapse to one f64",
+            ),
+        ),
+        SourceContract(
+            "current inferred-shape direct arithmetic narrative",
+            "crates/chelis-types/src/infer/validate.rs",
+            ("`max_elem` and `min_elem` are direct Tier-1 identities",),
+            ("`max_elem` (Tier 1) and `min_elem` (Tier 2)",),
+        ),
+        SourceContract(
+            "current runtime direct arithmetic narrative",
+            "crates/chelis-compiler-api/src/runtime/eval.rs",
+            ("Tier-1 `max_elem` and `min_elem` are direct element-wise",),
+            ("Tier-1 `max_elem` and Tier-2 `min_elem`",),
+        ),
     )
 
 
@@ -126,6 +195,11 @@ def validate_source_contracts(repo_root: Path = REPO_ROOT) -> None:
             if required not in source:
                 raise OracleFailure(
                     f"{contract.name}: required contract is absent from {contract.path}"
+                )
+        for forbidden in contract.forbidden:
+            if forbidden in source:
+                raise OracleFailure(
+                    f"{contract.name}: obsolete contract remains in {contract.path}"
                 )
 
 

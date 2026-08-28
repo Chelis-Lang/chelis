@@ -37,19 +37,25 @@ remain owned tensors and the borrow distinction SHALL be erased before IR loweri
 ### Requirement: Two tiers
 
 Tier-1 RISC primitives SHALL be the irreducible set the IR operates on, each with a defined AD
-adjoint rule. Tier-2 derived built-ins SHALL be convenience functions the desugarer emits and
-the IR lowers to Tier-1 compositions during IR construction; they SHALL exist in Deep AST only,
-not in the RISC DAG.
+adjoint or rejection rule. Direct checked subtraction and direct extrema selection SHALL remain
+Tier-1 identities. Tier-2 derived built-ins SHALL be convenience functions the desugarer emits
+and the IR lowers to Tier-1 compositions during IR construction; they SHALL exist in Deep AST
+only, not in the RISC DAG.
 
-#### Scenario: Derived builtin lowers to primitives
+#### Scenario: Direct subtraction remains a primitive
 
 - **WHEN** `sub(a, b)` is lowered
-- **THEN** it becomes `add(a, neg(b))` during IR construction
+- **THEN** it remains a direct `RiscOp::Sub` identity during IR construction
 
-#### Scenario: Derived builtin is not in the RISC DAG
+#### Scenario: Direct minimum remains a selection primitive
 
-- **WHEN** the IR DAG is inspected after lowering
-- **THEN** it contains only Tier-1 primitives, with `sub` decomposed rather than present as a node
+- **WHEN** `min_elem(a, b)` is lowered
+- **THEN** it remains a direct `RiscOp::MinElem` selection identity
+
+#### Scenario: A derived builtin is not in the RISC DAG
+
+- **WHEN** `sigmoid(x)` is lowered
+- **THEN** its Tier-1 composition is present rather than a dedicated `Sigmoid` node
 
 ### Requirement: Division semantics
 

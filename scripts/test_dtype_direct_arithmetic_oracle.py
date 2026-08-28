@@ -166,6 +166,17 @@ class SourceContractMutationTests(unittest.TestCase):
         with self.assertRaisesRegex(oracle.OracleFailure, "WireDag v6 identities"):
             oracle.validate_source_contracts(self.repo)
 
+    def test_surface_surrogate_narrative_mutation_fails(self) -> None:
+        self.mutate(
+            "docs/CHELIS_SURFACE.md",
+            "complete `g` to the exact operand selected by [05-OP-40]",
+            "(g*(x>=y), g*(x<y))",
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "current direct arithmetic surface narrative"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
 
 class RunnerTests(unittest.TestCase):
     @mock.patch.object(oracle, "validate_source_contracts")
