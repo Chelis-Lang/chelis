@@ -116,8 +116,8 @@ The production universe is a set of target-and-configuration fixtures, not one
 default host build. A generated, checked-in configuration manifest records:
 
 - every workspace feature and feature implication, optional and target-specific
-  dependency edge, non-test target `required-features` condition, and build-script
-  input that changes Rust compilation;
+  dependency edge, non-test target `required-features` condition, and compile-time
+  executor input that changes Rust compilation;
 - every `cfg` and `cfg_attr` predicate reachable from a production target, including
   predicates emitted by macro expansion or `cargo::rustc-cfg`; and
 - the exact supported release and CI host and target triples, every Cargo profile and
@@ -135,29 +135,44 @@ reason; it is never silently absent.
 
 Each compilation-unit fixture records the exact commit, toolchain, build host,
 compilation target, Cargo target identity and kind, profile and normalized codegen
-flags, feature assignment, and declared build-input assignment. A cross build creates
-separate host fixtures for its build scripts and proc macros and target fixtures for
-target code; it never substitutes `TARGET` for `HOST` when expanding host-compiled
-code. Debug, release, and every repository release/CI profile are included. A profile
-or flag that changes compiler `cfg` state, including `debug_assertions`, receives the
-same both-sides branch coverage as a source `cfg` predicate.
+flags, feature assignment, and declared compile-time-input assignment. A cross build
+creates separate host fixtures for its build scripts and proc macros and target
+fixtures for target code; it never substitutes `TARGET` for `HOST` when expanding
+host-compiled code. Debug, release, and every repository release/CI profile are
+included. A profile or flag that changes compiler `cfg` state, including
+`debug_assertions`, receives the same both-sides branch coverage as a source `cfg`
+predicate.
 
-Every custom-build target has a checked-in build-input manifest. Cargo-provided inputs
-come from a closed runner-owned set derived from the fixture. All other environment
-variables, filesystem roots, external commands, native-package probes, and network
-access must be declared with the finite value classes that can affect Rust sources,
-emitted `cfg`s, compiler flags, or artifacts. The oracle runs build scripts in a
-traced sandbox that rejects undeclared access; `rerun-if-changed` and
-`rerun-if-env-changed` outputs are checked against the manifest but are not treated as
-completeness proof. Each declared value class has a fixture. Native discovery such as
-`pkg-config` has explicit absent and present fixtures whose sandboxed command and
-filesystem responses are recorded, so an inactive probe is still executable evidence.
+Every custom-build target, procedural-macro invocation, and other host-executed
+expansion producer has a checked-in compile-time-input manifest. Cargo- and
+compiler-provided inputs come from a closed runner-owned set derived from the fixture.
+All other environment variables,
+filesystem roots, external commands, native-package probes, and network access must be
+declared with the finite value classes that can affect Rust sources, expansions,
+emitted `cfg`s, compiler flags, or artifacts.
+
+The oracle executes build scripts and isolated proc-macro compiler workers under one
+traced sandbox contract. A host API interposer mediates environment lookup,
+filesystem access, process creation, and networking; an attempted undeclared access
+is an oracle error rather than an absent value or ambient-host result. A host where
+that interposition cannot be proved complete cannot supply oracle evidence. The
+runner passes only its closed inputs and the fixture's declared assignment.
+`rerun-if-changed` and `rerun-if-env-changed` outputs are checked against the manifest
+but are not completeness proof.
+
+Each declared value class, including the absent class, has a fixture. Native discovery
+such as `pkg-config` has explicit absent and present fixtures whose sandboxed command
+and filesystem responses are recorded, so an inactive probe is still executable
+evidence. Every proc-macro input fixture uses an isolated expansion cache, or a checked
+cache key containing the complete input assignment and expansion digest; reuse across
+assignments is an oracle failure.
 
 Each fixture runs Cargo with that complete identity. The enumerator consumes Cargo
-JSON build-script messages and sandbox access records to bind emitted `cfg` values and
-`OUT_DIR` inputs to the fixture, then runs the type-resolved expansion over the result.
+JSON build-script messages, compiler-worker expansion digests, and sandbox access
+records to bind emitted `cfg` values, macro expansions, and `OUT_DIR` inputs to the
+fixture, then runs the type-resolved expansion over the result.
 A feature, feature implication, target predicate, profile flag, target-specific
-dependency, build-script input or emitted `cfg`, generated input, or
+dependency, compile-time input or emitted `cfg`, generated input, or
 compiler-observed branch without an applicable fixture fails closed.
 
 Native-host jobs execute the host fixtures on every supported release/CI host. The
@@ -188,7 +203,7 @@ expanded carriers and consumers to the same type-resolved enumerator. This appli
 defined outside the audited package. No opaque macro expansion is silently skipped.
 
 An identity is `(crate, Cargo target identity and kind, build host, compilation target,
-profile/codegen set, normalized feature and build-input applicability, module,
+profile/codegen set, normalized feature and compile-time-input applicability, module,
 enclosing item, carrier field or binding, consumer)`. Configuration applicability
 names every manifest fixture that activates the identity and the normalized predicate
 that those fixtures cover. Anonymous or ambiguous carriers must gain a stable census
@@ -241,12 +256,14 @@ The liveness oracle must reject all of these planted changes:
     build-script `cfg`, or generated input with no configuration fixture;
 17. a direct, indirect, macro-generated, or serialization-root consumer reachable
     only under a non-default profile or codegen flag such as `debug_assertions`;
-18. a host-only build-script or proc-macro carrier/consumer planted while cross
+18. a host-only compile-time-executor carrier or consumer planted while cross
     compiling for a different target;
-19. a declared environment, filesystem, command, or native-package input whose
-    inactive and active value classes expose different carriers or consumers;
+19. a declared compile-time-executor environment, filesystem, command, or
+    native-package input whose inactive and active value classes expose direct,
+    indirect, macro-generated, or serialization-root consumers;
 20. an undeclared environment, filesystem, command, network, or native-package access
-    from a build script;
+    from any compile-time executor, including a parent environment variable that must
+    not enter an isolated proc-macro worker;
 21. a new carrier or consumer with no census row; and
 22. an `#[allow(clippy::iter_over_hash_type)]` with no matching row.
 
@@ -348,11 +365,12 @@ The authoritative runner is `scripts/hash_order_determinism_oracle.py`. Exit 0 a
 the final line `HASH ORDER DETERMINISM ORACLE: PASS` require every leg:
 
 1. **Universe and bijection:** Cargo-derived production scope, source identities,
-   configuration and build-input manifests, exact-head native-host evidence,
+   configuration and compile-time-input manifests, exact-head native-host evidence,
    serialization roots, and census rows are exact and duplicate-free. Every
-   satisfiable production branch is activated by a typed fixture, every build-script
-   access is declared, and every identity's recorded applicability equals its observed
-   fixture set.
+   satisfiable production branch is activated by a typed fixture, every compile-time
+   executor access is declared, every expansion-cache identity contains its full input
+   assignment, and every identity's recorded applicability equals its observed fixture
+   set.
 2. **Mutation rejection:** all C2.3 mutations fail for the intended missing-row or
    forbidden-order reason.
 3. **Per-row evidence:** every census row's named test or controlled mutation exists,
@@ -381,7 +399,8 @@ module graph (including custom paths, custom-build targets, and generated inputs
 configuration-manifest generator and fixtures covering Cargo features, target
 triples, platform predicates, target-specific dependencies, required-feature targets,
 profiles/codegen flags, build host versus compilation target, and build-script-emitted
-`cfg`s; build-input manifests and the traced fail-closed build-script sandbox;
+`cfg`s; compile-time-input manifests, the host API interposer, isolated proc-macro
+workers, and the traced fail-closed build-script/proc-macro sandbox;
 exact-commit native-host evidence aggregation;
 expanded type-resolved enumerator, raw-source identity sidecar, macro-expansion
 fixture boundary, serialization-root and Serde graph extractor, census schema, all
@@ -391,8 +410,8 @@ currently discovered rows with executable evidence, and the C2.3 mutation suite.
 configuration applicability and expanded-to-source identity mapping,
 serialization-root identity, dispositions, executable-evidence schema, and the rule
 that unknown features, predicates, supported host/target/profile combinations,
-target-specific dependencies, build-script inputs or `cfg`s, generated inputs, syntax,
-macro expansions, and serialization edges fail closed.
+target-specific dependencies, compile-time inputs or `cfg`s, generated inputs, syntax,
+macro expansions, expansion-cache identities, and serialization edges fail closed.
 
 **Oracle:** `.venv/bin/python scripts/hash_order_determinism_oracle.py --phase census`
 exits 0 with `HASH ORDER CENSUS: PASS` after every negative mutation is observed and
