@@ -1048,17 +1048,24 @@ enum AxisSource {
   derivation requires that role to agree with the declaration authority, stored
   axis ID, and complete runtime-class manifest; `AxisSource` never invents,
   merges, or recovers a class from a display name. There is no Phase-4 sibling
-  registry or target-specific formula match.
+  registry or target-specific formula match. Equality of extent formulas does
+  not imply structural forwarding: an operation axis that the numbered spec
+  types fresh remains an operation-computed witness even when its runtime
+  value equals an input extent.
 - **C4.2 Exact movement mappings.** Same-rank `Expand` maps every
   unchanged output axis to the same input axis and maps the replaced axis to
   its literal or scalar size. Rank-increasing `Expand` maps axes
   before the insertion unchanged, the inserted axis to its size, and later
   output axes to input axis `output_axis - 1`. Each
   `Reshape` target maps to its literal, folded input axis, or scalar input;
-  a proved name remains output type metadata, not a runtime name lookup. Identity
-  `Shrink`, `Stride`, and `Pad` axes use
-  `InputAxis`; non-identity axes use their exact
-  `OpComputed` rule. `Load` axes use
+  a proved name remains output type metadata, not a runtime name lookup.
+  Only checker-detectable identity movement axes permitted by [04-SHAPE-5] --
+  `Stride` with literal step one and `Pad` with literal zero padding -- use
+  `InputAxis` and `AliasOf`. Every symbolic `Shrink` output axis uses its exact
+  `OpComputed` rule and a fresh `WitnessOf`, including a full-axis
+  `(Lit(0), ToEnd)` whose runtime extent equals the input extent; there is no
+  checker-detectable symbolic `Shrink` identity. Every other non-identity
+  movement axis likewise uses its exact `OpComputed` rule. `Load` axes use
   `ExternalAxis`. Shape-preserving non-movement ops use the exact
   input-axis map, while reductions, concatenation, convolution, and every other
   computed-shape op use a closed rule citing their own numbered atom. These
@@ -1154,6 +1161,14 @@ axes and windows in one issue.
    evaluate/bind/bind-except map, intermediate, and return; serialized
    `ExecutionDim`; `OneHot.vocab`; and the decoded Wire graph;
    physical capacity rejection, when applicable, occurs only afterward.
+   A named symbolic full-axis `Shrink` `(0, ToEnd)` is a dedicated positive:
+   its output has the same runtime extent but a fresh type identity and
+   `OpComputed`/`WitnessOf` class member. A paired declared-equality row checks
+   that fresh witness at its operation-ready `check_at` event before result
+   allocation, while a mismatch traps there; substituting `InputAxis` or
+   `AliasOf` is an exact negative. The row is shared unchanged by Eval, C, HIP,
+   Metal, every named transform in item 7, and Wire encode/decode rather than
+   being inferred from any one lane.
    Runtime windows are absent from this
    corpus; the composed #1298 oracle owns them.
 2. **GPU build and execution.** The same named rows compile and execute in the
@@ -1176,7 +1191,10 @@ axes and windows in one issue.
    reason on every applicable lane. Guard mutations that hoist a local producer into the
    prologue, cross an earlier effect/trap, delay past a dependent allocation or
    exposure, omit a control edge, duplicate a producer/guard, or change failure
-   attribution are exact negatives across Eval, C, HIP, and Metal.
+   attribution are exact negatives across Eval, C, HIP, and Metal. A symbolic
+   full-axis `Shrink` mutation that forwards the input class, emits
+   `InputAxis`, or stamps `AliasOf` instead of the fresh operation output fails
+   against the frozen output-axis rule before execution or emission.
 4. **Zero positives.** Literal-zero and runtime-zero rows cover positional
    replacement, positional insertion, and named-axis expansion. They assert
    the exact output shape, logical element count zero, no element access, and
@@ -1204,7 +1222,10 @@ axes and windows in one issue.
    bound scalars, shifted literal and node-valued axes, preserved tensor-axis
    witnesses, absolute input slots, typed and synthesized origins, lexical and
    scope-instance owners, source/use/class IDs, witness/alias roles, complete
-   manifests, guards, shapes, and values.
+   manifests, guards, shapes, and values. The full-axis symbolic `Shrink` row
+   retains its fresh `OpComputed`/`WitnessOf` identity and pre-allocation guard
+   through each transform even though its realized extent equals the input;
+   folding it to the input class is a failing transform mutation.
    Mutations that
    prepend a batch axis to a bound scalar, re-evaluate a dual-use producer
    instead of referencing it through `BroadcastScalarRef`,
@@ -1278,7 +1299,9 @@ axes and windows in one issue.
    carriers that disagree with the declaration, dropped otherwise-unused
    public Load or guard root, `input_axis` in any Pad/Shrink/Stride field or
    another owner-illegal tag, classed `to_end`, unshifted
-   vmap source axis, and incompatible axis/rank/output shape. Dynamic-axis
+   vmap source axis, a symbolic full-axis `Shrink` output encoded as an
+   input-axis alias instead of a fresh operation-computed witness, and
+   incompatible axis/rank/output shape. Dynamic-axis
    placement mutations put a node-valued witness on one static axis, omit or
    duplicate its graph-level carrier, or reuse its source in both placements.
    Namespace mutations cover `(some(u64::MAX - 1),
@@ -1511,7 +1534,8 @@ phase creates them.
 and [05-OP-7] representation to admit `RuntimeExtent` and the structural
 tensor-axis witness with a static-or-node axis for expand/reshape, while
 preserving section 2.4.1's node-valued `Shape` representation for
-Pad/Shrink/Stride; migrate every semantic static-extent `RtDim`, `DimInfo`,
+Pad/Shrink/Stride and [04-SHAPE-5]'s fresh symbolic output identity for every
+`Shrink` axis, including `(0, ToEnd)`; migrate every semantic static-extent `RtDim`, `DimInfo`,
 `DimExpr`, tensor-type, and Wire copy to exact nonnegative `i64` under one
 generated transit census that also covers derived keys, evaluation/binding
 APIs and maps, public execution artifacts, operation-defined extents,
