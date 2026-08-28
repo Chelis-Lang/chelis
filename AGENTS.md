@@ -89,16 +89,23 @@ not drift.
 
 - Every pull request creation workflow, including documentation-only work, must include
   at least one compliant red-team review of the exact PR head before merge.
-- A confirmed P0 (critical) or P1 (high/major) finding blocks merge. Fix the finding,
-  push the updated head, and run another fresh-context red-team review against that
-  exact head.
+- Classify every finding against the pull request's stated scope. A finding is in scope
+  only when the pull request introduces it, worsens it, or claims to correct it. Mere
+  discovery during review, including a pre-existing spec/implementation mismatch in an
+  unrelated surface, does not bring a finding into scope.
+- Only a confirmed in-scope P0 (critical) or P1 (high/major) finding blocks merge. Fix
+  that finding in the pull request, push the updated head, and run another fresh-context
+  red-team review against that exact head.
 - Repeat the fix-and-review cycle until the most recent exact-head red-team review
-  reports no P0 or P1 findings. A review of an earlier head does not satisfy this gate.
-- Route confirmed findings back to the original implementation agent when it is still
-  available so the fix retains its build context. Record every round's exact head,
-  verdict, commands, accepted-no-action observations, and residual scope in the PR.
-  File newly discovered pre-existing defects instead of silently absorbing them into
-  an unrelated PR.
+  reports no in-scope P0 or P1 findings. A review of an earlier head does not satisfy
+  this gate. An out-of-scope P0 or P1 finding does not require a change to the pull
+  request or another red-team review.
+- Route confirmed in-scope findings back to the original implementation agent when it
+  is still available so the fix retains its build context. Do not fix out-of-scope
+  findings in the pull request; link an existing issue or file one if the defect is not
+  already tracked. Record every round's exact head, verdict, commands, finding-scope
+  classifications, accepted-no-action observations, linked issues, and residual scope
+  in the pull request.
 
 ## Documentation And Spec Sync
 
