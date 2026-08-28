@@ -1302,6 +1302,20 @@ on the file digest) so the new rules are defended rather than only re-hashed,
 while connective sentences rest on the file digests. The [05-OP-7] blockquote and
 §4.7.1's anchored sentences are byte-identical to their prior state.
 
+[#1370] amends `spec/04-type-system.md` §4.7.2 to decide the order in which
+deferred positional `expand` defaults settle at the program freeze point, the
+settlement order that [#1338] exposed and `hash_order_determinism.md`
+implements, folding [#1343]'s settlement paragraph and its
+`positional expand settlement order` anchor into one paragraph that also
+defines the freeze point, the merged-obligation rule, and the `reshape`
+publication rule; it adds one determinism rule to `spec/00-context.md` §5.
+This deliberately moves the complete-file digest for
+`spec/04-type-system.md`; it does not touch a frozen [04-NUM] atom, the §9.1
+per-dtype table, the capability schema, or a numeric-surface identity, and
+every frozen atom and region digest and every required-literal anchor is
+unchanged. The script unit tests that call `validate_contract` are the
+executable evidence that only the file digest moved.
+
 ## B2. Invariants that hold across every boundary
 
 1. **Controls never move.** Every green control in the audit test files
@@ -2063,3 +2077,5 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#1314]: https://github.com/Chelis-Lang/chelis/issues/1314
 [#1310]: https://github.com/Chelis-Lang/chelis/pull/1310
 [#1343]: https://github.com/Chelis-Lang/chelis/pull/1343
+[#1338]: https://github.com/Chelis-Lang/chelis/issues/1338
+[#1370]: https://github.com/Chelis-Lang/chelis/pull/1370
