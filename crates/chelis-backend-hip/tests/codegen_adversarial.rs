@@ -2,9 +2,10 @@
 //!
 //! These probe edge cases not covered by S1-S13 structural tests.
 
-use chelis_backend_hip::codegen_hip;
+use chelis_backend_hip::{HipCodegenResult, codegen_hip};
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
 use chelis_types::types::Prim;
+use chelis_types::unsupported::{RejectionAuthorityKind, Stage, Unsupported, UnsupportedKind};
 
 fn scalar_f32() -> TensorType {
     TensorType::scalar_f32()
@@ -28,6 +29,46 @@ fn vec_bool(n: usize) -> TensorType {
     TensorType {
         dims: vec![DimInfo::Lit(n)],
         precision: Prim::Bool,
+    }
+}
+
+fn vec_i64(n: usize) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(n)],
+        precision: Prim::Int64,
+    }
+}
+
+fn assert_hip_dtype_rejection(error: Unsupported, dtype: &str, issue: u32) {
+    assert_eq!(
+        error.what,
+        UnsupportedKind::Dtype(dtype.to_string()),
+        "the rejection must carry the exact typed dtype"
+    );
+    assert_eq!(
+        error.stage,
+        Stage::Codegen("hip"),
+        "the rejection must identify the HIP codegen stage"
+    );
+    assert_eq!(
+        error.authority.kind(),
+        RejectionAuthorityKind::Unimplemented,
+        "the target capability gap must remain typed as unimplemented"
+    );
+    assert_eq!(
+        error.authority.issue().map(|issue| issue.number()),
+        Some(issue),
+        "the rejection must carry the exact implementation owner"
+    );
+}
+
+fn expect_hip_codegen_rejection(
+    result: Result<HipCodegenResult, Unsupported>,
+    message: &str,
+) -> Unsupported {
+    match result {
+        Err(error) => error,
+        Ok(_) => panic!("{message}"),
     }
 }
 
@@ -572,10 +613,91 @@ fn rt12b_cast_to_bool_is_rejected_not_emitted_as_f32() {
         Err(error) => error,
         Ok(_) => panic!("a bool result has no HIP kernel family (chelis#1364)"),
     };
-    assert!(
-        format!("{error:?}").contains("bool"),
-        "the rejection must name the offending dtype; got: {error:?}"
+    assert_hip_dtype_rejection(error, "bool", 1364);
+}
+
+/// chelis#1364 owns the reverse direction too: a real Bool8 family must read
+/// one-byte inputs and produce the requested destination representation.
+#[test]
+fn rt12b_cast_from_bool_carries_the_bool_family_authority() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_bool(4), None);
+    let c = dag.add_node(
+        RiscOp::Cast {
+            new_precision: Prim::F32,
+        },
+        vec![x],
+        vec_f32(4),
+        None,
     );
+    dag.add_root(c);
+    let error = expect_hip_codegen_rejection(
+        codegen_hip(&dag, "test_cast_from_bool"),
+        "cast from bool requires the chelis#1364 HIP Bool8 family",
+    );
+    assert_hip_dtype_rejection(error, "bool", 1364);
+}
+
+/// Copy materializes its input through the cast template, so Bool8 support is
+/// part of the same chelis#1364 family rather than the generic chelis#689
+/// fallback class.
+#[test]
+fn rt12b_copy_bool_carries_the_bool_family_authority() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_bool(4), None);
+    let copy = dag.add_node(RiscOp::Copy, vec![x], vec_bool(4), None);
+    dag.add_root(copy);
+    let error = expect_hip_codegen_rejection(
+        codegen_hip(&dag, "test_copy_bool"),
+        "copying bool requires the chelis#1364 HIP Bool8 family",
+    );
+    assert_hip_dtype_rejection(error, "bool", 1364);
+}
+
+/// Realize also materializes through the cast template and therefore has the
+/// same exact Bool8 capability owner as casts and copies.
+#[test]
+fn rt12b_realize_bool_carries_the_bool_family_authority() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_bool(4), None);
+    let realize = dag.add_node(RiscOp::Realize, vec![x], vec_bool(4), None);
+    dag.add_root(realize);
+    let error = expect_hip_codegen_rejection(
+        codegen_hip(&dag, "test_realize_bool"),
+        "realizing bool requires the chelis#1364 HIP Bool8 family",
+    );
+    assert_hip_dtype_rejection(error, "bool", 1364);
+}
+
+/// The chelis#1364 authority is operation-aware, not a blanket replacement
+/// for every bool rejection. A generic float-family op still belongs to the
+/// chelis#689 no-typed-kernel fallback class.
+#[test]
+fn rt12b_unrelated_bool_numeric_op_retains_generic_authority() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_bool(4), None);
+    let neg = dag.add_node(RiscOp::Neg, vec![x], vec_bool(4), None);
+    dag.add_root(neg);
+    let error = expect_hip_codegen_rejection(
+        codegen_hip(&dag, "test_neg_bool"),
+        "bool negation has no generic HIP arithmetic family",
+    );
+    assert_hip_dtype_rejection(error, "bool", 689);
+}
+
+/// The operation-aware bool path must not disturb the non-bool fallback that
+/// chelis#689 actually owns.
+#[test]
+fn rt12b_non_bool_materialization_retains_generic_authority() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_i64(4), None);
+    let realize = dag.add_node(RiscOp::Realize, vec![x], vec_i64(4), None);
+    dag.add_root(realize);
+    let error = expect_hip_codegen_rejection(
+        codegen_hip(&dag, "test_realize_i64"),
+        "int64 realize has no generic HIP arithmetic family",
+    );
+    assert_hip_dtype_rejection(error, "int64", 689);
 }
 
 /// chelis#1360 companion: `cmplt` is the other producer of a bool tensor, and

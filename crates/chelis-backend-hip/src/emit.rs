@@ -1178,9 +1178,7 @@ impl HipEmitter {
     /// the in-precision identity kernel; when they differ, it's the
     /// cross-precision conversion kernel.
     fn cast_kernel_name(node: &DagNode, dag: &Dag) -> Result<String, Unsupported> {
-        let src_ty = &dag.get(node.inputs[0]).unwrap().output_type;
-        let dst_kind = Self::elem_kind(&node.output_type)?;
-        let src_kind = Self::elem_kind(src_ty)?;
+        let (src_kind, dst_kind) = Self::cast_elem_kinds(node, dag)?;
         Ok(if src_kind == dst_kind {
             format!("kernel_cast_{}", dst_kind.suffix())
         } else {
@@ -1461,9 +1459,7 @@ impl HipEmitter {
     /// Cast / Realize / Copy kernel source: in-precision identity when
     /// src and dst kinds agree, cross-precision conversion otherwise.
     fn cast_kernel_source(name: &str, node: &DagNode, dag: &Dag) -> Result<String, Unsupported> {
-        let src_ty = &dag.get(node.inputs[0]).unwrap().output_type;
-        let dst_kind = Self::elem_kind(&node.output_type)?;
-        let src_kind = Self::elem_kind(src_ty)?;
+        let (src_kind, dst_kind) = Self::cast_elem_kinds(node, dag)?;
         Ok(if src_kind == dst_kind {
             kernels::cast(name, dst_kind)
         } else {
@@ -3797,6 +3793,43 @@ impl HipEmitter {
                  result dtype is chelis#1364"
             ),
         ))
+    }
+
+    /// Resolve the two arithmetic families used by the materialization
+    /// template shared by Cast, Copy, and Realize.
+    ///
+    /// A bool source or destination is not part of chelis#689's generic
+    /// float-family fallback class. It needs the exact one-byte read/write and
+    /// checked-cast behavior owned by chelis#1364. Keep that decision at this
+    /// operation-aware seam so unrelated bool arithmetic still receives the
+    /// generic no-typed-kernel rejection from [`Self::elem_kind`].
+    fn cast_elem_kinds(
+        node: &DagNode,
+        dag: &Dag,
+    ) -> Result<(kernels::ElemKind, kernels::ElemKind), Unsupported> {
+        let src_ty = &dag.get(node.inputs[0]).unwrap().output_type;
+        let operation = match &node.op {
+            RiscOp::Cast { .. } => "cast",
+            RiscOp::Copy => "copy",
+            RiscOp::Realize => "realize",
+            _ => unreachable!("cast_elem_kinds is only for Cast, Copy, and Realize"),
+        };
+        if src_ty.precision == Prim::Bool || node.output_type.precision == Prim::Bool {
+            return Err(Unsupported::new(
+                UnsupportedKind::Dtype(Prim::Bool.name().to_string()),
+                format!("HIP {operation} materialization requiring a one-byte bool kernel family"),
+                Stage::Codegen("hip"),
+                chelis_types::unimplemented_rejection!(
+                    1364,
+                    "HIP has no Bool8 materialization family: casts to bool need a checked \
+                     one-byte writer, casts from bool need a one-byte reader, and bool \
+                     Copy/Realize need an exact one-byte identity kernel"
+                ),
+            ));
+        }
+        let dst_kind = Self::elem_kind(&node.output_type)?;
+        let src_kind = Self::elem_kind(src_ty)?;
+        Ok((src_kind, dst_kind))
     }
 
     /// Map a tensor's precision to a [`kernels::ElemKind`] for kernel

@@ -241,7 +241,7 @@ unsafe impl TensorElement for Bool8 {
 ///
 /// # Safety
 ///
-/// `tensor` must point to a live F32 or current Bool tensor.
+/// `tensor` must point to a live F32 tensor.
 #[inline]
 pub unsafe fn data_as_f32(tensor: *mut chelis_tensor) -> *mut f32 {
     #[cfg(debug_assertions)]
@@ -256,7 +256,7 @@ pub unsafe fn data_as_f32(tensor: *mut chelis_tensor) -> *mut f32 {
 ///
 /// # Safety
 ///
-/// `tensor` must point to a live F32 or current Bool tensor.
+/// `tensor` must point to a live F32 tensor.
 #[inline]
 pub unsafe fn data_as_f32_const(tensor: *const chelis_tensor) -> *mut f32 {
     #[cfg(debug_assertions)]
