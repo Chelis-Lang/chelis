@@ -112,6 +112,34 @@ it. This rule includes the parser, Deep, effects, validation, pipeline-core, com
 API, CLI, bindings, proof, editor/server, build-script, and generated-code routes when
 they are in the derived graph.
 
+The production universe is a set of target-and-configuration fixtures, not one
+default host build. A generated, checked-in configuration manifest records:
+
+- every workspace feature and feature implication, optional and target-specific
+  dependency edge, non-test target `required-features` condition, and build-script
+  input that changes Rust compilation;
+- every `cfg` and `cfg_attr` predicate reachable from a production target, including
+  predicates emitted by macro expansion or `cargo::rustc-cfg`; and
+- the exact supported release and CI target triples, their compiler-reported target
+  `cfg` values, and the repository contract that declares each triple supported.
+
+The manifest generator normalizes those predicates and solves for configuration
+fixtures that exercise both sides of every satisfiable branch on every applicable
+supported target. It may coalesce fixtures with equivalent coverage, but it records
+the proof of equivalence. Default and `--all-features` builds are fixtures, not a
+completeness rule: negative features, mutually exclusive predicates, target-specific
+dependencies, and `required-features` targets receive their own satisfying fixtures.
+An unsupported or unsatisfiable branch has an explicit manifest row with its checked
+reason; it is never silently absent.
+
+Each fixture runs Cargo with the recorded target and exact feature assignment. The
+enumerator consumes Cargo JSON build-script messages to bind emitted `cfg` values and
+`OUT_DIR` inputs to that fixture, then runs the type-resolved expansion over the
+result. A feature, feature implication, target predicate, target-specific dependency,
+build-script-emitted `cfg`, generated input, or compiler-observed branch without an
+applicable fixture fails closed. A newly supported target enters the manifest and
+census before its release/CI declaration can pass the oracle.
+
 #### C2.2 Source identities and bijection
 
 The authoritative enumerator runs after macro expansion with resolved Rust types.
@@ -133,10 +161,14 @@ expanded carriers and consumers to the same type-resolved enumerator. This appli
 `macro_rules!`, derive and attribute macros, and procedural macros, including macros
 defined outside the audited package. No opaque macro expansion is silently skipped.
 
-An identity is `(crate, module, enclosing item, carrier field or binding,
-consumer)`. Anonymous or ambiguous carriers must gain a stable census marker;
-unresolved aliases, unmapped macro expansions, duplicate identities, and unknown
-order-consuming forms fail closed instead of being skipped.
+An identity is `(crate, target, normalized configuration applicability, module,
+enclosing item, carrier field or binding, consumer)`. Configuration applicability
+names every manifest fixture that activates the identity and the normalized predicate
+that those fixtures cover. Anonymous or ambiguous carriers must gain a stable census
+marker; unresolved aliases, unmapped macro expansions, duplicate identities, and
+unknown order-consuming forms fail closed instead of being skipped. A source identity
+whose declared applicability differs from the typed expansions observed across its
+fixtures also fails closed.
 
 The generated identities and census rows are bijective: a missing source row, a
 stale census row, or two rows claiming one identity is an oracle failure. The
@@ -172,8 +204,16 @@ The liveness oracle must reject all of these planted changes:
     whose `src_path` is outside `src/`;
 11. a serialization root in an outside-`src` target;
 12. the same four shapes in a `custom-build` target;
-13. a new carrier or consumer with no census row; and
-14. an `#[allow(clippy::iter_over_hash_type)]` with no matching row.
+13. direct, indirect, macro-generated, and serialization-root consumers reachable
+    only through a non-default feature assignment;
+14. the same four shapes reachable only on a non-host supported target or platform
+    `cfg` branch;
+15. a consumer enabled only by a target-specific dependency, target
+    `required-features`, or build-script-emitted `cfg`;
+16. a new feature, feature implication, target predicate, supported target,
+    build-script `cfg`, or generated input with no configuration fixture;
+17. a new carrier or consumer with no census row; and
+18. an `#[allow(clippy::iter_over_hash_type)]` with no matching row.
 
 The mutation suite is the completeness lock that the lint alone cannot provide.
 
@@ -273,7 +313,10 @@ The authoritative runner is `scripts/hash_order_determinism_oracle.py`. Exit 0 a
 the final line `HASH ORDER DETERMINISM ORACLE: PASS` require every leg:
 
 1. **Universe and bijection:** Cargo-derived production scope, source identities,
-   serialization roots, and census rows are exact and duplicate-free.
+   configuration manifest and fixtures, serialization roots, and census rows are
+   exact and duplicate-free. Every satisfiable production branch is activated by a
+   typed fixture, and every identity's recorded applicability equals its observed
+   fixture set.
 2. **Mutation rejection:** all C2.3 mutations fail for the intended missing-row or
    forbidden-order reason.
 3. **Per-row evidence:** every census row's named test or controlled mutation exists,
@@ -299,14 +342,19 @@ the deterministic structural and mutation legs.
 
 **Deliver:** the Cargo-derived package/target enumerator, exact non-test target and
 module graph (including custom paths, custom-build targets, and generated inputs),
+configuration-manifest generator and fixtures covering Cargo features, target
+triples, platform predicates, target-specific dependencies, required-feature targets,
+and build-script-emitted `cfg`s,
 expanded type-resolved enumerator, raw-source identity sidecar, macro-expansion
 fixture boundary, serialization-root and Serde graph extractor, census schema, all
 currently discovered rows with executable evidence, and the C2.3 mutation suite.
 
-**Frozen at exit:** package/target/module universe derivation, expanded-to-source
-identity mapping, serialization-root identity, dispositions, executable-evidence
-schema, and the rule that unknown targets, generated inputs, syntax, macro expansions,
-and serialization edges fail closed.
+**Frozen at exit:** package/target/module and configuration-universe derivation,
+configuration applicability and expanded-to-source identity mapping,
+serialization-root identity, dispositions, executable-evidence schema, and the rule
+that unknown features, predicates, supported targets, target-specific dependencies,
+build-script `cfg`s, generated inputs, syntax, macro expansions, and serialization
+edges fail closed.
 
 **Oracle:** `.venv/bin/python scripts/hash_order_determinism_oracle.py --phase census`
 exits 0 with `HASH ORDER CENSUS: PASS` after every negative mutation is observed and
