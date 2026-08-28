@@ -597,8 +597,10 @@ target-capacity rejection is allowed.
   Every rank-zero scalar or statically selected tensor axis that independently
   witnesses the binder is stamped `WitnessOf { class, source }`; a pass-through
   occurrence is stamped `AliasOf { class, use_id }`. Tensor result metadata
-  carries one optional stamp per statically known output axis, and rank-zero
-  exact-`int64` scalar producers carry the scalar form. A node-valued-axis read
+  derives one total `RuntimeAxisRole` per statically known output axis and
+  stores an optional stamp whose absence is legal exactly for `Unclassed`;
+  rank-zero exact-`int64` scalar producers carry the scalar witness form. A
+  node-valued-axis read
   cannot use either location: finalization emits exactly one graph-level
   `RuntimeDynamicAxisWitness { class, source, tensor, axis }` for it. That
   carrier executes the metadata selection, owns both node dependencies, and is
@@ -628,12 +630,14 @@ target-capacity rejection is allowed.
   Phase 2 generates and freezes one `OutputAxisRule` table bijective with the
   complete current `RiscOp` registry. Each possible output axis is classified
   as literal, external, structurally forwarded, scalar-derived, or
-  `OpComputed(OpExtentRule)`. The row determines witness-versus-alias and, for
-  an operation-computed witness, the exact pre-allocation extent formula citing
-  the owning numbered operation atom. An unclassified operation, output, rank
-  rule, or formula is a build failure; a missing governing atom is authored in
-  Phase 2 before the row can register. This is the single table Phase 4 later
-  consumes for total `AxisSource`; no second operation/source table exists.
+  `OpComputed(OpExtentRule)`. The same row determines the total
+  `Unclassed`/`WitnessOf`/`AliasOf` role described in C4.1 and, for an
+  operation-computed witness, the exact pre-allocation extent formula citing
+  the owning numbered operation atom. An unclassified operation, output, rank,
+  source class, runtime role, or formula is a build failure; a missing
+  governing atom is authored in Phase 2 before the row can register. This is
+  the single table Phase 4 later consumes for total `AxisSource`; no second
+  operation/source or role table exists.
 
   `derive_runtime_extent_classes(&FinalizedDag)` walks the authoritative declarations,
   resolves each durable source ID through literals, scalar/static-axis stamps,
@@ -1041,10 +1045,33 @@ enum AxisSource {
   and assigns every output axis its source class and formula. Adding an op,
   output, or rank rule without a complete row has already failed regeneration
   and compilation before Phase 2 exits.
-  The frozen row also supplies the runtime-dimension role for the axis: an
-  external or operation-computed source is `WitnessOf { class, source }`,
-  while a structurally forwarded source is
-  `AliasOf { class, use_id }`. Phase-4
+  The frozen row also supplies exactly one runtime-dimension role for the axis:
+
+  ```rust
+  enum RuntimeAxisRole {
+      Unclassed,
+      WitnessOf { class: RuntimeDimId, source: RuntimeDimSourceId },
+      AliasOf { class: RuntimeDimId, use_id: RuntimeDimUseId },
+  }
+  ```
+
+  The five source classes have this total disposition:
+
+  | output-axis source class | classed axis | unclassed axis |
+  |---|---|---|
+  | literal | `AliasOf` the declaration's literal source through this axis's durable use ID | `Unclassed`, only for an anonymous or fully concrete axis with no declaration |
+  | external | `WitnessOf` this exact external-axis source | `Unclassed`, only when no declaration owns the anonymous axis |
+  | structurally forwarded | `AliasOf` the exact input-axis class through this axis's durable use ID | `Unclassed`, only when the forwarded source is itself unclassed |
+  | scalar-derived | `AliasOf` the exact scalar-parameter or stamped scalar-operation source through this axis's durable use ID | `Unclassed`, only when that scalar source is not a declaration member |
+  | `OpComputed` | `WitnessOf` this exact operation-output source | `Unclassed`, only for an anonymous output with no declaration |
+
+  A literal declaration is the independent witness; its tensor result axis is
+  an alias, not a second witness. A scalar parameter or rank-zero scalar
+  producer is likewise the independent witness for a scalar-derived axis; the
+  tensor result axis is its alias and never re-executes the scalar. Absence of
+  a stamp is therefore an explicit `Unclassed` row result, not an optional
+  fallback, and a concrete literal may use it only when no runtime declaration
+  owns that axis. Phase-4
   derivation requires that role to agree with the declaration authority, stored
   axis ID, and complete runtime-class manifest; `AxisSource` never invents,
   merges, or recovers a class from a display name. There is no Phase-4 sibling
@@ -1059,7 +1086,8 @@ enum AxisSource {
   output axes to input axis `output_axis - 1`. Each
   `Reshape` target maps to its literal, folded input axis, or scalar input;
   a proved name remains output type metadata, not a runtime name lookup.
-  Only checker-detectable identity movement axes permitted by [04-SHAPE-5] --
+  Only checker-detectable identity movement axes permitted by `spec/04` section
+  4.7's identity-only movement rule --
   `Stride` with literal step one and `Pad` with literal zero padding -- use
   `InputAxis` and `AliasOf`. Every symbolic `Shrink` output axis uses its exact
   `OpComputed` rule and a fresh `WitnessOf`, including a full-axis
@@ -1145,7 +1173,14 @@ axes and windows in one issue.
    values, and traps. The named-dimension rows prove literal instantiation,
    canonical signature-order witness selection, and complete class guards for
    Load/Load, Load/operation-output, and operation-output/operation-output
-   classes, including a class with no movement-bound consumer. Positive guard
+   classes, including a class with no movement-bound consumer. Dedicated
+   Expand and Reshape role rows cover a classed literal result axis as
+   `AliasOf` its declaration literal, an anonymous concrete literal axis as
+   exactly `Unclassed` with no stamp, and classed scalar-parameter and
+   scalar-operation-derived result axes as `AliasOf` their one authoritative
+   scalar witness. They assert the same source/use IDs, stamp absence or
+   presence, manifest membership, and guard occurrence across every lane and
+   Wire. Positive guard
    rows compare a node-valued-axis shape read and a rank-zero arithmetic or
    user-function scalar result against an independently declared literal or
    named witness. The guard schedule crosses interface-only prologue checks,
@@ -1194,7 +1229,11 @@ axes and windows in one issue.
    attribution are exact negatives across Eval, C, HIP, and Metal. A symbolic
    full-axis `Shrink` mutation that forwards the input class, emits
    `InputAxis`, or stamps `AliasOf` instead of the fresh operation output fails
-   against the frozen output-axis rule before execution or emission.
+   against the frozen output-axis rule before execution or emission. For both
+   Expand and Reshape, mutations independently swap literal or scalar-derived
+   `AliasOf` to `WitnessOf`, omit a classed alias, stamp an unclassed concrete
+   literal, point the alias at another source/use, or re-execute the scalar;
+   each fails before execution, emission, or Wire encoding.
 4. **Zero positives.** Literal-zero and runtime-zero rows cover positional
    replacement, positional insertion, and named-axis expansion. They assert
    the exact output shape, logical element count zero, no element access, and
@@ -1226,6 +1265,11 @@ axes and windows in one issue.
    retains its fresh `OpComputed`/`WitnessOf` identity and pre-allocation guard
    through each transform even though its realized extent equals the input;
    folding it to the input class is a failing transform mutation.
+   The classed-literal, unclassed-literal, scalar-parameter, and
+   scalar-operation-derived Expand/Reshape role rows preserve their exact
+   `Unclassed`/`AliasOf` disposition through every transform. Mutations that
+   add a stamp to the unclassed literal, drop or change a classed alias, or
+   turn the scalar-derived alias into another witness fail at refinalization.
    Mutations that
    prepend a batch axis to a bound scalar, re-evaluate a dual-use producer
    instead of referencing it through `BroadcastScalarRef`,
@@ -1301,7 +1345,9 @@ axes and windows in one issue.
    another owner-illegal tag, classed `to_end`, unshifted
    vmap source axis, a symbolic full-axis `Shrink` output encoded as an
    input-axis alias instead of a fresh operation-computed witness, and
-   incompatible axis/rank/output shape. Dynamic-axis
+   a classed literal or scalar-derived Expand/Reshape output with a missing,
+   witness, or wrong-source alias stamp, an unclassed concrete literal with
+   any stamp, and incompatible axis/rank/output shape. Dynamic-axis
    placement mutations put a node-valued witness on one static axis, omit or
    duplicate its graph-level carrier, or reuse its source in both placements.
    Namespace mutations cover `(some(u64::MAX - 1),
@@ -1399,10 +1445,14 @@ never reused.
   `WireRuntimeExtentClass` separately, with the same ID and `literal`,
   `scalar`, or `tensor_axis` witnesses carrying their source IDs; a
   `tensor_axis` witness carries its tensor node and a literal or rank-zero
-  `int32` scalar node for the axis. Encode one optional
-  `witness { class, source }` or `alias { class, use_id }` stamp per static
-  tensor output axis and the corresponding optional stamp on rank-zero
-  exact-`int64` scalar producers. Encode every node-valued-axis source once in
+  `int32` scalar node for the axis. Encode the Phase-2-frozen total
+  `RuntimeAxisRole` for every static tensor output axis as no stamp exactly for
+  `Unclassed`, `witness { class, source }` exactly for `WitnessOf`, or
+  `alias { class, use_id }` exactly for `AliasOf`; encode the corresponding
+  optional witness stamp on rank-zero exact-`int64` scalar producers. A
+  classed literal or scalar-derived tensor axis must encode its alias, while an
+  unclassed concrete literal must encode no stamp. Encode every
+  node-valued-axis source once in
   a separate ordered `WireRuntimeDynamicAxisWitness { class, source, tensor,
   axis }` list; no static axis stamp may repeat that source. The public input
   manifest retains every declared Load independently of data uses and maps each
@@ -1534,8 +1584,9 @@ phase creates them.
 and [05-OP-7] representation to admit `RuntimeExtent` and the structural
 tensor-axis witness with a static-or-node axis for expand/reshape, while
 preserving section 2.4.1's node-valued `Shape` representation for
-Pad/Shrink/Stride and [04-SHAPE-5]'s fresh symbolic output identity for every
-`Shrink` axis, including `(0, ToEnd)`; migrate every semantic static-extent `RtDim`, `DimInfo`,
+Pad/Shrink/Stride and `spec/04` section 4.7's identity-only movement rule,
+including the fresh symbolic output identity of every `Shrink` axis and
+`(0, ToEnd)`; migrate every semantic static-extent `RtDim`, `DimInfo`,
 `DimExpr`, tensor-type, and Wire copy to exact nonnegative `i64` under one
 generated transit census that also covers derived keys, evaluation/binding
 APIs and maps, public execution artifacts, operation-defined extents,
