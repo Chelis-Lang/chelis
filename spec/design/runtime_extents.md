@@ -10,10 +10,11 @@ encoding. This plan implements those decisions; it does not weaken them to
 match a current lane. The one open language decision it exposes -- coupled
 positional-`expand` settlement order -- must land in
 `spec/04-type-system.md` before Phase 3.
-**Class fixed:** [#1277] -- every non-literal tensor extent is ordinary typed
-integer dataflow, but the current checker, deferral machinery, and backend
-recover that value through several incomplete provenance and symbolic-name
-paths.
+**Class fixed:** [#1277] -- a direct `shape()` extent is the
+folded movement-node metadata expression required by [05-OP-7], and every
+other non-literal tensor extent is ordinary typed integer dataflow. The current
+checker, deferral machinery, and backend recover those values through several
+incomplete provenance and symbolic-name paths.
 
 **Interlocks, not hidden scope:**
 
@@ -49,8 +50,9 @@ The implementation still has four separate recovery mechanisms:
    exact WireDag v6 serializes `Expand.size` as a string.
 
 The fix is ordered around representation. Phase 2 first gives every accepted
-`expand` size a scalar value edge, migrates every lane and WireDag,
-and only then deletes provenance rejections. Phase 3 totalizes the
+`expand` size either the folded input-axis expression required for a direct
+`shape()` extent or an ordinary scalar value edge, migrates every lane and
+WireDag, and only then deletes provenance rejections. Phase 3 totalizes the
 insert-versus-replace protocol. Phase 4 replaces output-axis name recovery
 with one checked source for every realized output axis. One runner records
 baseline state and enforces the allowed progression from an ICE or lane
@@ -74,8 +76,12 @@ execution.
   when a type-level identity is preserved.
 - **C1.3 Zero is legal.** Static negative extents are type errors and runtime
   negative extents trap `Domain` before allocation or access. Zero is
-  neither case: it produces a zero-element tensor with the declared shape and
-  the runtime's null-data/zero-capacity empty representation.
+  neither case: it produces a tensor with the declared shape and logical
+  element count zero. No lane may synthesize or access a logical element.
+  Physical backing is target-private: a runtime may retain a non-null,
+  one-byte allocation when its allocator or device API cannot represent a
+  zero-byte buffer. Pointer spelling and backing capacity are not language
+  observations and are not cross-lane parity requirements.
 - **C1.4 Extents are `int64` and axes are `int32`.** The
   checker, movement signatures, and C carrier have shipped this split. The HIP
   tensor still carries 32-bit shape, stride, size, and allocation metadata;
@@ -97,17 +103,40 @@ RiscOp::Expand {
 ```
 
 Only `RtDim::Lit` and `RtDim::Node` are legal for
-`Expand.size`. `RtDim::Sym` and
-`RtDim::ToEnd` remain illegal in that position.
+`Expand.size` ordinary values. A third legal variant represents exactly the
+folded direct-shape case required by `spec/05`:
 
-- **C2.1 Exact scalar-edge invariant.** `inputs[0]` is the tensor
+```rust
+RtDim::InputAxis {
+    tensor: usize,
+    axis: RtAxis, // Lit(int32) or Node(input slot with rank-0 int32)
+}
+```
+
+`tensor` and every `Node` are absolute slots in the owning movement
+node's `inputs`. `RtDim::Sym` and `RtDim::ToEnd`
+remain illegal in `Expand.size`.
+
+- **C2.1 Exact representation invariant.** `inputs[0]` is the tensor
   operand. `RtDim::Node(i)` is an absolute slot in the same node's
-  `inputs`, with `1 <= i < inputs.len()`. The referenced
-  node is earlier in topological order and has rank zero and exact
-  `int64` dtype. A `shape()` read or arithmetic chain is a
-  real value dependency through that slot, so DCE, specialization, AD, and
-  backend emission cannot lose it. A shape-only side table is not an
-  equivalent size carrier.
+  `inputs`, with `1 <= i < inputs.len()`. The referenced node is
+  earlier in topological order and has rank zero and exact `int64`
+  dtype. A `shape(tensor, axis)` value whose use is the movement extent,
+  including use through a transparent binding, does **not** materialize a
+  `RiscOp::Shape` value node for that use: it becomes
+  `RtDim::InputAxis`, whose tensor slot is an earlier tensor node and
+  whose literal or node-valued axis is exact `int32`. The movement node
+  reads that input's metadata directly. The typed producer retains this
+  `DirectShape` identity structurally across bindings; it is not recovered by
+  a syntax/provenance walk. If the same binding also has an ordinary scalar
+  consumer, lowering materializes `RiscOp::Shape` for that consumer while
+  the movement use remains folded. A cast, arithmetic expression, or
+  user-function result is ordinary scalar dataflow and reaches the movement
+  node as `RtDim::Node`.
+  Thus the direct read obeys [05-OP-7]'s folded-`DimExpr` rule while every
+  scalar value obeys `spec/04` §4.7.4. Both forms are real owning-node input
+  dependencies, so DCE cannot lose them; a symbolic name or shape-only side
+  table is not an equivalent size carrier.
 - **C2.2 Static values are an optimization.** A nonnegative statically proved
   value, including zero, may use `RtDim::Lit`. One checked static
   folder is shared or contract-tested across checker and lowering. Failure to
@@ -120,13 +149,32 @@ Only `RtDim::Lit` and `RtDim::Node` are legal for
   [#609] is deleted.
 - **C2.4 Every consumer lands before deletion.** Verification, Eval, C, HIP,
   Metal, specialization, AD, vmap, hashing, and cloning/remapping passes read
-  the scalar edge before any provenance rejection is removed. [#1112]'s HIP
-  carrier work and Metal audit are Phase 2 entry requirements because a
-  checker-only `int64` result is not an all-lane extent contract.
+  `Lit`, `InputAxis`, and `Node` before any provenance
+  rejection is removed. [#1112]'s HIP carrier work and Metal audit are Phase 2
+  entry requirements because a checker-only `int64` result is not an
+  all-lane extent contract. Entry requires their focused width, capacity,
+  guard, target-build, and hardware-availability smoke evidence; execution of
+  this plan's runtime-extent group is a Phase 2 **exit**, not an entry
+  requirement.
   Equality and negativity guards run before allocation or element access on
   every lane.
-- **C2.5 The deletion is atomic with the usable replacement.** Only after
-  C2.1-C2.4 and C6 are green does the phase delete `SizeClass`,
+- **C2.5 Transforms preserve the bound slice.** Transforming a movement node
+  transforms its complete bound-dependency slice, not only the tensor operand.
+  Under axis-zero `vmap`, non-tensor scalar parameters remain shared, direct
+  `InputAxis` reads observe the corresponding original tensor axis after
+  the inserted batch-axis shift, and scalar `shape`/integer nodes used only by
+  movement bounds remain rank-zero rather than acquiring a batch dimension.
+  Literal axes normalize against the original source rank and then shift;
+  node-valued axes perform the same checked normalization and shift at runtime.
+  Grad, specialization, cloning, and remapping preserve or remap every absolute
+  input slot and its dtype/rank invariant. A bound computed from vmapped tensor
+  *elements* could vary per example and is not decided by the current
+  transformation spec: before Phase 2, `spec/06-transformations.md` must choose
+  its regular-stack behavior (an equality guard or a typed rejection), and the
+  oracle must lock that choice. Implementation may not guess or silently share
+  such a value.
+- **C2.6 The deletion is atomic with the usable replacement.** Only after
+  C2.1-C2.5 and C6 are green does the phase delete `SizeClass`,
   `classify_expand_size`, `classify_arith_app`,
   `sourceless_expand_size_error`,
   `Env::size_provenance` and its plumbing, plus the lowerer's mirror
@@ -154,15 +202,33 @@ than assigning semantic labels by intuition:
   `axis == rank(input)` selects trailing insertion.
 
 Every inference rule that consumes a tensor must invoke exactly one action.
-Builtin rules carry an exhaustive `PendingExpandUse` entry; the same
-closed registry has explicit non-builtin rows for declared results and
-ascriptions, user-function calls, branch joins, generic instantiation,
-bindings, and complete-program finalization. Adding a builtin or a consuming
-inference rule without a row fails structurally. Generated tests execute both
-candidate outcomes and a contradictory shape for every `Constrain`
-row, propagation followed by later selection for every
-`Propagate` row, and the documented default for every
-`Freeze` row.
+This is enforced through one mandatory, typed choke point rather than inferred
+from a review table. Recursive expression inference returns an opaque,
+`#[must_use]` `Inferred` carrier whose type and pending-expand tokens have
+private fields. A child carrier can enter its parent only through
+`consume_pending(site: PendingUseSite, value: Inferred,
+action: PendingExpandUse)`. Only that module can inspect, clone, unify,
+project, or finalize a pending token; there is no raw-`Type` escape hatch.
+`PendingUseSite` is a closed enum generated bijectively from the builtin
+declaration registry and the Deep expression-form registry, so a new builtin
+or expression form fails compilation/regeneration until it has a disposition.
+
+The recursive choke point walks tensor-bearing tuple, List, record, ADT, and
+function fields rather than only a top-level tensor. Construction and closure
+capture propagate the corresponding token; tuple/record/ADT projection and
+pattern binding transfer the selected token; record update constrains an
+updated tensor field against its declared field shape while propagating
+untouched fields; branch joins, declared results, ascriptions, user-function
+parameters, generic instantiation, and builtin operand relations constrain;
+an undeclared closure return propagates to the call boundary; and
+complete-program finalization freezes. Generated compile-fail bypass tests
+prove no inference helper outside the module can unwrap or copy the carrier.
+Generated semantic tests execute both candidate outcomes and a contradictory
+shape for every `Constrain` row, propagation followed by later
+selection for every `Propagate` row, and the documented default for
+every `Freeze` row. Mutations that omit the tuple-projection, record
+update, pattern-binding, or closure-return call fail before a checker result is
+returned.
 
 Coupled defaults expose settlement order. Before Phase 3 implementation,
 `spec/04` §4.7.2 must state the order. This plan proposes first-deferred
@@ -183,7 +249,7 @@ interface is therefore a total per-output-axis algebra:
 ```rust
 enum AxisSource {
     Literal { value: usize },
-    InputAxis { input: usize, axis: usize },
+    InputAxis { input: usize, axis: RtAxis },
     ScalarInput { input: usize },
     OpComputed { rule: OpExtentRule },
 }
@@ -192,7 +258,8 @@ enum AxisSource {
 - **C4.1 Cardinality and ownership.** Every realized node supplies exactly one
   `AxisSource` for each output axis; the vector length equals output
   rank, and omission or duplication is invalid. `InputAxis` validates
-  the input slot and input axis. `ScalarInput` validates the same
+  the tensor input slot and its literal- or scalar-valued exact-`int32` axis.
+  `ScalarInput` validates the same
   earlier-node, rank-zero, exact-`int64` contract as C2.1.
   `OpComputed` is permitted only for a closed operation-and-axis
   `OpExtentRule` whose formula is the owning movement atom; it is not
@@ -202,8 +269,8 @@ enum AxisSource {
   its literal or scalar size. Rank-increasing `Expand` maps axes
   before the insertion unchanged, the inserted axis to its size, and later
   output axes to input axis `output_axis - 1`. Each
-  `Reshape` target maps to its literal or scalar input; a proved name
-  remains output type metadata, not a runtime name lookup. Identity
+  `Reshape` target maps to its literal, folded input axis, or scalar input;
+  a proved name remains output type metadata, not a runtime name lookup. Identity
   `Shrink`, `Stride`, and `Pad` axes use
   `InputAxis`; non-identity axes use their exact
   `OpComputed` rule.
@@ -263,9 +330,11 @@ evidence cannot be combined across different heads.
    and checked overflow fail for the owning reason on every applicable lane.
 4. **Zero positives.** Literal-zero and runtime-zero rows cover positional
    replacement, positional insertion, and named-axis expansion. They assert
-   the exact output shape, zero elements, null-data/zero-capacity behavior at
-   the runtime boundary, and Eval/C/HIP/Metal agreement. Acceptance alone is
-   not sufficient.
+   the exact output shape, logical element count zero, no element access, and
+   Eval/C/HIP/Metal agreement. They inspect logical tensor metadata, not pointer
+   nullness or target-private backing capacity. C and Metal one-byte backing is
+   a positive control; a HIP mutation that clamps logical `size` to one must
+   fail. Acceptance alone is not sufficient.
 5. **Real #569 transformation.** The runner proves a direct spelling checks,
    evaluates, and compiles; copies it to a temporary task-owned path; runs
    `chelis lint --fix` and `chelis fmt --inplace`; proves
@@ -284,7 +353,9 @@ evidence cannot be combined across different heads.
    extraction, compiler-API and binding consumption, and the capacity census
    are green. Missing size, old or future version, illegal bound tag, missing
    or out-of-range input slot, later-node reference, non-scalar source, wrong
-   dtype, and incompatible axis/rank/output shape are negative controls.
+   dtype, malformed `input_axis` tensor or axis slot, wrong axis dtype,
+   unshifted vmap source axis, and incompatible axis/rank/output shape are
+   negative controls.
 
 Positive rows use this allowed transition lattice:
 
@@ -311,10 +382,15 @@ wire change in the same implementation change:
 - amend `spec/10-serialization.md` and bump
   `WIRE_DAG_SCHEMA_VERSION` monotonically from 6 to 7;
 - encode `WireRiscOp::Expand { axis, size: WireRtDim }`, permitting
-  `lit` and `node` only for `expand`;
+  `lit`, `input_axis`, and `node` only for
+  `expand`; `input_axis` carries a tensor input slot plus a
+  `WireRtAxis` that is an exact int32 literal or scalar input slot;
 - interpret `WireRtDim::Node { input }` as an absolute index into the
   owning `WireDagNode.inputs`, then validate that referenced earlier
   node as rank-zero `int64`;
+- interpret `WireRtDim::InputAxis { tensor, axis }` as the folded
+  direct-`shape` expression: validate the tensor slot as an earlier tensor node
+  and a node-valued axis slot as an earlier rank-zero `int32` scalar;
 - validate the tensor operand, axis, input/output ranks, and exact output-axis
   mapping before encode and after exact-version decode;
 - reject v6, versionless, future, string-size, `sym`, and
@@ -370,18 +446,22 @@ scripts/runtime_extent_oracle.py --phase 1`. The runner executes
 supporting leg and the diagnostic census. The focused test confirms the
 language-level dtype rows only; it is not GPU completion evidence.
 
-### Phase 2 -- scalar edges, WireDag v7, then one resolver
+### Phase 2 -- runtime extent representation, WireDag v7, then one resolver
 
 **Entry requirements:** Phase 0; [#1112]'s HIP carrier/guard/widening and Metal
-audit landed with their focused capacity tests and the HIP/Metal commands in
-C5 green; the exact WireDag v7 contract ready to land atomically.
+audit landed with focused width, capacity, and guard tests; both target suites
+build and their hardware-availability smoke reports are recorded at the exact
+head; the `spec/06` batch-varying-extent decision has landed; and the exact
+WireDag v7 contract is ready to land atomically. The C5 runtime-extent groups
+cannot be an entry gate because this phase creates them.
 
-**Deliver in order:** C2.1-C2.4 and C6; all in-memory, target, transform, and
-wire consumers; then C2.5 deletion. Close [#1266], [#569], [#597], and [#609].
+**Deliver in order:** C2.1-C2.5 and C6; all in-memory, target, transform, and
+wire consumers; then C2.6 deletion. Close [#1266], [#569], [#597], and [#609].
 Close [#578]'s resolution-mechanism half only; rank-polymorphic legality stays
 with its owning docs.
 
-**Frozen at exit:** `Expand.size: RtDim`; scalar input invariants;
+**Frozen at exit:** `Expand.size: RtDim`; folded input-axis and scalar
+input invariants; transform behavior for every bound-dependency class;
 WireDag v7; no provenance-rejection construct; one static folder; all-lane
 guard placement.
 
@@ -394,12 +474,15 @@ WireDag, #569 transformation, zero, and negative rows owned by this phase.
 **Entry requirements:** Phase 2; the `spec/04` settlement-order
 amendment; [#1341]'s ordered-store mechanism.
 
-**Deliver:** the exhaustive `PendingExpandUse` registry and all
-non-builtin rows, comparison-family constraint routing, source-order stores,
-and generated action tests. Close [#1265] and [#1338]'s extent-selection half.
+**Deliver:** the opaque `Inferred` carrier, mandatory
+`consume_pending` choke point, exhaustive generated use-site registry,
+all recursive composite-carrier and non-builtin rows, comparison-family
+constraint routing, source-order stores, compile-fail bypass mutations, and
+generated action tests. Close [#1265] and [#1338]'s extent-selection half.
 
-**Frozen at exit:** registry identities, normative action mapping, settlement
-order, and K-run count.
+**Frozen at exit:** carrier privacy boundary, registry identities, normative
+action mapping, recursive composite dispositions, settlement order, and K-run
+count.
 
 **Oracle:** `uv run --managed-python --python 3.11 --no-project python
 scripts/runtime_extent_oracle.py --phase 3`; every action row and K fresh
