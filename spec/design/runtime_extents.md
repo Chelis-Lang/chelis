@@ -13,9 +13,12 @@ numbered tier before implementation: runtime-bound behavior under `vmap`
 in `spec/06` before Phase 2 and coupled positional-`expand`
 settlement order in `spec/04` before Phase 3. Phase 2 also amends
 `spec/05`'s closed runtime-extent representation before changing IR.
-**Class fixed:** [#1277] -- a direct `shape()` extent is the
-folded movement-node metadata expression required by [05-OP-7], and every
-other non-literal tensor extent is ordinary typed integer dataflow. The current
+**Class fixed:** [#1277] -- a direct `shape()` extent or proved tensor-backed
+dimension binder passed to `expand` or `reshape` is a folded movement-node
+metadata expression. [05-OP-7] requires that folding for the direct read. The
+same read used by `pad`, `shrink`, or `stride` remains the node-valued `Shape`
+scalar required by `spec/05` section 2.4.1, and every other non-literal tensor
+extent is ordinary typed integer dataflow. The current
 checker, deferral machinery, and backend recover those values through several
 incomplete provenance and symbolic-name paths.
 
@@ -183,7 +186,7 @@ struct ProvisionalRuntimeDimDeclaration {
 }
 
 struct AnnotatedDag {
-    graph: SealedDag, // private; exposes no raw mutable Dag
+    graph: SealedDag, // private; exposes no raw mutable graph
     runtime_dims: ProvisionalRuntimeDimAuthority,
 }
 
@@ -199,6 +202,7 @@ enum RuntimeGraphMutationSite { // generated
     Fuse,
     CloneOrRemap,
     ImportDag,
+    DecodeWireDag,
     Cse,
     Dce,
     EvalBind,
@@ -262,14 +266,22 @@ seeded by typed inference before lowering and is primary state beside, not an
 index reconstructed from, node-local annotations. The annotations point into
 this authority so transforms and finalization can cross-check two independent
 representations.
-`SealedDag` is a module-private newtype with no `DerefMut`, `AsMut<Dag>`, raw
-constructor, or extraction method. Only the generated transaction module can
-construct or mutate it; ordinary consumers receive read-only graph queries.
+`SealedDag` is a module-private newtype with no `DerefMut`, `AsMut<RawDag>`, raw
+constructor, or extraction method. The underlying `RawDag` implementation is
+also module-private: it is not re-exported, has no public constructor or
+mutator, and does not implement a public `Serialize` or `Deserialize` path.
+Only the generated transaction module can construct or mutate it.
+`AnnotatedDag` and `FinalizedDag` are the only public graph-state carriers;
+ordinary consumers receive read-only queries through those opaque states and
+can never recover a raw graph. Neither carrier has a public field or unchecked
+constructor: lowering or a registered import creates `AnnotatedDag`, and only
+`finalize_runtime_dims` or exact-version verified Wire decode creates
+`FinalizedDag`.
 
 Only `RtDim::Lit` and `RtDim::Node` are legal for
 `Expand.size` ordinary values. A third legal variant is the structural tensor
-axis witness used by a folded direct-shape read or a proved in-scope dimension
-binder:
+axis witness used by a folded expand/reshape direct-shape read or a proved
+in-scope dimension binder in one of those owners:
 
 ```rust
 RtDim::InputAxis {
@@ -301,24 +313,37 @@ literals.
   operand. `RtDim::Node(i)` is an absolute slot in the same node's
   `inputs`, with `1 <= i < inputs.len()`. The referenced node is
   earlier in topological order and has rank zero and exact `int64`
-  dtype. A `shape(tensor, axis)` value whose use is the movement extent,
-  including use through a transparent binding, does **not** materialize a
-  `RiscOp::Shape` value node for that use: it becomes
-  `RtDim::InputAxis`, whose tensor slot is an earlier tensor node and
-  whose literal or node-valued axis is exact `int32`. The movement node
+  dtype. A `shape(tensor, axis)` value used as an `Expand.size` or
+  `Reshape.new_shape` element, including through a transparent binding, does
+  **not** materialize a `RiscOp::Shape` value node for that use: it becomes
+  `RtDim::InputAxis`, whose tensor slot is an earlier tensor node and whose
+  literal or node-valued axis is exact `int32`. The owning expand or reshape
   reads that input's metadata directly. The typed producer retains this
   `TensorAxisWitness` identity structurally across bindings; it is not
   recovered by a syntax/provenance walk. If the same binding also has an
-  ordinary scalar consumer, lowering materializes `RiscOp::Shape` for
-  that consumer while the movement use remains folded. A cast, arithmetic expression, or
-  user-function result is ordinary scalar dataflow and reaches the movement
-  node as `RtDim::Node`.
+  ordinary scalar consumer, lowering materializes one `RiscOp::Shape` for
+  that consumer while the expand/reshape use remains folded.
+
+  `Pad`, `Shrink`, and `Stride` follow the distinct representation fixed by
+  `spec/05` section 2.4.1: a direct or transparently bound `shape()` value is
+  materialized exactly once as a rank-zero exact-`int64` `RiscOp::Shape`, and
+  the bound carries `RtDim::Node` pointing to that scalar input. Other scalar
+  consumers reuse the same node; lowering never creates a second `Shape`
+  operation. The declaration may still identify the source as the original
+  tensor-axis witness, while the materialized scalar and bound are its durable
+  alias/use occurrences. A cast, arithmetic expression, or user-function
+  result is ordinary scalar dataflow and likewise reaches every movement node
+  as `RtDim::Node`.
 
   A bare in-scope dimension value such as `a` in
-  `c: tensor[a, f32]` uses the same `InputAxis` carrier. The
+  `c: tensor[a, f32]` uses the same owner-specific carrier. For expand and
+  reshape, a tensor witness becomes `InputAxis`; for Pad, Shrink, and Stride,
+  it is materialized or reused as the exact `Shape` scalar and becomes
+  `Node`. The
   typed environment maps binder identity, never spelling, to its runtime
   witnesses. A literal instantiation becomes `Lit`; a tensor witness
-  becomes `InputAxis`; and a scalar term witness becomes `Node`.
+  becomes the tag admitted by the owning field; and a scalar term witness
+  becomes `Node`.
   Typed inference gives every binder an opaque provisional
   `HygienicRuntimeDim` key containing its lexical scope and binder slot. This
   key, its witness/use role, and a `RuntimeOrigin` travel through lowering on an
@@ -395,8 +420,11 @@ literals.
   independent provisional declaration and the corresponding annotations as
   one checked transaction; no pass can edit the authority vectors directly.
   `AnnotatedDag.graph` is sealed: callers receive read-only queries and have no
-  raw `Dag`, mutable-node slice, `set_roots`, `replace_node`, or type/input
-  setter. `RuntimeGraphTransaction` stages the graph mutation, its
+  raw graph, mutable-node slice, `set_roots`, `replace_node`, or type/input
+  setter. The current public `chelis_ir::Dag` re-export, its public
+  construction/mutation methods and serde implementations, and every raw-DAG
+  extraction method are removed rather than left as a parallel authority-free
+  surface. `RuntimeGraphTransaction` stages the graph mutation, its
   source/use/origin/liveness edits, and any checked discharges, validates both
   representations, and commits atomically or leaves both unchanged. Every
   non-import transaction that actually changes graph or authority state
@@ -420,25 +448,62 @@ literals.
   an unreachable internal declaration only through an explicit proven
   discharge, while a public input/interface witness remains a liveness root.
 
-  A generated registry is bijective with every graph-construction or mutation
-  capability and every reachable call site in compiler-API and CLI production,
-  including in-place root/node/input/type edits and transitive lowering, Eval
-  binding, host actualization, specialization, fusion, CSE, and DCE routes.
+  A generated registry is bijective with every graph-construction, mutation,
+  import, and deserialization capability and every reachable production call
+  site in the entire workspace, not only compiler-API and CLI. It includes
+  in-place root/node/input/type edits and transitive lowering, Eval binding,
+  host actualization, specialization, fusion, CSE, DCE, compiler artifacts,
+  bindings, prove/offline consumers, cache paths, and C/HIP/Metal routes.
   Every row names its `RuntimeGraphMutationSite`, transaction method, affected
   authority sets, and focused positive/negative mutation. Adding a capability,
   exposing a raw mutable graph, or invoking an unregistered call site fails
-  compilation/regeneration. Compile-fail controls attempt direct `set_roots`,
-  `replace_node`, mutable-node access, input mutation, and type mutation through
-  `AnnotatedDag`. Tests cover entry selection that discards a data root whose
+  compilation/regeneration. Test fixtures construct graphs through the same
+  annotated transaction builder; there is no feature, test helper, or public
+  serde route that restores an external raw-graph escape. External-crate
+  compile-fail controls attempt to import or deserialize `RawDag`, call its
+  former constructors and mutators, extract a raw graph from a pipeline
+  artifact, forge `AnnotatedDag` or `FinalizedDag`, mutate through
+  `AnnotatedDag`, and submit an arbitrary graph to Eval or each public
+  C/HIP/Metal entry point. Tests cover entry selection that
+  discards a data root whose
   otherwise-unused public Load still owns a declared witness/class, plus
   generated
   nonidentity movement bounds, nested vmap, two clones of one lexical scope,
   captured outer binders, CSE, specialization, fusion, and post-transform DCE.
 
-  Lowering construction, entry/root selection, symbolic binding, host
-  actualization, specialization, target fusion, and final DCE all complete as
-  registered annotated transactions before `finalize_runtime_dims`. No Eval or
-  backend route reconstructs or mutates graph structure after finalization.
+  Public `chelis-ir` lowering returns `AnnotatedDag`. Compiler pipeline
+  artifacts carry an opaque annotated or finalized state instead of a public
+  `dag` field, `dag()`, `into_dag()`, or raw `into_parts()` result. Lowering
+  construction, entry/root selection, symbolic binding, host actualization,
+  specialization, target fusion, and final DCE all complete as registered
+  annotated transactions before `finalize_runtime_dims`. Eval, prove/offline,
+  cache comparison, bindings, and the public C/HIP/Metal codegen functions
+  accept only `FinalizedDag` or checked Wire bytes that decode to it. Cache and
+  artifact serialization cover the finalized authority-bearing WireDag, never
+  an independently serialized raw graph. No route reconstructs or mutates
+  graph structure after finalization. A backend specialization that changes
+  structure must run as a registered annotated transaction before
+  finalization, or consume the finalized value back to annotated form and
+  refinalize before emission.
+
+  The migration inventory is exact; every current row must reach the stated
+  target in the same Phase-2 change set:
+
+  | current public or cross-crate surface | required target |
+  |---|---|
+  | `chelis_ir::Dag`, its serde impls, and `new`/`add_node`/`node_mut`/`set_roots`/`replace_node` | module-private `RawDag`; construction and mutation only inside registered transactions |
+  | `lower_program`, `try_lower_program`, `lower_program_with_context`, and named-entry lowering returning `Dag` | return opaque `AnnotatedDag` |
+  | public fusion, grad, vmap, specialization, DCE/CSE/folding, tier-2 lowering, symbolic binding, host actualization, and span/input/type/root mutation over `Dag` | generated `RuntimeGraphTransaction` methods with one registry row per capability and call site |
+  | `LoweredLibrary::dag`/raw extraction and pipeline `LoweredParts.pub dag`, `dag()`, `into_dag()`, or raw `into_parts()` | state-specific opaque artifacts; read-only queries, annotated consumption, or finalized consumption only |
+  | public Eval functions taking `&Dag` | take `&FinalizedDag` and its derived verified views |
+  | public C/HIP/Metal codegen and exported backend helpers taking arbitrary `&Dag` | take `&FinalizedDag`; graph-changing specialization happens before finalization |
+  | raw-DAG bincode/cache comparison | canonical finalized WireDag bytes including runtime authority and history |
+  | WireDag/prove/offline/binding decode or import | verified `FinalizedDag`, or explicit consume-to-annotated import followed by refinalization |
+
+  Read-only analyses either take `&FinalizedDag` or a non-forgeable borrowed
+  view issued by `AnnotatedDag` inside a registered transaction. No public
+  analysis signature can be used to manufacture, deserialize, extract, or
+  submit a raw graph.
 
   Only after every graph-creating transform and final DCE does
   `finalize_runtime_dims(AnnotatedDag)` cross-check the independent provisional
@@ -500,7 +565,7 @@ literals.
   Phase 2 before the row can register. This is the single table Phase 4 later
   consumes for total `AxisSource`; no second operation/source table exists.
 
-  `derive_runtime_extent_classes(&Dag)` walks the authoritative declarations,
+  `derive_runtime_extent_classes(&FinalizedDag)` walks the authoritative declarations,
   resolves each durable source ID through literals, scalar/static-axis stamps,
   graph-level dynamic-axis witnesses, and the typed-origin map, and
   constructs one executable manifest per ID. It does not discover class
@@ -521,8 +586,10 @@ literals.
   must resolve it to a local class/use pair and one of these three value forms.
   Missing witness or use, wrong class, and violated witness equality fail
   loudly; no pass searches for a matching string.
-  Thus the direct read obeys [05-OP-7]'s folded-`DimExpr` rule while every
-  scalar value obeys `spec/04` §4.7.4. Both forms are real owning-node input
+  Thus an expand/reshape direct read obeys [05-OP-7]'s folded-`DimExpr` rule,
+  while a Pad/Shrink/Stride read and every other scalar value obey the
+  node-valued rule in `spec/05` section 2.4.1 and `spec/04` section 4.7.4.
+  Both forms are real owning-node input
   dependencies, so DCE cannot lose them; a symbolic name or shape-only side
   table is not an equivalent size carrier.
 
@@ -533,10 +600,10 @@ literals.
   |---|---|---|
   | `Expand.size` | `RuntimeExtent` | `Lit`, `InputAxis`, `Node` |
   | `Reshape.new_shape[*]` | `RuntimeExtent` | `Lit`, `InputAxis`, `Node` |
-  | `Pad.padding[*].before/after` | `RuntimeExtent` | `Lit`, `InputAxis`, `Node` |
-  | `Shrink.bounds[*].start` | `RuntimeExtent` | `Lit`, `InputAxis`, `Node` |
-  | `Shrink.bounds[*].end` | `RuntimeExtent` | `Lit`, `InputAxis`, `Node`, `ToEnd` |
-  | `Stride.strides[*]` | `RuntimeExtent` | `Lit`, `InputAxis`, `Node` |
+  | `Pad.padding[*].before/after` | `RuntimeExtent` | `Lit`, `Node` |
+  | `Shrink.bounds[*].start` | `RuntimeExtent` | `Lit`, `Node` |
+  | `Shrink.bounds[*].end` | `RuntimeExtent` | `Lit`, `Node`, `ToEnd` |
+  | `Stride.strides[*]` | `RuntimeExtent` | `Lit`, `Node` |
 
   A surviving binder use requires `class: Some(RuntimeDimRef)` in every row.
   Anonymous or fully concrete values may have no class. `ToEnd` is legal only
@@ -621,8 +688,8 @@ literals.
   `RuntimeExtent.value`, its optional declared class/use reference, every
   source/use stamp, every dynamic-axis witness, and the complete ordered class
   manifest before any provenance rejection is removed.
-  Each bound value is still one underlying `Lit`, `InputAxis`, or
-  `Node`. [#1112]'s
+  Each ordinary bound value is exactly one tag admitted by the owner matrix;
+  `ToEnd` remains the sole sentinel. [#1112]'s
   HIP carrier work and Metal audit are Phase 2
   entry requirements because a checker-only `int64` result is not an
   all-lane extent contract. Entry requires their focused width, capacity,
@@ -636,10 +703,11 @@ literals.
   says every node is batched, so the numbered spec wins until that amendment
   lands. Transforming a movement node
   transforms its complete bound-dependency slice, not only the tensor operand.
-  Under axis-zero `vmap`, non-tensor scalar parameters remain shared, direct
-  `InputAxis` reads observe the corresponding original tensor axis after
-  the inserted batch-axis shift, and scalar `shape`/integer nodes used only by
-  movement bounds remain rank-zero rather than acquiring a batch dimension.
+  Under axis-zero `vmap`, non-tensor scalar parameters remain shared, folded
+  expand/reshape `InputAxis` reads observe the corresponding original tensor
+  axis after the inserted batch-axis shift, and Pad/Shrink/Stride `Shape`
+  nodes plus other scalar integer nodes used only by movement bounds remain
+  rank-zero rather than acquiring a batch dimension.
   Every class member, use reference, and source/use stamp follows the same axis
   shift, input-slot remap, liveness, and equality semantics as its canonical
   value.
@@ -668,9 +736,11 @@ literals.
   exact dtype, and repeats the already-computed value. Its `OutputAxisRule`
   structurally forwards those batch axes. It never re-executes the checked
   arithmetic or user function; nested vmap extends the ordered axis list. A
-  direct `shape` use needs no scalar adapter for the bound edge;
-  `InputAxis` reads the vmapped tensor metadata. The amended spec and
-  tests cover literal, scalar-parameter, shape, arithmetic, and dual-use slices.
+  folded expand/reshape `shape` use needs no scalar adapter for the bound edge;
+  `InputAxis` reads the vmapped tensor metadata. A Pad/Shrink/Stride bound
+  reuses its one rank-zero `Shape` producer through `Node`, including when an
+  ordinary branch also consumes that producer. The amended spec and tests
+  cover literal, scalar-parameter, shape, arithmetic, and dual-use slices.
   Grad, specialization, cloning, and remapping preserve or remap every absolute
   input slot and its dtype/rank invariant. A bound computed from vmapped tensor
   *elements* could vary per example and cannot construct one regular stacked
@@ -882,8 +952,8 @@ enum AxisSource {
   or guard is recovered by name. This
   closes [#665] and [#592].
 - **C4.5 Sources are a final-DAG derived view.** `AxisSource` is
-  neither stored in `Dag`/WireDag nor carried across transforms.
-  `derive_axis_sources(&Dag)` runs after the last DAG rewrite and
+  neither stored in `FinalizedDag`/WireDag nor carried across transforms.
+  `derive_axis_sources(&FinalizedDag)` runs after the last DAG rewrite and
   before final verification/emission, producing a view tied to that exact DAG
   generation. Any mutation or transform invalidates the view; callers cannot
   reuse it because the API borrows the immutable final DAG and keeps the map's
@@ -981,9 +1051,10 @@ axes and windows in one issue.
 6. **Deferral stability.** Every positional candidate row is run in K fresh
    processes. [#1338] is named and must settle to the normative source-order
    verdict every time.
-7. **Transform integrity.** Positive rows cover `Lit`, direct-shape
-   and named-binder `InputAxis`, shared non-tensor `Node`, and
-   shape/arithmetic `Node` dependencies, including dual-use producers,
+7. **Transform integrity.** Positive rows cover `Lit`, expand/reshape
+   direct-shape and named-binder `InputAxis`, Pad/Shrink/Stride materialized
+   shape `Node`, shared non-tensor `Node`, and arithmetic `Node` dependencies,
+   including dual-use producers,
    through vmap, grad, specialization, fusion, cloning/remapping, and DCE. They
    verify exact rank-zero
    bound scalars, shifted literal and node-valued axes, preserved tensor-axis
@@ -1010,9 +1081,13 @@ axes and windows in one issue.
    nested post-decode transforms, deterministic ordered DAG import/remapping,
    and rejection of replayed transform IDs, origins, generated paths, malformed
    scope-instance lineages, or duplicate complete owner identities. The
-   generated production-mutation registry covers every compiler-API and CLI
-   graph construction/mutation capability and reachable call site. Compile-fail
-   rows reject direct root, node, input, and type mutation; entry-selection
+   generated production-mutation registry covers every workspace production
+   graph construction/mutation/import/deserialization capability and reachable
+   call site. External-crate compile-fail rows reject raw graph import,
+   construction, serde decode, root/node/input/type mutation, raw artifact
+   extraction, annotated/finalized carrier forgery, and arbitrary-graph
+   submission to Eval and C/HIP/Metal;
+   entry-selection
    rows prove `SelectRootsAndDce` cannot lose an otherwise-unused public
    witness/class with the discarded data root. Fusion positives retain
    compute-once bound-only/dual-use scalar and dynamic-axis
@@ -1051,7 +1126,8 @@ axes and windows in one issue.
    disagreement, correlated stamp-plus-manifest removal with its declaration
    fixed, valid-axis substitution from another class, split/merged class
    carriers that disagree with the declaration, dropped otherwise-unused
-   public Load or guard root, owner-illegal tag, classed `to_end`, unshifted
+   public Load or guard root, `input_axis` in any Pad/Shrink/Stride field or
+   another owner-illegal tag, classed `to_end`, unshifted
    vmap source axis, and incompatible axis/rank/output shape. Dynamic-axis
    placement mutations put a node-valued witness on one static axis, omit or
    duplicate its graph-level carrier, or reuse its source in both placements.
@@ -1145,11 +1221,12 @@ never reused.
 - interpret `WireRtDim::Node { input }` as an absolute index into the
   owning `WireDagNode.inputs`, then validate that referenced earlier
   node as rank-zero `int64`;
-- interpret `WireRtDim::InputAxis { tensor, axis }` as a
-  structural tensor-axis witness for either a folded direct `shape` read
-  or a proved dimension binder: validate the tensor slot as an earlier tensor
-  node and a node-valued axis slot as an earlier rank-zero `int32`
-  scalar;
+- interpret `WireRtDim::InputAxis { tensor, axis }` as a structural tensor-axis
+  witness only where the owner matrix admits it: a folded direct `shape` read
+  or proved dimension binder for expand/reshape. Validate the tensor slot as
+  an earlier tensor node and a node-valued axis slot as an earlier rank-zero
+  `int32` scalar. Pad/Shrink/Stride shape-derived bounds serialize the one
+  materialized rank-zero exact-`int64` `Shape` producer through `node`;
 - apply this exact owner/tag matrix at encode, decode, verification, and
   mutation generation:
 
@@ -1157,10 +1234,10 @@ never reused.
   |---|---|---|
   | `Expand.size` | `lit`, `input_axis`, `node` | optional; required for a surviving binder use |
   | `Reshape.new_shape[*]` | `lit`, `input_axis`, `node` | optional; required for a surviving binder use |
-  | `Pad.padding[*].before/after` | `lit`, `input_axis`, `node` | optional; required for a surviving binder use |
-  | `Shrink.bounds[*].start` | `lit`, `input_axis`, `node` | optional; required for a surviving binder use |
-  | `Shrink.bounds[*].end` | `lit`, `input_axis`, `node`, `to_end` | optional except `to_end`, which requires absent |
-  | `Stride.strides[*]` | `lit`, `input_axis`, `node` | optional; required for a surviving binder use |
+  | `Pad.padding[*].before/after` | `lit`, `node` | optional; required for a surviving binder use |
+  | `Shrink.bounds[*].start` | `lit`, `node` | optional; required for a surviving binder use |
+  | `Shrink.bounds[*].end` | `lit`, `node`, `to_end` | optional except `to_end`, which requires absent |
+  | `Stride.strides[*]` | `lit`, `node` | optional; required for a surviving binder use |
 
   `sym` is illegal in every executable owner. An owner/tag pair absent
   from the table is invalid; there is no generic permissive arm;
@@ -1261,8 +1338,10 @@ the C5 runtime-extent groups cannot be an entry gate because this
 phase creates them.
 
 **Deliver in order:** first amend `spec/05`'s closed `RtDim`
-and [05-OP-7] representation to admit `RuntimeExtent`, the structural
-tensor-axis witness with a static-or-node axis, exact scalar-operation-output
+and [05-OP-7] representation to admit `RuntimeExtent` and the structural
+tensor-axis witness with a static-or-node axis for expand/reshape, while
+preserving section 2.4.1's node-valued `Shape` representation for
+Pad/Shrink/Stride; admit exact scalar-operation-output
 sources, the independent provisional authority, sealed annotated graph, and
 closed atomic graph/authority transaction API,
 provisional hygienic annotations, the typed/synthesized origin algebra,
@@ -1271,7 +1350,10 @@ with retained hashed high-water history and explicit exhaustion, lexical and
 runtime scope-instance ownership,
 post-transform primary binder declarations with durable source/use IDs, stable
 class IDs, static/scalar stamps plus the graph-level dynamic-axis witness
-carrier, the complete production mutation-capability/callsite registry,
+carrier, the complete workspace production
+mutation/import/deserialization-capability and callsite registry, the removal
+of public raw-DAG construction, mutation, serde, artifact-extraction, cache,
+Eval, and backend escape routes,
 compute-once `BroadcastScalarRef` adaptation and fusion barriers, source
 witness/alias roles, the complete in-memory owner
 matrix, and the complete graph-level
@@ -1296,7 +1378,9 @@ acceptance reproducer is green under the owning rank-polymorphism work.
 tensor-axis, and scalar input values;
 the exact `RuntimeExtent` owner matrix; provisional hygienic keys and the
 independent provisional authority, sealed graph, atomic mutation transactions,
-and compile-fail raw-mutation boundary; typed/synthesized origin and
+opaque annotated/finalized public states, finalized-only Eval/backend/cache
+boundaries, and external-crate compile-fail raw construction, mutation,
+deserialization, extraction, and submission boundaries; typed/synthesized origin and
 transform-instance algebras and exact structural comparator; the serialized
 checked transform cursor, retained history high-water, history-sensitive hash,
 exhaustion behavior, and post-decode/import collision rules;
@@ -1306,7 +1390,8 @@ identities; static-or-node tensor-axis and scalar-operation-output source
 algebras; graph-level dynamic-axis witness placement; stable runtime binder IDs;
 complete ordered equality-class manifests and source/use roles;
 the single generated `OutputAxisRule` and `OpExtentRule` variant/formula sets;
-the complete production-mutation capability/callsite registry,
+the complete workspace production mutation/import/deserialization capability
+and callsite registry,
 `BroadcastScalarRef`, trap/effect occurrence rules, and transform/fusion
 behavior for every bound-dependency class;
 WireDag v8; no provenance-rejection construct; one static folder; all-lane
@@ -1315,7 +1400,8 @@ guard placement.
 **Oracle:** `uv run --managed-python --python 3.11 --no-project python
 scripts/runtime_extent_oracle.py --phase 2`, including host, HIP, Metal,
 WireDag, #569 transformation, every transform-bound class, named-dimension
-witness sets and guards, generated-origin/clone-lineage rows, sealed-mutation
+witness sets and guards, generated-origin/clone-lineage rows, sealed public
+construction/mutation/deserialization/artifact/backend boundaries,
 and entry-selection rows, compute-once vmap/fusion trap/effect rows, retained
 high-water/DCE/hash rows, structural Wire negatives, coherent-replacement
 integrity mismatches, zero, and negative rows owned by this phase, plus the
