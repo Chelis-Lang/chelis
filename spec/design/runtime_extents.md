@@ -155,6 +155,14 @@ struct RuntimeExtentClass {
     id: RuntimeDimId,
     canonical: RuntimeExtentWitness,
     equals: Vec<RuntimeExtentWitness>,
+    substitution_aliases: Vec<RuntimeSubstitutionAliasMember>,
+}
+
+struct RuntimeSubstitutionAliasMember {
+    source: RuntimeDimSourceId,
+    representative: RuntimeDimSourceId,
+    occurrence: RuntimeValueOccurrenceId,
+    origin: RuntimeSubstitutionAliasOrigin,
 }
 
 struct RuntimeGuardSchedule {
@@ -265,18 +273,34 @@ struct RuntimeValueOccurrence {
     id: RuntimeValueOccurrenceId,
     origin: RuntimeDimSourceOrigin,
     witnesses: Vec<RuntimeWitnessBinding>,
-    aliases: Vec<RuntimeAliasBinding>,
+    substitution_aliases: Vec<RuntimeSubstitutionAliasBinding>,
+    use_aliases: Vec<RuntimeAliasBinding>,
 }
 
 struct RuntimeOccurrenceStamp {
     occurrence: RuntimeValueOccurrenceId,
     witnesses: Vec<RuntimeWitnessBinding>,
-    aliases: Vec<RuntimeAliasBinding>,
+    substitution_aliases: Vec<RuntimeSubstitutionAliasBinding>,
+    use_aliases: Vec<RuntimeAliasBinding>,
 }
 
 struct RuntimeWitnessBinding {
     class: RuntimeDimId,
     source: RuntimeDimSourceId,
+}
+
+struct RuntimeSubstitutionAliasBinding {
+    class: RuntimeDimId,
+    source: RuntimeDimSourceId,
+    representative: RuntimeDimSourceId,
+    origin: RuntimeSubstitutionAliasOrigin,
+}
+
+struct RuntimeSubstitutionAliasOrigin {
+    site: RuntimeGraphMutationSite, // exactly ImportDag
+    transform: TransformInstanceId,
+    operand: u32,
+    parameter: RuntimeInterfaceInputId,
 }
 
 struct RuntimeAliasBinding {
@@ -355,12 +379,20 @@ struct ProvisionalRuntimeValueOccurrence {
     id: ProvisionalRuntimeValueOccurrenceId,
     origin: RuntimeDimSourceOrigin,
     witnesses: Vec<ProvisionalRuntimeWitnessBinding>,
-    aliases: Vec<ProvisionalRuntimeAliasBinding>,
+    substitution_aliases: Vec<ProvisionalRuntimeSubstitutionAliasBinding>,
+    use_aliases: Vec<ProvisionalRuntimeAliasBinding>,
 }
 
 struct ProvisionalRuntimeWitnessBinding {
     class: HygienicRuntimeDim,
     source: ProvisionalRuntimeDimSourceId,
+}
+
+struct ProvisionalRuntimeSubstitutionAliasBinding {
+    class: HygienicRuntimeDim,
+    source: ProvisionalRuntimeDimSourceId,
+    representative: ProvisionalRuntimeDimSourceId,
+    origin: RuntimeSubstitutionAliasOrigin,
 }
 
 struct ProvisionalRuntimeAliasBinding {
@@ -577,10 +609,34 @@ canonical-topological producer closure.
 Missing, duplicate, stale, partially applied, or origin/readiness-mismatched
 substitutions fail before graph or authority mutation. Successful substitutions
 flow through the ordinary occurrence bijection at finalization; they never
-embed a final numeric occurrence ID into annotated state. Distinct callee
-scalar parameters may intentionally name one actual occurrence, but their class-local
-source/use identities remain distinct and the resulting bindings must still
-satisfy the one-witness-source-per-class-per-occurrence rule.
+embed a final numeric occurrence ID into annotated state.
+
+Distinct callee scalar parameters may intentionally name one actual occurrence.
+For each affected `(class, occurrence)`, the earliest source in canonical
+resident-then-operand/signature order remains the sole witness binding. Every
+additional same-class substituted source keeps its declaration/source ID but is
+stored in `ProvisionalRuntimeSubstitutionAliasBinding`, pointing to that
+representative source. The binding's durable origin carries the frozen
+`ImportDag` mutation-site tag, fresh import transform, declared operand ordinal,
+and source-local parameter ID; the transform/operand pair scopes that local ID
+after the callee interface row is consumed. Creating this authority is new
+structure and therefore requires the import's one fresh transform even when the
+imported history ranges and all graph nodes were otherwise reusable.
+Finalization translates class, source, representative, and occurrence through
+the existing five bijections into `RuntimeSubstitutionAliasBinding`;
+consume-to-annotated reconstructs the exact provisional binding through their
+checked inverses. No sixth numeric identity map or guessed source ID exists.
+
+The representative must be a witness of the same class on the same occurrence;
+an alias source must remain in that class's declaration and may appear in
+exactly one substitution-alias binding. Only explicit scalar-actual
+substitution may create the binding. CSE, DCE, clone, ordinary import, and Wire
+decode cannot synthesize one from value equality; they preserve/remap it
+atomically or discharge the alias source and binding together. Distinct-class
+sources sharing one actual remain ordinary witness bindings, one per class.
+Missing, structurally malformed, cyclic/chained, cross-class, cross-occurrence,
+non-`ImportDag`, duplicate-source, or noncanonical-representative alias
+authority fails before finalization and after Wire decode.
 
 `ProvisionalRuntimeDimDeclaration` uses the same owner, occurrence,
 many-to-many binding, and complete source/use algebras as the final
@@ -753,7 +809,8 @@ target-capacity rejection is allowed.
   occurrence identities. The transaction
   applies that class/source/use/occurrence mapping to every
   `ProvisionalRuntimeIdentitySource` atomically with the declaration,
-  occurrence bindings, graph `ProvisionalRuntimeDimRef`, evidence ID, and
+  occurrence bindings including substitution aliases and both of their source
+  endpoints, graph `ProvisionalRuntimeDimRef`, evidence ID, and
   evidence destination: a cloned local proof and bound point only to the cloned
   local class/use/source edges and cloned occurrence, while a proof and bound
   for a captured outside declaration remain unchanged. The evidence record and
@@ -794,7 +851,7 @@ target-capacity rejection is allowed.
   mark for the contiguous local ID range that has ever been allocated. DCE may
   delete a synthesized origin or occurrence only when no provisional/final
   declaration edge, source, use, owner lineage, annotation, occurrence stamp,
-  or dynamic witness references it, but
+  dynamic witness, or substitution-alias origin references it, but
   never lowers this mark.
   Allocation is checked and total: `Available(n)` returns `n`, sets
   `issued_through = Some(n)`, and becomes `Available(n + 1)`, except
@@ -815,6 +872,7 @@ target-capacity rejection is allowed.
   remaps every referenced lexical scope, typed site, and retained interface
   input into independent, disjoint destination ranges, then remaps every
   live transform ID, typed/synthesized origin, scalar-parameter occurrence,
+  substitution-alias origin,
   negative/proof site, evidence destination, annotation, manifest/event/guard
   reference, generated path, and scope lineage through the corresponding maps.
   The fresh transform range has the imported history count as its length
@@ -853,8 +911,11 @@ target-capacity rejection is allowed.
   order exactly once, independent of how many declarations reference them.
   Declarations follow owner order; their source/use ordering follows the rule
   below and compares a shared occurrence by that one canonical occurrence
-  index. Each occurrence's witness/alias bindings follow declaration order and
-  then source/use position. Evidence records follow their destination graph
+  index. Each occurrence's witness, substitution-alias, and use-alias bindings
+  follow declaration order and then source/use position; a substitution alias
+  compares by its representative, source, and durable
+  `(site, transform, operand, parameter)` origin after the declaration keys.
+  Evidence records follow their destination graph
   origin, then the outer destination-kind tag, then the complete bound-field
   key or output-axis number, then optional declaration and use order; evidence
   IDs are assigned only from that structural order. Thus an `ExpandSize` bound
@@ -899,13 +960,19 @@ target-capacity rejection is allowed.
   equal. A legal merge of unclassed occurrences or occurrences whose witness
   class sets are disjoint creates or selects one
   compute-once `RuntimeValueOccurrenceId`, transactionally remaps every
-  declaration edge to it, and unions the canonically ordered witness/alias
-  bindings; the distinct class, source, and use IDs are never merged. If the
+  declaration edge to it, and unions the canonically ordered witness,
+  pre-existing substitution-alias, and use-alias bindings; the distinct class,
+  source, and use IDs are never merged. Every retained substitution alias must
+  still point to its same-class witness representative on the selected
+  occurrence. CSE may preserve that explicit import authority but may neither
+  create it nor use it to merge another same-class producer. If the
   physical executions or occurrence origins differ, or the merged witness
   class sets overlap, CSE retains separate nodes. Multiple edges from distinct
   classes to one occurrence are the required structural representation, not a
-  reason to duplicate the producer; two source edges from one class are never a
-  legal merged state. DCE runs
+  reason to duplicate the producer. Two ordinary witness source edges from one
+  class are never a legal merged state; an additional same-class source is
+  legal only when it arrived through explicit scalar-actual substitution and
+  already carries the checked durable substitution-alias authority above. DCE runs
   before authority freezes, but may discharge a binder, source, or use only
   after the authority proves that no public interface, equality obligation,
   movement bound, alias, or surviving annotation refers to it. Root selection
@@ -993,6 +1060,12 @@ target-capacity rejection is allowed.
   It translates every provisional graph class/use ref, evidence ID, evidence
   destination, and `ProvisionalRuntimeIdentityEvidence` through these maps in
   the same transaction that freezes declarations and occurrence bindings.
+  For every provisional substitution alias, that same transaction maps its
+  class, source, representative, and containing occurrence, preserves its
+  checked import origin, and rejects any endpoint that is absent or maps into a
+  different declaration or occurrence. The alias adds no sixth identity
+  domain: both source endpoints use `sources`, and placement uses
+  `occurrences`.
   That transaction is the only conversion from
   `SealedDag<AnnotatedRuntimeDimState>` to
   `SealedDag<FinalizedRuntimeDimState>`: every
@@ -1026,8 +1099,11 @@ target-capacity rejection is allowed.
   canonical final order, records the checked inverse bijections for the
   duration of the transaction, and translates each final graph class/use ref,
   evidence attachment/destination, and `RuntimeIdentityEvidence` back to the
-  corresponding provisional records and proof triple. It never embeds or casts
-  a final numeric ID into a provisional handle. It preserves owner/origin
+  corresponding provisional records and proof triple. It also reconstructs
+  every substitution alias by inverse-mapping its class, source,
+  representative, and containing occurrence while preserving the exact durable
+  import origin. It never embeds or casts a final numeric ID into a provisional
+  handle. It preserves owner/origin
   records, history high-water, and transform cursor; a no-op
   consume/refinalize returns the same canonical final IDs and bytes because
   final ordering is structural, not because the provisional handles happen to
@@ -1037,8 +1113,12 @@ target-capacity rejection is allowed.
   Each physical literal, rank-zero scalar, or tensor-axis value is assigned one
   `RuntimeValueOccurrenceId`. A class source is a
   `RuntimeWitnessBinding { class, source }` edge to that occurrence; a
+  same-class source contracted by explicit scalar-actual substitution is a
+  `RuntimeSubstitutionAliasBinding { class, source, representative, origin }`;
+  and a
   pass-through use is a `RuntimeAliasBinding { class, use_id }` edge. One
-  occurrence may carry several canonically ordered witness and alias bindings,
+  occurrence may carry several canonically ordered witness, substitution-alias,
+  and use-alias bindings,
   including source edges from distinct hygienic declarations. Those edges do
   not merge classes and do not re-execute the value.
 
@@ -1057,11 +1137,14 @@ target-capacity rejection is allowed.
   literal, scalar-producer stamp, static tensor-output-axis stamp, or
   graph-level dynamic-axis carrier. Second, every class-local source/use ID
   appears exactly once in its declaration and in the matching occurrence
-  binding, alias stamp, or `RuntimeDimRef`. An occurrence may be the target of
+  witness binding, substitution-alias binding, use-alias stamp, or
+  `RuntimeDimRef`. An occurrence may be the target of
   several distinct class-local source IDs; a source ID itself may not be reused
   across classes, and one occurrence has at most one witness source edge in any
-  one class. Multiple alias use edges in one class remain distinct by durable
-  use ID. Empty binding vectors mean `Unclassed`, never missing authority.
+  one class. Additional same-class source IDs are legal only as checked
+  substitution aliases to that one witness; they do not make another witness
+  edge. Multiple alias use edges in one class remain distinct by durable use ID.
+  Empty binding vectors mean `Unclassed`, never missing authority.
 
   `RuntimeDimSourceOrigin::TensorAxis` covers both a static output axis and a
   folded `shape(tensor, axis_value)` read. Its tensor origin is a liveness and
@@ -1113,15 +1196,26 @@ target-capacity rejection is allowed.
   witnesses, and the typed-origin map, and
   constructs one executable manifest per ID. It does not discover class
   membership from optional stamps or merge declarations that share an
-  occurrence. Classes follow declaration order; within a
+  occurrence. A declared source found in a substitution-alias binding becomes
+  one `RuntimeSubstitutionAliasMember`; its representative must resolve to the
+  class's one witness binding on that occurrence. It remains visible in the
+  manifest but does not become a second `RuntimeExtentWitness` for the same
+  physical value. Classes follow declaration order; within a
   class, sources follow the exact order frozen in its declaration: external
   signature witnesses first in signature/source order, then literals in origin
   order, then scalar-operation and tensor-axis sources in origin order. Within
+  each source kind, resident members precede imported operands, and imported
+  members follow declared operand then source-signature order; this is the
+  canonical resident-then-operand/signature order used to choose a
+  substitution-alias representative. Within
   a tensor-axis source, a literal axis sorts before a scalar-origin axis and
   the latter uses canonical origin order. Uses sort by canonical origin, then
   frozen Wire role-tag bytes (`bound`, `alias_axis`, `scalar_alias`), then the
-  structural bound-field key or numeric axis. The first member is canonical
-  and every remaining member is an equality obligation. A
+  structural bound-field key or numeric axis. The first witness member is
+  canonical and every remaining witness member is an equality obligation.
+  `substitution_aliases` follows declaration/source order after its referenced
+  witness and preserves every contracted source ID, representative, occurrence,
+  and durable import origin. A
   single resolved occurrence may therefore appear as a source member in
   several manifests and in several guards without executing again. A
   `RuntimeExtent<S>` that denotes the binder carries the state-correct declared
@@ -1163,12 +1257,12 @@ target-capacity rejection is allowed.
   carries.
 - **C2.2 Equality classes are executable graph structure.** The DAG stores the
   authoritative declarations, the occurrence table, the independently mapped
-  witness/alias binding vectors on physical stamps, the independently mapped graph-level
+  witness/substitution-alias/use-alias binding vectors on physical stamps, the independently mapped graph-level
   dynamic-axis occurrences, and the derived canonical class manifest.
   Verification starts from the declarations and requires three exact
   bijections: occurrence IDs to their one physical placement; declared
-  class-local source/use IDs to occurrence witness/alias bindings, literals,
-  state-correct graph refs, and evidence attachments; then declared ordered
+  class-local source/use IDs to occurrence witness/substitution-alias/use-alias
+  bindings, literals, state-correct graph refs, and evidence attachments; then declared ordered
   classes to executable manifests.
   It rejects an absent declaration, occurrence, source, use, stamp,
   dynamic-axis occurrence, class, or bound reference; a duplicate or unplaced
@@ -1177,6 +1271,20 @@ target-capacity rejection is allowed.
   inconsistency. Several distinct class-local source edges may intentionally
   reference one occurrence; rejecting that relation or turning it into several
   producer executions is invalid.
+  For every substitution alias it additionally requires exactly one declared
+  alias source, the declaration-order-earliest same-class witness source as the
+  representative, one shared physical occurrence, and one durable origin whose
+  site is exactly `ImportDag`, whose transform exists at or below the retained
+  high-water mark, and whose operand/parameter records the consumed scalar
+  substitution from that import transaction. On an annotated DAG the sealed
+  `ImportDag` transaction is the only constructor and validates that record
+  against its operand and substitution input before commit. On finalized/Wire
+  state the binding itself is the durable record; decode cross-checks all of its
+  repeated structural carriers but does not claim to reconstruct an erased
+  import call from history. The representative may not
+  itself be an alias. A chain, cycle, duplicate alias source, missing manifest
+  member, cross-class or cross-occurrence representative, ordinary-CSE origin,
+  or source retained simultaneously as a witness is invalid.
   It also checks every scalar/axis node, rank, dtype, topological position,
   literal, `OutputAxisRule`, and state-correct `RuntimeExtent<S>` class/evidence
   references. This is
@@ -1186,7 +1294,8 @@ target-capacity rejection is allowed.
 
   Canonical class/member order controls identity, equality pairing, and
   serialization; it does not reorder dynamic evaluation. Finalization derives
-  one non-serialized `RuntimeEqualityGuard` for every noncanonical source and
+  one non-serialized `RuntimeEqualityGuard` for every noncanonical witness
+  binding and
   verifies an exact `RuntimeGuardSchedule`. `RuntimeExecutionOrder.events` is
   one total semantic order containing every interface binding, effect,
   explicit or checked-arithmetic trap, equality guard, capacity check,
@@ -1213,12 +1322,16 @@ target-capacity rejection is allowed.
 
   When several class-local sources reference one occurrence, its producer and
   readiness closure appear once in the execution graph. Finalization emits one
-  distinct guard per `(class, source)` obligation, all reading that cached
-  occurrence; declaration/source order places simultaneously ready guards, and
-  each guard precedes only its own complete dependent-event set. It is invalid
-  to deduplicate guards across classes, merge their declarations, or execute
-  the producer once per guard. Eval and every backend use the same occurrence
-  slot and total event order.
+  distinct guard per noncanonical `(class, witness source)` obligation, all
+  reading that cached occurrence; declaration/source order places
+  simultaneously ready guards, and each guard precedes only its own complete
+  dependent-event set. A substitution-alias member is structurally identical
+  to its representative and therefore creates no duplicate equality event; its
+  dependent uses attach to the representative's guard, or directly to the
+  occurrence when the representative is canonical. It is invalid to
+  deduplicate guards across classes, merge ordinary declarations, forge alias
+  authority to suppress a guard, or execute the producer once per source. Eval
+  and every backend use the same occurrence slot and total event order.
 
   Only actual interface values and declared literals are available for the
   entry/prologue schedule. Eval, C, HIP, and Metal check those entry members in
@@ -1313,7 +1426,8 @@ target-capacity rejection is allowed.
   Metal, specialization, fusion, AD, vmap, hashing, and cloning/remapping passes read
   `RuntimeExtent<S>.value`, its optional declared class/use reference and exact
   evidence attachment, every
-  value occurrence, witness/alias binding vector, dynamic-axis carrier, and
+  value occurrence, witness/substitution-alias/use-alias binding vector,
+  substitution-alias origin, dynamic-axis carrier, and
   complete ordered class manifest before any provenance rejection is removed.
   Each ordinary bound value is exactly one tag admitted by the owner matrix;
   `ToEnd` remains the sole sentinel. [#1112]'s
@@ -1600,6 +1714,12 @@ enum AxisSource {
   for several declarations while each result has its own output occurrence and
   class-local alias. Empty vectors and absent authority occurrences are valid
   exactly for `Unclassed`; classed axes never fall back to an absent stamp. The
+  vectors express axis witness/use placement only. If the selected occurrence
+  also carries scalar-actual substitution aliases, C4 validates their complete
+  occurrence bindings and manifest members through C2 authority; it neither
+  flattens them into `RuntimeAxisClassBinding` nor treats them as extra axis
+  witnesses.
+  The
   complete placement table is:
 
   | value rule | `Unclassed` | `ProvedAlias` | `FreshWitness` |
@@ -1642,7 +1762,8 @@ enum AxisSource {
 
   Phase-4 derivation requires the value rule, identity rule, value/output
   occurrences, both binding vectors, declaration authority, stored axis ID,
-  and complete runtime-class manifest to agree. `AxisSource` never invents, merges, or recovers a class
+  any occurrence substitution aliases, and complete runtime-class manifest to
+  agree. `AxisSource` never invents, merges, or recovers a class
   from a display name. There is no Phase-4 sibling registry or target-specific
   formula or placement match.
 - **C4.2 Exact movement mappings.** Same-rank `Expand` maps every
@@ -1761,7 +1882,19 @@ axes and windows in one issue.
    cases, declaration-order failure when both mismatch, each guard before its
    dependent allocation, and exact source attribution. The same source/use IDs, occurrence
    placement, binding vectors, stamp absence or presence, manifest membership,
-   and guard occurrence are asserted across every lane and Wire. Positive guard
+   and guard occurrence are asserted across every lane and Wire.
+
+   Scalar-actual substitution positives instantiate two distinct scalar
+   parameters of one callee class with the same caller actual. Separate rows use
+   a caller-interface scalar, a declared literal, and a local scalar producer.
+   In each row the canonical first callee source remains the sole witness, the
+   second source remains a distinct declaration member through one
+   substitution-alias binding, both name one physical occurrence and one
+   readiness/producer closure, and no duplicate equality guard is emitted.
+   Both callee parameter permutations and repeated consume/refinalize preserve
+   the canonical representative, durable import-origin fields, and deterministic
+   bytes. A distinct-class pair sharing the same actual remains two ordinary
+   witness bindings and is not rewritten into this alias form. Positive guard
    rows compare a node-valued-axis shape read and a rank-zero arithmetic or
    user-function scalar result against an independently declared literal or
    named witness. The guard schedule crosses interface-only prologue checks,
@@ -1822,6 +1955,18 @@ axes and windows in one issue.
    result or the alias on the value occurrence, re-execute the scalar per
    guard, or serialize only one binding. Each fails before
    execution, emission, or Wire encoding across Eval, C, HIP, and Metal.
+   Scalar-actual-alias mutations remove the binding or manifest member; change
+   its class, source, representative, containing occurrence, site, transform,
+   operand, or parameter; choose a later representative; retain the alias source
+   as a second witness; create a chain or cycle; duplicate one alias source; or
+   forge the form with a `Cse` site for an ordinary same-class merge. Each fails
+   before finalization and after Wire decode. A coherent Wire rewrite that adds
+   an internally valid `ImportDag` alias record and updates every repeated
+   carrier is a different-program replacement and is rejected by the
+   out-of-band integrity oracle, not claimed as a structural decode failure.
+   The ordinary CSE control still keeps its
+   two producers, while the three legitimate interface/literal/local actual
+   rows retain two declared source IDs and exactly one producer occurrence.
 4. **Zero positives.** Literal-zero and runtime-zero rows cover positional
    replacement, positional insertion, and named-axis expansion. They assert
    the exact output shape, logical element count zero, no element access, and
@@ -1899,7 +2044,13 @@ axes and windows in one issue.
    consumption row substitutes every parameter with an explicit actual
    occurrence/readiness fact and removes the callee manifest/bind rows;
    missing, duplicate, stale, partial, readiness-mismatched, or final-ID-bearing
-   substitutions fail without mutation. Operand permutation may change
+   substitutions fail without mutation. Its three same-class shared-actual
+   variants exercise `InterfaceBind`, `DeclaredLiteral`, and `ProducerClosure`
+   readiness. They preserve two callee source IDs as one witness plus one
+   substitution alias with the fresh `ImportDag` transform/operand/parameter
+   origin, execute the actual once, and generate no second guard. Missing or
+   forged alias authority, a non-`ImportDag` site, and a representative other
+   than the canonical first source fail without mutation. Operand permutation may change
    bytes according to declared order, but insertion order within either source
    arena may not.
    Grad, vmap, specialization, clone, and import rows create both synthesized
@@ -1923,10 +2074,16 @@ axes and windows in one issue.
    stale slot/ID fail before emission. Grad-created movement/output witnesses,
    specialization, and post-transform DCE finalize exactly. CSE merges only
    physically equivalent occurrences and transactionally unions their complete
-   ordered class edges without merging IDs or executions when their witness
+   ordered witness/substitution-alias/use-alias edges without merging IDs or executions when their witness
    class sets are disjoint. An exact negative gives two equivalent occurrences
    distinct source edges from the same class; they remain two producers, and a
-   mutation that merges them fails the one-source-per-class verifier. Mutations
+   mutation that merges them fails the one-source-per-class verifier. Supplying
+   the CSE transaction has no constructor for substitution-alias authority; a
+   fabricated record with its `Cse` transform/site does not authorize the
+   merge. A positive that
+   already owns valid substitution-alias authority may be remapped by CSE only
+   when its representative remains the sole same-class witness on the selected
+   occurrence. Mutations
    that lose an edge, merge IDs/classes, or combine nonequivalent occurrences
    likewise fail.
    Pre-finalization mutations remove a scalar-operation source, a static
@@ -1942,10 +2099,12 @@ axes and windows in one issue.
    scope-instance lineages, or duplicate complete owner identities. They also
    prove that consume-to-annotated allocates a complete inverse provisional
    baseline, translates final graph refs, evidence attachments/destinations,
-   and proof triples through it, and returns identical bytes on no-op
+   proof triples, and every substitution-alias
+   class/source/representative/occurrence endpoint through it, and returns
+   identical bytes on no-op
    refinalization; embedding or casting a final numeric ID into a provisional
-   annotation/proof, omitting one inverse endpoint, or detaching an evidence
-   record fails. The
+   annotation/proof/alias, omitting one inverse endpoint, changing the durable
+   alias origin, or detaching an evidence record fails. The
    derived guard schedule is recomputed after every named transform. Mutations
    stale or move a `check_at` event; omit or swap its immediate observable
    predecessor/successor fence; corrupt `ready_after` or `guarded_events`;
@@ -2005,7 +2164,13 @@ axes and windows in one issue.
    remapped scope/site/interface-input import namespace, duplicate scalar-parameter
    origin, one parameter origin with multiple occurrences, inconsistent
    manifest/`InterfaceBind`/guard interface IDs, an invalid callee actual
-   substitution, a proof/source mismatch, or an attempted
+   substitution, a missing or forged substitution alias; wrong alias class,
+   source, representative, occurrence, role tag, mutation-site tag, transform,
+   operand, or parameter; a noncanonical representative, alias chain/cycle,
+   duplicate alias source, source bound as both witness and substitution alias,
+   alias absent from the class manifest, or an ordinary-CSE alias carrying a
+   non-`ImportDag` site; a
+   proof/source mismatch, or an attempted
    `NotProved`-to-`ProvedEqual` upgrade,
    missing occurrence/source/use ID, placement, stamp, or binding;
    declaration/occurrence/stamp disagreement; correlated binding-plus-manifest
@@ -2024,7 +2189,7 @@ axes and windows in one issue.
    missing or wrong-source alias binding, an unclassed concrete literal with
    any binding, a shared scalar/tensor value occurrence serialized with only
    one of two class edges, with two producer occurrences, with value/output
-   occurrences collapsed, or with witness/alias bindings on the wrong
+   occurrences collapsed, or with witness/substitution-alias/use-alias bindings on the wrong
    occurrence, and incompatible
    axis/rank/output shape. Dynamic-axis
    placement mutations put a node-valued witness on one static axis, omit or
@@ -2058,7 +2223,9 @@ axes and windows in one issue.
 
    Whole-program integrity is a separate oracle. It coherently removes or
    replaces an internal declaration and every dependent graph/carrier field;
-   structural decode may succeed because the result is another valid program,
+   it also coherently injects an otherwise internally valid `ImportDag`
+   substitution-alias record while updating its occurrence and manifest copies.
+   Structural decode may succeed because the result is another valid program,
    but comparison with the caller-supplied expected fixture/content hash must
    fail. The expected commitment is outside the mutated Wire bytes. Tests never
    call coherent semantic replacement a structural decoder rejection.
@@ -2141,8 +2308,11 @@ never reused.
   hashed authority. Structural decode checks its internal origins, class/source
   relation, and `OutputAxisRule`; a coherent replacement remains subject to the
   caller's out-of-band artifact-integrity commitment. Each occurrence
-  row contains its stable ID, physical source origin, and complete canonical
-  witness/alias binding vectors used to cross-check graph stamps:
+  row contains its stable ID, physical source origin, and one complete
+  canonical `bindings` vector used to cross-check graph stamps. Its closed Wire
+  variants and frozen role bytes are `0x00`/`witness`,
+  `0x01`/`substitution_alias`, and `0x02`/`use_alias`; a decoder may not infer a
+  role from a repeated class/source value:
   a typed origin carries its lexical scope and typed site; a synthesized origin
   carries its transform instance, parent origin, and deterministic generated
   path. A tensor-axis occurrence selects a tensor origin and a
@@ -2152,12 +2322,20 @@ never reused.
   alias-axis, or scalar-alias roles. A scalar-parameter row carries its
   structural `RuntimeInterfaceInputId`, which must match exactly one public
   manifest entry and the derived `InterfaceBind` event; a bare artifact-local
-  ordinal is not compared across imports. Encode the derived
+  ordinal is not compared across imports. Each `substitution_alias` entry
+  encodes its class, distinct alias source, canonical representative source,
+  and durable origin fields `site: import_dag`, transform, operand, and
+  source-local parameter. It is nested in exactly one occurrence row; its
+  source and representative both resolve through the declaration, and only the
+  representative resolves through that occurrence's `witness` binding. Encode the derived
   `WireRuntimeExtentClass` separately, with the same ID and `literal`,
   `scalar`, or `tensor_axis` witnesses carrying their class-local source and
   shared occurrence IDs; a
   `tensor_axis` witness carries its tensor node and a literal or rank-zero
-  `int32` scalar node for the axis. Encode every static tensor output axis's
+  `int32` scalar node for the axis. Its separate ordered
+  `substitution_aliases` list repeats every alias source, representative,
+  occurrence, and durable origin from the occurrence table; these are hashed
+  manifest authority but never extra equality witnesses. Encode every static tensor output axis's
   sealed identity evidence ID, selected proof-sensitive identity rule, optional
   output-occurrence ID, and complete ordered output-axis
   `witness { class, source }` / `alias { class, use_id }` bindings. Its value
@@ -2170,14 +2348,15 @@ never reused.
   recomputes them from the current op, fields, and frozen registry. No stamp is
   valid only for `Unclassed` with no declaration edge. Rank-zero exact-`int64`
   scalar producers encode the same `WireRuntimeOccurrenceStamp`; one stamp may
-  contain witness edges for several classes. Encode every node-valued-axis
+  contain witness edges for several classes and checked substitution aliases
+  for an explicitly consumed scalar actual. Encode every node-valued-axis
   occurrence once in a separate ordered
   `WireRuntimeDynamicAxisOccurrence { stamp, tensor, axis }` list; no static axis
   stamp may repeat that occurrence. The public input
   manifest retains every declared Load and scalar parameter independently of
   data uses and maps each input axis/scalar to its value occurrence, structural
   interface-input ID, and complete ordered class-local
-  binding edges;
+  witness/substitution-alias/use-alias binding edges;
 - keep typed lexical-scope, typed-site, and interface-input IDs
   artifact-local on standalone Wire. The ephemeral
   `RuntimeArtifactImportRemap` is not another serialized authority: verified
@@ -2188,7 +2367,10 @@ never reused.
   Directly concatenating two Wire tables, preserving overlapping local zeros,
   or applying only part of any map is invalid. A consuming import uses the
   explicit scalar-actual-substitution path and emits no retained callee scalar
-  parameter or corresponding `InterfaceBind` row;
+  parameter or corresponding `InterfaceBind` row. It emits the checked
+  substitution-alias authority when two same-class callee sources select one
+  actual; later imports remap that authority's transform with the imported
+  history range while retaining its transform-scoped operand/parameter fields;
 - interpret `WireRtDim::Node { input }` as an absolute index into the
   owning `WireDagNode.inputs`, then validate that referenced earlier
   node as rank-zero `int64`;
@@ -2222,7 +2404,14 @@ never reused.
   the serialized class manifest. The occurrence table and physical placements
   are bijective, while declaration-to-occurrence source edges are
   many-to-many: several classes may target one occurrence, but each class-local
-  source ID and binding is unique. Every lexical scope, scope instance, clone
+  source ID and binding is unique. For each substitution alias, decode requires
+  the alias source exactly once in the declaration, occurrence vector, and
+  class manifest; the representative exactly once as the canonical
+  same-class witness of that occurrence; no alias chain or cycle; and the exact
+  `import_dag` origin tag with an issued transform and the consumed
+  operand/parameter identity. Missing, reordered, duplicated, cross-class,
+  cross-occurrence, noncanonical, non-import, or witness-and-alias-double-bound
+  forms are structural failures. Every lexical scope, scope instance, clone
   lineage, typed/synthesized origin, transform instance/path, source/use ID,
   member node/axis, literal, dtype, rank, class ID, uniqueness, canonical
   order, and control/liveness edge is checked before encode and after
@@ -2239,7 +2428,8 @@ never reused.
   parameters, and history range before combination; owners, typed origins,
   typed negative/proof sites, scalar-parameter occurrence origins, public
   manifests, derived interface-bind/guard references, evidence destinations,
-  annotations, and dependent paths must all use that one map. Decode never
+  annotations, substitution-alias origins, and dependent paths must all use
+  that one map. Decode never
   accepts duplicate parameter origins, one parameter origin with multiple
   physical occurrences, or an overlapping or partial raw import. A
   stamp/manifest pair cannot establish or resize
@@ -2344,7 +2534,7 @@ seven-variant indexed `RuntimeBoundField` algebra and frozen tags,
 typed-versus-synthesized negative/unclassed evidence sites, structural
 interface-input IDs, atomic proof/ref/site/attachment remapping, checked
 scope/site/retained-input import bijections, explicit callee-actual
-substitution, the checked
+substitution and durable same-class substitution-alias authority, the checked
 provisional-to-final bijections and consume-to-annotated inverse baseline, the
 typed/synthesized origin algebra,
 the exact structural origin comparator, a serialized checked transform cursor
@@ -2358,7 +2548,8 @@ mutation/import/deserialization-capability and callsite registry, the removal
 of public raw-DAG construction, mutation, serde, artifact-extraction, cache,
 Eval, and backend escape routes,
 compute-once `BroadcastScalarRef` adaptation and fusion barriers, separated
-value/proof-identity rules and canonical witness/alias binding vectors, the complete in-memory owner
+value/proof-identity rules and canonical
+witness/substitution-alias/use-alias binding vectors, the complete in-memory owner
 matrix, and the complete graph-level
 `RuntimeExtentClass` manifest plus the producer-ready, source-ordered
 `RuntimeGuardSchedule`, and require named values resolved before
@@ -2372,7 +2563,8 @@ element-derived extents; and amend `spec/10`
 for the next monotonic WireDag version (v8 from the current v6 baseline).
 Write the derived positive, negative, proof-sensitive same/cross-tensor,
 shared-occurrence/many-to-many, equality-class/observable-event-schedule,
-same-class CSE exclusion, semantic-transit/cross-host, owner-matrix,
+same-class scalar-actual alias and ordinary-CSE exclusion,
+semantic-transit/cross-host, owner-matrix,
 bound-destination/evidence-site, typed/interface import, and transform test stubs before
 implementation. Then deliver C2.1-C2.6 and C6
 across all in-memory, target, transform, and wire consumers, followed by C2.7
@@ -2395,7 +2587,8 @@ destinations, the outer identity-destination kind tags, the closed indexed
 bound-field tags, typed/synthesized evidence site algebra, structural
 interface-input IDs and occurrence/bind/manifest identity, atomic
 proof/ref/site/attachment remapping, checked scope/site/interface import
-remaps, explicit callee-actual substitution, checked
+remaps, explicit callee-actual substitution with durable alias provenance,
+checked
 provisional-to-final bijections, and consume-to-annotated inverse baseline;
 sealed graph, atomic mutation transactions,
 opaque annotated/finalized public states, finalized-only Eval/backend/cache
@@ -2407,7 +2600,8 @@ exhaustion behavior, and post-decode/import collision rules;
 lexical/runtime-scope and clone-lineage
 rules; post-transform primary binder declaration/ownership/source/use
 identities; stable compute-once value occurrences, many-to-many class-local
-source edges, and canonical binding vectors; static-or-node tensor-axis and
+source edges, durable same-class substitution aliases, and canonical binding
+vectors; static-or-node tensor-axis and
 scalar-operation-output source algebras; graph-level dynamic-axis occurrence
 placement; stable runtime binder IDs;
 complete ordered equality-class manifests and proof-sensitive identity rules;
@@ -2421,11 +2615,13 @@ the complete workspace production mutation/import/deserialization capability
 and callsite registry,
 `BroadcastScalarRef`, trap/effect occurrence rules, and transform/fusion
 behavior for every bound-dependency class;
-the same-class witness-source CSE exclusion;
+the explicit same-class scalar-actual alias contract and ordinary same-class
+witness-source CSE exclusion;
 the exact bound-field owner/index/side/endpoint algebra, outer
 bound-versus-output-axis destination kind, synthesized
 unclassed/fresh-witness evidence provenance, collision-free typed/interface
-import, and explicit interface-actual substitution;
+import, and explicit interface-actual substitution with durable
+substitution-alias authority;
 WireDag v8; no provenance-rejection construct; one static folder; all-lane
 guard placement.
 
@@ -2439,8 +2635,9 @@ construction/mutation/deserialization/artifact/backend boundaries,
 and entry-selection rows, same/cross-tensor proof-identity rows,
 earlier-owner/source/use/evidence redirection, correlated graph-ref/evidence
 attachment mutations, clone/vmap/import/CSE/DCE proof remap, and
-consume/refinalize inverse-map rows; shared-occurrence two-class and same-class
-CSE-exclusion rows; outer destination-kind collision/reorder mutations,
+consume/refinalize inverse-map rows; shared-occurrence two-class, same-class
+interface/literal/local scalar-actual alias, and ordinary-CSE-exclusion rows;
+outer destination-kind collision/reorder mutations,
 bound-field axis/side/endpoint/owner mutations,
 grad/vmap/specialization/clone/import typed-versus-synthesized evidence-site
 rows, and two-artifact scope/site/parameter-zero retained-interface
