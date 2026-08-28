@@ -104,7 +104,12 @@ The target `expand` node is:
 ```rust
 RiscOp::Expand {
     axis: usize,
-    size: RtDim,
+    size: GuardedRtDim,
+}
+
+struct GuardedRtDim {
+    value: RtDim,
+    equals: Vec<RtDim>,
 }
 ```
 
@@ -121,7 +126,10 @@ RtDim::InputAxis {
 ```
 
 `tensor` and every `Node` are absolute slots in the owning movement
-node's `inputs`. `RtDim::Sym` and `RtDim::ToEnd`
+node's `inputs`. `GuardedRtDim.value` is the executed extent;
+every entry in `equals` is an additional structural witness that must
+equal it before allocation or access. `RtDim::Sym` and
+`RtDim::ToEnd`
 remain illegal in `Expand.size`. In executable IR, a named
 `reshape` target also resolves to `Lit`, `InputAxis`, or
 `Node`; `Sym` may exist only in the typed pre-monomorphization
@@ -139,8 +147,8 @@ carrier and must not cross verification or WireDag.
   reads that input's metadata directly. The typed producer retains this
   `TensorAxisWitness` identity structurally across bindings; it is not
   recovered by a syntax/provenance walk. If the same binding also has an
-  ordinary scalar consumer, lowering materializes `RiscOp::Shape` for that consumer while
-  the movement use remains folded. A cast, arithmetic expression, or
+  ordinary scalar consumer, lowering materializes `RiscOp::Shape` for
+  that consumer while the movement use remains folded. A cast, arithmetic expression, or
   user-function result is ordinary scalar dataflow and reaches the movement
   node as `RtDim::Node`.
 
@@ -151,7 +159,13 @@ carrier and must not cross verification or WireDag.
   becomes `InputAxis`; and a scalar term witness becomes `Node`.
   When several tensor axes witness one binder, the first declaration in
   signature/source order is the canonical carrier and equality guards compare
-  every additional witness before use. A reusable generic may retain the
+  every additional witness before use. The canonical witness is
+  `GuardedRtDim.value`; every additional tensor axis is retained as an
+  `InputAxis` in `GuardedRtDim.equals`. A literal or scalar
+  canonical value uses `Lit` or `Node` with the same explicit
+  equality list. Equality witnesses are appended to the owning node's inputs in
+  signature/source order, are serialized in that order, and remain value/shape
+  dependencies for DCE. A reusable generic may retain the
   binder in typed pre-monomorphization state, but a complete executable DAG
   must resolve it to one of these three forms. Missing witness, wrong binder,
   and violated witness equality fail loudly; no pass searches for a matching
@@ -160,20 +174,36 @@ carrier and must not cross verification or WireDag.
   scalar value obeys `spec/04` §4.7.4. Both forms are real owning-node input
   dependencies, so DCE cannot lose them; a symbolic name or shape-only side
   table is not an equivalent size carrier.
-- **C2.2 Static values are an optimization.** A nonnegative statically proved
+- **C2.2 Equality guards are executable structure.** Every movement extent is
+  a `GuardedRtDim`, not a side-table obligation. Verification checks
+  `value` plus every `equals` entry using the same slot, rank,
+  dtype, topological, and owner-specific tag rules. Eval, C, HIP, and Metal
+  evaluate all witnesses in stored order and trap `Domain` on the first
+  mismatch before allocation or element access. WireDag encodes the complete
+  ordered list. DCE treats every referenced node as live; vmap, grad,
+  specialization, cloning, and remapping rewrite every slot; hashing includes
+  the complete carrier. Empty `equals` is the ordinary case. Duplicate,
+  missing, reordered-noncanonical, stale-slot, wrong-axis, and dropped-witness
+  mutations fail the verifier, exact-byte fixture, or a mismatched-witness
+  execution row that must trap. Only after these paths are
+  green may Phase 4 delete `SymbolicBinding.others` and the
+  name-grouped equality loop.
+- **C2.3 Static values are an optimization.** A nonnegative statically proved
   value, including zero, may use `RtDim::Lit`. One checked static
   folder is shared or contract-tested across checker and lowering. Failure to
   fold produces the exact `InputAxis` or `Node` carrier dictated by
   C2.1; it never rejects the expression or guesses a value.
-- **C2.3 Every result is constructed.** The checker always constructs an
+- **C2.4 Every result is constructed.** The checker always constructs an
   `expand` result tensor whose rank is the selected operand rank or
   operand rank plus one. It stamps complete type metadata and checks declared
   or ascribed rank and dimensions. The early exit that causes [#597] and
   [#609] is deleted.
-- **C2.4 Every consumer lands before deletion.** Verification, Eval, C, HIP,
+- **C2.5 Every consumer lands before deletion.** Verification, Eval, C, HIP,
   Metal, specialization, AD, vmap, hashing, and cloning/remapping passes read
-  `Lit`, `InputAxis`, and `Node` before any provenance
-  rejection is removed. [#1112]'s HIP carrier work and Metal audit are Phase 2
+  `GuardedRtDim.value` and every ordered equality witness,
+  including each underlying `Lit`, `InputAxis`, or
+  `Node`, before any provenance rejection is removed. [#1112]'s
+  HIP carrier work and Metal audit are Phase 2
   entry requirements because a checker-only `int64` result is not an
   all-lane extent contract. Entry requires their focused width, capacity,
   guard, target-build, and hardware-availability smoke evidence; execution of
@@ -181,7 +211,7 @@ carrier and must not cross verification or WireDag.
   requirement.
   Equality and negativity guards run before allocation or element access on
   every lane.
-- **C2.5 Transforms preserve the bound slice.** This clause is the proposed
+- **C2.6 Transforms preserve the bound slice.** This clause is the proposed
   rule for the required `spec/06` amendment; current `spec/06`
   says every node is batched, so the numbered spec wins until that amendment
   lands. Transforming a movement node
@@ -190,6 +220,8 @@ carrier and must not cross verification or WireDag.
   `InputAxis` reads observe the corresponding original tensor axis after
   the inserted batch-axis shift, and scalar `shape`/integer nodes used only by
   movement bounds remain rank-zero rather than acquiring a batch dimension.
+  Every `GuardedRtDim.equals` witness follows the same axis shift,
+  input-slot remap, liveness, and equality semantics as its canonical value.
   Literal axes normalize against the original source rank and then shift;
   node-valued axes perform the same checked normalization and shift at runtime.
   When one scalar producer has both bound and ordinary value consumers, vmap
@@ -204,13 +236,15 @@ carrier and must not cross verification or WireDag.
   choose its regular-stack behavior (an equality guard or a typed rejection).
   Implementation may not batch a bound-only scalar, guess, or silently share a
   varying value before the numbered rule and its positive/negative tests land.
-- **C2.6 The deletion is atomic with the usable replacement.** Only after
-  C2.1-C2.5 and C6 are green does the phase delete `SizeClass`,
+- **C2.7 The deletion is atomic with the usable replacement.** Only after
+  C2.1-C2.6 and C6 are green does the phase delete `SizeClass`,
   `classify_expand_size`, `classify_arith_app`,
   `sourceless_expand_size_error`,
   `Env::size_provenance` and its plumbing, plus the lowerer's mirror
   rejections. No intermediate commit may accept a value the IR cannot carry.
-  Best-effort identity recognition may survive only as refinement whose
+  Phase 4 separately removes `SymbolicBinding.others` only after
+  C4 consumes `GuardedRtDim` equality structure. Best-effort
+  identity recognition may survive only as refinement whose
   failure result is a fresh extent plus guard.
 
 ### C3 Positional expand uses one normative protocol
@@ -219,11 +253,11 @@ The implementation derives its action from `spec/04` §4.7.2 rather
 than assigning semantic labels by intuition:
 
 - **`Constrain(expected)`** is used when the context supplies an
-  independent tensor rank or shape equation. A declared result, ascription,
-  user-function parameter, branch join, generic instantiation, or builtin
-  relation between tensor operands selects the unique candidate satisfying
-  that equation. Comparisons constrain their operands even though their result
-  is scalar or boolean.
+  independently fixed tensor rank or shape equation. A declared result,
+  ascription, already-instantiated user-function parameter or generic field,
+  branch join with resolved shape evidence, or builtin relation between tensor
+  operands selects the unique candidate satisfying that equation. Comparisons
+  constrain their operands even though their result is scalar or boolean.
 - **`Propagate`** is used when a context can carry the same unresolved
   monomorphic candidate without requiring either rank. It adds no evidence and
   cannot select or clone the choice.
@@ -243,27 +277,48 @@ project, or finalize a pending token; there is no raw-`Type` escape hatch.
 `PendingUseSite` is a closed enum generated bijectively from the builtin
 declaration registry and the Deep expression-form registry, so a new builtin
 or expression form fails compilation/regeneration until it has a disposition.
+Each disposition is an exhaustive decision function over a closed
+`ExpectedShapeEvidence` enum (`Independent`, `Fresh`, or
+`LinkedPending`), not one action baked into the syntactic site.
+`Independent` carries the resolved tensor equation and yields
+`Constrain`; `Fresh` and `LinkedPending` yield
+`Propagate` unless the numbered freeze rule applies. Adding an evidence
+variant or leaving a site/evidence cell unhandled fails compilation and the
+generated table check.
 
 The recursive choke point walks tensor-bearing tuple, List, record, ADT, and
-function fields rather than only a top-level tensor. Anonymous tuple
-construction and closure capture propagate the corresponding token. A named
-record/ADT constructor field constrains against its declared field type; List
-construction constrains tensor elements through the homogeneous element
-equation; tuple/record/ADT projection and pattern binding transfer the selected
-token; record update constrains an updated tensor field against its declared
-field shape while propagating untouched fields; branch joins, declared
-results, ascriptions, user-function parameters, generic instantiation, and
-builtin operand relations constrain;
+function fields rather than only a top-level tensor. The action is derived from
+resolved expected-shape evidence, not from container syntax:
+
+- an anonymous tuple field, closure capture, fresh generic field or parameter,
+  singleton List, and the seed element of an inferred List
+  `Propagate` because each defines or carries its own provisional type;
+- a concrete declared record/ADT field, an already-instantiated generic field,
+  a declared/ascribed List element type, and a later List element facing an
+  independently resolved accumulated element shape `Constrain`;
+- if a later concrete List element supplies the first independent shape, the
+  recursive carrier routes that evidence back to constrain the earlier pending
+  seed; two unresolved elements link one monomorphic pending choice and
+  continue to propagate rather than selecting each other;
+- tuple/record/ADT projection and pattern binding transfer the selected token;
+  record update constrains an updated field only when its resolved schema is
+  independent, otherwise propagating the generic field along with untouched
+  fields.
+
+Branch joins, declared results, ascriptions, independently instantiated
+user-function parameters, and builtin operand relations constrain;
 an undeclared closure return propagates to the call boundary; and
 complete-program finalization freezes. Generated compile-fail bypass tests
 prove no inference helper outside the module can unwrap or copy the carrier.
 Generated semantic tests execute both candidate outcomes and a contradictory
 shape for every `Constrain` row, propagation followed by later
 selection for every `Propagate` row, and the documented default for
-every `Freeze` row. Mutations that omit the tuple-projection, named
+every `Freeze` row. Mutations that omit the tuple-projection,
 constructor-field, List-element, record-update, pattern-binding, or
-closure-return call fail before a checker result is returned. Constructor tests
-exercise replacement, insertion, and a contradictory declared field.
+closure-return call fail before a checker result is returned. Generated rows
+cross replacement, insertion, and contradiction with concrete fields, fresh
+and fixed generic fields, singleton/list-seed elements, later concrete and
+pending elements, declared List element types, and nested generic containers.
 
 Coupled defaults expose settlement order. Before Phase 3 implementation,
 `spec/04` §4.7.2 must state the order. This plan proposes first-deferred
@@ -329,15 +384,32 @@ enum AxisSource {
 - **C4.4 Target state consumes the algebra.** Eval and all backends consume
   `AxisSource` directly. Runtime extent flows no longer depend on
   `shape_source_for_axis`, `op_declared_output_axes`, or a
-  search for a Load carrying the same string. Static symbolic identities may
-  remain in type metadata, but no runtime size is recovered by name. This
+  search for a Load carrying the same string. `GuardedRtDim`
+  supplies every runtime equality witness, so this phase also deletes
+  `SymbolicBinding.others` and its name-grouped execution loops.
+  Static symbolic identities may remain in type metadata, but no runtime size
+  or guard is recovered by name. This
   closes [#665] and [#592].
+- **C4.5 Sources are a final-DAG derived view.** `AxisSource` is
+  neither stored in `Dag`/WireDag nor carried across transforms.
+  `derive_axis_sources(&Dag)` runs after the last DAG rewrite and
+  before final verification/emission, producing a view tied to that exact DAG
+  generation. Any mutation or transform invalidates the view; callers cannot
+  reuse it because the API borrows the immutable final DAG and keeps the map's
+  `NodeId`s private. Eval and each backend derive or receive the view
+  only after vmap, grad, specialization, cloning/remapping, and DCE finish.
+  Phase 4 runs derivation and cardinality verification after each transform in
+  focused tests and after the complete production pipeline. This proves
+  current-node identity without inventing a second remapping protocol.
 
 Required mutation tests cover every `RiscOp` registry row, external
 Load/root axes, kept axes before and after an inserted
 `Expand` axis, the inserted/replaced axis, same-rank versus
 rank-increasing forms, every `Reshape` target, and omitted,
-duplicate, wrong-shifted, out-of-range, and wrong-node sources.
+duplicate, wrong-shifted, out-of-range, and wrong-node sources. Lifecycle rows
+derive the view after vmap, grad, specialization, cloning/remapping, and DCE;
+a mutation that caches a pre-transform view or accepts a stale `NodeId`
+fails before emission.
 
 ### C5 The class oracle has a reachable boundary
 
@@ -390,7 +462,8 @@ axes and windows in one issue.
 3. **Negative parity.** Static negative extents fail with the owning type
    error; runtime negative extents trap `Domain`. Wrong dtype,
    out-of-range axis, rank-contradicting ascription, malformed scalar input,
-   and checked overflow fail for the owning reason on every applicable lane.
+   named-binder witness mismatch, missing equality witness, and checked
+   overflow fail for the owning reason on every applicable lane.
 4. **Zero positives.** Literal-zero and runtime-zero rows cover positional
    replacement, positional insertion, and named-axis expansion. They assert
    the exact output shape, logical element count zero, no element access, and
@@ -423,16 +496,19 @@ axes and windows in one issue.
    executes or rejects exactly as the amended `spec/06` decides.
 8. **Axis-source mutations.** A generated bijection covers every current
    `RiscOp` output axis, including external `Load`/root axes and
-   non-movement computed-shape operations. C4 cardinality and mapping
+   non-movement computed-shape operations. The view is recomputed and validated
+   after vmap, grad, specialization, cloning/remapping, and DCE. C4 cardinality and mapping
    corruptions fail before emission with the registered typed receipt; no
-   mutation is accepted, silently repaired, or allowed to reach an ICE.
-9. **WireDag v7.** Exact JSON round-trip, stable bytes/hash, prove and offline
+   mutation, cached pre-transform map, or stale `NodeId` is accepted,
+   silently repaired, or allowed to reach an ICE.
+9. **WireDag v8.** Exact JSON round-trip, stable bytes/hash, prove and offline
    extraction, compiler-API and binding consumption, and the capacity census
    are green. Missing size, old or future version, illegal bound tag, missing
    or out-of-range input slot, later-node reference, non-scalar source, wrong
    dtype, malformed `input_axis` tensor or axis slot, wrong axis dtype,
-   unshifted vmap source axis, and incompatible axis/rank/output shape are
-   negative controls.
+   missing/duplicate/reordered/stale equality witness, owner-illegal tag,
+   nonempty `to_end` equality list, unshifted vmap source axis, and
+   incompatible axis/rank/output shape are negative controls.
 
 Positive rows use this allowed transition lattice:
 
@@ -451,16 +527,25 @@ trap. A lane that already accepts a positive row may not regress, and an
 meaning. A phase invocation requires its owned rows at their exit state and
 rejects unexplained per-lane changes in every other row.
 
-### C6 Exact WireDag v7 migration
+### C6 Coordinated exact WireDag v8 migration
 
 Phase 2 changes the public compiler API and therefore carries the complete
-wire change in the same implementation change:
+wire change in the same implementation change. Current `main` is v6.
+Because prerequisite #1298 changes serialized `Shape.axis`, #1298
+first amends `spec/10` and consumes v7. Runtime extents then refetches
+that exact head, amends `spec/10` again, and consumes v8. A schema
+advance before implementation shifts both numbers monotonically; the invariant
+is that #1298 and runtime extents use two distinct successive versions and this
+document, both trackers, fixtures, and oracles update together. A version is
+never reused.
 
 - amend `spec/10-serialization.md` and bump
-  `WIRE_DAG_SCHEMA_VERSION` monotonically from 6 to 7;
-- encode `WireRiscOp::Expand { axis, size: WireRtDim }`, permitting
-  `lit`, `input_axis`, and `node` only for
-  `expand`; `input_axis` carries a tensor input slot plus a
+  `WIRE_DAG_SCHEMA_VERSION` monotonically from #1298's v7 to v8;
+- encode `WireRiscOp::Expand { axis, size: WireGuardedRtDim }`
+  and use the same guarded wrapper for every other runtime-extent owner;
+  `WireGuardedRtDim` contains one `value` plus an ordered
+  `equals` list, each a `WireRtDim`. `input_axis`
+  carries a tensor input slot plus a
   `WireRtAxis` that is an exact int32 literal or scalar input slot;
 - interpret `WireRtDim::Node { input }` as an absolute index into the
   owning `WireDagNode.inputs`, then validate that referenced earlier
@@ -470,10 +555,26 @@ wire change in the same implementation change:
   or a proved dimension binder: validate the tensor slot as an earlier tensor
   node and a node-valued axis slot as an earlier rank-zero `int32`
   scalar;
+- apply this exact owner/tag matrix at encode, decode, verification, and
+  mutation generation:
+
+  | owning field | legal `value` tags | legal `equals` tags |
+  |---|---|---|
+  | `Expand.size` | `lit`, `input_axis`, `node` | `lit`, `input_axis`, `node` |
+  | `Reshape.new_shape[*]` | `lit`, `input_axis`, `node` | `lit`, `input_axis`, `node` |
+  | `Pad.padding[*].before/after` | `lit`, `input_axis`, `node` | `lit`, `input_axis`, `node` |
+  | `Shrink.bounds[*].start` | `lit`, `input_axis`, `node` | `lit`, `input_axis`, `node` |
+  | `Shrink.bounds[*].end` | `lit`, `input_axis`, `node`, `to_end` | `lit`, `input_axis`, `node`; empty when value is `to_end` |
+  | `Stride.strides[*]` | `lit`, `input_axis`, `node` | `lit`, `input_axis`, `node` |
+
+  `sym` is illegal in every executable owner. An owner/tag pair absent
+  from the table is invalid; there is no generic permissive arm;
 - validate the tensor operand, axis, input/output ranks, and exact output-axis
-  mapping before encode and after exact-version decode;
-- reject v6, versionless, future, string-size, executable `sym`, and
-  illegal `to_end` spellings before IR consumption; no legacy
+  mapping, plus every equality-witness slot, dtype, rank, uniqueness, canonical
+  order, and liveness edge, before encode and after exact-version decode;
+- reject v6, #1298-only v7, versionless, future, string-size, executable
+  `sym`, and owner-illegal `to_end` spellings before IR
+  consumption; no legacy
   conversion or default exists. Named values must already be resolved through
   their structural witness before encoding;
 - update stable hash/prove/Beacon fixtures and every compiler-API or binding
@@ -526,38 +627,43 @@ scripts/runtime_extent_oracle.py --phase 1`. The runner executes
 supporting leg and the diagnostic census. The focused test confirms the
 language-level dtype rows only; it is not GPU completion evidence.
 
-### Phase 2 -- runtime extent representation, WireDag v7, then one resolver
+### Phase 2 -- runtime extent representation, WireDag v8, then one resolver
 
 **Entry requirements:** Phase 0; [#1112]'s HIP carrier/guard/widening and Metal
 audit landed with focused width, capacity, and guard tests; both target suites
 build and their hardware-availability smoke reports are recorded at the exact
 head; #1298 is closed and its complete dynamic-axis/window oracle passes at the
 integration head; and the exact normative and WireDag changes are ready to land
-atomically. The C5 runtime-extent groups cannot be an entry gate because this
+atomically. The entry record verifies #1298 consumed its distinct v7 schema;
+the C5 runtime-extent groups cannot be an entry gate because this
 phase creates them.
 
 **Deliver in order:** first amend `spec/05`'s closed `RtDim`
-and [05-OP-7] representation to admit the structural tensor-axis witness and
+and [05-OP-7] representation to admit `GuardedRtDim`, the
+structural tensor-axis witness, and ordered executable equality witnesses, and
 require named values resolved before executable IR; amend `spec/06` for
 rank-zero bound slices and batch-varying extents; and amend `spec/10`
-for WireDag v7. Write the derived positive, negative, and transform test stubs
-before implementation. Then deliver C2.1-C2.5 and C6 across all in-memory,
-target, transform, and wire consumers, followed by C2.6 deletion. Close
+for the next monotonic WireDag version (v8 from the current v6 baseline).
+Write the derived positive, negative, equality-witness, owner-matrix, and
+transform test stubs before implementation. Then deliver C2.1-C2.6 and C6
+across all in-memory, target, transform, and wire consumers, followed by C2.7
+deletion. Close
 [#1266], [#569], [#597], and [#609]. [#578] remains open; commits that improve
 its mechanism use `Part of #578` until its complete rank-polymorphic
 acceptance reproducer is green under the owning rank-polymorphism work.
 
 **Frozen at exit:** amended `spec/05`/`spec/06` atoms;
-`Expand.size: RtDim`; structural tensor-axis and scalar input
+`Expand.size: GuardedRtDim`; structural tensor-axis, scalar input,
+and ordered equality-witness
 invariants; transform behavior for every bound-dependency class;
-WireDag v7; no provenance-rejection construct; one static folder; all-lane
+WireDag v8; no provenance-rejection construct; one static folder; all-lane
 guard placement.
 
 **Oracle:** `uv run --managed-python --python 3.11 --no-project python
 scripts/runtime_extent_oracle.py --phase 2`, including host, HIP, Metal,
 WireDag, #569 transformation, every transform-bound class, named-dimension
-witnesses, zero, and negative rows owned by this phase, plus the composed
-exact-head #1298 oracle.
+witness sets and guards, zero, and negative rows owned by this phase, plus the
+composed exact-head #1298 oracle.
 
 ### Phase 3 -- deferral totality and deterministic settlement
 
@@ -566,15 +672,16 @@ amendment; [#1341]'s ordered-store mechanism.
 
 **Deliver:** the opaque `Inferred` carrier, mandatory
 `consume_pending` choke point, exhaustive generated use-site registry,
-all recursive composite-carrier and non-builtin rows, comparison-family
+closed `ExpectedShapeEvidence` decision matrix, all recursive
+composite-carrier and non-builtin rows, comparison-family
 constraint routing, source-order stores, compile-fail bypass mutations, and
 generated action tests. Close [#1265] when its complete reproducer is green.
 Use `Part of #1338`; close #1338 only if every remaining acceptance row
 owned by that issue is green, otherwise leave it open for its external work.
 
-**Frozen at exit:** carrier privacy boundary, registry identities, normative
-action mapping, recursive composite dispositions, settlement order, and K-run
-count.
+**Frozen at exit:** carrier privacy boundary, registry identities, evidence
+variant set, normative action mapping, recursive composite dispositions,
+settlement order, and K-run count.
 
 **Oracle:** `uv run --managed-python --python 3.11 --no-project python
 scripts/runtime_extent_oracle.py --phase 3`; every action row and K fresh
@@ -588,8 +695,8 @@ typed interim ratchet; then land C4.4 across Eval/C/HIP/Metal. Close [#665]
 and [#592].
 
 **Frozen at exit:** `AxisSource` and `OpExtentRule`
-variant sets, one-source-per-output-axis cardinality, and removal of
-runtime-extent name recovery.
+variant sets, final-DAG derivation point, one-source-per-output-axis
+cardinality, and removal of runtime-extent name and equality recovery.
 
 **Oracle:** `uv run --managed-python --python 3.11 --no-project python
 scripts/runtime_extent_oracle.py --phase 4` turns the named interim rows from
