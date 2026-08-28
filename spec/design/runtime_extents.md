@@ -74,9 +74,10 @@ through a typed implementation receipt, to exact execution.
    on a bare or borrowed variable, `let`-bound aliases through a lexically
    scoped provenance map, and applications of a fixed arithmetic set.
    Everything else hits a fail-closed catch-all arm. A record field access
-   ([#1266]) and the canonical pipe spelling `x |> shape(0) |> cast(int64)`
-   that `chelis fmt` itself emits ([#569]) are missing arms of that match,
-   not defects in the language; the
+   ([#1266]) and the canonical pipe spelling `x |> shape(0) |> cast(int64)`,
+   which `chelis fmt` keeps canonical and lint's autofix produces once the
+   walk no longer rejects it ([#569]), are missing arms of that match, not
+   defects in the language; the
    symbolic-rank body ([#578]) is rejected by the separate rank-polymorphism
    gate in `crates/chelis-types/src/infer/common.rs:1630-1716`, whose
    legality half belongs to the rank-polymorphism plans.
@@ -125,7 +126,8 @@ through a typed implementation receipt, to exact execution.
    4259`). `vmap` (`crates/chelis-ir/src/vmap.rs:12`) prepends the batch axis
    to every node including rank-0 scalars and has no `Shape` arm;
    `chelis_ir::verify::verify`, which would reject the rank-1 bound source
-   (`verify.rs:518-522`, `verify.rs:1471-1479`), runs only in tests, so on
+   (`verify.rs:518-522`, `verify.rs:1471-1479`), runs only in tests and at
+   the end of `grad_dag` (`grad.rs:562`), so on
    the build and eval paths a vmapped `shape()` bound silently reads the
    batch extent and both lanes agree on the wrong result ([#1378]). The checker
    rejects a zero size (`infer/app_tensor.rs:985-996` and `1184-1193`)
@@ -231,7 +233,7 @@ fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
   tensor[a, f32]` uses the same owner-specific carrier: a tensor witness
   becomes `InputAxis` in an `expand` size, stays `Sym` in a `reshape`
   target, and is a materialized `Node` for the other three; a literal
-  instantiation becomes `Lit`; a scalar witness becomes `Node`. The typed
+  instantiation becomes `Lit`. The typed
   environment maps binder identity, never
   spelling, to its witnesses. The reshape-only `Sym` target is the carrier
   `spec/05` §2.4.1 defines and is not changed by this plan; its runtime
@@ -259,7 +261,7 @@ fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
 - **C2.3 Every result is constructed.** The checker always constructs an
   `expand` result tensor whose rank is the operand rank or the operand rank
   plus one, stamps complete type metadata, and validates a declared or
-  ascribed rank and dimensions against it. The early exit that causes
+  ascribed rank, and a literal claim against a literal size, against it. The early exit that causes
   [#597] and [#609] is deleted.
 - **C2.4 Equality classes are derived, not stored.** Every stamped `Dim`
   claim, a binder name or a literal, that the checker attached to more than
@@ -451,7 +453,8 @@ fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource>;
 
 - **C4.1 Cardinality and ownership.** `output_axis_sources` is one
   exhaustive match over `RiscOp`; a check on every production path (eval
-  and build, not only the test-only `chelis_ir::verify::verify`) requires
+  and build, not only `chelis_ir::verify::verify`, which runs in tests and
+  at the end of `grad_dag`) requires
   its result to have exactly the output rank with no omitted or duplicated
   axis, so a new operation fails to compile and a missing flow through an
   existing operation fails that check. `ExternalAxis` names the exact external
@@ -530,8 +533,8 @@ the properties below; the generator, not this document, enumerates rows.
    proved identity beside a cross-tensor read that gets a guard, and a
    full-axis symbolic `shrink` `(0, ToEnd)` whose extent equals the input's
    but whose identity and guard are fresh; [#1374], [#1375], and [#1376] are
-   the named rows that start at `silent_unguarded`, and [#1377] the one that
-   starts at `lane_divergent`.
+   the named rows that start at `silent_unguarded`, and [#1377] and [#1379]
+   the ones that start at `lane_divergent`.
 2. **GPU build and execution.** The same rows compile and execute in the HIP
    and Metal correctness suites, not merely through capability-gate
    rejection tests:
@@ -632,8 +635,9 @@ only and may land before Slice B.
 
 **Entry requirements:** none from [#1298] or [#1112]: the C carrier is
 already `int64`, the HIP lane keeps its Load-declared symbolic `expand`
-through `InputAxis`, and node-valued axes stay rejected exactly as they are
-on `main` until [#1298] lands.
+through `InputAxis`, and node-valued axes keep their `main` baseline
+(`check` accepts, `chelis eval` executes, C, HIP, and Metal reject at
+lowering; recorded `lane_divergent`) until [#1298] lands.
 
 **Deliver in order:** the oracle runner with its generated corpus,
 checked-in per-row baseline, allowed-transition validation, and exact-head
@@ -651,9 +655,10 @@ next monotonic `WIRE_DAG_SCHEMA_VERSION` at landing, coordinated with [#1298]
 so the two migrations use distinct successive versions and both trackers,
 `spec/10`, fixtures, hashes, and rejected-version controls update together;
 and the regenerated typed wire capacity census. The provenance walk and the
-lowerer's rejection sites are untouched (C2.7). Close [#1367], [#597],
-[#609], [#1378], and [#592] if its reproducer is green once the size carrier
-lands. [#578] remains open; commits that improve its mechanism use `Part of
+lowerer's rejection sites are untouched (C2.7). Close [#1367], [#609],
+[#1378], and [#592] if its reproducer is green once the size carrier lands;
+[#597] waits for Slice B's removal of the lowering override that inserts
+the extra axis. [#578] remains open; commits that improve its mechanism use `Part of
 #578` until its complete rank-polymorphic acceptance reproducer is green
 under the owning rank-polymorphism work.
 
@@ -664,17 +669,18 @@ bound-slice rule; the wire schema version; the provenance walk's acceptance
 decisions unchanged.
 
 **Oracle:** `uv run --managed-python --python 3.11 --no-project python
-scripts/runtime_extent_oracle.py --phase a`: lane parity for every row the
-walk accepts today, HIP and Metal build-and-execute rows for `Lit` and
-`InputAxis` (with `Node` rows at `typed_unsupported([05-MOV-1])`), zero
-rows, rebuild-survival rows, and wire rows this slice owns; every row the
-walk rejects today stays at its recorded baseline.
+scripts/runtime_extent_oracle.py --phase a`: lane parity for every row
+`main` executes on every lane today, HIP and Metal build-and-execute rows
+for `Lit` and `InputAxis` (with `Node` rows at
+`typed_unsupported([05-MOV-1])`), zero rows, rebuild-survival rows, and wire
+rows this slice owns; every other row stays at its recorded baseline.
 
 ### Slice B - one resolver: sources, classes, guards, and the walk's deletion
 
-**Entry requirements:** Slice A. [#1112] for the HIP guard rows only: HIP
-must carry `int64` extents to compare them exactly, so host, C, and Metal
-rows may exit first with the HIP rows at `typed_unsupported(#1112)`.
+**Entry requirements:** Slice A. [#1112] for the HIP guard rows over
+device-resident extents only: HIP must carry `int64` device extents to
+compare them exactly, so host, C, Metal, and host-emitted HIP rows may exit
+first with the device-resident HIP rows at `typed_unsupported(#1112)`.
 [#1298] for the node-valued `InputAxis` axis rows only, which sit at
 `typed_unsupported(#1298)` on every lane until then.
 
@@ -689,8 +695,8 @@ by the two derivations; then, in the same change, deletion of `SizeClass`,
 `classify_expand_size`, `classify_arith_app`,
 `sourceless_expand_size_error`, `Env::size_provenance`, and the lowerer's
 two rejection sites, and, once nothing reads it, of `shape_deps`. Close
-[#1266], [#569], [#665], [#1374], [#1375], [#1376], [#1377], and any residue
-of [#592].
+[#1266], [#569], [#597], [#665], [#1374], [#1375], [#1376], [#1377], [#1379],
+and any residue of [#592].
 
 **Frozen at exit:** the `RuntimeDimClass` shape, canonical class and member
 order, the guard placement realization per lane, the `AxisSource` variant
@@ -733,8 +739,8 @@ class completion oracle and ends with `RUNTIME EXTENT ORACLE: PASS`.
 ### Interlocks
 
 - **[#729] / [#1112]:** owns the remaining HIP `int64` metadata carrier.
-  Slice B's HIP guard rows depend on it; nothing else here does, and this
-  plan neither reparents nor closes it.
+  Slice B's HIP guard rows over device-resident extents depend on it;
+  nothing else here does, and this plan neither reparents nor closes it.
 - **[#1298]:** owns computed runtime `shape` axes and runtime reduction
   windows. This plan admits `RtAxis::Node` only after that runtime axis
   lands, and composes its oracle only for those rows. Whichever of [#1298]
@@ -772,7 +778,7 @@ class completion oracle and ends with `RUNTIME EXTENT ORACLE: PASS`.
 | [#1367] | stale `int32` extent and Form-3 guidance | A |
 | [#1266] | record projection rejected by provenance walk | B |
 | [#569] | real lint/fmt transformation breaks a legal extent | B |
-| [#597] | static expand gets no evaluator type metadata | A |
+| [#597] | static expand gets no type metadata and lowering inserts an axis | B |
 | [#609] | wrong-rank ascription is accepted | A |
 | [#665] | movement-op runtime wildcard is lost across Expand | B |
 | [#592] | grad-backward Expand size cannot be traced to a Load | A (size carrier); B for any kept-axis residue |
@@ -781,6 +787,7 @@ class completion oracle and ends with `RUNTIME EXTENT ORACLE: PASS`.
 | [#1376] | same-tensor read on the set axis under a foreign claim, no guard | B |
 | [#1377] | eval executes a literal claim over a cross-tensor read that C guards | B |
 | [#1378] | vmap batches a `shape()` bound so it reads the batch extent | A |
+| [#1379] | arithmetic size under a named claim: eval unguarded, compiled lanes reject | B |
 | [#1265] | comparison consumer never selects the deferred shape | C |
 | [#1338] | coupled defaults settle nondeterministically | C / [#1341] mechanism |
 | [#578] | mechanism evidence only; full rank-polymorphic repro stays open | external rank-polymorphism work |
@@ -958,3 +965,4 @@ decides the underlying rule, and what replaces it.
 [#1376]: https://github.com/Chelis-Lang/chelis/issues/1376
 [#1377]: https://github.com/Chelis-Lang/chelis/issues/1377
 [#1378]: https://github.com/Chelis-Lang/chelis/issues/1378
+[#1379]: https://github.com/Chelis-Lang/chelis/issues/1379

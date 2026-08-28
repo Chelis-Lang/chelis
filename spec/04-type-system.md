@@ -1364,19 +1364,20 @@ access whose shape depends on the guarded extent. A guard whose operands are
 all interface values (an input tensor's axis, a scalar parameter, or a
 literal) is evaluated at function entry, in declared signature order, before
 any other operation of the function runs. A guard that compares a locally
-computed value (a `shape()` read, a cast, checked integer arithmetic, a
-user-function result, or an extent an operation computes) is evaluated after
-its producers and takes the source position of the operation that introduces
-the guarded extent: an independent effect or trap that precedes that operation
-in source order is observed first, and one that follows it is observed only if
-the guard passes. Guards ready at the same source position are evaluated in
-declaration order. These constraints are the complete observable contract; a
-guard and an operation related by neither data dependence nor source order may
-be evaluated in either order. A failing equality guard traps `Domain` under
-the operation that introduces the guarded extent (for a guard whose operands
-are all interface values, the `load` of the later witness in signature order)
-and names the disagreeing sources; a failing non-negativity guard traps
-`Domain` under the owning movement operation.
+computed value (checked integer arithmetic, a user-function result, or an
+extent an operation computes) is evaluated after its producers and takes the
+source position of the operation that introduces the guarded extent: an
+independent effect or trap that precedes that operation in source order is
+observed first, and one that follows it is observed only if the guard passes.
+Guards ready at the same source position are evaluated in declaration order.
+These constraints are the complete observable contract; a guard and an
+operation related by neither data dependence nor source order may be evaluated
+in either order. A failing equality guard traps `Domain` under the operation
+that introduces the guarded extent (for a guard whose operands are all
+interface values, the `load` primitive of the later witness in signature
+order, spec/05-risc-primitives.md §2.5) and names the disagreeing sources; a
+failing non-negativity guard traps `Domain` under the owning movement
+operation.
 Every execution mode places guards by this rule.
 
 For the movement primitives, symbolic-dim pass-through is
