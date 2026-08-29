@@ -198,7 +198,7 @@ in 0.18.3, 0.18.4, and 0.18.5 (chelis#1349).
   three registries are the normative authority.
 
 - **BREAKING (stdlib): the exported numeric surface is aligned with
-  `[05-OP-35]`'s 84 definitions (chelis#1344, chelis#1314).** Three
+  `[05-OP-35]`'s 84 definitions (chelis#1293, chelis#1314).** Three
   exports are removed outright: the duplicate prelude JSON
   representation, the legacy JSON and assertion builtin aliases, and
   `init/xavier::sample`, which was never a language-level definition.
@@ -459,7 +459,8 @@ in 0.18.3, 0.18.4, and 0.18.5 (chelis#1349).
   the caller's alias-aware machinery. Retain and block-close release
   cancel, so the fix is leak-neutral (zero leaked-byte delta over 4000
   calls). One residual shape — a transfer through a `__call_argN`
-  temp — is re-confirmed broken and recorded on chelis#1344.
+  temp — is re-confirmed broken and recorded on chelis#1344 under the
+  chelis#1286 ownership class, which stays open.
 
 - **A cross-package constructor collision silently emitted wrong C
   (chelis#1271).** Two packages in one dependency graph may each
@@ -595,10 +596,14 @@ in 0.18.3, 0.18.4, and 0.18.5 (chelis#1349).
 
 ### Known issues
 
-- **chelis#1344 residual.** A transfer through a `__call_argN` temp
-  still over-releases: one creation, zero retains, two releases. It is
-  invisible to ASan because the underflow is inside the uninstrumented
-  runtime.
+- **Compiled value ownership is not closed (chelis#1286).** Four live
+  shapes: a transfer through a `__call_argN` temp still over-releases
+  (one creation, zero retains, two releases, invisible to ASan because
+  the underflow is inside the uninstrumented runtime); a mixed `if` with
+  one aliasing and one fresh arm leaks the fresh arm's allocation
+  (chelis#1352); a call returning its argument double-releases when that
+  argument is a fresh literal (chelis#1356); and compiled recursive defs
+  retain every frame's tensor intermediates (chelis#1206).
 - **chelis#1339.** A `def` capturing a top-level binding declared
   *later* passes `check` when that binding is type-annotated, and the
   compiled program reads the unassigned file-scope static: `eval` gives
@@ -614,9 +619,12 @@ in 0.18.3, 0.18.4, and 0.18.5 (chelis#1349).
 - **chelis#1345.** `ChelisGpuTensor` retains fixed-rank `int32`
   metadata; moving it is a separate ABI change to that struct and its
   consumers.
-- **chelis#1357, chelis#1359, chelis#1372, chelis#1373, chelis#1374,
-  chelis#1375, chelis#1376, chelis#1379** were filed from this cycle's
-  reviews and are not fixed here.
+- **chelis#1359, chelis#1372, chelis#1373, chelis#1374, chelis#1375,
+  chelis#1376, chelis#1379** were filed from this cycle's reviews and
+  are not fixed here. The four chelis#1374..#1376/#1379 entries are
+  runtime-extent guards that spec/04 §4.7 now decides but nothing yet
+  enforces; chelis#1359 is an eval-vs-compiled disagreement on top-level
+  record-field observation labels.
 - **HIP device execution was not exercised for this release.** The
   development workstation for several of these changes has no `hipcc`
   or `rocminfo`, so the HIP entries above are derived from emitted
