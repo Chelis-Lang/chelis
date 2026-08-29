@@ -239,9 +239,9 @@ PIPELINE_CORE_COMPILE_FAIL: list[str] = [
 # deliberately does not install it, while workspace shard 2 installs it and
 # has already built the workspace, so the oracle's two
 # `nextest run` calls and its `cargo build -p chelis-cli` are warm. The
-# sibling `Verify nextest profile coverage` step in that job is the same
-# disposition for the same reason. `--local` keeps it: a developer machine
-# running the gate already has nextest.
+# separate `Verify nextest profile coverage` step also needs nextest, but runs
+# on shard 1 to balance the hosted work. `--local` keeps both obligations: a
+# developer machine running the gate already has nextest.
 UNREPRESENTABLE_DOMAIN_ORACLE: list[str] = [
     MANAGED_PYTHON,
     "scripts/unrepresentable_domain_oracle.py",

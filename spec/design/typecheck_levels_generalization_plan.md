@@ -471,7 +471,7 @@ Chelis language semantics.
 | Persisted variable is re-generalized by new code | Typed resumption at both non-empty entry points plus stacked tests |
 | Repeated persisted resumption grows obsolete level history | Resume-floor compaction plus repeated-cycle size and semantic-equivalence tests |
 | An old bincode payload is decoded as new state | Exact V10/V6/V3 payload bumps and stale-version tests; envelope stays V1 |
-| Parity misses heavy checker tests behind nextest's default filter | `--ignore-default-filter`, non-ignored acceptance tests, and a dedicated two-partition CI suite with a fail-closed aggregate |
+| Parity misses heavy checker tests behind nextest's default filter | `--ignore-default-filter`, non-ignored acceptance tests, and a dedicated four-partition CI suite with a fail-closed aggregate |
 | Parity passes while production still sweeps | Independent reference-disabled zero-visit assertion in the authoritative oracle |
 | Quantifier reordering creates false parity failures | Deterministic ID ordering and exact ordered-scheme equality |
 | Performance claim expands into chelis#1205 | Generated binding corpus and explicit nested-lowering exclusion |
