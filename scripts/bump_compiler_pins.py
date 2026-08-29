@@ -64,6 +64,22 @@ changes, seven categories of files must change with it:
    locks are NOT auto-synced: cargo writes them, but only when something
    re-resolves the fixture.
 
+8. Checked-in test-fixture data that hand-pins the compiler. A Rust
+   fixture built from a string literal auto-syncs through category (1),
+   but a fixture that lives on disk as `.toml`/`.json` data cannot: it is
+   `include_str!`'d verbatim and written to a temp package, where
+   `validate_manifest` rejects any pin but the running binary's. The
+   `crates/chelis-reef/tests/fixtures/pipeline_parity/` set is the
+   instance -- two `reef.toml` manifests plus the frozen
+   `expected_schema.json` / `expected_shell.json` captures that record the
+   same pin. It arrived after the 0.18.4 bump, went stale at 0.18.5 (the
+   active rejected leg failed with `package.compiler must be =0.18.5`
+   where it expected the frozen type errors), and was hand-repaired by the
+   release operator both times. `expected_hashes.txt` is deliberately NOT
+   in this set: `BASELINE.md` records those values as nondeterministic
+   across machines and no longer asserted, and the leg that reads them is
+   `#[ignore]`d pending chelis#1198.
+
 This script is the single, scriptable entry point for the release bump.
 These tripwires fail loudly when the categories drift, pointing future
 operators at this script:
@@ -148,6 +164,24 @@ FOLLOWUP_LOCK_REBUILD_DIRS: list[Path] = [
     package_root
     for package_root in PINNED_REAL_LOCK_DIRS
     if package_root != CHELIS_STD_DIR
+]
+
+# Checked-in fixture data that hand-pins the compiler (category 8). These
+# are `include_str!`'d by their tests and written verbatim to a temp
+# package, so they cannot auto-sync the way a Rust string literal does.
+# `expected_hashes.txt` is deliberately absent: those values are
+# nondeterministic across machines and the leg reading them is `#[ignore]`d
+# (chelis#1198).
+PIPELINE_PARITY_FIXTURES = (
+    REPO_ROOT / "crates/chelis-reef/tests/fixtures/pipeline_parity"
+)
+PINNED_FIXTURE_TOML_FILES: list[Path] = [
+    PIPELINE_PARITY_FIXTURES / "accepted/reef.toml",
+    PIPELINE_PARITY_FIXTURES / "rejected/reef.toml",
+]
+PINNED_FIXTURE_JSON_FILES: list[Path] = [
+    PIPELINE_PARITY_FIXTURES / "accepted/expected_schema.json",
+    PIPELINE_PARITY_FIXTURES / "accepted/expected_shell.json",
 ]
 
 # Manifests of the out-of-workspace compile-fail fixtures (category 7).
@@ -257,6 +291,33 @@ def bump_compiler_pin(path: Path, version: str, dry_run: bool) -> FileChange | N
     m = pattern.search(text)
     if m is None:
         sys.exit(f"error: no `compiler = \"...\"` line in {path}")
+    before = m.group(2)
+    if before == expected_after:
+        return None
+    new_text = pattern.sub(
+        lambda mm: f"{mm.group(1)}{expected_after}{mm.group(3)}",
+        text,
+        count=1,
+    )
+    if not dry_run:
+        path.write_text(new_text)
+    return FileChange(path, before, expected_after)
+
+
+def bump_json_compiler_pin(path: Path, version: str, dry_run: bool) -> FileChange | None:
+    """Rewrite a `"compiler": "=<version>"` field in a frozen JSON capture.
+
+    Line-based rewrite (not a json round-trip) for the same reason
+    `bump_hull_manifest_pin` uses one: these captures are compared
+    byte-for-byte against `serde_json::to_string_pretty` output, so only
+    the pin may move.
+    """
+    text = path.read_text()
+    expected_after = f"={version}"
+    pattern = re.compile(r'^(\s*"compiler"\s*:\s*")([^"]+)(".*)$', re.MULTILINE)
+    m = pattern.search(text)
+    if m is None:
+        sys.exit(f'error: no `"compiler": "..."` field in {path}')
     before = m.group(2)
     if before == expected_after:
         return None
@@ -451,6 +512,20 @@ def main(argv: list[str]) -> int:
         if not toml_path.exists():
             sys.exit(f"error: pinned-toml file is missing: {toml_path}")
         ch = bump_compiler_pin(toml_path, args.version, args.dry_run)
+        if ch is not None:
+            changes.append(ch)
+
+    for toml_path in PINNED_FIXTURE_TOML_FILES:
+        if not toml_path.exists():
+            sys.exit(f"error: pinned fixture toml is missing: {toml_path}")
+        ch = bump_compiler_pin(toml_path, args.version, args.dry_run)
+        if ch is not None:
+            changes.append(ch)
+
+    for json_path in PINNED_FIXTURE_JSON_FILES:
+        if not json_path.exists():
+            sys.exit(f"error: pinned fixture json is missing: {json_path}")
+        ch = bump_json_compiler_pin(json_path, args.version, args.dry_run)
         if ch is not None:
             changes.append(ch)
 
