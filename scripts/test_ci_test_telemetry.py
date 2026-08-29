@@ -181,14 +181,39 @@ class OutputContractTests(unittest.TestCase):
 
             first = root / "first.xml"
             second = root / "second.xml"
-            telemetry.write_merged_junit(
-                report_for("first", reversed_order=False), first
-            )
-            telemetry.write_merged_junit(
-                report_for("second", reversed_order=True), second
-            )
+            first_json = root / "first.json"
+            second_json = root / "second.json"
+            first_report = report_for("first", reversed_order=False)
+            second_report = report_for("second", reversed_order=True)
+            telemetry.write_merged_junit(first_report, first)
+            telemetry.write_merged_junit(second_report, second)
+            telemetry.write_json_report(first_report, first_json)
+            telemetry.write_json_report(second_report, second_json)
 
             self.assertEqual(first.read_bytes(), second.read_bytes())
+            self.assertEqual(first_json.read_bytes(), second_json.read_bytes())
+
+    def test_json_overlap_owners_are_canonical_across_shard_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            one = root / "one.xml"
+            two = root / "two.xml"
+            one.write_text(_junit([("bin", "same", 1.0)]), encoding="utf-8")
+            two.write_text(_junit([("bin", "same", 2.0)]), encoding="utf-8")
+            shard_one = telemetry.parse_shard("workspace", one)
+            shard_two = telemetry.parse_shard("dtype", two)
+            forward = telemetry.build_report(
+                (shard_one, shard_two), require_disjoint=False
+            )
+            reverse = telemetry.build_report(
+                (shard_two, shard_one), require_disjoint=False
+            )
+            forward_json = root / "forward.json"
+            reverse_json = root / "reverse.json"
+            telemetry.write_json_report(forward, forward_json)
+            telemetry.write_json_report(reverse, reverse_json)
+
+            self.assertEqual(forward_json.read_bytes(), reverse_json.read_bytes())
 
     def test_outputs_are_machine_readable_and_timing_check_compatible(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

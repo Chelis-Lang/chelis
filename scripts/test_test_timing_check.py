@@ -220,7 +220,7 @@ class EvaluateTests(unittest.TestCase):
     def test_baselined_test_over_absolute_ceiling_is_always_flagged(self):
         # A fresh baseline must not legalize an ordinary test above the
         # absolute ceiling. This observation is below its 2x relative budget
-        # (40s) but still violates the suite-wide 30s contract.
+        # (40s) but is still classified by the 30s diagnostic threshold.
         timings = {"bin_a::existing": 31.0}
         baseline = {"bin_a::existing": 20.0}
         flags = tc.evaluate(timings, baseline, tolerance=2.0, absolute_ceiling=30.0)

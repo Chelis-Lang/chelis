@@ -19,12 +19,12 @@ baselines need a real jump, not noise, while large baselines are
 unaffected (a 5s -> 12s regression clears both gates easily). This is the
 "several unrelated tests fail at near-identical times = CPU starvation,
 not code" pattern; the floor stops that starvation from gating PRs while
-keeping genuine, sustained regressions blocking.
+keeping genuine, sustained regressions visible.
 
 Thresholds are config, never hardcoded:
 
   - `scripts/test_timing_config.json` holds `tolerance` (a multiplier),
-    `absolute_ceiling` (the hard per-test seconds limit), and
+    `absolute_ceiling` (the per-test diagnostic threshold), and
     `min_regression_delta` (seconds,
     the absolute slowdown floor below which a multiplicative "regression"
     is treated as jitter; optional, defaults to 0.0 for back-compat).

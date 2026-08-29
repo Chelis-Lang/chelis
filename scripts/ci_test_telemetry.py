@@ -4,7 +4,7 @@
 Each CI test process writes one JUnit document. This helper makes the shard
 boundary explicit: every expected report is named on the command line,
 missing or malformed reports fail loudly, and hash partitions may be required
-to be disjoint before their XML is handed to the blocking timing budget.
+to be disjoint before their XML is handed to the timing diagnostics.
 
 Cross-lane reports may retain overlap because the workspace, dtype,
 generalization, and macOS lanes intentionally exercise some of the same test
@@ -203,7 +203,7 @@ def write_merged_junit(report: Report, path: Path) -> None:
                     "name": observation.name,
                     # Preserve the parsed float exactly across the merged
                     # artifact. Rounding here can move a value just above the
-                    # blocking timing ceiling onto the allowed boundary.
+                    # configured timing threshold onto the allowed boundary.
                     "time": repr(observation.seconds),
                 },
             )
@@ -222,10 +222,10 @@ def _report_payload(report: Report) -> dict[str, object]:
                 "label": shard.label,
                 "test_count": len(shard.observations),
             }
-            for shard in report.shards
+            for shard in sorted(report.shards, key=lambda item: item.label)
         ],
         "overlaps": {
-            test_id: list(owners)
+            test_id: sorted(owners)
             for test_id, owners in sorted(report.overlaps.items())
         },
         "slowest": [
