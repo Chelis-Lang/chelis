@@ -1536,7 +1536,16 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("fail-fast: false", shard_block)
         self.assertIn("scripts/gate.py integration --tests-only", shard_block)
         self.assertIn("scripts/gate.py integration --support-only", shard_block)
-        self.assertIn("if: matrix.shard == 2", shard_block)
+        self.assertIn(
+            "- name: Gate (integration support subset)\n"
+            "        if: matrix.shard == 2",
+            shard_block,
+        )
+        self.assertIn(
+            "- name: Verify nextest profile coverage\n"
+            "        if: matrix.shard == 1",
+            shard_block,
+        )
         self.assertEqual(shard_block.count("--support-only"), 1)
         self.assertIn(
             "needs: [changes, workspace-tests-shard]",
