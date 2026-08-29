@@ -660,7 +660,7 @@ jobs:
     # always false. `needs: [changes]` is what makes the output readable.
     needs: [changes]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
-    # Strip debuginfo; see lint-and-unit for the chelis#392 rationale.
+    # Strip debuginfo; see lint-rust for the chelis#392 rationale.
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
@@ -672,7 +672,7 @@ jobs:
       - name: Free disk space (Ubuntu)
         uses: ./.github/actions/free-disk-space
 
-      # apt-get under retry (scripts/ci_apt_get.py); see the lint-and-unit
+      # apt-get under retry (scripts/ci_apt_get.py); see the lint-rust
       # job for the transient-mirror-reset rationale.
       - name: Install C dependencies
         run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
@@ -680,7 +680,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # See lint-and-unit job for why this runs before the cargo cache
+      # See lint-rust for why this runs before the cargo cache
       # and why the version is pinned to v8.1.0 rather than @v8.
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
@@ -841,8 +841,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-workspace
-          # Both parallel jobs restore the same cache; only workspace-tests
-          # saves it, avoiding a second multi-GB entry in the 10 GB cache pool.
+          # Both parallel jobs restore the same cache; only matrix shard 1 of
+          # workspace-tests-shard saves it, avoiding a second multi-GB entry.
           save-if: false
 
       # The wire and bindings census binaries both invoke nested cargo rustdoc
@@ -923,8 +923,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-workspace
-          # Restore the workspace cache but leave the single writer in the
-          # workspace-tests job, avoiding another multi-GB cache entry.
+          # Restore the workspace cache but leave the single writer in matrix
+          # shard 1 of workspace-tests-shard, avoiding another multi-GB entry.
           save-if: false
 
       - name: Install cargo-nextest
@@ -1081,7 +1081,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # See lint-and-unit job for why this runs before the cargo cache
+      # See lint-rust for why this runs before the cargo cache
       # and why the version is pinned to v8.1.0 rather than @v8.
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
@@ -1279,7 +1279,7 @@ jobs:
       CHELIS_C_TEST_EXTRA_FLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer
       ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
       UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-      # Strip debuginfo; see lint-and-unit for the chelis#392 rationale.
+      # Strip debuginfo; see lint-rust for the chelis#392 rationale.
       # ASan/UBSan still report file:line from the C side; the Rust
       # debuginfo dropped here does not affect the sanitizer findings.
       CARGO_PROFILE_DEV_DEBUG: 0
@@ -1292,7 +1292,7 @@ jobs:
       - name: Free disk space (Ubuntu)
         uses: ./.github/actions/free-disk-space
 
-      # apt-get under retry (scripts/ci_apt_get.py); see the lint-and-unit
+      # apt-get under retry (scripts/ci_apt_get.py); see the lint-rust
       # job for the transient-mirror-reset rationale.
       - name: Install C dependencies
         run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
@@ -1380,7 +1380,7 @@ jobs:
   docs:
     name: Docs
     runs-on: ubuntu-latest
-    # Strip debuginfo; see lint-and-unit for the chelis#392 rationale.
+    # Strip debuginfo; see lint-rust for the chelis#392 rationale.
     # This job compiles the chelis-e2e skill-suite test binary.
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
