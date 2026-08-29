@@ -123,13 +123,34 @@ class FilterTextTests(unittest.TestCase):
 
     def test_every_profile_runs_to_completion_after_failures(self):
         config = tomllib.loads(NEXTEST_TOML.read_text())
-        for profile in ("default", "ci", "nightly"):
+        for profile in ("default", "ci", "ci-full", "nightly"):
             with self.subTest(profile=profile):
                 self.assertIs(
                     config["profile"][profile].get("fail-fast"),
                     False,
                     f"nextest profile {profile!r} hides later failures",
                 )
+
+    def test_full_ci_telemetry_profile_inherits_local_scope_and_writes_junit(self):
+        config = tomllib.loads(NEXTEST_TOML.read_text())
+        profile = config["profile"]["ci-full"]
+        self.assertEqual(profile.get("inherits"), "default")
+        self.assertEqual(profile.get("junit", {}).get("path"), "junit.xml")
+        self.assertNotIn(
+            "default-filter",
+            profile,
+            "ci-full must inherit the ordinary profile unless a command "
+            "explicitly passes --ignore-default-filter",
+        )
+
+    def test_contention_sensitive_recursive_parity_case_is_nightly_owned(self):
+        default_block, _ci, nightly_block = _filter_blocks()
+        selector = (
+            "binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & "
+            "test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)"
+        )
+        self.assertIn(selector, _norm(_negative_filter_inner(default_block)))
+        self.assertIn(selector, _norm(nightly_block))
 
     def test_ci_adds_only_oracle_owned_binaries_to_default_exclusion(self):
         default_block, ci_block, _nightly = _filter_blocks()

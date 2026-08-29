@@ -32,6 +32,12 @@ class FlattenedManifestTests(unittest.TestCase):
     def test_recursive_nextest_commands_flatten_to_one_exact_union(self) -> None:
         command = manifest.flattened_nextest_command(sys.executable)
         self.assertEqual(command[:4], ("cargo", "nextest", "run", "--workspace"))
+        self.assertEqual(
+            command[command.index("--profile") + 1],
+            "ci-full",
+            "the flattened CI oracle must publish JUnit telemetry without "
+            "changing its explicit filterset",
+        )
         self.assertIn("--ignore-default-filter", command)
         self.assertIn("--no-fail-fast", command)
         self.assertEqual(command.count("-E"), 1)
