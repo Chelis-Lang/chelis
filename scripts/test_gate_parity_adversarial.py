@@ -170,6 +170,29 @@ class GateParityAdversarialTests(unittest.TestCase):
             "the parity lock did NOT fail closed on a YAML-escaped command",
         )
 
+    def test_aliased_cargo_command_is_caught(self):
+        mutated = self.ci_text.replace(
+            "jobs:\n",
+            "env:\n"
+            "  HIDDEN_COMMAND: &hidden_command "
+            "cargo check -p chelis-types\n\n"
+            "jobs:\n",
+            1,
+        ).replace(
+            ANCHOR,
+            "      - name: Sneaky aliased command\n"
+            "        run: *hidden_command\n\n"
+            + ANCHOR,
+            1,
+        )
+        self.assertNotEqual(mutated, self.ci_text, "mutation did not apply")
+        result = _run_parity_against(mutated)
+        self.assertGreater(
+            len(result.failures) + len(result.errors),
+            0,
+            "the parity lock ignored an aliased cargo command",
+        )
+
     def test_underscore_job_id_with_direct_cargo_is_caught(self):
         mutated = self.ci_text.rstrip() + (
             "\n  Unclassified_job:\n"
