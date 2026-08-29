@@ -384,6 +384,10 @@ def _assert_cvc5_closure_cache(workflow: str) -> None:
 NON_GATE_JOBS = {
     "macos-workspace-shard",
     "macos-smoke",
+    # Rule-id: GATE-SCOPE-WORKSPACE-AGGREGATE -- the stable aggregate merges
+    # shard JUnit, checks timing, and publishes telemetry with Python. The
+    # workspace-tests-shard workers own the gate.py commands.
+    "workspace-tests",
     "backend-sanitizers",
     "no-ai-authorship",
     "docs",
