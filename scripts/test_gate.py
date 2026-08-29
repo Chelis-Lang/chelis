@@ -1414,6 +1414,8 @@ class CiParityTests(unittest.TestCase):
         authenticated_oracle = (
             "env:\n"
             "          GH_TOKEN: ${{ github.token }}\n"
+            "          CHELIS_TEST_SHARED_REEF_HOME: "
+            "${{ runner.temp }}/chelis-test-shared-reef\n"
             f"        {oracle_command}"
         )
         self.assertNotIn("  issues: read", top_level_permissions)
@@ -1674,15 +1676,28 @@ class CiParityTests(unittest.TestCase):
             "CHELIS_TEST_SHARED_REEF_HOME: "
             "${{ runner.temp }}/chelis-test-shared-reef"
         )
-        for job in (
-            "workspace-tests-shard",
-            "dtype-phase3-oracle",
-            "faithful-observation-phase2-oracle",
-            "generalize-sweep-oracle-shard",
-            "macos-workspace-shard",
-        ):
+        execution_steps = {
+            "workspace-tests-shard": "Gate (workspace test shard)",
+            "dtype-phase3-oracle": "Dtype Phase 0-3 oracle",
+            "faithful-observation-phase2-oracle": (
+                "Faithful observation Phase 2 oracle"
+            ),
+            "generalize-sweep-oracle-shard": (
+                "Typecheck level generalization oracle"
+            ),
+            "macos-workspace-shard": "Workspace tests",
+        }
+        for job, step in execution_steps.items():
             with self.subTest(job=job):
-                self.assertEqual(_ci_job_block(job).count(setting), 1)
+                block = _ci_job_block(job)
+                self.assertEqual(block.count(setting), 1)
+                step_start = block.index(f"- name: {step}\n")
+                step_end = block.find("\n      - name:", step_start + 1)
+                if step_end == -1:
+                    step_end = len(block)
+                execution_step = block[step_start:step_end]
+                self.assertIn("\n        env:\n", execution_step)
+                self.assertIn(setting, execution_step)
 
     def test_shared_cache_contract_rejects_an_explicit_target_override(self):
         block = _ci_job_block("faithful-observation-phase2-oracle")
