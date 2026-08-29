@@ -1144,20 +1144,52 @@ class ListOutputTests(unittest.TestCase):
 
 # A gate `run:` step is "gate-relevant" if it invokes the Rust
 # toolchain (`cargo ...`) or the Chelis CLI directly (`chelis ...`).
-# The `cargo run -p chelis-cli --bin chelis -- ...` form is already
-# covered by the `cargo ` prefix; the bare `chelis ...` form is the
-# case the original `cargo `-only filter missed (RT-2 finding). Both
-# the module docstring and
-# docs/investigations/test_toolchain_guards_design.md describe the lock
-# as covering "every `cargo`/`chelis` invocation", so the parser must
-# catch both.
-_GATE_COMMAND_PREFIXES = ("cargo ", "chelis ")
+# The command can appear after another shell command or a separator, so
+# matching only at the start would let a hand-inlined invocation evade the
+# parity lock.
+_GATE_COMMAND = re.compile(r"(?<![A-Za-z0-9_.-])(?:cargo|chelis)(?:\s|$)")
 
 
 def _is_gate_relevant_command(command: str) -> bool:
     """True if `command` is a `cargo` or `chelis` invocation that a gate
     job must route through `gate.py` rather than hand-inline."""
-    return any(command.startswith(prefix) for prefix in _GATE_COMMAND_PREFIXES)
+    return _GATE_COMMAND.search(command) is not None
+
+
+def _strip_yaml_scalar_quotes(command: str) -> str:
+    """Remove one matching YAML quote pair and its trailing comment.
+
+    This is deliberately a small scalar normalizer rather than a second YAML
+    implementation. The parity guard only needs the shell command text, but it
+    must recognize quoted scalars whose closing quote is followed by a YAML
+    comment or appears on a continuation line.
+    """
+    command = command.strip()
+    if not command or command[0] not in ("'", '"'):
+        return re.sub(r"\s+#.*$", "", command).strip()
+
+    quote = command[0]
+    index = 1
+    while index < len(command):
+        if quote == "'" and command[index] == "'":
+            if index + 1 < len(command) and command[index + 1] == "'":
+                index += 2
+                continue
+            trailing = command[index + 1 :].strip()
+            if not trailing or trailing.startswith("#"):
+                return command[1:index].replace("''", "'").strip()
+            return command
+        if quote == '"':
+            if command[index] == "\\":
+                index += 2
+                continue
+            if command[index] == '"':
+                trailing = command[index + 1 :].strip()
+                if not trailing or trailing.startswith("#"):
+                    return command[1:index].strip()
+                return command
+        index += 1
+    return command
 
 
 def _parse_ci_gate_invocations(text: str | None = None) -> dict[str, list[str]]:
@@ -1165,13 +1197,13 @@ def _parse_ci_gate_invocations(text: str | None = None) -> dict[str, list[str]]:
     list of `run:` command lines that invoke `cargo` or `chelis`
     (including the `cargo run ... chelis ... lint` form).
 
-    The parser is intentionally narrow line-based YAML-shape matching:
-    it tracks the current `<job>:` header (two-space indent under
-    `jobs:`) and collects single-line `run:` values whose command
-    starts with `cargo ` or `chelis ` (see `_is_gate_relevant_command`).
-    Matching outer YAML quotes are removed before classifying the command.
-    Literal or folded block-scalar indicators are recorded as a sentinel so
-    `test_no_multiline_run_in_gate_jobs` can reject them in gate workers.
+    The parser is intentionally narrow line-based YAML-shape matching: it
+    tracks the current `<job>:` header (two-space indent under `jobs:`), then
+    reconstructs plain and quoted `run:` scalars across indented continuation
+    lines. Matching outer YAML quotes and YAML comments are removed before
+    classifying the command. Literal or folded block-scalar indicators are
+    recorded as a sentinel so `test_no_multiline_run_in_gate_jobs` can reject
+    them in gate workers.
     """
     if text is None:
         text = CI_YML.read_text()
@@ -1179,19 +1211,43 @@ def _parse_ci_gate_invocations(text: str | None = None) -> dict[str, list[str]]:
     current_job: str | None = None
     invocations: dict[str, list[str]] = {}
     job_header = re.compile(r"^  ([a-z0-9-]+):\s*$")
-    run_inline = re.compile(r"^\s*(?:-\s*)?run:\s*(.+?)\s*$")
-    for line in lines:
+    run_inline = re.compile(
+        r"^(?P<indent>\s*)(?P<dash>-\s*)?run:\s*(?P<value>.*?)\s*$"
+    )
+    line_index = 0
+    while line_index < len(lines):
+        line = lines[line_index]
         m = job_header.match(line)
         if m is not None:
             current_job = m.group(1)
             invocations.setdefault(current_job, [])
+            line_index += 1
             continue
         if current_job is None:
+            line_index += 1
             continue
         rm = run_inline.match(line)
         if rm is None:
+            line_index += 1
             continue
-        command = rm.group(1).strip()
+
+        scalar_parts = [rm.group("value").strip()]
+        continuation_floor = len(rm.group("indent")) + len(rm.group("dash") or "")
+        next_index = line_index + 1
+        while next_index < len(lines):
+            continuation = lines[next_index]
+            if not continuation.strip():
+                next_index += 1
+                continue
+            continuation_indent = len(continuation) - len(
+                continuation.lstrip(" ")
+            )
+            if continuation_indent <= continuation_floor:
+                break
+            scalar_parts.append(continuation.strip())
+            next_index += 1
+
+        command = " ".join(part for part in scalar_parts if part).strip()
         block_indicator = command.split(maxsplit=1)[0]
         if re.fullmatch(
             r"[|>](?:[+-][1-9]?|[1-9][+-]?)?",
@@ -1200,15 +1256,12 @@ def _parse_ci_gate_invocations(text: str | None = None) -> dict[str, list[str]]:
             # Literal or folded block; record a sentinel so the dedicated
             # guard test can detect every YAML-equivalent spelling.
             invocations[current_job].append("<multiline-run-block>")
+            line_index = next_index
             continue
-        if (
-            len(command) >= 2
-            and command[0] == command[-1]
-            and command[0] in ("'", '"')
-        ):
-            command = command[1:-1].strip()
+        command = _strip_yaml_scalar_quotes(command)
         if _is_gate_relevant_command(command):
             invocations[current_job].append(command)
+        line_index = next_index
     return invocations
 
 
@@ -1763,6 +1816,42 @@ class CiParityTests(unittest.TestCase):
                 self.assertEqual(
                     _parse_ci_gate_invocations(workflow)["probe"],
                     ["<multiline-run-block>"],
+                )
+
+    def test_parser_reconstructs_plain_and_quoted_yaml_scalars(self):
+        cases = (
+            (
+                "      - run: 'cargo check -p chelis-types' # comment\n",
+                "cargo check -p chelis-types",
+            ),
+            (
+                "      - run:\n"
+                "          cargo check -p chelis-types\n",
+                "cargo check -p chelis-types",
+            ),
+            (
+                "      - run: cargo\n"
+                "          check -p chelis-types\n",
+                "cargo check -p chelis-types",
+            ),
+            (
+                "      - run: 'cargo check\n"
+                "          -p chelis-types'\n",
+                "cargo check -p chelis-types",
+            ),
+            (
+                "      - run:\n"
+                "          python3 scripts/gate.py lint-and-unit;\n"
+                "          cargo check -p chelis-types\n",
+                "python3 scripts/gate.py lint-and-unit; cargo check -p chelis-types",
+            ),
+        )
+        for run_scalar, expected in cases:
+            with self.subTest(run_scalar=run_scalar):
+                workflow = "jobs:\n  probe:\n    steps:\n" + run_scalar
+                self.assertEqual(
+                    _parse_ci_gate_invocations(workflow)["probe"],
+                    [expected],
                 )
 
     def test_all_workflow_files_are_scope_classified(self):
