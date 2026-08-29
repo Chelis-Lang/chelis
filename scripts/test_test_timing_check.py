@@ -476,6 +476,54 @@ class MainExitCodeTests(unittest.TestCase):
                 tc.CONFIG_PATH, tc.BASELINE_PATH = saved
             self.assertEqual(rc, 1)
 
+    def test_informational_all_reports_absolute_and_relative_without_blocking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            junit = Path(tmp) / "junit.xml"
+            junit.write_text(
+                _junit(
+                    [
+                        ("bin_a", "over_ceiling", 31.0),
+                        ("bin_a", "relative_only", 5.0),
+                    ]
+                )
+            )
+            baseline = Path(tmp) / "baseline.json"
+            baseline.write_text(
+                json.dumps(
+                    {
+                        "bin_a::over_ceiling": 20.0,
+                        "bin_a::relative_only": 1.0,
+                    }
+                )
+            )
+            config = Path(tmp) / "config.json"
+            config.write_text(
+                json.dumps({"tolerance": 2.0, "absolute_ceiling": 30.0})
+            )
+            saved = (tc.CONFIG_PATH, tc.BASELINE_PATH)
+            tc.CONFIG_PATH, tc.BASELINE_PATH = config, baseline
+            try:
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    rc = tc.main(
+                        ["--junit", str(junit), "--informational"]
+                    )
+            finally:
+                tc.CONFIG_PATH, tc.BASELINE_PATH = saved
+            self.assertEqual(rc, 0)
+            self.assertIn("over the 30.00s absolute ceiling", buf.getvalue())
+            self.assertIn("regressed past", buf.getvalue())
+            self.assertIn("timing findings are informational", buf.getvalue())
+
+    def test_informational_all_keeps_malformed_junit_blocking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            junit = Path(tmp) / "junit.xml"
+            junit.write_text("<broken")
+            rc = tc.main(
+                ["--junit", str(junit), "--informational"]
+            )
+            self.assertEqual(rc, 2, "invalid telemetry must still fail closed")
+
     def test_missing_junit_exits_two(self):
         with tempfile.TemporaryDirectory() as tmp:
             rc = tc.main(["--junit", str(Path(tmp) / "nope.xml")])

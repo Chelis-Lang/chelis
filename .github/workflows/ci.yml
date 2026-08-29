@@ -780,15 +780,16 @@ jobs:
           --summary target/test-telemetry/workspace-summary.md
           --github-summary "${GITHUB_STEP_SUMMARY}"
 
-      # The baseline comes from the exact two-shard hosted runner. Relative
-      # changes remain visible but informational because one hosted sample is
-      # noisy; the 30-second absolute ceiling blocks every ordinary PR test.
-      - name: Test-timing budget (blocking)
+      # The baseline comes from the exact two-shard hosted runner. A later
+      # unchanged-code run put ordinary cases above the 30-second diagnostic
+      # threshold, so timing findings remain visible without false-redding the
+      # required gate. Invalid telemetry is still a blocking exit 2.
+      - name: Validate and report test timing
         run: >-
           uv run --managed-python --python 3.11 --no-project python
           scripts/test_timing_check.py
           --junit target/test-telemetry/workspace-junit.xml
-          --informational-relative
+          --informational
 
       - name: Upload merged workspace telemetry
         if: always()
@@ -863,11 +864,11 @@ jobs:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
         run: .venv/bin/python scripts/dtype_phase3_oracle.py
 
-      - name: Test-timing ceiling (blocking)
+      - name: Validate and report test timing
         run: >-
           .venv/bin/python scripts/test_timing_check.py
           --junit target/nextest/ci-full/junit.xml
-          --informational-relative
+          --informational
 
       - name: Upload dtype JUnit
         if: always()
@@ -996,11 +997,11 @@ jobs:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
         run: cargo nextest run --workspace --profile ci-full --ignore-default-filter --features chelis-types/generalize-sweep-oracle --no-fail-fast -E 'not (binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) | (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)))' --partition hash:${{ matrix.shard }}/4
 
-      - name: Test-timing ceiling (blocking)
+      - name: Validate and report test timing
         run: >-
           .venv/bin/python scripts/test_timing_check.py
           --junit target/nextest/ci-full/junit.xml
-          --informational-relative
+          --informational
 
       - name: Upload generalization JUnit shard
         if: always()
@@ -1149,11 +1150,11 @@ jobs:
         if: matrix.shard == 2
         run: python3 .github/scripts/smoke_macos_metal.py ./target/debug/chelis
 
-      - name: Test-timing ceiling (blocking)
+      - name: Validate and report test timing
         run: >-
           .venv/bin/python scripts/test_timing_check.py
           --junit target/nextest/ci-full/junit.xml
-          --informational-relative
+          --informational
 
   # Keep the exact branch-protection context stable and fail closed if either
   # disjoint full-workspace partition fails.
@@ -1173,9 +1174,9 @@ jobs:
   # Preserve every partition's nextest timing as a durable artifact and one
   # cross-platform report. Overlap between semantic lanes is intentional and
   # remains visible; the workspace aggregate separately proves its hash
-  # partitions are disjoint before enforcing the blocking absolute ceiling.
-  # Dtype, generalization, and macOS producers enforce the same ceiling before
-  # their own required aggregates.
+  # partitions are disjoint before producing their validated timing report.
+  # Dtype, generalization, and macOS producers validate and report the same
+  # diagnostic thresholds before their own required aggregates.
   test-telemetry:
     name: CI Test Telemetry
     runs-on: ubuntu-latest

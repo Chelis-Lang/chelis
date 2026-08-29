@@ -1792,7 +1792,7 @@ class CiParityTests(unittest.TestCase):
         )
         self.assertIn("scripts/ci_require_success.py", aggregate_block)
 
-    def test_workspace_junit_shards_merge_before_one_aggregate_timing_budget(self):
+    def test_workspace_junit_shards_merge_before_one_validated_timing_report(self):
         shard_block = _ci_job_block("workspace-tests-shard")
         aggregate_block = _ci_job_block("workspace-tests")
         self.assertEqual(shard_block.count("uses: actions/upload-artifact@v7"), 1)
@@ -1808,8 +1808,8 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("scripts/ci_test_telemetry.py", aggregate_block)
         self.assertIn("--require-disjoint", aggregate_block)
         self.assertIn("scripts/test_timing_check.py", aggregate_block)
-        self.assertIn("--informational-relative", aggregate_block)
-        self.assertIn("name: Test-timing budget (blocking)", aggregate_block)
+        self.assertIn("--informational", aggregate_block)
+        self.assertIn("name: Validate and report test timing", aggregate_block)
         self.assertNotIn("continue-on-error: true", aggregate_block)
 
     def test_every_partitioned_test_lane_publishes_named_junit(self):
@@ -1839,7 +1839,7 @@ class CiParityTests(unittest.TestCase):
                 self.assertIn(f"path: {path}", block)
                 self.assertIn("if-no-files-found: error", block)
 
-    def test_every_nonworkspace_pr_lane_enforces_the_absolute_ceiling(self):
+    def test_every_nonworkspace_pr_lane_validates_and_reports_timing(self):
         expectations = {
             "dtype-phase3-oracle": "target/nextest/ci-full/junit.xml",
             "generalize-sweep-oracle-shard": (
@@ -1851,11 +1851,12 @@ class CiParityTests(unittest.TestCase):
             with self.subTest(job=job):
                 block = _ci_job_block(job)
                 self.assertEqual(
-                    block.count("name: Test-timing ceiling (blocking)"), 1
+                    block.count("name: Validate and report test timing"), 1
                 )
                 self.assertIn("scripts/test_timing_check.py", block)
                 self.assertIn(f"--junit {junit}", block)
-                self.assertIn("--informational-relative", block)
+                self.assertIn("--informational", block)
+                self.assertNotIn("continue-on-error: true", block)
 
     def test_cross_lane_telemetry_requires_every_expected_artifact(self):
         block = _ci_job_block("test-telemetry")

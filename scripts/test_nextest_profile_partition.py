@@ -113,6 +113,10 @@ GENERALIZATION_PR_FILTER = (
     f"not ({NIGHTLY_CACHE_CONCURRENCY_SELECTOR} | "
     f"({NIGHTLY_RECURSIVE_SELECTOR}))"
 )
+CONTENDED_DEADLINE_RETRY_SELECTOR = (
+    "binary_id(/^chelis-cli::test_suite_timeout$/) & "
+    "test(/^normal_output_forwarding_is_part_of_whole_command_deadline$/)"
+)
 
 
 def _cargo_environment(
@@ -161,6 +165,17 @@ class FilterTextTests(unittest.TestCase):
             "ci-full must inherit the ordinary profile unless a command "
             "explicitly passes --ignore-default-filter",
         )
+
+    def test_contended_deadline_probe_retries_without_slowing_green_runs(self):
+        config = tomllib.loads(NEXTEST_TOML.read_text())
+        overrides = config["profile"]["default"].get("overrides", [])
+        matching = [
+            override
+            for override in overrides
+            if override.get("filter") == CONTENDED_DEADLINE_RETRY_SELECTOR
+        ]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0].get("retries"), 2)
 
     def test_contention_sensitive_recursive_parity_case_is_nightly_owned(self):
         default_block, _ci, nightly_block = _filter_blocks()

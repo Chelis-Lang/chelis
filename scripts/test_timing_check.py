@@ -37,9 +37,10 @@ regression into the baseline. Regeneration is one command:
     python3 scripts/test_timing_check.py --update-baseline
 
 CI runs this after merging the two disjoint Linux workspace timing shards.
-The hard ceiling is blocking; single-run relative comparisons remain visible
-but informational because hosted-runner contention is too variable for them
-to be a reliable required check.
+Both threshold classes remain visible there, but timing findings are
+informational because hosted-runner contention is too variable for a single
+sample to be a reliable required check. Missing, malformed, empty, or invalid
+telemetry remains blocking.
 
 Usage:
     python3 scripts/test_timing_check.py
@@ -49,7 +50,8 @@ Usage:
 Exit codes:
     0  no blocking finding (or --update-baseline succeeded)
     1  one or more blocking findings; with --informational-relative,
-       only absolute-ceiling findings block
+       only absolute-ceiling findings block; with --informational, valid
+       timing findings are reported but do not block
     2  usage / IO error (missing or malformed JUnit XML, bad config)
 """
 from __future__ import annotations
@@ -326,6 +328,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "Flag integration tests that regressed past their committed "
             "timing budget."
         ),
+        allow_abbrev=False,
     )
     p.add_argument(
         "--junit",
@@ -345,12 +348,22 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "documented regeneration command."
         ),
     )
-    p.add_argument(
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument(
         "--informational-relative",
         action="store_true",
         help=(
             "Report tolerance-relative regressions without making them "
             "fail the command. Absolute-ceiling violations remain blocking."
+        ),
+    )
+    mode.add_argument(
+        "--informational",
+        action="store_true",
+        help=(
+            "Report all valid timing findings without making them fail the "
+            "command. Missing, malformed, empty, or invalid telemetry still "
+            "fails with exit 2."
         ),
     )
     return p.parse_args(argv)
@@ -381,6 +394,12 @@ def main(argv: list[str]) -> int:
                 "on hosted CI; the absolute ceiling remains blocking"
             )
         flags = [flag for flag in flags if flag.kind == Flag.OVER_CEILING]
+    elif args.informational and flags:
+        print(
+            "test-timing budget: timing findings are informational on hosted "
+            "CI; invalid telemetry remains blocking"
+        )
+        flags = []
     return 1 if flags else 0
 
 
