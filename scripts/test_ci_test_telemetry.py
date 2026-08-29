@@ -157,6 +157,39 @@ class MergeContractTests(unittest.TestCase):
 
 
 class OutputContractTests(unittest.TestCase):
+    def test_merged_junit_is_canonical_across_source_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def report_for(prefix: str, *, reversed_order: bool):
+                one = root / f"{prefix}-one.xml"
+                two = root / f"{prefix}-two.xml"
+                cases_one = [("bin-b", "two", 2.0), ("bin-a", "one", 1.0)]
+                cases_two = [("bin-d", "four", 4.0), ("bin-c", "three", 3.0)]
+                if reversed_order:
+                    cases_one.reverse()
+                    cases_two.reverse()
+                one.write_text(_junit(cases_one), encoding="utf-8")
+                two.write_text(_junit(cases_two), encoding="utf-8")
+                shards = (
+                    telemetry.parse_shard("workspace-1", one),
+                    telemetry.parse_shard("workspace-2", two),
+                )
+                if reversed_order:
+                    shards = tuple(reversed(shards))
+                return telemetry.build_report(shards, require_disjoint=True)
+
+            first = root / "first.xml"
+            second = root / "second.xml"
+            telemetry.write_merged_junit(
+                report_for("first", reversed_order=False), first
+            )
+            telemetry.write_merged_junit(
+                report_for("second", reversed_order=True), second
+            )
+
+            self.assertEqual(first.read_bytes(), second.read_bytes())
+
     def test_outputs_are_machine_readable_and_timing_check_compatible(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

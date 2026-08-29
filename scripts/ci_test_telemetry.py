@@ -183,7 +183,7 @@ def write_merged_junit(report: Report, path: Path) -> None:
     if report.overlaps:
         raise TelemetryError("cannot write merged JUnit while test identities overlap")
     root = ET.Element("testsuites")
-    for shard in report.shards:
+    for shard in sorted(report.shards, key=lambda item: item.label):
         suite = ET.SubElement(
             root,
             "testsuite",
@@ -192,7 +192,9 @@ def write_merged_junit(report: Report, path: Path) -> None:
                 "tests": str(len(shard.observations)),
             },
         )
-        for observation in shard.observations:
+        for observation in sorted(
+            shard.observations, key=lambda item: item.test_id
+        ):
             ET.SubElement(
                 suite,
                 "testcase",

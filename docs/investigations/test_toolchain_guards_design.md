@@ -217,7 +217,7 @@ directly.
 ## Ordering
 
 Guard 3 owns the CI-step refactor (it touches the gate steps in
-`.github/workflows/ci.yml`); Guard 1 slots its blocking timing step
+`.github/workflows/ci.yml`); Guard 1 slots its timing telemetry step
 and the `ci` nextest profile in afterward. Guard 2 is independent of
 both.
 

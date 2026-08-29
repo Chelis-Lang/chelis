@@ -1887,7 +1887,8 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("scripts/ci_test_telemetry.py", aggregate_block)
         self.assertIn("--require-disjoint", aggregate_block)
         self.assertIn("scripts/test_timing_check.py", aggregate_block)
-        self.assertIn("--informational", aggregate_block)
+        self.assertRegex(aggregate_block, r"(?m)^\s+--informational\s*$")
+        self.assertNotIn("--informational-relative", aggregate_block)
         self.assertIn("name: Validate and report test timing", aggregate_block)
         self.assertNotIn("continue-on-error: true", aggregate_block)
 
@@ -1934,7 +1935,8 @@ class CiParityTests(unittest.TestCase):
                 )
                 self.assertIn("scripts/test_timing_check.py", block)
                 self.assertIn(f"--junit {junit}", block)
-                self.assertIn("--informational", block)
+                self.assertRegex(block, r"(?m)^\s+--informational\s*$")
+                self.assertNotIn("--informational-relative", block)
                 self.assertNotIn("continue-on-error: true", block)
 
     def test_cross_lane_telemetry_requires_every_expected_artifact(self):

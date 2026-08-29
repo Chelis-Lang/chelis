@@ -781,9 +781,9 @@ jobs:
           --github-summary "${GITHUB_STEP_SUMMARY}"
 
       # The baseline comes from the exact two-shard hosted runner. A later
-      # unchanged-code run put ordinary cases above the 30-second diagnostic
-      # threshold, so timing findings remain visible without false-redding the
-      # required gate. Invalid telemetry is still a blocking exit 2.
+      # unchanged-code run produced scheduler-sensitive relative and absolute
+      # outliers, so both stay visible without false-redding the required gate.
+      # Missing, malformed, empty, or invalid telemetry remains blocking.
       - name: Validate and report test timing
         run: >-
           uv run --managed-python --python 3.11 --no-project python
