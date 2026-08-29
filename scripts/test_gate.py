@@ -482,8 +482,8 @@ class DiagnosticKindOracleJobTests(unittest.TestCase):
             )
 
 # Whole WORKFLOW FILES that are out-of-scope-by-design for the per-PR developer
-# `gate.py` quartet (like the backend-sanitizers / macos-smoke jobs in ci.yml,
-# but in their own files). They run their own commands the gate does not
+# `gate.py` quartet (like the backend-sanitizers / macos-workspace-shard jobs
+# in ci.yml, but in their own files). They run their own commands the gate does not
 # produce, by design. Listed here so the exclusion is explicit and reviewable.
 # Rule-id: GATE-SCOPE-CONFORMANCE -- the Hull conformance gate runs a Python
 # corpus runner against the built binary; it is a CI job, NOT part of the cargo
@@ -1262,7 +1262,16 @@ def _assert_supported_workflow_step_shapes(workflow: str) -> None:
 def _is_gate_relevant_command(command: str) -> bool:
     """True if `command` is a `cargo` or `chelis` invocation that a gate
     job must route through `gate.py` rather than hand-inline."""
-    return _GATE_COMMAND.search(command) is not None
+    if _GATE_COMMAND.search(command) is not None:
+        return True
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        return any(word in {"cargo", "chelis"} for word in lexer)
+    except ValueError:
+        # An unsupported shell scalar must not make a gate worker look clean.
+        return True
 
 
 def _strip_yaml_scalar_quotes(command: str) -> str:
@@ -1489,7 +1498,8 @@ def _rust_cache_inputs(job_block: str) -> dict[str, str]:
             raise AssertionError(
                 "unsupported quoted workflow action reference"
             )
-        if action == "Swatinem/rust-cache@v2":
+        action_name, separator, _action_ref = action.partition("@")
+        if separator and action_name.casefold() == "swatinem/rust-cache":
             uses_indices.append(idx)
     if len(uses_indices) != 1:
         raise AssertionError(
@@ -1803,6 +1813,9 @@ class CiParityTests(unittest.TestCase):
         unrepresentable_domain = (
             REPO_ROOT / "spec" / "design" / "unrepresentable_ast_domain.md"
         ).read_text()
+        reef_distribution = (
+            REPO_ROOT / "spec" / "design" / "reef_distribution.md"
+        ).read_text()
         self.assertIn(
             "`macos-workspace-shard` job runs "
             "`python3 .github/scripts/smoke_macos_metal.py` on shard 2",
@@ -1818,6 +1831,10 @@ class CiParityTests(unittest.TestCase):
         )
         self.assertIn("all four shards succeed", runtime_diagnosis)
         self.assertIn(
+            "`workspace-tests-shard`\n> matrix, and only shard 1 saves",
+            runtime_diagnosis,
+        )
+        self.assertIn(
             "append metal compile/link step to macos-workspace-shard "
             "job (shard 2)",
             metal_plan,
@@ -1829,6 +1846,22 @@ class CiParityTests(unittest.TestCase):
         self.assertIn(
             "hosted CI's `workspace-tests-shard` matrix",
             unrepresentable_domain,
+        )
+        self.assertIn("CI's `lint-rust` worker", checker_totality)
+        self.assertIn(
+            "`lint-rust` worker deliberately does not install",
+            unrepresentable_domain,
+        )
+        self.assertIn("hosted `lint-rust` worker", reef_distribution)
+
+    def test_topology_docs_guard_runs_in_docs_job(self):
+        docs_block = _ci_job_block("docs")
+        self.assertIn("uses: astral-sh/setup-uv@v8.1.0", docs_block)
+        self.assertIn(
+            "uv run --managed-python --python 3.11 --no-project python "
+            "-m unittest scripts.test_gate.CiParityTests."
+            "test_topology_docs_name_current_shard_owners",
+            docs_block,
         )
 
     def test_parallel_jobs_share_one_saved_rust_cache_namespace(self):
@@ -1933,6 +1966,16 @@ class CiParityTests(unittest.TestCase):
             ),
             (
                 "\n      - uses : Swatinem/rust-cache@v2\n"
+                "        with:\n"
+                "          save-if: true\n"
+            ),
+            (
+                "\n      - uses: swatinem/rust-cache@v2.7.8\n"
+                "        with:\n"
+                "          save-if: true\n"
+            ),
+            (
+                "\n      - uses: SWATINEM/RUST-CACHE@master\n"
                 "        with:\n"
                 "          save-if: true\n"
             ),
@@ -2104,6 +2147,25 @@ class CiParityTests(unittest.TestCase):
                 self.assertEqual(
                     _parse_ci_gate_invocations(workflow)["probe"],
                     ["cargo check -p chelis-types"],
+                )
+
+    def test_parser_classifies_shell_quoted_executables(self):
+        for command in (
+            '"cargo" check -p chelis-types',
+            "c'a'rgo check -p chelis-types",
+            r"car\go check -p chelis-types",
+            '"chelis" lint --check .',
+        ):
+            with self.subTest(command=command):
+                workflow = (
+                    "jobs:\n"
+                    "  probe:\n"
+                    "    steps:\n"
+                    f"      - run: {command}\n"
+                )
+                self.assertEqual(
+                    _parse_ci_gate_invocations(workflow)["probe"],
+                    [command],
                 )
 
     def test_parser_marks_literal_and_folded_yaml_run_blocks(self):

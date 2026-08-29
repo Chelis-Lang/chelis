@@ -166,9 +166,10 @@ expensive part.
 > *following* leg a delta, it does not make the first leg cheap. And the wire
 > leg measured 47.4s on the base Linux run against 61.6s on the branch, one
 > sample each and no instrumented explanation. It is not cache carryover: the
-> only job that saves the `linux-workspace` cache is `workspace-tests`, whose
-> `ci` profile excludes both census binaries, so no census rustdoc artifact has
-> ever been in that cache, before or after the rename.
+> only workers that run the `ci` profile are the `workspace-tests-shard`
+> matrix, and only shard 1 saves the `linux-workspace` cache. That profile
+> excludes both census binaries, so no census rustdoc artifact has ever been
+> in that cache, before or after the rename.
 
 The Phase 1 portion of the required dtype oracle already runs both complete
 census binaries. The Linux `ci` nextest profile therefore excludes those two

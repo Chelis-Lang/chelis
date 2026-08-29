@@ -501,7 +501,7 @@ top-level role restriction at all.
 Hosted CI runs that stage in the `workspace-tests-shard` matrix
 (`Workspace Tests (Linux)`), on every pull request that is not docs-only.
 That stage rather than `lint-and-unit` because two obligations run `cargo
-nextest`, which the lint-and-unit job deliberately does not install.
+nextest`, which the `lint-rust` worker deliberately does not install.
 Acceptance is exit 0 with a final `ORACLE: PASS` line. Its obligations cover the compiler-API ingress:
 obligation 3 drives [03-PROG-1] and [03-PROG-2] through the built `chelis`
 binary over `.dp` fixtures, and obligation 5 executes the compiled
