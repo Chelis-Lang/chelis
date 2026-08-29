@@ -94,6 +94,15 @@ ORACLE_OWNED_FILTERS = tuple(
     f"binary_id(/^{binary_id}$/)"
     for binary_id in sorted(ORACLE_OWNED_BINARY_IDS)
 )
+NIGHTLY_RECURSIVE_TEST = (
+    "chelis-cli::issue_1293_redteam_round4::"
+    "recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c"
+)
+NIGHTLY_RECURSIVE_SELECTOR = (
+    "binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & "
+    "test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)"
+)
+GENERALIZATION_PR_FILTER = f"not ({NIGHTLY_RECURSIVE_SELECTOR})"
 
 
 def _cargo_environment(
@@ -145,12 +154,11 @@ class FilterTextTests(unittest.TestCase):
 
     def test_contention_sensitive_recursive_parity_case_is_nightly_owned(self):
         default_block, _ci, nightly_block = _filter_blocks()
-        selector = (
-            "binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & "
-            "test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)"
+        self.assertIn(
+            NIGHTLY_RECURSIVE_SELECTOR,
+            _norm(_negative_filter_inner(default_block)),
         )
-        self.assertIn(selector, _norm(_negative_filter_inner(default_block)))
-        self.assertIn(selector, _norm(nightly_block))
+        self.assertIn(NIGHTLY_RECURSIVE_SELECTOR, _norm(nightly_block))
 
     def test_ci_adds_only_oracle_owned_binaries_to_default_exclusion(self):
         default_block, ci_block, _nightly = _filter_blocks()
@@ -301,6 +309,46 @@ def _list_filterset(filterset: str) -> dict[str, tuple[str, bool]]:
     return out
 
 
+def _list_generalization_pr() -> dict[str, tuple[str, bool]]:
+    """List the exact explicit-filter scope used by the PR generalization lane."""
+    cmd = [
+        "cargo",
+        "nextest",
+        "list",
+        "--workspace",
+        "--profile",
+        "ci-full",
+        "--ignore-default-filter",
+        "--features",
+        "chelis-types/generalize-sweep-oracle",
+        "--message-format",
+        "json",
+        "-E",
+        GENERALIZATION_PR_FILTER,
+    ]
+    result = subprocess.run(
+        cmd,
+        cwd=REPO_ROOT,
+        env=_cargo_environment(),
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"generalization PR list failed (exit {result.returncode}): "
+            f"{result.stderr[-2000:]}"
+        )
+    data = json.loads(result.stdout)
+    out: dict[str, tuple[str, bool]] = {}
+    for binary_id, suite in data.get("rust-suites", {}).items():
+        for test_name, info in suite.get("testcases", {}).items():
+            key = f"{binary_id}::{test_name}"
+            status = info.get("filter-match", {}).get("status")
+            out[key] = (status, bool(info.get("ignored")))
+    return out
+
+
 @unittest.skipUnless(
     _have_nextest(), "cargo nextest unavailable; skipping set-math oracle"
 )
@@ -317,6 +365,7 @@ class ProfilePartitionTests(unittest.TestCase):
         cls.ci = _list_profile("ci")
         cls.nightly = _list_profile("nightly")
         cls.full = _list_profile(None)
+        cls.generalization_pr = _list_generalization_pr()
         cls.dtype_flat = _list_filterset(
             dtype_oracle_manifest.flattened_filter(sys.executable)
         )
@@ -412,6 +461,12 @@ class ProfilePartitionTests(unittest.TestCase):
             f"{len(nightly_ignored)} `nightly`-selected test(s) are also "
             f"`#[ignore]`-d, so they never run: {sorted(nightly_ignored)}",
         )
+
+    def test_nightly_recursive_case_is_excluded_from_generalization_pr(self):
+        self.assertIn(NIGHTLY_RECURSIVE_TEST, self.generalization_pr)
+        status, ignored = self.generalization_pr[NIGHTLY_RECURSIVE_TEST]
+        self.assertEqual(status, "mismatch")
+        self.assertFalse(ignored)
 
     def test_flattened_dtype_filter_is_the_exact_union_of_phase_owners(self):
         flattened = {

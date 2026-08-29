@@ -1480,6 +1480,8 @@ class CiParityTests(unittest.TestCase):
             "cargo nextest run --workspace --profile ci-full "
             "--ignore-default-filter "
             "--features chelis-types/generalize-sweep-oracle --no-fail-fast "
+            "-E 'not (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) "
+            "& test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/))' "
             "--partition hash:${{ matrix.shard }}/4"
         )
 
@@ -1565,6 +1567,7 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("scripts/ci_test_telemetry.py", aggregate_block)
         self.assertIn("--require-disjoint", aggregate_block)
         self.assertIn("scripts/test_timing_check.py", aggregate_block)
+        self.assertIn("--informational-relative", aggregate_block)
         self.assertIn("name: Test-timing budget (blocking)", aggregate_block)
         self.assertNotIn("continue-on-error: true", aggregate_block)
 

@@ -36,8 +36,10 @@ regression into the baseline. Regeneration is one command:
 
     python3 scripts/test_timing_check.py --update-baseline
 
-CI runs this as a blocking step after merging the two disjoint Linux
-workspace timing shards.
+CI runs this after merging the two disjoint Linux workspace timing shards.
+The hard ceiling is blocking; single-run relative comparisons remain visible
+but informational because hosted-runner contention is too variable for them
+to be a reliable required check.
 
 Usage:
     python3 scripts/test_timing_check.py
@@ -316,6 +318,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "documented regeneration command."
         ),
     )
+    p.add_argument(
+        "--informational-relative",
+        action="store_true",
+        help=(
+            "Report tolerance-relative regressions without making them "
+            "fail the command. Absolute-ceiling violations remain blocking."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -324,8 +334,10 @@ def main(argv: list[str]) -> int:
     try:
         if args.update_baseline:
             return update_baseline(args.junit)
-        tolerance, absolute_ceiling, min_regression_delta = load_config()
-        baseline = load_baseline()
+        tolerance, absolute_ceiling, min_regression_delta = load_config(
+            CONFIG_PATH
+        )
+        baseline = load_baseline(BASELINE_PATH)
         timings = parse_junit(args.junit)
     except TimingError as exc:
         print(f"test-timing budget: error: {exc}", file=sys.stderr)
@@ -334,6 +346,14 @@ def main(argv: list[str]) -> int:
         timings, baseline, tolerance, absolute_ceiling, min_regression_delta
     )
     print_report(flags, timings, tolerance)
+    if args.informational_relative:
+        relative = [flag for flag in flags if flag.kind == Flag.REGRESSED]
+        if relative:
+            print(
+                "test-timing budget: relative regressions are informational "
+                "on hosted CI; the absolute ceiling remains blocking"
+            )
+        flags = [flag for flag in flags if flag.kind == Flag.OVER_CEILING]
     return 1 if flags else 0
 
 

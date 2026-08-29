@@ -388,6 +388,58 @@ class MainExitCodeTests(unittest.TestCase):
             self.assertEqual(rc, 1)
             self.assertIn("over budget", buf.getvalue())
 
+    def test_informational_relative_regression_exits_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            junit = Path(tmp) / "junit.xml"
+            junit.write_text(_junit([("bin_a", "slow", 5.0)]))
+            baseline = Path(tmp) / "baseline.json"
+            baseline.write_text(json.dumps({"bin_a::slow": 1.0}))
+            config = Path(tmp) / "config.json"
+            config.write_text(
+                json.dumps({"tolerance": 2.0, "absolute_ceiling": 30.0})
+            )
+            saved = (tc.CONFIG_PATH, tc.BASELINE_PATH)
+            tc.CONFIG_PATH, tc.BASELINE_PATH = config, baseline
+            try:
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    rc = tc.main(
+                        [
+                            "--junit",
+                            str(junit),
+                            "--informational-relative",
+                        ]
+                    )
+            finally:
+                tc.CONFIG_PATH, tc.BASELINE_PATH = saved
+            self.assertEqual(rc, 0)
+            self.assertIn("informational", buf.getvalue())
+            self.assertIn("regressed past", buf.getvalue())
+
+    def test_informational_relative_keeps_absolute_ceiling_blocking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            junit = Path(tmp) / "junit.xml"
+            junit.write_text(_junit([("bin_a", "slow", 31.0)]))
+            baseline = Path(tmp) / "baseline.json"
+            baseline.write_text(json.dumps({"bin_a::slow": 20.0}))
+            config = Path(tmp) / "config.json"
+            config.write_text(
+                json.dumps({"tolerance": 2.0, "absolute_ceiling": 30.0})
+            )
+            saved = (tc.CONFIG_PATH, tc.BASELINE_PATH)
+            tc.CONFIG_PATH, tc.BASELINE_PATH = config, baseline
+            try:
+                rc = tc.main(
+                    [
+                        "--junit",
+                        str(junit),
+                        "--informational-relative",
+                    ]
+                )
+            finally:
+                tc.CONFIG_PATH, tc.BASELINE_PATH = saved
+            self.assertEqual(rc, 1)
+
     def test_missing_junit_exits_two(self):
         with tempfile.TemporaryDirectory() as tmp:
             rc = tc.main(["--junit", str(Path(tmp) / "nope.xml")])
