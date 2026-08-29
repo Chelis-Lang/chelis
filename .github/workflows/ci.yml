@@ -722,10 +722,11 @@ jobs:
         if: matrix.shard == 2
         run: python3 scripts/gate.py integration --support-only
 
-      # This structural oracle needs cargo-nextest. Keep it on the same warm
-      # shard as the other support checks and execute it exactly once.
+      # This structural oracle needs cargo-nextest. Execute it exactly once on
+      # shard 1, balancing its hosted 21-second cost against shard 2's
+      # exact-once integration support subset.
       - name: Verify nextest profile coverage
-        if: matrix.shard == 2
+        if: matrix.shard == 1
         run: .venv/bin/python -m unittest scripts.test_nextest_profile_partition.ProfilePartitionTests
 
       - name: Test-timing budget (informational)
