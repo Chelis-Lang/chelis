@@ -1443,8 +1443,8 @@ class CiParityTests(unittest.TestCase):
             "faithful-observation-phase2-oracle, generalize-sweep-oracle]",
             aggregate_block,
         )
-        self.assertNotIn("always()", aggregate_block)
-        self.assertIn("!cancelled()", aggregate_block)
+        self.assertIn("always()", aggregate_block)
+        self.assertNotIn("!cancelled()", aggregate_block)
         self.assertIn("scripts/ci_require_success.py", aggregate_block)
 
     def test_faithful_observation_phase2_oracle_is_a_dedicated_blocking_job(self):
@@ -1646,7 +1646,16 @@ class CiParityTests(unittest.TestCase):
             "generalize-sweep-oracle-shard",
         )
         self.assertEqual(workspace_inputs.get("shared-key"), "linux-workspace")
-        self.assertNotEqual(workspace_inputs.get("save-if"), "false")
+        self.assertEqual(
+            workspace_inputs.get("save-if"), "${{ matrix.shard == 1 }}"
+        )
+        macos_inputs = _rust_cache_inputs(
+            _ci_job_block("macos-workspace-shard")
+        )
+        self.assertEqual(macos_inputs.get("shared-key"), "macos-workspace")
+        self.assertEqual(
+            macos_inputs.get("save-if"), "${{ matrix.shard == 1 }}"
+        )
         for job in read_only_jobs:
             with self.subTest(job=job):
                 block = _ci_job_block(job)
@@ -2309,8 +2318,8 @@ class DocsOnlySkipTests(unittest.TestCase):
             "faithful-observation-phase2-oracle, generalize-sweep-oracle]",
         )
         cond = integration.get("if", "")
-        self.assertNotIn("always()", cond)
-        self.assertIn("!cancelled()", cond)
+        self.assertIn("always()", cond)
+        self.assertNotIn("!cancelled()", cond)
         self.assertIn("needs.changes.result != 'success'", cond)
         self.assertIn("needs.changes.outputs.docs_only != 'true'", cond)
         block = _ci_job_block("integration")
@@ -2328,13 +2337,21 @@ class DocsOnlySkipTests(unittest.TestCase):
             "[changes, generalize-sweep-oracle-shard]",
         )
         cond = aggregate.get("if", "")
-        self.assertNotIn("always()", cond)
-        self.assertIn("!cancelled()", cond)
+        self.assertIn("always()", cond)
+        self.assertNotIn("!cancelled()", cond)
         self.assertIn("needs.changes.result != 'success'", cond)
         self.assertIn("needs.changes.outputs.docs_only != 'true'", cond)
         block = _ci_job_block("generalize-sweep-oracle")
         self.assertIn("needs.generalize-sweep-oracle-shard.result", block)
         self.assertIn("scripts/ci_require_success.py", block)
+
+    def test_every_required_aggregator_runs_after_cancelled_dependencies(self):
+        attrs = _parse_job_attrs()
+        for job in self.HEAVY_AGGREGATOR_JOBS:
+            with self.subTest(job=job):
+                cond = attrs[job].get("if", "")
+                self.assertIn("always()", cond)
+                self.assertNotIn("!cancelled()", cond)
 
     def test_always_run_jobs_are_not_gated(self):
         attrs = _parse_job_attrs()

@@ -152,8 +152,9 @@ jobs:
     # below) is what keeps the Linux workspace build off "No space left on
     # device" / the mid-link ld bus-error (signal 7) — chelis#392. Symbols
     # only affect backtraces, never what is tested. Set per-job (not
-    # workflow-wide) so macos-smoke, the authoritative oracle, is byte-for-
-    # byte unchanged; the disk pressure is Linux-only.
+    # workflow-wide) so unrelated jobs and release profiles keep their own
+    # settings. The macOS workspace workers make the same test-only tradeoff
+    # explicitly below.
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
@@ -257,7 +258,7 @@ jobs:
     permissions:
       contents: read
     needs: [changes, lint-rust, script-unit]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     steps:
       - uses: actions/checkout@v6
 
@@ -744,7 +745,7 @@ jobs:
     permissions:
       contents: read
     needs: [changes, workspace-tests-shard]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     steps:
       - uses: actions/checkout@v6
 
@@ -1003,7 +1004,7 @@ jobs:
     permissions:
       contents: read
     needs: [changes, generalize-sweep-oracle-shard]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     steps:
       - uses: actions/checkout@v6
 
@@ -1011,15 +1012,15 @@ jobs:
         run: python3 scripts/ci_require_success.py generalize-sweep-oracle-shard=${{ needs.generalize-sweep-oracle-shard.result }}
 
   # Keep the existing required status context while making the expensive
-  # legs parallel. `!cancelled()` lets this job inspect dependency failures
-  # while still suppressing work after cancellation.
+  # legs parallel. `always()` makes the stable required context inspect every
+  # dependency result, including cancellation, instead of being skipped green.
   integration:
     name: Integration Tests (Linux)
     runs-on: ubuntu-latest
     permissions:
       contents: read
     needs: [changes, workspace-tests, dtype-phase3-oracle, faithful-observation-phase2-oracle, generalize-sweep-oracle]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     steps:
       - uses: actions/checkout@v6
 
@@ -1143,7 +1144,7 @@ jobs:
     permissions:
       contents: read
     needs: [changes, macos-workspace-shard]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     steps:
       - uses: actions/checkout@v6
 

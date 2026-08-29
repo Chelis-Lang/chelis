@@ -3,6 +3,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -81,11 +82,37 @@ class FlattenedManifestTests(unittest.TestCase):
 
     def test_ownership_receipt_records_the_before_and_after_counts(self) -> None:
         receipt = manifest.ownership_receipt(sys.executable)
-        self.assertEqual(receipt["schema_version"], 1)
+        self.assertEqual(receipt["schema_version"], 2)
         self.assertEqual(receipt["nextest_invocations_before_flattening"], 21)
         self.assertEqual(receipt["nextest_invocations_after_flattening"], 1)
+        self.assertEqual(receipt["non_test_invocations_before_flattening"], 3)
+        self.assertEqual(receipt["non_test_invocations_after_flattening"], 3)
         self.assertEqual(set(receipt["owners"]), set(manifest.OWNERS))
+        self.assertEqual(set(receipt["non_test_owners"]), set(manifest.OWNERS))
         self.assertEqual(len(receipt["filter_sha256"]), 64)
+
+    def test_future_inherited_non_test_leg_is_executed_and_receipted(self) -> None:
+        original = manifest.dtype_phase0_oracle.oracle_legs()
+        injected = manifest.dtype_phase0_oracle.OracleLeg(
+            "injected inherited non-test obligation",
+            (sys.executable, "scripts/injected_dtype_obligation.py"),
+        )
+        with mock.patch.object(
+            manifest.dtype_phase0_oracle,
+            "oracle_legs",
+            return_value=original + (injected,),
+        ):
+            legs = manifest.non_test_legs(sys.executable)
+            receipt = manifest.ownership_receipt(sys.executable)
+
+        self.assertIn(tuple(injected.argv), [leg.argv for leg in legs])
+        self.assertIn(
+            {
+                "name": injected.name,
+                "argv": list(injected.argv),
+            },
+            receipt["non_test_owners"]["dtype-phase0"],
+        )
 
 
 if __name__ == "__main__":

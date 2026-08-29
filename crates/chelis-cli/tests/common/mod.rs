@@ -20,12 +20,14 @@
 //!
 //! ## Concurrency
 //!
-//! Per `crates/chelis-reef/src/lib.rs:353` (`load_package_graph_for_eval`)
-//! eval is read-only against `CHELIS_REEF_HOME`. Build/check write only
-//! the app's own `reef.lock`, which lives under the per-test app dir.
-//! After the cache pre-warm, intra- and cross-binary reads are safe. An empty,
-//! relative, partially initialized, or incompatible configured root fails
-//! loudly rather than falling back to a per-binary registry.
+//! Eval, check, and build can populate content-addressed compiled-context and
+//! prepared-graph caches under the shared `CHELIS_REEF_HOME`. Those writers use
+//! per-process temporary files and atomic renames, while each app's `reef.lock`
+//! remains under its isolated per-test directory. The fixture pre-warm reduces
+//! cache contention, and the atomic writers make remaining intra- and
+//! cross-binary races safe. An empty, relative, partially initialized, or
+//! incompatible configured root fails loudly rather than falling back to a
+//! per-binary registry.
 //!
 //! ## Usage
 //!
