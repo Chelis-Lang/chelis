@@ -998,7 +998,7 @@ jobs:
       # compilation, so a separate `cargo build --workspace` step
       # beforehand is redundant under Swatinem's rust-cache. nextest's
       # cross-binary parallelism keeps this job off the same ~200-binary
-      # serialization bloat as the Linux integration job; see
+      # serialization bloat as the Linux workspace workers; see
       # docs/investigations/ci_integration_test_runtime_diagnosis.md.
       - name: Workspace tests
         run: cargo nextest run --workspace --partition hash:${{ matrix.shard }}/2
@@ -1169,14 +1169,21 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
 
+      - name: Install uv for focused documentation contracts
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Validate CI topology documentation
+        run: uv run --managed-python --python 3.11 --no-project python -m unittest scripts.test_gate.CiParityTests.test_topology_docs_name_current_shard_owners
+
       - name: Install mdBook
         uses: taiki-e/install-action@v2
         with:
           tool: mdbook
 
-      # No uv setup here — `cargo test -p chelis-e2e` does not transitively
-      # pull pyo3 (verified by `cargo tree -p chelis-e2e`), so
-      # pyo3-build-config never runs in this job.
+      # No project venv setup here — `cargo test -p chelis-e2e` does not
+      # transitively pull pyo3 (verified by `cargo tree -p chelis-e2e`), so
+      # pyo3-build-config never runs in this job. The focused documentation
+      # contract above uses uv's managed no-project interpreter directly.
       - name: Validate package SKILL and mdBook examples
         run: cargo test -p chelis-e2e --test skill_suite
 
