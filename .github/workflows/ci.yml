@@ -1154,7 +1154,7 @@ jobs:
   # Preserve every partition's nextest timing as a durable artifact and one
   # cross-platform report. Overlap between semantic lanes is intentional and
   # remains visible; the workspace aggregate separately proves its hash
-  # partitions are disjoint before enforcing the blocking timing budget.
+  # partitions are disjoint before enforcing the blocking absolute ceiling.
   test-telemetry:
     name: CI Test Telemetry
     runs-on: ubuntu-latest

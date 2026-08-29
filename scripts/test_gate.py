@@ -2238,8 +2238,10 @@ class DocsOnlySkipTests(unittest.TestCase):
         "generalize-sweep-oracle",
         "integration",
         "macos-smoke",
-        "test-telemetry",
     }
+    # Best-effort reporting aggregates run after failed dependencies but may
+    # skip on cancellation because they are not required status contexts.
+    HEAVY_REPORT_JOBS = {"test-telemetry"}
     # Jobs that use the same always-present `changes` job but key on a
     # narrower contract input rather than on the docs-only classification.
     CHANGE_GATED_JOBS = {
@@ -2353,6 +2355,14 @@ class DocsOnlySkipTests(unittest.TestCase):
                 self.assertIn("always()", cond)
                 self.assertNotIn("!cancelled()", cond)
 
+    def test_nonrequired_report_aggregator_skips_on_cancellation(self):
+        attrs = _parse_job_attrs()
+        for job in self.HEAVY_REPORT_JOBS:
+            with self.subTest(job=job):
+                cond = attrs[job].get("if", "")
+                self.assertIn("!cancelled()", cond)
+                self.assertNotIn("always()", cond)
+
     def test_always_run_jobs_are_not_gated(self):
         attrs = _parse_job_attrs()
         for job in self.ALWAYS_RUN_JOBS:
@@ -2376,6 +2386,7 @@ class DocsOnlySkipTests(unittest.TestCase):
         classified = (
             self.HEAVY_GATED_JOBS
             | self.HEAVY_AGGREGATOR_JOBS
+            | self.HEAVY_REPORT_JOBS
             | self.CHANGE_GATED_JOBS
             | self.ALWAYS_RUN_JOBS
         )

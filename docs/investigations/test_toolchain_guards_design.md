@@ -44,37 +44,37 @@ Three failure modes kept recurring in CI:
   `binary::test`) and flags tests over budget.
 - Thresholds are config, never hardcoded:
   - `scripts/test_timing_config.json` holds `tolerance` (a multiplier)
-    and `absolute_ceiling` (seconds).
+    `absolute_ceiling` (seconds), and `min_regression_delta` (seconds).
   - `scripts/test_timing_baseline.json` maps `binary::test` -> seconds.
-- The check flags a test when either:
-  - it is NEW relative to the baseline AND runs longer than
-    `absolute_ceiling`, or
-  - it regressed past `tolerance` x its baseline time.
+- Every ordinary-PR test, whether baselined or new, fails CI above the
+  `absolute_ceiling`. Baselined tests that exceed both `tolerance` times their
+  baseline and `min_regression_delta` are reported as relative regressions.
 - The baseline is hand-curated and explicitly regenerated, NOT
   auto-regenerated on merge. Auto-regen would launder a real
   regression into the baseline. Regeneration is one documented
   command: `python3 scripts/test_timing_check.py --update-baseline`.
-- CI wiring: an informational, non-failing step
-  (`continue-on-error: true`) runs after the integration test step.
-  It is promotable to blocking later by removing `continue-on-error`.
+- CI merges the two exact, disjoint workspace JUnit shards before one timing
+  check. The hard ceiling is blocking. Relative comparisons use
+  `--informational-relative`: a single hosted sample varies too much to make
+  those comparisons a reliable required check, but the report remains visible.
 
 ### Why these defaults
 
-`tolerance = 2.0` and `absolute_ceiling = 30.0`s were chosen against
-the current-state baseline: the slowest existing tests are the
-`phase3j_pre_std` stdlib build oracles at ~42s. They are already in
-the baseline, so they are only flagged if they more than double. A
-genuinely new test that lands over 30s is worth a look. A separate
-workstream (typecheck cache) is expected to shift the timing baseline
-shortly; when it lands, the baseline is regenerated with the one
-documented command above.
+`tolerance = 2.0`, `min_regression_delta = 0.05`, and
+`absolute_ceiling = 30.0`s preserve useful relative diagnostics while keeping
+the required signal stable. The committed two-shard hosted baseline contained
+8,166 tests and no observation above 30 seconds; a second unchanged-code run
+nevertheless produced hundreds of relative outliers. That evidence makes the
+absolute ceiling suitable for blocking and the one-sample relative comparison
+suitable for diagnosis only.
 
 ### Exit codes
 
-`scripts/test_timing_check.py` exits `0` when nothing is over budget,
-`1` when one or more tests are over budget, and `2` on usage / IO
-error (missing or malformed JUnit XML, bad config). A malformed or
-empty JUnit file is a loud error, never a silent pass.
+By default, `scripts/test_timing_check.py` exits `1` for either kind of finding.
+With `--informational-relative`, relative-only findings exit `0`, while any
+absolute-ceiling finding still exits `1`. Exit `2` is a usage or IO error
+(missing or malformed JUnit XML, bad config). A malformed or empty JUnit file
+is a loud error, never a silent pass.
 
 ## Guard 2: em-dash-in-test-strings visibility
 

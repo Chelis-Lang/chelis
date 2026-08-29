@@ -47,8 +47,9 @@ Usage:
     python3 scripts/test_timing_check.py --update-baseline
 
 Exit codes:
-    0  no test over budget (or --update-baseline succeeded)
-    1  one or more tests over budget
+    0  no blocking finding (or --update-baseline succeeded)
+    1  one or more blocking findings; with --informational-relative,
+       only absolute-ceiling findings block
     2  usage / IO error (missing or malformed JUnit XML, bad config)
 """
 from __future__ import annotations
