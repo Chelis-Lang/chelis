@@ -1386,14 +1386,19 @@ def _workflow_job_block(path: Path, job: str) -> str:
 def _rust_cache_inputs(job_block: str) -> dict[str, str]:
     """Return the `with:` inputs for a job's Swatinem/rust-cache step."""
     lines = job_block.splitlines()
-    uses_indices = [
-        idx
-        for idx, line in enumerate(lines)
-        if re.fullmatch(
-            r"(?:-\s*)?uses:\s*Swatinem/rust-cache@v2(?:\s+#.*)?",
-            line.strip(),
-        )
-    ]
+    uses_indices = []
+    uses_line = re.compile(r"(?:-\s*)?uses:\s*(?P<value>.+?)\s*$")
+    for idx, line in enumerate(lines):
+        match = uses_line.fullmatch(line.strip())
+        if match is None:
+            continue
+        action = _strip_yaml_scalar_quotes(match.group("value"))
+        if action == _UNSUPPORTED_RUN_SCALAR:
+            raise AssertionError(
+                "unsupported quoted workflow action reference"
+            )
+        if action == "Swatinem/rust-cache@v2":
+            uses_indices.append(idx)
     if len(uses_indices) != 1:
         raise AssertionError(
             "expected exactly one Swatinem/rust-cache@v2 step, "
@@ -1824,6 +1829,16 @@ class CiParityTests(unittest.TestCase):
                 "        with:\n"
                 "          save-if: true\n"
             ),
+            (
+                "\n      - uses: 'Swatinem/rust-cache@v2'\n"
+                "        with:\n"
+                "          save-if: true\n"
+            ),
+            (
+                '\n      - uses: "Swatinem/rust-cache@v2"\n'
+                "        with:\n"
+                "          save-if: true\n"
+            ),
         )
         for second_step in second_steps:
             with self.subTest(second_step=second_step):
@@ -1832,6 +1847,19 @@ class CiParityTests(unittest.TestCase):
                     "exactly one Swatinem/rust-cache@v2 step",
                 ):
                     _assert_read_only_workspace_cache(block + second_step)
+
+    def test_read_only_cache_contract_rejects_escaped_action_references(self):
+        block = _ci_job_block("faithful-observation-phase2-oracle")
+        mutated = block + (
+            '\n      - uses: "\\x53watinem/rust-cache@v2"\n'
+            "        with:\n"
+            "          save-if: true\n"
+        )
+        with self.assertRaisesRegex(
+            AssertionError,
+            "unsupported quoted workflow action reference",
+        ):
+            _assert_read_only_workspace_cache(mutated)
 
     def test_shared_cache_contract_rejects_an_explicit_target_override(self):
         block = _ci_job_block("faithful-observation-phase2-oracle")
