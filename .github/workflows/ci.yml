@@ -793,8 +793,9 @@ jobs:
   # Split the one corpus over two deterministic hash partitions: each shard
   # still compiles the exact feature-enabled workspace, while the expensive
   # test execution runs on two hosted CPUs in parallel. The aggregate job
-  # below retains the stable required-check context and fails closed unless
-  # both disjoint partitions succeed.
+  # below retains a stable oracle status and fails closed unless both disjoint
+  # partitions succeed; the directly required Integration Tests (Linux)
+  # context transitively gates that aggregate.
   generalize-sweep-oracle-shard:
     name: Typecheck Level Generalization Oracle (shard ${{ matrix.shard }}/2)
     strategy:
