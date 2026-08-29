@@ -121,6 +121,39 @@ class GateParityAdversarialTests(unittest.TestCase):
             "a `run: |` multiline block in a gate job",
         )
 
+    def test_cargo_inside_plain_continuation_is_caught(self):
+        mutated = self.ci_text.replace(
+            ANCHOR,
+            "      - name: Sneaky plain continuation\n"
+            "        run:\n"
+            "          python3 scripts/gate.py integration --support-only;\n"
+            "          cargo check -p chelis-types\n\n" + ANCHOR,
+            1,
+        )
+        self.assertNotEqual(mutated, self.ci_text, "mutation did not apply")
+        result = _run_parity_against(mutated)
+        self.assertGreater(
+            len(result.failures) + len(result.errors),
+            0,
+            "the parity lock did NOT catch cargo in a plain continued scalar",
+        )
+
+    def test_quoted_cargo_command_with_yaml_comment_is_caught(self):
+        mutated = self.ci_text.replace(
+            ANCHOR,
+            "      - name: Sneaky quoted command\n"
+            "        run: 'cargo check -p chelis-types' # valid YAML comment\n\n"
+            + ANCHOR,
+            1,
+        )
+        self.assertNotEqual(mutated, self.ci_text, "mutation did not apply")
+        result = _run_parity_against(mutated)
+        self.assertGreater(
+            len(result.failures) + len(result.errors),
+            0,
+            "the parity lock did NOT catch quoted cargo before a YAML comment",
+        )
+
     def test_bare_chelis_command_is_caught(self):
         # RT-2 finding, now closed: the parser originally only inspected
         # commands starting with `cargo `, so a gate job that
