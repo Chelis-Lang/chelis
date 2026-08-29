@@ -621,7 +621,7 @@ until chelis#875 they ran in no continuous job and this paragraph claimed
 supporting evidence the repo was not producing. They are now driven by the
 `cargo test -p chelis-types -p chelis-compiler-api --doc` stage in
 `scripts/gate.py`, which is in
-both the `--local` subset and CI's `lint-and-unit` job.
+both the `--local` subset and CI's `lint-rust` worker.
 
 Scope of the guarantee, so this section does not read stronger than the
 mechanism: the witness makes a `Type::Error` **without a diagnostic**
@@ -789,7 +789,7 @@ top-level forms and [03-PROG-2] states the rejection contract.
 
 The authoritative oracle is [#908]'s
 `scripts/unrepresentable_domain_oracle.py`, run by `scripts/gate.py`'s
-`integration` stage (hosted CI's `workspace-tests` job, on every
+`integration` stage (hosted CI's `workspace-tests-shard` matrix, on every
 non-docs-only pull request) and by its `--local` pre-push subset. It executes
 `crates/chelis-compiler-api/tests/phase3_stamped_ingress.rs` as one of its
 obligations; that suite is evidence, not a second oracle. The suite's

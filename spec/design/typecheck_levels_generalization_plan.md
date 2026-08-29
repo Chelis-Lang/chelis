@@ -384,7 +384,7 @@ expected result is exit code zero with:
 - the independent-binding structural test observing zero production environment
   visits.
 
-CI executes the same selection as two deterministic, disjoint nextest hash
+CI executes the same selection as four deterministic, disjoint nextest hash
 partitions:
 
 ```sh
@@ -392,21 +392,33 @@ cargo nextest run --workspace \
   --ignore-default-filter \
   --features chelis-types/generalize-sweep-oracle \
   --no-fail-fast \
-  --partition hash:1/2
+  --partition hash:1/4
 
 cargo nextest run --workspace \
   --ignore-default-filter \
   --features chelis-types/generalize-sweep-oracle \
   --no-fail-fast \
-  --partition hash:2/2
+  --partition hash:2/4
+
+cargo nextest run --workspace \
+  --ignore-default-filter \
+  --features chelis-types/generalize-sweep-oracle \
+  --no-fail-fast \
+  --partition hash:3/4
+
+cargo nextest run --workspace \
+  --ignore-default-filter \
+  --features chelis-types/generalize-sweep-oracle \
+  --no-fail-fast \
+  --partition hash:4/4
 ```
 
-The CI matrix must contain both partition indices exactly once and must disable
-matrix fail-fast so one failure cannot hide the other partition's result. A
+The CI matrix must contain all four partition indices exactly once and must disable
+matrix fail-fast so one failure cannot hide any other partition's result. A
 fail-closed aggregate job keeps the stable **Typecheck Level Generalization
-Oracle** status and succeeds only when both partitions succeed. The union of the
-two partitions is the oracle; neither partition is independent completion
-evidence. This is an execution split of one corpus, not two acceptance oracles.
+Oracle** status and succeeds only when all four partitions succeed. The union of
+the four partitions is the oracle; no partition is independent completion
+evidence. This is an execution split of one corpus, not four acceptance oracles.
 
 The one-shot runner remains manually reproducible even though it intentionally
 re-runs the old sweeps and may exceed the local inner-loop budget. Document the
@@ -459,7 +471,7 @@ Chelis language semantics.
 | Persisted variable is re-generalized by new code | Typed resumption at both non-empty entry points plus stacked tests |
 | Repeated persisted resumption grows obsolete level history | Resume-floor compaction plus repeated-cycle size and semantic-equivalence tests |
 | An old bincode payload is decoded as new state | Exact V10/V6/V3 payload bumps and stale-version tests; envelope stays V1 |
-| Parity misses heavy checker tests behind nextest's default filter | `--ignore-default-filter`, non-ignored acceptance tests, and a dedicated two-partition CI suite with a fail-closed aggregate |
+| Parity misses heavy checker tests behind nextest's default filter | `--ignore-default-filter`, non-ignored acceptance tests, and a dedicated four-partition CI suite with a fail-closed aggregate |
 | Parity passes while production still sweeps | Independent reference-disabled zero-visit assertion in the authoritative oracle |
 | Quantifier reordering creates false parity failures | Deterministic ID ordering and exact ordered-scheme equality |
 | Performance claim expands into chelis#1205 | Generated binding corpus and explicit nested-lowering exclusion |

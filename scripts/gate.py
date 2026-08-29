@@ -18,8 +18,10 @@ by name so the exclusion is visible and reviewable.
 
 Usage (an unmanaged launcher is automatically re-executed through uv):
     python3 scripts/gate.py            # run every gate command
-    python3 scripts/gate.py lint-and-unit   # run the lint-and-unit subset
+    python3 scripts/gate.py lint-and-unit   # run the Rust-policy subset
     python3 scripts/gate.py integration     # run the integration subset
+    python3 scripts/gate.py integration --tests-only --partition hash:1/2
+    python3 scripts/gate.py integration --support-only
     python3 scripts/gate.py --list     # print the canonical full list,
                                        # annotated local-vs-CI-owned
     python3 scripts/gate.py --local    # run the developer pre-push subset
@@ -123,8 +125,9 @@ PYTHON_VERSION_PROBE = (
 )
 
 # The canonical CI-stage command list. The CI workflow
-# has two developer-gate jobs, `lint-and-unit` and `workspace-tests`; each
-# runs its own subset (`workspace-tests` invokes the `integration` stage).
+# has Rust-policy and workspace worker jobs. The workspace test workers run
+# hash partitions of the integration stage's nextest command, while one
+# support worker runs its two non-test oracles exactly once.
 # The full developer gate substitutes the complete default nextest profile for
 # CI's split profile so the delegated census binaries are not dropped locally.
 # Every
@@ -232,14 +235,13 @@ PIPELINE_CORE_COMPILE_FAIL: list[str] = [
 # Acceptance is exit 0 with a final `ORACLE: PASS` line.
 #
 # It belongs to the `integration` stage, not `lint-and-unit`, because those
-# compiled obligations need `cargo nextest`. The lint-and-unit job
-# deliberately does not install it (that absence is what makes
-# `test_nextest_profile_partition` self-skip there), while the integration
-# job installs it and has already built the workspace, so the oracle's two
+# compiled obligations need `cargo nextest`. The Rust-policy worker
+# deliberately does not install it, while workspace shard 2 installs it and
+# has already built the workspace, so the oracle's two
 # `nextest run` calls and its `cargo build -p chelis-cli` are warm. The
-# sibling `Verify nextest profile coverage` step in that job is the same
-# disposition for the same reason. `--local` keeps it: a developer machine
-# running the gate already has nextest.
+# separate `Verify nextest profile coverage` step also needs nextest, but runs
+# on shard 1 to balance the hosted work. `--local` keeps both obligations: a
+# developer machine running the gate already has nextest.
 UNREPRESENTABLE_DOMAIN_ORACLE: list[str] = [
     MANAGED_PYTHON,
     "scripts/unrepresentable_domain_oracle.py",
@@ -277,7 +279,6 @@ CHELIS_BINARY_PRODUCERS: tuple[tuple[str, ...], ...] = (
 
 STAGES: dict[str, list[list[str]]] = {
     "lint-and-unit": [
-        BUILD_WORKSPACE,
         CLIPPY_WORKSPACE,
         FMT_CHECK,
         CHELIS_LINT_CHECK,
@@ -298,6 +299,10 @@ STAGES: dict[str, list[list[str]]] = {
 }
 
 STAGE_ORDER: list[str] = ["lint-and-unit", "integration"]
+
+HASH_PARTITION_RE = re.compile(
+    r"^hash:(?P<shard>[1-9][0-9]*)/(?P<count>[1-9][0-9]*)$"
+)
 
 # The static `--local` pre-push subset (chelis#360). Deliberately
 # excludes BUILD_WORKSPACE (clippy already compiles everything; no mass
@@ -590,7 +595,7 @@ def oracle_binary_handoff(
     treats the variable as authoritative and fails loudly on a bad path, so
     the gate may only set it where the list itself guarantees the build.
     That is also why `gate.py integration` on its own hands over nothing;
-    hosted CI's `Workspace Tests (Linux)` job keeps the oracle's original
+    hosted CI's support-only workspace-shard slice keeps the oracle's original
     build-it-yourself behavior.
     """
     try:
@@ -790,6 +795,24 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--tests-only",
+        action="store_true",
+        help="Run only the integration stage's workspace nextest command.",
+    )
+    p.add_argument(
+        "--support-only",
+        action="store_true",
+        help="Run only the integration stage's non-nextest support oracles.",
+    )
+    p.add_argument(
+        "--partition",
+        metavar="HASH:N/M",
+        help=(
+            "Append one nextest hash partition to --tests-only integration; "
+            "for example hash:1/2."
+        ),
+    )
+    p.add_argument(
         "--list",
         action="store_true",
         help=(
@@ -812,7 +835,43 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         p.error("--local cannot be combined with a CI stage name")
     if args.local and args.list:
         p.error("--local cannot be combined with --list")
+    if args.tests_only and args.support_only:
+        p.error("--tests-only and --support-only are mutually exclusive")
+    if (args.tests_only or args.support_only) and args.stage != "integration":
+        p.error("--tests-only/--support-only require the integration stage")
+    if args.partition is not None and not args.tests_only:
+        p.error("--partition requires integration --tests-only")
+    if args.partition is not None:
+        match = HASH_PARTITION_RE.fullmatch(args.partition)
+        if match is None:
+            p.error("--partition must have the form hash:N/M")
+        if int(match.group("shard")) > int(match.group("count")):
+            p.error("--partition shard N must not exceed partition count M")
+    if (args.tests_only or args.support_only or args.partition) and (
+        args.local or args.list
+    ):
+        p.error("integration selectors cannot be combined with --local/--list")
     return args
+
+
+def selected_stage_commands(
+    stage: str,
+    *,
+    tests_only: bool,
+    support_only: bool,
+    partition: str | None,
+) -> list[list[str]]:
+    """Return one CI stage slice without duplicating canonical commands."""
+    commands = STAGES[stage]
+    if tests_only:
+        selected = [list(commands[0])]
+    elif support_only:
+        selected = [list(command) for command in commands[1:]]
+    else:
+        selected = [list(command) for command in commands]
+    if partition is not None:
+        selected[0].extend(["--partition", partition])
+    return selected
 
 
 def describe_returncode(returncode: int) -> str:
@@ -1093,7 +1152,12 @@ def main(argv: list[str]) -> int:
     if args.local:
         return run_local()
     if args.stage is not None:
-        commands = STAGES[args.stage]
+        commands = selected_stage_commands(
+            args.stage,
+            tests_only=args.tests_only,
+            support_only=args.support_only,
+            partition=args.partition,
+        )
         stage_label = args.stage
     else:
         commands = full_command_list()

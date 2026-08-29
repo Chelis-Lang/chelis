@@ -64,7 +64,7 @@ jobs:
       # `.cargo/config.toml` sets `PYO3_PYTHON=.venv/bin/python`; CI
       # runners need a matching uv-managed venv before any cargo run
       # (pyo3-build-config is a transitive build-dep that runs before
-      # main compilation). See ci.yml lint-and-unit job for the same
+      # main compilation). See ci.yml lint-rust worker for the same
       # pattern and for why the version is pinned to v8.1.0 rather
       # than @v8.
       - name: Install uv

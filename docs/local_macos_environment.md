@@ -186,11 +186,12 @@ In order of preference:
 
 ## CI Is the Fallback Oracle
 
-When local exec is wedged, do not block on the local run: the
-`macos-smoke` CI job (`.github/workflows/ci.yml`) runs the full workspace
-test suite on macOS and serves as the macOS signal. Push the branch and
-let CI serve as the oracle, noting in the PR or phase docs that local
-validation was blocked by this failure mode.
+When local exec is wedged, do not block on the local run. The
+`macos-workspace-shard` matrix runs the full workspace test suite on
+macOS across two disjoint hash partitions. Shard 2 also runs the Metal smoke
+probe. The stable `macos-smoke` aggregate requires both shards and serves as
+the macOS signal. Push the branch and let CI serve as the oracle, noting in
+the PR or phase docs that local validation was blocked by this failure mode.
 
 ## Preflight Probe Details
 

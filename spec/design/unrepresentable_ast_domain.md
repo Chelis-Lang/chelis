@@ -440,7 +440,7 @@ This file. All design forks resolved before implementation.
 
 - Python `scripts/unrepresentable_domain_oracle.py` (behavioral) - the
   authoritative oracle, run by `scripts/gate.py`'s `integration` stage
-  (hosted CI's `workspace-tests` job) and its `--local` subset, and locked
+  (hosted CI's `workspace-tests-shard` matrix) and its `--local` subset, and locked
   there by `scripts/test_gate.py`. Acceptance is exit 0 with a final
   `ORACLE: PASS` line.
 - Python `scripts/test_unrepresentable_domain_oracle.py` (unit tests).
@@ -498,10 +498,10 @@ top-level role restriction at all.
 
 **The oracle is `scripts/unrepresentable_domain_oracle.py`**, wired into
 `scripts/gate.py`'s `integration` stage and its `--local` pre-push subset.
-Hosted CI runs that stage in the `workspace-tests` job
+Hosted CI runs that stage in the `workspace-tests-shard` matrix
 (`Workspace Tests (Linux)`), on every pull request that is not docs-only.
 That stage rather than `lint-and-unit` because two obligations run `cargo
-nextest`, which the lint-and-unit job deliberately does not install.
+nextest`, which the `lint-rust` worker deliberately does not install.
 Acceptance is exit 0 with a final `ORACLE: PASS` line. Its obligations cover the compiler-API ingress:
 obligation 3 drives [03-PROG-1] and [03-PROG-2] through the built `chelis`
 binary over `.dp` fixtures, and obligation 5 executes the compiled

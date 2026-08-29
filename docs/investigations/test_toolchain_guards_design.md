@@ -33,9 +33,11 @@ Three failure modes kept recurring in CI:
 
 ### Design
 
-- The CI workspace-tests job runs `cargo nextest run --workspace`. A `ci`
-  nextest profile (`.config/nextest.toml`) adds a `[profile.ci.junit]`
-  section so nextest writes machine-readable per-test JUnit XML to
+- Two CI `workspace-tests-shard` workers run deterministic, disjoint hash
+  partitions of `cargo nextest run --workspace`; a stable `workspace-tests`
+  aggregate requires both workers to succeed. A `ci` nextest profile
+  (`.config/nextest.toml`) adds a `[profile.ci.junit]` section so each worker
+  writes machine-readable per-test JUnit XML to
   `target/nextest/ci/junit.xml`.
 - `scripts/test_timing_check.py` parses that JUnit XML
   (`<testcase classname=... name=... time=...>`, keyed as
@@ -129,9 +131,11 @@ charset checker was added: that would be a second source of truth for
 - `scripts/gate.py` is the single source of truth for the per-PR
   developer-runnable gate. It defines the command list once, split by
   CI stage (`lint-and-unit`, `integration`), with the union as the
-  full gate. The workflow's `workspace-tests` job invokes the integration
-  stage; the stable `Integration Tests (Linux)` context aggregates that job
-  with the parallel Phase 0-3 oracle. A stage name runs one subset; `--list`
+  full gate. Two `workspace-tests-shard` workers invoke disjoint partitions
+  of the integration test command, and shard 2 invokes the support-only slice
+  exactly once. The stable `Workspace Tests (Linux)` context aggregates the
+  shards, and `Integration Tests (Linux)` aggregates it with the parallel
+  Phase 0-3 oracles. A stage name runs one subset; `--list`
   prints the canonical full list and `--local` derives per-crate tests from
   the diff against `origin/main`.
 - `python3 scripts/gate.py ...` is a bootstrap command, not permission to use
@@ -153,21 +157,30 @@ charset checker was added: that would be a second source of truth for
   commands also pass `--no-fail-fast` explicitly. A failing assertion does
   not cancel later tests that may reveal independent failures.
 - The canonical full list:
-  - `cargo build --workspace --all-targets`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo fmt --all -- --check`
   - `cargo run -p chelis-cli --bin chelis --quiet -- lint --check .`
+  - `<managed-python> scripts/regenerate_chelis_std_bundle.py --debug --check`
   - `cargo test -p chelis-types --doc`
   - `cargo test -p chelis-compiler-api --doc`
+  - `cargo test -p chelis-pipeline-core --doc`
   - `<managed-python> scripts/check_checkpoint_compile_fail.py`
+  - `<managed-python> scripts/pipeline_core_dependency_guard.py`
+  - `<managed-python> scripts/pipeline_core_documentation_guard.py`
+  - `<managed-python> scripts/check_pipeline_core_compile_fail.py`
   - `cargo nextest run --workspace --no-fail-fast`
+  - `<managed-python> scripts/compiler_front_end_performance.py`
+  - `<managed-python> scripts/unrepresentable_domain_oracle.py`
 - CI substitutes `cargo nextest run --workspace --profile ci
-  --no-fail-fast` for the last
-  command and delegates the excluded capacity-census binaries to the required
+  --no-fail-fast` for the workspace-nextest command and delegates the excluded
+  capacity-census binaries to the required
   dtype oracle.
 - `.github/workflows/ci.yml` gate steps call
   `python3 scripts/gate.py <stage>` instead of inlining
   cargo/chelis commands.
+- The parity guard pins the complete ordered set of single-line `run:` scalars
+  in each gate-owned worker. It does not try to emulate Bash or classify an
+  executable from shell text; every added command requires an explicit review.
 - `AGENTS.md` "Minimum repo gate" points at `python3 scripts/gate.py`
   plus a `--list` echo of the canonical list and documents uv routing and
   retained failure diagnostics.
@@ -180,20 +193,19 @@ charset checker was added: that would be a second source of truth for
 `scripts/test_gate.py` asserts:
 
 - the `--stage` subsets union exactly to the full list;
-- a parity assertion that greps `.github/workflows/ci.yml` and asserts
-  every `cargo`/`chelis` invocation in a gate step is produced by
-  `gate.py`. This is the lock that makes future drift a test failure.
-  The parity test excludes the sanitizer / macOS-smoke / docs /
-  LOC-report / no-AI-authorship jobs by name (`NON_GATE_JOBS`) so the
-  exclusion is visible and reviewable;
+- a structural parity assertion that parses every single-line `run:` scalar in
+  the gate-owned jobs and compares the complete ordered list with an exact
+  allowlist. This makes future drift a test failure without depending on a
+  partial Bash parser. Every other CI job is classified by name
+  (`NON_GATE_JOBS`) so the exclusion is visible and reviewable;
 - `--list` prints the canonical list.
 - uv/Devenv detection, unmanaged re-exec, missing-uv guidance, child
   `PYO3_PYTHON` propagation, success cleanup, and complete failed-command
   diagnostics are covered by `scripts/test_gate_diagnostics.py`.
 
-A `run: |` multi-line block in either gate job would hide its commands
-from the line-based parity parser; `test_no_multiline_run_in_gate_jobs`
-disallows it so parity stays enforceable.
+A `run: |` multi-line block in either gate job is outside the exact scalar
+contract; `test_no_multiline_run_in_gate_jobs` also names that prohibition
+directly.
 
 ## Ordering
 

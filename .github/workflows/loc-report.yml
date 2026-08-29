@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # Pinned to v8.1.0 — see ci.yml lint-and-unit job for rationale.
+      # Pinned to v8.1.0 — see ci.yml lint-rust worker for rationale.
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
 

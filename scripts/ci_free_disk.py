@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """Reclaim disk on GitHub-hosted Ubuntu CI runners before the Rust build.
 
-The `lint-and-unit` and `integration` Linux jobs build and test the full
-Cargo workspace. The debug `target/` plus all build artifacts pushes the
-runner past its disk ceiling intermittently, surfacing as
+The `lint-rust` and `workspace-tests-shard` Linux workers compile or test the
+full Cargo workspace. The debug `target/` plus all build artifacts pushes
+the runner past its disk ceiling intermittently, surfacing as
 `No space left on device (os error 28)` during an in-test `gcc` build or
 `/usr/bin/ld: final link failed: No space left on device`
 (`ld terminated with signal 7 [Bus error]`) while linking the `chelis`
 binary. Those failures land on whatever crate happens to be building at the
 moment (often unrelated `chelis-backend-c` f16 tests), so they read like a
-code regression but are purely environmental. The macOS Smoke job (more
-disk) runs the same `cargo nextest run --workspace` and stays green.
+code regression but are purely environmental. The macOS workspace workers
+(more disk) run the same partitioned `cargo nextest run --workspace` suite.
 
 This mirrors the `Free Disk Space (Ubuntu)` step the neoteny repo runs in
 its CI: it removes large pre-installed SDK toolchains that the chelis
