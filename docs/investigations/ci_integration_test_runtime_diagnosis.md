@@ -81,13 +81,12 @@ Two levers, both applied:
 
 ### Lever A — swap CI integration runners to `cargo nextest`
 
-The `integration` and `macos-smoke` jobs swap `cargo test --workspace --tests`
-for `cargo nextest run --workspace`. nextest is installed via
-`taiki-e/install-action@nextest`. This ignores zero tests; it is purely a
-scheduler change that overlaps heavyweight binaries. Other CI jobs that use
-narrower invocations (`cargo test --workspace --lib`, `cargo test -p ...`) are
-left on plain `cargo test` since they do not have the many-binary serialization
-problem and `cargo test` must keep working for them.
+The Linux and macOS workspace shard jobs run
+`cargo nextest run --workspace` through the repository gate. Their
+fail-closed `workspace-tests` and `macos-smoke` aggregates retain the stable
+required-check names while the test processes run in parallel. nextest is
+installed via `taiki-e/install-action@nextest`; this scheduler change does not
+alter the selected tests.
 
 ### Lever B — `#[ignore]` the single pathological full-repo-lint test
 
@@ -199,7 +198,7 @@ the same miss.
 
 The execution repair keeps the corpus intact:
 
-- nextest hash partitions `1/2` and `2/2` run concurrently with matrix
+- nextest hash partitions `1/4` through `4/4` run concurrently with matrix
   fail-fast disabled;
 - a fail-closed aggregate retains the stable **Typecheck Level Generalization
   Oracle** status and succeeds only when both shards succeed; the directly
@@ -208,10 +207,8 @@ The execution repair keeps the corpus intact:
 - the read-only oracle jobs no longer set `CARGO_TARGET_DIR`, so their
   `linux-workspace` cache identity matches the sole writer.
 
-An exact-head `cargo nextest list` census at `d052af9e` found 8,710 selected
-non-ignored tests: 4,361 in shard 1 and 4,349 in shard 2, with zero overlap,
-zero missing tests, and zero extras. That proves the selection split, not the
-hosted duration. Based on the measured 5m42s compile plus two roughly equal
-halves of the 24m47s execution, each cold shard should finish in about 18
-minutes; a hosted run of the changed workflow is still required to replace
-that estimate with an observed exact-head result.
+An exact-head `cargo nextest list` census at `0b446bbc` found 8,710 selected
+non-ignored tests: 2,215, 2,191, 2,146, and 2,158 in shards 1 through 4,
+respectively, with zero overlap, zero missing tests, and zero extras. That
+proves the selection split, not the hosted duration. A hosted exact-head
+sample remains required to establish the actual critical path.
