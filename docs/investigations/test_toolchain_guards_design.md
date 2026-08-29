@@ -57,6 +57,9 @@ Three failure modes kept recurring in CI:
   check. The hard ceiling is blocking. Relative comparisons use
   `--informational-relative`: a single hosted sample varies too much to make
   those comparisons a reliable required check, but the report remains visible.
+  Dtype, explicit-generalization, and macOS workers apply the same check to
+  their own JUnit before their required aggregates, so tests outside the Linux
+  workspace selection cannot bypass the ceiling.
 
 ### Why these defaults
 

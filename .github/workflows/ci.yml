@@ -863,6 +863,12 @@ jobs:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
         run: .venv/bin/python scripts/dtype_phase3_oracle.py
 
+      - name: Test-timing ceiling (blocking)
+        run: >-
+          .venv/bin/python scripts/test_timing_check.py
+          --junit target/nextest/ci-full/junit.xml
+          --informational-relative
+
       - name: Upload dtype JUnit
         if: always()
         uses: actions/upload-artifact@v7
@@ -989,6 +995,12 @@ jobs:
         env:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
         run: cargo nextest run --workspace --profile ci-full --ignore-default-filter --features chelis-types/generalize-sweep-oracle --no-fail-fast -E 'not (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/))' --partition hash:${{ matrix.shard }}/4
+
+      - name: Test-timing ceiling (blocking)
+        run: >-
+          .venv/bin/python scripts/test_timing_check.py
+          --junit target/nextest/ci-full/junit.xml
+          --informational-relative
 
       - name: Upload generalization JUnit shard
         if: always()
@@ -1137,6 +1149,12 @@ jobs:
         if: matrix.shard == 2
         run: python3 .github/scripts/smoke_macos_metal.py ./target/debug/chelis
 
+      - name: Test-timing ceiling (blocking)
+        run: >-
+          .venv/bin/python scripts/test_timing_check.py
+          --junit target/nextest/ci-full/junit.xml
+          --informational-relative
+
   # Keep the exact branch-protection context stable and fail closed if either
   # disjoint full-workspace partition fails.
   macos-smoke:
@@ -1156,6 +1174,8 @@ jobs:
   # cross-platform report. Overlap between semantic lanes is intentional and
   # remains visible; the workspace aggregate separately proves its hash
   # partitions are disjoint before enforcing the blocking absolute ceiling.
+  # Dtype, generalization, and macOS producers enforce the same ceiling before
+  # their own required aggregates.
   test-telemetry:
     name: CI Test Telemetry
     runs-on: ubuntu-latest

@@ -1607,6 +1607,24 @@ class CiParityTests(unittest.TestCase):
                 self.assertIn(f"path: {path}", block)
                 self.assertIn("if-no-files-found: error", block)
 
+    def test_every_nonworkspace_pr_lane_enforces_the_absolute_ceiling(self):
+        expectations = {
+            "dtype-phase3-oracle": "target/nextest/ci-full/junit.xml",
+            "generalize-sweep-oracle-shard": (
+                "target/nextest/ci-full/junit.xml"
+            ),
+            "macos-workspace-shard": "target/nextest/ci-full/junit.xml",
+        }
+        for job, junit in expectations.items():
+            with self.subTest(job=job):
+                block = _ci_job_block(job)
+                self.assertEqual(
+                    block.count("name: Test-timing ceiling (blocking)"), 1
+                )
+                self.assertIn("scripts/test_timing_check.py", block)
+                self.assertIn(f"--junit {junit}", block)
+                self.assertIn("--informational-relative", block)
+
     def test_cross_lane_telemetry_requires_every_expected_artifact(self):
         block = _ci_job_block("test-telemetry")
         self.assertIn("name: CI Test Telemetry", block)
