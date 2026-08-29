@@ -232,7 +232,7 @@ def _report_payload(report: Report) -> dict[str, object]:
             {
                 "shard": observation.shard,
                 "test_id": observation.test_id,
-                "seconds": round(observation.seconds, 6),
+                "seconds": observation.seconds,
             }
             for observation in report.slowest[:50]
         ],
@@ -261,7 +261,7 @@ def render_markdown_summary(report: Report) -> str:
     ]
     for observation in report.slowest[:20]:
         lines.append(
-            f"| {observation.seconds:.3f}s | `{observation.shard}` | "
+            f"| {observation.seconds!r}s | `{observation.shard}` | "
             f"`{observation.test_id}` |"
         )
     return "\n".join(lines) + "\n"

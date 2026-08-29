@@ -111,6 +111,20 @@ class ParseJunitTests(unittest.TestCase):
                     tc.parse_junit(p)
                 self.assertIn("finite, non-negative time", str(cm.exception))
 
+    def test_duplicate_test_identity_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "junit.xml"
+            p.write_text(
+                _junit(
+                    [
+                        ("bin_a", "same", 1.0),
+                        ("bin_a", "same", 2.0),
+                    ]
+                )
+            )
+            with self.assertRaisesRegex(tc.TimingError, "duplicate test identity"):
+                tc.parse_junit(p)
+
 
 class EvaluateTests(unittest.TestCase):
     def test_all_under_budget_is_empty(self):

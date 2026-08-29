@@ -210,9 +210,11 @@ def parse_junit(path: Path) -> dict[str, float]:
                 f"finite, non-negative time, got {time_attr!r}"
             )
         key = f"{classname}::{name}"
-        # If a test name collides (parameterized reruns), keep the
-        # slowest observation; the budget cares about worst case.
-        timings[key] = max(timings.get(key, 0.0), seconds)
+        if key in timings:
+            raise TimingError(
+                f"JUnit XML {path} contains duplicate test identity {key}"
+            )
+        timings[key] = seconds
     return timings
 
 

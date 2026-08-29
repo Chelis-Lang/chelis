@@ -233,7 +233,7 @@ class OutputContractTests(unittest.TestCase):
             self.assertEqual(payload["schema_version"], 1)
             self.assertEqual(payload["observation_count"], 2)
             rendered = summary.read_text(encoding="utf-8")
-            self.assertIn("30.480s", rendered)
+            self.assertIn("30.48s", rendered)
             self.assertIn("bin-b::slow", rendered)
 
     def test_merged_junit_preserves_just_over_ceiling_boundary(self) -> None:
@@ -264,6 +264,48 @@ class OutputContractTests(unittest.TestCase):
             )
             self.assertEqual(len(flags), 1)
             self.assertEqual(flags[0].kind, timing_check.Flag.OVER_CEILING)
+
+    def test_every_durable_output_preserves_binary64_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.xml"
+            merged = root / "merged.xml"
+            machine = root / "report.json"
+            summary = root / "summary.md"
+            values = {
+                "subnormal": 5e-324,
+                "boundary": 30.0,
+                "adjacent-above": 30.000000000000004,
+                "maximum": float.fromhex("0x1.fffffffffffffp+1023"),
+            }
+            source.write_text(
+                _junit(
+                    [("bin", name, seconds) for name, seconds in values.items()]
+                ),
+                encoding="utf-8",
+            )
+            report = telemetry.build_report(
+                (telemetry.parse_shard("workspace", source),),
+                require_disjoint=True,
+            )
+
+            telemetry.write_merged_junit(report, merged)
+            telemetry.write_json_report(report, machine)
+            telemetry.write_markdown_summary(report, summary)
+
+            self.assertEqual(
+                timing_check.parse_junit(merged),
+                {f"bin::{name}": seconds for name, seconds in values.items()},
+            )
+            payload = json.loads(machine.read_text(encoding="utf-8"))
+            json_values = {
+                item["test_id"].removeprefix("bin::"): item["seconds"]
+                for item in payload["slowest"]
+            }
+            self.assertEqual(json_values, values)
+            rendered = summary.read_text(encoding="utf-8")
+            for seconds in values.values():
+                self.assertIn(f"| {seconds!r}s |", rendered)
 
     def test_cli_requires_unique_labels_and_writes_all_requested_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
