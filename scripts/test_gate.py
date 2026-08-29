@@ -1504,7 +1504,13 @@ def _rust_cache_steps(job_block: str) -> list[dict[str, str]]:
         for idx in range(uses_idx + 1, len(lines)):
             if re.match(r"^\s*- ", lines[idx]):
                 break
-            if lines[idx].strip() == "with:":
+            stripped = lines[idx].strip()
+            if re.match(r"^with\s*:", stripped):
+                if stripped != "with:":
+                    raise AssertionError(
+                        "unsupported rust-cache input shape: "
+                        f"{stripped!r}"
+                    )
                 with_idx = idx
                 break
         if with_idx is None:
@@ -1518,11 +1524,39 @@ def _rust_cache_steps(job_block: str) -> list[dict[str, str]]:
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
-            match = re.match(
-                r"^([A-Za-z0-9_-]+):\s*(.+?)\s*$", stripped
+            match = re.fullmatch(
+                r"(?P<key>[A-Za-z0-9_-]+)\s*:\s*(?P<value>.+?)",
+                stripped,
             )
-            if match is not None:
-                inputs[match.group(1)] = match.group(2)
+            if match is None:
+                raise AssertionError(
+                    "unsupported rust-cache input shape: "
+                    f"{stripped!r}"
+                )
+            key = match.group("key")
+            raw_value = match.group("value").strip()
+            if (
+                raw_value.startswith(("&", "*", "!", "{", "[", "#"))
+                or _is_yaml_block_scalar(raw_value)
+            ):
+                raise AssertionError(
+                    "unsupported rust-cache input shape: "
+                    f"{stripped!r}"
+                )
+            value = _strip_yaml_scalar_quotes(raw_value)
+            if value == _UNSUPPORTED_RUN_SCALAR or (
+                raw_value.startswith(("'", '"')) and value == raw_value
+            ):
+                raise AssertionError(
+                    "unsupported rust-cache input shape: "
+                    f"{stripped!r}"
+                )
+            if not value or key in inputs:
+                raise AssertionError(
+                    "unsupported rust-cache input shape: "
+                    f"{stripped!r}"
+                )
+            inputs[key] = value
         steps.append(inputs)
     return steps
 
@@ -1995,6 +2029,75 @@ class CiParityTests(unittest.TestCase):
             "linux-workspace.*exactly one writer",
         ):
             _assert_shared_rust_cache_writer_contract(mutated)
+
+    def test_cache_input_parser_normalizes_or_rejects_yaml_equivalents(self):
+        cases = (
+            (
+                '        with:\n          shared-key: "linux-workspace"\n'
+                "          save-if: true\n",
+                "exactly one writer",
+            ),
+            (
+                "        with:\n          shared-key: 'linux-workspace'\n"
+                "          save-if: true\n",
+                "exactly one writer",
+            ),
+            (
+                "        with:\n          shared-key: linux-workspace # writer\n"
+                "          save-if: true\n",
+                "exactly one writer",
+            ),
+            (
+                "        with:\n          shared-key : linux-workspace\n"
+                "          save-if: true\n",
+                "exactly one writer",
+            ),
+            (
+                "        with:\n          shared-key: &workspace_key "
+                "linux-workspace\n          save-if: true\n",
+                "unsupported rust-cache input shape",
+            ),
+            (
+                "        with:\n          shared-key: !!str linux-workspace\n"
+                "          save-if: true\n",
+                "unsupported rust-cache input shape",
+            ),
+            (
+                "        with:\n          shared-key: >-\n"
+                "            linux-workspace\n          save-if: true\n",
+                "unsupported rust-cache input shape",
+            ),
+            (
+                '        with:\n          "shared-key": linux-workspace\n'
+                "          save-if: true\n",
+                "unsupported rust-cache input shape",
+            ),
+            (
+                "        with:\n          ? shared-key\n"
+                "          : linux-workspace\n          save-if: true\n",
+                "unsupported rust-cache input shape",
+            ),
+            (
+                "        with: {shared-key: linux-workspace, "
+                "save-if: true}\n",
+                "unsupported rust-cache input shape",
+            ),
+        )
+        workflow = CI_YML.read_text()
+        for with_map, error in cases:
+            with self.subTest(with_map=with_map):
+                step = (
+                    "\n      - name: Competing cache writer\n"
+                    "        uses: Swatinem/rust-cache@v2\n"
+                    + with_map
+                )
+                mutated = workflow.replace(
+                    "\n  workspace-tests-shard:",
+                    step + "\n  workspace-tests-shard:",
+                    1,
+                )
+                with self.assertRaisesRegex(AssertionError, error):
+                    _assert_shared_rust_cache_writer_contract(mutated)
 
     def test_read_only_cache_contract_rejects_a_second_cache_step(self):
         block = _ci_job_block("faithful-observation-phase2-oracle")
