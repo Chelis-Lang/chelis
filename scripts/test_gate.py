@@ -409,7 +409,9 @@ NON_GATE_JOBS = {
     "faithful-observation-phase2-oracle",
     # Rule-id: GATE-SCOPE-GENERALIZE-SWEEP-ORACLE -- chelis#1207's exact
     # sweep-versus-level parity corpus intentionally bypasses nextest's
-    # default filter and is owned by its dedicated blocking CI leg.
+    # default filter. Two CI-owned shards execute its disjoint partitions;
+    # the aggregate retains the stable blocking status context.
+    "generalize-sweep-oracle-shard",
     "generalize-sweep-oracle",
     "integration",
     # Rule-id: GATE-SCOPE-SMT -- the smt-build job is the required fast
@@ -1268,6 +1270,41 @@ def _rust_cache_inputs(job_block: str) -> dict[str, str]:
     return inputs
 
 
+def _assert_generalize_sweep_partition_contract(shard_block: str) -> None:
+    matrix_match = re.search(r"^\s+shard:\s*\[([^]]+)\]$", shard_block, re.M)
+    if matrix_match is None:
+        raise AssertionError("missing explicit shard matrix")
+    shards = [int(value.strip()) for value in matrix_match.group(1).split(",")]
+    partition_match = re.search(
+        r"--partition hash:\$\{\{ matrix\.shard \}\}/(\d+)",
+        shard_block,
+    )
+    if partition_match is None:
+        raise AssertionError("missing hash partition command")
+    partition_count = int(partition_match.group(1))
+    if partition_count != 2:
+        raise AssertionError(f"expected two partitions, found {partition_count}")
+    expected = list(range(1, partition_count + 1))
+    if shards != expected:
+        raise AssertionError(
+            "the shard matrix must cover every nextest hash partition exactly "
+            f"once: expected {expected}, found {shards}"
+        )
+
+
+def _assert_read_only_workspace_cache(job_block: str) -> None:
+    inputs = _rust_cache_inputs(job_block)
+    if inputs.get("shared-key") != "linux-workspace":
+        raise AssertionError("read-only job does not use the workspace cache")
+    if inputs.get("save-if") != "false":
+        raise AssertionError("read-only job must not save a competing cache entry")
+    if "CARGO_TARGET_DIR:" in job_block:
+        raise AssertionError(
+            "an explicit target path changes rust-cache's environment hash and "
+            "silently prevents reuse of the workspace cache"
+        )
+
+
 class CiParityTests(unittest.TestCase):
     """The lock: every cargo/chelis gate invocation in the CI workflow
     must be produced by `gate.py`. If a future edit hand-inlines a
@@ -1368,10 +1405,7 @@ class CiParityTests(unittest.TestCase):
         cache_inputs = _rust_cache_inputs(oracle_block)
         self.assertEqual(cache_inputs.get("shared-key"), "linux-workspace")
         self.assertEqual(cache_inputs.get("save-if"), "false")
-        self.assertIn(
-            "CARGO_TARGET_DIR: ${{ github.workspace }}/target",
-            oracle_block,
-        )
+        self.assertNotIn("CARGO_TARGET_DIR:", oracle_block)
         _assert_executable_run_once(oracle_block, command)
         self.assertNotIn(command, workspace_block)
         self.assertNotIn(command, dtype_block)
@@ -1380,33 +1414,88 @@ class CiParityTests(unittest.TestCase):
             aggregate_block,
         )
 
-    def test_generalize_sweep_oracle_is_a_dedicated_blocking_job(self):
+    def test_generalize_sweep_oracle_is_a_sharded_blocking_aggregate(self):
+        shard_block = _ci_job_block("generalize-sweep-oracle-shard")
         oracle_block = _ci_job_block("generalize-sweep-oracle")
         aggregate_block = _ci_job_block("integration")
         command = (
             "cargo nextest run --workspace --ignore-default-filter "
-            "--features chelis-types/generalize-sweep-oracle --no-fail-fast"
+            "--features chelis-types/generalize-sweep-oracle --no-fail-fast "
+            "--partition hash:${{ matrix.shard }}/2"
         )
 
+        self.assertIn(
+            "name: Typecheck Level Generalization Oracle "
+            "(shard ${{ matrix.shard }}/2)",
+            shard_block,
+        )
+        self.assertIn("fail-fast: false", shard_block)
+        self.assertIn("shard: [1, 2]", shard_block)
+        self.assertIn("needs: [changes]", shard_block)
+        self.assertIn("contents: read", shard_block)
+        self.assertIn("dtolnay/rust-toolchain@stable", shard_block)
+        self.assertIn("python3 scripts/ci_setup_uv_python.py", shard_block)
+        self.assertIn("taiki-e/install-action@nextest", shard_block)
+        _assert_executable_run_once(shard_block, command)
+
         self.assertIn("name: Typecheck Level Generalization Oracle", oracle_block)
-        self.assertIn("needs: [changes]", oracle_block)
+        self.assertIn(
+            "needs: [changes, generalize-sweep-oracle-shard]",
+            oracle_block,
+        )
         self.assertIn("contents: read", oracle_block)
-        self.assertIn("dtolnay/rust-toolchain@stable", oracle_block)
-        self.assertIn("python3 scripts/ci_setup_uv_python.py", oracle_block)
-        self.assertIn("taiki-e/install-action@nextest", oracle_block)
-        self.assertIn(command, oracle_block)
+        self.assertNotIn("cargo nextest", oracle_block)
+        _assert_executable_run_once(
+            oracle_block,
+            "python3 scripts/ci_require_success.py "
+            "generalize-sweep-oracle-shard="
+            "${{ needs.generalize-sweep-oracle-shard.result }}",
+        )
         self.assertIn(
             "generalize-sweep-oracle=${{ needs.generalize-sweep-oracle.result }}",
             aggregate_block,
         )
 
+    def test_generalize_sweep_partition_contract_has_no_gap_or_overlap(self):
+        shard_block = _ci_job_block("generalize-sweep-oracle-shard")
+        _assert_generalize_sweep_partition_contract(shard_block)
+
+    def test_generalize_sweep_partition_contract_rejects_a_missing_shard(self):
+        shard_block = _ci_job_block("generalize-sweep-oracle-shard")
+        mutated = shard_block.replace("shard: [1, 2]", "shard: [1]", 1)
+        with self.assertRaisesRegex(
+            AssertionError,
+            "cover every nextest hash partition exactly once",
+        ):
+            _assert_generalize_sweep_partition_contract(mutated)
+
     def test_parallel_jobs_share_one_saved_rust_cache_namespace(self):
         workspace_inputs = _rust_cache_inputs(_ci_job_block("workspace-tests"))
-        oracle_inputs = _rust_cache_inputs(_ci_job_block("dtype-phase3-oracle"))
+        read_only_jobs = (
+            "dtype-phase3-oracle",
+            "faithful-observation-phase2-oracle",
+            "generalize-sweep-oracle-shard",
+        )
         self.assertEqual(workspace_inputs.get("shared-key"), "linux-workspace")
-        self.assertEqual(oracle_inputs.get("shared-key"), "linux-workspace")
         self.assertNotEqual(workspace_inputs.get("save-if"), "false")
-        self.assertEqual(oracle_inputs.get("save-if"), "false")
+        for job in read_only_jobs:
+            with self.subTest(job=job):
+                block = _ci_job_block(job)
+                _assert_read_only_workspace_cache(block)
+
+    def test_shared_cache_contract_rejects_an_explicit_target_override(self):
+        block = _ci_job_block("faithful-observation-phase2-oracle")
+        mutated = block.replace(
+            "      CARGO_PROFILE_TEST_DEBUG: 0",
+            "      CARGO_PROFILE_TEST_DEBUG: 0\n"
+            "      CARGO_TARGET_DIR: ${{ github.workspace }}/target",
+            1,
+        )
+        with self.assertRaisesRegex(
+            AssertionError,
+            "explicit target path changes rust-cache's environment hash",
+        ):
+            _assert_read_only_workspace_cache(mutated)
 
     def test_profile_partition_set_math_runs_continuously(self):
         workspace_block = _ci_job_block("workspace-tests")
@@ -1903,14 +1992,14 @@ class DocsOnlySkipTests(unittest.TestCase):
         "workspace-tests",
         "dtype-phase3-oracle",
         "faithful-observation-phase2-oracle",
-        "generalize-sweep-oracle",
+        "generalize-sweep-oracle-shard",
         "macos-smoke",
         "backend-sanitizers",
         "smt-build",
     }
     # The stable required context aggregates the parallel integration legs,
     # so it needs their results as well as the docs-only classification.
-    HEAVY_AGGREGATOR_JOBS = {"integration"}
+    HEAVY_AGGREGATOR_JOBS = {"generalize-sweep-oracle", "integration"}
     # Jobs that use the same always-present `changes` job but key on a
     # narrower contract input rather than on the docs-only classification.
     CHANGE_GATED_JOBS = {
@@ -2006,6 +2095,22 @@ class DocsOnlySkipTests(unittest.TestCase):
         self.assertIn("needs.dtype-phase3-oracle.result", block)
         self.assertIn("needs.faithful-observation-phase2-oracle.result", block)
         self.assertIn("needs.generalize-sweep-oracle.result", block)
+        self.assertIn("scripts/ci_require_success.py", block)
+
+    def test_generalize_sweep_aggregator_is_fail_closed_and_docs_gated(self):
+        attrs = _parse_job_attrs()
+        aggregate = attrs["generalize-sweep-oracle"]
+        self.assertEqual(
+            aggregate.get("needs"),
+            "[changes, generalize-sweep-oracle-shard]",
+        )
+        cond = aggregate.get("if", "")
+        self.assertNotIn("always()", cond)
+        self.assertIn("!cancelled()", cond)
+        self.assertIn("needs.changes.result != 'success'", cond)
+        self.assertIn("needs.changes.outputs.docs_only != 'true'", cond)
+        block = _ci_job_block("generalize-sweep-oracle")
+        self.assertIn("needs.generalize-sweep-oracle-shard.result", block)
         self.assertIn("scripts/ci_require_success.py", block)
 
     def test_always_run_jobs_are_not_gated(self):

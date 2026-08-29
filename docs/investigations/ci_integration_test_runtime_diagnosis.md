@@ -178,3 +178,40 @@ in the oracle without paying for them twice. The local `default` profile and
 macOS workspace run remain unchanged. A profile-partition oracle checks that
 the CI-only exclusions are selected by the required dtype oracle, so a future
 rename cannot silently drop them.
+
+## 2026-08-28 typecheck parity-oracle critical path
+
+The level-generalization parity oracle became the per-PR critical path after
+#1207 landed. In CI run `33211316008`, job `98992391323` took 31m38s. Its
+nextest step compiled the feature-enabled workspace in 5m42s, then ran 8,718
+tests in 1,487.053s (24m47s). Setup outside that step was under one minute.
+The same run's Workspace Tests job took 24m48s, so setup or package-install
+trimming could not bring the overall run below 30 minutes while the parity
+corpus remained serial.
+
+The oracle also did not restore the Rust cache it claimed to share with the
+workspace job. `Swatinem/rust-cache` includes `CARGO_TARGET_DIR` in its
+environment hash. The explicit but redundant target override produced cache
+key prefix `72d1170c`; the log reports `No cache found`. The workspace job,
+whose target path was implicit, used prefix `69700c73` and restored a 533 MB
+cache. The faithful-observation job carried the same redundant override and
+the same miss.
+
+The execution repair keeps the corpus intact:
+
+- nextest hash partitions `1/2` and `2/2` run concurrently with matrix
+  fail-fast disabled;
+- a fail-closed aggregate retains the stable **Typecheck Level Generalization
+  Oracle** status and succeeds only when both shards succeed; the directly
+  required **Integration Tests (Linux)** context transitively gates that
+  aggregate; and
+- the read-only oracle jobs no longer set `CARGO_TARGET_DIR`, so their
+  `linux-workspace` cache identity matches the sole writer.
+
+An exact-head `cargo nextest list` census at `d052af9e` found 8,710 selected
+non-ignored tests: 4,361 in shard 1 and 4,349 in shard 2, with zero overlap,
+zero missing tests, and zero extras. That proves the selection split, not the
+hosted duration. Based on the measured 5m42s compile plus two roughly equal
+halves of the 24m47s execution, each cold shard should finish in about 18
+minutes; a hosted run of the changed workflow is still required to replace
+that estimate with an observed exact-head result.

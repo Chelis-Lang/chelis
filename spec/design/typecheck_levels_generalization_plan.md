@@ -362,7 +362,8 @@ The implementation change adds the internal Cargo feature
 generalization computes both the level result and the retained sweep result and
 asserts exact equality of ordered `tvars`, `dvars`, `rvars`, and the scheme body.
 
-The phase's one authoritative oracle is:
+The phase's one authoritative oracle is the named **Typecheck Level
+Generalization Oracle** suite. Its one-shot local runner is:
 
 ```sh
 cargo nextest run --workspace \
@@ -383,10 +384,33 @@ expected result is exit code zero with:
 - the independent-binding structural test observing zero production environment
   visits.
 
-The implementation change must add a dedicated CI job that invokes this exact
-command. The same runner remains manually reproducible even though it intentionally
+CI executes the same selection as two deterministic, disjoint nextest hash
+partitions:
+
+```sh
+cargo nextest run --workspace \
+  --ignore-default-filter \
+  --features chelis-types/generalize-sweep-oracle \
+  --no-fail-fast \
+  --partition hash:1/2
+
+cargo nextest run --workspace \
+  --ignore-default-filter \
+  --features chelis-types/generalize-sweep-oracle \
+  --no-fail-fast \
+  --partition hash:2/2
+```
+
+The CI matrix must contain both partition indices exactly once and must disable
+matrix fail-fast so one failure cannot hide the other partition's result. A
+fail-closed aggregate job keeps the stable **Typecheck Level Generalization
+Oracle** status and succeeds only when both partitions succeed. The union of the
+two partitions is the oracle; neither partition is independent completion
+evidence. This is an execution split of one corpus, not two acceptance oracles.
+
+The one-shot runner remains manually reproducible even though it intentionally
 re-runs the old sweeps and may exceed the local inner-loop budget. Document the
-command and its exact-head result in the implementation PR and current-state
+runner and its exact-head result in the implementation PR and current-state
 evidence. `python3 scripts/gate.py --local` remains the pre-push gate, but it does
 not replace this oracle.
 
@@ -404,9 +428,9 @@ change without evidence.
    still uses sweeps.
 3. Add lowering at every bind choke point, PP1 handling, all ordinary boundaries,
    and the corrected SCC order in both drivers.
-4. Add the oracle feature and its dedicated exact-command CI job.
+4. Add the oracle feature and its dedicated fail-closed CI suite.
 5. Flip `Env::generalize` to levels; retain sweeps only behind the oracle feature.
-6. Run the local gate, then the exact authoritative oracle.
+6. Run the local gate, then the authoritative oracle.
 7. Record supporting timings and file separate follow-ups for SCC/reachability and
    any surviving checker-lane gap.
 
@@ -435,7 +459,7 @@ Chelis language semantics.
 | Persisted variable is re-generalized by new code | Typed resumption at both non-empty entry points plus stacked tests |
 | Repeated persisted resumption grows obsolete level history | Resume-floor compaction plus repeated-cycle size and semantic-equivalence tests |
 | An old bincode payload is decoded as new state | Exact V10/V6/V3 payload bumps and stale-version tests; envelope stays V1 |
-| Parity misses heavy checker tests behind nextest's default filter | `--ignore-default-filter`, non-ignored acceptance tests, and a dedicated exact-command CI job |
+| Parity misses heavy checker tests behind nextest's default filter | `--ignore-default-filter`, non-ignored acceptance tests, and a dedicated two-partition CI suite with a fail-closed aggregate |
 | Parity passes while production still sweeps | Independent reference-disabled zero-visit assertion in the authoritative oracle |
 | Quantifier reordering creates false parity failures | Deterministic ID ordering and exact ordered-scheme equality |
 | Performance claim expands into chelis#1205 | Generated binding corpus and explicit nested-lowering exclusion |
