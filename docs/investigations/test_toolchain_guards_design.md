@@ -175,8 +175,8 @@ charset checker was added: that would be a second source of truth for
   - `<managed-python> scripts/compiler_front_end_performance.py`
   - `<managed-python> scripts/unrepresentable_domain_oracle.py`
 - CI substitutes `cargo nextest run --workspace --profile ci
-  --no-fail-fast` for the last
-  command and delegates the excluded capacity-census binaries to the required
+  --no-fail-fast` for the workspace-nextest command and delegates the excluded
+  capacity-census binaries to the required
   dtype oracle.
 - `.github/workflows/ci.yml` gate steps call
   `python3 scripts/gate.py <stage>` instead of inlining
