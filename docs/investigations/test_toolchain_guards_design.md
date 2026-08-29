@@ -157,14 +157,20 @@ charset checker was added: that would be a second source of truth for
   commands also pass `--no-fail-fast` explicitly. A failing assertion does
   not cancel later tests that may reveal independent failures.
 - The canonical full list:
-  - `cargo build --workspace --all-targets`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo fmt --all -- --check`
   - `cargo run -p chelis-cli --bin chelis --quiet -- lint --check .`
+  - `<managed-python> scripts/regenerate_chelis_std_bundle.py --debug --check`
   - `cargo test -p chelis-types --doc`
   - `cargo test -p chelis-compiler-api --doc`
+  - `cargo test -p chelis-pipeline-core --doc`
   - `<managed-python> scripts/check_checkpoint_compile_fail.py`
+  - `<managed-python> scripts/pipeline_core_dependency_guard.py`
+  - `<managed-python> scripts/pipeline_core_documentation_guard.py`
+  - `<managed-python> scripts/check_pipeline_core_compile_fail.py`
   - `cargo nextest run --workspace --no-fail-fast`
+  - `<managed-python> scripts/compiler_front_end_performance.py`
+  - `<managed-python> scripts/unrepresentable_domain_oracle.py`
 - CI substitutes `cargo nextest run --workspace --profile ci
   --no-fail-fast` for the last
   command and delegates the excluded capacity-census binaries to the required

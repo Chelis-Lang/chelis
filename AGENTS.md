@@ -632,10 +632,10 @@ diagnosing it as branch-owned.
 
 ```sh
 python3 scripts/gate.py --list
-# cargo build --workspace --all-targets  # ci-owned
 # cargo clippy --workspace --all-targets -- -D warnings  # local + ci
 # cargo fmt --all -- --check  # local + ci
 # cargo run -p chelis-cli --bin chelis --quiet -- lint --check .  # local + ci
+# <managed-python> scripts/regenerate_chelis_std_bundle.py --debug --check  # local + ci
 # cargo test -p chelis-types --doc  # local + ci
 # cargo test -p chelis-compiler-api --doc  # local + ci
 # cargo test -p chelis-pipeline-core --doc  # local + ci
@@ -698,10 +698,9 @@ oracle's stage and a nextest-installing job.
 The oracle builds its own `chelis` before its first `.dp` fixture. Inside a
 gate run that binary already exists, so `gate.py` hands the built path over
 in `CHELIS_ORACLE_BINARY` and the oracle skips the build (chelis#1322). The
-gate sets it only for a command list whose earlier commands provably build
-that bin target (`cargo build --workspace --all-targets` and `cargo run -p
-chelis-cli --bin chelis`); the support-only integration slice used by hosted
-CI sets nothing and keeps the original
+gate sets it only for a command list whose earlier `cargo run -p chelis-cli
+--bin chelis` command provably builds that bin target; the support-only
+integration slice used by hosted CI sets nothing and keeps the original
 build-it-yourself behavior. The variable is an explicit override and is
 therefore authoritative: a path that is not an executable file is a loud
 failure, never a silent fall back to a build, and an explicit setting from
