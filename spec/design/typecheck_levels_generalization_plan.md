@@ -414,7 +414,7 @@ cargo nextest run --workspace \
 ```
 
 The CI matrix must contain all four partition indices exactly once and must disable
-matrix fail-fast so one failure cannot hide the other partition's result. A
+matrix fail-fast so one failure cannot hide any other partition's result. A
 fail-closed aggregate job keeps the stable **Typecheck Level Generalization
 Oracle** status and succeeds only when all four partitions succeed. The union of
 the four partitions is the oracle; no partition is independent completion
