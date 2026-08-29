@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -97,6 +98,20 @@ def load_config(path: Path = CONFIG_PATH) -> tuple[float, float, float]:
             f"timing config {path} `min_regression_delta` must be numeric: "
             f"{exc}"
         ) from exc
+    if not math.isfinite(tolerance):
+        raise TimingError(
+            f"timing config `tolerance` must be finite, got {tolerance}"
+        )
+    if not math.isfinite(absolute_ceiling):
+        raise TimingError(
+            "timing config `absolute_ceiling` must be finite, got "
+            f"{absolute_ceiling}"
+        )
+    if not math.isfinite(min_regression_delta):
+        raise TimingError(
+            "timing config `min_regression_delta` must be finite, got "
+            f"{min_regression_delta}"
+        )
     if tolerance < 1.0:
         raise TimingError(
             f"timing config `tolerance` must be >= 1.0, got {tolerance}"
@@ -130,12 +145,18 @@ def load_baseline(path: Path = BASELINE_PATH) -> dict[str, float]:
     out: dict[str, float] = {}
     for key, value in data.items():
         try:
-            out[str(key)] = float(value)
+            seconds = float(value)
         except (TypeError, ValueError) as exc:
             raise TimingError(
                 f"timing baseline {path}: entry {key!r} is not numeric: "
                 f"{exc}"
             ) from exc
+        if not math.isfinite(seconds) or seconds < 0.0:
+            raise TimingError(
+                f"timing baseline {path}: entry {key!r} must be finite and "
+                f"non-negative, got {value!r}"
+            )
+        out[str(key)] = seconds
     return out
 
 
@@ -181,6 +202,11 @@ def parse_junit(path: Path) -> dict[str, float]:
                 f"JUnit XML {path}: <testcase {classname}::{name}> has "
                 f"non-numeric time={time_attr!r}: {exc}"
             ) from exc
+        if not math.isfinite(seconds) or seconds < 0.0:
+            raise TimingError(
+                f"JUnit XML {path}: <testcase {classname}::{name}> must have "
+                f"finite, non-negative time, got {time_attr!r}"
+            )
         key = f"{classname}::{name}"
         # If a test name collides (parameterized reruns), keep the
         # slowest observation; the budget cares about worst case.

@@ -98,6 +98,19 @@ class ParseJunitTests(unittest.TestCase):
                 tc.parse_junit(p)
             self.assertIn("non-numeric time", str(cm.exception))
 
+    def test_nonfinite_and_negative_times_fail_closed(self):
+        for seconds in ("NaN", "Infinity", "-Infinity", "-0.001"):
+            with self.subTest(seconds=seconds), tempfile.TemporaryDirectory() as tmp:
+                p = Path(tmp) / "junit.xml"
+                p.write_text(
+                    _junit(
+                        [("bin_a", "test_one", seconds)]  # type: ignore[list-item]
+                    )
+                )
+                with self.assertRaises(tc.TimingError) as cm:
+                    tc.parse_junit(p)
+                self.assertIn("finite, non-negative time", str(cm.exception))
+
 
 class EvaluateTests(unittest.TestCase):
     def test_all_under_budget_is_empty(self):
@@ -274,6 +287,20 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(tc.TimingError):
                 tc.load_config(p)
 
+    def test_nonfinite_config_values_fail_closed(self):
+        for key in ("tolerance", "absolute_ceiling", "min_regression_delta"):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as tmp:
+                payload = {
+                    "tolerance": 2.0,
+                    "absolute_ceiling": 30.0,
+                    "min_regression_delta": 0.05,
+                }
+                payload[key] = "NaN"
+                p = self._write_config(tmp, payload)
+                with self.assertRaises(tc.TimingError) as cm:
+                    tc.load_config(p)
+                self.assertIn("must be finite", str(cm.exception))
+
     def test_missing_config_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(tc.TimingError):
@@ -331,6 +358,15 @@ class BaselineTests(unittest.TestCase):
             p.write_text(json.dumps(["not", "an", "object"]))
             with self.assertRaises(tc.TimingError):
                 tc.load_baseline(p)
+
+    def test_nonfinite_and_negative_baseline_values_fail_closed(self):
+        for seconds in ("NaN", "Infinity", "-1"):
+            with self.subTest(seconds=seconds), tempfile.TemporaryDirectory() as tmp:
+                p = Path(tmp) / "baseline.json"
+                p.write_text(json.dumps({"bin_a::t": seconds}))
+                with self.assertRaises(tc.TimingError) as cm:
+                    tc.load_baseline(p)
+                self.assertIn("finite and non-negative", str(cm.exception))
 
     def test_committed_baseline_is_valid(self):
         # The committed scripts/test_timing_baseline.json must load and
