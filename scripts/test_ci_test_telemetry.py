@@ -26,6 +26,21 @@ def _load_module():
 telemetry = _load_module()
 
 
+def _load_timing_check_module():
+    here = Path(__file__).resolve().parent
+    spec = importlib.util.spec_from_file_location(
+        "test_timing_check_impl", here / "test_timing_check.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+timing_check = _load_timing_check_module()
+
+
 def _junit(cases: list[tuple[str, str, float]]) -> str:
     rows = "\n".join(
         f'<testcase classname="{binary}" name="{name}" time="{seconds}" />'
@@ -162,6 +177,35 @@ class OutputContractTests(unittest.TestCase):
             rendered = summary.read_text(encoding="utf-8")
             self.assertIn("30.480s", rendered)
             self.assertIn("bin-b::slow", rendered)
+
+    def test_merged_junit_preserves_just_over_ceiling_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.xml"
+            merged = root / "merged.xml"
+            just_over_ceiling = 30.00000001
+            source.write_text(
+                _junit([("bin", "boundary", just_over_ceiling)]),
+                encoding="utf-8",
+            )
+            report = telemetry.build_report(
+                (telemetry.parse_shard("workspace", source),),
+                require_disjoint=True,
+            )
+
+            telemetry.write_merged_junit(report, merged)
+
+            timings = timing_check.parse_junit(merged)
+            self.assertEqual(timings["bin::boundary"], just_over_ceiling)
+            flags = timing_check.evaluate(
+                timings,
+                {},
+                tolerance=2.0,
+                absolute_ceiling=30.0,
+                min_regression_delta=0.05,
+            )
+            self.assertEqual(len(flags), 1)
+            self.assertEqual(flags[0].kind, timing_check.Flag.OVER_CEILING)
 
     def test_cli_requires_unique_labels_and_writes_all_requested_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

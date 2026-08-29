@@ -199,7 +199,10 @@ def write_merged_junit(report: Report, path: Path) -> None:
                 {
                     "classname": observation.classname,
                     "name": observation.name,
-                    "time": format(observation.seconds, ".9g"),
+                    # Preserve the parsed float exactly across the merged
+                    # artifact. Rounding here can move a value just above the
+                    # blocking timing ceiling onto the allowed boundary.
+                    "time": repr(observation.seconds),
                 },
             )
     _ensure_parent(path)
