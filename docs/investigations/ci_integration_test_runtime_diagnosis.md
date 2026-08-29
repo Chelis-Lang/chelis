@@ -201,7 +201,7 @@ The execution repair keeps the corpus intact:
 - nextest hash partitions `1/4` through `4/4` run concurrently with matrix
   fail-fast disabled;
 - a fail-closed aggregate retains the stable **Typecheck Level Generalization
-  Oracle** status and succeeds only when both shards succeed; the directly
+  Oracle** status and succeeds only when all four shards succeed; the directly
   required **Integration Tests (Linux)** context transitively gates that
   aggregate; and
 - the read-only oracle jobs no longer set `CARGO_TARGET_DIR`, so their

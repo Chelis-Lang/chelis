@@ -588,7 +588,7 @@ spec/08-backends.md                 -- new "Phase M: Metal Backend" top-level se
 spec/12-roadmap.md                  -- add Phase M row
 docs/manual_gates.md                -- register M6 manual oracle
 docs/phase_oracles.md               -- register M1-M7 phase oracles
-.github/workflows/ci.yml            -- append metal compile/link step to macos-smoke job
+.github/workflows/ci.yml            -- append metal compile/link step to macos-workspace-shard job (shard 2)
 ```
 
 **Notably NOT modified** (deliberate, per architectural decision in §3.3):
@@ -669,7 +669,7 @@ M3: Compile-and-link smoke on macOS CI (default-gate, macOS only)
 ├── Drives chelis build --target metal then clang++ -framework Metal/Foundation
 ├── Compile-and-link only, NO execution — MTLCreateSystemDefaultDevice may
 │   return null on macos-latest VMs (Apple's CI GPU policy oscillates)
-├── Append step to .github/workflows/ci.yml macos-smoke job
+├── Append step to .github/workflows/ci.yml macos-workspace-shard job (shard 2)
 └── Oracle: the new CI step passes on macos-latest
 
 M4: Reductions + fused-elementwise-into-reduction (default-gate)

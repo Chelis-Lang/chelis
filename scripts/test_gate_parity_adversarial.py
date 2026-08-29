@@ -185,6 +185,20 @@ class GateParityAdversarialTests(unittest.TestCase):
             "and uppercase characters",
         )
 
+    def test_quoted_job_id_with_direct_cargo_is_caught(self):
+        mutated = self.ci_text.rstrip() + (
+            '\n  "Quoted_Job":\n'
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: cargo check -p chelis-types\n"
+        )
+        result = _run_parity_against(mutated)
+        self.assertGreater(
+            len(result.failures) + len(result.errors),
+            0,
+            "the parity lock ignored a valid quoted job id",
+        )
+
     def test_bare_chelis_command_is_caught(self):
         # RT-2 finding, now closed: the parser originally only inspected
         # commands starting with `cargo `, so a gate job that
