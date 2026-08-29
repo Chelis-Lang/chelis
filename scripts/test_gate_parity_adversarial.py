@@ -27,6 +27,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 ANCHOR = "      - name: Gate (workspace test shard)"
+CACHE_JOB_ANCHOR = "\n  workspace-tests-shard:"
 
 
 def _load_test_gate():
@@ -258,6 +259,50 @@ class GateParityAdversarialTests(unittest.TestCase):
             0,
             "the structural parity lock allowed an unreviewed run command",
         )
+
+    def test_cache_census_rejects_every_valid_hidden_writer_spelling(self):
+        with_maps = (
+            '        with:\n          shared-key: "linux-workspace"\n'
+            "          save-if: true\n",
+            "        with:\n          shared-key: 'linux-workspace'\n"
+            "          save-if: true\n",
+            "        with:\n          shared-key: &workspace_key linux-workspace\n"
+            "          save-if: true\n",
+            "        with:\n          shared-key: !!str linux-workspace\n"
+            "          save-if: true\n",
+            "        with:\n          shared-key: >-\n"
+            "            linux-workspace\n          save-if: true\n",
+            '        with:\n          "shared-key": linux-workspace\n'
+            "          save-if: true\n",
+            "        with:\n          ? shared-key\n"
+            "          : linux-workspace\n          save-if: true\n",
+            "        with: {shared-key: linux-workspace, save-if: true}\n",
+            "        with:\n          shared-key: linux-workspace # writer\n"
+            "          save-if: true\n",
+            "        with:\n          shared-key : linux-workspace\n"
+            "          save-if: true\n",
+        )
+        for with_map in with_maps:
+            with self.subTest(with_map=with_map):
+                step = (
+                    "\n      - name: Hidden competing cache writer\n"
+                    "        uses: Swatinem/rust-cache@v2\n"
+                    + with_map
+                )
+                mutated = self.ci_text.replace(
+                    CACHE_JOB_ANCHOR,
+                    step + CACHE_JOB_ANCHOR,
+                    1,
+                )
+                self.assertNotEqual(
+                    mutated, self.ci_text, "mutation did not apply"
+                )
+                result = _run_parity_against(mutated)
+                self.assertGreater(
+                    len(result.failures) + len(result.errors),
+                    0,
+                    "the workflow-wide cache census accepted a hidden writer",
+                )
 
     def test_underscore_job_id_with_direct_cargo_is_caught(self):
         mutated = self.ci_text.rstrip() + (
