@@ -193,6 +193,22 @@ class GateParityAdversarialTests(unittest.TestCase):
             "the parity lock ignored an aliased cargo command",
         )
 
+    def test_tagged_escaped_cargo_command_is_caught(self):
+        mutated = self.ci_text.replace(
+            ANCHOR,
+            "      - name: Sneaky tagged escaped command\n"
+            '        run: !!str "\\x63argo check -p chelis-types"\n\n'
+            + ANCHOR,
+            1,
+        )
+        self.assertNotEqual(mutated, self.ci_text, "mutation did not apply")
+        result = _run_parity_against(mutated)
+        self.assertGreater(
+            len(result.failures) + len(result.errors),
+            0,
+            "the parity lock ignored a tagged escaped cargo command",
+        )
+
     def test_underscore_job_id_with_direct_cargo_is_caught(self):
         mutated = self.ci_text.rstrip() + (
             "\n  Unclassified_job:\n"
