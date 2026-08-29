@@ -15,7 +15,7 @@ Four things are locked here:
       `cargo run -p chelis-cli --bin chelis -- ...` form is caught by
       the `cargo ` prefix). This is the lock that turns future
       CI-vs-gate drift into a test failure. The non-gate jobs
-      (dtype oracle/aggregator, sanitizer, macOS-smoke, docs, LOC-report,
+      (dtype oracle/aggregator, sanitizer, macOS workers/aggregate, docs, LOC-report,
       no-AI-authorship) are excluded by name so the exclusion is explicit
       and reviewable;
   (c) `--list` prints the canonical full list;
@@ -378,9 +378,11 @@ def _assert_cvc5_closure_cache(workflow: str) -> None:
 
 
 # CI jobs that are deliberately NOT part of the per-PR developer gate.
-# `gate.py` only owns the `lint-and-unit` and `workspace-tests` jobs; these
-# are listed by name so the parity test's exclusion is visible.
+# `gate.py` only owns commands invoked by the `lint-rust` and
+# `workspace-tests-shard` workers; these are listed by name so the parity
+# test's exclusion is visible.
 NON_GATE_JOBS = {
+    "macos-workspace-shard",
     "macos-smoke",
     "backend-sanitizers",
     "no-ai-authorship",
@@ -409,7 +411,7 @@ NON_GATE_JOBS = {
     "faithful-observation-phase2-oracle",
     # Rule-id: GATE-SCOPE-GENERALIZE-SWEEP-ORACLE -- chelis#1207's exact
     # sweep-versus-level parity corpus intentionally bypasses nextest's
-    # default filter. Two CI-owned shards execute its disjoint partitions;
+    # default filter. Four CI-owned shards execute its disjoint partitions;
     # the aggregate retains the stable blocking status context.
     "generalize-sweep-oracle-shard",
     "generalize-sweep-oracle",
@@ -717,8 +719,9 @@ class ListOutputTests(unittest.TestCase):
 
     def test_the_oracles_stage_is_a_job_that_installs_nextest(self):
         # Both of the oracle's compiled obligations run `cargo nextest`. The
-        # lint-and-unit job deliberately does not install it, so placing the
-        # oracle there produces a deterministic `no such command: nextest`.
+        # Rust-policy worker deliberately does not install it, so placing the
+        # oracle in its lint-and-unit stage produces a deterministic
+        # `no such command: nextest`.
         # Assert the pairing structurally: the stage the oracle lives in must
         # be run by a job that installs cargo-nextest.
         command = "<managed-python> scripts/unrepresentable_domain_oracle.py"
@@ -1350,8 +1353,8 @@ def _assert_read_only_workspace_cache(job_block: str) -> None:
 class CiParityTests(unittest.TestCase):
     """The lock: every cargo/chelis gate invocation in the CI workflow
     must be produced by `gate.py`. If a future edit hand-inlines a
-    cargo command into the `lint-and-unit` or `workspace-tests` job, this
-    test fails."""
+    cargo command into the `lint-rust` or `workspace-tests-shard` worker,
+    this test fails."""
 
     def test_ci_file_exists(self):
         self.assertTrue(CI_YML.is_file(), f"missing {CI_YML}")
@@ -1653,6 +1656,22 @@ class CiParityTests(unittest.TestCase):
                 ),
             )
 
+    def test_every_direct_command_job_is_scope_classified(self):
+        invocations = _parse_ci_gate_invocations()
+        gate_workers = {"lint-rust", "workspace-tests-shard"}
+        direct_command_jobs = {
+            job for job, commands in invocations.items() if commands
+        }
+        unclassified = direct_command_jobs - gate_workers - NON_GATE_JOBS
+        self.assertEqual(
+            unclassified,
+            set(),
+            (
+                "CI job(s) with direct commands are neither gate workers nor "
+                f"explicit NON_GATE_JOBS: {sorted(unclassified)}"
+            ),
+        )
+
     def test_all_workflow_files_are_scope_classified(self):
         # Every workflow file under .github/workflows/ must be explicitly
         # classified as out-of-scope-by-design (NON_GATE_WORKFLOWS) so adding a
@@ -1682,10 +1701,10 @@ class CiParityTests(unittest.TestCase):
 
     def test_no_multiline_run_in_gate_jobs(self):
         # A `run: |` block in a gate job would hide its commands from
-        # the line-based parity parser. Disallow it for the two gate
-        # jobs so parity stays enforceable.
+        # the line-based parity parser. Disallow it for the two gate workers
+        # so parity stays enforceable.
         invocations = _parse_ci_gate_invocations()
-        for job in ("lint-and-unit", "workspace-tests"):
+        for job in ("lint-rust", "workspace-tests-shard"):
             self.assertNotIn(
                 "<multiline-run-block>",
                 invocations.get(job, []),
