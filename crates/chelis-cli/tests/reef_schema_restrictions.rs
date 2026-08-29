@@ -15,14 +15,20 @@ fn write(path: &Path, contents: &str) {
 fn reef_schema_json_preserves_the_canonical_active_float_restriction() {
     let directory = tempdir().expect("fixture directory must be created");
     let root = directory.path().join("schema-restrictions");
+    // Category-1 auto-sync (see `scripts/bump_compiler_pins.py`): derive the
+    // `compiler` pin from `COMPILER_VERSION` rather than hand-pinning it, so a
+    // release bump does not leave this fixture rejected by `validate_manifest`.
     write(
         &root.join("reef.toml"),
-        r#"[package]
+        &format!(
+            r#"[package]
 name = "schema-restrictions"
 version = "1.0.0"
-compiler = "=0.18.5"
+compiler = "={}"
 module_prefix = "Restriction"
 "#,
+            chelis_compiler_api::COMPILER_VERSION
+        ),
     );
     write(
         &root.join("src/main.ch"),

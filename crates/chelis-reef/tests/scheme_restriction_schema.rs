@@ -15,14 +15,23 @@ fn write(path: &Path, contents: &str) {
 fn package_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
     let directory = tempdir().expect("fixture directory must be created");
     let root = directory.path().join("schema-restrictions");
+    // Category-1 auto-sync (see `scripts/bump_compiler_pins.py`): a synthesized
+    // fixture derives its `compiler` pin from the running crate version rather
+    // than hand-pinning it, because `validate_manifest` rejects any pin but the
+    // running binary's and a release bump would otherwise leave this test red.
+    // Every workspace member inherits `workspace.package.version`, so this is
+    // the same string `chelis_compiler_api::COMPILER_VERSION` expands to.
     write(
         &root.join("reef.toml"),
-        r#"[package]
+        &format!(
+            r#"[package]
 name = "schema-restrictions"
 version = "1.0.0"
-compiler = "=0.18.5"
+compiler = "={}"
 module_prefix = "Restriction"
 "#,
+            env!("CARGO_PKG_VERSION")
+        ),
     );
     write(
         &root.join("src/main.ch"),

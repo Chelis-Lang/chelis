@@ -297,6 +297,82 @@ class LockRegenerationWiringTests(unittest.TestCase):
         )
 
 
+class PinnedFixtureDataTests(unittest.TestCase):
+    """Category 8: checked-in test-fixture data that hand-pins the compiler.
+
+    A Rust fixture built from a string literal auto-syncs through category
+    (1); an `include_str!`'d `.toml`/`.json` file on disk cannot. The
+    `pipeline_parity` set went stale at 0.18.5 and was hand-repaired by the
+    release operator, which is the recurrence this category exists to stop.
+    """
+
+    SCHEMA = (
+        "{\n"
+        '  "package": {\n'
+        '    "name": "pipeline-parity",\n'
+        '    "version": "1.2.3"\n'
+        "  },\n"
+        '  "compiler": "=0.18.5",\n'
+        '  "modules": []\n'
+        "}\n"
+    )
+
+    def _bump_json(self, original: str, new_version: str, dry_run: bool = False):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "expected_schema.json"
+            path.write_text(original)
+            change = bump_mod.bump_json_compiler_pin(path, new_version, dry_run=dry_run)
+            return change, path.read_text()
+
+    def test_json_pin_rewrite_moves_only_the_compiler_field(self):
+        change, bumped = self._bump_json(self.SCHEMA, "0.18.6")
+        self.assertIsNotNone(change)
+        self.assertEqual(change.before, "=0.18.5")
+        self.assertEqual(change.after, "=0.18.6")
+        self.assertEqual(bumped, self.SCHEMA.replace('"=0.18.5"', '"=0.18.6"'))
+        # The package's own semver must not be confused for the pin.
+        self.assertIn('"version": "1.2.3"', bumped)
+
+    def test_json_pin_rewrite_is_a_no_op_when_already_current(self):
+        change, bumped = self._bump_json(self.SCHEMA, "0.18.5")
+        self.assertIsNone(change)
+        self.assertEqual(bumped, self.SCHEMA)
+
+    def test_json_pin_dry_run_reports_but_does_not_write(self):
+        change, text = self._bump_json(self.SCHEMA, "0.18.6", dry_run=True)
+        self.assertIsNotNone(change)
+        self.assertEqual(text, self.SCHEMA)
+
+    def test_every_declared_fixture_file_exists_and_carries_a_pin(self):
+        # An aspirational path would make the category silently cover
+        # nothing, which is the state that produced the 0.18.5 repair.
+        for path in bump_mod.PINNED_FIXTURE_TOML_FILES:
+            self.assertTrue(path.is_file(), path)
+            self.assertRegex(path.read_text(), r'(?m)^\s*compiler\s*=\s*"=')
+        for path in bump_mod.PINNED_FIXTURE_JSON_FILES:
+            self.assertTrue(path.is_file(), path)
+            self.assertRegex(path.read_text(), r'(?m)^\s*"compiler"\s*:\s*"=')
+
+    def test_fixture_pins_match_the_workspace_version(self):
+        version = _workspace_version()
+        for path in (
+            bump_mod.PINNED_FIXTURE_TOML_FILES + bump_mod.PINNED_FIXTURE_JSON_FILES
+        ):
+            self.assertIn(f'"={version}"', path.read_text(), path)
+
+    def test_nondeterministic_hash_capture_is_excluded(self):
+        # `expected_hashes.txt` records values BASELINE.md declares
+        # nondeterministic across machines and no longer asserted; bumping
+        # it would imply an oracle this repository does not run.
+        declared = set(
+            bump_mod.PINNED_FIXTURE_TOML_FILES + bump_mod.PINNED_FIXTURE_JSON_FILES
+        )
+        self.assertNotIn(
+            bump_mod.PIPELINE_PARITY_FIXTURES / "accepted/expected_hashes.txt",
+            declared,
+        )
+
+
 class CompileFailFixtureLockTests(unittest.TestCase):
     """Category 7: the committed `Cargo.lock` beside an out-of-workspace
     compile-fail fixture pins the real crates at the workspace version, and
