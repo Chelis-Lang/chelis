@@ -47,6 +47,72 @@ class FlattenedManifestTests(unittest.TestCase):
         ):
             self.assertIn(selector, expression)
 
+    def test_selector_translation_rejects_unsafe_or_ambiguous_inputs(self) -> None:
+        cases = (
+            (
+                ("cargo", "test", "--workspace"),
+                "not a nextest run command",
+            ),
+            (
+                ("cargo", "nextest", "run"),
+                "selects no tests",
+            ),
+            (
+                ("cargo", "nextest", "run", "--workspace"),
+                "unrecognized dtype-oracle nextest selector",
+            ),
+            (
+                (
+                    "cargo",
+                    "nextest",
+                    "run",
+                    "-p",
+                    "chelis-cli) | all()",
+                ),
+                "unsafe nextest package name",
+            ),
+            (
+                (
+                    "cargo",
+                    "nextest",
+                    "run",
+                    "-E",
+                    "package(=chelis-cli)",
+                    "-E",
+                    "all()",
+                ),
+                "multiple filtersets",
+            ),
+        )
+        for argv, message in cases:
+            with self.subTest(argv=argv):
+                with self.assertRaisesRegex(ValueError, message):
+                    manifest.command_filter(argv)
+
+    def test_owner_filter_rejects_an_unknown_owner(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unknown dtype phase owner"):
+            manifest.owner_filter("not-a-phase", sys.executable)
+
+    def test_recursive_manifest_inheritance_cycle_fails_closed(self) -> None:
+        script = "scripts/injected_dtype_phase3_cycle.py"
+        cycle = manifest.OracleLeg(
+            "injected recursive inheritance",
+            (sys.executable, script),
+        )
+        with mock.patch.dict(
+            manifest._INHERITED_SCRIPTS,
+            {script: "dtype-phase3"},
+        ), mock.patch.object(
+            manifest,
+            "phase3_legacy_legs",
+            return_value=(cycle,),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "dtype oracle inheritance cycle: dtype-phase3 -> dtype-phase3",
+            ):
+                manifest.owned_leaf_legs(sys.executable)
+
     def test_only_non_test_obligations_remain_as_separate_processes(self) -> None:
         legs = manifest.non_test_legs(sys.executable)
         self.assertEqual(
