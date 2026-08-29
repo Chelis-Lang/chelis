@@ -1605,17 +1605,23 @@ work (none needed).
 **Oracle:** `.venv/bin/python scripts/dtype_phase3_oracle.py` is this phase's
 single authoritative command. Acceptance is exit 0 with the final line
 `DTYPE PHASE 3 ORACLE: PASS`. Its tested manifest inherits the complete dtype
-Phase 2 oracle and the faithful-observation Phase 3 oracle; runs the C rows of
+Phase 2 oracle and the faithful-observation Phase 3 oracle. The continuous
+runner flattens their 21 nextest selections into one filterset union, so a
+test owned by more than one inherited phase executes once, and writes the
+phase-to-selection receipt under `target/dtype-phase3/phase-ownership.json`.
+It runs the C rows of
 `narrow_dtype_matrix.rs`, `int_width_lane_matrix.rs`,
 `scalar_stub_matrix.rs`, `precision_matrix.rs`,
 `reduction_and_bitwise_matrix.rs`, `fold_static_cond_matrix.rs`, the checked
 cast/subnormal/reduced-float `to_string` fixtures, and the complete observation
 harness; runs the C
 emitter structural locks; and finishes with the numeric-surface capacity
-censuses. It never opts into Phase 4's ignored capability cells or HIP/Metal.
-The required Linux Integration job invokes this nested oracle after the
-normal integration gate, so Phases 0-3 remain continuous without duplicating
-their commands in `scripts/gate.py`.
+censuses. The Python dtype ingress, Hull reader, faithful-observation static
+and runtime receipts, and capacity liveness check each remain executable once.
+It never opts into Phase 4's ignored capability cells or HIP/Metal. The
+required Linux Integration aggregate invokes this oracle beside the workspace
+shards, so Phases 0-3 remain continuous without duplicating their commands in
+`scripts/gate.py`.
 
 ## Post-Phase-3 checked-cast maintenance ([#1150], [#1152])
 

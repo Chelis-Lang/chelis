@@ -1718,6 +1718,8 @@ class CiParityTests(unittest.TestCase):
         authenticated_oracle = (
             "env:\n"
             "          GH_TOKEN: ${{ github.token }}\n"
+            "          CHELIS_TEST_SHARED_REEF_HOME: "
+            "${{ runner.temp }}/chelis-test-shared-reef\n"
             f"        {oracle_command}"
         )
         self.assertNotIn("  issues: read", top_level_permissions)
@@ -2014,6 +2016,56 @@ class CiParityTests(unittest.TestCase):
                 block = _ci_job_block(job)
                 _assert_read_only_workspace_cache(block)
 
+    def test_capacity_rustdoc_cache_is_restored_by_both_census_consumers(self):
+        path = "path: target/agents/729-capacity-rustdoc"
+        key = (
+            "key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-"
+            "${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', "
+            "'scripts/capacity_census_typed.py', "
+            "'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}"
+        )
+        dtype = _ci_job_block("dtype-phase3-oracle")
+        generalization = _ci_job_block("generalize-sweep-oracle-shard")
+        for name, block in (
+            ("dtype-phase3-oracle", dtype),
+            ("generalize-sweep-oracle-shard", generalization),
+        ):
+            with self.subTest(job=name):
+                self.assertEqual(block.count("uses: actions/cache/restore@v4"), 1)
+                self.assertIn(path, block)
+                self.assertIn(key, block)
+        self.assertEqual(dtype.count("uses: actions/cache/save@v4"), 1)
+        self.assertIn("github.event_name == 'push'", dtype)
+        self.assertIn("github.ref == 'refs/heads/main'", dtype)
+        self.assertNotIn("uses: actions/cache/save@v4", generalization)
+
+    def test_nextest_jobs_share_one_reef_fixture_root_per_runner(self):
+        setting = (
+            "CHELIS_TEST_SHARED_REEF_HOME: "
+            "${{ runner.temp }}/chelis-test-shared-reef"
+        )
+        execution_steps = {
+            "workspace-tests-shard": "Gate (workspace test shard)",
+            "dtype-phase3-oracle": "Dtype Phase 0-3 oracle",
+            "faithful-observation-phase2-oracle": (
+                "Faithful observation Phase 2 oracle"
+            ),
+            "generalize-sweep-oracle-shard": (
+                "Typecheck level generalization oracle"
+            ),
+            "macos-workspace-shard": "Workspace tests",
+        }
+        for job, step in execution_steps.items():
+            with self.subTest(job=job):
+                block = _ci_job_block(job)
+                self.assertEqual(block.count(setting), 1)
+                step_start = block.index(f"- name: {step}\n")
+                step_end = block.find("\n      - name:", step_start + 1)
+                if step_end == -1:
+                    step_end = len(block)
+                execution_step = block[step_start:step_end]
+                self.assertIn("\n        env:\n", execution_step)
+                self.assertIn(setting, execution_step)
     def test_shared_cache_writer_contract_censuses_every_ci_job(self):
         workflow = CI_YML.read_text()
         competing_step = (

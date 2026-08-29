@@ -713,6 +713,8 @@ jobs:
       # budget step below consumes this shard's timings. Do not hand-inline cargo
       # commands into this job (see scripts/test_gate.py parity lock).
       - name: Gate (workspace test shard)
+        env:
+          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
         run: python3 scripts/gate.py integration --tests-only --partition hash:${{ matrix.shard }}/2
 
       # Shard 2 already has the feature-complete workspace build warm. Run
@@ -790,13 +792,33 @@ jobs:
           # workspace-tests-shard saves it, avoiding a second multi-GB entry.
           save-if: false
 
+      # The wire and bindings census binaries both invoke nested cargo rustdoc
+      # in this shared ~500 MB target. Restore it independently of the normal
+      # workspace cache so those exact nested builds survive across runs.
+      - name: Restore capacity rustdoc build
+        uses: actions/cache/restore@v4
+        with:
+          path: target/agents/729-capacity-rustdoc
+          key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
       - name: Dtype Phase 0-3 oracle
         env:
           GH_TOKEN: ${{ github.token }}
+          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
         run: .venv/bin/python scripts/dtype_phase3_oracle.py
+
+      # Pull requests only consume the last main-produced cache. One
+      # successful push-to-main writer avoids duplicate multi-hundred-MB
+      # entries and same-key races across the parallel consumers.
+      - name: Save capacity rustdoc build
+        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@v4
+        with:
+          path: target/agents/729-capacity-rustdoc
+          key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
 
   # Keep the #732 Phase 2 acceptance contract executable as its own blocking
   # leg. This is deliberately not appended to the dtype job: each phase oracle
@@ -841,6 +863,8 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Faithful observation Phase 2 oracle
+        env:
+          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
         run: .venv/bin/python scripts/faithful_observation_phase2_oracle.py
 
   # chelis#1207's authoritative parity corpus compares every production
@@ -890,10 +914,18 @@ jobs:
           shared-key: linux-workspace
           save-if: false
 
+      - name: Restore capacity rustdoc build
+        uses: actions/cache/restore@v4
+        with:
+          path: target/agents/729-capacity-rustdoc
+          key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
       - name: Typecheck level generalization oracle
+        env:
+          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
         run: cargo nextest run --workspace --ignore-default-filter --features chelis-types/generalize-sweep-oracle --no-fail-fast --partition hash:${{ matrix.shard }}/4
 
   generalize-sweep-oracle:
@@ -1001,6 +1033,8 @@ jobs:
       # serialization bloat as the Linux workspace workers; see
       # docs/investigations/ci_integration_test_runtime_diagnosis.md.
       - name: Workspace tests
+        env:
+          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
         run: cargo nextest run --workspace --partition hash:${{ matrix.shard }}/2
 
       - name: Verify packaged binary architecture

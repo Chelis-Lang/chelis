@@ -48,6 +48,24 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(self._run_main_with(fake_run), 1)
         self.assertEqual(calls, list(oracle.SUITE_COMMANDS[:2]))
 
+    def test_preflight_reports_missing_tools_without_running_tests(self) -> None:
+        with (
+            mock.patch.object(oracle, "source_violations", return_value=[]),
+            mock.patch.object(oracle, "comparator_violations", return_value=[]),
+            mock.patch.object(
+                oracle, "definition_digest_violations", return_value=[]
+            ),
+            mock.patch.object(
+                oracle.shutil,
+                "which",
+                side_effect=lambda name: None if name == "cc" else "/tool",
+            ),
+        ):
+            self.assertEqual(
+                oracle.preflight_violations(),
+                ["a host C compiler (`cc`) is required"],
+            )
+
 
 class IgnoreInventoryTests(unittest.TestCase):
     def test_shipped_phase3_suites_have_only_the_declared_environment_skip(self) -> None:

@@ -46,11 +46,7 @@ NEXTEST_TOML = REPO_ROOT / ".config" / "nextest.toml"
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-import dtype_phase0_oracle  # noqa: E402
-import dtype_phase1_oracle  # noqa: E402
-import dtype_phase2_oracle  # noqa: E402
-import dtype_phase3_oracle  # noqa: E402
-import faithful_observation_phase3_oracle  # noqa: E402
+import dtype_oracle_manifest  # noqa: E402
 
 
 def _filter_blocks() -> list[str]:
@@ -73,31 +69,10 @@ def _negative_filter_inner(block: str) -> str:
 
 
 def _required_phase3_commands() -> tuple[tuple[str, ...], ...]:
-    """Resolve every command inherited by the required Phase 3 oracle."""
-    python = sys.executable
-    phase3 = dtype_phase3_oracle.oracle_legs(python)
-    if phase3[0].argv != (python, "scripts/dtype_phase2_oracle.py"):
-        raise AssertionError("Phase 3 no longer inherits dtype_phase2_oracle.py")
-    if phase3[1].argv != (
-        python,
-        "scripts/faithful_observation_phase3_oracle.py",
-    ):
-        raise AssertionError(
-            "Phase 3 no longer inherits faithful_observation_phase3_oracle.py"
-        )
-    phase2 = dtype_phase2_oracle.oracle_legs(python)
-    if phase2[0].argv != (python, "scripts/dtype_phase1_oracle.py"):
-        raise AssertionError("Phase 2 no longer inherits dtype_phase1_oracle.py")
-    phase1 = dtype_phase1_oracle.oracle_legs(python)
-    if phase1[0].argv != (python, "scripts/dtype_phase0_oracle.py"):
-        raise AssertionError("Phase 1 no longer inherits dtype_phase0_oracle.py")
-
-    return (
-        *(leg.argv for leg in phase3),
-        *(leg.argv for leg in phase2),
-        *(leg.argv for leg in phase1),
-        *(leg.argv for leg in dtype_phase0_oracle.oracle_legs()),
-        *(argv for _name, argv in faithful_observation_phase3_oracle.SUITE_COMMANDS),
+    """Resolve every selection flattened into the required Phase 3 union."""
+    return tuple(
+        leg.argv
+        for leg in dtype_oracle_manifest.owned_nextest_legs(sys.executable)
     )
 
 
@@ -269,6 +244,42 @@ def _list_profile(profile: str | None) -> dict[str, tuple[str, bool]]:
     return out
 
 
+def _list_filterset(filterset: str) -> dict[str, tuple[str, bool]]:
+    """List one unfiltered dtype-owner selection through nextest itself."""
+    cmd = [
+        "cargo",
+        "nextest",
+        "list",
+        "--workspace",
+        "--ignore-default-filter",
+        "--message-format",
+        "json",
+        "-E",
+        filterset,
+    ]
+    result = subprocess.run(
+        cmd,
+        cwd=REPO_ROOT,
+        env=_cargo_environment(),
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"dtype filterset list failed (exit {result.returncode}): "
+            f"{result.stderr[-2000:]}"
+        )
+    data = json.loads(result.stdout)
+    out: dict[str, tuple[str, bool]] = {}
+    for binary_id, suite in data.get("rust-suites", {}).items():
+        for test_name, info in suite.get("testcases", {}).items():
+            key = f"{binary_id}::{test_name}"
+            status = info.get("filter-match", {}).get("status")
+            out[key] = (status, bool(info.get("ignored")))
+    return out
+
+
 @unittest.skipUnless(
     _have_nextest(), "cargo nextest unavailable; skipping set-math oracle"
 )
@@ -285,6 +296,15 @@ class ProfilePartitionTests(unittest.TestCase):
         cls.ci = _list_profile("ci")
         cls.nightly = _list_profile("nightly")
         cls.full = _list_profile(None)
+        cls.dtype_flat = _list_filterset(
+            dtype_oracle_manifest.flattened_filter(sys.executable)
+        )
+        cls.dtype_owners = {
+            owner: _list_filterset(
+                dtype_oracle_manifest.owner_filter(owner, sys.executable)
+            )
+            for owner in dtype_oracle_manifest.OWNERS
+        }
 
     def _sets(self):
         ci_matches = {k for k, (s, _) in self.ci.items() if s == "matches"}
@@ -370,6 +390,31 @@ class ProfilePartitionTests(unittest.TestCase):
             set(),
             f"{len(nightly_ignored)} `nightly`-selected test(s) are also "
             f"`#[ignore]`-d, so they never run: {sorted(nightly_ignored)}",
+        )
+
+    def test_flattened_dtype_filter_is_the_exact_union_of_phase_owners(self):
+        flattened = {
+            key
+            for key, (status, ignored) in self.dtype_flat.items()
+            if status == "matches" and not ignored
+        }
+        owner_sets = {
+            owner: {
+                key
+                for key, (status, ignored) in listing.items()
+                if status == "matches" and not ignored
+            }
+            for owner, listing in self.dtype_owners.items()
+        }
+        inherited_union = set().union(*owner_sets.values())
+        self.assertEqual(flattened, inherited_union)
+        self.assertGreater(len(flattened), 0, "flattened dtype oracle is empty")
+        ownership_count = sum(len(selected) for selected in owner_sets.values())
+        self.assertGreater(
+            ownership_count,
+            len(flattened),
+            "the control corpus no longer contains any inherited duplicate "
+            "selection, so flattening has no executable duplication to remove",
         )
 
 
