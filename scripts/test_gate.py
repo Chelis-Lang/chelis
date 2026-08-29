@@ -1315,6 +1315,15 @@ def _strip_yaml_scalar_quotes(command: str) -> str:
     return command
 
 
+def _is_yaml_block_scalar(value: str) -> bool:
+    if not value:
+        return False
+    return re.fullmatch(
+        r"[|>](?:[+-][1-9]?|[1-9][+-]?)?",
+        value.split(maxsplit=1)[0],
+    ) is not None
+
+
 def _parse_ci_gate_invocations(text: str | None = None) -> dict[str, list[str]]:
     """Parse `.github/workflows/ci.yml` and return, per gate job, the
     list of `run:` command lines that invoke `cargo` or `chelis`
@@ -1379,15 +1388,11 @@ def _parse_ci_gate_invocations(text: str | None = None) -> dict[str, list[str]]:
             next_index += 1
 
         command = " ".join(part for part in scalar_parts if part).strip()
-        if command.startswith(("&", "*")):
+        if command.startswith(("&", "*", "!")):
             raise AssertionError(
                 f"unsupported workflow run scalar: {command!r}"
             )
-        block_indicator = command.split(maxsplit=1)[0]
-        if re.fullmatch(
-            r"[|>](?:[+-][1-9]?|[1-9][+-]?)?",
-            block_indicator,
-        ):
+        if _is_yaml_block_scalar(command):
             # Literal or folded block; record a sentinel so the dedicated
             # guard test can detect every YAML-equivalent spelling.
             invocations[current_job].append("<multiline-run-block>")
@@ -1470,15 +1475,24 @@ def _rust_cache_inputs(job_block: str) -> dict[str, str]:
     uses_indices = []
     uses_line = re.compile(r"(?:-\s*)?uses\s*:\s*(?P<value>.+?)\s*$")
     for idx, line in enumerate(lines):
-        match = uses_line.fullmatch(line.strip())
+        stripped = line.strip()
+        if re.fullmatch(r"(?:-\s*)?uses\s*:\s*(?:#.*)?", stripped):
+            raise AssertionError("unsupported workflow action reference")
+        match = uses_line.fullmatch(stripped)
         if match is None:
             continue
         raw_action = match.group("value").strip()
-        if raw_action.startswith(("&", "*")):
+        if raw_action.startswith(("&", "*", "!")) or _is_yaml_block_scalar(
+            raw_action
+        ):
             raise AssertionError(
                 f"unsupported workflow action reference: {raw_action!r}"
             )
         action = _strip_yaml_scalar_quotes(raw_action)
+        if raw_action[0] in {"'", '"'} and action == raw_action:
+            raise AssertionError(
+                f"unsupported workflow action reference: {raw_action!r}"
+            )
         if action == _UNSUPPORTED_RUN_SCALAR:
             raise AssertionError(
                 "unsupported quoted workflow action reference"
@@ -2051,6 +2065,7 @@ class CiParityTests(unittest.TestCase):
         for uses in (
             "uses: &cache_action Swatinem/rust-cache@v2",
             "uses: *cache_action",
+            "uses: !!str Swatinem/rust-cache@v2",
         ):
             with self.subTest(uses=uses):
                 mutated = block + (
@@ -2078,12 +2093,24 @@ class CiParityTests(unittest.TestCase):
                 "with: {save-if: true}}\n"
             ),
             "\n      - *competing_cache_step\n",
+            (
+                "\n      - uses: |-\n"
+                "          Swatinem/rust-cache@v2\n"
+                "        with:\n"
+                "          save-if: true\n"
+            ),
+            (
+                "\n      - uses:\n"
+                "          Swatinem/rust-cache@v2\n"
+                "        with:\n"
+                "          save-if: true\n"
+            ),
         )
         for second_step in second_steps:
             with self.subTest(second_step=second_step):
                 with self.assertRaisesRegex(
                     AssertionError,
-                    "unsupported workflow step shape",
+                    "unsupported workflow (?:step shape|action reference)",
                 ):
                     _assert_read_only_workspace_cache(block + second_step)
 
@@ -2314,6 +2341,7 @@ class CiParityTests(unittest.TestCase):
         steps = (
             "      - run: *hidden_command\n",
             "      - run: &hidden_command cargo check -p chelis-types\n",
+            '      - run: !!str "\\x63argo check -p chelis-types"\n',
             (
                 "      - ? run\n"
                 "        : cargo check -p chelis-types\n"
