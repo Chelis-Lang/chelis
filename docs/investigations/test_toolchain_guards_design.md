@@ -33,9 +33,11 @@ Three failure modes kept recurring in CI:
 
 ### Design
 
-- The CI workspace-tests job runs `cargo nextest run --workspace`. A `ci`
-  nextest profile (`.config/nextest.toml`) adds a `[profile.ci.junit]`
-  section so nextest writes machine-readable per-test JUnit XML to
+- Two CI `workspace-tests-shard` workers run deterministic, disjoint hash
+  partitions of `cargo nextest run --workspace`; a stable `workspace-tests`
+  aggregate requires both workers to succeed. A `ci` nextest profile
+  (`.config/nextest.toml`) adds a `[profile.ci.junit]` section so each worker
+  writes machine-readable per-test JUnit XML to
   `target/nextest/ci/junit.xml`.
 - `scripts/test_timing_check.py` parses that JUnit XML
   (`<testcase classname=... name=... time=...>`, keyed as
