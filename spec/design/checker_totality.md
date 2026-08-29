@@ -621,7 +621,7 @@ until chelis#875 they ran in no continuous job and this paragraph claimed
 supporting evidence the repo was not producing. They are now driven by the
 `cargo test -p chelis-types -p chelis-compiler-api --doc` stage in
 `scripts/gate.py`, which is in
-both the `--local` subset and CI's `lint-and-unit` job.
+both the `--local` subset and CI's `lint-rust` worker.
 
 Scope of the guarantee, so this section does not read stronger than the
 mechanism: the witness makes a `Type::Error` **without a diagnostic**

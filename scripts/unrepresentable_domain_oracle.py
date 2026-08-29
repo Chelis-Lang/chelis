@@ -52,13 +52,14 @@ Usage:
 Acceptance is exit 0 with the final line ``ORACLE: PASS``.
 
 Wiring: `scripts/gate.py`'s `integration` stage and its `--local` pre-push
-subset. Hosted CI runs that stage in the `workspace-tests` job
-(`Workspace Tests (Linux)`), on every pull request that is not docs-only.
-The stage choice is not incidental: obligations 4 and 5 run `cargo nextest`,
-which the `lint-and-unit` job deliberately does not install, so the oracle
-would fail there with `no such command: nextest`. `scripts/test_gate.py`
-locks both memberships and the pairing between the oracle's stage and a job
-that installs cargo-nextest.
+subset. Hosted CI runs that stage in the `workspace-tests-shard` matrix,
+which feeds the stable `Workspace Tests (Linux)` aggregate on every pull
+request that is not docs-only. The stage choice is not incidental:
+obligations 4 and 5 run `cargo nextest`, which the `lint-rust` worker
+deliberately does not install, so the oracle would fail there with
+`no such command: nextest`. `scripts/test_gate.py` locks both memberships
+and the pairing between the oracle's stage and a worker that installs
+cargo-nextest.
 
 Binary handoff (chelis#1322): when a gate command list already builds
 `chelis` before it reaches this oracle, `scripts/gate.py` names the built
@@ -279,7 +280,7 @@ class OracleBinaryError(RuntimeError):
 # `scripts/gate.py` names the `chelis` it already built in this variable when
 # the command list it is running provably builds that binary before reaching
 # this oracle. Unset means "build your own", which is what a standalone run
-# and hosted CI's `gate.py integration` job both do.
+# and hosted CI's `workspace-tests-shard` workers both do.
 ORACLE_BINARY_ENV = "CHELIS_ORACLE_BINARY"
 
 
