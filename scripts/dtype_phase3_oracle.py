@@ -51,10 +51,12 @@ def run_oracle(python: str = sys.executable) -> None:
     print(f"phase ownership receipt: {ownership_path}", flush=True)
 
     nextest_command = manifest.flattened_nextest_command(python)
+    non_test_legs = manifest.non_test_legs(python)
+    total = 1 + len(non_test_legs)
     env = os.environ.copy()
     env["CHELIS_PHASE3_RECEIPT_PATH"] = str(runtime_receipt_path)
     print(
-        f"[1/4] flattened Phase 0-3 nextest union: "
+        f"[1/{total}] flattened Phase 0-3 nextest union: "
         f"{shlex.join(nextest_command)}",
         flush=True,
     )
@@ -83,10 +85,9 @@ def run_oracle(python: str = sys.executable) -> None:
             + "; ".join(receipt_violations)
         )
 
-    non_test_legs = manifest.non_test_legs(python)
     for index, leg in enumerate(non_test_legs, start=2):
         print(
-            f"[{index}/4] {leg.name}: {shlex.join(leg.argv)}",
+            f"[{index}/{total}] {leg.name}: {shlex.join(leg.argv)}",
             flush=True,
         )
         try:

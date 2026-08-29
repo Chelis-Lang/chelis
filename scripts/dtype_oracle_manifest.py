@@ -44,10 +44,18 @@ class OracleLeg:
 
 
 @dataclass(frozen=True)
-class OwnedNextestLeg:
+class OwnedOracleLeg:
     owner: str
     name: str
     argv: tuple[str, ...]
+
+
+_INHERITED_SCRIPTS = {
+    "scripts/dtype_phase0_oracle.py": "dtype-phase0",
+    "scripts/dtype_phase1_oracle.py": "dtype-phase1",
+    "scripts/dtype_phase2_oracle.py": "dtype-phase2",
+    "scripts/faithful_observation_phase3_oracle.py": "observation-phase3",
+}
 
 
 def phase3_legacy_legs(python: str) -> tuple[OracleLeg, ...]:
@@ -112,50 +120,67 @@ def phase3_legacy_legs(python: str) -> tuple[OracleLeg, ...]:
     )
 
 
-def _owned(
-    owner: str, legs: tuple[object, ...]
-) -> list[OwnedNextestLeg]:
-    owned: list[OwnedNextestLeg] = []
-    for leg in legs:
-        argv = tuple(getattr(leg, "argv"))
-        if argv[:3] == _NEXTEST_PREFIX:
-            owned.append(
-                OwnedNextestLeg(owner, str(getattr(leg, "name")), argv)
-            )
-    return owned
-
-
-def owned_nextest_legs(python: str = sys.executable) -> tuple[OwnedNextestLeg, ...]:
-    """Every inherited nextest selection, attributed to exactly one phase."""
-    observation_legs = tuple(
-        OracleLeg(name, tuple(argv))
-        for name, argv in faithful_observation_phase3_oracle.SUITE_COMMANDS
+def _manifest_legs(owner: str, python: str) -> tuple[OracleLeg, ...]:
+    if owner == "dtype-phase0":
+        source = dtype_phase0_oracle.oracle_legs()
+    elif owner == "dtype-phase1":
+        source = dtype_phase1_oracle.oracle_legs(python)
+    elif owner == "dtype-phase2":
+        source = dtype_phase2_oracle.oracle_legs(python)
+    elif owner == "observation-phase3":
+        source = tuple(
+            OracleLeg(name, tuple(argv))
+            for name, argv in faithful_observation_phase3_oracle.SUITE_COMMANDS
+        )
+    elif owner == "dtype-phase3":
+        source = phase3_legacy_legs(python)
+    else:
+        raise ValueError(f"unknown dtype phase owner {owner!r}")
+    return tuple(
+        OracleLeg(str(getattr(leg, "name")), tuple(getattr(leg, "argv")))
+        for leg in source
     )
-    legs = [
-        *_owned("dtype-phase0", dtype_phase0_oracle.oracle_legs()),
-        *_owned("dtype-phase1", dtype_phase1_oracle.oracle_legs(python)),
-        *_owned("dtype-phase2", dtype_phase2_oracle.oracle_legs(python)),
-        *_owned("observation-phase3", observation_legs),
-        *_owned("dtype-phase3", phase3_legacy_legs(python)),
-    ]
-    return tuple(legs)
+
+
+def _inherited_owner(leg: OracleLeg, python: str) -> str | None:
+    if len(leg.argv) != 2 or leg.argv[0] != python:
+        return None
+    return _INHERITED_SCRIPTS.get(leg.argv[1])
+
+
+def owned_leaf_legs(python: str = sys.executable) -> tuple[OwnedOracleLeg, ...]:
+    """Every recursively inherited executable leaf with its phase owner."""
+    leaves: list[OwnedOracleLeg] = []
+
+    def visit(owner: str, active: tuple[str, ...]) -> None:
+        if owner in active:
+            cycle = " -> ".join((*active, owner))
+            raise ValueError(f"dtype oracle inheritance cycle: {cycle}")
+        for leg in _manifest_legs(owner, python):
+            inherited_owner = _inherited_owner(leg, python)
+            if inherited_owner is None:
+                leaves.append(OwnedOracleLeg(owner, leg.name, leg.argv))
+            else:
+                visit(inherited_owner, (*active, owner))
+
+    visit("dtype-phase3", ())
+    return tuple(leaves)
+
+
+def owned_nextest_legs(python: str = sys.executable) -> tuple[OwnedOracleLeg, ...]:
+    """Every inherited nextest selection, attributed to exactly one phase."""
+    return tuple(
+        leg for leg in owned_leaf_legs(python) if leg.argv[:3] == _NEXTEST_PREFIX
+    )
 
 
 def non_test_legs(python: str = sys.executable) -> tuple[OracleLeg, ...]:
     """Inherited executable obligations that are not nextest selections."""
-    phase1 = {
-        leg.name: leg
-        for leg in dtype_phase1_oracle.oracle_legs(python)
-    }
-    phase3 = {leg.name: leg for leg in phase3_legacy_legs(python)}
-    return tuple(
-        OracleLeg(source.name, tuple(source.argv))
-        for source in (
-            phase1["Python dtype ingress"],
-            phase1["Hull tagged-value reader"],
-            phase3["numeric surface censuses"],
-        )
-    )
+    unique: dict[tuple[str, ...], OracleLeg] = {}
+    for leg in owned_leaf_legs(python):
+        if leg.argv[:3] != _NEXTEST_PREFIX:
+            unique.setdefault(leg.argv, OracleLeg(leg.name, leg.argv))
+    return tuple(unique.values())
 
 
 def _exact_predicate(predicate: str, name: str) -> str:
@@ -242,19 +267,31 @@ def flattened_nextest_command(
 
 
 def ownership_receipt(python: str = sys.executable) -> dict[str, object]:
-    legs = owned_nextest_legs(python)
+    leaves = owned_leaf_legs(python)
+    legs = tuple(leg for leg in leaves if leg.argv[:3] == _NEXTEST_PREFIX)
+    non_test = tuple(leg for leg in leaves if leg.argv[:3] != _NEXTEST_PREFIX)
     filterset = flattened_filter(python)
     owners: dict[str, list[dict[str, str]]] = {owner: [] for owner in OWNERS}
+    non_test_owners: dict[str, list[dict[str, object]]] = {
+        owner: [] for owner in OWNERS
+    }
     for leg in legs:
         owners[leg.owner].append(
             {"name": leg.name, "filter": command_filter(leg.argv)}
         )
+    for leg in non_test:
+        non_test_owners[leg.owner].append(
+            {"name": leg.name, "argv": list(leg.argv)}
+        )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "nextest_invocations_before_flattening": len(legs),
         "nextest_invocations_after_flattening": 1,
+        "non_test_invocations_before_flattening": len(non_test),
+        "non_test_invocations_after_flattening": len(non_test_legs(python)),
         "filter_sha256": hashlib.sha256(filterset.encode("utf-8")).hexdigest(),
         "owners": owners,
+        "non_test_owners": non_test_owners,
     }
 
 
