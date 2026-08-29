@@ -1480,8 +1480,9 @@ class CiParityTests(unittest.TestCase):
             "cargo nextest run --workspace --profile ci-full "
             "--ignore-default-filter "
             "--features chelis-types/generalize-sweep-oracle --no-fail-fast "
-            "-E 'not (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) "
-            "& test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/))' "
+            "-E 'not (binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) "
+            "| (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) "
+            "& test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)))' "
             "--partition hash:${{ matrix.shard }}/4"
         )
 

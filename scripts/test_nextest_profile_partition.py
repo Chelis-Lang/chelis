@@ -98,11 +98,21 @@ NIGHTLY_RECURSIVE_TEST = (
     "chelis-cli::issue_1293_redteam_round4::"
     "recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c"
 )
+NIGHTLY_CACHE_CONCURRENCY_TEST = (
+    "chelis-cli::stdlib_typecheck_cache_concurrency::"
+    "parallel_cold_cache_invocations_all_succeed_identically"
+)
 NIGHTLY_RECURSIVE_SELECTOR = (
     "binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & "
     "test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)"
 )
-GENERALIZATION_PR_FILTER = f"not ({NIGHTLY_RECURSIVE_SELECTOR})"
+NIGHTLY_CACHE_CONCURRENCY_SELECTOR = (
+    "binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/)"
+)
+GENERALIZATION_PR_FILTER = (
+    f"not ({NIGHTLY_CACHE_CONCURRENCY_SELECTOR} | "
+    f"({NIGHTLY_RECURSIVE_SELECTOR}))"
+)
 
 
 def _cargo_environment(
@@ -462,11 +472,24 @@ class ProfilePartitionTests(unittest.TestCase):
             f"`#[ignore]`-d, so they never run: {sorted(nightly_ignored)}",
         )
 
-    def test_nightly_recursive_case_is_excluded_from_generalization_pr(self):
-        self.assertIn(NIGHTLY_RECURSIVE_TEST, self.generalization_pr)
-        status, ignored = self.generalization_pr[NIGHTLY_RECURSIVE_TEST]
-        self.assertEqual(status, "mismatch")
-        self.assertFalse(ignored)
+    def test_nightly_contention_cases_are_excluded_from_generalization_pr(self):
+        for test_id in (NIGHTLY_RECURSIVE_TEST, NIGHTLY_CACHE_CONCURRENCY_TEST):
+            with self.subTest(test_id=test_id):
+                self.assertIn(test_id, self.nightly)
+                nightly_status, ignored = self.nightly[test_id]
+                self.assertEqual(nightly_status, "matches")
+                self.assertFalse(ignored)
+        recursive_status, recursive_ignored = self.generalization_pr[
+            NIGHTLY_RECURSIVE_TEST
+        ]
+        self.assertEqual(recursive_status, "mismatch")
+        self.assertFalse(recursive_ignored)
+        self.assertNotIn(
+            NIGHTLY_CACHE_CONCURRENCY_TEST,
+            self.generalization_pr,
+            "the generalization PR selector must exclude the entire "
+            "nightly-owned cache-concurrency binary",
+        )
 
     def test_flattened_dtype_filter_is_the_exact_union_of_phase_owners(self):
         flattened = {

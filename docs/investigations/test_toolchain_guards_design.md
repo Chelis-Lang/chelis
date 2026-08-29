@@ -43,7 +43,7 @@ Three failure modes kept recurring in CI:
   (`<testcase classname=... name=... time=...>`, keyed as
   `binary::test`) and flags tests over budget.
 - Thresholds are config, never hardcoded:
-  - `scripts/test_timing_config.json` holds `tolerance` (a multiplier)
+  - `scripts/test_timing_config.json` holds `tolerance` (a multiplier),
     `absolute_ceiling` (seconds), and `min_regression_delta` (seconds).
   - `scripts/test_timing_baseline.json` maps `binary::test` -> seconds.
 - Every ordinary-PR test, whether baselined or new, fails CI above the
@@ -211,7 +211,7 @@ disallows it so parity stays enforceable.
 ## Ordering
 
 Guard 3 owns the CI-step refactor (it touches the gate steps in
-`.github/workflows/ci.yml`); Guard 1 slots its new informational step
+`.github/workflows/ci.yml`); Guard 1 slots its blocking timing step
 and the `ci` nextest profile in afterward. Guard 2 is independent of
 both.
 
