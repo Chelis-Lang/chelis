@@ -778,11 +778,10 @@ jobs:
           --summary target/test-telemetry/workspace-summary.md
           --github-summary "${GITHUB_STEP_SUMMARY}"
 
-      # This is informational for the first telemetry head only. Its exact
-      # hosted JUnit artifacts regenerate the stale baseline; the follow-up
-      # head removes continue-on-error and makes this required context block.
-      - name: Test-timing budget (baseline refresh staging)
-        continue-on-error: true
+      # The baseline comes from the exact two-shard hosted runner. This hard
+      # gate also applies the 30-second absolute ceiling to every ordinary
+      # PR test, so baseline refreshes cannot normalize a slow test.
+      - name: Test-timing budget (blocking)
         run: >-
           uv run --managed-python --python 3.11 --no-project python
           scripts/test_timing_check.py

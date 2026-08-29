@@ -196,13 +196,24 @@ class EvaluateTests(unittest.TestCase):
         self.assertEqual(len(flags), 1)
 
     def test_new_test_over_absolute_ceiling_is_flagged(self):
-        # Not in baseline + over the 30s ceiling -> flagged as new.
+        # Not in baseline + over the 30s ceiling -> flagged.
         timings = {"bin_a::brand_new": 45.0}
         baseline = {"bin_a::existing": 1.0}
         flags = tc.evaluate(timings, baseline, tolerance=2.0, absolute_ceiling=30.0)
         self.assertEqual(len(flags), 1)
-        self.assertEqual(flags[0].kind, tc.Flag.NEW_OVER_CEILING)
+        self.assertEqual(flags[0].kind, tc.Flag.OVER_CEILING)
         self.assertEqual(flags[0].key, "bin_a::brand_new")
+
+    def test_baselined_test_over_absolute_ceiling_is_always_flagged(self):
+        # A fresh baseline must not legalize an ordinary test above the
+        # absolute ceiling. This observation is below its 2x relative budget
+        # (40s) but still violates the suite-wide 30s contract.
+        timings = {"bin_a::existing": 31.0}
+        baseline = {"bin_a::existing": 20.0}
+        flags = tc.evaluate(timings, baseline, tolerance=2.0, absolute_ceiling=30.0)
+        self.assertEqual(len(flags), 1)
+        self.assertEqual(flags[0].kind, tc.Flag.OVER_CEILING)
+        self.assertEqual(flags[0].key, "bin_a::existing")
 
     def test_new_test_under_absolute_ceiling_is_not_flagged(self):
         # A fast new test is fine; it gets absorbed at the next

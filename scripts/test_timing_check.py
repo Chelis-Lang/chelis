@@ -5,8 +5,8 @@ Parses the JUnit XML that `cargo nextest run --profile ci` writes
 (`target/nextest/ci/junit.xml`) and flags integration tests that have
 grown too slow:
 
-  - a test that is NEW relative to the committed baseline AND runs
-    longer than `absolute_ceiling` seconds, or
+  - any ordinary-PR test that runs longer than `absolute_ceiling`
+    seconds, or
   - a test that REGRESSED past `tolerance` x its baseline time AND by
     at least `min_regression_delta` seconds in absolute terms.
 
@@ -24,7 +24,8 @@ keeping genuine, sustained regressions blocking.
 Thresholds are config, never hardcoded:
 
   - `scripts/test_timing_config.json` holds `tolerance` (a multiplier),
-    `absolute_ceiling` (seconds), and `min_regression_delta` (seconds,
+    `absolute_ceiling` (the hard per-test seconds limit), and
+    `min_regression_delta` (seconds,
     the absolute slowdown floor below which a multiplicative "regression"
     is treated as jitter; optional, defaults to 0.0 for back-compat).
   - `scripts/test_timing_baseline.json` maps `binary::test` -> seconds.
@@ -35,8 +36,8 @@ regression into the baseline. Regeneration is one command:
 
     python3 scripts/test_timing_check.py --update-baseline
 
-CI runs this as an informational, non-failing step today (the CI step
-uses `continue-on-error: true`); it is promotable to blocking later.
+CI runs this as a blocking step after merging the two disjoint Linux
+workspace timing shards.
 
 Usage:
     python3 scripts/test_timing_check.py
@@ -187,7 +188,7 @@ def parse_junit(path: Path) -> dict[str, float]:
 class Flag:
     """A single over-budget finding."""
 
-    NEW_OVER_CEILING = "new-over-absolute-ceiling"
+    OVER_CEILING = "over-absolute-ceiling"
     REGRESSED = "regressed-past-tolerance"
 
     def __init__(self, key: str, kind: str, observed: float, limit: float):
@@ -197,9 +198,9 @@ class Flag:
         self.limit = limit
 
     def render(self) -> str:
-        if self.kind == Flag.NEW_OVER_CEILING:
+        if self.kind == Flag.OVER_CEILING:
             return (
-                f"  {self.key}: {self.observed:.2f}s -- NEW test over the "
+                f"  {self.key}: {self.observed:.2f}s -- test over the "
                 f"{self.limit:.2f}s absolute ceiling"
             )
         return (
@@ -217,29 +218,30 @@ def evaluate(
 ) -> list[Flag]:
     """Return the list of over-budget findings, sorted slowest first.
 
-    A baselined test is flagged REGRESSED only when it is BOTH over its
-    `tolerance x baseline` budget AND slower than baseline by at least
-    `min_regression_delta` seconds. The absolute-delta floor keeps
+    Every test is first held to `absolute_ceiling`, so refreshing the
+    baseline can never legalize an ordinary test above the hard limit.
+    A baselined test below that ceiling is flagged REGRESSED only when
+    it is BOTH over its `tolerance x baseline` budget AND slower than
+    baseline by at least `min_regression_delta` seconds. The
+    absolute-delta floor keeps
     millisecond scheduler jitter against a near-zero baseline (the bulk of
     the suite) from false-flagging an unchanged test; it does not weaken
     detection of a real, multi-second regression, which clears both gates.
     `min_regression_delta=0.0` reproduces the pre-floor behavior."""
     flags: list[Flag] = []
     for key, observed in timings.items():
-        if key in baseline:
+        if observed > absolute_ceiling:
+            flags.append(
+                Flag(key, Flag.OVER_CEILING, observed, absolute_ceiling)
+            )
+        elif key in baseline:
             budget = baseline[key] * tolerance
             over_multiplier = observed > budget
             over_absolute = (observed - baseline[key]) >= min_regression_delta
             if over_multiplier and over_absolute:
                 flags.append(Flag(key, Flag.REGRESSED, observed, budget))
-        else:
-            # New test (not in baseline): only flag if it is also over
-            # the absolute ceiling. A fast new test is fine and gets
-            # picked up at the next explicit baseline regeneration.
-            if observed > absolute_ceiling:
-                flags.append(
-                    Flag(key, Flag.NEW_OVER_CEILING, observed, absolute_ceiling)
-                )
+        # A new test under the absolute ceiling is fine and gets picked up
+        # at the next explicit baseline regeneration.
     flags.sort(key=lambda f: f.observed, reverse=True)
     return flags
 

@@ -1565,7 +1565,8 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("scripts/ci_test_telemetry.py", aggregate_block)
         self.assertIn("--require-disjoint", aggregate_block)
         self.assertIn("scripts/test_timing_check.py", aggregate_block)
-        self.assertIn("continue-on-error: true", aggregate_block)
+        self.assertIn("name: Test-timing budget (blocking)", aggregate_block)
+        self.assertNotIn("continue-on-error: true", aggregate_block)
 
     def test_every_partitioned_test_lane_publishes_named_junit(self):
         expectations = {
