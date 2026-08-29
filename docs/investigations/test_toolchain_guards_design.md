@@ -178,6 +178,9 @@ charset checker was added: that would be a second source of truth for
 - `.github/workflows/ci.yml` gate steps call
   `python3 scripts/gate.py <stage>` instead of inlining
   cargo/chelis commands.
+- The parity guard pins the complete ordered set of single-line `run:` scalars
+  in each gate-owned worker. It does not try to emulate Bash or classify an
+  executable from shell text; every added command requires an explicit review.
 - `AGENTS.md` "Minimum repo gate" points at `python3 scripts/gate.py`
   plus a `--list` echo of the canonical list and documents uv routing and
   retained failure diagnostics.
@@ -190,20 +193,19 @@ charset checker was added: that would be a second source of truth for
 `scripts/test_gate.py` asserts:
 
 - the `--stage` subsets union exactly to the full list;
-- a parity assertion that greps `.github/workflows/ci.yml` and asserts
-  every `cargo`/`chelis` invocation in a gate step is produced by
-  `gate.py`. This is the lock that makes future drift a test failure.
-  The parity test excludes the sanitizer / macOS-smoke / docs /
-  LOC-report / no-AI-authorship jobs by name (`NON_GATE_JOBS`) so the
-  exclusion is visible and reviewable;
+- a structural parity assertion that parses every single-line `run:` scalar in
+  the gate-owned jobs and compares the complete ordered list with an exact
+  allowlist. This makes future drift a test failure without depending on a
+  partial Bash parser. Every other CI job is classified by name
+  (`NON_GATE_JOBS`) so the exclusion is visible and reviewable;
 - `--list` prints the canonical list.
 - uv/Devenv detection, unmanaged re-exec, missing-uv guidance, child
   `PYO3_PYTHON` propagation, success cleanup, and complete failed-command
   diagnostics are covered by `scripts/test_gate_diagnostics.py`.
 
-A `run: |` multi-line block in either gate job would hide its commands
-from the line-based parity parser; `test_no_multiline_run_in_gate_jobs`
-disallows it so parity stays enforceable.
+A `run: |` multi-line block in either gate job is outside the exact scalar
+contract; `test_no_multiline_run_in_gate_jobs` also names that prohibition
+directly.
 
 ## Ordering
 

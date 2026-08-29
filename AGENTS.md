@@ -619,9 +619,10 @@ python3 scripts/gate.py --local
 `scripts/gate.py` is the single source of truth for the per-PR
 gate. Agents run only the `--local` subset before pushing; the bare full gate is
 CI-owned for routine PR validation. CI calls `python3 scripts/gate.py <stage>`
-for each split job, and `scripts/test_gate.py` asserts the CI workflow
-hand-inlines no gate command the script does not produce. To see the canonical
-full list and the local/CI ownership annotations:
+for each split job. `scripts/test_gate.py` pins the complete ordered set of
+single-line `run:` commands permitted in those gate-owned jobs, so shell syntax
+cannot hide an unreviewed command. To see the canonical full list and the
+local/CI ownership annotations:
 
 Before `--local` or another long local validation, fetch `origin/main` so the
 changed-crate selection and inherited-failure comparison use current evidence. If the

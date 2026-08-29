@@ -9,15 +9,11 @@ Four things are locked here:
   (a) the full developer gate keeps the complete default nextest profile while
       CI delegates its two census binaries from the `ci` profile to the dtype
       oracle;
-  (b) a parity assertion: every `cargo`/`chelis` invocation in a gate
-      step of `.github/workflows/ci.yml` is produced by `gate.py`. This
-      covers both `cargo ...` and bare `chelis ...` commands (the
-      `cargo run -p chelis-cli --bin chelis -- ...` form is caught by
-      the `cargo ` prefix). This is the lock that turns future
-      CI-vs-gate drift into a test failure. The non-gate jobs
-      (dtype oracle/aggregator, sanitizer, macOS workers/aggregate, docs, LOC-report,
-      no-AI-authorship) are excluded by name so the exclusion is explicit
-      and reviewable;
+  (b) a structural parity assertion: every single-line `run:` scalar in a
+      gate-owned job exactly matches that job's reviewed allowlist. This does
+      not emulate Bash; quoting, expansion, and substitution cannot hide an
+      added command. Every other CI job is classified by name so the scope
+      exclusion is explicit and reviewable;
   (c) `--list` prints the canonical full list;
   (d) no-ai-authorship patterns cover the current banned tool identities.
 """
@@ -389,11 +385,38 @@ def _assert_cvc5_closure_cache(workflow: str) -> None:
             )
 
 
+# Every single-line command allowed in the two gate-owned workers. Comparing
+# complete scalars is intentionally stricter than recognizing Cargo through
+# Bash syntax: an added command of any kind requires an explicit review here.
+GATE_WORKER_RUN_COMMANDS = {
+    "lint-rust": (
+        "python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1",
+        "python3 scripts/ci_setup_uv_python.py",
+        "python3 scripts/gate.py lint-and-unit",
+    ),
+    "workspace-tests-shard": (
+        "python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1",
+        "python3 scripts/ci_setup_uv_python.py",
+        "python3 scripts/gate.py integration --tests-only "
+        "--partition hash:${{ matrix.shard }}/2",
+        "python3 scripts/gate.py integration --support-only",
+        ".venv/bin/python -m unittest "
+        "scripts.test_nextest_profile_partition.ProfilePartitionTests",
+        "python3 scripts/test_timing_check.py --junit "
+        "target/nextest/ci/junit.xml",
+    ),
+}
+
+
 # CI jobs that are deliberately NOT part of the per-PR developer gate.
-# `gate.py` only owns commands invoked by the `lint-rust` and
-# `workspace-tests-shard` workers; these are listed by name so the parity
-# test's exclusion is visible.
+# `gate.py` only owns the two workers above; every other job is listed by name
+# so a new job cannot silently escape a scope decision.
 NON_GATE_JOBS = {
+    # CI-owned Python unit coverage; it runs no canonical gate stage.
+    "script-unit",
+    # Stable branch-protection aggregates, not command-producing workers.
+    "lint-and-unit",
+    "workspace-tests",
     "macos-workspace-shard",
     "macos-smoke",
     "backend-sanitizers",
@@ -1154,12 +1177,6 @@ class ListOutputTests(unittest.TestCase):
         self.assertNotIn("cargo test --workspace", rendered)
 
 
-# A gate `run:` step is "gate-relevant" if it invokes the Rust
-# toolchain (`cargo ...`) or the Chelis CLI directly (`chelis ...`).
-# The command can appear after another shell command or a separator, so
-# matching only at the start would let a hand-inlined invocation evade the
-# parity lock.
-_GATE_COMMAND = re.compile(r"(?<![A-Za-z0-9_.-])(?:cargo|chelis)(?:\s|$)")
 _WORKFLOW_JOB_ID_PATTERN = r"[A-Za-z_][A-Za-z0-9_-]*"
 _WORKFLOW_JOB_HEADER = re.compile(r"^  (?P<key>\S.*?):\s*(?:#.*)?$")
 _WORKFLOW_JOBS_HEADER = re.compile(
@@ -1259,21 +1276,6 @@ def _assert_supported_workflow_step_shapes(workflow: str) -> None:
             steps_indent = len(match.group("indent"))
 
 
-def _is_gate_relevant_command(command: str) -> bool:
-    """True if `command` is a `cargo` or `chelis` invocation that a gate
-    job must route through `gate.py` rather than hand-inline."""
-    if _GATE_COMMAND.search(command) is not None:
-        return True
-    try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
-        lexer.whitespace_split = True
-        lexer.commenters = "#"
-        return any(word in {"cargo", "chelis"} for word in lexer)
-    except ValueError:
-        # An unsupported shell scalar must not make a gate worker look clean.
-        return True
-
-
 def _strip_yaml_scalar_quotes(command: str) -> str:
     """Remove one matching YAML quote pair and its trailing comment.
 
@@ -1325,18 +1327,16 @@ def _is_yaml_block_scalar(value: str) -> bool:
     ) is not None
 
 
-def _parse_ci_gate_invocations(text: str | None = None) -> dict[str, list[str]]:
-    """Parse `.github/workflows/ci.yml` and return, per gate job, the
-    list of `run:` command lines that invoke `cargo` or `chelis`
-    (including the `cargo run ... chelis ... lint` form).
+def _parse_ci_run_commands(text: str | None = None) -> dict[str, list[str]]:
+    """Parse `.github/workflows/ci.yml` and return every `run:` command.
 
     The parser is intentionally narrow line-based YAML-shape matching: it
     tracks the current `<job>:` header (two-space indent under `jobs:`), then
     reconstructs plain and quoted `run:` scalars across indented continuation
-    lines. Matching outer YAML quotes and YAML comments are removed before
-    classifying the command. Literal or folded block-scalar indicators are
-    recorded as a sentinel so `test_no_multiline_run_in_gate_jobs` can reject
-    them in gate workers.
+    lines. Matching outer YAML quotes and YAML comments are removed. Literal
+    or folded block-scalar indicators are recorded as a sentinel. The gate
+    parity lock compares this complete list with an exact per-job allowlist;
+    it never tries to infer which executable Bash will ultimately run.
     """
     if text is None:
         text = CI_YML.read_text()
@@ -1400,10 +1400,7 @@ def _parse_ci_gate_invocations(text: str | None = None) -> dict[str, list[str]]:
             line_index = next_index
             continue
         command = _strip_yaml_scalar_quotes(command)
-        if command == _UNSUPPORTED_RUN_SCALAR:
-            invocations[current_job].append(command)
-        elif _is_gate_relevant_command(command):
-            invocations[current_job].append(command)
+        invocations[current_job].append(command)
         line_index = next_index
     return invocations
 
@@ -1469,8 +1466,8 @@ def _workflow_job_block(path: Path, job: str) -> str:
     return block.rstrip("\r\n")
 
 
-def _rust_cache_inputs(job_block: str) -> dict[str, str]:
-    """Return the `with:` inputs for a job's Swatinem/rust-cache step."""
+def _rust_cache_steps(job_block: str) -> list[dict[str, str]]:
+    """Return every Swatinem/rust-cache step's `with:` inputs in a job."""
     _assert_supported_workflow_step_shapes(job_block)
     lines = job_block.splitlines()
     uses_indices = []
@@ -1501,34 +1498,83 @@ def _rust_cache_inputs(job_block: str) -> dict[str, str]:
         action_name, separator, _action_ref = action.partition("@")
         if separator and action_name.casefold() == "swatinem/rust-cache":
             uses_indices.append(idx)
-    if len(uses_indices) != 1:
+    steps: list[dict[str, str]] = []
+    for uses_idx in uses_indices:
+        with_idx: int | None = None
+        for idx in range(uses_idx + 1, len(lines)):
+            if re.match(r"^\s*- ", lines[idx]):
+                break
+            if lines[idx].strip() == "with:":
+                with_idx = idx
+                break
+        if with_idx is None:
+            steps.append({})
+            continue
+
+        inputs: dict[str, str] = {}
+        for line in lines[with_idx + 1 :]:
+            if re.match(r"^\s*- ", line):
+                break
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            match = re.match(
+                r"^([A-Za-z0-9_-]+):\s*(.+?)\s*$", stripped
+            )
+            if match is not None:
+                inputs[match.group(1)] = match.group(2)
+        steps.append(inputs)
+    return steps
+
+
+def _rust_cache_inputs(job_block: str) -> dict[str, str]:
+    """Return inputs when a job has exactly one rust-cache step."""
+    steps = _rust_cache_steps(job_block)
+    if len(steps) != 1:
         raise AssertionError(
             "expected exactly one Swatinem/rust-cache@v2 step, "
-            f"found {len(uses_indices)}"
+            f"found {len(steps)}"
         )
-    uses_idx = uses_indices[0]
+    return steps[0]
 
-    with_idx: int | None = None
-    for idx in range(uses_idx + 1, len(lines)):
-        if re.match(r"^\s*- ", lines[idx]):
-            break
-        if lines[idx].strip() == "with:":
-            with_idx = idx
-            break
-    if with_idx is None:
-        return {}
 
-    inputs: dict[str, str] = {}
-    for line in lines[with_idx + 1 :]:
-        if re.match(r"^\s*- ", line):
-            break
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        m = re.match(r"^([A-Za-z0-9_-]+):\s*(.+?)\s*$", stripped)
-        if m is not None:
-            inputs[m.group(1)] = m.group(2)
-    return inputs
+def _assert_shared_rust_cache_writer_contract(workflow: str) -> None:
+    """Require exactly one reviewed writer for each shared cache namespace."""
+    census: list[tuple[str, dict[str, str]]] = []
+    for job, block in _workflow_job_blocks(workflow).items():
+        census.extend((job, inputs) for inputs in _rust_cache_steps(block))
+
+    expected = {
+        "linux-workspace": (
+            "workspace-tests-shard",
+            "${{ matrix.shard == 1 }}",
+        ),
+        "macos-workspace": (
+            "macos-workspace-shard",
+            "${{ matrix.shard == 1 }}",
+        ),
+    }
+    for shared_key, expected_writer in expected.items():
+        namespace = [
+            (job, inputs)
+            for job, inputs in census
+            if inputs.get("shared-key") == shared_key
+        ]
+        writers = [
+            (job, inputs.get("save-if", "true"))
+            for job, inputs in namespace
+            if inputs.get("save-if", "true") != "false"
+        ]
+        if len(writers) != 1:
+            raise AssertionError(
+                f"{shared_key} must have exactly one writer across the "
+                f"workflow, found {writers}"
+            )
+        if writers[0] != expected_writer:
+            raise AssertionError(
+                f"{shared_key} writer must be {expected_writer}, "
+                f"found {writers[0]}"
+            )
 
 
 def _assert_hash_partition_contract(
@@ -1575,28 +1621,24 @@ def _assert_read_only_workspace_cache(job_block: str) -> None:
 
 
 class CiParityTests(unittest.TestCase):
-    """The lock: every cargo/chelis gate invocation in the CI workflow
-    must be produced by `gate.py`. If a future edit hand-inlines a
-    cargo command into the `lint-rust` or `workspace-tests-shard` worker,
-    this test fails."""
+    """Lock the complete CI topology around the canonical developer gate."""
 
     def test_ci_file_exists(self):
         self.assertTrue(CI_YML.is_file(), f"missing {CI_YML}")
 
     def test_gate_jobs_call_gate_py(self):
-        # Each expensive worker must invoke
-        # `python3 scripts/gate.py <stage>` and must NOT hand-inline
-        # any `cargo` or `chelis` command.
-        invocations = _parse_ci_gate_invocations()
-        for job in ("lint-rust", "workspace-tests-shard"):
-            self.assertIn(job, invocations, f"CI job '{job}' not found")
+        # Every run scalar in a gate-owned worker is reviewed here. This is a
+        # structural contract, not a partial Bash executable classifier.
+        commands = _parse_ci_run_commands()
+        for job, expected in GATE_WORKER_RUN_COMMANDS.items():
+            self.assertIn(job, commands, f"CI job '{job}' not found")
             self.assertEqual(
-                invocations[job],
-                [],
+                commands[job],
+                list(expected),
                 (
-                    f"CI job '{job}' hand-inlines cargo/chelis command(s) "
-                    f"{invocations[job]}; route them through "
-                    f"scripts/gate.py instead"
+                    f"CI job '{job}' has unreviewed or reordered run commands; "
+                    "route gate work through scripts/gate.py and review any "
+                    "bootstrap or reporting command explicitly"
                 ),
             )
         # Positive parity: the workflow text must actually call
@@ -1794,6 +1836,7 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("scripts/ci_require_success.py", aggregate_block)
 
     def test_topology_docs_name_current_shard_owners(self):
+        agent_contract = (REPO_ROOT / "AGENTS.md").read_text()
         phase_oracles = (REPO_ROOT / "docs" / "phase_oracles.md").read_text()
         macos_runbook = (
             REPO_ROOT / "docs" / "local_macos_environment.md"
@@ -1816,6 +1859,32 @@ class CiParityTests(unittest.TestCase):
         reef_distribution = (
             REPO_ROOT / "spec" / "design" / "reef_distribution.md"
         ).read_text()
+        remediation_status = (
+            REPO_ROOT
+            / "docs"
+            / "investigations"
+            / "remediation_status_2026_08_04.md"
+        ).read_text()
+        toolchain_design = (
+            REPO_ROOT
+            / "docs"
+            / "investigations"
+            / "test_toolchain_guards_design.md"
+        ).read_text()
+        generalization_plan = (
+            REPO_ROOT
+            / "spec"
+            / "design"
+            / "typecheck_levels_generalization_plan.md"
+        ).read_text()
+        self.assertIn(
+            "second `workspace-tests-shard` worker before the",
+            agent_contract,
+        )
+        self.assertIn(
+            "pins the complete ordered set of\nsingle-line `run:` commands",
+            agent_contract,
+        )
         self.assertIn(
             "`macos-workspace-shard` job runs "
             "`python3 .github/scripts/smoke_macos_metal.py` on shard 2",
@@ -1853,6 +1922,24 @@ class CiParityTests(unittest.TestCase):
             unrepresentable_domain,
         )
         self.assertIn("hosted `lint-rust` worker", reef_distribution)
+        self.assertIn(
+            "`workspace-tests-shard` matrix on every non-docs-only PR",
+            remediation_status,
+        )
+        self.assertIn(
+            "Two `workspace-tests-shard` workers invoke disjoint partitions",
+            toolchain_design,
+        )
+        self.assertIn(
+            "parity guard pins the complete ordered set of single-line "
+            "`run:` scalars",
+            toolchain_design,
+        )
+        self.assertIn(
+            "CI executes the same selection as four deterministic, disjoint "
+            "nextest hash\npartitions:",
+            generalization_plan,
+        )
 
     def test_topology_docs_guard_runs_in_docs_job(self):
         docs_block = _ci_job_block("docs")
@@ -1865,6 +1952,7 @@ class CiParityTests(unittest.TestCase):
         )
 
     def test_parallel_jobs_share_one_saved_rust_cache_namespace(self):
+        _assert_shared_rust_cache_writer_contract(CI_YML.read_text())
         workspace_inputs = _rust_cache_inputs(
             _ci_job_block("workspace-tests-shard")
         )
@@ -1939,6 +2027,27 @@ class CiParityTests(unittest.TestCase):
                 execution_step = block[step_start:step_end]
                 self.assertIn("\n        env:\n", execution_step)
                 self.assertIn(setting, execution_step)
+    def test_shared_cache_writer_contract_censuses_every_ci_job(self):
+        workflow = CI_YML.read_text()
+        competing_step = (
+            "\n      - name: Competing cache writer\n"
+            "        uses: Swatinem/rust-cache@v2\n"
+            "        with:\n"
+            "          shared-key: linux-workspace\n"
+            "          save-if: true\n"
+        )
+        mutated = workflow.replace(
+            "\n  workspace-tests-shard:",
+            competing_step + "\n  workspace-tests-shard:",
+            1,
+        )
+        self.assertNotEqual(mutated, workflow, "mutation did not apply")
+        with self.assertRaisesRegex(
+            AssertionError,
+            "linux-workspace.*exactly one writer",
+        ):
+            _assert_shared_rust_cache_writer_contract(mutated)
+
     def test_read_only_cache_contract_rejects_a_second_cache_step(self):
         block = _ci_job_block("faithful-observation-phase2-oracle")
         second_steps = (
@@ -2103,11 +2212,9 @@ class CiParityTests(unittest.TestCase):
             _assert_executable_run_once(mutated, command)
 
     def test_non_gate_jobs_are_excluded_by_name(self):
-        # The non-gate jobs are allowed to keep their own cargo/chelis
-        # invocations. This test pins the exclusion list so it stays
-        # visible: if a new non-gate job is added, the author must
-        # decide explicitly whether it is in scope.
-        invocations = _parse_ci_gate_invocations()
+        # Non-gate jobs keep their own commands. Pin the exclusion list so a
+        # rename or removal requires an explicit scope update.
+        invocations = _parse_ci_run_commands()
         present_jobs = set(invocations.keys())
         for job in NON_GATE_JOBS:
             self.assertIn(
@@ -2119,23 +2226,20 @@ class CiParityTests(unittest.TestCase):
                 ),
             )
 
-    def test_every_direct_command_job_is_scope_classified(self):
-        invocations = _parse_ci_gate_invocations()
-        gate_workers = {"lint-rust", "workspace-tests-shard"}
-        direct_command_jobs = {
-            job for job, commands in invocations.items() if commands
-        }
-        unclassified = direct_command_jobs - gate_workers - NON_GATE_JOBS
+    def test_every_ci_job_is_scope_classified(self):
+        commands = _parse_ci_run_commands()
+        gate_workers = set(GATE_WORKER_RUN_COMMANDS)
+        unclassified = set(commands) - gate_workers - NON_GATE_JOBS
         self.assertEqual(
             unclassified,
             set(),
             (
-                "CI job(s) with direct commands are neither gate workers nor "
+                "CI job(s) are neither gate workers nor "
                 f"explicit NON_GATE_JOBS: {sorted(unclassified)}"
             ),
         )
 
-    def test_parser_classifies_quoted_inline_gate_commands(self):
+    def test_parser_reads_quoted_inline_commands(self):
         for quote in ('"', "'"):
             with self.subTest(quote=quote):
                 workflow = (
@@ -2145,11 +2249,11 @@ class CiParityTests(unittest.TestCase):
                     f"      - run: {quote}cargo check -p chelis-types{quote}\n"
                 )
                 self.assertEqual(
-                    _parse_ci_gate_invocations(workflow)["probe"],
+                    _parse_ci_run_commands(workflow)["probe"],
                     ["cargo check -p chelis-types"],
                 )
 
-    def test_parser_classifies_shell_quoted_executables(self):
+    def test_parser_reads_shell_quoted_commands_without_interpreting_them(self):
         for command in (
             '"cargo" check -p chelis-types',
             "c'a'rgo check -p chelis-types",
@@ -2164,9 +2268,21 @@ class CiParityTests(unittest.TestCase):
                     f"      - run: {command}\n"
                 )
                 self.assertEqual(
-                    _parse_ci_gate_invocations(workflow)["probe"],
+                    _parse_ci_run_commands(workflow)["probe"],
                     [command],
                 )
+
+    def test_parser_retains_benign_shell_text_without_classifying_it(self):
+        workflow = (
+            "jobs:\n"
+            "  probe:\n"
+            "    steps:\n"
+            "      - run: echo cargo\n"
+        )
+        self.assertEqual(
+            _parse_ci_run_commands(workflow)["probe"],
+            ["echo cargo"],
+        )
 
     def test_parser_marks_literal_and_folded_yaml_run_blocks(self):
         for indicator in ("|", "|-", "|+", ">", ">-", ">+", "|2", ">2-"):
@@ -2179,7 +2295,7 @@ class CiParityTests(unittest.TestCase):
                     "          cargo check -p chelis-types\n"
                 )
                 self.assertEqual(
-                    _parse_ci_gate_invocations(workflow)["probe"],
+                    _parse_ci_run_commands(workflow)["probe"],
                     ["<multiline-run-block>"],
                 )
 
@@ -2219,7 +2335,7 @@ class CiParityTests(unittest.TestCase):
             with self.subTest(run_scalar=run_scalar):
                 workflow = "jobs:\n  probe:\n    steps:\n" + run_scalar
                 self.assertEqual(
-                    _parse_ci_gate_invocations(workflow)["probe"],
+                    _parse_ci_run_commands(workflow)["probe"],
                     [expected],
                 )
 
@@ -2239,7 +2355,7 @@ class CiParityTests(unittest.TestCase):
                     "      - run: cargo check -p chelis-types\n"
                 )
                 self.assertEqual(
-                    _parse_ci_gate_invocations(workflow)["Unclassified_job"],
+                    _parse_ci_run_commands(workflow)["Unclassified_job"],
                     ["cargo check -p chelis-types"],
                 )
                 self.assertEqual(
@@ -2258,7 +2374,7 @@ class CiParityTests(unittest.TestCase):
             "      - run: cargo check -p chelis-types\n"
         )
         for parser in (
-            _parse_ci_gate_invocations,
+            _parse_ci_run_commands,
             _parse_job_attrs,
             _workflow_job_blocks,
         ):
@@ -2286,7 +2402,7 @@ class CiParityTests(unittest.TestCase):
         )
         for workflow in workflows:
             for parser in (
-                _parse_ci_gate_invocations,
+                _parse_ci_run_commands,
                 _parse_job_attrs,
                 _workflow_job_blocks,
             ):
@@ -2317,7 +2433,7 @@ class CiParityTests(unittest.TestCase):
                     AssertionError,
                     "unsupported workflow (?:run scalar|step shape)",
                 ):
-                    _parse_ci_gate_invocations(workflow)
+                    _parse_ci_run_commands(workflow)
 
     def test_escaped_double_quoted_scalars_fail_closed(self):
         cases = (
@@ -2329,7 +2445,7 @@ class CiParityTests(unittest.TestCase):
             with self.subTest(run_scalar=run_scalar):
                 workflow = "jobs:\n  probe:\n    steps:\n" + run_scalar
                 self.assertEqual(
-                    _parse_ci_gate_invocations(workflow)["probe"],
+                    _parse_ci_run_commands(workflow)["probe"],
                     ["<unsupported-run-scalar>"],
                 )
 
@@ -2361,10 +2477,9 @@ class CiParityTests(unittest.TestCase):
             self.assertIn(name, NON_GATE_WORKFLOWS)
 
     def test_no_multiline_run_in_gate_jobs(self):
-        # A `run: |` block in a gate job would hide its commands from
-        # the line-based parity parser. Disallow it for the two gate workers
-        # so parity stays enforceable.
-        invocations = _parse_ci_gate_invocations()
+        # Multi-line shell bodies are deliberately outside the exact scalar
+        # contract for gate-owned workers.
+        invocations = _parse_ci_run_commands()
         for job in ("lint-rust", "workspace-tests-shard"):
             self.assertNotIn(
                 "<multiline-run-block>",
