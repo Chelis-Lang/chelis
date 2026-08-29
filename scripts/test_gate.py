@@ -119,10 +119,11 @@ def _workflow_job_blocks(workflow: str) -> dict[str, str]:
     in_jobs = False
     offset = 0
     for line in workflow.splitlines(keepends=True):
-        if line.rstrip("\r\n").rstrip() == "jobs:":
+        clean_line = line.rstrip("\r\n")
+        if _parse_workflow_jobs_header(clean_line):
             in_jobs = True
         elif in_jobs:
-            name = _parse_workflow_job_header(line.rstrip("\r\n"))
+            name = _parse_workflow_job_header(clean_line)
             if name is not None:
                 headers.append((name, offset))
         offset += len(line)
@@ -1169,7 +1170,21 @@ class ListOutputTests(unittest.TestCase):
 _GATE_COMMAND = re.compile(r"(?<![A-Za-z0-9_.-])(?:cargo|chelis)(?:\s|$)")
 _WORKFLOW_JOB_ID_PATTERN = r"[A-Za-z_][A-Za-z0-9_-]*"
 _WORKFLOW_JOB_HEADER = re.compile(r"^  (?P<key>\S.*?):\s*(?:#.*)?$")
+_WORKFLOW_JOBS_HEADER = re.compile(
+    r"^(?:jobs|'jobs'|\"jobs\")\s*:\s*(?P<value>.*)$"
+)
 _UNSUPPORTED_RUN_SCALAR = "<unsupported-run-scalar>"
+
+
+def _parse_workflow_jobs_header(line: str) -> bool:
+    """Recognize the block-form `jobs` map and reject inline variants."""
+    match = _WORKFLOW_JOBS_HEADER.fullmatch(line)
+    if match is None:
+        return False
+    value = match.group("value").strip()
+    if not value or value.startswith("#"):
+        return True
+    raise AssertionError(f"unsupported workflow jobs mapping: {line!r}")
 
 
 def _parse_workflow_job_header(line: str) -> str | None:
@@ -1181,6 +1196,10 @@ def _parse_workflow_job_header(line: str) -> str | None:
     """
     match = _WORKFLOW_JOB_HEADER.fullmatch(line)
     if match is None:
+        indent = len(line) - len(line.lstrip(" "))
+        content = line.strip()
+        if indent == 2 and content and not content.startswith("#"):
+            raise AssertionError(f"unsupported workflow job entry: {line!r}")
         return None
 
     raw = match.group("key").strip()
@@ -1273,7 +1292,7 @@ def _parse_ci_gate_invocations(text: str | None = None) -> dict[str, list[str]]:
     line_index = 0
     while line_index < len(lines):
         line = lines[line_index]
-        if line.rstrip() == "jobs:":
+        if _parse_workflow_jobs_header(line):
             in_jobs = True
             line_index += 1
             continue
@@ -2154,6 +2173,34 @@ class CiParityTests(unittest.TestCase):
                 ):
                     parser(workflow)
 
+    def test_unsupported_job_mapping_shapes_fail_closed(self):
+        workflows = (
+            (
+                "jobs:\n"
+                "  ? Explicit_Job\n"
+                "  :\n"
+                "    runs-on: ubuntu-latest\n"
+            ),
+            (
+                "jobs:\n"
+                "  Hidden_Job: &hidden_job\n"
+                "    runs-on: ubuntu-latest\n"
+            ),
+            "jobs: {Inline_Job: {runs-on: ubuntu-latest}}\n",
+        )
+        for workflow in workflows:
+            for parser in (
+                _parse_ci_gate_invocations,
+                _parse_job_attrs,
+                _workflow_job_blocks,
+            ):
+                with self.subTest(workflow=workflow, parser=parser.__name__):
+                    with self.assertRaisesRegex(
+                        AssertionError,
+                        "unsupported workflow job",
+                    ):
+                        parser(workflow)
+
     def test_escaped_double_quoted_scalars_fail_closed(self):
         cases = (
             '      - run: "\\x63argo check -p chelis-types"\n',
@@ -2580,7 +2627,7 @@ def _parse_job_attrs(text: str | None = None) -> dict[str, dict[str, str]]:
     # jobs.
     in_jobs = False
     for line in lines:
-        if line.rstrip() == "jobs:":
+        if _parse_workflow_jobs_header(line):
             in_jobs = True
             continue
         if not in_jobs:
