@@ -275,9 +275,10 @@ class ListAnnotationTests(unittest.TestCase):
                 ),
             )
             annotations[command] = annotation
-        # The local subset: clippy, fmt, chelis lint. The workspace build is
-        # CI-owned; the full gate's default-profile workspace suite is covered
-        # in CI by the split workspace and dtype-oracle jobs.
+        # The local subset: clippy, fmt, chelis lint. The standalone workspace
+        # build is intentionally absent: clippy already compiles all targets,
+        # and the full gate's default-profile workspace suite is covered in CI
+        # by the split workspace and dtype-oracle jobs.
         self.assertEqual(
             annotations[gate.render(gate.CLIPPY_WORKSPACE)],
             gate.LOCAL_ANNOTATION,
@@ -290,10 +291,7 @@ class ListAnnotationTests(unittest.TestCase):
             annotations[gate.render(gate.CHELIS_LINT_CHECK)],
             gate.LOCAL_ANNOTATION,
         )
-        self.assertEqual(
-            annotations[gate.render(gate.BUILD_WORKSPACE)],
-            gate.CI_OWNED_ANNOTATION,
-        )
+        self.assertNotIn(gate.render(gate.BUILD_WORKSPACE), annotations)
         self.assertEqual(
             annotations[gate.render(gate.NEXTEST_WORKSPACE)],
             gate.FULL_GATE_SPLIT_ANNOTATION,

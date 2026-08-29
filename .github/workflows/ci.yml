@@ -142,9 +142,11 @@ jobs:
       - name: Run C2.2 controlled mutations
         run: .venv/bin/python scripts/diagnostic_kind_oracle.py
 
-  lint-and-unit:
-    name: Lint and Unit Tests (Linux)
+  lint-rust:
+    name: Rust Policy (Linux)
     runs-on: ubuntu-latest
+    needs: [changes]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     # Strip debuginfo from the dev/test build. Debuginfo is the dominant
     # disk consumer in target/; dropping it (alongside the free-disk step
     # below) is what keeps the Linux workspace build off "No space left on
@@ -204,35 +206,63 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
 
-      # Run the scripts/ Python unit tests (gate.py, ci_free_disk.py, the
-      # CI/release-workflow guards, etc.). This is the only job that runs
-      # them, and it is the right host: cargo is present (so the release
-      # pyo3 dep-graph oracle works) but cargo-nextest is NOT installed
-      # here, so test_nextest_profile_partition's heavy `cargo nextest
-      # list --workspace` oracle self-skips. Uses the uv-managed .venv
-      # interpreter per repo policy. Not a cargo/chelis command, so the
-      # scripts/test_gate.py parity lock leaves it alone.
-      - name: Script unit tests (scripts/test_*.py)
-        run: .venv/bin/python -m unittest discover -s scripts -p 'test_*.py'
-
-      # Phase 1's registered-PyO3 ingress tests are pure Python and stub the
-      # native module, but intentionally exercise real NumPy dtype identities.
-      # Install only that declared runtime dependency; safetensors is stubbed by
-      # the suite so this step never builds the extension module.
-      - name: Install Python binding ingress test dependency
-        run: uv pip install --python .venv/bin/python 'numpy>=2.0'
-
-      - name: Python binding ingress unit tests
-        run: .venv/bin/python -m unittest discover -s bindings/python/tests -p 'test_*.py'
-
-      # The lint-and-unit gate subset (build, clippy, fmt, chelis lint
-      # --check) is defined once in scripts/gate.py and run here via
+      # The Rust-policy gate subset (clippy, fmt, chelis lint --check,
+      # doctests, and compile guards) is defined once in scripts/gate.py.
+      # Clippy already compiles every workspace target, so a preceding
+      # standalone `cargo build --workspace --all-targets` is redundant.
       # `gate.py lint-and-unit`. Do not hand-inline cargo/chelis
       # commands into this job: scripts/test_gate.py greps this file
       # and fails if any gate step is not produced by gate.py. See
       # docs/investigations/test_toolchain_guards_design.md.
       - name: Gate (lint-and-unit subset)
         run: python3 scripts/gate.py lint-and-unit
+
+  script-unit:
+    name: Script and Python Unit Tests (Linux)
+    runs-on: ubuntu-latest
+    needs: [changes]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      # A small number of workflow guards inspect Cargo metadata. They do not
+      # compile the workspace, but they require the stable cargo executable.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
+
+      # cargo-nextest is intentionally absent, so the expensive structural
+      # profile oracle self-skips here and runs once on workspace shard 2.
+      - name: Script unit tests (scripts/test_*.py)
+        run: .venv/bin/python -m unittest discover -s scripts -p 'test_*.py'
+
+      - name: Install Python binding ingress test dependency
+        run: uv pip install --python .venv/bin/python 'numpy>=2.0'
+
+      - name: Python binding ingress unit tests
+        run: .venv/bin/python -m unittest discover -s bindings/python/tests -p 'test_*.py'
+
+  # Preserve the required branch-protection context while the independent
+  # Rust and Python policy workers execute in parallel.
+  lint-and-unit:
+    name: Lint and Unit Tests (Linux)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [changes, lint-rust, script-unit]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Require every lint and unit worker
+        run: python3 scripts/ci_require_success.py lint-rust=${{ needs.lint-rust.result }} script-unit=${{ needs.script-unit.result }}
 
   # Non-gate job (see NON_GATE_JOBS in scripts/test_gate.py, rule-id
   # GATE-SCOPE-SMT): the required fast SMT smoke. It builds the
@@ -385,6 +415,8 @@ jobs:
   smt-build-glibc231:
     name: SMT Feature Build (Linux, glibc 2.31)
     runs-on: ubuntu-latest
+    needs: [changes]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     container: debian:11
     defaults:
       run:
@@ -515,6 +547,8 @@ jobs:
   smt-build-darwin-arm64:
     name: SMT Feature Build (darwin-arm64)
     runs-on: macos-latest
+    needs: [changes]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -613,8 +647,12 @@ jobs:
       - name: Verify cvc5 discharge path (smt feature live)
         run: python3 .github/scripts/verify_release_smt.py ./target/release/chelis
 
-  workspace-tests:
-    name: Workspace Tests (Linux)
+  workspace-tests-shard:
+    name: Workspace Tests (Linux, shard ${{ matrix.shard }}/2)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     runs-on: ubuntu-latest
     # Skip on docs-only PRs (chelis#419). A skipped required job reports
     # success, so branch protection stays satisfied; on push docs_only is
@@ -653,6 +691,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-workspace
+          # Both shards restore the same warm workspace cache. Only shard 1
+          # publishes a new entry, avoiding a same-key save race.
+          save-if: ${{ matrix.shard == 1 }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -664,32 +705,45 @@ jobs:
       # a single global thread pool, overlapping the heavyweight work.
       # See docs/investigations/ci_integration_test_runtime_diagnosis.md.
       #
-      # The integration gate subset (`cargo nextest run --workspace`)
-      # is defined once in scripts/gate.py and run here via `gate.py
-      # integration`. The `ci` nextest profile writes per-test JUnit
+      # The integration nextest command is defined once in scripts/gate.py.
+      # Each worker selects one of two deterministic, disjoint hash
+      # partitions. The `ci` nextest profile writes per-test JUnit
       # timing XML to target/nextest/ci/junit.xml; the test-timing
-      # budget step below consumes it. Do not hand-inline cargo
+      # budget step below consumes this shard's timings. Do not hand-inline cargo
       # commands into this job (see scripts/test_gate.py parity lock).
-      - name: Gate (integration subset)
-        run: python3 scripts/gate.py integration
+      - name: Gate (workspace test shard)
+        run: python3 scripts/gate.py integration --tests-only --partition hash:${{ matrix.shard }}/2
 
-      # This structural oracle needs cargo-nextest, which the script-unit job
-      # intentionally does not install. Run it here after the workspace build
-      # is warm so its three `nextest list` calls are continuously enforced.
+      # Shard 2 already has the feature-complete workspace build warm. Run
+      # each non-test integration oracle exactly once here instead of paying
+      # for a third independently compiled worker.
+      - name: Gate (integration support subset)
+        if: matrix.shard == 2
+        run: python3 scripts/gate.py integration --support-only
+
+      # This structural oracle needs cargo-nextest. Keep it on the same warm
+      # shard as the other support checks and execute it exactly once.
       - name: Verify nextest profile coverage
+        if: matrix.shard == 2
         run: .venv/bin/python -m unittest scripts.test_nextest_profile_partition.ProfilePartitionTests
 
-      # Informational, non-failing: flags integration tests that have
-      # regressed past their committed timing baseline or that are new
-      # and over the absolute ceiling. The baseline
-      # (scripts/test_timing_baseline.json) is hand-curated and
-      # explicitly regenerated, never auto-updated on merge. Promotable
-      # to a blocking step later. See
-      # docs/investigations/test_toolchain_guards_design.md.
       - name: Test-timing budget (informational)
         if: always()
         continue-on-error: true
         run: python3 scripts/test_timing_check.py --junit target/nextest/ci/junit.xml
+
+  workspace-tests:
+    name: Workspace Tests (Linux)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [changes, workspace-tests-shard]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Require every workspace test worker
+        run: python3 scripts/ci_require_success.py workspace-tests-shard=${{ needs.workspace-tests-shard.result }}
 
   # Run the inherited Phase 0-3 acceptance contract beside the workspace
   # nextest suite. On the measured #1118 run these steps took 7m22s after a
@@ -790,18 +844,18 @@ jobs:
   # chelis#1207's authoritative parity corpus compares every production
   # level-based generalization with the retained reference sweep and bypasses
   # nextest's default filter so no discovered non-ignored test is omitted.
-  # Split the one corpus over two deterministic hash partitions: each shard
+  # Split the one corpus over four deterministic hash partitions: each shard
   # still compiles the exact feature-enabled workspace, while the expensive
-  # test execution runs on two hosted CPUs in parallel. The aggregate job
-  # below retains a stable oracle status and fails closed unless both disjoint
-  # partitions succeed; the directly required Integration Tests (Linux)
+  # test execution runs on four hosted runners in parallel. The aggregate job
+  # below retains a stable oracle status and fails closed unless all four
+  # disjoint partitions succeed; the directly required Integration Tests (Linux)
   # context transitively gates that aggregate.
   generalize-sweep-oracle-shard:
-    name: Typecheck Level Generalization Oracle (shard ${{ matrix.shard }}/2)
+    name: Typecheck Level Generalization Oracle (shard ${{ matrix.shard }}/4)
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3, 4]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -838,7 +892,7 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Typecheck level generalization oracle
-        run: cargo nextest run --workspace --ignore-default-filter --features chelis-types/generalize-sweep-oracle --no-fail-fast --partition hash:${{ matrix.shard }}/2
+        run: cargo nextest run --workspace --ignore-default-filter --features chelis-types/generalize-sweep-oracle --no-fail-fast --partition hash:${{ matrix.shard }}/4
 
   generalize-sweep-oracle:
     name: Typecheck Level Generalization Oracle
@@ -873,8 +927,12 @@ jobs:
   # (.github/workflows/loc-report.yml) so it no longer commits a bot
   # commit to main on every merge. See WS-7 / spend-trim.
 
-  macos-smoke:
-    name: macOS Smoke
+  macos-workspace-shard:
+    name: macOS Workspace (shard ${{ matrix.shard }}/2)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     runs-on: macos-latest
     # Successful runs normally finish in 14-16 minutes, but hosted-runner
     # variance can push the workspace suite past the old 20-minute job cap.
@@ -916,6 +974,9 @@ jobs:
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-workspace
+          save-if: ${{ matrix.shard == 1 }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -938,14 +999,16 @@ jobs:
       # serialization bloat as the Linux integration job; see
       # docs/investigations/ci_integration_test_runtime_diagnosis.md.
       - name: Workspace tests
-        run: cargo nextest run --workspace
+        run: cargo nextest run --workspace --partition hash:${{ matrix.shard }}/2
 
       - name: Verify packaged binary architecture
+        if: matrix.shard == 2
         run: |
           set -euo pipefail
           file target/debug/chelis | grep -E 'arm64|aarch64'
 
       - name: Smoke test manifested C callable ABI
+        if: matrix.shard == 2
         run: python3 .github/scripts/smoke_macos_manifested_callable.py ./target/debug/chelis
 
       # Phase M smoke: emit `.mm` from the Metal backend and link it
@@ -955,7 +1018,23 @@ jobs:
       # in the M6 manual gate (`cargo test -p chelis-backend-metal
       # --test gpu_correctness -- --ignored`) on a real workstation.
       - name: Smoke test Metal backend codegen + link
+        if: matrix.shard == 2
         run: python3 .github/scripts/smoke_macos_metal.py ./target/debug/chelis
+
+  # Keep the exact branch-protection context stable and fail closed if either
+  # disjoint full-workspace partition fails.
+  macos-smoke:
+    name: macOS Smoke
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [changes, macos-workspace-shard]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Require every macOS workspace shard
+        run: python3 scripts/ci_require_success.py macos-workspace-shard=${{ needs.macos-workspace-shard.result }}
 
   backend-sanitizers:
     name: Backend Sanitizers

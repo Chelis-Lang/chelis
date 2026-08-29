@@ -543,6 +543,40 @@ class StageUnionTests(unittest.TestCase):
             "no gate command should appear in more than one stage",
         )
 
+    def test_lint_stage_does_not_repeat_the_workspace_build(self):
+        self.assertNotIn(gate.BUILD_WORKSPACE, gate.STAGES["lint-and-unit"])
+        self.assertIn(gate.CLIPPY_WORKSPACE, gate.STAGES["lint-and-unit"])
+
+    def test_integration_partition_selects_only_the_nextest_command(self):
+        commands = gate.selected_stage_commands(
+            "integration",
+            tests_only=True,
+            support_only=False,
+            partition="hash:1/2",
+        )
+        self.assertEqual(
+            commands,
+            [gate.NEXTEST_WORKSPACE_CI + ["--partition", "hash:1/2"]],
+        )
+
+    def test_integration_support_selects_each_non_test_oracle_once(self):
+        commands = gate.selected_stage_commands(
+            "integration",
+            tests_only=False,
+            support_only=True,
+            partition=None,
+        )
+        self.assertEqual(commands, gate.STAGES["integration"][1:])
+
+    def test_partition_is_rejected_outside_tests_only_integration(self):
+        for argv in (
+            ["lint-and-unit", "--partition", "hash:1/2"],
+            ["integration", "--partition", "hash:1/2"],
+            ["integration", "--support-only", "--partition", "hash:1/2"],
+        ):
+            with self.subTest(argv=argv), self.assertRaises(SystemExit):
+                gate.parse_args(argv)
+
 
 class ListOutputTests(unittest.TestCase):
     def test_list_prints_canonical_full_list(self):
@@ -1270,7 +1304,9 @@ def _rust_cache_inputs(job_block: str) -> dict[str, str]:
     return inputs
 
 
-def _assert_generalize_sweep_partition_contract(shard_block: str) -> None:
+def _assert_hash_partition_contract(
+    shard_block: str, *, expected_count: int
+) -> None:
     matrix_match = re.search(r"^\s+shard:\s*\[([^]]+)\]$", shard_block, re.M)
     if matrix_match is None:
         raise AssertionError("missing explicit shard matrix")
@@ -1282,14 +1318,20 @@ def _assert_generalize_sweep_partition_contract(shard_block: str) -> None:
     if partition_match is None:
         raise AssertionError("missing hash partition command")
     partition_count = int(partition_match.group(1))
-    if partition_count != 2:
-        raise AssertionError(f"expected two partitions, found {partition_count}")
+    if partition_count != expected_count:
+        raise AssertionError(
+            f"expected {expected_count} partitions, found {partition_count}"
+        )
     expected = list(range(1, partition_count + 1))
     if shards != expected:
         raise AssertionError(
             "the shard matrix must cover every nextest hash partition exactly "
             f"once: expected {expected}, found {shards}"
         )
+
+
+def _assert_generalize_sweep_partition_contract(shard_block: str) -> None:
+    _assert_hash_partition_contract(shard_block, expected_count=4)
 
 
 def _assert_read_only_workspace_cache(job_block: str) -> None:
@@ -1315,11 +1357,11 @@ class CiParityTests(unittest.TestCase):
         self.assertTrue(CI_YML.is_file(), f"missing {CI_YML}")
 
     def test_gate_jobs_call_gate_py(self):
-        # The `lint-and-unit` and `workspace-tests` jobs must invoke
+        # Each expensive worker must invoke
         # `python3 scripts/gate.py <stage>` and must NOT hand-inline
         # any `cargo` or `chelis` command.
         invocations = _parse_ci_gate_invocations()
-        for job in ("lint-and-unit", "workspace-tests"):
+        for job in ("lint-rust", "workspace-tests-shard"):
             self.assertIn(job, invocations, f"CI job '{job}' not found")
             self.assertEqual(
                 invocations[job],
@@ -1331,10 +1373,17 @@ class CiParityTests(unittest.TestCase):
                 ),
             )
         # Positive parity: the workflow text must actually call
-        # gate.py for both stages.
+        # gate.py for both stages. The workspace test shards select only the
+        # partitioned nextest command; shard 2 selects the remaining
+        # integration oracles exactly once after its test partition.
         text = CI_YML.read_text()
         self.assertIn("scripts/gate.py lint-and-unit", text)
-        self.assertIn("scripts/gate.py integration", text)
+        self.assertIn(
+            "scripts/gate.py integration --tests-only "
+            "--partition hash:${{ matrix.shard }}/2",
+            text,
+        )
+        self.assertIn("scripts/gate.py integration --support-only", text)
 
     def test_python_binding_ingress_suite_is_continuous(self):
         text = CI_YML.read_text()
@@ -1344,7 +1393,7 @@ class CiParityTests(unittest.TestCase):
             text,
             (
                 "bindings/python/tests contains the #729 Python-ingress oracle; "
-                "the lint-and-unit job must discover it continuously"
+                "the script-unit job must discover it continuously"
             ),
         )
 
@@ -1374,7 +1423,10 @@ class CiParityTests(unittest.TestCase):
             oracle_block.index(numpy_command),
             oracle_block.index(oracle_command),
         )
-        self.assertIn("needs: [changes]", workspace_block)
+        self.assertIn(
+            "needs: [changes, workspace-tests-shard]",
+            workspace_block,
+        )
         self.assertIn("needs: [changes]", oracle_block)
         self.assertEqual(oracle_block.count("    needs:"), 1)
         self.assertNotIn("needs.workspace-tests", oracle_block)
@@ -1421,16 +1473,16 @@ class CiParityTests(unittest.TestCase):
         command = (
             "cargo nextest run --workspace --ignore-default-filter "
             "--features chelis-types/generalize-sweep-oracle --no-fail-fast "
-            "--partition hash:${{ matrix.shard }}/2"
+            "--partition hash:${{ matrix.shard }}/4"
         )
 
         self.assertIn(
             "name: Typecheck Level Generalization Oracle "
-            "(shard ${{ matrix.shard }}/2)",
+            "(shard ${{ matrix.shard }}/4)",
             shard_block,
         )
         self.assertIn("fail-fast: false", shard_block)
-        self.assertIn("shard: [1, 2]", shard_block)
+        self.assertIn("shard: [1, 2, 3, 4]", shard_block)
         self.assertIn("needs: [changes]", shard_block)
         self.assertIn("contents: read", shard_block)
         self.assertIn("dtolnay/rust-toolchain@stable", shard_block)
@@ -1462,15 +1514,51 @@ class CiParityTests(unittest.TestCase):
 
     def test_generalize_sweep_partition_contract_rejects_a_missing_shard(self):
         shard_block = _ci_job_block("generalize-sweep-oracle-shard")
-        mutated = shard_block.replace("shard: [1, 2]", "shard: [1]", 1)
+        mutated = shard_block.replace(
+            "shard: [1, 2, 3, 4]", "shard: [1, 2, 3]", 1
+        )
         with self.assertRaisesRegex(
             AssertionError,
             "cover every nextest hash partition exactly once",
         ):
             _assert_generalize_sweep_partition_contract(mutated)
 
+    def test_workspace_suite_is_two_disjoint_shards_plus_one_support_job(self):
+        shard_block = _ci_job_block("workspace-tests-shard")
+        aggregate_block = _ci_job_block("workspace-tests")
+        _assert_hash_partition_contract(shard_block, expected_count=2)
+        self.assertIn(
+            "name: Workspace Tests (Linux, shard ${{ matrix.shard }}/2)",
+            shard_block,
+        )
+        self.assertIn("fail-fast: false", shard_block)
+        self.assertIn("scripts/gate.py integration --tests-only", shard_block)
+        self.assertIn("scripts/gate.py integration --support-only", shard_block)
+        self.assertIn("if: matrix.shard == 2", shard_block)
+        self.assertEqual(shard_block.count("--support-only"), 1)
+        self.assertIn(
+            "needs: [changes, workspace-tests-shard]",
+            aggregate_block,
+        )
+        self.assertIn("scripts/ci_require_success.py", aggregate_block)
+
+    def test_macos_suite_is_two_disjoint_shards_behind_stable_aggregate(self):
+        shard_block = _ci_job_block("macos-workspace-shard")
+        aggregate_block = _ci_job_block("macos-smoke")
+        _assert_hash_partition_contract(shard_block, expected_count=2)
+        self.assertIn("cargo nextest run --workspace", shard_block)
+        self.assertIn("--partition hash:${{ matrix.shard }}/2", shard_block)
+        self.assertIn("if: matrix.shard == 2", shard_block)
+        self.assertIn("name: macOS Smoke", aggregate_block)
+        self.assertIn(
+            "needs: [changes, macos-workspace-shard]", aggregate_block
+        )
+        self.assertIn("scripts/ci_require_success.py", aggregate_block)
+
     def test_parallel_jobs_share_one_saved_rust_cache_namespace(self):
-        workspace_inputs = _rust_cache_inputs(_ci_job_block("workspace-tests"))
+        workspace_inputs = _rust_cache_inputs(
+            _ci_job_block("workspace-tests-shard")
+        )
         read_only_jobs = (
             "dtype-phase3-oracle",
             "faithful-observation-phase2-oracle",
@@ -1498,7 +1586,7 @@ class CiParityTests(unittest.TestCase):
             _assert_read_only_workspace_cache(mutated)
 
     def test_profile_partition_set_math_runs_continuously(self):
-        workspace_block = _ci_job_block("workspace-tests")
+        workspace_block = _ci_job_block("workspace-tests-shard")
         _assert_executable_run_once(
             workspace_block,
             ".venv/bin/python -m unittest "
@@ -1989,17 +2077,27 @@ class DocsOnlySkipTests(unittest.TestCase):
 
     # Jobs that must skip on a docs-only PR.
     HEAVY_GATED_JOBS = {
-        "workspace-tests",
+        "lint-rust",
+        "script-unit",
+        "workspace-tests-shard",
         "dtype-phase3-oracle",
         "faithful-observation-phase2-oracle",
         "generalize-sweep-oracle-shard",
-        "macos-smoke",
+        "macos-workspace-shard",
         "backend-sanitizers",
         "smt-build",
+        "smt-build-glibc231",
+        "smt-build-darwin-arm64",
     }
     # The stable required context aggregates the parallel integration legs,
     # so it needs their results as well as the docs-only classification.
-    HEAVY_AGGREGATOR_JOBS = {"generalize-sweep-oracle", "integration"}
+    HEAVY_AGGREGATOR_JOBS = {
+        "lint-and-unit",
+        "workspace-tests",
+        "generalize-sweep-oracle",
+        "integration",
+        "macos-smoke",
+    }
     # Jobs that use the same always-present `changes` job but key on a
     # narrower contract input rather than on the docs-only classification.
     CHANGE_GATED_JOBS = {
@@ -2007,18 +2105,10 @@ class DocsOnlySkipTests(unittest.TestCase):
         "diagnostic-kind-oracle",
     }
     # Jobs that must ALWAYS run (never gated on docs_only).
-    # smt-build-glibc231 / smt-build-darwin-arm64 were added by chelis#422
-    # (ship-smt) without a docs_only `if`, so today they run unconditionally
-    # and are classified here. Follow-up: give them the same docs-skip `if` +
-    # `needs: [changes]` as smt-build and move them to HEAVY_GATED_JOBS so the
-    # heavy from-source cvc5 builds also skip on docs-only PRs (chelis#419).
     ALWAYS_RUN_JOBS = {
-        "lint-and-unit",
         "no-ai-authorship",
         "docs",
         "changes",
-        "smt-build-glibc231",
-        "smt-build-darwin-arm64",
     }
 
     def test_changes_job_exists_and_is_ungated(self):

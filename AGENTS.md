@@ -687,10 +687,11 @@ binary over `.dp` fixtures, and compiled test binaries through `cargo
 nextest`. Its Python unit tests patch the command runners, so they are
 evidence about the script's decision logic and never a substitute for
 running it. It runs in the `integration` stage, which hosted CI executes
-in the `workspace-tests` job (`Workspace Tests (Linux)`) on every
-non-docs-only pull request, and in the `--local` pre-push subset. That
-stage, not `lint-and-unit`, because two of its obligations run `cargo
-nextest`, which the lint-and-unit job deliberately does not install.
+exactly once on the second `workspace-tests-shard` worker before the
+fail-closed `Workspace Tests (Linux)` aggregate, on every non-docs-only pull
+request, and in the `--local` pre-push subset. That stage, not
+`lint-and-unit`, because two of its obligations run `cargo nextest`, which
+the Rust-policy worker deliberately does not install.
 `scripts/test_gate.py` locks both memberships and the pairing between the
 oracle's stage and a nextest-installing job.
 
@@ -699,8 +700,8 @@ gate run that binary already exists, so `gate.py` hands the built path over
 in `CHELIS_ORACLE_BINARY` and the oracle skips the build (chelis#1322). The
 gate sets it only for a command list whose earlier commands provably build
 that bin target (`cargo build --workspace --all-targets` and `cargo run -p
-chelis-cli --bin chelis`); `gate.py integration` on its own, which is how
-hosted CI reaches the oracle, sets nothing and keeps the original
+chelis-cli --bin chelis`); the support-only integration slice used by hosted
+CI sets nothing and keeps the original
 build-it-yourself behavior. The variable is an explicit override and is
 therefore authoritative: a path that is not an executable file is a loud
 failure, never a silent fall back to a build, and an explicit setting from

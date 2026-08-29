@@ -129,9 +129,11 @@ charset checker was added: that would be a second source of truth for
 - `scripts/gate.py` is the single source of truth for the per-PR
   developer-runnable gate. It defines the command list once, split by
   CI stage (`lint-and-unit`, `integration`), with the union as the
-  full gate. The workflow's `workspace-tests` job invokes the integration
-  stage; the stable `Integration Tests (Linux)` context aggregates that job
-  with the parallel Phase 0-3 oracle. A stage name runs one subset; `--list`
+  full gate. Two `workspace-tests-shard` workers invoke disjoint partitions
+  of the integration test command, and shard 2 invokes the support-only slice
+  exactly once. The stable `Workspace Tests (Linux)` context aggregates the
+  shards, and `Integration Tests (Linux)` aggregates it with the parallel
+  Phase 0-3 oracles. A stage name runs one subset; `--list`
   prints the canonical full list and `--local` derives per-crate tests from
   the diff against `origin/main`.
 - `python3 scripts/gate.py ...` is a bootstrap command, not permission to use
