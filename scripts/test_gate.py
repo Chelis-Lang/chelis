@@ -1173,6 +1173,9 @@ _WORKFLOW_JOB_HEADER = re.compile(r"^  (?P<key>\S.*?):\s*(?:#.*)?$")
 _WORKFLOW_JOBS_HEADER = re.compile(
     r"^(?:jobs|'jobs'|\"jobs\")\s*:\s*(?P<value>.*)$"
 )
+_WORKFLOW_STEPS_HEADER = re.compile(
+    r"^(?P<indent> +)(?:steps|'steps'|\"steps\")\s*:\s*(?P<value>.*)$"
+)
 _UNSUPPORTED_RUN_SCALAR = "<unsupported-run-scalar>"
 
 
@@ -1217,6 +1220,51 @@ def _parse_workflow_job_header(line: str) -> str | None:
         raise AssertionError(f"unsupported quoted workflow job id: {raw!r}")
 
     raise AssertionError(f"unsupported workflow job id header: {raw!r}")
+
+
+def _assert_supported_workflow_step_shapes(workflow: str) -> None:
+    """Reject step YAML shapes the dependency-free parser cannot attribute."""
+    steps_indent: int | None = None
+    unsupported_entry = re.compile(r"^-\s*(?:[?{*&'\"!]|<<:)")
+    unsupported_key = re.compile(r"^(?:[?:{*&'\"!]|<<:)")
+    explicit_steps_key = re.compile(
+        r"^\s*(?:\?\s*(?:steps|'steps'|\"steps\")|"
+        r"&\S+\s+(?:steps|'steps'|\"steps\")\s*:|"
+        r"\*\S+\s*:).*$"
+    )
+
+    for line in workflow.splitlines():
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+
+        if steps_indent is not None:
+            if stripped and not stripped.startswith("#") and indent <= steps_indent:
+                steps_indent = None
+            else:
+                relative_indent = indent - steps_indent
+                if relative_indent == 2 and unsupported_entry.match(stripped):
+                    raise AssertionError(
+                        f"unsupported workflow step shape: {line!r}"
+                    )
+                if relative_indent == 4 and unsupported_key.match(stripped):
+                    raise AssertionError(
+                        f"unsupported workflow step shape: {line!r}"
+                    )
+
+        if steps_indent is None:
+            if explicit_steps_key.fullmatch(line):
+                raise AssertionError(
+                    f"unsupported workflow step shape: {line!r}"
+                )
+            match = _WORKFLOW_STEPS_HEADER.fullmatch(line)
+            if match is None:
+                continue
+            value = match.group("value").strip()
+            if value and not value.startswith("#"):
+                raise AssertionError(
+                    f"unsupported workflow step shape: {line!r}"
+                )
+            steps_indent = len(match.group("indent"))
 
 
 def _is_gate_relevant_command(command: str) -> bool:
@@ -1282,11 +1330,12 @@ def _parse_ci_gate_invocations(text: str | None = None) -> dict[str, list[str]]:
     """
     if text is None:
         text = CI_YML.read_text()
+    _assert_supported_workflow_step_shapes(text)
     lines = text.splitlines()
     current_job: str | None = None
     invocations: dict[str, list[str]] = {}
     run_inline = re.compile(
-        r"^(?P<indent>\s*)(?P<dash>-\s*)?run:\s*(?P<value>.*?)\s*$"
+        r"^(?P<indent>\s*)(?P<dash>-\s*)?run\s*:\s*(?P<value>.*?)\s*$"
     )
     in_jobs = False
     line_index = 0
@@ -1330,6 +1379,10 @@ def _parse_ci_gate_invocations(text: str | None = None) -> dict[str, list[str]]:
             next_index += 1
 
         command = " ".join(part for part in scalar_parts if part).strip()
+        if command.startswith(("&", "*")):
+            raise AssertionError(
+                f"unsupported workflow run scalar: {command!r}"
+            )
         block_indicator = command.split(maxsplit=1)[0]
         if re.fullmatch(
             r"[|>](?:[+-][1-9]?|[1-9][+-]?)?",
@@ -1412,14 +1465,20 @@ def _workflow_job_block(path: Path, job: str) -> str:
 
 def _rust_cache_inputs(job_block: str) -> dict[str, str]:
     """Return the `with:` inputs for a job's Swatinem/rust-cache step."""
+    _assert_supported_workflow_step_shapes(job_block)
     lines = job_block.splitlines()
     uses_indices = []
-    uses_line = re.compile(r"(?:-\s*)?uses:\s*(?P<value>.+?)\s*$")
+    uses_line = re.compile(r"(?:-\s*)?uses\s*:\s*(?P<value>.+?)\s*$")
     for idx, line in enumerate(lines):
         match = uses_line.fullmatch(line.strip())
         if match is None:
             continue
-        action = _strip_yaml_scalar_quotes(match.group("value"))
+        raw_action = match.group("value").strip()
+        if raw_action.startswith(("&", "*")):
+            raise AssertionError(
+                f"unsupported workflow action reference: {raw_action!r}"
+            )
+        action = _strip_yaml_scalar_quotes(raw_action)
         if action == _UNSUPPORTED_RUN_SCALAR:
             raise AssertionError(
                 "unsupported quoted workflow action reference"
@@ -1960,6 +2019,11 @@ class CiParityTests(unittest.TestCase):
                 "        with:\n"
                 "          save-if: true\n"
             ),
+            (
+                "\n      - uses : Swatinem/rust-cache@v2\n"
+                "        with:\n"
+                "          save-if: true\n"
+            ),
         )
         for second_step in second_steps:
             with self.subTest(second_step=second_step):
@@ -1981,6 +2045,47 @@ class CiParityTests(unittest.TestCase):
             "unsupported quoted workflow action reference",
         ):
             _assert_read_only_workspace_cache(mutated)
+
+    def test_read_only_cache_contract_rejects_yaml_action_references(self):
+        block = _ci_job_block("faithful-observation-phase2-oracle")
+        for uses in (
+            "uses: &cache_action Swatinem/rust-cache@v2",
+            "uses: *cache_action",
+        ):
+            with self.subTest(uses=uses):
+                mutated = block + (
+                    f"\n      - {uses}\n"
+                    "        with:\n"
+                    "          save-if: true\n"
+                )
+                with self.assertRaisesRegex(
+                    AssertionError,
+                    "unsupported workflow action reference",
+                ):
+                    _assert_read_only_workspace_cache(mutated)
+
+    def test_read_only_cache_contract_rejects_unsupported_step_maps(self):
+        block = _ci_job_block("faithful-observation-phase2-oracle")
+        second_steps = (
+            (
+                "\n      - ? uses\n"
+                "        : Swatinem/rust-cache@v2\n"
+                "        with:\n"
+                "          save-if: true\n"
+            ),
+            (
+                "\n      - {uses: Swatinem/rust-cache@v2, "
+                "with: {save-if: true}}\n"
+            ),
+            "\n      - *competing_cache_step\n",
+        )
+        for second_step in second_steps:
+            with self.subTest(second_step=second_step):
+                with self.assertRaisesRegex(
+                    AssertionError,
+                    "unsupported workflow step shape",
+                ):
+                    _assert_read_only_workspace_cache(block + second_step)
 
     def test_shared_cache_contract_rejects_an_explicit_target_override(self):
         block = _ci_job_block("faithful-observation-phase2-oracle")
@@ -2113,6 +2218,10 @@ class CiParityTests(unittest.TestCase):
                 "cargo check -p chelis-types",
             ),
             (
+                "      - run : cargo check -p chelis-types\n",
+                "cargo check -p chelis-types",
+            ),
+            (
                 "      - run:\n"
                 "          python3 scripts/gate.py lint-and-unit;\n"
                 "          cargo check -p chelis-types\n",
@@ -2200,6 +2309,27 @@ class CiParityTests(unittest.TestCase):
                         "unsupported workflow job",
                     ):
                         parser(workflow)
+
+    def test_unsupported_run_step_shapes_fail_closed(self):
+        steps = (
+            "      - run: *hidden_command\n",
+            "      - run: &hidden_command cargo check -p chelis-types\n",
+            (
+                "      - ? run\n"
+                "        : cargo check -p chelis-types\n"
+            ),
+            "      - {run: cargo check -p chelis-types}\n",
+            "      - *hidden_run_step\n",
+            '      - "run": cargo check -p chelis-types\n',
+        )
+        for step in steps:
+            workflow = "jobs:\n  probe:\n    steps:\n" + step
+            with self.subTest(step=step):
+                with self.assertRaisesRegex(
+                    AssertionError,
+                    "unsupported workflow (?:run scalar|step shape)",
+                ):
+                    _parse_ci_gate_invocations(workflow)
 
     def test_escaped_double_quoted_scalars_fail_closed(self):
         cases = (
