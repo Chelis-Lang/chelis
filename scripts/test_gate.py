@@ -1164,25 +1164,26 @@ def _is_gate_relevant_command(command: str) -> bool:
     return any(command.startswith(prefix) for prefix in _GATE_COMMAND_PREFIXES)
 
 
-def _parse_ci_gate_invocations() -> dict[str, list[str]]:
+def _parse_ci_gate_invocations(text: str | None = None) -> dict[str, list[str]]:
     """Parse `.github/workflows/ci.yml` and return, per gate job, the
     list of `run:` command lines that invoke `cargo` or `chelis`
     (including the `cargo run ... chelis ... lint` form).
 
-    The parser is intentionally simple line-based YAML-shape matching:
+    The parser is intentionally narrow line-based YAML-shape matching:
     it tracks the current `<job>:` header (two-space indent under
     `jobs:`) and collects single-line `run:` values whose command
     starts with `cargo ` or `chelis ` (see `_is_gate_relevant_command`).
-    Multi-line `run: |` blocks in the gate jobs are not used today; if
-    one is introduced the parity test will not see it, which the
-    `test_no_multiline_run_in_gate_jobs` guard catches.
+    Matching outer YAML quotes are removed before classifying the command.
+    Literal or folded block-scalar indicators are recorded as a sentinel so
+    `test_no_multiline_run_in_gate_jobs` can reject them in gate workers.
     """
-    text = CI_YML.read_text()
+    if text is None:
+        text = CI_YML.read_text()
     lines = text.splitlines()
     current_job: str | None = None
     invocations: dict[str, list[str]] = {}
     job_header = re.compile(r"^  ([a-z0-9-]+):\s*$")
-    run_inline = re.compile(r"^\s*run:\s*(.+?)\s*$")
+    run_inline = re.compile(r"^\s*(?:-\s*)?run:\s*(.+?)\s*$")
     for line in lines:
         m = job_header.match(line)
         if m is not None:
@@ -1195,11 +1196,21 @@ def _parse_ci_gate_invocations() -> dict[str, list[str]]:
         if rm is None:
             continue
         command = rm.group(1).strip()
-        if command == "|":
-            # Multi-line block; record a sentinel so the dedicated
-            # guard test can detect it.
+        block_indicator = command.split(maxsplit=1)[0]
+        if re.fullmatch(
+            r"[|>](?:[+-][1-9]?|[1-9][+-]?)?",
+            block_indicator,
+        ):
+            # Literal or folded block; record a sentinel so the dedicated
+            # guard test can detect every YAML-equivalent spelling.
             invocations[current_job].append("<multiline-run-block>")
             continue
+        if (
+            len(command) >= 2
+            and command[0] == command[-1]
+            and command[0] in ("'", '"')
+        ):
+            command = command[1:-1].strip()
         if _is_gate_relevant_command(command):
             invocations[current_job].append(command)
     return invocations
@@ -1822,6 +1833,35 @@ class CiParityTests(unittest.TestCase):
                 f"explicit NON_GATE_JOBS: {sorted(unclassified)}"
             ),
         )
+
+    def test_parser_classifies_quoted_inline_gate_commands(self):
+        for quote in ('"', "'"):
+            with self.subTest(quote=quote):
+                workflow = (
+                    "jobs:\n"
+                    "  probe:\n"
+                    "    steps:\n"
+                    f"      - run: {quote}cargo check -p chelis-types{quote}\n"
+                )
+                self.assertEqual(
+                    _parse_ci_gate_invocations(workflow)["probe"],
+                    ["cargo check -p chelis-types"],
+                )
+
+    def test_parser_marks_literal_and_folded_yaml_run_blocks(self):
+        for indicator in ("|", "|-", "|+", ">", ">-", ">+", "|2", ">2-"):
+            with self.subTest(indicator=indicator):
+                workflow = (
+                    "jobs:\n"
+                    "  probe:\n"
+                    "    steps:\n"
+                    f"      - run: {indicator}\n"
+                    "          cargo check -p chelis-types\n"
+                )
+                self.assertEqual(
+                    _parse_ci_gate_invocations(workflow)["probe"],
+                    ["<multiline-run-block>"],
+                )
 
     def test_all_workflow_files_are_scope_classified(self):
         # Every workflow file under .github/workflows/ must be explicitly
