@@ -281,6 +281,13 @@ class GateParityAdversarialTests(unittest.TestCase):
             "          save-if: true\n",
             "        with:\n          shared-key : linux-workspace\n"
             "          save-if: true\n",
+            "        with:\n          shared-key: ${{ 'linux-workspace' }}\n"
+            "          save-if: true\n",
+            "        with:\n          shared-key: "
+            "${{ format('linux-{0}', 'workspace') }}\n"
+            "          save-if: true\n",
+            "        with:\n          shared-key: linux-${{ 'workspace' }}\n"
+            "          save-if: true\n",
         )
         for with_map in with_maps:
             with self.subTest(with_map=with_map):

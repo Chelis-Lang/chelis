@@ -1562,6 +1562,11 @@ def _rust_cache_steps(job_block: str) -> list[dict[str, str]]:
                     "unsupported rust-cache input shape: "
                     f"{stripped!r}"
                 )
+            if key == "shared-key" and ("${{" in value or "}}" in value):
+                raise AssertionError(
+                    "rust-cache shared-key must be a literal scalar: "
+                    f"{stripped!r}"
+                )
             inputs[key] = value
         steps.append(inputs)
     return steps
