@@ -3,23 +3,18 @@
 Run via: `python3 -m unittest scripts.test_gate_parity_adversarial`
 from repo root, or `python3 scripts/test_gate_parity_adversarial.py`.
 
-`scripts/test_gate.py` ships the parity lock: it greps
-`.github/workflows/ci.yml` and fails if a gate job hand-inlines a
-command that `gate.py` does not produce. `scripts/test_gate.py`'s own
+`scripts/test_gate.py` ships the parity lock: it parses every single-line
+`run:` scalar in each gate-owned job and fails unless the complete command
+is in that job's reviewed allowlist. `scripts/test_gate.py`'s own
 tests assert it passes on the *current* workflow. This file is the
 adversarial complement: it MUTATES a copy of `ci.yml`, points the
 parity test at the mutation, and asserts the lock actually fails. A
 parity lock that never fails on a real drift is theater.
 
-It also covers bare `chelis ...` invocations. RT-2 found that the
-parity parser originally only inspected commands starting with
-`cargo `, so a gate job that hand-inlined a bare `chelis ...` command
-(rather than the `cargo run -p chelis-cli ... -- ...` form) slipped
-past the lock, contradicting the "every `cargo`/`chelis` invocation"
-claim in the `test_gate.py` docstring and the design note.
-`_is_gate_relevant_command` in `scripts/test_gate.py` now matches both
-prefixes; `test_bare_chelis_command_is_caught` is the adversarial proof
-that the gap is closed.
+The structural rule covers bare `chelis ...`, direct Cargo, shell quoting,
+parameter expansion, and command substitution without trying to reconstruct
+Bash execution semantics. Even a benign extra command is rejected as an
+unreviewed workflow change, not misidentified as a Cargo invocation.
 """
 
 import importlib.util
@@ -225,6 +220,45 @@ class GateParityAdversarialTests(unittest.TestCase):
             "the parity lock ignored a shell-quoted cargo executable",
         )
 
+    def test_shell_expansion_cargo_executables_are_caught(self):
+        commands = (
+            "$'cargo' check -p chelis-types",
+            "${TOOL:-cargo} check -p chelis-types",
+            "$(printf car)go check -p chelis-types",
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                mutated = self.ci_text.replace(
+                    ANCHOR,
+                    "      - name: Sneaky expanded executable\n"
+                    f"        run: {command}\n\n" + ANCHOR,
+                    1,
+                )
+                self.assertNotEqual(
+                    mutated, self.ci_text, "mutation did not apply"
+                )
+                result = _run_parity_against(mutated)
+                self.assertGreater(
+                    len(result.failures) + len(result.errors),
+                    0,
+                    f"the parity lock ignored expanded executable {command!r}",
+                )
+
+    def test_unreviewed_benign_run_command_is_caught_structurally(self):
+        mutated = self.ci_text.replace(
+            ANCHOR,
+            "      - name: Unreviewed diagnostic\n"
+            "        run: echo cargo\n\n" + ANCHOR,
+            1,
+        )
+        self.assertNotEqual(mutated, self.ci_text, "mutation did not apply")
+        result = _run_parity_against(mutated)
+        self.assertGreater(
+            len(result.failures) + len(result.errors),
+            0,
+            "the structural parity lock allowed an unreviewed run command",
+        )
+
     def test_underscore_job_id_with_direct_cargo_is_caught(self):
         mutated = self.ci_text.rstrip() + (
             "\n  Unclassified_job:\n"
@@ -273,7 +307,7 @@ class GateParityAdversarialTests(unittest.TestCase):
         # commands starting with `cargo `, so a gate job that
         # hand-inlined a bare `chelis ...` command (rather than the
         # `cargo run -p chelis-cli ... -- ...` form) slipped past the
-        # lock. `_is_gate_relevant_command` now matches `chelis ` too.
+        # lock. The exact run-command allowlist covers `chelis ` too.
         # Plant a hand-inlined bare `chelis` step into the workspace-test
         # gate job. The parity lock MUST fail.
         mutated = self.ci_text.replace(

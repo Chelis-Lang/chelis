@@ -186,8 +186,8 @@ In order of preference:
 
 ## CI Is the Fallback Oracle
 
-When local exec is wedged, do not block on the local run: the
-The `macos-workspace-shard` matrix runs the full workspace test suite on
+When local exec is wedged, do not block on the local run. The
+`macos-workspace-shard` matrix runs the full workspace test suite on
 macOS across two disjoint hash partitions. Shard 2 also runs the Metal smoke
 probe. The stable `macos-smoke` aggregate requires both shards and serves as
 the macOS signal. Push the branch and let CI serve as the oracle, noting in

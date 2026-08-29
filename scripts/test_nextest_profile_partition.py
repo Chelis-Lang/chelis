@@ -166,7 +166,7 @@ class FilterTextTests(unittest.TestCase):
             "explicitly passes --ignore-default-filter",
         )
 
-    def test_contended_deadline_probe_retries_without_slowing_green_runs(self):
+    def test_deadline_probe_has_no_retry_cost(self):
         config = tomllib.loads(NEXTEST_TOML.read_text())
         overrides = config["profile"]["default"].get("overrides", [])
         matching = [
@@ -174,8 +174,12 @@ class FilterTextTests(unittest.TestCase):
             for override in overrides
             if override.get("filter") == CONTENDED_DEADLINE_RETRY_SELECTOR
         ]
-        self.assertEqual(len(matching), 1)
-        self.assertEqual(matching[0].get("retries"), 2)
+        self.assertEqual(
+            matching,
+            [],
+            "the deadline test accepts both fail-closed timeout diagnostics; "
+            "retrying it only repeats a deterministic contract probe",
+        )
 
     def test_contention_sensitive_recursive_parity_case_is_nightly_owned(self):
         default_block, _ci, nightly_block = _filter_blocks()

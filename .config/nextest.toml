@@ -54,15 +54,6 @@ default-filter = '''
     )
 '''
 
-# This deadline-contract probe deliberately fills an unread output pipe and
-# races the CLI's whole-command timeout. Hosted contention can make the CLI
-# reach the equally safe fallback diagnostic instead of the probe's preferred
-# reason on the first attempt. Retry only this exact probe; passing runs pay no
-# extra work, and a persistent contract failure remains red after two retries.
-[[profile.default.overrides]]
-filter = 'binary_id(/^chelis-cli::test_suite_timeout$/) & test(/^normal_output_forwarding_is_part_of_whole_command_deadline$/)'
-retries = 2
-
 [profile.ci]
 fail-fast = false
 # Keep the local fast-suite scope, then delegate every complete test binary

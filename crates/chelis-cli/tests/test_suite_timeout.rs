@@ -266,10 +266,15 @@ fn normal_output_forwarding_is_part_of_whole_command_deadline() {
         .expect("stderr pipe")
         .read_to_end(&mut stderr)
         .expect("read stderr");
+    let stderr = String::from_utf8_lossy(&stderr);
+    // Under load, the same whole-command deadline can expire either while
+    // forwarding normal output or while the bounded timeout reporter tries to
+    // describe the unread stdout pipe. Both paths are explicit, incomplete,
+    // nonzero failures; neither is a false-success fallback.
     assert!(
-        String::from_utf8_lossy(&stderr).contains("output forwarding exceeded"),
-        "bounded failure must identify incomplete output: {}",
-        String::from_utf8_lossy(&stderr)
+        stderr.contains("output forwarding exceeded")
+            || stderr.contains("suite timeout report could not be written to stdout",),
+        "bounded failure must identify incomplete output: {stderr}"
     );
 }
 

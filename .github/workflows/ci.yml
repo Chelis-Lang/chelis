@@ -709,9 +709,9 @@ jobs:
       # The integration nextest command is defined once in scripts/gate.py.
       # Each worker selects one of two deterministic, disjoint hash
       # partitions. The `ci` nextest profile writes per-test JUnit
-      # timing XML to target/nextest/ci/junit.xml; the test-timing
-      # budget step below consumes this shard's timings. Do not hand-inline cargo
-      # commands into this job (see scripts/test_gate.py parity lock).
+      # timing XML to target/nextest/ci/junit.xml; the aggregate job downloads
+      # both artifacts and reports their combined timings. Do not hand-inline
+      # cargo commands into this job (see scripts/test_gate.py parity lock).
       - name: Gate (workspace test shard)
         env:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
