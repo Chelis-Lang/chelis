@@ -9,19 +9,23 @@
 //! v0.2.7 release CI run measured 33m 42s on the integration step, with
 //! per-test publish overhead the dominant cost.
 //!
-//! `SharedReef` publishes chelis-std exactly once per test binary and
-//! also pre-warms the lazy archive-extraction cache (a check-then-act
-//! race surfaces at `--test-threads >= 8` without the warm pass — see
-//! `feedback_shared_test_fixtures.md`). Tests then call `make_app` to
-//! allocate a fresh per-test app shell pointing at the shared registry.
+//! `SharedReef` publishes chelis-std and pre-warms the lazy archive-extraction
+//! cache (a check-then-act race surfaces at `--test-threads >= 8` without the
+//! warm pass — see `feedback_shared_test_fixtures.md`). Local runs do this once
+//! per test binary in an isolated tempdir. CI sets
+//! `CHELIS_TEST_SHARED_REEF_HOME` to one absolute, job-scoped root; an atomic
+//! cross-process lock and versioned sentinel then prepare that root once across
+//! every integration-test binary. Tests call `make_app` to allocate a fresh
+//! per-test app shell pointing at the shared registry.
 //!
 //! ## Concurrency
 //!
 //! Per `crates/chelis-reef/src/lib.rs:353` (`load_package_graph_for_eval`)
 //! eval is read-only against `CHELIS_REEF_HOME`. Build/check write only
 //! the app's own `reef.lock`, which lives under the per-test app dir.
-//! After the cache pre-warm, intra-binary thread parallelism is safe at
-//! `--test-threads=8` and `--test-threads=16` (verified empirically).
+//! After the cache pre-warm, intra- and cross-binary reads are safe. An empty,
+//! relative, partially initialized, or incompatible configured root fails
+//! loudly rather than falling back to a per-binary registry.
 //!
 //! ## Usage
 //!
@@ -49,10 +53,15 @@
 #![allow(dead_code)]
 
 use assert_cmd::Command;
-use std::fs;
+use std::env;
+use std::ffi::OsString;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use std::sync::LazyLock;
+use std::thread;
+use std::time::{Duration, Instant};
 use tempfile::{TempDir, tempdir};
 
 /// Pinned compiler version for fixture `reef.toml` files. Re-exported from
@@ -89,19 +98,159 @@ pub fn copy_dir_recursive(src: &Path, dst: &Path) {
 }
 
 pub struct SharedReef {
-    _dir: TempDir,
+    _dir: Option<TempDir>,
     pub reef_home: PathBuf,
 }
 
-pub static SHARED_REEF: LazyLock<SharedReef> = LazyLock::new(|| {
-    let dir = tempdir().expect("tempdir");
-    let reef_home = dir.path().join("reef-home");
-    let std_pkg = dir.path().join("chelis-std");
+pub const SHARED_REEF_READY_FILE: &str = ".chelis-test-shared-reef-ready-v1";
+const SHARED_REEF_LOCK_FILE: &str = ".chelis-test-shared-reef-prepare.lock";
+const SHARED_REEF_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
+const SHARED_REEF_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+fn shared_reef_ready_contract() -> String {
+    format!("chelis-test-shared-reef-v1\ncompiler={COMPILER_VERSION}\nchelis-std=0.4.0\n")
+}
+
+pub fn resolve_configured_shared_reef_home(
+    value: Option<OsString>,
+) -> Result<Option<PathBuf>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Err("CHELIS_TEST_SHARED_REEF_HOME must not be empty".to_owned());
+    }
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err(format!(
+            "CHELIS_TEST_SHARED_REEF_HOME must be absolute, got {}",
+            path.display()
+        ));
+    }
+    Ok(Some(path))
+}
+
+fn ready_state(root: &Path) -> Result<bool, String> {
+    let ready = root.join(SHARED_REEF_READY_FILE);
+    if !ready.exists() {
+        return Ok(false);
+    }
+    let actual = fs::read_to_string(&ready)
+        .map_err(|error| format!("read shared Reef sentinel {}: {error}", ready.display()))?;
+    let expected = shared_reef_ready_contract();
+    if actual != expected {
+        return Err(format!(
+            "shared Reef sentinel {} has an incompatible contract",
+            ready.display()
+        ));
+    }
+    Ok(true)
+}
+
+struct PrepareLock {
+    path: PathBuf,
+}
+
+impl Drop for PrepareLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+pub fn ensure_job_shared_reef_with<F>(root: &Path, prepare: F) -> Result<(), String>
+where
+    F: FnOnce(&Path) -> Result<(), String>,
+{
+    if !root.is_absolute() {
+        return Err(format!(
+            "shared Reef root must be absolute: {}",
+            root.display()
+        ));
+    }
+    fs::create_dir_all(root)
+        .map_err(|error| format!("create shared Reef root {}: {error}", root.display()))?;
+    let lock_path = root.join(SHARED_REEF_LOCK_FILE);
+    let started = Instant::now();
+    let mut prepare = Some(prepare);
+    loop {
+        if ready_state(root)? {
+            return Ok(());
+        }
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+        {
+            Ok(mut lock_file) => {
+                let _lock = PrepareLock {
+                    path: lock_path.clone(),
+                };
+                writeln!(lock_file, "pid={}", std::process::id()).map_err(|error| {
+                    format!("write shared Reef lock {}: {error}", lock_path.display())
+                })?;
+                if ready_state(root)? {
+                    return Ok(());
+                }
+                let unexpected = fs::read_dir(root)
+                    .map_err(|error| {
+                        format!("inspect shared Reef root {}: {error}", root.display())
+                    })?
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .filter(|path| path != &lock_path)
+                    .collect::<Vec<_>>();
+                if !unexpected.is_empty() {
+                    return Err(format!(
+                        "shared Reef root {} is not empty and has no valid sentinel: {:?}",
+                        root.display(),
+                        unexpected
+                    ));
+                }
+                prepare
+                    .take()
+                    .expect("initializer is consumed by only one lock owner")(root)?;
+                let ready = root.join(SHARED_REEF_READY_FILE);
+                let temporary = root.join(format!(
+                    ".chelis-test-shared-reef-ready-{}.tmp",
+                    std::process::id()
+                ));
+                fs::write(&temporary, shared_reef_ready_contract()).map_err(|error| {
+                    format!(
+                        "write shared Reef sentinel {}: {error}",
+                        temporary.display()
+                    )
+                })?;
+                fs::rename(&temporary, &ready).map_err(|error| {
+                    format!("publish shared Reef sentinel {}: {error}", ready.display())
+                })?;
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if started.elapsed() >= SHARED_REEF_WAIT_TIMEOUT {
+                    return Err(format!(
+                        "timed out waiting for shared Reef initializer lock {}",
+                        lock_path.display()
+                    ));
+                }
+                thread::sleep(SHARED_REEF_POLL_INTERVAL);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "create shared Reef initializer lock {}: {error}",
+                    lock_path.display()
+                ));
+            }
+        }
+    }
+}
+
+fn prepare_shared_reef(reef_home: &Path, scratch: &Path) {
+    let std_pkg = scratch.join("chelis-std");
     copy_dir_recursive(&package_std(), &std_pkg);
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .env("CHELIS_REEF_HOME", &reef_home)
+        .env("CHELIS_REEF_HOME", reef_home)
         .args(["reef", "publish", std_pkg.to_str().unwrap()])
         .assert()
         .success();
@@ -111,7 +260,7 @@ pub static SHARED_REEF: LazyLock<SharedReef> = LazyLock::new(|| {
     // into `reef_home/cache/<hash>/`. Without this serializing pass, threads
     // racing on the extract surfaced `failed to read .../reef.toml: No such
     // file or directory` at --test-threads=8.
-    let warm_app = dir.path().join("__cache_warm");
+    let warm_app = scratch.join("__cache_warm");
     fs::create_dir_all(warm_app.join("src")).expect("mkdir warm app");
     fs::write(
         warm_app.join("reef.toml"),
@@ -136,15 +285,36 @@ chelis-std = {{ version = "0.4.0" }}
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .env("CHELIS_REEF_HOME", &reef_home)
+        .env("CHELIS_REEF_HOME", reef_home)
         .current_dir(&warm_app)
         .args(["check", warm_app.join("src/main.ch").to_str().unwrap()])
         .assert()
         .success();
+}
 
-    SharedReef {
-        _dir: dir,
-        reef_home,
+pub static SHARED_REEF: LazyLock<SharedReef> = LazyLock::new(|| {
+    let configured =
+        resolve_configured_shared_reef_home(env::var_os("CHELIS_TEST_SHARED_REEF_HOME"))
+            .unwrap_or_else(|error| panic!("invalid shared Reef configuration: {error}"));
+    if let Some(reef_home) = configured {
+        ensure_job_shared_reef_with(&reef_home, |root| {
+            let scratch = tempdir().map_err(|error| error.to_string())?;
+            prepare_shared_reef(root, scratch.path());
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("prepare job-scoped shared Reef: {error}"));
+        SharedReef {
+            _dir: None,
+            reef_home,
+        }
+    } else {
+        let dir = tempdir().expect("tempdir");
+        let reef_home = dir.path().join("reef-home");
+        prepare_shared_reef(&reef_home, dir.path());
+        SharedReef {
+            _dir: Some(dir),
+            reef_home,
+        }
     }
 });
 

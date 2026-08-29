@@ -535,22 +535,25 @@ def run_command(
     return True
 
 
-def main() -> int:
+def preflight_violations() -> list[str]:
+    """Return every static-contract or required-tool failure."""
     violations = (
         source_violations()
         + comparator_violations()
         + definition_digest_violations()
     )
+    if shutil.which("cc") is None:
+        violations.append("a host C compiler (`cc`) is required")
+    if shutil.which("cargo") is None:
+        violations.append("cargo is required")
+    return violations
+
+
+def main() -> int:
+    violations = preflight_violations()
     if violations:
         for violation in violations:
             print(f"PHASE 3 ORACLE: FAIL: {violation}", file=sys.stderr)
-        return 1
-
-    if shutil.which("cc") is None:
-        print("PHASE 3 ORACLE: FAIL: a host C compiler (`cc`) is required", file=sys.stderr)
-        return 1
-    if shutil.which("cargo") is None:
-        print("PHASE 3 ORACLE: FAIL: cargo is required", file=sys.stderr)
         return 1
 
     for index, (label, command) in enumerate(SUITE_COMMANDS):

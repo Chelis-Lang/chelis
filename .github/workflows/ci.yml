@@ -663,6 +663,7 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
+      CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
     steps:
       - uses: actions/checkout@v6
 
@@ -759,6 +760,7 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
+      CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
     steps:
       - uses: actions/checkout@v6
 
@@ -788,6 +790,15 @@ jobs:
           # saves it, avoiding a second multi-GB entry in the 10 GB cache pool.
           save-if: false
 
+      # The wire and bindings census binaries both invoke nested cargo rustdoc
+      # in this shared ~500 MB target. Restore it independently of the normal
+      # workspace cache so those exact nested builds survive across runs.
+      - name: Restore capacity rustdoc build
+        uses: actions/cache/restore@v4
+        with:
+          path: target/agents/729-capacity-rustdoc
+          key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
@@ -795,6 +806,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: .venv/bin/python scripts/dtype_phase3_oracle.py
+
+      # Pull requests only consume the last main-produced cache. One
+      # successful push-to-main writer avoids duplicate multi-hundred-MB
+      # entries and same-key races across the parallel consumers.
+      - name: Save capacity rustdoc build
+        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@v4
+        with:
+          path: target/agents/729-capacity-rustdoc
+          key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
 
   # Keep the #732 Phase 2 acceptance contract executable as its own blocking
   # leg. This is deliberately not appended to the dtype job: each phase oracle
@@ -809,6 +830,7 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
+      CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
     steps:
       - uses: actions/checkout@v6
 
@@ -864,6 +886,7 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
+      CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
     steps:
       - uses: actions/checkout@v6
 
@@ -887,6 +910,12 @@ jobs:
         with:
           shared-key: linux-workspace
           save-if: false
+
+      - name: Restore capacity rustdoc build
+        uses: actions/cache/restore@v4
+        with:
+          path: target/agents/729-capacity-rustdoc
+          key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -958,6 +987,7 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
+      CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
     steps:
       - uses: actions/checkout@v6
 
