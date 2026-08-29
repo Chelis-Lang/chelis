@@ -197,15 +197,60 @@ in 0.18.3, 0.18.4, and 0.18.5 (chelis#1349).
   consumers are all migrated. `[05-OP-31]`..`[05-OP-33]` and their
   three registries are the normative authority.
 
-- **BREAKING (stdlib): the exported numeric surface is aligned with
-  `[05-OP-35]`'s 84 definitions (chelis#1293, chelis#1314).** Three
-  exports are removed outright: the duplicate prelude JSON
-  representation, the legacy JSON and assertion builtin aliases, and
-  `init/xavier::sample`, which was never a language-level definition.
-  Recursive `List` selection adjoints and the seeded pathwise
-  Random-adjoint foundation are implemented. If your code imports one
-  of the removed names, the fix is the canonical spelling in
-  `Std.Io.Json` or `Std.Test`; there is no alias to fall back on.
+- **BREAKING (stdlib): the exported surface is aligned with
+  `[05-OP-35]`'s 84 definitions (chelis#1293, chelis#1314), and the
+  change reaches far past the numeric families.** Recursive `List`
+  selection adjoints and the seeded pathwise Random-adjoint foundation
+  are implemented. There are no aliases to fall back on. The complete
+  exported delta, module by module:
+
+  **Every filesystem and process entry point now declares `! { IO }`.**
+  This is the item most likely to break a build, because it changes the
+  *effect* row of a signature rather than a name: a caller in a pure
+  context stops type-checking, and the fix is to propagate `! { IO }`
+  outward or handle it. Affected: `Std.Io`'s `read_text`, `write_text`,
+  `read_trimmed_lines`, `read_head_bytes`, `exists`, `list`,
+  `mmap_size`; `Std.Io.Json`'s `load_json`, `try_load_json`,
+  `write_json`, `try_write_json`; `Std.Process`'s `run` and
+  `run_chelis`; and `Std.Tokenizer`'s `load_tokenizer` and
+  `try_load_tokenizer`.
+
+  **Removed and renamed exports:**
+
+  | module | was | now |
+  |---|---|---|
+  | `Std.Test` | `assert_eq_int`, `assert_eq_bool`, `assert_eq_string` | removed; use the generic `assert_eq` |
+  | `Std.Test` | `assert_eq_tensor_int64[n]` | `assert_eq_tensor[p]`, rank-polymorphic |
+  | `Std.Sort` | `sort_1d`, `sort_2d` | `sort`, one rank-polymorphic definition |
+  | `Std.Contracts` | `abs_f32` | `abs_float[p_float]` |
+  | `Std.Contracts` | `erfc_approx` | removed |
+  | `Std.Io.Json` | `json_finite` | `json_serializable` |
+  | `Std.Init.Xavier` | `sample` | removed; the module exports nothing |
+
+  **Monomorphic definitions generalized.** Each of these type-checks a
+  strictly larger set of programs, but a call that relied on the old
+  concrete type to drive inference may now need an annotation, and
+  `assert_shape`'s parameter type changed outright:
+
+  | definition | was | now |
+  |---|---|---|
+  | `Std.Scalar.{max,min,abs}` | `f32` | `[p_numeric]` |
+  | `Std.Test.assert_eq` | `(f32, f32, string)` | `[q](q, q, string)` |
+  | `Std.Test.assert_close` | `(f32, f32, f32, string)` | `[p_float]` |
+  | `Std.Test.assert_close_tensor` | `[n, p](&tensor[n, p], &tensor[n, p], f32, ..)` | `[p_float](&tensor[..r, p_float], &tensor[..r, p_float], p_float, ..)` |
+  | `Std.Test.assert_shape` | `expected_n: int64` | `expected: List[int64]` |
+  | `Std.Contracts.normal_cdf` | `f32` | `[p_float]` |
+  | `Std.Tensor.Construct.{linspace,arange,stack,squeeze,unsqueeze}` | fixed rank and dtype | rank- and dtype-generic |
+  | `Std.Tensor.Mask.where_indices` | `[n, hits](&tensor[n, bool])` | `[hits](&tensor[..r, bool])` |
+
+  **Added:** `Std.Io.Json` gains `JsonBigInt`, `json_bigint`, and
+  `canonical_object_entries`; `Std.Test` gains `assert_eq_tensor`; the
+  `Std.Init.*` modules gain parameter-validation helpers.
+
+  Also removed, and not part of the module surface above: the duplicate
+  prelude JSON representation and the legacy JSON and assertion
+  **builtin** aliases, which are compiler builtins rather than
+  `Std.Test` definitions.
 
 - **BREAKING (stdlib): `Std.Test.assert_close_tensor` requires one
   shared active-float dtype (chelis#1292).** Both tensors and the
@@ -653,17 +698,37 @@ For a downstream shell or embedder, in the order the work bites:
 3. **Upgrade any Beacon deployment in lockstep** — request envelope
    schema 2 with `wire_dag_v6_base64`, and v6 is exact-only with no
    read migration.
-4. **Fix stdlib imports.** Remove `init/xavier::sample`, the legacy
-   JSON and assertion aliases, and the duplicate prelude JSON
-   representation; give `Std.Test.assert_close_tensor` one shared
-   float dtype across both tensors and the tolerance.
-5. **Expect `JsonBigInt`.** A `match` over `Json` that was exhaustive
+4. **Fix stdlib imports and effect rows.** Work the two tables in the
+   stdlib entry above: rename or drop every removed export, and
+   propagate `! { IO }` outward from every `Std.Io` / `Std.Io.Json` /
+   `Std.Process` / `Std.Tokenizer` call. Expect the effect row to be
+   the larger job. A test suite that used `assert_eq_int` /
+   `assert_eq_bool` / `assert_eq_string` will fail to compile
+   outright with `module Std.Test does not export assert_eq_int`;
+   `coral`'s 0.18.6 bump migrated 119 such call sites across eight
+   files. Give `Std.Test.assert_close_tensor` one shared float dtype
+   across both tensors and the tolerance, and give `assert_shape` a
+   `List[int64]`.
+
+5. **Refresh your local reef registry.** The CHB envelope change means
+   0.18.6 rejects a 0.18.5-era `.chb` sitting in `~/.chelis/reef` with
+   `error: invalid shell envelope: unsupported predecessor shell
+   format`. `chelis reef conform bump` can surface this as a nonzero
+   exit *after* writing every edit correctly, so check `git status`
+   rather than trusting the exit code alone, and republish or re-fetch
+   the stale packages.
+6. **Expect `JsonBigInt`.** A `match` over `Json` that was exhaustive
    before is not exhaustive now, and out-of-`int64` integer tokens that
-   used to trap `Overflow` now parse.
-6. **If you target HIP, check for materialized `bool` tensors.** A
+   used to trap `Overflow` now parse. **A wildcard arm is the dangerous
+   case**, because it keeps compiling and silently swallows the new
+   variant: `coral`'s JSON renderer ended in `| _ => ""` and turned
+   every out-of-`int64` integer into an empty string until its 0.18.6
+   bump enumerated all eight variants. Prefer an exhaustive match, so a
+   future variant is a compile error rather than lost data.
+7. **If you target HIP, check for materialized `bool` tensors.** A
    comparison whose *result* is a bool tensor now fails the build
    loudly. `where(x < y, a, b)` is unaffected.
-7. **Nothing to do for caches.** The first build is cold.
+8. **Nothing to do for caches.** The first build is cold.
 
 ## [0.18.5] — 2026-08-22
 
