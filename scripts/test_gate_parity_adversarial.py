@@ -154,6 +154,37 @@ class GateParityAdversarialTests(unittest.TestCase):
             "the parity lock did NOT catch quoted cargo before a YAML comment",
         )
 
+    def test_escaped_double_quoted_cargo_command_is_caught(self):
+        mutated = self.ci_text.replace(
+            ANCHOR,
+            "      - name: Sneaky escaped command\n"
+            '        run: "\\x63argo check -p chelis-types"\n\n'
+            + ANCHOR,
+            1,
+        )
+        self.assertNotEqual(mutated, self.ci_text, "mutation did not apply")
+        result = _run_parity_against(mutated)
+        self.assertGreater(
+            len(result.failures) + len(result.errors),
+            0,
+            "the parity lock did NOT fail closed on a YAML-escaped command",
+        )
+
+    def test_underscore_job_id_with_direct_cargo_is_caught(self):
+        mutated = self.ci_text.rstrip() + (
+            "\n  Unclassified_job:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: cargo check -p chelis-types\n"
+        )
+        result = _run_parity_against(mutated)
+        self.assertGreater(
+            len(result.failures) + len(result.errors),
+            0,
+            "the parity lock ignored a valid job id containing underscore "
+            "and uppercase characters",
+        )
+
     def test_bare_chelis_command_is_caught(self):
         # RT-2 finding, now closed: the parser originally only inspected
         # commands starting with `cargo `, so a gate job that

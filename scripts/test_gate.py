@@ -115,7 +115,12 @@ def _assert_nix_system_job_parity(contracts: str, workflow: str) -> None:
 
 
 def _workflow_job_blocks(workflow: str) -> dict[str, str]:
-    headers = list(re.finditer(r"(?m)^  (?P<name>[a-z0-9-]+):\s*$", workflow))
+    headers = list(
+        re.finditer(
+            rf"(?m)^  (?P<name>{_WORKFLOW_JOB_ID_PATTERN}):\s*$",
+            workflow,
+        )
+    )
     blocks: dict[str, str] = {}
     for index, header in enumerate(headers):
         end = headers[index + 1].start() if index + 1 < len(headers) else len(workflow)
@@ -1148,6 +1153,8 @@ class ListOutputTests(unittest.TestCase):
 # matching only at the start would let a hand-inlined invocation evade the
 # parity lock.
 _GATE_COMMAND = re.compile(r"(?<![A-Za-z0-9_.-])(?:cargo|chelis)(?:\s|$)")
+_WORKFLOW_JOB_ID_PATTERN = r"[A-Za-z_][A-Za-z0-9_-]*"
+_UNSUPPORTED_RUN_SCALAR = "<unsupported-run-scalar>"
 
 
 def _is_gate_relevant_command(command: str) -> bool:
@@ -1167,6 +1174,12 @@ def _strip_yaml_scalar_quotes(command: str) -> str:
     command = command.strip()
     if not command or command[0] not in ("'", '"'):
         return re.sub(r"\s+#.*$", "", command).strip()
+
+    # YAML double-quoted scalars interpret escapes and line continuations.
+    # This dependency-free guard does not reproduce that grammar; reject the
+    # unsupported shape so a decoded cargo/chelis command cannot disappear.
+    if command[0] == '"' and "\\" in command:
+        return _UNSUPPORTED_RUN_SCALAR
 
     quote = command[0]
     index = 1
@@ -1210,7 +1223,7 @@ def _parse_ci_gate_invocations(text: str | None = None) -> dict[str, list[str]]:
     lines = text.splitlines()
     current_job: str | None = None
     invocations: dict[str, list[str]] = {}
-    job_header = re.compile(r"^  ([a-z0-9-]+):\s*$")
+    job_header = re.compile(rf"^  ({_WORKFLOW_JOB_ID_PATTERN}):\s*$")
     run_inline = re.compile(
         r"^(?P<indent>\s*)(?P<dash>-\s*)?run:\s*(?P<value>.*?)\s*$"
     )
@@ -1259,7 +1272,9 @@ def _parse_ci_gate_invocations(text: str | None = None) -> dict[str, list[str]]:
             line_index = next_index
             continue
         command = _strip_yaml_scalar_quotes(command)
-        if _is_gate_relevant_command(command):
+        if command == _UNSUPPORTED_RUN_SCALAR:
+            invocations[current_job].append(command)
+        elif _is_gate_relevant_command(command):
             invocations[current_job].append(command)
         line_index = next_index
     return invocations
@@ -1331,7 +1346,7 @@ def _workflow_job_block(path: Path, job: str) -> str:
         raise AssertionError(f"missing workflow job {job!r} in {path}")
     end = len(lines)
     for idx in range(start + 1, len(lines)):
-        if re.match(r"^  [a-z0-9-]+:\s*$", lines[idx]):
+        if re.match(rf"^  {_WORKFLOW_JOB_ID_PATTERN}:\s*$", lines[idx]):
             end = idx
             break
     return "\n".join(lines[start:end])
@@ -1340,13 +1355,17 @@ def _workflow_job_block(path: Path, job: str) -> str:
 def _rust_cache_inputs(job_block: str) -> dict[str, str]:
     """Return the `with:` inputs for a job's Swatinem/rust-cache step."""
     lines = job_block.splitlines()
-    uses_idx: int | None = None
-    for idx, line in enumerate(lines):
-        if line.strip() == "uses: Swatinem/rust-cache@v2":
-            uses_idx = idx
-            break
-    if uses_idx is None:
-        raise AssertionError("missing Swatinem/rust-cache@v2 step")
+    uses_indices = [
+        idx
+        for idx, line in enumerate(lines)
+        if line.strip() == "uses: Swatinem/rust-cache@v2"
+    ]
+    if len(uses_indices) != 1:
+        raise AssertionError(
+            "expected exactly one Swatinem/rust-cache@v2 step, "
+            f"found {len(uses_indices)}"
+        )
+    uses_idx = uses_indices[0]
 
     with_idx: int | None = None
     for idx in range(uses_idx + 1, len(lines)):
@@ -1633,6 +1652,31 @@ class CiParityTests(unittest.TestCase):
         )
         self.assertIn("scripts/ci_require_success.py", aggregate_block)
 
+    def test_topology_docs_name_current_shard_owners(self):
+        phase_oracles = (REPO_ROOT / "docs" / "phase_oracles.md").read_text()
+        macos_runbook = (
+            REPO_ROOT / "docs" / "local_macos_environment.md"
+        ).read_text()
+        runtime_diagnosis = (
+            REPO_ROOT
+            / "docs"
+            / "investigations"
+            / "ci_integration_test_runtime_diagnosis.md"
+        ).read_text()
+        self.assertIn(
+            "`macos-workspace-shard` job runs "
+            "`python3 .github/scripts/smoke_macos_metal.py` on shard 2",
+            phase_oracles,
+        )
+        self.assertIn(
+            "`macos-workspace-shard` matrix runs the full workspace test suite",
+            macos_runbook,
+        )
+        self.assertIn(
+            "nextest hash partitions `1/4` through `4/4` run concurrently",
+            runtime_diagnosis,
+        )
+
     def test_parallel_jobs_share_one_saved_rust_cache_namespace(self):
         workspace_inputs = _rust_cache_inputs(
             _ci_job_block("workspace-tests-shard")
@@ -1708,6 +1752,20 @@ class CiParityTests(unittest.TestCase):
                 execution_step = block[step_start:step_end]
                 self.assertIn("\n        env:\n", execution_step)
                 self.assertIn(setting, execution_step)
+    def test_read_only_cache_contract_rejects_a_second_cache_step(self):
+        block = _ci_job_block("faithful-observation-phase2-oracle")
+        mutated = block + (
+            "\n      - name: Competing cache writer\n"
+            "        uses: Swatinem/rust-cache@v2\n"
+            "        with:\n"
+            "          shared-key: linux-workspace\n"
+            "          save-if: true\n"
+        )
+        with self.assertRaisesRegex(
+            AssertionError,
+            "exactly one Swatinem/rust-cache@v2 step",
+        ):
+            _assert_read_only_workspace_cache(mutated)
 
     def test_shared_cache_contract_rejects_an_explicit_target_override(self):
         block = _ci_job_block("faithful-observation-phase2-oracle")
@@ -1852,6 +1910,39 @@ class CiParityTests(unittest.TestCase):
                 self.assertEqual(
                     _parse_ci_gate_invocations(workflow)["probe"],
                     [expected],
+                )
+
+    def test_parser_accepts_full_github_job_id_grammar(self):
+        workflow = (
+            "jobs:\n"
+            "  Unclassified_job:\n"
+            "    needs: [changes]\n"
+            "    if: always()\n"
+            "    steps:\n"
+            "      - run: cargo check -p chelis-types\n"
+        )
+        self.assertEqual(
+            _parse_ci_gate_invocations(workflow)["Unclassified_job"],
+            ["cargo check -p chelis-types"],
+        )
+        self.assertEqual(
+            _parse_job_attrs(workflow)["Unclassified_job"],
+            {"needs": "[changes]", "if": "always()"},
+        )
+        self.assertIn("Unclassified_job", _workflow_job_blocks(workflow))
+
+    def test_escaped_double_quoted_scalars_fail_closed(self):
+        cases = (
+            '      - run: "\\x63argo check -p chelis-types"\n',
+            '      - run: "car\\\n'
+            '          go check -p chelis-types"\n',
+        )
+        for run_scalar in cases:
+            with self.subTest(run_scalar=run_scalar):
+                workflow = "jobs:\n  probe:\n    steps:\n" + run_scalar
+                self.assertEqual(
+                    _parse_ci_gate_invocations(workflow)["probe"],
+                    ["<unsupported-run-scalar>"],
                 )
 
     def test_all_workflow_files_are_scope_classified(self):
@@ -2250,16 +2341,17 @@ class SmtCiSplitTests(unittest.TestCase):
         )
 
 
-def _parse_job_attrs() -> dict[str, dict[str, str]]:
+def _parse_job_attrs(text: str | None = None) -> dict[str, dict[str, str]]:
     """Parse `.github/workflows/ci.yml` and return, per job, its
     top-level `needs:` and `if:` lines (the first occurrence at the
     job's own indent). Line-based to match the existing parser style and
     avoid a PyYAML dependency the CI venv may not carry."""
-    text = CI_YML.read_text()
+    if text is None:
+        text = CI_YML.read_text()
     lines = text.splitlines()
     current_job: str | None = None
     attrs: dict[str, dict[str, str]] = {}
-    job_header = re.compile(r"^  ([a-z0-9-]+):\s*$")
+    job_header = re.compile(rf"^  ({_WORKFLOW_JOB_ID_PATTERN}):\s*$")
     attr_line = re.compile(r"^    (needs|if):\s*(.+?)\s*$")
     # Only parse headers inside the `jobs:` block; `on:` triggers like
     # `  push:` share the two-space indent and would otherwise read as
