@@ -402,8 +402,6 @@ GATE_WORKER_RUN_COMMANDS = {
         "python3 scripts/gate.py integration --support-only",
         ".venv/bin/python -m unittest "
         "scripts.test_nextest_profile_partition.ProfilePartitionTests",
-        "python3 scripts/test_timing_check.py --junit "
-        "target/nextest/ci/junit.xml",
     ),
 }
 
@@ -419,6 +417,10 @@ NON_GATE_JOBS = {
     "workspace-tests",
     "macos-workspace-shard",
     "macos-smoke",
+    # Rule-id: GATE-SCOPE-WORKSPACE-AGGREGATE -- the stable aggregate merges
+    # shard JUnit, checks timing, and publishes telemetry with Python. The
+    # workspace-tests-shard workers own the gate.py commands.
+    "workspace-tests",
     "backend-sanitizers",
     "no-ai-authorship",
     "docs",
@@ -451,6 +453,10 @@ NON_GATE_JOBS = {
     "generalize-sweep-oracle-shard",
     "generalize-sweep-oracle",
     "integration",
+    # Rule-id: GATE-SCOPE-TEST-TELEMETRY -- this CI-owned aggregate reads
+    # nextest artifacts produced by the gate and oracle jobs. It runs no
+    # cargo or Chelis command itself.
+    "test-telemetry",
     # Rule-id: GATE-SCOPE-SMT -- the smt-build job is the required fast
     # cvc5-backed `smt` feature smoke. It is out of gate.py scope by
     # design, like backend-sanitizers; the full prove corpus lives in
@@ -1781,8 +1787,12 @@ class CiParityTests(unittest.TestCase):
         oracle_block = _ci_job_block("generalize-sweep-oracle")
         aggregate_block = _ci_job_block("integration")
         command = (
-            "cargo nextest run --workspace --ignore-default-filter "
+            "cargo nextest run --workspace --profile ci-full "
+            "--ignore-default-filter "
             "--features chelis-types/generalize-sweep-oracle --no-fail-fast "
+            "-E 'not (binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) "
+            "| (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) "
+            "& test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)))' "
             "--partition hash:${{ matrix.shard }}/4"
         )
 
@@ -1860,6 +1870,99 @@ class CiParityTests(unittest.TestCase):
             aggregate_block,
         )
         self.assertIn("scripts/ci_require_success.py", aggregate_block)
+
+    def test_workspace_junit_shards_merge_before_one_validated_timing_report(self):
+        shard_block = _ci_job_block("workspace-tests-shard")
+        aggregate_block = _ci_job_block("workspace-tests")
+        self.assertEqual(shard_block.count("uses: actions/upload-artifact@v7"), 1)
+        self.assertIn(
+            "name: junit-linux-workspace-${{ matrix.shard }}", shard_block
+        )
+        self.assertIn("path: target/nextest/ci/junit.xml", shard_block)
+        self.assertIn("if-no-files-found: error", shard_block)
+        self.assertNotIn("scripts/test_timing_check.py", shard_block)
+        self.assertEqual(aggregate_block.count("uses: actions/download-artifact@v7"), 2)
+        self.assertIn("name: junit-linux-workspace-1", aggregate_block)
+        self.assertIn("name: junit-linux-workspace-2", aggregate_block)
+        self.assertIn("scripts/ci_test_telemetry.py", aggregate_block)
+        self.assertIn("--require-disjoint", aggregate_block)
+        self.assertIn("scripts/test_timing_check.py", aggregate_block)
+        self.assertRegex(aggregate_block, r"(?m)^\s+--informational\s*$")
+        self.assertNotIn("--informational-relative", aggregate_block)
+        self.assertIn("name: Validate and report test timing", aggregate_block)
+        self.assertNotIn("continue-on-error: true", aggregate_block)
+
+    def test_every_partitioned_test_lane_publishes_named_junit(self):
+        expectations = {
+            "workspace-tests-shard": (
+                "junit-linux-workspace-${{ matrix.shard }}",
+                "target/nextest/ci/junit.xml",
+            ),
+            "dtype-phase3-oracle": (
+                "junit-linux-dtype",
+                "target/nextest/ci-full/junit.xml",
+            ),
+            "generalize-sweep-oracle-shard": (
+                "junit-linux-generalization-${{ matrix.shard }}",
+                "target/nextest/ci-full/junit.xml",
+            ),
+            "macos-workspace-shard": (
+                "junit-macos-workspace-${{ matrix.shard }}",
+                "target/nextest/ci-full/junit.xml",
+            ),
+        }
+        for job, (artifact, path) in expectations.items():
+            with self.subTest(job=job):
+                block = _ci_job_block(job)
+                self.assertEqual(block.count("uses: actions/upload-artifact@v7"), 1)
+                self.assertIn(f"name: {artifact}", block)
+                self.assertIn(f"path: {path}", block)
+                self.assertIn("if-no-files-found: error", block)
+
+    def test_every_nonworkspace_pr_lane_validates_and_reports_timing(self):
+        expectations = {
+            "dtype-phase3-oracle": "target/nextest/ci-full/junit.xml",
+            "generalize-sweep-oracle-shard": (
+                "target/nextest/ci-full/junit.xml"
+            ),
+            "macos-workspace-shard": "target/nextest/ci-full/junit.xml",
+        }
+        for job, junit in expectations.items():
+            with self.subTest(job=job):
+                block = _ci_job_block(job)
+                self.assertEqual(
+                    block.count("name: Validate and report test timing"), 1
+                )
+                self.assertIn("scripts/test_timing_check.py", block)
+                self.assertIn(f"--junit {junit}", block)
+                self.assertRegex(block, r"(?m)^\s+--informational\s*$")
+                self.assertNotIn("--informational-relative", block)
+                self.assertNotIn("continue-on-error: true", block)
+
+    def test_cross_lane_telemetry_requires_every_expected_artifact(self):
+        block = _ci_job_block("test-telemetry")
+        self.assertIn("name: CI Test Telemetry", block)
+        self.assertIn(
+            "needs: [changes, workspace-tests-shard, dtype-phase3-oracle, "
+            "generalize-sweep-oracle-shard, macos-workspace-shard]",
+            block,
+        )
+        self.assertEqual(block.count("uses: actions/download-artifact@v7"), 9)
+        for artifact in (
+            "junit-linux-workspace-1",
+            "junit-linux-workspace-2",
+            "junit-linux-dtype",
+            "junit-linux-generalization-1",
+            "junit-linux-generalization-2",
+            "junit-linux-generalization-3",
+            "junit-linux-generalization-4",
+            "junit-macos-workspace-1",
+            "junit-macos-workspace-2",
+        ):
+            self.assertIn(f"name: {artifact}", block)
+        self.assertIn("scripts/ci_test_telemetry.py", block)
+        self.assertNotIn("--require-disjoint", block)
+        self.assertIn("uses: actions/upload-artifact@v7", block)
 
     def test_macos_suite_is_two_disjoint_shards_behind_stable_aggregate(self):
         shard_block = _ci_job_block("macos-workspace-shard")
@@ -3019,6 +3122,9 @@ class DocsOnlySkipTests(unittest.TestCase):
         "integration",
         "macos-smoke",
     }
+    # Best-effort reporting aggregates run after failed dependencies but may
+    # skip on cancellation because they are not required status contexts.
+    HEAVY_REPORT_JOBS = {"test-telemetry"}
     # Jobs that use the same always-present `changes` job but key on a
     # narrower contract input rather than on the docs-only classification.
     CHANGE_GATED_JOBS = {
@@ -3132,6 +3238,14 @@ class DocsOnlySkipTests(unittest.TestCase):
                 self.assertIn("always()", cond)
                 self.assertNotIn("!cancelled()", cond)
 
+    def test_nonrequired_report_aggregator_skips_on_cancellation(self):
+        attrs = _parse_job_attrs()
+        for job in self.HEAVY_REPORT_JOBS:
+            with self.subTest(job=job):
+                cond = attrs[job].get("if", "")
+                self.assertIn("!cancelled()", cond)
+                self.assertNotIn("always()", cond)
+
     def test_always_run_jobs_are_not_gated(self):
         attrs = _parse_job_attrs()
         for job in self.ALWAYS_RUN_JOBS:
@@ -3155,6 +3269,7 @@ class DocsOnlySkipTests(unittest.TestCase):
         classified = (
             self.HEAVY_GATED_JOBS
             | self.HEAVY_AGGREGATOR_JOBS
+            | self.HEAVY_REPORT_JOBS
             | self.CHANGE_GATED_JOBS
             | self.ALWAYS_RUN_JOBS
         )

@@ -43,38 +43,45 @@ Three failure modes kept recurring in CI:
   (`<testcase classname=... name=... time=...>`, keyed as
   `binary::test`) and flags tests over budget.
 - Thresholds are config, never hardcoded:
-  - `scripts/test_timing_config.json` holds `tolerance` (a multiplier)
-    and `absolute_ceiling` (seconds).
+  - `scripts/test_timing_config.json` holds `tolerance` (a multiplier),
+    `absolute_ceiling` (seconds), and `min_regression_delta` (seconds).
   - `scripts/test_timing_baseline.json` maps `binary::test` -> seconds.
-- The check flags a test when either:
-  - it is NEW relative to the baseline AND runs longer than
-    `absolute_ceiling`, or
-  - it regressed past `tolerance` x its baseline time.
+- Every ordinary-PR test, whether baselined or new, is reported above the
+  `absolute_ceiling`. Baselined tests that exceed both `tolerance` times their
+  baseline and `min_regression_delta` are reported as relative regressions.
 - The baseline is hand-curated and explicitly regenerated, NOT
   auto-regenerated on merge. Auto-regen would launder a real
   regression into the baseline. Regeneration is one documented
   command: `python3 scripts/test_timing_check.py --update-baseline`.
-- CI wiring: an informational, non-failing step
-  (`continue-on-error: true`) runs after the integration test step.
-  It is promotable to blocking later by removing `continue-on-error`.
+- CI merges the two exact, disjoint workspace JUnit shards before one timing
+  check. All threshold findings use `--informational`: repeated unchanged-code
+  hosted samples vary too much to make a single observation a reliable
+  required check, but the report remains visible. Dtype,
+  explicit-generalization, and macOS workers apply the same validation and
+  report to their own JUnit before their required aggregates, so tests outside
+  the Linux workspace selection remain observable. Missing, malformed, empty,
+  or non-finite telemetry still fails the producing or aggregate job.
 
 ### Why these defaults
 
-`tolerance = 2.0` and `absolute_ceiling = 30.0`s were chosen against
-the current-state baseline: the slowest existing tests are the
-`phase3j_pre_std` stdlib build oracles at ~42s. They are already in
-the baseline, so they are only flagged if they more than double. A
-genuinely new test that lands over 30s is worth a look. A separate
-workstream (typecheck cache) is expected to shift the timing baseline
-shortly; when it lands, the baseline is regenerated with the one
-documented command above.
+`tolerance = 2.0`, `min_regression_delta = 0.05`, and
+`absolute_ceiling = 30.0`s preserve useful diagnostics. The committed
+two-shard hosted baseline contained 8,166 tests and no observation above 30
+seconds. Exact-head run `33248009321` of unchanged test code then reported a
+36.64-second workspace case and 34.87-to-83.02-second cases in the dtype and
+generalization lanes, alongside dozens of relative outliers. The slow cases
+were nested-build and compile/execute tests competing inside the runner, not
+one consistent regression. That evidence makes both threshold classes useful
+for diagnosis and unsuitable for a one-sample required check.
 
 ### Exit codes
 
-`scripts/test_timing_check.py` exits `0` when nothing is over budget,
-`1` when one or more tests are over budget, and `2` on usage / IO
-error (missing or malformed JUnit XML, bad config). A malformed or
-empty JUnit file is a loud error, never a silent pass.
+By default, `scripts/test_timing_check.py` exits `1` for either kind of finding.
+With `--informational-relative`, relative-only findings exit `0`, while any
+absolute-ceiling finding still exits `1`. Hosted CI uses `--informational`,
+which reports both classes and exits `0` for a valid report. Exit `2` is a
+usage or IO error (missing or malformed JUnit XML, bad config) under every
+mode. A malformed or empty JUnit file is a loud error, never a silent pass.
 
 ## Guard 2: em-dash-in-test-strings visibility
 
@@ -210,7 +217,7 @@ directly.
 ## Ordering
 
 Guard 3 owns the CI-step refactor (it touches the gate steps in
-`.github/workflows/ci.yml`); Guard 1 slots its new informational step
+`.github/workflows/ci.yml`); Guard 1 slots its timing telemetry step
 and the `ci` nextest profile in afterward. Guard 2 is independent of
 both.
 

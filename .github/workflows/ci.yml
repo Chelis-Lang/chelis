@@ -709,9 +709,9 @@ jobs:
       # The integration nextest command is defined once in scripts/gate.py.
       # Each worker selects one of two deterministic, disjoint hash
       # partitions. The `ci` nextest profile writes per-test JUnit
-      # timing XML to target/nextest/ci/junit.xml; the test-timing
-      # budget step below consumes this shard's timings. Do not hand-inline cargo
-      # commands into this job (see scripts/test_gate.py parity lock).
+      # timing XML to target/nextest/ci/junit.xml; the aggregate job downloads
+      # both artifacts and reports their combined timings. Do not hand-inline
+      # cargo commands into this job (see scripts/test_gate.py parity lock).
       - name: Gate (workspace test shard)
         env:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
@@ -731,10 +731,14 @@ jobs:
         if: matrix.shard == 1
         run: .venv/bin/python -m unittest scripts.test_nextest_profile_partition.ProfilePartitionTests
 
-      - name: Test-timing budget (informational)
+      - name: Upload workspace JUnit shard
         if: always()
-        continue-on-error: true
-        run: python3 scripts/test_timing_check.py --junit target/nextest/ci/junit.xml
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-linux-workspace-${{ matrix.shard }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: error
+          retention-days: 14
 
   workspace-tests:
     name: Workspace Tests (Linux)
@@ -748,6 +752,56 @@ jobs:
 
       - name: Require every workspace test worker
         run: python3 scripts/ci_require_success.py workspace-tests-shard=${{ needs.workspace-tests-shard.result }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Download workspace JUnit shard 1
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-workspace-1
+          path: target/test-telemetry/input/workspace-1
+
+      - name: Download workspace JUnit shard 2
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-workspace-2
+          path: target/test-telemetry/input/workspace-2
+
+      - name: Merge disjoint workspace timing reports
+        run: >-
+          uv run --managed-python --python 3.11 --no-project python
+          scripts/ci_test_telemetry.py
+          --shard workspace-1=target/test-telemetry/input/workspace-1/junit.xml
+          --shard workspace-2=target/test-telemetry/input/workspace-2/junit.xml
+          --require-disjoint
+          --merged-junit target/test-telemetry/workspace-junit.xml
+          --json target/test-telemetry/workspace-report.json
+          --summary target/test-telemetry/workspace-summary.md
+          --github-summary "${GITHUB_STEP_SUMMARY}"
+
+      # The baseline comes from the exact two-shard hosted runner. A later
+      # unchanged-code run produced scheduler-sensitive relative and absolute
+      # outliers, so both stay visible without false-redding the required gate.
+      # Missing, malformed, empty, or invalid telemetry remains blocking.
+      - name: Validate and report test timing
+        run: >-
+          uv run --managed-python --python 3.11 --no-project python
+          scripts/test_timing_check.py
+          --junit target/test-telemetry/workspace-junit.xml
+          --informational
+
+      - name: Upload merged workspace telemetry
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-telemetry-linux-workspace
+          path: |
+            target/test-telemetry/workspace-junit.xml
+            target/test-telemetry/workspace-report.json
+            target/test-telemetry/workspace-summary.md
+          if-no-files-found: error
+          retention-days: 14
 
   # Run the inherited Phase 0-3 acceptance contract beside the workspace
   # nextest suite. On the measured #1118 run these steps took 7m22s after a
@@ -809,6 +863,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
         run: .venv/bin/python scripts/dtype_phase3_oracle.py
+
+      - name: Validate and report test timing
+        run: >-
+          .venv/bin/python scripts/test_timing_check.py
+          --junit target/nextest/ci-full/junit.xml
+          --informational
+
+      - name: Upload dtype JUnit
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-linux-dtype
+          path: target/nextest/ci-full/junit.xml
+          if-no-files-found: error
+          retention-days: 14
 
       # Pull requests only consume the last main-produced cache. One
       # successful push-to-main writer avoids duplicate multi-hundred-MB
@@ -926,7 +995,22 @@ jobs:
       - name: Typecheck level generalization oracle
         env:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
-        run: cargo nextest run --workspace --ignore-default-filter --features chelis-types/generalize-sweep-oracle --no-fail-fast --partition hash:${{ matrix.shard }}/4
+        run: cargo nextest run --workspace --profile ci-full --ignore-default-filter --features chelis-types/generalize-sweep-oracle --no-fail-fast -E 'not (binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) | (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)))' --partition hash:${{ matrix.shard }}/4
+
+      - name: Validate and report test timing
+        run: >-
+          .venv/bin/python scripts/test_timing_check.py
+          --junit target/nextest/ci-full/junit.xml
+          --informational
+
+      - name: Upload generalization JUnit shard
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-linux-generalization-${{ matrix.shard }}
+          path: target/nextest/ci-full/junit.xml
+          if-no-files-found: error
+          retention-days: 14
 
   generalize-sweep-oracle:
     name: Typecheck Level Generalization Oracle
@@ -1035,7 +1119,16 @@ jobs:
       - name: Workspace tests
         env:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
-        run: cargo nextest run --workspace --partition hash:${{ matrix.shard }}/2
+        run: cargo nextest run --workspace --profile ci-full --partition hash:${{ matrix.shard }}/2
+
+      - name: Upload macOS workspace JUnit shard
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-macos-workspace-${{ matrix.shard }}
+          path: target/nextest/ci-full/junit.xml
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Verify packaged binary architecture
         if: matrix.shard == 2
@@ -1057,6 +1150,12 @@ jobs:
         if: matrix.shard == 2
         run: python3 .github/scripts/smoke_macos_metal.py ./target/debug/chelis
 
+      - name: Validate and report test timing
+        run: >-
+          .venv/bin/python scripts/test_timing_check.py
+          --junit target/nextest/ci-full/junit.xml
+          --informational
+
   # Keep the exact branch-protection context stable and fail closed if either
   # disjoint full-workspace partition fails.
   macos-smoke:
@@ -1071,6 +1170,104 @@ jobs:
 
       - name: Require every macOS workspace shard
         run: python3 scripts/ci_require_success.py macos-workspace-shard=${{ needs.macos-workspace-shard.result }}
+
+  # Preserve every partition's nextest timing as a durable artifact and one
+  # cross-platform report. Overlap between semantic lanes is intentional and
+  # remains visible; the workspace aggregate separately proves its hash
+  # partitions are disjoint before producing their validated timing report.
+  # Dtype, generalization, and macOS producers validate and report the same
+  # diagnostic thresholds before their own required aggregates.
+  test-telemetry:
+    name: CI Test Telemetry
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [changes, workspace-tests-shard, dtype-phase3-oracle, generalize-sweep-oracle-shard, macos-workspace-shard]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Download Linux workspace JUnit shard 1
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-workspace-1
+          path: target/test-telemetry/input/linux-workspace-1
+
+      - name: Download Linux workspace JUnit shard 2
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-workspace-2
+          path: target/test-telemetry/input/linux-workspace-2
+
+      - name: Download dtype JUnit
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-dtype
+          path: target/test-telemetry/input/linux-dtype
+
+      - name: Download generalization JUnit shard 1
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-generalization-1
+          path: target/test-telemetry/input/linux-generalization-1
+
+      - name: Download generalization JUnit shard 2
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-generalization-2
+          path: target/test-telemetry/input/linux-generalization-2
+
+      - name: Download generalization JUnit shard 3
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-generalization-3
+          path: target/test-telemetry/input/linux-generalization-3
+
+      - name: Download generalization JUnit shard 4
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-generalization-4
+          path: target/test-telemetry/input/linux-generalization-4
+
+      - name: Download macOS workspace JUnit shard 1
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-macos-workspace-1
+          path: target/test-telemetry/input/macos-workspace-1
+
+      - name: Download macOS workspace JUnit shard 2
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-macos-workspace-2
+          path: target/test-telemetry/input/macos-workspace-2
+
+      - name: Build cross-lane timing report
+        run: >-
+          uv run --managed-python --python 3.11 --no-project python
+          scripts/ci_test_telemetry.py
+          --shard linux-workspace-1=target/test-telemetry/input/linux-workspace-1/junit.xml
+          --shard linux-workspace-2=target/test-telemetry/input/linux-workspace-2/junit.xml
+          --shard linux-dtype=target/test-telemetry/input/linux-dtype/junit.xml
+          --shard linux-generalization-1=target/test-telemetry/input/linux-generalization-1/junit.xml
+          --shard linux-generalization-2=target/test-telemetry/input/linux-generalization-2/junit.xml
+          --shard linux-generalization-3=target/test-telemetry/input/linux-generalization-3/junit.xml
+          --shard linux-generalization-4=target/test-telemetry/input/linux-generalization-4/junit.xml
+          --shard macos-workspace-1=target/test-telemetry/input/macos-workspace-1/junit.xml
+          --shard macos-workspace-2=target/test-telemetry/input/macos-workspace-2/junit.xml
+          --json target/test-telemetry/full/report.json
+          --summary target/test-telemetry/full/summary.md
+          --github-summary "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload cross-lane timing report
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-telemetry-all-lanes
+          path: target/test-telemetry/full
+          if-no-files-found: error
+          retention-days: 14
 
   backend-sanitizers:
     name: Backend Sanitizers

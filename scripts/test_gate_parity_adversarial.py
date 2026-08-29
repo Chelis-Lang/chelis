@@ -26,7 +26,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
-ANCHOR = "      - name: Test-timing budget (informational)"
+ANCHOR = "      - name: Gate (workspace test shard)"
 CACHE_JOB_ANCHOR = "\n  workspace-tests-shard:"
 
 
@@ -79,7 +79,7 @@ class GateParityAdversarialTests(unittest.TestCase):
         )
 
     def test_hand_inlined_cargo_command_is_caught(self):
-        # Plant a hand-inlined `cargo test` step into the `integration`
+        # Plant a hand-inlined `cargo test` step into the workspace-test
         # gate job. The parity lock MUST fail.
         mutated = self.ci_text.replace(
             ANCHOR,
@@ -360,7 +360,7 @@ class GateParityAdversarialTests(unittest.TestCase):
         # hand-inlined a bare `chelis ...` command (rather than the
         # `cargo run -p chelis-cli ... -- ...` form) slipped past the
         # lock. The exact run-command allowlist covers `chelis ` too.
-        # Plant a hand-inlined bare `chelis` step into the `integration`
+        # Plant a hand-inlined bare `chelis` step into the workspace-test
         # gate job. The parity lock MUST fail.
         mutated = self.ci_text.replace(
             ANCHOR,
@@ -374,7 +374,7 @@ class GateParityAdversarialTests(unittest.TestCase):
             len(result.failures) + len(result.errors),
             0,
             "the parity lock did NOT catch a hand-inlined bare `chelis` "
-            "command in the `integration` gate job -- the RT-2 gap is "
+            "command in the workspace-test gate job -- the RT-2 gap is "
             "still open",
         )
 
@@ -397,7 +397,7 @@ class GateParityAdversarialTests(unittest.TestCase):
             0,
             "the parity lock did NOT catch a hand-inlined `cargo run -p "
             "chelis-cli --bin chelis -- ...` command in the "
-            "`integration` gate job",
+            "workspace-test gate job",
         )
 
 

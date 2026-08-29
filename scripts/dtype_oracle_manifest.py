@@ -259,6 +259,8 @@ def flattened_nextest_command(
         "nextest",
         "run",
         "--workspace",
+        "--profile",
+        "ci-full",
         "--ignore-default-filter",
         "--no-fail-fast",
         "-E",

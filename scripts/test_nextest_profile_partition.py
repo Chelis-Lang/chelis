@@ -94,6 +94,29 @@ ORACLE_OWNED_FILTERS = tuple(
     f"binary_id(/^{binary_id}$/)"
     for binary_id in sorted(ORACLE_OWNED_BINARY_IDS)
 )
+NIGHTLY_RECURSIVE_TEST = (
+    "chelis-cli::issue_1293_redteam_round4::"
+    "recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c"
+)
+NIGHTLY_CACHE_CONCURRENCY_TEST = (
+    "chelis-cli::stdlib_typecheck_cache_concurrency::"
+    "parallel_cold_cache_invocations_all_succeed_identically"
+)
+NIGHTLY_RECURSIVE_SELECTOR = (
+    "binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & "
+    "test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)"
+)
+NIGHTLY_CACHE_CONCURRENCY_SELECTOR = (
+    "binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/)"
+)
+GENERALIZATION_PR_FILTER = (
+    f"not ({NIGHTLY_CACHE_CONCURRENCY_SELECTOR} | "
+    f"({NIGHTLY_RECURSIVE_SELECTOR}))"
+)
+CONTENDED_DEADLINE_RETRY_SELECTOR = (
+    "binary_id(/^chelis-cli::test_suite_timeout$/) & "
+    "test(/^normal_output_forwarding_is_part_of_whole_command_deadline$/)"
+)
 
 
 def _cargo_environment(
@@ -123,13 +146,48 @@ class FilterTextTests(unittest.TestCase):
 
     def test_every_profile_runs_to_completion_after_failures(self):
         config = tomllib.loads(NEXTEST_TOML.read_text())
-        for profile in ("default", "ci", "nightly"):
+        for profile in ("default", "ci", "ci-full", "nightly"):
             with self.subTest(profile=profile):
                 self.assertIs(
                     config["profile"][profile].get("fail-fast"),
                     False,
                     f"nextest profile {profile!r} hides later failures",
                 )
+
+    def test_full_ci_telemetry_profile_inherits_local_scope_and_writes_junit(self):
+        config = tomllib.loads(NEXTEST_TOML.read_text())
+        profile = config["profile"]["ci-full"]
+        self.assertEqual(profile.get("inherits"), "default")
+        self.assertEqual(profile.get("junit", {}).get("path"), "junit.xml")
+        self.assertNotIn(
+            "default-filter",
+            profile,
+            "ci-full must inherit the ordinary profile unless a command "
+            "explicitly passes --ignore-default-filter",
+        )
+
+    def test_deadline_probe_has_no_retry_cost(self):
+        config = tomllib.loads(NEXTEST_TOML.read_text())
+        overrides = config["profile"]["default"].get("overrides", [])
+        matching = [
+            override
+            for override in overrides
+            if override.get("filter") == CONTENDED_DEADLINE_RETRY_SELECTOR
+        ]
+        self.assertEqual(
+            matching,
+            [],
+            "the deadline test accepts both fail-closed timeout diagnostics; "
+            "retrying it only repeats a deterministic contract probe",
+        )
+
+    def test_contention_sensitive_recursive_parity_case_is_nightly_owned(self):
+        default_block, _ci, nightly_block = _filter_blocks()
+        self.assertIn(
+            NIGHTLY_RECURSIVE_SELECTOR,
+            _norm(_negative_filter_inner(default_block)),
+        )
+        self.assertIn(NIGHTLY_RECURSIVE_SELECTOR, _norm(nightly_block))
 
     def test_ci_adds_only_oracle_owned_binaries_to_default_exclusion(self):
         default_block, ci_block, _nightly = _filter_blocks()
@@ -280,6 +338,46 @@ def _list_filterset(filterset: str) -> dict[str, tuple[str, bool]]:
     return out
 
 
+def _list_generalization_pr() -> dict[str, tuple[str, bool]]:
+    """List the exact explicit-filter scope used by the PR generalization lane."""
+    cmd = [
+        "cargo",
+        "nextest",
+        "list",
+        "--workspace",
+        "--profile",
+        "ci-full",
+        "--ignore-default-filter",
+        "--features",
+        "chelis-types/generalize-sweep-oracle",
+        "--message-format",
+        "json",
+        "-E",
+        GENERALIZATION_PR_FILTER,
+    ]
+    result = subprocess.run(
+        cmd,
+        cwd=REPO_ROOT,
+        env=_cargo_environment(),
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"generalization PR list failed (exit {result.returncode}): "
+            f"{result.stderr[-2000:]}"
+        )
+    data = json.loads(result.stdout)
+    out: dict[str, tuple[str, bool]] = {}
+    for binary_id, suite in data.get("rust-suites", {}).items():
+        for test_name, info in suite.get("testcases", {}).items():
+            key = f"{binary_id}::{test_name}"
+            status = info.get("filter-match", {}).get("status")
+            out[key] = (status, bool(info.get("ignored")))
+    return out
+
+
 @unittest.skipUnless(
     _have_nextest(), "cargo nextest unavailable; skipping set-math oracle"
 )
@@ -296,6 +394,7 @@ class ProfilePartitionTests(unittest.TestCase):
         cls.ci = _list_profile("ci")
         cls.nightly = _list_profile("nightly")
         cls.full = _list_profile(None)
+        cls.generalization_pr = _list_generalization_pr()
         cls.dtype_flat = _list_filterset(
             dtype_oracle_manifest.flattened_filter(sys.executable)
         )
@@ -390,6 +489,25 @@ class ProfilePartitionTests(unittest.TestCase):
             set(),
             f"{len(nightly_ignored)} `nightly`-selected test(s) are also "
             f"`#[ignore]`-d, so they never run: {sorted(nightly_ignored)}",
+        )
+
+    def test_nightly_contention_cases_are_excluded_from_generalization_pr(self):
+        for test_id in (NIGHTLY_RECURSIVE_TEST, NIGHTLY_CACHE_CONCURRENCY_TEST):
+            with self.subTest(test_id=test_id):
+                self.assertIn(test_id, self.nightly)
+                nightly_status, ignored = self.nightly[test_id]
+                self.assertEqual(nightly_status, "matches")
+                self.assertFalse(ignored)
+        recursive_status, recursive_ignored = self.generalization_pr[
+            NIGHTLY_RECURSIVE_TEST
+        ]
+        self.assertEqual(recursive_status, "mismatch")
+        self.assertFalse(recursive_ignored)
+        self.assertNotIn(
+            NIGHTLY_CACHE_CONCURRENCY_TEST,
+            self.generalization_pr,
+            "the generalization PR selector must exclude the entire "
+            "nightly-owned cache-concurrency binary",
         )
 
     def test_flattened_dtype_filter_is_the_exact_union_of_phase_owners(self):
