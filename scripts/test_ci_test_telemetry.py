@@ -66,6 +66,26 @@ class ShardParsingTests(unittest.TestCase):
             with self.assertRaisesRegex(telemetry.TelemetryError, "duplicate"):
                 telemetry.parse_shard("workspace-1", path)
 
+    def test_invalid_times_fail_closed(self) -> None:
+        for seconds, fragment in (
+            ("not-a-number", "nonnumeric time"),
+            ("NaN", "invalid time"),
+            ("Infinity", "invalid time"),
+            ("+Infinity", "invalid time"),
+            ("-Infinity", "invalid time"),
+            ("-0.001", "invalid time"),
+        ):
+            with self.subTest(seconds=seconds), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "junit.xml"
+                path.write_text(
+                    _junit(
+                        [("bin", "test", seconds)]  # type: ignore[list-item]
+                    ),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(telemetry.TelemetryError, fragment):
+                    telemetry.parse_shard("workspace-1", path)
+
 
 class MergeContractTests(unittest.TestCase):
     def _shards(self, root: Path):
