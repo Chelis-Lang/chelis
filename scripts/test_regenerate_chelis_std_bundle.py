@@ -31,6 +31,26 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+class CanonicalBundleEnvironmentTests(unittest.TestCase):
+    def test_missing_parent_epoch_becomes_canonical_zero(self):
+        with mock.patch.dict(os.environ, {"PATH": "/test/bin"}, clear=True):
+            environment = regen.canonical_bundle_environment()
+
+        self.assertEqual(environment["SOURCE_DATE_EPOCH"], "0")
+        self.assertEqual(environment["PATH"], "/test/bin")
+
+    def test_nonzero_parent_epoch_is_overridden(self):
+        with mock.patch.dict(
+            os.environ,
+            {"PATH": "/test/bin", "SOURCE_DATE_EPOCH": "315532800"},
+            clear=True,
+        ):
+            environment = regen.canonical_bundle_environment()
+
+        self.assertEqual(environment["SOURCE_DATE_EPOCH"], "0")
+        self.assertEqual(environment["PATH"], "/test/bin")
+
+
 class RuntimeLockRegenerationTests(unittest.TestCase):
     def make_package(self, root: Path) -> Path:
         package = root / "chelis-std"
@@ -68,8 +88,9 @@ class RuntimeLockRegenerationTests(unittest.TestCase):
             artifact = package / "dist/artifact.chb"
             before = artifact.read_bytes()
 
-            def fake_run(command, *, cwd):
+            def fake_run(command, *, cwd, env):
                 self.assertEqual(command[:3], ["/tmp/chelis", "reef", "build"])
+                self.assertEqual(env["SOURCE_DATE_EPOCH"], "0")
                 staged = Path(command[3])
                 self.assertNotEqual(staged, package)
                 (staged / "reef.lock").write_text("generated final lock\n")
@@ -77,13 +98,55 @@ class RuntimeLockRegenerationTests(unittest.TestCase):
                 (staged / "dist/incidental.chb").write_text("discard me\n")
                 return SimpleNamespace(returncode=0)
 
-            with mock.patch.object(regen.subprocess, "run", side_effect=fake_run):
+            with (
+                mock.patch.dict(os.environ, {"SOURCE_DATE_EPOCH": "315532800"}),
+                mock.patch.object(regen.subprocess, "run", side_effect=fake_run),
+            ):
                 regen.regenerate_runtime_lock(
                     Path("/tmp/chelis"), package, repository_root=root
                 )
 
             self.assertEqual((package / "reef.lock").read_text(), "generated final lock\n")
             self.assertEqual(artifact.read_bytes(), before)
+
+    def test_regeneration_pins_epoch_for_every_build_subprocess(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            package_dist = repo / "packages/chelis-std/dist"
+            bundle_dist = repo / "crates/chelis-std-bundle/dist"
+            target_dir = repo / "target/debug"
+            package_dist.mkdir(parents=True)
+            bundle_dist.mkdir(parents=True)
+            target_dir.mkdir(parents=True)
+            (repo / "packages/chelis-std/reef.toml").write_text(
+                '[package]\nname = "chelis-std"\nversion = "0.4.0"\n'
+            )
+            (target_dir / "chelis").write_bytes(b"test binary")
+            (package_dist / "chelis-std-0.4.0.tar.zst").write_bytes(b"archive")
+            (package_dist / "chelis-std-0.4.0.chb").write_bytes(b"shell")
+
+            calls = []
+
+            def fake_run(command, *, cwd, env):
+                calls.append((command, cwd, env.copy()))
+                return SimpleNamespace(returncode=0)
+
+            with (
+                mock.patch.dict(os.environ, {"SOURCE_DATE_EPOCH": "315532800"}),
+                mock.patch.object(regen.subprocess, "run", side_effect=fake_run),
+                mock.patch.object(regen, "regenerate_runtime_lock") as regenerate_lock,
+            ):
+                self.assertEqual(regen.regenerate(repo, debug=True, show_diff=False), 0)
+
+            self.assertEqual(len(calls), 3)
+            for _command, cwd, environment in calls:
+                self.assertEqual(cwd, repo)
+                self.assertEqual(environment["SOURCE_DATE_EPOCH"], "0")
+            regenerate_lock.assert_called_once_with(
+                target_dir / "chelis",
+                repo / "packages/chelis-std",
+                repository_root=repo,
+            )
 
     def test_owned_output_inventory_is_complete_and_exact(self):
         repo = regen.repo_root()

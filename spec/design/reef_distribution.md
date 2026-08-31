@@ -294,11 +294,14 @@ Two consequences:
    (`crates/chelis-std-bundle/dist/chelis-std-<version>.{tar.zst,chb}`)
    are committed to the repo. The pipeline is "regenerate artifacts ->
    commit -> build"; `scripts/regenerate_chelis_std_bundle.py` is the
-   canonical regen entry. Its `--check` mode compares all five committed
+   canonical regen entry. It pins `SOURCE_DATE_EPOCH=0` for every subprocess
+   so the committed bundle identity does not depend on an ambient Devenv or
+   release-shell value; general `chelis reef build` invocations continue to
+   honor the caller's epoch. Its `--check` mode compares all five committed
    outputs with a first generation, compares that first generation with a
    second, and restores the exact committed inputs; it is part of both the
-   hosted `lint-rust` worker and `gate.py --local`. The bundle crate's build.rs verifies the
-   dist files exist and emits `cargo:rerun-if-changed=` so cargo
+   hosted `lint-rust` worker and `gate.py --local`. The bundle crate's build.rs
+   verifies the dist files exist and emits `cargo:rerun-if-changed=` so cargo
    invalidates the bundle when the bytes change.
 3. **No registry seeding required.** `chelis reef build` against a
    project that depends on chelis-std (implicitly or explicitly)

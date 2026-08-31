@@ -34,19 +34,32 @@ Exit codes:
   1  build/copy failed; stderr carries the underlying tool output.
 
 The script is intentionally idempotent: re-running with no source
-changes produces no diff. The committed artifacts ARE the source of
-truth. The build.rs in chelis-std-bundle does not regenerate them.
+changes produces no diff. It pins SOURCE_DATE_EPOCH to 0 for every
+subprocess so ambient build environments cannot change the committed
+artifact identity. The committed artifacts ARE the source of truth.
+The build.rs in chelis-std-bundle does not regenerate them.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import tomllib
 from pathlib import Path
+
+
+CANONICAL_BUNDLE_SOURCE_DATE_EPOCH = "0"
+
+
+def canonical_bundle_environment() -> dict[str, str]:
+    """Return the inherited environment with the committed bundle epoch pinned."""
+    environment = os.environ.copy()
+    environment["SOURCE_DATE_EPOCH"] = CANONICAL_BUNDLE_SOURCE_DATE_EPOCH
+    return environment
 
 
 def repo_root() -> Path:
@@ -110,6 +123,7 @@ def regenerate_runtime_lock(
         rc = subprocess.run(
             [str(chelis_bin), "reef", "build", str(staged_root)],
             cwd=repository_root,
+            env=canonical_bundle_environment(),
         ).returncode
         if rc != 0:
             raise RuntimeError("chelis reef build failed while regenerating chelis-std lock")
@@ -121,6 +135,7 @@ def regenerate_runtime_lock(
 
 def regenerate(repo: Path, *, debug: bool, show_diff: bool = True) -> int:
     """Run one complete canonical source-to-artifact generation pass."""
+    environment = canonical_bundle_environment()
     version = chelis_std_version(repo)
     bundle_dist = repo / "crates" / "chelis-std-bundle" / "dist"
     pkg_dist = repo / "packages" / "chelis-std" / "dist"
@@ -138,6 +153,7 @@ def regenerate(repo: Path, *, debug: bool, show_diff: bool = True) -> int:
     rc = subprocess.run(
         ["cargo", "build", "-p", "chelis-cli", *profile_flag],
         cwd=repo,
+        env=environment,
     ).returncode
     if rc != 0:
         print("ERROR: cargo build failed", file=sys.stderr)
@@ -160,6 +176,7 @@ def regenerate(repo: Path, *, debug: bool, show_diff: bool = True) -> int:
     rc = subprocess.run(
         [str(chelis_bin), "reef", "build", "packages/chelis-std"],
         cwd=repo,
+        env=environment,
     ).returncode
     if rc != 0:
         print("ERROR: chelis reef build failed for packages/chelis-std", file=sys.stderr)
@@ -196,6 +213,7 @@ def regenerate(repo: Path, *, debug: bool, show_diff: bool = True) -> int:
     rc = subprocess.run(
         ["cargo", "build", "-p", "chelis-cli", *profile_flag],
         cwd=repo,
+        env=environment,
     ).returncode
     if rc != 0:
         print("ERROR: cargo rebuild failed after bundle copy", file=sys.stderr)
@@ -223,6 +241,7 @@ def regenerate(repo: Path, *, debug: bool, show_diff: bool = True) -> int:
                 *(str(path.relative_to(repo)) for path in owned_outputs),
             ],
             cwd=repo,
+            env=environment,
         )
 
     print("OK: chelis-std bundle regenerated.", file=sys.stderr)
