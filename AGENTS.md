@@ -518,15 +518,9 @@ When a public surface has an implicit invariant, make it explicit and test it.
   bash-ism there passes CI while still violating the POSIX-`sh` requirement above.
   All other scripts remain Python.
 - Existing `scripts/` directory uses Python; follow that convention.
-- **Use a uv-managed Python**, not the system Python. Install uv from
-  <https://docs.astral.sh/uv/getting-started/installation/>, verify it with
-  `uv --version`, and provision the project version with
-  `uv python install 3.11`. Inside Devenv, use the activated environment at
-  `.devenv/state/venv`. Outside Devenv, use `.venv/bin/python` or
-  `uv run --managed-python --python 3.11 --no-project python`.
-  `scripts/gate.py` is the one `python3` entry point that self-heals: it
-  re-executes through that uv command before running gate logic, so a bare
-  `python3 scripts/gate.py` is always safe.
+- **Use a uv-managed Python**, not the system Python, for every script and every
+  ad-hoc invocation. [Build Toolchain](#build-toolchain) owns provisioning, the
+  resolution order, and the direct-invocation forms.
 - **Two diagnostics are deliberately bootstrap-free.**
   `scripts/reap_orphans.py` and `scripts/preflight_exec_probe.py` are invoked
   as bare `python3` on purpose: they run *before* and independently of a
@@ -538,17 +532,6 @@ When a public surface has an implicit invariant, make it explicit and test it.
   exemption extends to any other script: everything else, and all ad-hoc
   scripting, uses a uv-managed interpreter.
   `scripts/test_bootstrapless_scripts.py` locks both properties.
-- Create a primary checkout's manual environment once with
-  `uv venv --python 3.11`. Prefer the same in a dedicated git worktree: run
-  `uv venv --python 3.11` at its root, and never copy or symlink another
-  checkout's `.venv`. Test and gate code resolves an interpreter through
-  `tests/support/managed_python.rs`, which takes an explicit `PYO3_PYTHON` first
-  and falls back to the checkout's `.venv`, so exporting
-  `PYO3_PYTHON="$(uv python find 3.11)"` also works and is what direct Cargo
-  commands need. An explicit `PYO3_PYTHON` is
-  authoritative and an invalid path must fail rather than fall back.
-  `py/pyproject.toml` pins `requires-python = ">=3.11"`. See
-  [`README.md`](README.md) for the full setup.
 
 ## Worktree And Branch Discipline
 
@@ -559,8 +542,8 @@ When a public surface has an implicit invariant, make it explicit and test it.
   create or remove scratch artifacts in it.
 - Create a dedicated worktree before the first write for every task, including small
   documentation edits and throwaway probes. Keep its branch, target, and scratch state
-  task-owned. For direct Cargo commands, set
-  `PYO3_PYTHON="$(uv python find 3.11)"`; do not copy or symlink the primary `.venv`.
+  task-owned, and give it its own environment per
+  [Build Toolchain](#build-toolchain); never copy or symlink the primary `.venv`.
 - Do not repurpose an unrelated worktree because it appears idle. Reuse is allowed only
   for the same PR or immediate follow-up work after checking ownership, exact head,
   status, and active processes.
@@ -580,17 +563,35 @@ When a public surface has an implicit invariant, make it explicit and test it.
 
 ## Build Toolchain
 
-`chelis-python` links against `libpython`. Outside Devenv, `.cargo/config.toml`
-sets `PYO3_PYTHON` to `.venv/bin/python`. Devenv overrides that variable with
-`.devenv/state/venv/bin/python` and activates the same environment.
+A uv-managed Python is a hard prerequisite on every platform: `chelis-python` links
+against `libpython`, and the gate scripts and several tests need an interpreter. Install
+uv from <https://docs.astral.sh/uv/getting-started/installation/>, verify it with
+`uv --version`, and provision the version with `uv python install 3.11`.
+`py/pyproject.toml` pins `requires-python = ">=3.11"`. See [`README.md`](README.md) for
+the full setup.
 
-A managed Python is a hard prerequisite on every platform. Outside Devenv,
-direct `cargo build` for a crate that pulls pyo3 uses `.venv/` by default.
-Create it with `uv venv --python 3.11`, or set
-`PYO3_PYTHON="$(uv python find 3.11)"` in a dedicated worktree. On macOS,
-Apple's bundled Python reports a stale `sysconfig.LIBDIR` path; do not route
-PyO3 to it. `scripts/gate.py` sets `PYO3_PYTHON` to its uv-selected interpreter
-for every child command.
+**Provisioning.** Create a checkout's environment once with `uv venv --python 3.11`, at
+the root of the primary checkout and at the root of every dedicated worktree. Never copy
+or symlink another checkout's `.venv`. Inside Devenv, the activated environment at
+`.devenv/state/venv` serves the same purpose and needs no separate step.
+
+**Resolution.** Rust test and gate code resolves an interpreter through
+`tests/support/managed_python.rs`: an explicit `PYO3_PYTHON` wins outright, and the
+checkout's `.venv/bin/python` is the fallback. Outside Devenv, `.cargo/config.toml`
+points `PYO3_PYTHON` at `.venv/bin/python`; Devenv overrides it with
+`.devenv/state/venv/bin/python`. For direct Cargo commands in a dedicated worktree,
+export `PYO3_PYTHON="$(uv python find 3.11)"`. An explicit `PYO3_PYTHON` is
+authoritative: an invalid path must fail loudly rather than fall back.
+
+**Invoking Python directly.** Outside Devenv use `.venv/bin/python` or
+`uv run --managed-python --python 3.11 --no-project python`; inside Devenv use the
+activated environment. `scripts/gate.py` is the one `python3` entry point that
+self-heals, re-executing through that uv command before running gate logic, so a bare
+`python3 scripts/gate.py` is always safe; it also sets `PYO3_PYTHON` to its uv-selected
+interpreter for every child command.
+
+**macOS:** Apple's bundled Python reports a stale `sysconfig.LIBDIR` path. Do not route
+PyO3 to it.
 
 ## Local Git Hook
 
