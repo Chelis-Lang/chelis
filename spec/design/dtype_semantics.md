@@ -1316,6 +1316,18 @@ every frozen atom and region digest and every required-literal anchor is
 unchanged. The script unit tests that call `validate_contract` are the
 executable evidence that only the file digest moved.
 
+[#1399] amends `spec/02-surf-syntax.md` to make unqualified value scope exact
+and invariant under unrelated unimported modules, and adds [04-FIT-2] to
+`spec/04-type-system.md` so unresolved-name fitness mirrors checker
+diagnostics exactly. These are checker and diagnostic-accounting rules outside
+the numeric contracts: they do not touch a frozen [04-NUM] atom, the §9.1
+per-dtype table, the capability schema, or a numeric-surface identity. The
+complete-file digests for `spec/02-surf-syntax.md`, `spec/04-type-system.md`,
+and this document move deliberately, and the generated rejection registry
+gains the new [04-FIT-2] atom. The full Phase 4B oracle is rerun so every
+numeric matrix and frozen numeric region remains executable evidence rather
+than an inference from scope.
+
 ## B2. Invariants that hold across every boundary
 
 1. **Controls never move.** Every green control in the audit test files
@@ -2085,3 +2097,4 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#1343]: https://github.com/Chelis-Lang/chelis/pull/1343
 [#1338]: https://github.com/Chelis-Lang/chelis/issues/1338
 [#1370]: https://github.com/Chelis-Lang/chelis/pull/1370
+[#1399]: https://github.com/Chelis-Lang/chelis/pull/1399

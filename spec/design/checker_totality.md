@@ -1,15 +1,17 @@
 # Checker Totality: every construct is checked or loudly rejected
 
-**Status:** Phases 2 and 3 implemented. Phase 3 first shipped `DeepTag` as
-derive-on-demand dispatch and was red-teamed in that form (round-1
-QUALIFIED PASS with findings folded, round-2 PASS); a maintainer directive
-then superseded that record with the decode-once REWORK now in the tree
-(the parser stamps `Atom::Tag`, the tag string does not exist in memory,
-and the [#858]/[#859] discoveries are fixed rather than deferred). The
-rework's fresh-context red-team round is pending. [#908] is now replacing
-that physical carrier with private validated `Node`; the replacement is a
-successor only when it preserves the decode-once, exhaustive-disposition,
-and continuous-oracle guarantees below. Tracking issue: [#731].
+**Status:** Phases 0-3 and PP1-PP3 are delivered. Phase 3 first shipped
+`DeepTag` as derive-on-demand dispatch and was red-teamed in that form
+(round-1 QUALIFIED PASS with findings folded, round-2 PASS); a maintainer
+directive then superseded that record with the decode-once rework now in the
+tree (the parser stamps `Atom::Tag`, the tag string does not exist in memory,
+and the [#858]/[#859] discoveries are fixed rather than deferred). Fresh
+local-subagent reviews of the rework ran on PR #855 and their findings were
+folded before merge; the former pending-review status was stale. [#908] is
+now replacing that physical carrier with private validated `Node`; the
+replacement is a successor only when it preserves the decode-once,
+exhaustive-disposition, and continuous-oracle guarantees below. Tracking
+issue: [#731].
 **Owning specs:** `spec/03-deep-syntax.md` (the 62-tag closed vocabulary),
 `spec/04-type-system.md` (what "checked" means per construct; its §10
 carries this plan's decided contract as current blockquote authorities
@@ -1135,6 +1137,121 @@ join the failing set under the same mutation. The delivery remains one
 class change: a shadowing special-case in the chain walk or a
 reserved-name screen in the desugarer does not satisfy it.
 
+### PP4. Exact module scope at checker and test-batch boundaries ([#1264], residue of [#1261])
+
+**Opened 2026-08-31; decided below.** [#1264] and the residue explicitly left
+by PR [#1273] are two entry paths into one scope-identity defect.
+
+- In package checking, reef already rewrites every value that is genuinely in
+  scope to its exact internal identity. A bare unimported value remains bare,
+  but `infer_var` follows a failed exact lookup with
+  `lookup_terminal_unique`, so one foreign export with the same terminal name
+  becomes an accidental binding. `chelis check` and `eval` therefore accept a
+  program whose build-side check rejects.
+- In suite batching, `run_test_batch` flattens the raw declarations from every
+  admitted file into one `combined_decls` unit before name resolution. PR
+  [#1273] made explicit declared/imported collisions demote to per-file
+  execution and made fallback visible, closing [#1261]. It deliberately could
+  not see the opposite sign: file A has an unimported bare use and file B
+  declares the same terminal name, so there is no declared/imported collision
+  to classify and B silently confers scope on A.
+
+Both paths violate the same rule in `spec/02-surf-syntax.md` P2: scope comes
+from lexical/module declarations, builtins, and imports, never from a unique
+terminal match elsewhere in the linked program. A checker-only removal of the
+fuzzy fallback would close the package reproducer while leaving the batch
+construction able to manufacture a new exact binding before the checker sees
+the use. Another `BatchScope` census arm would close only known declaration
+shapes and leave the next unenumerated scope producer open. PP4 closes the
+identity mechanism at both boundaries.
+
+**Decision (2026-08-31).** `spec/02-surf-syntax.md` P2 is the controlling
+scope rule. `spec/04-type-system.md` [04-FIT-2] controls the existing fitness
+wire: `UnboundVariable` and `UnknownConstructor` both lower `names`, populate
+`unresolved_names`, keep `errors` non-empty, and force `score < 1`.
+`spec/design/chelis_native_testing_plan.md` controls the execution mechanism:
+`--batch-mode auto` may share a prepared package and one evaluator handle, but
+each test file retains the same source scope it has under `--batch-mode file`.
+No new CLI option or JSON field is introduced.
+
+**You deliver:**
+
+1. **Exact value resolution.** Value-position inference resolves through the
+   exact environment only. Terminal-segment lookup remains available for
+   spelling suggestions and out-of-scope diagnostics, but it is never a
+   binding path. The existing constructor rule is the positive architectural
+   precedent: reef-rewritten exact constructors resolve, while fuzzy
+   constructor lookup is diagnostic-only.
+2. **One isolated batch-link operation.** The prepared-graph boundary accepts
+   a list of test entry modules, each carrying its manifest file index, parsed
+   declarations, and selected test roots. For each entry it inserts the
+   synthetic roots and runs the ordinary module rewriter under a deterministic
+   reserved module identity derived from that index. It returns rewritten
+   declarations and an original-root-to-exact-root map. The manifest index,
+   not a path spelling or user declaration, is the namespace key, so two test
+   files cannot collide with each other or a package module. The operation
+   derives the synthetic module's complete local symbol map from that file
+   alone (including signatures, values, types, constructors, dimensions,
+   macros, and properties) and resolves only its declared imports through the
+   prepared package graph; it never publishes one test module's symbols into
+   another's resolver.
+3. **Rewrite before combine, exactly once.** `run_test_batch` combines only
+   the independently rewritten declarations and evaluates only the returned
+   exact roots. Both the cached `CompiledContext` path and the legacy
+   `PreparedReefGraph` worker consume the same isolated rewrite product. That
+   product is appended to the prepared library snapshot without passing
+   through the eval-entry rewriter a second time. Raw declarations from two
+   files never coexist in one source scope.
+4. **Admission is not authority.** `BatchScope` remains a conservative
+   performance/admission rule and continues to explain demotions, but no
+   successful verdict depends on its name inventory being complete. A batch
+   rejection that requires per-file attribution uses the already-reported
+   fallback and produces the same file/test rows and exit verdict as
+   `--batch-mode file`; it cannot disappear behind the fallback.
+5. **Structured fitness accounting.** The unresolved identifier is structured
+   checker-diagnostic data, populated when an `UnboundVariable` or
+   `UnknownConstructor` is constructed. One shared kind-and-identifier
+   accessor drives both the `names` numerator and `unresolved_names`; fitness
+   does not recover identifiers by parsing rendered messages. The public
+   report keeps its existing keys and [04-FIT-2]'s one-entry-per-diagnostic
+   ordering.
+6. **Spec-first paired coverage.** The implementation change begins with the
+   PP4 oracle's failing negative and positive stubs. It does not absorb
+   builtin/prelude shadowing ([#1076]/[#672]), integer type applications
+   ([#1247]), stamped-ingress parity ([#1125]/[#1134]), or the tag-keyed
+   coverage exemption ([#874]/[#887]).
+
+**Oracle:**
+
+```sh
+cargo nextest run -p chelis-cli --test issue_1264_module_scope_honesty
+```
+
+The test is the authoritative PP4 completion oracle and drives the public CLI
+against temporary reef packages. It contains both polarities for every rule:
+
+- a unique unimported foreign value, and the same bare name exported by two
+  foreign modules, reject as `UnboundVariable` in `check`, `eval`, and build;
+  an explicit selective import and a qualified reference pass;
+- an unimported record constructor rejects as `UnknownConstructor`; both name
+  error kinds make `check` exit 2 with `names < 1`, a non-empty `errors` array,
+  and one matching `unresolved_names` entry, while their imported controls
+  keep `names == 1` and an empty list;
+- adding, removing, or renaming an unrelated exporting module cannot change a
+  selected module's verdict;
+- in a two-file suite, file A's unimported bare use cannot resolve to file B's
+  declaration under `--batch-mode auto`; `auto` and `file` emit the same
+  pass/fail rows and nonzero test verdict. An explicit import and an unrelated
+  sibling declaration remain green controls;
+- exact linker identities, lexical locals, and builtins remain positive
+  controls, proving that the change removes fuzzy scope rather than name
+  resolution generally.
+
+Supporting unit tests pin the exact-vs-terminal environment edge and
+[04-FIT-2]'s two diagnostic kinds. The mutation receipt adds a foreign export
+to the negative package and independently makes the batch sibling declare the
+bare name; neither mutation may turn a red source module green.
+
 ### Adjacent ledger rows delivered with the class change
 
 - **[#850], checker half.** `defsig` is now a same-unit annotation for a
@@ -1187,17 +1304,26 @@ reserved-name screen in the desugarer does not satisfy it.
   states unrepresentable by changing the carrier. `Node` is the accepted
   successor only at §C4.2's four-part ingress/validator/disposition/deletion
   boundary. Neither plan may declare the other complete from a bridge state.
+- **With [#1261]/[#730] (`chelis_native_testing_plan.md`)**: PR [#1273]
+  delivered the declared/imported collision guard and visible fallback. PP4
+  preserves both and closes only the raw-flat-scope residue that PR explicitly
+  left to [#1264]/[#731]. The already-closed issue is context, not a second
+  closing claim.
 - **With [#721]**: none (eval ingestion, no checker code); listed so nobody
   searches for it here.
 
 ## Issue map
 
-| phase | goes green / becomes unwritable |
+| delivery | goes green / becomes unwritable |
 |---|---|
 | 0 | detection; the invariant exists |
 | 1 | [#709] (all three escalations), [#710]'s silent half |
 | 2 | the future supply of silent exemptions (type-state) |
 | 3 | the future supply of undecided TAGS (compile-time totality) |
+| PP1 | [#780]/[#783]'s deferred parameter checks; [#847]'s rigid control |
+| PP2 | [#1147] and the future supply of registered builtins with no inference disposition |
+| PP3 | [#1209]/[#1211]/[#1212]'s name-keyed binding-identity channel |
+| PP4 | [#1264] and [#1261]'s raw-flat-test-scope residue; exact module scope in every checker/test entry |
 
 ## Decisions and remaining questions
 
@@ -1209,6 +1335,7 @@ reserved-name screen in the desugarer does not satisfy it.
 | 4 | score semantics for `UnknownForm`/`MalformedForm` | DECIDED 2026-07-17: severity parity with `TypeMismatch` (the existing 0.5-class precedent), no new weight class. The invariant that matters - any pushed error forces score < 1.0 - is locked by §C4.4's corpus independently of the weights, so calibration can move later without touching it | scoring code + this doc |
 | 5 | how a lambda-bound or function-valued parameter's type binds, and which checks re-run once it is bound | DECIDED 2026-08-04: shape-constrained lambdas with an unknown outer parameter constructor are monomorphic bind-on-first-use within their enclosing declaration, replay the ordinary semantic rule, and reject unresolved at that declaration's own boundary; a result annotation or later top-level caller does not bind them; symbolic declared tensors remain polymorphic and rigid dimensions remain distinct absent a real equality constraint | [04-INF-1] + PP1 |
 | 6 | whether two closures may each consume one underlying value through two user-visible names (`y = x`, one capture per name), or capture forwards through the alias chain generally | DECIDED 2026-08-21: preserved and made normative. A capture consumes the binding it names; distinct user-visible bindings of one value are distinct for capture; only a destructured component (or an alias of one) forwards to its carrier. Nautilus `lu_solve` and coral depend on the spelling; the reviewer guidance on [#1209] was to specify the choice explicitly and keep any tightening separate | [04-LIN-2] + PP3 |
+| 7 | whether one linked module's uniquely matching terminal name or one batched test file's declaration can confer unimported scope on another file | DECIDED 2026-08-31: no. Value lookup is exact-only after reef rewriting; batch entries are independently module-rewritten before combination; terminal matching is diagnostic-only | spec/02 P2 + [04-FIT-2] + PP4 |
 
 ## Contract summary
 
@@ -1219,7 +1346,10 @@ neither an error type nor a missing authoritative owner stamp. Phase 3 makes a
 Deep tag without a checker disposition uncompilable through exhaustive
 `DeepTag` matching. [#908] may replace Phase 3's physical tag carrier, but its
 successor must retain the same decode-once, exhaustive-disposition, and
-continuous-oracle guarantees.
+continuous-oracle guarantees. PP4 additionally makes module scope exact at
+both package and batched-test boundaries: a foreign terminal-name match is
+never a binding, and the fitness report cannot describe an unresolved value or
+constructor as fully resolved.
 
 [#696]: https://github.com/Chelis-Lang/chelis/pull/696
 [#703]: https://github.com/Chelis-Lang/chelis/issues/703
@@ -1252,3 +1382,12 @@ continuous-oracle guarantees.
 [#1209]: https://github.com/Chelis-Lang/chelis/issues/1209
 [#1211]: https://github.com/Chelis-Lang/chelis/issues/1211
 [#1212]: https://github.com/Chelis-Lang/chelis/issues/1212
+[#1261]: https://github.com/Chelis-Lang/chelis/issues/1261
+[#1264]: https://github.com/Chelis-Lang/chelis/issues/1264
+[#1273]: https://github.com/Chelis-Lang/chelis/pull/1273
+[#1076]: https://github.com/Chelis-Lang/chelis/issues/1076
+[#672]: https://github.com/Chelis-Lang/chelis/issues/672
+[#1247]: https://github.com/Chelis-Lang/chelis/issues/1247
+[#1125]: https://github.com/Chelis-Lang/chelis/issues/1125
+[#1134]: https://github.com/Chelis-Lang/chelis/issues/1134
+[#887]: https://github.com/Chelis-Lang/chelis/issues/887

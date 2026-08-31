@@ -2045,6 +2045,15 @@ Suggestions are structured data in the fitness report JSON, not just strings.
 }
 ```
 
+> **[04-FIT-2]** Every `UnboundVariable` and `UnknownConstructor`
+> diagnostic SHALL contribute to the `names` component and SHALL add the
+> offending identifier to `unresolved_names`. The list contains one entry per
+> such diagnostic in checker diagnostic order; repeated diagnostics are not
+> deduplicated. A report containing either kind SHALL have `names < 1`, a
+> non-empty `errors` list, and `score < 1`. The fitness report adds no separate
+> name-resolution wire field: these invariants govern the existing
+> `components.names`, `errors`, and `unresolved_names` fields.
+
 ---
 
 ## 7. Effects
