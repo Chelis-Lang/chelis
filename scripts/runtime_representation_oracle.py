@@ -29,12 +29,28 @@ DESIGN_PATH = REPO_ROOT / "spec/design/runtime_representation.md"
 DIRECT_ACCESS_MUTATION_SOURCE = Path("crates/chelis-runtime/src/decimal_parse.rs")
 DTYPE_MUTATION_SOURCE = Path("crates/chelis-vocab/src/lib.rs")
 
-# This is the reviewed Phase 0 foundation digest. Updating it is a freeze move,
+# This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FOUNDATION_SHA256 = "3aea9b3dc2a970f4df8481b24273f9b3d9fee2c2b0f7d8de3fb5fbe71281aa96"
+FREEZE_SHA256 = "ef143a3c1b6b7b6ffcd6921ce974e8a4e0752c0198844c2d163c7a1d173165e0"
 
-SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cu", ".h", ".metal", ".rs"}
+SOURCE_SUFFIXES = {
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cu",
+    ".cxx",
+    ".h",
+    ".h++",
+    ".hh",
+    ".hip",
+    ".hpp",
+    ".hxx",
+    ".m",
+    ".metal",
+    ".mm",
+    ".rs",
+}
 SOURCE_PREFIXES = (
     "crates/chelis-runtime/src/",
     "crates/chelis-runtime/include/",
@@ -440,8 +456,14 @@ def inventory_rows(root: Path) -> tuple[InventoryRow, ...]:
     return tuple(sorted(rows, key=lambda row: row.identity))
 
 
-def _foundation_digest(rows: Sequence[dict[str, object]]) -> str:
-    payload = json.dumps(rows, sort_keys=True, separators=(",", ":"))
+def _freeze_digest(
+    rows: Sequence[dict[str, object]], manifest: dict[str, object]
+) -> str:
+    payload = json.dumps(
+        {"coverage_manifest": manifest, "foundation_rows": rows},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -469,12 +491,13 @@ def coverage_manifest() -> dict[str, object]:
 
 def build_foundation_baseline(rows: Sequence[InventoryRow]) -> dict[str, object]:
     foundation = [row.to_baseline_dict() for row in rows]
+    manifest = coverage_manifest()
     return {
-        "schema_version": 1,
-        "foundation_sha256": _foundation_digest(foundation),
+        "schema_version": 2,
+        "freeze_sha256": _freeze_digest(foundation, manifest),
         "foundation_rows": foundation,
         "active_debt": [row.identity for row in rows],
-        "coverage_manifest": coverage_manifest(),
+        "coverage_manifest": manifest,
     }
 
 
@@ -491,9 +514,12 @@ def load_baseline() -> dict[str, object]:
 def validate_baseline(
     baseline: dict[str, object], rows: Sequence[InventoryRow]
 ) -> None:
-    if baseline.get("schema_version") != 1:
+    if baseline.get("schema_version") != 2:
         raise OracleFailure("unsupported Phase 0 inventory schema")
-    if baseline.get("coverage_manifest") != coverage_manifest():
+    manifest = baseline.get("coverage_manifest")
+    if not isinstance(manifest, dict):
+        raise OracleFailure("coverage_manifest must be an object")
+    if manifest != coverage_manifest():
         raise OracleFailure("Phase 0 coverage manifest drifted")
     foundation = baseline.get("foundation_rows")
     active = baseline.get("active_debt")
@@ -502,9 +528,9 @@ def validate_baseline(
     if not isinstance(active, list) or not all(isinstance(value, str) for value in active):
         raise OracleFailure("active_debt must be a list of identities")
 
-    computed_digest = _foundation_digest(foundation)
-    if baseline.get("foundation_sha256") != computed_digest or computed_digest != FOUNDATION_SHA256:
-        raise OracleFailure("Phase 0 foundation digest does not match the reviewed freeze")
+    computed_digest = _freeze_digest(foundation, manifest)
+    if baseline.get("freeze_sha256") != computed_digest or computed_digest != FREEZE_SHA256:
+        raise OracleFailure("Phase 0 freeze digest does not match the reviewed contract")
 
     foundation_ids = [row.get("identity") for row in foundation]
     if not all(isinstance(value, str) for value in foundation_ids):
@@ -738,12 +764,49 @@ def mutate_c_unknown_arithmetic_pointer(source: str) -> str:
     )
 
 
+def mutate_c_redefined_alias_pointer(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_c_redefined_alias",
+        "#define RUNTIME_REPRESENTATION_PHASE0_REDEFINED float\n"
+        "extern void runtime_representation_phase0_c_redefined_alias("
+        "RUNTIME_REPRESENTATION_PHASE0_REDEFINED *payload);\n"
+        "#undef RUNTIME_REPRESENTATION_PHASE0_REDEFINED\n"
+        "#define RUNTIME_REPRESENTATION_PHASE0_REDEFINED void",
+    )
+
+
+def mutate_cxx_reference_and_template(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_cxx_reference",
+        "extern void runtime_representation_phase0_cxx_reference(float &payload);\n"
+        "extern void runtime_representation_phase0_cxx_template("
+        "vector<float, 4> *payload);",
+    )
+
+
 def mutate_rust_dynamic_c_pointer(source: str) -> str:
     return _append_probe(
         source,
         "runtime_representation_phase0_rust_dynamic_pointer",
         "fn runtime_representation_phase0_rust_dynamic_pointer(ty: &str) -> String {\n"
         "    format!(r#\"extern void dynamic({ty} const *payload);\"#)\n"
+        "}",
+    )
+
+
+def mutate_rust_positional_and_macro_rules_pointer(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_rust_positional_pointer",
+        "fn runtime_representation_phase0_rust_positional_pointer(\n"
+        "    ty: &str, name: &str,\n"
+        ") -> String {\n"
+        "    format!(\"{} *{}\", ty, name)\n"
+        "}\n"
+        "macro_rules! runtime_representation_phase0_macro_pointer {\n"
+        "    () => { \"double *payload\" };\n"
         "}",
     )
 
@@ -859,8 +922,23 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
         ),
         MutationProbe(
             "raw-element-pointer",
+            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
+            mutate_c_redefined_alias_pointer,
+        ),
+        MutationProbe(
+            "raw-element-pointer",
+            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
+            mutate_cxx_reference_and_template,
+        ),
+        MutationProbe(
+            "raw-element-pointer",
             Path("crates/chelis-backend-hip/src/kernels.rs"),
             mutate_rust_dynamic_c_pointer,
+        ),
+        MutationProbe(
+            "raw-element-pointer",
+            Path("crates/chelis-backend-hip/src/kernels.rs"),
+            mutate_rust_positional_and_macro_rules_pointer,
         ),
         MutationProbe(
             "raw-element-pointer",

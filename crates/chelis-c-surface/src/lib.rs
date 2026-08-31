@@ -8,7 +8,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use quote::ToTokens;
 use serde::{Deserialize, Serialize};
 use syn::parse::Parser;
 use syn::punctuated::Punctuated;
@@ -92,6 +91,7 @@ const QUALIFIERS: &[&str] = &[
     "restrict",
     "__restrict",
     "__restrict__",
+    "__unsafe_unretained",
     "CHELIS_RESTRICT",
 ];
 
@@ -103,6 +103,7 @@ const EXTERNAL_NONNUMERIC_C_TYPES: &[&str] = &[
     "MPSMatrix",
     "MPSMatrixDescriptor",
     "MPSMatrixMultiplication",
+    "MTLBuffer",
     "MTLGPUFamily",
     "NSMutableDictionary",
     "NSError",
@@ -115,6 +116,7 @@ const EXTERNAL_NONNUMERIC_C_TYPES: &[&str] = &[
     "hipblasStatus_t",
     "hiprtcProgram",
     "hiprtcResult",
+    "id",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -430,6 +432,7 @@ fn tokens(source: &str) -> Vec<String> {
 
 pub fn collect_typedefs(text: &str) -> BTreeMap<String, Vec<String>> {
     let mut aliases = BTreeMap::new();
+    collect_aggregate_typedefs(text, &mut aliases);
     for statement in strip_c_comments(text).split(';') {
         let canonical = canonical_c_tokens(statement);
         let statement_tokens: Vec<&str> = canonical.split_whitespace().collect();
@@ -448,13 +451,13 @@ pub fn collect_typedefs(text: &str) -> BTreeMap<String, Vec<String>> {
         }
         if rest.contains('(') {
             if let Some((name, target)) = function_pointer_typedef(&statement) {
-                aliases.insert(name, target);
+                merge_alias_words(&mut aliases, name, target);
             }
             continue;
         }
         if rest.contains('[') {
             if let Some((name, target)) = array_typedef(&statement) {
-                aliases.insert(name, target);
+                merge_alias_words(&mut aliases, name, target);
             }
             continue;
         }
@@ -471,10 +474,77 @@ pub fn collect_typedefs(text: &str) -> BTreeMap<String, Vec<String>> {
             {
                 words.truncate(1);
             }
-            aliases.insert(name, words);
+            merge_alias_words(&mut aliases, name, words);
         }
     }
     aliases
+}
+
+fn collect_aggregate_typedefs(text: &str, aliases: &mut BTreeMap<String, Vec<String>>) {
+    let source_tokens = tokens(text);
+    let mut index = 0usize;
+    while index + 2 < source_tokens.len() {
+        if source_tokens[index] != "typedef"
+            || !matches!(
+                source_tokens[index + 1].as_str(),
+                "struct" | "enum" | "union"
+            )
+        {
+            index += 1;
+            continue;
+        }
+        let aggregate = source_tokens[index + 1].clone();
+        let Some(open_offset) = source_tokens[index + 2..]
+            .iter()
+            .position(|token| token == "{" || token == ";")
+        else {
+            break;
+        };
+        let open = index + 2 + open_offset;
+        if source_tokens[open] != "{" {
+            index = open + 1;
+            continue;
+        }
+        let mut depth = 1usize;
+        let mut close = open + 1;
+        while close < source_tokens.len() && depth > 0 {
+            match source_tokens[close].as_str() {
+                "{" => depth += 1,
+                "}" => depth -= 1,
+                _ => {}
+            }
+            close += 1;
+        }
+        if depth != 0 {
+            break;
+        }
+        let Some(semicolon_offset) = source_tokens[close..].iter().position(|token| token == ";")
+        else {
+            break;
+        };
+        let semicolon = close + semicolon_offset;
+        if let Some(name) = source_tokens[close..semicolon]
+            .iter()
+            .rev()
+            .find(|token| is_identifier(token))
+        {
+            merge_alias_words(aliases, name.clone(), vec![aggregate]);
+        }
+        index = semicolon + 1;
+    }
+}
+
+fn merge_alias_words(
+    aliases: &mut BTreeMap<String, Vec<String>>,
+    name: String,
+    target: Vec<String>,
+) {
+    let resolved = aliases.entry(name).or_default();
+    for word in target {
+        if !resolved.contains(&word) {
+            resolved.push(word);
+        }
+    }
 }
 
 fn array_typedef(statement: &str) -> Option<(String, Vec<String>)> {
@@ -571,21 +641,39 @@ fn collect_macro_aliases(source: &str) -> BTreeMap<String, Vec<String>> {
         let Some(rest) = line.trim_start().strip_prefix("#define") else {
             continue;
         };
-        let mut parts = rest.trim_start().splitn(2, char::is_whitespace);
-        let Some(name) = parts.next() else {
-            continue;
-        };
-        if name.contains('(') {
+        let rest = rest.trim_start();
+        let name_end = rest
+            .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+            .unwrap_or(rest.len());
+        if name_end == 0 {
             continue;
         }
-        let replacement = parts.next().unwrap_or_default();
+        let name = &rest[..name_end];
+        let mut replacement = &rest[name_end..];
+        if replacement.starts_with('(') {
+            let Some(close) = replacement.find(')') else {
+                continue;
+            };
+            replacement = &replacement[close + 1..];
+        }
         let words: Vec<String> = tokens(replacement)
             .into_iter()
             .filter(|token| is_identifier(token))
             .collect();
         if !words.is_empty() {
-            aliases.insert(name.to_string(), words);
+            merge_alias_words(&mut aliases, name.to_string(), words);
         }
+    }
+    aliases
+}
+
+/// Collect every typedef and type-like macro definition without allowing a
+/// later definition to erase an earlier meaning.  Repository scans use the
+/// union from all tracked C-family sources as a conservative include prelude.
+pub fn collect_c_aliases(source: &str) -> BTreeMap<String, Vec<String>> {
+    let mut aliases = collect_typedefs(source);
+    for (name, target) in collect_macro_aliases(source) {
+        merge_alias_words(&mut aliases, name, target);
     }
     aliases
 }
@@ -602,13 +690,38 @@ fn resolve_element_type(
     authored: &str,
     aliases: &BTreeMap<String, Vec<String>>,
 ) -> Result<Option<String>, ScanError> {
-    let words = resolve_words_checked(vec![authored.to_string()], aliases)?;
-    if let Some(resolved) = words
-        .iter()
-        .find(|word| ELEMENT_C_TYPES.contains(&word.as_str()))
-        .cloned()
+    resolve_type_words(
+        vec![authored.to_string()],
+        aliases,
+        is_unknown_type_word(authored),
+    )
+}
+
+fn resolve_type_words(
+    authored: Vec<String>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    reject_unknown: bool,
+) -> Result<Option<String>, ScanError> {
+    let words = resolve_words_checked(authored, aliases)?;
+    if reject_unknown
+        && let Some(unknown) = words.iter().find(|word| {
+            !ELEMENT_C_TYPES.contains(&word.as_str())
+                && !NON_NUMERIC_C_TYPE_WORDS.contains(&word.as_str())
+                && !EXTERNAL_NONNUMERIC_C_TYPES.contains(&word.as_str())
+                && !QUALIFIERS.contains(&word.as_str())
+                && !is_base_modifier(word)
+        })
     {
-        return Ok(Some(resolved));
+        return Err(ScanError::new(
+            ScanErrorKind::UnknownType,
+            format!("unknown C type word `{unknown}` at a carrier position"),
+        ));
+    }
+    if words
+        .iter()
+        .any(|word| ELEMENT_C_TYPES.contains(&word.as_str()))
+    {
+        return Ok(Some(words.join(" ")));
     }
     if words.iter().all(|word| {
         EXTERNAL_NONNUMERIC_C_TYPES.contains(&word.as_str())
@@ -616,7 +729,7 @@ fn resolve_element_type(
     }) {
         return Ok(None);
     }
-    if words.iter().any(|word| is_unknown_type_word(word)) {
+    if reject_unknown && words.iter().any(|word| is_unknown_type_word(word)) {
         return Err(ScanError::new(
             ScanErrorKind::UnknownType,
             format!(
@@ -640,6 +753,25 @@ fn resolves_to_known_nonnumeric(
         EXTERNAL_NONNUMERIC_C_TYPES.contains(&word.as_str())
             || NON_NUMERIC_C_TYPE_WORDS.contains(&word.as_str())
     }))
+}
+
+fn range_resolves_to_known_nonnumeric(
+    source_tokens: &[String],
+    aliases: &BTreeMap<String, Vec<String>>,
+) -> Result<bool, ScanError> {
+    let identifiers: Vec<&String> = source_tokens
+        .iter()
+        .filter(|token| is_identifier(token))
+        .collect();
+    if identifiers.is_empty() {
+        return Ok(false);
+    }
+    for identifier in identifiers {
+        if !resolves_to_known_nonnumeric(identifier, aliases)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn resolve_words_checked(
@@ -693,8 +825,13 @@ fn format_hole_before(tokens: &[String], end: usize) -> Option<(usize, String)> 
     while index > 0 {
         index -= 1;
         if tokens[index] == "{" {
-            let name = tokens.get(index + 1)?;
-            return is_identifier(name).then(|| (index, format!("format-hole:{name}")));
+            let contents = &tokens[index + 1..end];
+            let name = contents
+                .first()
+                .filter(|name| is_identifier(name))
+                .map_or("positional", String::as_str);
+            return (contents.is_empty() || is_identifier(name))
+                .then(|| (index, format!("format-hole:{name}")));
         }
         if tokens[index] == "}" {
             return None;
@@ -707,11 +844,15 @@ fn format_hole_after(tokens: &[String], start: usize) -> Option<(usize, String)>
     if tokens.get(start)? != "{" {
         return None;
     }
-    let name = tokens.get(start + 1)?;
-    if !is_identifier(name) {
+    let close = tokens[start + 1..].iter().position(|token| token == "}")? + start + 1;
+    let contents = &tokens[start + 1..close];
+    let name = contents
+        .first()
+        .filter(|name| is_identifier(name))
+        .map_or("positional", String::as_str);
+    if !contents.is_empty() && !is_identifier(name) {
         return None;
     }
-    let close = tokens[start + 2..].iter().position(|token| token == "}")? + start + 2;
     Some((close + 1, format!("format-hole:{name}")))
 }
 
@@ -733,6 +874,163 @@ fn matching_open_reverse(
         }
     }
     None
+}
+
+fn matching_angle_open_reverse(tokens: &[String], close: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for index in (0..=close).rev() {
+        match tokens[index].as_str() {
+            ">" => depth += 1,
+            ">>" => depth += 2,
+            "<" => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            "<<" => {
+                depth = depth.checked_sub(2)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn is_base_modifier(token: &str) -> bool {
+    matches!(
+        token,
+        "_Complex" | "_Imaginary" | "signed" | "unsigned" | "short" | "long"
+    )
+}
+
+fn is_storage_specifier(token: &str) -> bool {
+    matches!(
+        token,
+        "extern" | "inline" | "register" | "static" | "typedef"
+    )
+}
+
+fn is_declaration_prefix_stop(token: &str) -> bool {
+    matches!(
+        token,
+        "break"
+            | "case"
+            | "continue"
+            | "define"
+            | "elif"
+            | "else"
+            | "endif"
+            | "for"
+            | "if"
+            | "ifdef"
+            | "ifndef"
+            | "include"
+            | "pragma"
+            | "return"
+            | "sizeof"
+            | "switch"
+            | "undef"
+            | "while"
+    )
+}
+
+fn type_start_before(tokens: &[String], end: usize) -> usize {
+    if end == 0 {
+        return 0;
+    }
+    let mut cursor = end - 1;
+    if matches!(tokens[cursor].as_str(), ">" | ">>")
+        && let Some(open) = matching_angle_open_reverse(tokens, cursor)
+        && open > 0
+    {
+        cursor = open - 1;
+    } else if tokens[cursor] == ")"
+        && let Some(open) = matching_open_reverse(tokens, cursor, "(", ")")
+        && open > 0
+        && is_identifier(&tokens[open - 1])
+    {
+        cursor = open - 1;
+    }
+    while is_identifier(&tokens[cursor])
+        && cursor > 0
+        && is_identifier(&tokens[cursor - 1])
+        && !is_declaration_prefix_stop(&tokens[cursor - 1])
+        && !is_storage_specifier(&tokens[cursor - 1])
+    {
+        cursor -= 1;
+    }
+    cursor
+}
+
+fn declaration_context(tokens: &[String], type_end: usize) -> bool {
+    let start = type_start_before(tokens, type_end);
+    if tokens.get(start).is_some_and(|token| {
+        matches!(
+            token.as_str(),
+            "break" | "case" | "continue" | "else" | "for" | "if" | "return" | "switch" | "while"
+        )
+    }) {
+        return false;
+    }
+    if start == 0 {
+        return true;
+    }
+    let previous = tokens[start - 1].as_str();
+    if matches!(previous, ";" | "{" | "}" | ",") {
+        return true;
+    }
+    if previous != "(" {
+        return matches!(
+            previous,
+            "extern" | "inline" | "register" | "static" | "typedef"
+        );
+    }
+
+    if start >= 2
+        && matches!(
+            tokens[start - 2].as_str(),
+            "for" | "if" | "return" | "sizeof" | "switch" | "while"
+        )
+    {
+        return false;
+    }
+    if start >= 3
+        && tokens[start - 2] == "("
+        && matches!(
+            tokens[start - 3].as_str(),
+            "for" | "if" | "return" | "sizeof" | "switch" | "while"
+        )
+    {
+        return false;
+    }
+
+    // A parenthesis after a function name is a parameter-list boundary only
+    // when that name itself has a declaration prefix.  This distinguishes
+    // `f(type *p)` from an expression such as `f(lhs * rhs)`.
+    if start >= 2 && is_identifier(&tokens[start - 2]) {
+        if start < 3 {
+            return false;
+        }
+        let before_name = tokens[start - 3].as_str();
+        return ELEMENT_C_TYPES.contains(&before_name)
+            || NON_NUMERIC_C_TYPE_WORDS.contains(&before_name)
+            || EXTERNAL_NONNUMERIC_C_TYPES.contains(&before_name)
+            || before_name == ")"
+            || before_name == "*";
+    }
+    true
+}
+
+fn reference_declaration_context(tokens: &[String], type_end: usize) -> bool {
+    let start = type_start_before(tokens, type_end);
+    if start > 0 && tokens[start - 1] == "(" && (start < 2 || !is_identifier(&tokens[start - 2])) {
+        return false;
+    }
+    declaration_context(tokens, type_end)
 }
 
 fn type_before(
@@ -785,6 +1083,55 @@ fn type_before(
             }
             return Ok(type_spec);
         }
+        if is_identifier(marker) {
+            if let Some(resolved) = resolve_element_type(marker, aliases)? {
+                return Ok(Some(TypeSpec {
+                    start: open - 1,
+                    authored: format!("{marker}()"),
+                    resolved,
+                    qualifiers,
+                }));
+            }
+            if reject_unknown_external && !resolves_to_known_nonnumeric(marker, aliases)? {
+                return Err(ScanError::new(
+                    ScanErrorKind::UnknownType,
+                    format!("unknown C type macro `{marker}(...)` at a carrier position"),
+                ));
+            }
+            return Ok(None);
+        }
+    }
+    if matches!(tokens[cursor].as_str(), ">" | ">>")
+        && let Some(open) = matching_angle_open_reverse(tokens, cursor)
+        && open > 0
+        && is_identifier(&tokens[open - 1])
+    {
+        let container = open - 1;
+        let inner = type_in_range(tokens, open + 1, cursor, aliases, false)?;
+        if inner.is_some() {
+            let authored = tokens[container..=cursor].join(" ");
+            return Ok(Some(TypeSpec {
+                start: container,
+                resolved: authored.clone(),
+                authored,
+                qualifiers,
+            }));
+        }
+        if resolves_to_known_nonnumeric(&tokens[container], aliases)?
+            && range_resolves_to_known_nonnumeric(&tokens[open + 1..cursor], aliases)?
+        {
+            return Ok(None);
+        }
+        if reject_unknown_external {
+            return Err(ScanError::new(
+                ScanErrorKind::UnknownType,
+                format!(
+                    "unknown C++ template type `{}` at a carrier position",
+                    tokens[container..=cursor].join(" ")
+                ),
+            ));
+        }
+        return Ok(None);
     }
     if let Some((start, authored)) = format_hole_before(tokens, cursor) {
         return Ok(Some(TypeSpec {
@@ -801,21 +1148,41 @@ fn type_before(
     {
         return Ok(None);
     }
-    if let Some(resolved) = resolve_element_type(&authored, aliases)? {
-        let mut start = cursor;
-        while start > 0 && QUALIFIERS.contains(&tokens[start - 1].as_str()) {
+    if !is_identifier(&authored) {
+        return Ok(None);
+    }
+    let mut start = cursor;
+    while start > 0
+        && (QUALIFIERS.contains(&tokens[start - 1].as_str())
+            || is_base_modifier(&tokens[start - 1]))
+    {
+        start -= 1;
+    }
+    if reject_unknown_external {
+        while start > 0
+            && is_identifier(&tokens[start - 1])
+            && !is_declaration_prefix_stop(&tokens[start - 1])
+            && !is_storage_specifier(&tokens[start - 1])
+        {
             start -= 1;
-            qualifiers.insert(tokens[start].clone());
         }
-        if matches!(resolved.as_str(), "int" | "short" | "long" | "char") {
-            while start > 0 && matches!(tokens[start - 1].as_str(), "signed" | "unsigned" | "long")
-            {
-                start -= 1;
+    }
+    let authored_words: Vec<String> = tokens[start..=cursor]
+        .iter()
+        .filter(|word| !QUALIFIERS.contains(&word.as_str()) && !is_storage_specifier(word.as_str()))
+        .cloned()
+        .collect();
+    if let Some(resolved) =
+        resolve_type_words(authored_words.clone(), aliases, reject_unknown_external)?
+    {
+        for word in &tokens[start..=cursor] {
+            if QUALIFIERS.contains(&word.as_str()) {
+                qualifiers.insert(word.clone());
             }
         }
         return Ok(Some(TypeSpec {
             start,
-            authored,
+            authored: authored_words.join(" "),
             resolved,
             qualifiers,
         }));
@@ -835,9 +1202,7 @@ fn type_before(
             format!("unsupported C type decoration `{authored}` at a carrier position"),
         ));
     }
-    if is_unknown_type_word(&authored)
-        || (reject_unknown_external && authored.chars().next().is_some_and(char::is_uppercase))
-    {
+    if reject_unknown_external && (is_unknown_type_word(&authored) || is_identifier(&authored)) {
         return Err(ScanError::new(
             ScanErrorKind::UnknownType,
             format!("unknown C type word `{authored}` at a carrier position"),
@@ -934,9 +1299,10 @@ fn incomplete_pointer_fragment(tokens: &[String], star: usize) -> bool {
         cursor -= 1;
     }
     cursor == 0
-        && tokens
+        && (tokens
             .get(star + 1)
             .is_some_and(|token| is_identifier(token))
+            || format_hole_after(tokens, star + 1).is_some())
 }
 
 fn incomplete_array_fragment(tokens: &[String], open: usize, close: usize) -> bool {
@@ -987,9 +1353,10 @@ fn canonical_signature(
     type_spec: &TypeSpec,
     pointer_qualifiers: &BTreeSet<String>,
     name: &str,
+    declarator_detail: &str,
 ) -> String {
     format!(
-        "shape={shape};resolved={};authored={};qualifiers={};pointer-qualifiers={};name={name}",
+        "shape={shape};resolved={};authored={};qualifiers={};pointer-qualifiers={};name={name};declarator={declarator_detail}",
         type_spec.resolved,
         type_spec.authored,
         type_spec
@@ -1009,13 +1376,14 @@ fn canonical_signature(
 fn has_candidate_anchor(tokens: &[String]) -> bool {
     tokens
         .iter()
-        .any(|token| token == "*" || token == "[" || token == "sizeof")
+        .any(|token| token == "*" || token == "&" || token == "[" || token == "sizeof")
 }
 
 fn scan_source(
     source: &str,
     owner: &str,
     require_global_balance: bool,
+    predeclared_aliases: Option<&BTreeMap<String, Vec<String>>>,
 ) -> Result<Vec<CarrierUse>, ScanError> {
     let tokens = tokens(source);
     if !has_candidate_anchor(&tokens) {
@@ -1025,24 +1393,34 @@ fn scan_source(
     if require_global_balance {
         validate_balanced(&tokens)?;
     }
-    let mut aliases = collect_typedefs(source);
-    aliases.extend(collect_macro_aliases(source));
+    let mut aliases = predeclared_aliases.cloned().unwrap_or_default();
+    for (name, target) in collect_c_aliases(source) {
+        merge_alias_words(&mut aliases, name, target);
+    }
     let mut rows = Vec::new();
 
     for (index, token) in tokens.iter().enumerate() {
-        if token == "*" {
+        if token == "*" || token == "&" {
             if tokens.get(index + 1).map(String::as_str) == Some("sizeof") {
                 continue;
             }
             let mut type_end = index;
-            let mut shape = "pointer";
-            if index > 0 && tokens[index - 1] == "(" {
+            let mut shape = if token == "&" { "reference" } else { "pointer" };
+            if token == "*" && index > 0 && tokens[index - 1] == "(" {
                 type_end = index - 1;
                 shape = "function-pointer";
             }
-            let Some(type_spec) = type_before(&tokens, type_end, &aliases, require_global_balance)?
-            else {
-                if !require_global_balance && incomplete_pointer_fragment(&tokens, index) {
+            let reject_unknown = require_global_balance
+                && if token == "&" {
+                    reference_declaration_context(&tokens, type_end)
+                } else {
+                    declaration_context(&tokens, type_end)
+                };
+            let Some(type_spec) = type_before(&tokens, type_end, &aliases, reject_unknown)? else {
+                if token == "*"
+                    && !require_global_balance
+                    && incomplete_pointer_fragment(&tokens, index)
+                {
                     return Err(ScanError::new(
                         ScanErrorKind::IncompleteFragment,
                         "C carrier fragment contains a pointer declarator without its type",
@@ -1055,11 +1433,6 @@ fn scan_source(
             while cursor < tokens.len() && QUALIFIERS.contains(&tokens[cursor].as_str()) {
                 pointer_qualifiers.insert(tokens[cursor].clone());
                 cursor += 1;
-            }
-            if type_spec.resolved.starts_with("format-hole:")
-                && tokens.get(cursor).map(String::as_str) == Some("{")
-            {
-                continue;
             }
             let dynamic_name = format_hole_after(&tokens, cursor);
             let name = if let Some((_, ref name)) = dynamic_name {
@@ -1078,15 +1451,15 @@ fn scan_source(
             rows.push(CarrierUse {
                 kind: "raw-element-pointer".to_string(),
                 owner: owner.to_string(),
-                signature: canonical_signature(shape, &type_spec, &pointer_qualifiers, name),
+                signature: canonical_signature(shape, &type_spec, &pointer_qualifiers, name, token),
             });
         }
 
         if token == "[" && index > 0 && is_identifier(&tokens[index - 1]) {
             let close = matching_close(&tokens, index, "[", "]")?;
             let name = &tokens[index - 1];
-            let Some(mut type_spec) =
-                type_before(&tokens, index - 1, &aliases, require_global_balance)?
+            let reject_unknown = require_global_balance && declaration_context(&tokens, index - 1);
+            let Some(mut type_spec) = type_before(&tokens, index - 1, &aliases, reject_unknown)?
             else {
                 if !require_global_balance && incomplete_array_fragment(&tokens, index, close) {
                     return Err(ScanError::new(
@@ -1102,7 +1475,13 @@ fn scan_source(
             rows.push(CarrierUse {
                 kind: "raw-element-pointer".to_string(),
                 owner: owner.to_string(),
-                signature: canonical_signature("array", &type_spec, &BTreeSet::new(), name),
+                signature: canonical_signature(
+                    "array",
+                    &type_spec,
+                    &BTreeSet::new(),
+                    name,
+                    &tokens[index + 1..close].join(" "),
+                ),
             });
         }
 
@@ -1121,6 +1500,7 @@ fn scan_source(
                     &type_spec,
                     &BTreeSet::new(),
                     "<abstract>",
+                    "sizeof",
                 ),
             });
         }
@@ -1129,11 +1509,19 @@ fn scan_source(
 }
 
 pub fn scan_c_source(source: &str, owner: &str) -> Result<Vec<CarrierUse>, ScanError> {
-    scan_source(source, owner, true)
+    scan_source(source, owner, true, None)
+}
+
+pub fn scan_c_source_with_aliases(
+    source: &str,
+    owner: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+) -> Result<Vec<CarrierUse>, ScanError> {
+    scan_source(source, owner, true, Some(aliases))
 }
 
 fn scan_c_fragment(source: &str, owner: &str) -> Result<Vec<CarrierUse>, ScanError> {
-    scan_source(source, owner, false)
+    scan_source(source, owner, false, None)
 }
 
 #[derive(Default)]
@@ -1187,6 +1575,22 @@ impl RustStringScanner {
         visit(self);
         self.owners.pop();
     }
+
+    fn scan_token_stream_literals(&mut self, stream: proc_macro2::TokenStream) {
+        for token in stream {
+            match token {
+                proc_macro2::TokenTree::Group(group) => {
+                    self.scan_token_stream_literals(group.stream());
+                }
+                proc_macro2::TokenTree::Literal(literal) => {
+                    if let Ok(syn::Lit::Str(literal)) = syn::parse_str(&literal.to_string()) {
+                        self.scan_literal(&literal);
+                    }
+                }
+                proc_macro2::TokenTree::Ident(_) | proc_macro2::TokenTree::Punct(_) => {}
+            }
+        }
+    }
 }
 
 impl<'ast> Visit<'ast> for RustStringScanner {
@@ -1208,10 +1612,8 @@ impl<'ast> Visit<'ast> for RustStringScanner {
         let is_test = module.attrs.iter().any(|attribute| {
             attribute.path().is_ident("cfg")
                 && attribute
-                    .meta
-                    .to_token_stream()
-                    .to_string()
-                    .contains("test")
+                    .parse_args::<syn::Path>()
+                    .is_ok_and(|path| path.is_ident("test"))
         });
         if !is_test {
             visit::visit_item_mod(self, module);
@@ -1228,6 +1630,8 @@ impl<'ast> Visit<'ast> for RustStringScanner {
             for argument in &arguments {
                 self.visit_expr(argument);
             }
+        } else {
+            self.scan_token_stream_literals(macro_call.tokens.clone());
         }
     }
 }

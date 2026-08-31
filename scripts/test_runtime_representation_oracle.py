@@ -162,8 +162,45 @@ static size_t qualified_sizeof(void) { return sizeof(const float); }
     def test_foundation_digest_rejects_an_edited_row(self) -> None:
         baseline = oracle.load_baseline()
         baseline["foundation_rows"][0]["owner"] = "forged_owner"
-        with self.assertRaisesRegex(oracle.OracleFailure, "foundation digest"):
+        with self.assertRaisesRegex(oracle.OracleFailure, "freeze digest"):
             oracle.validate_baseline(baseline, oracle.inventory_rows(oracle.REPO_ROOT))
+
+    def test_freeze_digest_rejects_an_edited_coverage_manifest(self) -> None:
+        baseline = oracle.load_baseline()
+        altered = baseline["coverage_manifest"]["source_inventory"]["mutations"]
+        altered.pop()
+        with mock.patch.object(
+            oracle,
+            "coverage_manifest",
+            return_value=baseline["coverage_manifest"],
+        ):
+            with self.assertRaisesRegex(oracle.OracleFailure, "freeze digest"):
+                oracle.validate_baseline(
+                    baseline,
+                    oracle.inventory_rows(oracle.REPO_ROOT),
+                )
+
+    def test_c_family_suffix_set_covers_all_supported_source_forms(self) -> None:
+        self.assertEqual(
+            oracle.SOURCE_SUFFIXES,
+            {
+                ".c",
+                ".cc",
+                ".cpp",
+                ".cu",
+                ".cxx",
+                ".h",
+                ".h++",
+                ".hh",
+                ".hip",
+                ".hpp",
+                ".hxx",
+                ".m",
+                ".metal",
+                ".mm",
+                ".rs",
+            },
+        )
 
     def test_active_debt_cannot_add_an_identity(self) -> None:
         baseline = oracle.load_baseline()
@@ -232,7 +269,10 @@ class MutationContractTests(unittest.TestCase):
                 "mutate_c_typedef_alias_pointer",
                 "mutate_c_macro_alias_pointer",
                 "mutate_c_unknown_arithmetic_pointer",
+                "mutate_c_redefined_alias_pointer",
+                "mutate_cxx_reference_and_template",
                 "mutate_rust_dynamic_c_pointer",
+                "mutate_rust_positional_and_macro_rules_pointer",
                 "mutate_rust_split_c_pointer",
             }
             <= names

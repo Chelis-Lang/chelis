@@ -3,7 +3,9 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
-use chelis_c_surface::{CarrierUse, scan_c_source, scan_rust_source};
+use chelis_c_surface::{
+    CarrierUse, collect_c_aliases, scan_c_source_with_aliases, scan_rust_source,
+};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -65,19 +67,35 @@ fn run() -> Result<(), String> {
         .map_err(|error| format!("read path manifest: {error}"))?;
     let paths: Vec<String> =
         serde_json::from_str(&input).map_err(|error| format!("parse path manifest: {error}"))?;
-    let mut output = Vec::new();
+    let mut sources = Vec::with_capacity(paths.len());
     for raw_path in paths {
         let relative = Path::new(&raw_path);
         validate_relative(relative)?;
         let source = fs::read_to_string(root.join(relative))
             .map_err(|error| format!("read `{raw_path}`: {error}"))?;
+        sources.push((raw_path, source));
+    }
+    let c_prelude = sources
+        .iter()
+        .filter(|(path, _)| {
+            Path::new(path)
+                .extension()
+                .is_none_or(|extension| extension != "rs")
+        })
+        .map(|(_, source)| source.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let aliases = collect_c_aliases(&c_prelude);
+    let mut output = Vec::new();
+    for (raw_path, source) in sources {
+        let relative = Path::new(&raw_path);
         let rows = if relative
             .extension()
             .is_some_and(|extension| extension == "rs")
         {
             scan_rust_source(&source)
         } else {
-            scan_c_source(&source, "c-source")
+            scan_c_source_with_aliases(&source, "c-source", &aliases)
         }
         .map_err(|error| format!("{raw_path}: {error}"))?;
         output.extend(located(&raw_path, rows));

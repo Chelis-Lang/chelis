@@ -497,7 +497,7 @@ dependencies = [
 name = "chelis-c-surface"
 version = "0.18.6"
 dependencies = [
- "quote",
+ "proc-macro2",
  "serde",
  "serde_json",
  "syn 2.0.117",

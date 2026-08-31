@@ -473,12 +473,17 @@ source and classifies every hit into one of these final forms:
 
 Until Phase 5, a hit may instead match one exact Phase-0 transition-debt
 identity with one owning deletion phase. That frozen manifest is generated
-from the reviewed Phase-0 tree, integrity-digested, and shrink-only: the oracle
-may delete rows, but regeneration cannot bless an addition, rename, signature
-change, relocation, or reclassification. Such a change removes the old
-identity and introduces a new unclassified hit, which fails. At Phase 5 the
-debt set must be empty. This is an explicit migration ledger, not an allow-list
-or a final authority class.
+from the reviewed Phase-0 tree, integrity-digested, and shrink-only. The digest
+binds one canonical object containing both the immutable foundation rows and
+the executable coverage manifest (enumerator, command, success condition, and
+mutation set); the separately stored active-debt identity list is deliberately
+outside that digest so it can only shrink. Co-editing the stored and live
+coverage manifest without moving the reviewed digest therefore fails. The
+oracle may delete active rows, but regeneration cannot bless an addition,
+rename, signature change, relocation, reclassification, or weakened coverage
+contract. Such a change removes the old identity and introduces a new
+unclassified hit, which fails. At Phase 5 the debt set must be empty. This is
+an explicit migration ledger, not an allow-list or a final authority class.
 
 Anything neither final nor an unchanged frozen debt identity fails. The
 inventory includes descriptor fields, `data` access, pointer casts,
@@ -490,16 +495,33 @@ path.
 
 The C-family portion is parsed by the shared `chelis-c-surface` crate rather
 than matched as declaration text. It tokenizes comments, quoted literals, and
-C++ raw strings; resolves transitive typedef and object-like macro aliases;
-normalizes qualifier placement; and classifies pointer and array declarators,
-pointer casts, and `sizeof(type)` operands from token structure. Rust emitters
-are parsed with `syn`, and their ordinary and raw string literals enter the
-same C-family parser with format holes represented as explicit dynamic type or
-name nodes. A complete C/HIP/Metal source containing carrier syntax must have
-closed lexical constructs and balanced delimiters. An emitted Rust fragment
-may leave only its outer C block open; each carrier candidate must remain
-locally complete, so splitting the type from a pointer or array declarator
-fails instead of disappearing.
+C++ raw strings; normalizes qualifier placement; and classifies pointer,
+reference, array, and C++ template declarators, pointer casts, and
+`sizeof(type)` operands from token structure. Each exact identity preserves
+the complete canonical base spelling and modifiers, declarator shape, pointer
+qualifiers, and array extent; width-equal spellings such as `int` and
+`unsigned int`, or arrays of four and eight elements, cannot collapse to one
+identity.
+
+Typedefs (including aggregate definitions) and object-like or function-like
+type macros are collected from every tracked C-family source as a conservative
+include prelude. Every definition of a name contributes to a monotone union:
+a later macro redefinition or block-local typedef can add meaning but cannot
+erase an earlier numeric meaning. This intentionally over-approximates
+preprocessor and lexical scopes; a source-specific definition may expose a
+carrier for review, but it can never launder one out of the inventory.
+
+Rust emitters are parsed with `syn`, and ordinary/raw string literals in
+expressions and `macro_rules!` token trees enter the same C-family parser.
+Named and positional format holes are explicit dynamic type or name nodes.
+Only a module whose attribute is exactly `cfg(test)` is excluded;
+`cfg(not(test))` and other formulas remain production surface. The tracked
+suffix set covers C, C++, Objective-C, Objective-C++, CUDA, HIP, Metal, and
+Rust source/header forms. A complete source containing carrier syntax must
+have closed lexical constructs and balanced delimiters. An emitted Rust
+fragment may leave only its outer C block open; each carrier candidate must
+remain locally complete, so splitting the type from a pointer or array
+declarator fails instead of disappearing.
 
 The parser and the public-header capacity census share lexical normalization,
 the closed arithmetic/non-arithmetic type vocabulary, alias expansion, and
@@ -522,8 +544,10 @@ returns:
 - handwrite a second ABI field list;
 - vary C qualifier placement, use an array declarator or pointer cast, hide a
   carrier behind typedef/macro aliases, or add qualified `sizeof` arithmetic;
-- introduce an unknown C arithmetic spelling or split one emitted declarator
-  across Rust string fragments;
+- redefine a numeric alias as nonnumeric, add C++ reference/template carriers,
+  or introduce an unknown C arithmetic spelling;
+- use positional Rust format holes or a `macro_rules!` literal, or split one
+  emitted declarator across Rust string fragments;
 - change a Bool8 lane spelling to `float`; and
 - make a Bool8 kernel store `1.0f` or omit the device failure flag.
 
@@ -540,7 +564,12 @@ prove its sanctioned replacements work.
 
 - Phase 0 freezes the derived inventory, mutation set, current accepted/rejected
   behavior, and the exact issue-to-phase map. Later phases may reduce raw hits
-  but may not add an exception.
+  but may not add an exception. The Phase-0 implementation moves this freeze
+  once from schema 1 to schema 2 because schema 1 hashed only the row list and
+  used non-injective C declarator identities. Schema 2 binds rows plus coverage
+  manifest and uses the complete identities and monotone alias environment
+  defined in C6; the manifest-integrity and parser controls above are the
+  required negative evidence for that move.
 - Phase 1 freezes `DTypeContract`, sealed element markers, exact capacity keys,
   and checked finite-count types. Later phases consume them without parallel
   tables.
@@ -604,8 +633,9 @@ manifest in C6; release-profile reproducers for exact capacity collision,
 count/byte overflow, zero extents, and malformed foreign metadata; one
 detection mutation for every source classifier, including a new direct field
 access and incomplete dtype registration; a fail-closed structural parser for
-C/HIP/Metal sources and Rust-emitted C-family fragments; source-only and
-hardware probe harnesses; all landed receipts as positive controls.
+C/HIP/Metal sources and Rust-emitted C-family fragments, including monotone
+cross-source alias resolution and injective declarator identities; source-only
+and hardware probe harnesses; all landed receipts as positive controls.
 
 The inventory records identities, not mutable line numbers. Each enumerator has
 a mutation that plants a new hit in a different file/configuration. HIP and
