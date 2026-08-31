@@ -2013,15 +2013,15 @@ compiled value live, when that owner terminates, and what proof permits storage
 reuse. Neither can reconstruct the other's fact.
 
 The ownership design selects an opaque tagged carrier as its target, but this
-design-freeze change does not alter the exact current [05-OP-31]/[05-OP-33]
+design-freeze change does not alter the exact current [05-OP-31..33]
 surface or its census partition. Before implementation begins, Phase 1 must
-amend those numbered atoms, their normative registries, this document, the
+amend those numbered atoms, all three normative registries, this document, the
 capability table, the generated rejection registry when required, every public
 header consumer, and the executable census in one atomic change. No old and
 new ABI may coexist. The old layout-visible tensor, `owns_data`,
-`chelis_free`, `chelis_alloc_view`, and ambiguous value-conversion identities
-are deletion targets at that cut, not grandfather rows or compatibility
-aliases.
+`chelis_free`, `chelis_alloc_view`, the by-value `chelis_option_scalar` and
+`chelis_option_value` carriers, and ambiguous value-conversion identities are
+deletion targets at that cut, not grandfather rows or compatibility aliases.
 
 After the cut, a tagged carrier still preserves its exact dtype and stored
 bits; opacity changes construction authority, not [04-NUM] semantics.

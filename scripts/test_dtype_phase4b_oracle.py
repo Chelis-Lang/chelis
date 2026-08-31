@@ -1163,6 +1163,63 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("FFI entry borrow")
 
+    def test_compiled_ownership_keeps_the_complete_c_authority_range(self) -> None:
+        self.replace(
+            Path("spec/11-ffi.md"),
+            "governed by [05-OP-31..33]",
+            "governed by [05-OP-31] and [05-OP-33]",
+        )
+        self.assert_contract_fails("FFI complete C authority range")
+
+    def test_compiled_ownership_cannot_omit_option(self) -> None:
+        mutations = (
+            (
+                "    Option,\n    MappedFile,",
+                "    MappedFile,",
+                "Option heap kind",
+            ),
+            (
+                "| `Option<T>` for every `T` | `Option` | opaque `chelis_option *` "
+                "handle and `CHELIS_VALUE_OPTION` |",
+                "| `Option<T>` | none | legacy by-value carrier |",
+                "Option carrier mapping",
+            ),
+            (
+                "Every `Option<T>`, including `Option` of a scalar or another `Option`",
+                "Only an `Option` whose child is already a heap handle",
+                "recursive Option heap classification",
+            ),
+            (
+                "balanced tensor/string/List/tuple/dictionary/ADT/Option/mapped-file "
+                "ownership",
+                "balanced tensor/string/List/tuple/dictionary/ADT/mapped-file ownership",
+                "Option ownership fixtures",
+            ),
+            (
+                "omit `ConcreteHostType::Option` or `CHELIS_VALUE_OPTION`",
+                "omit an unrelated host variant",
+                "Option omission mutation",
+            ),
+        )
+        path = self.root / "spec/design/compiled_value_ownership.md"
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_compiled_ownership_phase_one_cannot_skip_container_authority(self) -> None:
+        self.replace(
+            Path("spec/design/compiled_value_ownership.md"),
+            "The existing exact ABI remains [05-OP-31..33] and all three registries",
+            "The existing exact ABI remains [05-OP-31] and [05-OP-33]",
+        )
+        self.assert_contract_fails("complete C ABI authority chain")
+
     def test_backend_cannot_accept_unverified_ownership(self) -> None:
         self.replace(
             Path("spec/design/compiled_value_ownership.md"),

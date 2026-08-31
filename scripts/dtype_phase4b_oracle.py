@@ -69,16 +69,16 @@ FROZEN_FILE_DIGESTS = {
         "58f707d4e155d098962db224317061684b2c026816cab234ba026d560510a6da"
     ),
     "spec/11-ffi.md": (
-        "6a7dd4847cacf38bb209e6e0be7bb38a6330919ce554e4f9384c5da36737b829"
+        "0d0b5065f90ae704ecea26744208e76f1075907f8ea49279a1a958db6f1c14b3"
     ),
     "spec/design/capability_table.md": (
         "ac8e3f8761f8470774e093ac4c15b0f35e547e84209659eae4f0eaf8667ccc62"
     ),
     "spec/design/compiled_value_ownership.md": (
-        "a580373fb4cb74fe38e2df9d36868b081996640c533982d5c0e4f5ceeb9ddf9d"
+        "2e0e5d09821fc81a2b2a4dc2019e438d4a0f8ef9e31d9d793c3e0fa426ac6d7d"
     ),
     "spec/design/dtype_semantics.md": (
-        "659064d90b12f754eb6d86d3e0323ce903404e2e3ac8145a735f3590c9ed1dae"
+        "7822e4eb60c0f7b9042e198099db17c340e3fcb9280de72dd642216af0373327"
     ),
     "spec/design/loud_unsupported.md": (
         "eb85be5512ab6127445c3d99260acc44358ef584fdae93950dfc0c4fc3ebe5d2"
@@ -850,6 +850,7 @@ def validate_normative_contract(
                 "FFI input preservation",
             ),
             ("independently owned and may\nbe released in either order", "FFI root owners"),
+            ("governed by [05-OP-31..33]", "FFI complete C authority range"),
         ),
         violations,
     )
@@ -870,8 +871,35 @@ def validate_normative_contract(
                 "closed mapped-file kind",
             ),
             (
-                "derives a bijection across heap-backed `ConcreteHostType`",
-                "heap-kind universe bijection",
+                "one total, wildcard-free ownership classification",
+                "closed host/carrier/heap classification",
+            ),
+            (
+                "Every `Option<T>`, including `Option` of a scalar or another `Option`",
+                "recursive Option heap classification",
+            ),
+            ("    Option,\n    MappedFile,", "Option heap kind"),
+            (
+                "| `Option<T>` for every `T` | `Option` | opaque `chelis_option *` "
+                "handle and `CHELIS_VALUE_OPTION` |",
+                "Option carrier mapping",
+            ),
+            (
+                "`chelis_option_scalar` / `chelis_option_value` split",
+                "Option legacy-carrier deletion target",
+            ),
+            (
+                "The existing exact ABI remains [05-OP-31..33] and all three registries",
+                "complete C ABI authority chain",
+            ),
+            (
+                "balanced tensor/string/List/tuple/dictionary/ADT/Option/mapped-file "
+                "ownership",
+                "Option ownership fixtures",
+            ),
+            (
+                "omit `ConcreteHostType::Option` or `CHELIS_VALUE_OPTION`",
+                "Option omission mutation",
             ),
             (
                 "Only the planner constructs `ReusableOwnedStorage`",

@@ -9,9 +9,10 @@ The exact target heap and C-callable contract described below becomes normative
 only through Phase 1's atomic numbered-spec entry amendment.
 
 **Class fixed when:** an invalid compiled ownership state cannot be constructed
-at the backend boundary; every heap kind has one exhaustive clone/release path;
-every backend receives the same proof before reusing storage; and the complete
-`compiled-value-ownership` suite is green with no expected-failure receipt.
+at the backend boundary; every ownership-bearing host carrier maps totally to
+one exhaustive heap clone/release path; every backend receives the same proof
+before reusing storage; and the complete `compiled-value-ownership` suite is
+green with no expected-failure receipt.
 
 ## Summary
 
@@ -21,8 +22,9 @@ model:
 1. source linearity inserts `Copy` and `Drop`, then erases borrow information;
 2. host C emission reconstructs aliases, escaped arguments, and releases from
    `HostProgram` names and expression shapes;
-3. tensors use `owns_data` and `chelis_free`, while strings and aggregates use
-   independent refcounts and `chelis_value_release` omits tensors; and
+3. tensors use `owns_data` and `chelis_free`, strings and aggregates use
+   independent refcounts, heap-carrying `Option` values have no release path,
+   and `chelis_value_release` omits tensors; and
 4. C and HIP decide in-place reuse with separate backend-local predicates.
 
 That separation is the defect class. A missing arm leaks tensors in aggregates;
@@ -33,8 +35,8 @@ backend can reuse caller storage after omitting one guard.
 The repair is one structural boundary. The compiler lowers every checked program
 to an ownership-explicit form, verifies it, and gives backends only the verified
 form. The runtime uses one closed heap-kind and strong-owner model for tensors,
-storage, strings, aggregates, and the existing mapped-file resource. Storage
-reuse requires one unforgeable proof
+storage, strings, aggregates including `Option`, and the existing mapped-file
+resource. Storage reuse requires one unforgeable proof
 created by the shared ownership/memory planner. The selected target C ABI exposes
 opaque handles, not ownership fields. Phase 1 may not edit the runtime until its
 first change amends the numbered primitive atoms and exact registries for that
@@ -253,6 +255,7 @@ enum HeapKind {
     Tuple,
     Dict,
     Adt,
+    Option,
     MappedFile,
 }
 ```
@@ -268,13 +271,24 @@ The final universe is exact:
 | tuple | `Tuple` | opaque `chelis_tuple *` handle and `CHELIS_VALUE_TUPLE` |
 | dictionary | `Dict` | opaque `chelis_dict *` handle and `CHELIS_VALUE_DICT` |
 | ADT | `Adt` | opaque `chelis_adt *` handle and `CHELIS_VALUE_ADT` |
+| `Option<T>` for every `T` | `Option` | opaque `chelis_option *` handle and `CHELIS_VALUE_OPTION` |
 | `MappedFile` resource | `MappedFile` | opaque `chelis_mapped_file *`; never a `chelis_value` |
 
-The implementation derives a bijection across heap-backed `ConcreteHostType`
-variants, heap `chelis_value` tags, private heap allocations, and `HeapKind`.
-Scalar, bool, and unit carriers are structurally nonheap. A new heap-backed host
-type, value tag, or private allocation fails the same executable registry until
-its kind, validation, clone/retain rule, and finalizer are all present.
+The implementation derives one total, wildcard-free ownership classification
+over every `ConcreteHostType` variant, public carrier, heap `chelis_value` tag,
+private allocation, and `HeapKind`. Each identity has exactly one disposition:
+structurally nonheap, direct heap carrier, tagged heap payload, or private heap
+allocation. Each heap disposition names exactly one kind and its one finalizer;
+private storage and untagged resource kinds need not invent a `chelis_value`
+tag. Numeric scalars, bool, unit, and function carriers are structurally nonheap.
+Every `Option<T>`, including `Option` of a scalar or another `Option`, is instead
+one immutable `Option` heap node: `None` owns no child and `Some(value)` owns
+exactly one tagged child. This deliberately replaces the current by-value
+`chelis_option_scalar` / `chelis_option_value` split, whose type-recursive
+ownership cannot be recovered by the emitter. A new host type, value tag, or
+private allocation fails the same executable registry until it is classified;
+a heap classification is incomplete until its kind, validation, clone/retain
+rule, child walk, and finalizer are all present.
 
 The real types remain private and may add validation metadata, but they may not
 split the kind, count, and finalizer authorities. Retain uses checked relaxed
@@ -295,24 +309,29 @@ retains the storage for its entire lifetime. Finalizing a descriptor releases
 storage once; finalizing storage frees bytes once. There is no `owns_data`, raw
 dtype id, or tensor-special free path.
 
-Strings and aggregate nodes are immutable. Constructors clone borrowed children
-exactly once; accessors returning by-value `chelis_value` clone exactly once;
+Strings, `Option`, and aggregate nodes are immutable. Constructors clone borrowed
+children exactly once; accessors returning by-value `chelis_value` clone exactly once;
 finalizers release each stored child exactly once. Because child sets cannot be
 mutated after construction, a value cannot be inserted into itself or create a
 cycle through a later update.
 
 ## C5. Target opaque C ownership ABI
 
-The existing exact ABI remains [05-OP-31], [05-OP-33], and their registries
+The existing exact ABI remains [05-OP-31..33] and all three registries
 until Phase 1. The Phase 1 entry amendment must re-check the highest current
 `[05-OP-N]`, author the exact lifetime/heap semantics and identity registry,
-replace the tensor identities in [05-OP-31]/[05-OP-33], and update every
-numeric-capacity authority artifact atomically. Only then does implementation
-begin. That amendment must encode this selected target:
+replace affected carrier, container, and tensor identities throughout
+[05-OP-31..33], and update every numeric-capacity authority artifact atomically.
+Only then does implementation begin. That amendment must encode this selected
+target:
 
 - `chelis_tensor` and `chelis_tensor_write` are opaque;
 - `chelis_tensor_retain` and `chelis_tensor_release` are the sole public
   tensor lifetime operations;
+- every `Option<T>` uses an opaque `chelis_option *`; `chelis_option_retain`,
+  `chelis_option_release`, and checked constructor/accessor operations share
+  the tagged child clone/release authority, while `CHELIS_VALUE_OPTION` is its
+  only `chelis_value` representation;
 - `chelis_mapped_file_retain` and `chelis_mapped_file_release` put the existing
   mapped-file resource under the same lifetime authority;
 - `chelis_tensor_read_view` and `chelis_tensor_write_view` pair the pointer
@@ -323,7 +342,8 @@ begin. That amendment must encode this selected target:
 - `chelis_value_clone`, `chelis_value_release`, explicit `take`, and explicit
   `borrow` conversions carry heap ownership; and
 - `chelis_free`, `chelis_alloc_view`, public tensor fields,
-  `chelis_value_retain`, `chelis_value_from_*`, and
+  `chelis_option_scalar`, `chelis_option_value`, `chelis_value_retain`,
+  `chelis_value_from_*`, and
   `chelis_value_as_*` do not survive the cut.
 
 The cut is atomic across the runtime header, generated C/HIP, compiler API,
@@ -418,7 +438,7 @@ device reports `BLOCKED` and exits nonzero.
 The complete run covers:
 
 1. caller input bytes unchanged after every attempted reusable-input fusion;
-2. balanced tensor/string/List/tuple/dictionary/ADT/mapped-file ownership,
+2. balanced tensor/string/List/tuple/dictionary/ADT/Option/mapped-file ownership,
    including the exact size and nesting thresholds in [#543] and [#544];
 3. top-level aliases, argument/capture/fresh returns, mixed branch/match arms,
    fold-carried aliases, and repeated tensor insertion into aggregates;
@@ -433,6 +453,8 @@ The complete run covers:
 Required mutations include:
 
 - add a `HeapKind` without clone/release/finalize handling: compilation fails;
+- omit `ConcreteHostType::Option` or `CHELIS_VALUE_OPTION` from the closed
+  host/carrier/heap projection: compilation or the structural registry fails;
 - omit tensor cloning from `chelis_value_clone`: aggregate balance fails;
 - turn one branch clone into a borrow: verifier or runtime fixture fails;
 - permit `EntryBorrow` to mint `ReusableOwnedStorage`: C and HIP fixtures fail;
@@ -465,8 +487,9 @@ with a controlling spec stops the phase and amends the controlling document firs
 ## B2. Invariants at every phase boundary
 
 1. **One owner question, one answer.** Backend syntax never decides ownership.
-2. **No unchecked heap kind.** Every discovered heap variant is exhaustively
-   validated, cloned, and finalized.
+2. **No unchecked ownership carrier.** Every host variant is classified, and
+   every discovered heap variant is exhaustively validated, cloned, walked,
+   and finalized.
 3. **Negative parity.** Every positive ownership fixture has the corresponding
    rejected or balance-failure control.
 4. **No expected-failure laundering.** A receipt names an open issue and a
@@ -506,7 +529,8 @@ existing [#1222]/[#1344] regressions, and the open issue reproducers.
 - the typed fixture/command/mutation manifest;
 - a test-only runtime allocation ledger with deterministic owner/byte counts;
 - compile/link/run helpers for generated C and the hardware HIP path;
-- exact positive and negative fixtures for all nine children; and
+- exact positive and negative fixtures for all nine children;
+- scalar, heap-child, and recursively nested `Option` balance fixtures; and
 - an explicit external-prerequisite row for [#1339].
 
 The current failing children are represented as typed expected failures. Closed
@@ -536,6 +560,7 @@ exist.
 - the closed heap header/kind and checked strong-owner operations;
 - tensor descriptor/storage ownership and retained internal views;
 - exhaustive `chelis_value` clone/release over every heap kind;
+- canonical opaque `Option` nodes and deletion of both by-value option carriers;
 - mapped-file retain/release under the same heap header and finalizer dispatch;
 - immutable aggregate construction/access/finalization balance;
 - the opaque tensor, lifetime registry, and guarded tagged-data ABI;
@@ -615,7 +640,7 @@ exit zero and final line `COMPILED VALUE OWNERSHIP PHASE 3: PASS`.
 
 - deletion ratchets for old tensor fields/symbols, backend ownership analyses,
   wildcard/no-op release arms, and unverified backend entry points;
-- exact header/source and heap-kind/consumer bijections;
+- exact host/header/source/value-tag and heap-kind/consumer classifications;
 - zero expected-failure receipts in the ownership manifest;
 - the full example and embedding corpus under the allocation ledger; and
 - final exact-head red-team evidence across specs, IR, runtime, C, HIP, docs,
