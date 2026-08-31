@@ -1105,6 +1105,72 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("OP-31.*chelis_tensor")
 
+    def test_compiled_owner_atoms_are_frozen(self) -> None:
+        mutations = (
+            (
+                Path("spec/04-type-system.md"),
+                "exactly one logical owner",
+                "zero or more logical owners",
+                "04-LIN-3.*logical owner",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "externally supplied entry arguments\n> are borrowed",
+                "externally supplied entry arguments\n> transfer ownership",
+                "04-LIN-7.*entry arguments",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "compiler SHALL create an ordinary copy",
+                "compiler MAY consume the entry borrow directly",
+                "04-LIN-7.*ordinary copy",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "result owner may be the owner transferred\n> through an owned parameter",
+                "result ownership is inferred from the returned address",
+                "04-LIN-4.*transferred",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "storage reclaimable\n> before a following tail call or loop back-edge",
+                "reclaimable only after the function returns",
+                "04-LIN-8.*tail call",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "move may transfer the value to one explicit successor owner",
+                "move may leave both source and successor owners live",
+                "04-LIN-8.*successor owner",
+            ),
+        )
+        for relative, old, new, message in mutations:
+            with self.subTest(message=message):
+                path = self.root / relative
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_ffi_entry_borrow_cannot_become_an_owned_input(self) -> None:
+        self.replace(
+            Path("spec/11-ffi.md"),
+            "compiled entry borrows every input runtime value",
+            "compiled entry owns every input runtime value",
+        )
+        self.assert_contract_fails("FFI entry borrow")
+
+    def test_backend_cannot_accept_unverified_ownership(self) -> None:
+        self.replace(
+            Path("spec/design/compiled_value_ownership.md"),
+            "No arrow after verification may accept the pre-verification form",
+            "A backend may accept the pre-verification form as a fallback",
+        )
+        self.assert_contract_fails("verified backend boundary")
+
     def test_scalar_parse_nan_spelling_and_images_are_frozen(self) -> None:
         path = self.root / "spec/05-risc-primitives.md"
         mutations = (

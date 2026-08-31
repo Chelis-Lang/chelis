@@ -2005,6 +2005,32 @@ updates this section, `loud_unsupported.md` §I1, and
 
 ---
 
+## I2. Interlock with compiled value ownership ([#1286])
+
+This plan owns dtype identity, stored representation, numeric construction,
+and exact operation semantics. `compiled_value_ownership.md` owns who keeps a
+compiled value live, when that owner terminates, and what proof permits storage
+reuse. Neither can reconstruct the other's fact.
+
+The ownership design selects an opaque tagged carrier as its target, but this
+design-freeze change does not alter the exact current [05-OP-31]/[05-OP-33]
+surface or its census partition. Before implementation begins, Phase 1 must
+amend those numbered atoms, their normative registries, this document, the
+capability table, the generated rejection registry when required, every public
+header consumer, and the executable census in one atomic change. No old and
+new ABI may coexist. The old layout-visible tensor, `owns_data`,
+`chelis_free`, `chelis_alloc_view`, and ambiguous value-conversion identities
+are deletion targets at that cut, not grandfather rows or compatibility
+aliases.
+
+After the cut, a tagged carrier still preserves its exact dtype and stored
+bits; opacity changes construction authority, not [04-NUM] semantics.
+`ReusableOwnedStorage` may permit mutation only after ownership uniqueness,
+while capability cells and dtype rules continue to decide whether the
+operation exists and what it computes.
+
+---
+
 # Part IV - bookkeeping
 
 ## Issue map
@@ -2094,6 +2120,7 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#1281]: https://github.com/Chelis-Lang/chelis/issues/1281
 [#1282]: https://github.com/Chelis-Lang/chelis/issues/1282
 [#1284]: https://github.com/Chelis-Lang/chelis/issues/1284
+[#1286]: https://github.com/Chelis-Lang/chelis/issues/1286
 [#1294]: https://github.com/Chelis-Lang/chelis/issues/1294
 [#1295]: https://github.com/Chelis-Lang/chelis/issues/1295
 [#1296]: https://github.com/Chelis-Lang/chelis/issues/1296

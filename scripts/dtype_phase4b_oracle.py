@@ -28,7 +28,9 @@ CONTRACT_FILES = (
     "spec/05-risc-primitives.md",
     "spec/06-transformations.md",
     "spec/10-serialization.md",
+    "spec/11-ffi.md",
     "spec/design/capability_table.md",
+    "spec/design/compiled_value_ownership.md",
     "spec/design/dtype_semantics.md",
     "spec/design/loud_unsupported.md",
     "spec/design/spec_provenance.md",
@@ -55,7 +57,7 @@ FROZEN_FILE_DIGESTS = {
         "5e21649cf61087df1119040a971a60b5b499d40321d8647ce719e91b8571120a"
     ),
     "spec/04-type-system.md": (
-        "8a339bc1fd08a15136dabae321bb9d2594a560613b14eb3cfb0011049dd61300"
+        "9d2c22b1b756821d9ae4e16c1b953b0fad972bb4d70e791b213ae18dcfb3c4f1"
     ),
     "spec/05-risc-primitives.md": (
         "10d64930ae6d9b3316ac9b0f35892052b2e0b1475c50097dd63ca5c0ba61ef6a"
@@ -66,14 +68,20 @@ FROZEN_FILE_DIGESTS = {
     "spec/10-serialization.md": (
         "58f707d4e155d098962db224317061684b2c026816cab234ba026d560510a6da"
     ),
+    "spec/11-ffi.md": (
+        "6a7dd4847cacf38bb209e6e0be7bb38a6330919ce554e4f9384c5da36737b829"
+    ),
     "spec/design/capability_table.md": (
         "ac8e3f8761f8470774e093ac4c15b0f35e547e84209659eae4f0eaf8667ccc62"
     ),
+    "spec/design/compiled_value_ownership.md": (
+        "a580373fb4cb74fe38e2df9d36868b081996640c533982d5c0e4f5ceeb9ddf9d"
+    ),
     "spec/design/dtype_semantics.md": (
-        "0c07902dc58dda07a92030093b8123e3bd97b4e052172c86cdf2f65a27017314"
+        "659064d90b12f754eb6d86d3e0323ce903404e2e3ac8145a735f3590c9ed1dae"
     ),
     "spec/design/loud_unsupported.md": (
-        "2e375ee9d67fdf3229126c3e2278f0df8ca1e16046e75680095c870000f6f2c4"
+        "eb85be5512ab6127445c3d99260acc44358ef584fdae93950dfc0c4fc3ebe5d2"
     ),
     "spec/design/spec_provenance.md": (
         "6e206f634ce6062d56701f0dea0bf57bcbdca4fbf630a6c12264a904f14ea426"
@@ -339,6 +347,12 @@ EXPECTED_OP_MANIFESTS = {
 }
 
 FROZEN_ATOM_DIGESTS = {
+    "04-LIN-3": "52a61c21d53b8eaf194feebed4eee608f49bc30ebb0008fcc4d366fd93c3e649",
+    "04-LIN-4": "ab21050a84236c40236b7d8d53453767dc15839a44ae1fd012d33bed411fecf9",
+    "04-LIN-5": "2ad4e07442bf890a6fdd434362f50ab86215d6bd35c3d680e515de6fba5f9a29",
+    "04-LIN-6": "6cfcc780a3f5b9836507772cf7ef76ce231a0505f07e9a06b3c1ba55e0946d92",
+    "04-LIN-7": "6c1d8d77d251d245df6e1aa6e2138458048bdac31a407adfeba586302b0f3625",
+    "04-LIN-8": "3e0013311e070716145da9245eea66361c8cf91fc6914ad200b68790b41313eb",
     "04-NUM-2": "1aab318622574c9505ec5e85472b27bf333318657407c38b2311325962e19a96",
     "04-NUM-4": "685b5a3447a069f138877d357e65d1ab225e6b712e62b2a5bd38e1ef960636cb",
     "04-NUM-8": "8887537f42a0c8263569296700826dc7466a0a3bf05e5c854ffff2406f075028",
@@ -478,7 +492,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/remediation_roadmap.md",
         "| **v0.19.0 - grounded dtype storage break",
         "| **v0.20.0 - behavior-preserving permanent guards**",
-        "ebf68cc4acbcc38039b3eb75489cac731ba4cf769e087b3e4ced70da82b720b4",
+        "8491f8f73a847bcfb4216eaf426a173bc6f4dac2b9f002b679ae61d3395f7535",
     ),
     "status dtype row": (
         "docs/investigations/remediation_status_2026_08_04.md",
@@ -737,6 +751,8 @@ def validate_normative_contract(
     spec05 = docs["spec/05-risc-primitives.md"]
     spec06 = docs["spec/06-transformations.md"]
     spec10 = docs["spec/10-serialization.md"]
+    spec11 = docs["spec/11-ffi.md"]
+    ownership_design = docs["spec/design/compiled_value_ownership.md"]
     captured_risc = docs["openspec/specs/risc-primitives/spec.md"]
     captured_transformations = docs["openspec/specs/transformations/spec.md"]
 
@@ -825,6 +841,52 @@ def validate_normative_contract(
         violations,
     )
     require_all(
+        spec11,
+        (
+            ("compiled entry borrows every input runtime value", "FFI entry borrow"),
+            ("one owned runtime value for every owned result", "FFI owned result"),
+            (
+                "never\nreleases or mutates an input's storage",
+                "FFI input preservation",
+            ),
+            ("independently owned and may\nbe released in either order", "FFI root owners"),
+        ),
+        violations,
+    )
+    require_all(
+        ownership_design,
+        (
+            (
+                "No arrow after verification may accept the pre-verification form",
+                "verified backend boundary",
+            ),
+            (
+                "only `verify_ownership` constructs\n`VerifiedOwnershipProgram`",
+                "private verification constructor",
+            ),
+            (
+                "MappedFile` is included even though no current [#1286] child "
+                "names it",
+                "closed mapped-file kind",
+            ),
+            (
+                "derives a bijection across heap-backed `ConcreteHostType`",
+                "heap-kind universe bijection",
+            ),
+            (
+                "Only the planner constructs `ReusableOwnedStorage`",
+                "private reuse proof",
+            ),
+            (
+                "C, HIP, and Metal\nconsume the same proof-bearing plan",
+                "shared backend reuse proof",
+            ),
+            ("final manifest contains zero expected failures", "zero expected failures"),
+            ("`Part of #1286`", "honest issue linkage"),
+        ),
+        violations,
+    )
+    require_all(
         agents,
         (
             (
@@ -836,6 +898,73 @@ def validate_normative_contract(
     )
 
     spec04_blocks = atom_blocks(spec04)
+    require_atom(
+        spec04_blocks,
+        "04-LIN-3",
+        (
+            "exactly one logical owner",
+            "exactly one terminal consuming use or `Drop`",
+            "a borrow neither creates nor terminates an owner",
+        ),
+        violations,
+    )
+    require_atom(
+        spec04_blocks,
+        "04-LIN-4",
+        (
+            "owned function parameter is a consuming call edge",
+            "every return path",
+            "result owner may be the owner transferred through an owned parameter",
+            "borrowed argument or still-live capture",
+            "ordinary copy operation creates an independent owner",
+            "pointer equality, a source name, or a selected return arm",
+        ),
+        violations,
+    )
+    require_atom(
+        spec04_blocks,
+        "04-LIN-5",
+        (
+            "exactly one owned incoming value from every predecessor path",
+            "Fold and loop-carried owners are block parameters",
+            "Alias provenance SHALL NOT be overwritten",
+        ),
+        violations,
+    )
+    require_atom(
+        spec04_blocks,
+        "04-LIN-6",
+        (
+            "in manifest order",
+            "implicit terminal consuming use",
+            "participates in the same copy insertion",
+        ),
+        violations,
+    )
+    require_atom(
+        spec04_blocks,
+        "04-LIN-7",
+        (
+            "externally supplied entry arguments are borrowed",
+            "neither mutate nor release their storage",
+            "Before an entry value crosses an internal owned-parameter edge",
+            "compiler SHALL create an ordinary copy",
+            "independent owner for the caller",
+        ),
+        violations,
+    )
+    require_atom(
+        spec04_blocks,
+        "04-LIN-8",
+        (
+            "move may transfer the value to one explicit successor owner",
+            "consuming use with no successor owner",
+            "reclaimable before a following tail call or loop back-edge",
+            "proved unique",
+            "recursion depth alone is not such a reason",
+        ),
+        violations,
+    )
     require_atom(
         spec04_blocks,
         "04-NUM-2",

@@ -406,8 +406,11 @@ more C-side ownership risk exactly where the language is getting broader.
 
 **ABI cleanup decision:**
 
-- `chelis_tensor` stays layout-visible and stable because generated tensor code
+- The shipped Phase 3 runtime kept `chelis_tensor` layout-visible because generated tensor code
   dereferences tensor fields directly
+- chelis#1286 supersedes that historical choice: the next ownership cut makes the tensor
+  opaque and moves generated code to tagged read/unique-write access plus a shared
+  unique-storage proof; see `compiled_value_ownership.md`
 - `chelis_string`, `chelis_list`, `chelis_tuple`, and `chelis_dict` become opaque
   handles
 - generated host code must use runtime accessors and retain/release APIs rather than

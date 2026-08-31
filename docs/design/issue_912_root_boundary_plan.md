@@ -26,12 +26,22 @@ inference already returns rank-zero `tensor[f32]`; the associated change adds
 explicit positive/negative coverage and corrects fixture signatures. That
 evidence does not establish full per-dtype [05-OP-33] conformance.
 
+The root's ownership face is now decided normatively by
+`spec/04-type-system.md` [04-LIN-6]: each already-manifested root is an ordered
+terminal consuming use and participates in ordinary copy insertion. That rule
+does not change this plan's authority over root identity, topology, order, lane,
+or artifact routing. Its compiler/runtime implementation is owned by #1286 and
+`spec/design/compiled_value_ownership.md`; it is not part of the seventeen-cell
+delivery recorded above.
+
 ## Problem Statement
 
-Nothing authoritatively defines what a top-level root IS at the observation
-boundary. Five faces of one missing decision: silent root disappearance (#820,
-#947), naming inconsistency, artifact/lane/precision routing via fragile
-syntactic predicate, and dead-library-node symbolic-dim errors (#848).
+The original issue was that nothing authoritatively defined what a top-level
+root IS at the observation boundary. The delivered faces were silent root
+disappearance (#820, #947), naming, artifact/lane/precision routing, and
+dead-library-node symbolic-dim errors (#848). The later ownership audit exposed
+the fifth face: what observing an already-manifested owner consumes. [04-LIN-6]
+decides that face while #1286 owns its implementation.
 
 ## Verified Behavior (executed against `origin/main`)
 
@@ -139,6 +149,12 @@ for f32-declared tensors) is the eval-f64-intermediate vs C-f32-float gap —
     emit a partial executable. It returns [05-UNS-1], naming the root and the
     missing input, and leaves no artifact behind.
 
+19. **Observation is an ownership consume, not a borrow.** Manifest entries are
+    consumed in manifest order after this plan has fixed their identity and
+    routing. Aliased entries use ordinary copy insertion so every exported root
+    is independently owned; non-root owners drop. This ownership lowering is
+    downstream #1286 work and does not add a second root manifest.
+
 ## Coordination
 
 - **#733** (spec provenance): manifest machinery binds to atoms.
@@ -146,6 +162,8 @@ for f32-declared tensors) is the eval-f64-intermediate vs C-f32-float gap —
 - **#729** (dtype): precision upstream; #729 Phase 4 downstream.
 - **#732 Phase 2**: delivers `chelis_format_shortest`. This plan delivers the
   format specification and manifest ordering it targets.
+- **#1286**: consumes this plan's completed manifest and adds terminal root
+  ownership. It may not recompute root identity, topology, order, or routing.
 
 ## Empirical Measurement Results (Task 1, executed against origin/main)
 

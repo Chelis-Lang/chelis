@@ -56,6 +56,7 @@ issue that took it:
 | [#731] makes a silent `Type::Error` unconstructible by gating its constructor. The same move is unavailable for `Type::Unit`, which is an ordinary type with no constructor to gate (its own section C3 says so), and `DeepTag` exhaustiveness forces *a* disposition, not a correct one. Neither reaches the `Atom` / list-head domain | [#908] ([#885], [#887] Tier 2). [#887] Tier 1 stays with [#731], which does deliver *diagnosed*: the sub-issue link puts it under [#874], inside the [#731] subtree |
 | [#730] makes callable rejections loud and explicitly non-goals making them WORK ("that is [#729]'s or an op-owner's work"), so a C-host function-value ABI has no owner anywhere in the five | [#909] ([#866], [#867], [#879]). [#868] sits in [#883]'s subtree with the rest of the span work; section C2 remains [#730]'s contract, and the parent link records where the fix lands |
 | [#729] seals numeric construction behind private Rust constructors. It has no reach into the C runtime, where `chelis_tensor.data` is a `pub` untyped `*mut u8`; Phases 0-4 never touch it | [`runtime_representation.md`](runtime_representation.md) ([#893]) — one closed stored/arithmetic representation contract, exact capacity identity, generated host/device descriptors, module-private typed tensor views, typed lane loads/stores, and exact source/device probes. Its current children are [#899], [#889], [#1289], [#1345], [#1360], and [#1364]; [#888] is an explicitly linked Phase 1 interlock and [#1347] a landed zero-extent receipt. [#892]'s bool storage still rides [#729] directly |
+| [#893] seals and types the runtime tensor representation, but neither it nor [#729] owns compiled call/branch/fold/root ownership, aggregate lifetime balance, recursive last-use release, or one cross-backend reuse proof | [#1286] ([#543], [#544], [#1206], [#1214], [#1222], [#1344], [#1346], [#1352], [#1356]); [`compiled_value_ownership.md`](compiled_value_ownership.md) owns the phased structural repair and consumes [#893]'s seal in Phase 1 |
 | [#730] section C2 declares the diagnostic span normative and [#731] owns checker diagnostics, but neither has a phase that threads one: `Unsupported::with_span` has zero call sites and `CheckError::with_span_id` has none outside its own builder test | [#883] ([#868], [#886], [#916], [#1172]). [#730] section C2 keeps the span *contract*; the sub-issue links say where the *fix* lands |
 | [05-OBS-1..5] were each conditioned on a stored numeric value reaching an exit, so root existence, naming, order, and the `build` artifact obligation were outside [#732]. [05-OBS-6] authored the always-labelled envelope; [05-OBS-7..11] and the integrated #1079/#1082/#1083 delivery now define and consume the target-carrying manifested root boundary for eval, C, and HIP. This remains independent of the formatter plan | [#912] ([#820], [#862]), with the post-[#1003] integration/acceptance surface tracked at [#1023]. [#775]'s shape half was authored as [05-OBS-4] under [#732] |
 | no numeric plan touches `chelis reef conform`'s audit surface, which the four bump waves below keep regenerating gaps in | [#788] ([#814], [#825], [#845]) |
@@ -1063,3 +1064,13 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#1273]: https://github.com/Chelis-Lang/chelis/pull/1273
 [#1277]: https://github.com/Chelis-Lang/chelis/issues/1277
 [#1355]: https://github.com/Chelis-Lang/chelis/issues/1355
+[#543]: https://github.com/Chelis-Lang/chelis/issues/543
+[#544]: https://github.com/Chelis-Lang/chelis/issues/544
+[#1206]: https://github.com/Chelis-Lang/chelis/issues/1206
+[#1214]: https://github.com/Chelis-Lang/chelis/issues/1214
+[#1222]: https://github.com/Chelis-Lang/chelis/issues/1222
+[#1286]: https://github.com/Chelis-Lang/chelis/issues/1286
+[#1344]: https://github.com/Chelis-Lang/chelis/issues/1344
+[#1346]: https://github.com/Chelis-Lang/chelis/issues/1346
+[#1352]: https://github.com/Chelis-Lang/chelis/issues/1352
+[#1356]: https://github.com/Chelis-Lang/chelis/issues/1356
