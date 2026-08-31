@@ -488,6 +488,27 @@ A final-form exception may name a private owner function and reason, but a
 stale or unmatched entry fails and an issue citation does not authorize a raw
 path.
 
+The C-family portion is parsed by the shared `chelis-c-surface` crate rather
+than matched as declaration text. It tokenizes comments, quoted literals, and
+C++ raw strings; resolves transitive typedef and object-like macro aliases;
+normalizes qualifier placement; and classifies pointer and array declarators,
+pointer casts, and `sizeof(type)` operands from token structure. Rust emitters
+are parsed with `syn`, and their ordinary and raw string literals enter the
+same C-family parser with format holes represented as explicit dynamic type or
+name nodes. A complete C/HIP/Metal source containing carrier syntax must have
+closed lexical constructs and balanced delimiters. An emitted Rust fragment
+may leave only its outer C block open; each carrier candidate must remain
+locally complete, so splitting the type from a pointer or array declarator
+fails instead of disappearing.
+
+The parser and the public-header capacity census share lexical normalization,
+the closed arithmetic/non-arithmetic type vocabulary, alias expansion, and
+numeric classification. Known SDK handles and control enums occupy an exact
+external-nonnumeric set. An unknown arithmetic-shaped spelling, unresolved
+alias chain, malformed candidate, or recognized incomplete carrier fragment is
+a build failure, not an unclassified spelling that a later regular expression
+may or may not learn.
+
 The oracle self-validates with temporary mutations that are restored before it
 returns:
 
@@ -499,12 +520,17 @@ returns:
 - replace exact product arithmetic with saturation;
 - add a fixed-rank device field or narrow one metadata field;
 - handwrite a second ABI field list;
+- vary C qualifier placement, use an array declarator or pointer cast, hide a
+  carrier behind typedef/macro aliases, or add qualified `sizeof` arithmetic;
+- introduce an unknown C arithmetic spelling or split one emitted declarator
+  across Rust string fragments;
 - change a Bool8 lane spelling to `float`; and
 - make a Bool8 kernel store `1.0f` or omit the device failure flag.
 
 Every mutation must make the relevant phase command fail for the intended
-reason. A source scan is the completeness guard; compile-fail and execution
-tests prove its sanctioned replacements work.
+reason. The same command executes the parser's positive and negative contract
+suite. A source scan is the completeness guard; compile-fail and execution tests
+prove its sanctioned replacements work.
 
 ---
 
@@ -577,8 +603,9 @@ code-generation text test.
 manifest in C6; release-profile reproducers for exact capacity collision,
 count/byte overflow, zero extents, and malformed foreign metadata; one
 detection mutation for every source classifier, including a new direct field
-access and incomplete dtype registration; source-only and hardware probe
-harnesses; all landed receipts as positive controls.
+access and incomplete dtype registration; a fail-closed structural parser for
+C/HIP/Metal sources and Rust-emitted C-family fragments; source-only and
+hardware probe harnesses; all landed receipts as positive controls.
 
 The inventory records identities, not mutable line numbers. Each enumerator has
 a mutation that plants a new hit in a different file/configuration. HIP and

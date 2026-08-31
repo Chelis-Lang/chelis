@@ -2,8 +2,9 @@
 """Authoritative executable oracle for chelis#893 runtime representation phases.
 
 Phase 0 freezes a source-derived inventory, proves that its transition debt can
-only shrink, runs two controlled detector mutations, and executes the release
-reproducers and landed positive receipts. Later phases extend this same runner.
+only shrink, runs controlled detector mutations, and executes the parser
+contract, release reproducers, and landed positive receipts. Later phases
+extend this same runner.
 """
 
 from __future__ import annotations
@@ -13,8 +14,10 @@ from collections import defaultdict
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import cache
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
@@ -29,7 +32,7 @@ DTYPE_MUTATION_SOURCE = Path("crates/chelis-vocab/src/lib.rs")
 # This is the reviewed Phase 0 foundation digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FOUNDATION_SHA256 = "00a801ba11c0037068ca7809d2ca6c0fc473d1c542185badbcbeba62e1241196"
+FOUNDATION_SHA256 = "3aea9b3dc2a970f4df8481b24273f9b3d9fee2c2b0f7d8de3fb5fbe71281aa96"
 
 SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cu", ".h", ".metal", ".rs"}
 SOURCE_PREFIXES = (
@@ -52,11 +55,6 @@ DECLARATION_PATTERNS = (
     re.compile(r"^\s*macro_rules!\s+([A-Za-z_][A-Za-z0-9_]*)"),
 )
 
-C_ELEMENT_TYPE_RE = (
-    r"(?:float|double|half|__half|hip_bfloat16|bfloat|bool|"
-    r"u?int(?:8|16|32|64)_t|(?:signed\s+|unsigned\s+)?"
-    r"(?:char|short|int|long(?:\s+long)?))"
-)
 RUST_ELEMENT_TYPE_RE = (
     r"(?:f(?:16|32|64)|i(?:8|16|32|64)|u(?:8|16|32|64)|"
     r"half::(?:f16|bf16)|Bool8)"
@@ -64,10 +62,7 @@ RUST_ELEMENT_TYPE_RE = (
 DIRECT_DATA_RE = re.compile(r"(?:\.data\b|->data\b)")
 RAW_POINTER_RE = re.compile(
     rf"(?:as\s+\*(?:mut|const)\s+{RUST_ELEMENT_TYPE_RE}\b"
-    rf"|\*(?:mut|const)\s+{RUST_ELEMENT_TYPE_RE}\b"
-    rf"|\(\s*(?:const\s+)?{C_ELEMENT_TYPE_RE}\s*\*\s*\)"
-    rf"|\b(?:const\s+)?{C_ELEMENT_TYPE_RE}\s*\*+\s*"
-    r"(?:(?:__restrict__|restrict|CHELIS_RESTRICT)\s+)?[A-Za-z_][A-Za-z0-9_]*)"
+    rf"|\*(?:mut|const)\s+{RUST_ELEMENT_TYPE_RE}\b)"
 )
 FIXED_RANK_RE = re.compile(
     r"(?:\b[A-Z][A-Z0-9_]*MAX_DIM\b|\bMAX_DIM\b|\[(?:i32|i64|int|int32_t|int64_t)\s*;\s*(?:[2-9][0-9]*|[A-Z][A-Z0-9_]*)\])"
@@ -79,7 +74,6 @@ NARROW_METADATA_RE = re.compile(
 )
 WIDTH_ARITHMETIC_RE = re.compile(
     rf"(?:byte_width|dtype_size|elem(?:ent)?_size|byte_capacity|checked_mul|saturating_mul"
-    rf"|sizeof\s*\(\s*{C_ELEMENT_TYPE_RE}\s*\)"
     rf"|size_of\s*::\s*<\s*{RUST_ELEMENT_TYPE_RE}\s*>)"
 )
 BACKEND_SPELLING_RE = re.compile(
@@ -153,6 +147,7 @@ class MutationProbe:
     expected_kind: str
     path: Path
     mutate: Callable[[str], str]
+    expected_error: str = "unclassified inventory hit"
 
 
 def _tracked_source_paths(root: Path) -> tuple[Path, ...]:
@@ -179,6 +174,95 @@ def _tracked_source_paths(root: Path) -> tuple[Path, ...]:
 
 def _is_backend_source(path: str) -> bool:
     return BACKEND_SOURCE_RE.match(path) is not None
+
+
+def _is_c_surface_source(path: str) -> bool:
+    return (
+        path.startswith("crates/chelis-runtime/")
+        or path.startswith("crates/chelis-python/src/")
+        or _is_backend_source(path)
+    )
+
+
+@cache
+def _c_surface_binary() -> Path:
+    configured = os.environ.get("CHELIS_C_SURFACE_BINARY")
+    if configured:
+        binary = Path(configured)
+        if not binary.is_absolute():
+            binary = REPO_ROOT / binary
+        if not binary.is_file():
+            raise OracleFailure(
+                f"CHELIS_C_SURFACE_BINARY does not name a file: {binary}"
+            )
+        return binary
+
+    target = Path(os.environ.get("CARGO_TARGET_DIR", "target"))
+    if not target.is_absolute():
+        target = REPO_ROOT / target
+    binary = target / "debug" / (
+        "chelis-c-surface.exe" if os.name == "nt" else "chelis-c-surface"
+    )
+    completed = subprocess.run(
+        (
+            "cargo",
+            "build",
+            "-p",
+            "chelis-c-surface",
+            "--bin",
+            "chelis-c-surface",
+        ),
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0 or not binary.is_file():
+        raise OracleFailure(
+            "could not build the C-surface parser:\n"
+            + completed.stdout
+            + completed.stderr
+        )
+    return binary
+
+
+def c_surface_inventory_rows(
+    root: Path, paths: Sequence[Path]
+) -> tuple[tuple[str, str, str, str], ...]:
+    manifest = [path.as_posix() for path in paths if _is_c_surface_source(path.as_posix())]
+    completed = subprocess.run(
+        (str(_c_surface_binary()), "--repo", str(root)),
+        cwd=root,
+        input=json.dumps(manifest),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise OracleFailure(
+            "fail-closed C-surface parser rejected the source tree: "
+            + completed.stderr.strip()
+        )
+    try:
+        decoded = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise OracleFailure(f"C-surface parser emitted invalid JSON: {error}") from error
+    if not isinstance(decoded, list):
+        raise OracleFailure("C-surface parser output must be a JSON list")
+    rows = []
+    for row in decoded:
+        if not isinstance(row, dict) or set(row) != {
+            "path",
+            "kind",
+            "owner",
+            "signature",
+        }:
+            raise OracleFailure("C-surface parser emitted an invalid row")
+        values = tuple(row[key] for key in ("kind", "path", "owner", "signature"))
+        if not all(isinstance(value, str) for value in values):
+            raise OracleFailure("C-surface parser row fields must be strings")
+        rows.append(values)
+    return tuple(rows)
 
 
 def _owner_after_line(line: str, owner: str) -> str:
@@ -311,7 +395,12 @@ def _line_kinds(path: str, owner: str, line: str) -> tuple[str, ...]:
 
 def inventory_rows(root: Path) -> tuple[InventoryRow, ...]:
     candidates: list[tuple[str, str, str, str, int]] = []
-    for relative in _tracked_source_paths(root):
+    tracked_paths = _tracked_source_paths(root)
+    for kind, path, owner, signature in c_surface_inventory_rows(root, tracked_paths):
+        candidates.append(
+            (kind, path, owner, signature, _deletion_phase(kind, path, owner))
+        )
+    for relative in tracked_paths:
         path = relative.as_posix()
         owner = "module"
         source = (root / relative).read_text(encoding="utf-8")
@@ -529,7 +618,9 @@ def mutate_load_store_template(source: str) -> str:
     return _append_probe(
         source,
         "runtime_representation_phase0_load_store",
-        'let runtime_representation_phase0_load_store = format!("phase0 pointer");',
+        "fn runtime_representation_phase0_load_store() {\n"
+        '    let runtime_representation_phase0_load_store = format!("phase0 pointer");\n'
+        "}",
     )
 
 
@@ -580,6 +671,90 @@ def mutate_c_sizeof_width_authority(source: str) -> str:
         source,
         "runtime_representation_phase0_c_sizeof",
         "static size_t runtime_representation_phase0_c_sizeof(void) { return sizeof(float); }",
+    )
+
+
+def mutate_c_const_after_element_pointer(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_c_const_after_pointer",
+        "extern void runtime_representation_phase0_c_const_after_pointer("
+        "float const *payload);",
+    )
+
+
+def mutate_c_array_parameter(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_c_array_parameter",
+        "extern void runtime_representation_phase0_c_array_parameter(float payload[]);",
+    )
+
+
+def mutate_c_const_after_pointer_cast(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_c_const_after_cast",
+        "static float runtime_representation_phase0_c_const_after_cast(void *payload) "
+        "{ return *((float const *)payload); }",
+    )
+
+
+def mutate_c_qualified_sizeof_width_authority(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_c_qualified_sizeof",
+        "static size_t runtime_representation_phase0_c_qualified_sizeof(void) "
+        "{ return sizeof(const float); }",
+    )
+
+
+def mutate_c_typedef_alias_pointer(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_c_typedef_pointer",
+        "typedef float runtime_representation_phase0_element;\n"
+        "extern void runtime_representation_phase0_c_typedef_pointer("
+        "runtime_representation_phase0_element *payload);",
+    )
+
+
+def mutate_c_macro_alias_pointer(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_c_macro_pointer",
+        "#define RUNTIME_REPRESENTATION_PHASE0_ELEMENT float\n"
+        "extern void runtime_representation_phase0_c_macro_pointer("
+        "RUNTIME_REPRESENTATION_PHASE0_ELEMENT *payload);",
+    )
+
+
+def mutate_c_unknown_arithmetic_pointer(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_c_unknown_pointer",
+        "extern void runtime_representation_phase0_c_unknown_pointer("
+        "_Float16 *payload);",
+    )
+
+
+def mutate_rust_dynamic_c_pointer(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_rust_dynamic_pointer",
+        "fn runtime_representation_phase0_rust_dynamic_pointer(ty: &str) -> String {\n"
+        "    format!(r#\"extern void dynamic({ty} const *payload);\"#)\n"
+        "}",
+    )
+
+
+def mutate_rust_split_c_pointer(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_rust_split_pointer",
+        "fn runtime_representation_phase0_rust_split_pointer(ty: &str) -> String {\n"
+        "    format!(\"{ty}\") + \" *payload\"\n"
+        "}",
     )
 
 
@@ -646,6 +821,53 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
             Path("crates/chelis-backend-metal/runtime/chelis_metal_runtime.h"),
             mutate_c_sizeof_width_authority,
         ),
+        MutationProbe(
+            "raw-element-pointer",
+            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
+            mutate_c_const_after_element_pointer,
+        ),
+        MutationProbe(
+            "raw-element-pointer",
+            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
+            mutate_c_array_parameter,
+        ),
+        MutationProbe(
+            "raw-element-pointer",
+            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
+            mutate_c_const_after_pointer_cast,
+        ),
+        MutationProbe(
+            "width-arithmetic",
+            Path("crates/chelis-backend-metal/runtime/chelis_metal_runtime.h"),
+            mutate_c_qualified_sizeof_width_authority,
+        ),
+        MutationProbe(
+            "raw-element-pointer",
+            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
+            mutate_c_typedef_alias_pointer,
+        ),
+        MutationProbe(
+            "raw-element-pointer",
+            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
+            mutate_c_macro_alias_pointer,
+        ),
+        MutationProbe(
+            "raw-element-pointer",
+            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
+            mutate_c_unknown_arithmetic_pointer,
+            "fail-closed C-surface parser rejected",
+        ),
+        MutationProbe(
+            "raw-element-pointer",
+            Path("crates/chelis-backend-hip/src/kernels.rs"),
+            mutate_rust_dynamic_c_pointer,
+        ),
+        MutationProbe(
+            "raw-element-pointer",
+            Path("crates/chelis-backend-hip/src/kernels.rs"),
+            mutate_rust_split_c_pointer,
+            "fail-closed C-surface parser rejected",
+        ),
     )
 
 
@@ -677,7 +899,10 @@ def _assert_mutation_sources_clean() -> None:
 
 
 def _expect_unclassified_mutation(
-    path: Path, mutate: Callable[[str], str], expected_kind: str
+    path: Path,
+    mutate: Callable[[str], str],
+    expected_kind: str,
+    expected_error: str,
 ) -> None:
     baseline = load_baseline()
     with temporary_mutation(path, mutate):
@@ -685,7 +910,10 @@ def _expect_unclassified_mutation(
             validate_baseline(baseline, inventory_rows(REPO_ROOT))
         except OracleFailure as error:
             message = str(error)
-            if "unclassified inventory hit" not in message or f"kind={expected_kind}|" not in message:
+            if expected_error not in message or (
+                expected_error == "unclassified inventory hit"
+                and f"kind={expected_kind}|" not in message
+            ):
                 raise OracleFailure(
                     f"{expected_kind} mutation failed for the wrong reason: {message}"
                 ) from error
@@ -700,11 +928,24 @@ def run_phase0_mutations() -> None:
             REPO_ROOT / probe.path,
             probe.mutate,
             probe.expected_kind,
+            probe.expected_error,
         )
 
 
 def phase0_legs() -> tuple[OracleLeg, ...]:
     return (
+        OracleLeg(
+            "fail-closed C-surface parser contract",
+            (
+                "cargo",
+                "nextest",
+                "run",
+                "-p",
+                "chelis-c-surface",
+                "--test",
+                "c_surface",
+            ),
+        ),
         OracleLeg(
             "capacity collision release reproducer",
             (

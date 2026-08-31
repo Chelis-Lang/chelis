@@ -3102,27 +3102,7 @@ fn assert_context_invariant_headers(include_dir: &Path, roots: &[&str]) {
 }
 
 fn strip_c_comments(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
-            i += 2;
-            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                i += 1;
-            }
-            i = (i + 2).min(bytes.len());
-            out.push(' ');
-        } else if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
-            while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
-            }
-        } else {
-            out.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-    out
+    chelis_c_surface::strip_c_comments(text)
 }
 
 fn normalize_ws(s: &str) -> String {
@@ -3132,72 +3112,7 @@ fn normalize_ws(s: &str) -> String {
 /// Tokenize the declaration subset of C used by published headers. Identity
 /// is the token sequence, never a preprocessor's incidental whitespace.
 fn canonical_c_tokens(s: &str) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    let mut tokens = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        if c.is_whitespace() {
-            i += 1;
-            continue;
-        }
-        if c == '"' || c == '\'' {
-            let quote = c;
-            let mut token = String::new();
-            token.push(c);
-            i += 1;
-            while i < chars.len() {
-                let next = chars[i];
-                token.push(next);
-                i += 1;
-                if next == '\\' && i < chars.len() {
-                    token.push(chars[i]);
-                    i += 1;
-                } else if next == quote {
-                    break;
-                }
-            }
-            tokens.push(token);
-            continue;
-        }
-        if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
-            let mut token = String::new();
-            while i < chars.len()
-                && (chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '.')
-            {
-                token.push(chars[i]);
-                i += 1;
-            }
-            // C23 makes `bool` a keyword; older preprocessors expand the
-            // <stdbool.h> macro to `_Bool`. They are the same ABI type and
-            // must not produce platform-dependent census identities.
-            tokens.push(if token == "bool" {
-                "_Bool".to_string()
-            } else {
-                token
-            });
-            continue;
-        }
-        if i + 2 < chars.len() && chars[i..i + 3] == ['.', '.', '.'] {
-            tokens.push("...".to_string());
-            i += 3;
-            continue;
-        }
-        if i + 1 < chars.len() {
-            let pair = [c, chars[i + 1]].iter().collect::<String>();
-            if matches!(
-                pair.as_str(),
-                "->" | "++" | "--" | "<<" | ">>" | "<=" | ">=" | "==" | "!=" | "&&" | "||"
-            ) {
-                tokens.push(pair);
-                i += 2;
-                continue;
-            }
-        }
-        tokens.push(c.to_string());
-        i += 1;
-    }
-    tokens.join(" ")
+    chelis_c_surface::canonical_c_tokens(s)
 }
 
 fn canonical_inventory_id(id: &str) -> String {
@@ -3354,27 +3269,7 @@ fn active_legacy_permanent_plain_sample() -> &'static FrozenDispositionRow {
 /// conservative numeric candidates too; the three existing bare-int
 /// control/layout exports are removed only by the exact reviewed seam-disposition
 /// intersection in `apply_exact_integer_plumbing_exemption`.
-const NUMERIC_C_TYPES: &[&str] = &[
-    "double",
-    "float",
-    "int",
-    "short",
-    "long",
-    "signed",
-    "unsigned",
-    "size_t",
-    "ptrdiff_t",
-    "intptr_t",
-    "uintptr_t",
-    "int64_t",
-    "int32_t",
-    "int16_t",
-    "int8_t",
-    "uint64_t",
-    "uint32_t",
-    "uint16_t",
-    "uint8_t",
-];
+const NUMERIC_C_TYPES: &[&str] = chelis_c_surface::NUMERIC_C_TYPES;
 
 /// The FROZEN set of type words a published declaration may use that carry
 /// no arithmetic width: storage/qualifier noise, the aggregate keywords, and
@@ -3392,27 +3287,7 @@ const NUMERIC_C_TYPES: &[&str] = &[
 /// words that are known not to carry a dtype. A new arithmetic spelling
 /// then arrives as a build failure naming the unknown word, which is the
 /// same footing an unresolvable typedef already has.
-const NON_NUMERIC_C_TYPE_WORDS: &[&str] = &[
-    "_Bool",
-    "_Noreturn",
-    "bool",
-    "char",
-    "const",
-    "enum",
-    "extern",
-    "inline",
-    "register",
-    "restrict",
-    "static",
-    "struct",
-    "typedef",
-    "union",
-    "void",
-    "volatile",
-    "wchar_t",
-    "__restrict",
-    "__restrict__",
-];
+const NON_NUMERIC_C_TYPE_WORDS: &[&str] = chelis_c_surface::NON_NUMERIC_C_TYPE_WORDS;
 
 /// The flags that make a row a capacity SEAM (subject to the grandfather
 /// freeze). `numeric-op` is classification, not a seam.
@@ -3556,55 +3431,12 @@ fn function_pointer_typedef(stmt: &str) -> Option<(String, Vec<String>)> {
 
 /// Expand typedef aliases (transitively, depth-capped) so classification
 /// operates on resolved spellings.
-fn resolve_words(words: Vec<String>, typedefs: &BTreeMap<String, Vec<String>>) -> Vec<String> {
-    let mut out = words;
-    for _ in 0..8 {
-        let mut changed = false;
-        let mut next = Vec::with_capacity(out.len());
-        for w in &out {
-            if let Some(target) = typedefs.get(w) {
-                next.extend(target.iter().cloned());
-                changed = true;
-            } else {
-                next.push(w.clone());
-            }
-        }
-        out = next;
-        if !changed {
-            break;
-        }
-    }
-    out
-}
-
 /// Classification shapes the enforcement rule a row falls under; the
 /// citation requirement applies to EVERY inventory change, so renaming a
 /// parameter to dodge a flag dodges nothing, and typedef/macro spellings
 /// are resolved before classifying.
 fn classify(sig: &str, typedefs: &BTreeMap<String, Vec<String>>) -> Vec<String> {
-    let mut flags = Vec::new();
-    let words: Vec<String> = sig
-        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .filter(|w| !w.is_empty())
-        .map(|w| w.to_string())
-        .collect();
-    let words = resolve_words(words, typedefs);
-    if words.iter().any(|w| w == "double" || w == "float") {
-        flags.push("float-carrier".to_string());
-    }
-    // A raw `int` (never int8_t/int32_t/uint32_t, which are exact-width
-    // spellings) adjacent to an identifier mentioning dtype: the
-    // `(value, int dtype)` seam shape.
-    for pair in words.windows(2) {
-        if pair[0] == "int" && pair[1].contains("dtype") {
-            flags.push("raw-dtype-int".to_string());
-            break;
-        }
-    }
-    if words.iter().any(|w| NUMERIC_C_TYPES.contains(&w.as_str())) {
-        flags.push("numeric-op".to_string());
-    }
-    flags
+    chelis_c_surface::classify(sig, typedefs)
 }
 
 fn apply_exact_integer_plumbing_exemption(id: &str, flags: &mut Vec<String>) {

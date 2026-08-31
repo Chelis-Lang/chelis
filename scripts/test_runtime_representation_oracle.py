@@ -112,6 +112,48 @@ typedef struct { void *data; const int64_t *shape; const int64_t *strides;
             {"NewlyHandwrittenMirror", "second_c_abi_list"},
         )
 
+    def test_shared_c_parser_covers_the_reported_spelling_variants(self) -> None:
+        source = """
+extern void const_after(float const *payload);
+extern void array_parameter(float payload[]);
+static float const_after_cast(void *payload) {
+    return *((float const *)payload);
+}
+extern void multiline(const volatile double * restrict payload);
+static size_t qualified_sizeof(void) { return sizeof(const float); }
+"""
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            relative = Path("crates/chelis-runtime/include/fixture.h")
+            path = root / relative
+            path.parent.mkdir(parents=True)
+            path.write_text(source, encoding="utf-8")
+            rows = oracle.c_surface_inventory_rows(root, (relative,))
+        self.assertEqual(
+            sum(kind == "raw-element-pointer" for kind, *_ in rows),
+            4,
+        )
+        self.assertEqual(
+            sum(kind == "width-arithmetic" for kind, *_ in rows),
+            1,
+        )
+
+    def test_shared_c_parser_fails_closed_for_unknown_arithmetic_type(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            root = Path(raw_dir)
+            relative = Path("crates/chelis-runtime/include/fixture.h")
+            path = root / relative
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                "extern void unknown(_Float16 *payload);\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                oracle.OracleFailure,
+                "fail-closed C-surface parser rejected",
+            ):
+                oracle.c_surface_inventory_rows(root, (relative,))
+
     def test_committed_debt_is_exact_and_shrink_only(self) -> None:
         baseline = oracle.load_baseline()
         rows = oracle.inventory_rows(oracle.REPO_ROOT)
@@ -179,19 +221,42 @@ class MutationContractTests(unittest.TestCase):
             probes,
         )
 
-    def test_every_classifier_mutation_is_rejected_as_unclassified(self) -> None:
+    def test_structural_c_parser_edges_have_controlled_mutations(self) -> None:
+        names = {probe.mutate.__name__ for probe in oracle.phase0_mutation_probes()}
+        self.assertTrue(
+            {
+                "mutate_c_const_after_element_pointer",
+                "mutate_c_array_parameter",
+                "mutate_c_const_after_pointer_cast",
+                "mutate_c_qualified_sizeof_width_authority",
+                "mutate_c_typedef_alias_pointer",
+                "mutate_c_macro_alias_pointer",
+                "mutate_c_unknown_arithmetic_pointer",
+                "mutate_rust_dynamic_c_pointer",
+                "mutate_rust_split_c_pointer",
+            }
+            <= names
+        )
+
+    def test_every_classifier_mutation_is_rejected_for_its_intended_reason(self) -> None:
         baseline = oracle.load_baseline()
         for probe in oracle.phase0_mutation_probes():
             with self.subTest(kind=probe.expected_kind):
                 path = oracle.REPO_ROOT / probe.path
                 original = path.read_bytes()
                 with oracle.temporary_mutation(path, probe.mutate):
-                    rows = oracle.inventory_rows(oracle.REPO_ROOT)
-                    with self.assertRaisesRegex(
-                        oracle.OracleFailure,
-                        rf"unclassified inventory hit: .*kind={probe.expected_kind}\|",
-                    ):
-                        oracle.validate_baseline(baseline, rows)
+                    try:
+                        oracle.validate_baseline(
+                            baseline,
+                            oracle.inventory_rows(oracle.REPO_ROOT),
+                        )
+                    except oracle.OracleFailure as error:
+                        message = str(error)
+                        self.assertIn(probe.expected_error, message)
+                        if probe.expected_error == "unclassified inventory hit":
+                            self.assertIn(f"kind={probe.expected_kind}|", message)
+                    else:
+                        self.fail(f"{probe.mutate.__name__} was silently accepted")
                 self.assertEqual(path.read_bytes(), original)
 
     def test_direct_access_mutation_creates_one_unclassified_identity(self) -> None:
@@ -231,14 +296,17 @@ class PhaseZeroManifestTests(unittest.TestCase):
         self.assertEqual(
             names,
             [
+                "fail-closed C-surface parser contract",
                 "capacity collision release reproducer",
                 "count byte zero and foreign metadata release reproducers",
                 "landed representation receipts",
             ],
         )
-        for leg in oracle.phase0_legs():
+        parser_leg, *release_legs = oracle.phase0_legs()
+        self.assertEqual(parser_leg.argv[-2:], ("--test", "c_surface"))
+        for leg in release_legs:
             self.assertIn("--release", leg.argv, leg.name)
-        capacity_leg = oracle.phase0_legs()[0]
+        capacity_leg = release_legs[0]
         self.assertIn("--test", capacity_leg.argv)
         self.assertIn("issue_888_capacity_collision", capacity_leg.argv)
 

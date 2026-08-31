@@ -55,6 +55,7 @@ smt = ["chelis-prove/smt", "chelis-tide/smt"]
 [dev-dependencies]
 assert_cmd = "2"
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
+chelis-c-surface = { path = "../chelis-c-surface" }
 chelis-shell.workspace = true
 # `reef_setup.rs` synthesizes a chelis toolchain release tarball
 # (`chelis-vX.Y.Z-<slug>.tar.gz`, gzip) so the auto-install-via-chelisup path
