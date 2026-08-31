@@ -475,10 +475,7 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                         }
                     }
                 }
-                if param_kinds
-                    .iter()
-                    .any(|kind| *kind == NominalParamKind::Dimension)
-                {
+                if param_kinds.contains(&NominalParamKind::Dimension) {
                     Ok(Type::KindedAdt(name.to_string(), args))
                 } else {
                     Ok(Type::Adt(

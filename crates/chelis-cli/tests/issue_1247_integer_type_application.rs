@@ -296,13 +296,18 @@ def first(frame: Frame[2]) -> f32 = index(to_list(frame.items), 0)
 
 #[test]
 fn matching_dimension_application_evaluates_and_c_backend_runs() {
-    let source = format!(
-        "{COLUMN_DECL}def total(value: Column[2]) -> f32 = match value with {{ | FloatCol(items) => add(index(to_list(items), 0), index(to_list(items), 1)) }}\ndef main() -> f32 = total(FloatCol(to_tensor([cast(1.0, f32), cast(2.0, f32)])))\nout = print(main())\n"
-    );
+    let source = "\
+type Column[n] =
+  | Column { items: tensor[n, f32] }
+type Pair[n] = Column[n]
+def total(value: Pair[2]) -> f32 = add(index(to_list(value.items), 0), index(to_list(value.items), 1))
+def main() -> f32 = total(Column { items: to_tensor([cast(1.0, f32), cast(2.0, f32)]) })
+out = print(main())
+";
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("positive.ch");
     let out_dir = dir.path().join("out");
-    write_file(&path, &source);
+    write_file(&path, source);
     Command::cargo_bin("chelis")
         .expect("chelis binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")

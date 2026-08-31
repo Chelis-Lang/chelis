@@ -29,9 +29,10 @@ pub struct AdtDef {
     /// Checker-owned kind for each nominal parameter, in source order.
     #[serde(default)]
     pub param_kinds: Vec<NominalParamKind>,
-    /// The fresh `TypeVar`s allocated for `type_params` at
-    /// registration, in the same order. Variant field types reference
-    /// these vars, so storing them lets call sites instantiate a
+    /// The fresh `TypeVar`s allocated for the type-kinded subset of
+    /// `type_params`, in source order with dimension-kinded parameters
+    /// omitted. Variant field types reference these vars, so storing them
+    /// lets call sites instantiate a
     /// SPECIFIC ADT's constructor without going through the
     /// name-keyed env (where same-named constructors from colliding
     /// ADTs overwrite each other, chelis#148).

@@ -596,8 +596,8 @@ fn type_ingress_rejects_every_non_type_carrier_and_role_swap() {
         ),
         ("reference rank in type role", "(t-ref {} (d-rank {} r0))"),
         (
-            "adt dimension in type-argument role",
-            "(t-adt {} List (d-lit {} 1))",
+            "adt rank in nominal-argument role",
+            "(t-adt {} List (d-rank {} r0))",
         ),
         (
             "adt non-name constructor role",

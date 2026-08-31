@@ -208,16 +208,37 @@ def identity[n, a](column: Column[n, a]) -> Column[n, a] = column
         .adt_registry()
         .lookup("Column")
         .expect("checked registry must retain dimensional Column");
-    let Type::Tensor(_, TensorPrec::Var(stored_precision)) = &column.variants[0].fields[0].1 else {
+    let Type::Tensor(stored_dims, TensorPrec::Var(stored_precision)) =
+        &column.variants[0].fields[0].1
+    else {
         panic!("Column must retain its checker-owned polymorphic tensor field");
     };
     assert_eq!(
-        *stored_precision, column.param_vars[1],
+        column.param_kinds,
+        vec![NominalParamKind::Dimension, NominalParamKind::Type],
+        "the registry must preserve each source parameter's checker-owned kind"
+    );
+    let NominalArg::Dimension(Dim::Var(parameter_dimension)) = &column.param_args[0] else {
+        panic!("Column's first parameter must retain its dimension variable");
+    };
+    let NominalArg::Type(Type::Var(parameter_precision)) = &column.param_args[1] else {
+        panic!("Column's second parameter must retain its type variable");
+    };
+    let Some(Dim::Var(field_dimension)) = stored_dims.first() else {
+        panic!("Column's field must retain its parameterized dimension");
+    };
+    assert_eq!(
+        stored_precision, parameter_precision,
         "dtype parameter is the tensor's stored precision"
     );
-    assert_ne!(
-        *stored_precision, column.param_vars[0],
-        "dimension parameter must not be reconstructed as a stored dtype"
+    assert_eq!(
+        field_dimension, parameter_dimension,
+        "dimension parameter is the tensor's stored extent"
+    );
+    assert_eq!(
+        column.param_vars,
+        vec![*parameter_precision],
+        "dimension parameters must not be reconstructed as stored dtypes"
     );
 }
 

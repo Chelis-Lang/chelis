@@ -1011,6 +1011,7 @@ fn collect_nominal_kind_evidence(
     owner: &str,
     existing_headers: &TypeResolutionEnv,
 ) {
+    stack_guard!("collect_nominal_kind_evidence", expr);
     let Some((tag, _, kids)) = stamped_parts(expr) else {
         return;
     };
@@ -2381,11 +2382,15 @@ pub(super) fn infer_top_level(
                 unify_result.is_ok() && body_return_collapsed && body_has_unbound_diagnostic;
             let unrecovered_initial_failure = initial_failed && !recovered_by_relaxed_retry;
             if unrecovered_initial_failure || masked_by_error {
-                let mismatch_kind = unify_result
-                    .as_ref()
-                    .err()
-                    .map(|error| check_error_kind_from_type_error_kind(&error.kind))
-                    .unwrap_or(CheckErrorKind::TypeMismatch);
+                // Declared-signature mismatches remain the established
+                // TypeMismatch contract except when nominal-dimension
+                // enforcement proves a concrete extent disagreement.  The
+                // latter is the one structurally distinct case introduced by
+                // [04-ADT-4].
+                let mismatch_kind = match unify_result.as_ref().err().map(|error| &error.kind) {
+                    Some(TypeErrorKind::DimensionMismatch) => CheckErrorKind::DimensionMismatch,
+                    _ => CheckErrorKind::TypeMismatch,
+                };
                 // RT-2 fixup B1: when the mismatch is a tensor
                 // precision mismatch (notably a `reduce_sum` body
                 // whose result precision differs from the declared

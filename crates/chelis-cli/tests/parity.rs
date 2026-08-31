@@ -529,6 +529,11 @@ fn parity_opaque_invariants_simplex_library_only() {
 }
 
 #[test]
+fn parity_kinded_nominal_dimensions() {
+    drive_parity(&examples_root().join("kinded_nominal_dimensions.ch"), true);
+}
+
+#[test]
 fn parity_rank_poly_borrow_library_only() {
     drive_parity(&examples_root().join("rank_poly_borrow.ch"), false);
 }
@@ -550,6 +555,7 @@ fn parity_corpus_is_complete() {
         "hello_tensor.ch",
         "induction_bond.ch",
         "iter_foundation.ch",
+        "kinded_nominal_dimensions.ch",
         "linreg.ch",
         "list_foundation.ch",
         "mnist.ch",

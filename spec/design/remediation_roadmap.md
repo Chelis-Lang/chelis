@@ -33,17 +33,20 @@ Tracking Conventions owns the one-tracker-per-class rule now.
 
 ### #731 work after the original four phases
 
-[#731]'s Phases 0-3 and PP1-PP4 are delivered. Work discovered afterwards is
+[#731]'s Phases 0-3 and PP1-PP4 are delivered. [#1247]'s kinded nominal
+application residue is separately delivered by PR [#1406], together with its
+[#1258]/[#1024] resugaring interlock. Work discovered afterwards is
 recorded as independently landable PP items or separate residue; it does not
 extend the historical wave DAG with a fifth phase. PP4 was delivered by PR
 [#1402]: exact module scope at the package checker and batched-test boundaries.
-The remaining rows stay separately owned residue; this delivery does not select
-or absorb a successor slice.
+The remaining rows stay separately owned residue; neither delivery absorbs a
+successor mechanism.
 
 | disposition | issues | coordination record |
 |---|---|---|
 | PP4 (delivered by PR [#1402]) | [#1264], plus the raw-flat-scope residue explicitly left by closed [#1261]/PR [#1273] | One scope-identity rule: a unique foreign terminal name is never an import, and independently rewritten test modules are combined only after they carry exact internal names. PP4 does not close [#1261] again. |
-| Later #731 residue, not PP4 | [#874]/[#887] Tier 1; [#1125]/[#1134]; [#1076]/[#672]; [#1247] | Keep these as separate mechanisms: tag-keyed vacuity, stamped-ingress parity, compiler-provided-name precedence, and integer type-application enforcement respectively. A PP4 repair must not absorb any of their contracts or tests. |
+| Kinded nominal-application residue (delivered by PR [#1406], not PP4) | [#1247], with [#1258]/[#1024] | Checker-owned fixed-point parameter kinds; structural `d-lit` nominal arguments; exact kind and dimension enforcement across check, test, round-trip, eval, and build. This does not extend the PP sequence or absorb another residue mechanism. |
+| Later #731 residue, not PP4 | [#874]/[#887] Tier 1; [#1125]/[#1134]; [#1076]/[#672] | Keep these as separate mechanisms: tag-keyed vacuity, stamped-ingress parity, and compiler-provided-name precedence respectively. Neither PP4 nor the kinded nominal-application repair may absorb their contracts or tests. |
 | Owned or dispositioned elsewhere | [#850], [#609], [#1355] | [#850]'s checker half is delivered and its native-emission half remains [#730]/[#763] work. [#609] is already Slice A of [#1277]/`runtime_extents.md`, so duplicating it under PP4 would create two owners. [#1355] is the same diagonal-result extent family but is not yet in that design's issue map; an ownership amendment belongs there, not in PP4. |
 | Closed bookkeeping | [#1129] | Closed 2026-08-27 after its landing inventory was reconciled; it is not open checker-totality residue and creates no design deliverable. |
 
@@ -1060,10 +1063,12 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#1129]: https://github.com/Chelis-Lang/chelis/issues/1129
 [#1134]: https://github.com/Chelis-Lang/chelis/issues/1134
 [#1247]: https://github.com/Chelis-Lang/chelis/issues/1247
+[#1258]: https://github.com/Chelis-Lang/chelis/issues/1258
 [#1261]: https://github.com/Chelis-Lang/chelis/issues/1261
 [#1264]: https://github.com/Chelis-Lang/chelis/issues/1264
 [#1273]: https://github.com/Chelis-Lang/chelis/pull/1273
 [#1402]: https://github.com/Chelis-Lang/chelis/pull/1402
+[#1406]: https://github.com/Chelis-Lang/chelis/pull/1406
 [#1277]: https://github.com/Chelis-Lang/chelis/issues/1277
 [#1355]: https://github.com/Chelis-Lang/chelis/issues/1355
 [#1362]: https://github.com/Chelis-Lang/chelis/issues/1362

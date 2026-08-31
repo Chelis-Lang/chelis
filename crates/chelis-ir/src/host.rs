@@ -4578,11 +4578,7 @@ fn lower_host_expr_kind(
                 .and_then(symbol_name)
                 .ok_or_else(|| host_expr_lowering_error(expr, "a `var` node has no symbol"))?
                 .to_string();
-            let ty = expr_type(expr)
-                .filter(|ty| !ty.is_unresolved())
-                .or_else(|| scope.get(&name).cloned())
-                .or_else(|| lookup_declared_host_type(program, &name))
-                .unwrap_or_else(fresh_host_inference);
+            let ty = expr_host_type(expr, program, scope);
             if name == "Nil" {
                 return Ok(HostExpr::new(HostExprKind::List(
                     Vec::new(),
@@ -10967,10 +10963,98 @@ fn expr_host_type(
 ) -> HostTypeTerm {
     let raw = expr_host_type_raw(expr, program, scope);
     let subst = active_type_subst();
-    if subst.is_empty() {
-        return raw;
+    let specialized = if subst.is_empty() {
+        raw
+    } else {
+        apply_host_type_subst(&raw, &subst)
+    };
+    expand_host_type_aliases(program, specialized)
+}
+
+/// Expand checker-validated aliases before a host type drives layout,
+/// constructor, field, or match decisions.
+///
+/// The checker keeps an authored alias name in expression metadata even
+/// though aliases are semantically transparent. Host lowering previously
+/// happened to work only when the type was a direct ADT. In particular,
+/// `type Pair[n] = Column[n]` left an access through `Pair[2]` looking for a
+/// nonexistent `Pair` constructor layout. Resolve the alias at the single
+/// host-type boundary so every downstream consumer sees `Column[Unit]`, with
+/// the nominal dimension retained only as the existing private erased-layout
+/// witness.
+fn expand_host_type_aliases(program: &CheckedProgram, ty: HostTypeTerm) -> HostTypeTerm {
+    fn expand(
+        program: &CheckedProgram,
+        ty: HostTypeTerm,
+        visiting: &mut HashSet<String>,
+    ) -> HostTypeTerm {
+        match ty {
+            HostTypeTerm::Adt(name, args) => {
+                let args = args
+                    .into_iter()
+                    .map(|argument| expand(program, argument, visiting))
+                    .collect::<Vec<_>>();
+                let Some(alias) = program.adt_registry().resolve_alias(&name) else {
+                    return HostTypeTerm::Adt(name, args);
+                };
+                if alias.params.len() != args.len() || !visiting.insert(name.clone()) {
+                    return HostTypeTerm::Adt(name, args);
+                }
+                let checker_parameter_names = alias
+                    .param_args
+                    .iter()
+                    .zip(&alias.params)
+                    .filter_map(|(argument, parameter)| match argument {
+                        NominalArg::Type(Type::Var(variable)) => {
+                            Some((format!("t{}", variable.0), parameter.clone()))
+                        }
+                        NominalArg::Dimension(Dim::Var(variable)) => {
+                            Some((format!("d{}", variable.0), parameter.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect::<HashMap<_, _>>();
+                let body = rename_host_type_variables(
+                    decode_host_type_or_raise(&type_to_deep_expr(&alias.body), &HashMap::new()),
+                    &checker_parameter_names,
+                );
+                let substitutions = alias.params.iter().cloned().zip(args).collect();
+                let expanded = expand(
+                    program,
+                    substitute_host_type_term(body, &substitutions),
+                    visiting,
+                );
+                visiting.remove(&name);
+                expanded
+            }
+            HostTypeTerm::Fn(params, ret) => HostTypeTerm::Fn(
+                params
+                    .into_iter()
+                    .map(|param| expand(program, param, visiting))
+                    .collect(),
+                Box::new(expand(program, *ret, visiting)),
+            ),
+            HostTypeTerm::List(inner) => {
+                HostTypeTerm::List(Box::new(expand(program, *inner, visiting)))
+            }
+            HostTypeTerm::Dict(key, value) => HostTypeTerm::Dict(
+                Box::new(expand(program, *key, visiting)),
+                Box::new(expand(program, *value, visiting)),
+            ),
+            HostTypeTerm::Tuple(items) => HostTypeTerm::Tuple(
+                items
+                    .into_iter()
+                    .map(|item| expand(program, item, visiting))
+                    .collect(),
+            ),
+            HostTypeTerm::Option(inner) => {
+                HostTypeTerm::Option(Box::new(expand(program, *inner, visiting)))
+            }
+            other => other,
+        }
     }
-    apply_host_type_subst(&raw, &subst)
+
+    expand(program, ty, &mut HashSet::new())
 }
 
 /// Replace every bound `TypeVariable` in a host type (chelis#1201).
