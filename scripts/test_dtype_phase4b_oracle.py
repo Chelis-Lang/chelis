@@ -2496,6 +2496,35 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("frozen contract file")
 
+    def test_num8_keeps_representation_distinct_from_width(self) -> None:
+        self.replace(
+            Path("spec/04-type-system.md"),
+            "Equal storage widths do not make two representations interchangeable",
+            "Equal storage widths make two representations interchangeable",
+        )
+        self.assert_contract_fails("04-NUM-8.*representations interchangeable")
+
+    def test_num11_preserves_device_and_binding_metadata_domains(self) -> None:
+        self.replace(
+            Path("spec/04-type-system.md"),
+            "A language binding or device descriptor SHALL preserve rank as int32\n"
+            "> and each extent, stride, element count, and byte capacity as int64",
+            "A language binding or device descriptor MAY narrow rank, extents,\n"
+            "> strides, element counts, and byte capacities to an implementation width",
+        )
+        self.assert_contract_fails("04-NUM-11.*device descriptor")
+
+    def test_shape_capacity_equivalence_never_saturates_into_equality(self) -> None:
+        self.replace(
+            Path("spec/04-type-system.md"),
+            "SHALL NOT wrap, saturate, truncate, or\n"
+            "> substitute an overflow sentinel that can make unequal mathematical counts\n"
+            "> equal",
+            "MAY saturate both overflowing products to one sentinel and treat them\n"
+            "> as equal",
+        )
+        self.assert_contract_fails("04-SHAPE-1.*overflow sentinel")
+
     def test_count_axes_remain_signature_checks_not_table_b_narrowing(self) -> None:
         self.replace(
             Path("spec/design/capability_table.md"),
@@ -2954,6 +2983,56 @@ class ContractValidationTests(unittest.TestCase):
             "[#729] owns the remaining reduction rows",
         )
         self.assert_contract_fails("roadmap reduction owner")
+
+    def test_roadmap_keeps_the_runtime_representation_owner(self) -> None:
+        self.replace(
+            Path("spec/design/remediation_roadmap.md"),
+            "[`runtime_representation.md`](runtime_representation.md) ([#893])",
+            "[#893] has no design owner",
+        )
+        self.assert_contract_fails("runtime representation owner")
+
+    def test_runtime_capacity_key_preserves_partial_division_domain(self) -> None:
+        self.replace(
+            Path("spec/design/runtime_representation.md"),
+            "Division is a partial exact-integer operation, not rational arithmetic",
+            "Division is normalized as unrestricted rational arithmetic",
+        )
+        self.assert_contract_fails("runtime capacity validity domain")
+
+    def test_runtime_zero_product_preserves_nested_partial_division(self) -> None:
+        self.replace(
+            Path("spec/design/runtime_representation.md"),
+            "`0 * (1 / n)` retains the partial quotient and remains distinct "
+            "from zero\nunless `n != 0` and `n` divides 1 have both been proved",
+            "`0 * (1 / n)` always collapses to zero",
+        )
+        self.assert_contract_fails("runtime zero-product validity domain")
+
+    def test_runtime_phase0_debt_is_shrink_only(self) -> None:
+        self.replace(
+            Path("spec/design/runtime_representation.md"),
+            "exact shrink-only transition-debt\nmanifest",
+            "editable transition-debt\nmanifest",
+        )
+        self.assert_contract_fails("runtime Phase 0 shrink-only debt")
+
+    def test_foreign_carrier_never_forms_rust_slices(self) -> None:
+        self.replace(
+            Path("spec/design/runtime_representation.md"),
+            "A foreign carrier never constructs `TensorRef<T>`, `TensorMut<T>`, "
+            "`&[T]`, or\n`&mut [T]`",
+            "A foreign carrier may construct `TensorMut<T>` and `&mut [T]`",
+        )
+        self.assert_contract_fails("runtime foreign slice prohibition")
+
+    def test_runtime_launch_gate_keeps_the_host_field_seal(self) -> None:
+        self.replace(
+            Path("spec/design/runtime_representation.md"),
+            "the Phase 3 `--host` field-seal evidence",
+            "no field-seal evidence",
+        )
+        self.assert_contract_fails("runtime launch-gate boundary")
 
     def test_additive_parent_absorption_clause_fails(self) -> None:
         self.replace(

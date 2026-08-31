@@ -1955,6 +1955,14 @@ different decisions:
   move to or duplicate into vocab. This document owns finalization, value
   domains, the §C3 storage decision, cast behavior, operation legality, and
   kernel behavior.
+- [`runtime_representation.md`](runtime_representation.md) C1 adds the closed
+  `DTypeContract` projection of [04-NUM-8] to that dependency-bottom vocabulary:
+  exact stored representation, byte width derived from it, and arithmetic
+  representation. It does not move finalization, value domains, operation
+  legality, or backend capability policy out of this document. The runtime
+  consumes the projection in Phase 1; [#899] remains open until every backend
+  consumer and duplicate representation table is eliminated in that plan's
+  Phase 4.
 - `loud_unsupported.md` defines how every negative decision reaches the user.
   This document defines correct behavior for supported cells. A cell may move
   from silently wrong to loudly rejected under [#730], then to correctly

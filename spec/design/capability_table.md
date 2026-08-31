@@ -17,8 +17,12 @@ capability keys and cells, and target-independent numeric policy. Those types
 do not move to or duplicate into `chelis-vocab`. Dependency-free
 `chelis-vocab` owns only the cross-layer representation vocabulary required by
 lower layers, including `EffectKind`, `RuntimeDType`, `Repr`, and canonical C
-wire spellings. Backends consume `chelis-types` for numeric identity and
-capability policy and `chelis-vocab` for representation vocabulary.
+wire spellings. [`runtime_representation.md`](runtime_representation.md) C1
+adds `DTypeContract` as the closed [04-NUM-8] projection that binds each runtime
+dtype to its stored and arithmetic representation; it does not add an operation
+or backend-capability decision. Backends consume `chelis-types` for numeric
+identity and capability policy and `chelis-vocab` for representation
+vocabulary.
 
 The schema separates target-independent operation semantics from
 per-backend implementation status. Tables A and B cover operations; the

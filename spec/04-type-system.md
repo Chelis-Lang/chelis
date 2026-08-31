@@ -1509,6 +1509,18 @@ symbolic, or `shape`-derived values. Eval, C, HIP, and Metal execute the same
 graph and checks. A backend may optimize a proven constant but may not require
 one, infer provenance to narrow the language, or substitute a guessed extent.
 
+> **[04-SHAPE-1]** Any equality or ordering over tensor element counts or
+> storage capacities that an implementation uses to select, alias, or reuse a
+> buffer SHALL be sound over the exact mathematical values of the complete
+> typed extent expressions. An implementation MAY conservatively decline to
+> prove two capacities equal, but it SHALL NOT wrap, saturate, truncate, or
+> substitute an overflow sentinel that can make unequal mathematical counts
+> equal. Projection from the exact count into `int64`, `usize`, or a target
+> allocation-size domain SHALL be checked and SHALL fail before planning,
+> allocation, or element access when the value is outside that domain. This
+> rule applies to compiler analyses as well as runtime allocation paths; a
+> reuse decision is not exempt because no bytes have yet been touched.
+
 #### 4.7.5 Precision rule for `reshape`'s shape list
 
 `reshape`'s shape list is `List<int64>`: its elements are extent-domain
@@ -2420,23 +2432,32 @@ Scope:
 > escape hatch by construction), and requesting one on a non-integer
 > dtype is a checker-level type error.
 
-> **[04-NUM-8]** Every dtype declares an ARITHMETIC WIDTH in addition to
-> its storage width. Every op SHALL be performed at its operands'
+> **[04-NUM-8]** Every dtype declares a STORED REPRESENTATION and an
+> ARITHMETIC WIDTH in addition to its storage width. Every op SHALL be performed at its operands'
 > arithmetic width and finalized to the storage width once per op, in
 > every lane and on every surface. No lane SHALL compute at any other
-> width. The arithmetic widths are:
+> width. The representations and arithmetic widths are:
 >
-> | dtype | storage width | arithmetic width |
-> |---|---|---|
-> | `f64` | 64 | f64 |
-> | `f32` | 32 | f32 |
-> | `f16` | 16 | f32 |
-> | `bf16` | 16 | f32 |
-> | `int64` | 64 | exact int64 |
-> | `int32` | 32 | exact int32 |
-> | `int16` | 16 | exact int16 |
-> | `int8` | 8 | exact int8 |
-> | `bool` | 8 | not an arithmetic dtype ([04-NUM-4]) |
+> | dtype | stored representation | storage width | arithmetic width |
+> |---|---|---|---|
+> | `f64` | IEEE-754 binary64 | 64 | f64 |
+> | `f32` | IEEE-754 binary32 | 32 | f32 |
+> | `f16` | IEEE-754 binary16 | 16 | f32 |
+> | `bf16` | bfloat16 | 16 | f32 |
+> | `int64` | signed two's-complement 64-bit integer | 64 | exact int64 |
+> | `int32` | signed two's-complement 32-bit integer | 32 | exact int32 |
+> | `int16` | signed two's-complement 16-bit integer | 16 | exact int16 |
+> | `int8` | signed two's-complement 8-bit integer | 8 | exact int8 |
+> | `bool` | canonical Bool8 (`0x00` false, `0x01` true) | 8 | not an arithmetic dtype ([04-NUM-4]) |
+>
+> Stored representation, storage width, and arithmetic width are separate
+> facts. Equal storage widths do not make two representations interchangeable:
+> for example, `f32` and `int32` are both 32 bits, and `bool` and `int8` are
+> both 8 bits, but neither pair may share a typed load, store, carrier, or
+> kernel element spelling. Every boundary and lane SHALL match the exact
+> representation identity, not only its byte width. No implementation may
+> infer arithmetic width from storage width or storage width from arithmetic
+> width.
 >
 > The `matmul`, `sum`, and `einsum` accumulator parameter of §5.7 is the ONLY
 > user-selectable widening; it is explicit, typed, defaulted per §5.7.1,
@@ -2558,7 +2579,14 @@ named operations if introduced. Behaviors are named operations, never modes.
 > through a language binding, and read back. A representation that cannot
 > carry a dtype's full value set is not a conforming representation for
 > that dtype, and no stage SHALL substitute a wider or narrower one to
-> compensate.
+> compensate. A language binding or device descriptor SHALL preserve rank as int32
+> and each extent, stride, element count, and byte capacity as int64, matching
+> the domains of [05-DIM-1], [05-DIM-2], and [05-OP-31]. It SHALL carry the
+> exact dtype tag and dynamic rank; a fixed-rank carrier, a narrower metadata
+> field, or an element pointer not coupled to the exact tag in the same
+> validated descriptor is not a conforming substitute. A
+> boundary MAY reject a value outside the declared domain before crossing, but
+> it SHALL NOT narrow, clamp, wrap, or fabricate metadata to make it fit.
 
 > **[04-NUM-12]** A numeric trap's OCCURRENCE is deterministic within a
 > lane and is defined by that lane's documented evaluation order. For a
