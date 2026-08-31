@@ -101,11 +101,14 @@ not drift.
 - If a review raises a confirmed in-scope P0 (critical) or P1 (high/major) finding,
   another fresh-context red-team review must be run after the fix is made. Repeat the
   fix-and-review cycle until the most recent red-team review reports no in-scope P0 or
-  P1 findings. Minor updates, bug fixes, or textual changes do not inherently merit
-  another round. A rebase whose overlap with your work is significant, either in changed
-  lines or in semantics, may merit a fresh-context red-team review of the intersection;
-  a rebase that only picks up an atom clearly consistent with, or irrelevant to, the
-  files you are working on does not. Use your best judgement.
+  P1 findings. This holds however small the fix is: a one-word repair of a P1 still
+  earns a round.
+- Absent an in-scope P0 or P1 finding, scale rounds to the change. Minor updates, bug
+  fixes, and textual changes do not inherently merit another round. A rebase whose
+  overlap with your work is significant, either in changed lines or in semantics, may
+  merit a fresh-context red-team review of the intersection; a rebase that only picks up
+  an atom clearly consistent with, or irrelevant to, the files you are working on does
+  not. Use your best judgement.
 - When several red-team reviews find issues in the same area of your build or design,
   stop and consider whether the approach is right, rather than filling the gaps each
   review raises.
@@ -414,7 +417,8 @@ openspec validate --all --strict --no-interactive
 ### One Tracking Issue Per Class
 
 A recurring defect class gets **one tracking issue**, which is also the GitHub
-**sub-issue parent** for every instance. Its body carries the plan (phases,
+**sub-issue parent** for every instance, and no second issue beside it: do not file a
+separate META issue to hold the class statement or the instance list. Its body carries the plan (phases,
 oracles, freeze points, the class statement); its evidence lives in the owning
 design doc under `spec/design/` or in `docs/investigations/`.
 
@@ -685,8 +689,9 @@ execute doctests, and the gate deliberately does not use `--workspace --doc`.
 **Doctests only run where something invokes them.** The canonical gate
 invokes doctests for `chelis-types`, `chelis-compiler-api`, and
 `chelis-pipeline-core`. The `backend-sanitizers` job also runs
-`cargo test -p chelis-backend-c` without a filter. A `compile_fail` oracle in another crate runs nowhere until that
-crate gains an equivalent invocation in the same change set.
+`cargo test -p chelis-backend-c` without a filter. A `compile_fail` oracle in
+another crate runs nowhere until that crate gains an equivalent invocation in
+the same change set.
 
 `scripts/unrepresentable_domain_oracle.py` is chelis#908's authoritative
 completion oracle, and the tracker requires every fix in that class to run
@@ -861,10 +866,11 @@ the built-in gate.
   enforcement). The canonical formatter is `chelis_surf::format` for
   `.ch` and `chelis_deep::printer` for `.dp`.
 - Override flag: `--allow-style-violations` bypasses the gate with a
-  stderr warning. Use only for emergency local builds and one-off
-  migrations. CI must not pass it. The flag bypasses only the style
-  gate, not parse, type, effect, validation, evaluation, or backend
-  errors.
+  stderr warning. Use only for emergency local builds. CI must not pass
+  it, and it is not a way around a formatter or lint failure during a
+  migration: migrate the source instead. The flag bypasses only the
+  style gate, not parse, type, effect, validation, evaluation, or
+  backend errors.
 - Test override env var: `CHELIS_STYLE_GATE_DISABLE=1` disables the
   gate process-wide. Reserved for the integration-test corpus that
   synthesizes ad-hoc Surf to exercise type/effect/linearity behavior;
@@ -882,6 +888,7 @@ The authority is `spec/02-surf-syntax.md` §0.1
 (canonical forms and the bidirectional contract); §P10-P12 define the
 wider set of input spellings the parser still *accepts* but the
 formatter rewrites.
+
 When writing or rewriting Surf in this repository:
 
 - prefer `def ... -> T = ...` over `def ... : T = ...` (enforced by the

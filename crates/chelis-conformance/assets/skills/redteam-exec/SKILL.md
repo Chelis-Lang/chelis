@@ -61,11 +61,13 @@ validation pass.
 
 - **Every pull request needs at least one compliant red-team review before it merges**,
   documentation-only work included. Repeat the fix-and-review cycle until the most
-  recent review reports no in-scope P0 or P1 finding.
-- Scale rounds to the change. Minor updates, bug fixes, and textual changes do not
-  inherently merit another round. A rebase whose overlap with the reviewed work is
-  significant, in changed lines or in semantics, may merit a fresh-context review of the
-  intersection; one that only picks up an unrelated change does not. Use your best
+  recent review reports no in-scope P0 or P1 finding. That holds however small the fix
+  is: a one-word repair of a P1 still earns a round.
+- Absent an in-scope P0 or P1 finding, scale rounds to the change. Minor updates, bug
+  fixes, and textual changes do not inherently merit another round. A rebase whose
+  overlap with the reviewed work is significant, in changed lines or in semantics, may
+  merit a fresh-context review of the intersection; one that only picks up a change
+  clearly consistent with, or irrelevant to, the reviewed files does not. Use your best
   judgement.
 - Classify every finding against the pull request's stated scope. It is in scope only
   when the pull request introduces it, worsens it, or claims to correct it. Mere
