@@ -860,6 +860,13 @@ default workspace run.
   removal keeps the branch ref; branch deletion is a separate later decision. If macOS
   leaves a partially removed target or `.DS_Store`, re-inspect the exact path before an
   equally narrow cleanup command.
+- Close the issues the PR actually resolved, as a separate step; merging does not do it
+  (see [Issues Are Closed Manually](#issues-are-closed-manually)). Use
+  `gh issue close <N> --comment "resolved by #<PR>"`.
+- A merged PR is not proof its issues are resolved: confirm the behavior on current
+  `main` first, and when the PR only advanced an issue, leave it open with a comment on
+  what remains. Close a tracking hub only when every sub-issue is closed and the
+  condition the hub itself names is met.
 
 ## Subagent Coordination And Delivery
 
