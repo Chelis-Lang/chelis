@@ -279,6 +279,50 @@ fn normal_output_forwarding_is_part_of_whole_command_deadline() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn failed_primary_stderr_writer_reports_on_still_writable_stderr() {
+    let (_dir, pkg) = make_reef_package("suite-timeout-failed-stderr-writer");
+    let stderr_file = pkg.join("small-stderr.bin");
+    fs::write(&stderr_file, b"captured suite stderr\n").expect("small stderr probe");
+
+    let ungated = Command::cargo_bin("chelis")
+        .expect("binary")
+        .timeout(Duration::from_secs(5))
+        .current_dir(&pkg)
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env_remove("CHELIS_TEST_INTERNAL_TESTING")
+        .env("CHELIS_TEST_BATCH_STDERR_FILE", &stderr_file)
+        .env("CHELIS_TEST_FAIL_BOUNDED_WRITER", "1")
+        .args(["test", "tests/", "--json", "--suite-timeout", "30"])
+        .output()
+        .expect("run ungated control");
+    assert_eq!(
+        ungated.status.code(),
+        Some(0),
+        "production environment activated the forced-writer test hook"
+    );
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .timeout(Duration::from_secs(5))
+        .current_dir(&pkg)
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_TEST_INTERNAL_TESTING", "1")
+        .env("CHELIS_TEST_BATCH_STDERR_FILE", &stderr_file)
+        .env("CHELIS_TEST_FAIL_BOUNDED_WRITER", "1")
+        .args(["test", "tests/", "--json", "--suite-timeout", "30"])
+        .output()
+        .expect("run");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("output forwarding exceeded"),
+        "writable stderr lacked an incomplete-output diagnostic: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn blocked_stderr_cannot_publish_a_perfect_stdout_summary() {
