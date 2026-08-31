@@ -84,6 +84,17 @@ separate host-language embedding model first.
 After Phase `3m`, that C-facing surface is expected to come from `chelis_runtime.h`
 plus the shipped Rust static runtime library rather than a generated `chelis_runtime.c`
 implementation file.
+
+### 2.1 Compiled value ownership
+
+A compiled entry borrows every input runtime value for the complete call and returns
+one owned runtime value for every owned result, following [04-LIN-7]. The callee never
+releases or mutates an input's storage, including when a result is value-equal to that
+input. Two returned roots that denote the same value are independently owned and may
+be released in either order. Exact public C carrier and callable identities remain the
+ones governed by [05-OP-31..33]. (The compiled ownership requirement is not
+fully implemented; see chelis#1286.)
+
 The compiler-api pipeline behind this surface serves two products with different
 entry contracts:
 

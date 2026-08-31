@@ -2162,7 +2162,9 @@ the `effects` key on checked `fn` nodes carries the inferred unhandled set.
 Chelis uses lightweight uniqueness, not a Rust-style ownership-and-lifetimes
 system. Tensor values are owned by default, but read-only calls borrow their tensor
 arguments. A consuming use makes the binding dead; a borrow leaves the owned binding
-live. The compiler inserts end-of-scope `Drop` operations for unconsumed local owners.
+live. For an unconsumed local owner, the compiler inserts `Drop` at the earliest
+post-dominating point after its last use, as [04-LIN-8] requires. Lexical scope
+exit is the fallback only when no earlier valid terminal point can be proved.
 
 ### 8.2 Type Representation
 
@@ -2183,8 +2185,10 @@ The user surface is type- and expression-based:
 - `copy(x)` accepts either owned `T` or borrowed `&T` and yields a fresh owned value;
   explicit and compiler-inserted copies lower to `RiscOp::Copy`
 - borrows cannot be stored in aggregates, returned, or captured by closures
-- borrow types are erased before IR and backend lowering; implicit linearity then
-  inserts explicit `RiscOp::Copy` and `RiscOp::Drop` nodes
+- source borrow syntax is erased before backend lowering, but the resolved ownership
+  disposition of every use remains explicit in ownership-lowered IR; implicit
+  linearity inserts explicit clone/move/borrow dispositions and terminal `Drop`
+  operations before any backend sees the program
 
 #### Borrow target classification (the `&x` inner type)
 
@@ -2226,13 +2230,14 @@ That gives the compiler a stronger basis for safe in-place buffer reuse.
 
 - A local owned linear binding must have exactly one terminal path in lowered IR:
   either a consuming use or an inserted `Drop`. Borrow sites do not count as consumes.
-- Function parameters are ownership-transfer boundaries: an owned parameter may be
-  borrowed throughout the function body and then leave the function scope without an
-  implicit local `drop` expression.
-- A local value that was borrowed but never consumed receives an inserted end-of-scope
-  `Drop` in lowered IR. This is not a user-facing type error.
-- `copy(x)` reads `x` without consuming it and yields a fresh tensor value.
-- `drop(x)` is an explicit consume. The compiler also inserts implicit end-of-scope
+- Function parameters are ownership-transfer boundaries: an owned parameter becomes
+  the callee's owner and must be moved into a result or another consuming destination,
+  or receive a `Drop`, on every return path.
+- A local value that was borrowed but never consumed receives an inserted `Drop` at
+  the earliest point after its last use that post-dominates that use on the applicable
+  control-flow path. This is not a user-facing type error.
+- `copy(x)` reads `x` without consuming it and yields a fresh owned value.
+- `drop(x)` is an explicit consume. The compiler also inserts implicit last-use
   drops for locals that are not otherwise consumed.
 - Pattern matching on a tuple or other value carrying tensor payloads consumes the
   scrutinee; any tensor payloads bound by the pattern become the new live bindings.
@@ -2284,6 +2289,61 @@ Two requirements pin the binding-identity semantics the rules above rest on:
 > accepted. The sole forwarding is a consuming capture of a destructured
 > component (or of an alias of one), which consumes the component's
 > carrier binding.
+
+> **[04-LIN-3]** Evaluating an expression of an owned linear type SHALL
+> produce exactly one logical owner. Binding another name to that value does
+> not create a second owner. A second terminal use is legal only when an
+> explicit or compiler-inserted `copy` creates another owned value. Each
+> logical owner SHALL reach exactly one terminal consuming use or `Drop` on
+> every control-flow path; a borrow neither creates nor terminates an owner.
+
+> **[04-LIN-4]** An owned function parameter is a consuming call edge and a
+> borrowed parameter is a non-consuming call edge. Every function result of
+> an owned linear type is a new logical owner for the caller on every return
+> path, including a path whose result has the same value or physical storage
+> as an argument or capture. The result owner may be the owner transferred
+> through an owned parameter. A borrowed argument or still-live capture may
+> become an owned result only after the ordinary copy operation creates an
+> independent owner. A backend SHALL NOT infer a returned owner from pointer
+> equality, a source name, or a selected return arm.
+
+> **[04-LIN-5]** An `if`, `match`, loop, or fold that produces an owned linear
+> result SHALL join with exactly one owned incoming value from every
+> predecessor path. A path that forwards an existing owner transfers it into
+> the join; a path that preserves another live use first creates a copy.
+> Fold and loop-carried owners are block parameters: each iteration consumes
+> the previous owner exactly once and produces the next owner exactly once.
+> Alias provenance SHALL NOT be overwritten when the loop target is rebound.
+
+> **[04-LIN-6]** Each entry in a top-level root manifest is, in manifest
+> order, an implicit terminal consuming use of the binding it observes.
+> Root observation participates in the same copy insertion as any authored
+> consuming fan-out. Therefore two roots denoting one value receive two
+> independently owned results, while the final root may consume the original.
+> Every owned top-level value that is not consumed by a manifested root or an
+> authored use receives a `Drop`.
+
+> **[04-LIN-7]** A compiled artifact's externally supplied entry arguments
+> are borrowed for the complete invocation, irrespective of the owned
+> parameter modes used by calls inside the artifact. The artifact SHALL
+> neither mutate nor release their storage. Every owned result returned across
+> that boundary is an independent owner for the caller, even when its value is
+> equal to an entry argument. Before an entry value crosses an internal
+> owned-parameter edge, the compiler SHALL create an ordinary copy; an internal
+> borrowed-parameter edge may borrow the entry value directly. Passing the
+> result back transfers or borrows it
+> only according to the next invocation's boundary; ownership is never
+> inferred from address equality.
+
+> **[04-LIN-8]** After an owner's terminal use, that owner is no longer live;
+> a move may transfer the value to one explicit successor owner. A `Drop` or
+> consuming use with no successor owner SHALL make its storage reclaimable
+> before a following tail call or loop back-edge whose live set excludes it.
+> In-place reuse is permitted only for program-owned storage
+> proved unique at that point. Entry arguments, borrowed values, storage with
+> another live owner, and storage retained by a view never satisfy that proof.
+> An implementation may reclaim later only when an explicitly live owner or
+> view requires the storage; recursion depth alone is not such a reason.
 
 Diagnostics for violations of these rules SHALL name a binding the
 program's source spells — the alias or component name written at the

@@ -28,8 +28,11 @@ CONTRACT_FILES = (
     "spec/05-risc-primitives.md",
     "spec/06-transformations.md",
     "spec/10-serialization.md",
+    "spec/11-ffi.md",
     "spec/design/capability_table.md",
+    "spec/design/compiled_value_ownership.md",
     "spec/design/dtype_semantics.md",
+    "spec/design/implicit_linearity.md",
     "spec/design/loud_unsupported.md",
     "spec/design/spec_provenance.md",
     "spec/design/remediation_roadmap.md",
@@ -55,10 +58,10 @@ FROZEN_FILE_DIGESTS = {
         "5e21649cf61087df1119040a971a60b5b499d40321d8647ce719e91b8571120a"
     ),
     "spec/04-type-system.md": (
-        "8a339bc1fd08a15136dabae321bb9d2594a560613b14eb3cfb0011049dd61300"
+        "6ec65dc7640e64119f056562fb3807b827af29f2d84a2880d42ed24043449d08"
     ),
     "spec/05-risc-primitives.md": (
-        "10d64930ae6d9b3316ac9b0f35892052b2e0b1475c50097dd63ca5c0ba61ef6a"
+        "e427fa744b313a3a8a7cad99e1ca92ed7df8e57db459bf53a499edb098dca86a"
     ),
     "spec/06-transformations.md": (
         "30a78217103d0a57d63b9e1a3d927d2e1079affa4d1d0641ef36a9afff34e25a"
@@ -66,14 +69,23 @@ FROZEN_FILE_DIGESTS = {
     "spec/10-serialization.md": (
         "58f707d4e155d098962db224317061684b2c026816cab234ba026d560510a6da"
     ),
+    "spec/11-ffi.md": (
+        "0d0b5065f90ae704ecea26744208e76f1075907f8ea49279a1a958db6f1c14b3"
+    ),
     "spec/design/capability_table.md": (
         "ac8e3f8761f8470774e093ac4c15b0f35e547e84209659eae4f0eaf8667ccc62"
     ),
+    "spec/design/compiled_value_ownership.md": (
+        "47a457e78b1e615b80848a637cb276aa6ca9e41540d33ba115dc4f6c45a3f542"
+    ),
     "spec/design/dtype_semantics.md": (
-        "0c07902dc58dda07a92030093b8123e3bd97b4e052172c86cdf2f65a27017314"
+        "2404679404fb438296707ea18873ded671b0ed5a920be5ad98b22c072e7d9d3f"
+    ),
+    "spec/design/implicit_linearity.md": (
+        "f03302f4b328841d79824f6326f1edf2e954a9b98c0118992d4a3a1f2dfb67cf"
     ),
     "spec/design/loud_unsupported.md": (
-        "2e375ee9d67fdf3229126c3e2278f0df8ca1e16046e75680095c870000f6f2c4"
+        "6c8c5dec977fb044ced99da0f424a2c3782cca404e7884239cd044567c551f71"
     ),
     "spec/design/spec_provenance.md": (
         "6e206f634ce6062d56701f0dea0bf57bcbdca4fbf630a6c12264a904f14ea426"
@@ -339,6 +351,12 @@ EXPECTED_OP_MANIFESTS = {
 }
 
 FROZEN_ATOM_DIGESTS = {
+    "04-LIN-3": "52a61c21d53b8eaf194feebed4eee608f49bc30ebb0008fcc4d366fd93c3e649",
+    "04-LIN-4": "ab21050a84236c40236b7d8d53453767dc15839a44ae1fd012d33bed411fecf9",
+    "04-LIN-5": "2ad4e07442bf890a6fdd434362f50ab86215d6bd35c3d680e515de6fba5f9a29",
+    "04-LIN-6": "6cfcc780a3f5b9836507772cf7ef76ce231a0505f07e9a06b3c1ba55e0946d92",
+    "04-LIN-7": "6c1d8d77d251d245df6e1aa6e2138458048bdac31a407adfeba586302b0f3625",
+    "04-LIN-8": "3e0013311e070716145da9245eea66361c8cf91fc6914ad200b68790b41313eb",
     "04-NUM-2": "1aab318622574c9505ec5e85472b27bf333318657407c38b2311325962e19a96",
     "04-NUM-4": "685b5a3447a069f138877d357e65d1ab225e6b712e62b2a5bd38e1ef960636cb",
     "04-NUM-8": "8887537f42a0c8263569296700826dc7466a0a3bf05e5c854ffff2406f075028",
@@ -478,7 +496,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/remediation_roadmap.md",
         "| **v0.19.0 - grounded dtype storage break",
         "| **v0.20.0 - behavior-preserving permanent guards**",
-        "ebf68cc4acbcc38039b3eb75489cac731ba4cf769e087b3e4ced70da82b720b4",
+        "5916532d8cb8de3fbdcd1837702793e33a61e921d17bb0f31f4ecd90286eba1c",
     ),
     "status dtype row": (
         "docs/investigations/remediation_status_2026_08_04.md",
@@ -737,6 +755,9 @@ def validate_normative_contract(
     spec05 = docs["spec/05-risc-primitives.md"]
     spec06 = docs["spec/06-transformations.md"]
     spec10 = docs["spec/10-serialization.md"]
+    spec11 = docs["spec/11-ffi.md"]
+    ownership_design = docs["spec/design/compiled_value_ownership.md"]
+    implicit_linearity = docs["spec/design/implicit_linearity.md"]
     captured_risc = docs["openspec/specs/risc-primitives/spec.md"]
     captured_transformations = docs["openspec/specs/transformations/spec.md"]
 
@@ -790,6 +811,34 @@ def validate_normative_contract(
                 "backend-neutral active primitive set",
             ),
             ("nine active tensor element dtypes", "nine tensor element dtypes"),
+            (
+                "For an unconsumed local owner, the compiler inserts `Drop` at the "
+                "earliest\npost-dominating point after its last use",
+                "linearity last-use Drop placement",
+            ),
+            (
+                "Lexical scope\nexit is the fallback only when no earlier valid "
+                "terminal point can be proved",
+                "linearity scope-exit fallback",
+            ),
+        ),
+        violations,
+    )
+    require_all(
+        spec05,
+        (
+            (
+                "Source borrow syntax and primitive-DAG borrow markers\n"
+                "are erased before backend emission",
+                "primitive source-marker erasure",
+            ),
+            (
+                "The resolved disposition of every use is not erased; ownership\n"
+                "lowering first records explicit borrow, move, clone, and terminal "
+                "`Drop` obligations\nin the verified ownership representation "
+                "consumed by every backend",
+                "primitive verified ownership preservation",
+            ),
         ),
         violations,
     )
@@ -825,6 +874,221 @@ def validate_normative_contract(
         violations,
     )
     require_all(
+        spec11,
+        (
+            ("compiled entry borrows every input runtime value", "FFI entry borrow"),
+            ("one owned runtime value for every owned result", "FFI owned result"),
+            (
+                "never\nreleases or mutates an input's storage",
+                "FFI input preservation",
+            ),
+            ("independently owned and may\nbe released in either order", "FFI root owners"),
+            ("governed by [05-OP-31..33]", "FFI complete C authority range"),
+        ),
+        violations,
+    )
+    require_all(
+        ownership_design,
+        (
+            (
+                "No arrow after verification may accept the pre-verification form",
+                "verified backend boundary",
+            ),
+            (
+                "only `verify_ownership` constructs\n`VerifiedOwnershipProgram`",
+                "private verification constructor",
+            ),
+            (
+                "MappedFile` is included even though no current [#1286] child "
+                "names it",
+                "closed mapped-file kind",
+            ),
+            (
+                "one total, wildcard-free ownership classification",
+                "closed host/carrier/heap classification",
+            ),
+            (
+                "Every target-representable `Option<T>`, including `Option` of a "
+                "scalar, mapped\nresource, or another `Option`",
+                "recursive Option heap classification",
+            ),
+            ("    Option,\n    MappedFile,", "Option heap kind"),
+            (
+                "| `string` | `String` | opaque `chelis_string` handle and "
+                "`CHELIS_VALUE_STRING` |",
+                "string carrier mapping",
+            ),
+            (
+                "| tensor value or internal tensor view | `Tensor` | opaque "
+                "`chelis_tensor *` handle and `CHELIS_VALUE_TENSOR` |",
+                "tensor carrier mapping",
+            ),
+            (
+                "| `Option<T>` where `T` has a target recursive-value representation "
+                "| `Option` | opaque `chelis_option *` handle and "
+                "`CHELIS_VALUE_OPTION` |",
+                "Option carrier mapping",
+            ),
+            (
+                "| `MappedFile` resource | `MappedFile` | opaque "
+                "`chelis_mapped_file *` handle and `CHELIS_VALUE_MAPPED_FILE` |",
+                "mapped-file carrier mapping",
+            ),
+            (
+                "`CHELIS_VALUE_MAPPED_FILE` is the exact tagged representation "
+                "when that handle\nis stored in `Option`, `List`, tuple, "
+                "dictionary, or ADT",
+                "recursive mapped-file representation",
+            ),
+            (
+                "tensor storage is the sole private heap allocation with no public "
+                "tag. Every\ndirectly carried public heap kind also has the table's "
+                "exact tagged\nrepresentation for recursive aggregates",
+                "public heap tag totality",
+            ),
+            (
+                "Each identity has\nexactly one disposition: structurally nonheap, "
+                "target-rejected with an owning\ncapability issue, direct heap "
+                "carrier, tagged heap payload, or private heap\nallocation",
+                "closed target-rejection disposition",
+            ),
+            (
+                "A function\nstored in `Option`, `List`, tuple, dictionary, or ADT "
+                "is a `FirstClassValue`,\nnot a contextual callback",
+                "recursive function placement",
+            ),
+            (
+                "`UnsupportedKind::HostAbi`, `Stage::Codegen(\"c\")`, and\n"
+                "`Unimplemented { issue: #879 }` before ownership verification "
+                "constructs a\nplan",
+                "recursive function target rejection",
+            ),
+            (
+                "It is a target capability result, not a language type error, "
+                "scalar\nsubstitution, empty value, or permission to omit the type "
+                "from the registry",
+                "function rejection semantics",
+            ),
+            (
+                "`chelis_option_scalar` / `chelis_option_value` split",
+                "Option legacy-carrier deletion target",
+            ),
+            (
+                "The existing exact ABI remains [05-OP-31..33] and all three registries",
+                "complete C ABI authority chain",
+            ),
+            (
+                "balanced tensor/string/List/tuple/dictionary/ADT/Option/mapped-file "
+                "ownership,\n   including `Option[MappedFile]`, nested resource "
+                "aggregates",
+                "Option ownership fixtures",
+            ),
+            (
+                "omit `ConcreteHostType::Option` or `CHELIS_VALUE_OPTION`",
+                "Option omission mutation",
+            ),
+            (
+                "omit `CHELIS_VALUE_MAPPED_FILE` or its `Option[MappedFile]` "
+                "fixture",
+                "mapped-file omission mutation",
+            ),
+            (
+                "admit `Option[function]` or another recursive function container "
+                "without the\n  exact [#879] target rejection",
+                "function-container omission mutation",
+            ),
+            (
+                "Only the planner constructs `ReusableOwnedStorage`",
+                "private reuse proof",
+            ),
+            (
+                "C and HIP consume\nthe same proof-bearing plan",
+                "shared C and HIP reuse proof",
+            ),
+            (
+                "typed `MetalNeverReuse` plan whose input cannot carry "
+                "`ReusableOwnedStorage`",
+                "Metal typed no-reuse plan",
+            ),
+            (
+                "Metal emission with distinct storage for every produced node and "
+                "no input",
+                "Metal no-alias fixture",
+            ),
+            (
+                "let the Metal plan accept `ReusableOwnedStorage`",
+                "Metal no-reuse mutation",
+            ),
+            (
+                "scripts/compiled_value_ownership_oracle.py --phase launch",
+                "launch ownership oracle command",
+            ),
+            (
+                "COMPILED VALUE OWNERSHIP LAUNCH SUBSET: PASS",
+                "launch ownership oracle success line",
+            ),
+            (
+                "The `complete --require-hip` invocation is the eventual [#1286] "
+                "class-closure\noracle. It is deliberately stronger than the "
+                "launch invocation",
+                "launch and class-closure distinction",
+            ),
+            (
+                "A support, syntax, diagnostic, or reachability observation outside\n"
+                "   this class must have an explicit external owner before phase "
+                "exit",
+                "external observation ownership",
+            ),
+            (
+                "The top-level tuple missing-`main` observation is [#545], not an "
+                "ownership-oracle row",
+                "top-level tuple external owner",
+            ),
+            (
+                "Runtime-valued `with seed` remains [#735] syntax/semantics work; "
+                "recursive-host operation support remains [#729]/[#730] capability "
+                "work",
+                "recursive support external owners",
+            ),
+            (
+                "[#1172] owns the span-key cause that can over-broaden hints; Surf "
+                "reachability is exposure evidence",
+                "reachability external owner",
+            ),
+            (
+                "Phase 1 must\n  explicitly supersede its numbered-spec citations, "
+                "`runtime_representation.md`\n  target, guards, and public-layout "
+                "promise in the same atomic change",
+                "runtime representation supersession",
+            ),
+            (
+                "[#909]/[#879]:** own shared first-class function representation "
+                "and the\n  general C-host closure ABI",
+                "function-value external owners",
+            ),
+            ("final manifest contains zero expected failures", "zero expected failures"),
+            ("`Part of #1286`", "honest issue linkage"),
+        ),
+        violations,
+    )
+    require_all(
+        implicit_linearity,
+        (
+            (
+                "The current C/HIP emitters still\n"
+                "treat the IR node as an emission no-op and reconstruct host "
+                "releases from backend-local\nstate",
+                "current Drop implementation status",
+            ),
+            (
+                "the successor verified-ownership lanes emit the matching heap "
+                "release at the\nterminal operation",
+                "successor Drop release",
+            ),
+        ),
+        violations,
+    )
+    require_all(
         agents,
         (
             (
@@ -836,6 +1100,73 @@ def validate_normative_contract(
     )
 
     spec04_blocks = atom_blocks(spec04)
+    require_atom(
+        spec04_blocks,
+        "04-LIN-3",
+        (
+            "exactly one logical owner",
+            "exactly one terminal consuming use or `Drop`",
+            "a borrow neither creates nor terminates an owner",
+        ),
+        violations,
+    )
+    require_atom(
+        spec04_blocks,
+        "04-LIN-4",
+        (
+            "owned function parameter is a consuming call edge",
+            "every return path",
+            "result owner may be the owner transferred through an owned parameter",
+            "borrowed argument or still-live capture",
+            "ordinary copy operation creates an independent owner",
+            "pointer equality, a source name, or a selected return arm",
+        ),
+        violations,
+    )
+    require_atom(
+        spec04_blocks,
+        "04-LIN-5",
+        (
+            "exactly one owned incoming value from every predecessor path",
+            "Fold and loop-carried owners are block parameters",
+            "Alias provenance SHALL NOT be overwritten",
+        ),
+        violations,
+    )
+    require_atom(
+        spec04_blocks,
+        "04-LIN-6",
+        (
+            "in manifest order",
+            "implicit terminal consuming use",
+            "participates in the same copy insertion",
+        ),
+        violations,
+    )
+    require_atom(
+        spec04_blocks,
+        "04-LIN-7",
+        (
+            "externally supplied entry arguments are borrowed",
+            "neither mutate nor release their storage",
+            "Before an entry value crosses an internal owned-parameter edge",
+            "compiler SHALL create an ordinary copy",
+            "independent owner for the caller",
+        ),
+        violations,
+    )
+    require_atom(
+        spec04_blocks,
+        "04-LIN-8",
+        (
+            "move may transfer the value to one explicit successor owner",
+            "consuming use with no successor owner",
+            "reclaimable before a following tail call or loop back-edge",
+            "proved unique",
+            "recursion depth alone is not such a reason",
+        ),
+        violations,
+    )
     require_atom(
         spec04_blocks,
         "04-NUM-2",
@@ -2622,6 +2953,16 @@ def validate_schema_and_consumers(
             ),
             ("first-class `count` [05-OP-29]", "roadmap count contract"),
             ("zero-exception census ([#1288])", "roadmap census prerequisite"),
+            (
+                "[#1286]'s verified compiled ownership and opaque unified-heap ABI "
+                "through [#1362]'s C-lane `--phase launch` oracle",
+                "roadmap launch ownership gate",
+            ),
+            (
+                "full [#1286] class closure, including HIP and non-launch children, "
+                "remains tracker work and does not gate v0.19",
+                "roadmap full ownership boundary",
+            ),
             ("WireDag v6 exact-only break", "roadmap wire v6 break"),
             (
                 "[#1295] owns all-active-float rounding/random parameter contracts "

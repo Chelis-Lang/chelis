@@ -1105,6 +1105,475 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("OP-31.*chelis_tensor")
 
+    def test_compiled_owner_atoms_are_frozen(self) -> None:
+        mutations = (
+            (
+                Path("spec/04-type-system.md"),
+                "exactly one logical owner",
+                "zero or more logical owners",
+                "04-LIN-3.*logical owner",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "externally supplied entry arguments\n> are borrowed",
+                "externally supplied entry arguments\n> transfer ownership",
+                "04-LIN-7.*entry arguments",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "compiler SHALL create an ordinary copy",
+                "compiler MAY consume the entry borrow directly",
+                "04-LIN-7.*ordinary copy",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "result owner may be the owner transferred\n> through an owned parameter",
+                "result ownership is inferred from the returned address",
+                "04-LIN-4.*transferred",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "storage reclaimable\n> before a following tail call or loop back-edge",
+                "reclaimable only after the function returns",
+                "04-LIN-8.*tail call",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "move may transfer the value to one explicit successor owner",
+                "move may leave both source and successor owners live",
+                "04-LIN-8.*successor owner",
+            ),
+        )
+        for relative, old, new, message in mutations:
+            with self.subTest(message=message):
+                path = self.root / relative
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_ffi_entry_borrow_cannot_become_an_owned_input(self) -> None:
+        self.replace(
+            Path("spec/11-ffi.md"),
+            "compiled entry borrows every input runtime value",
+            "compiled entry owns every input runtime value",
+        )
+        self.assert_contract_fails("FFI entry borrow")
+
+    def test_linearity_model_cannot_restore_scope_end_drop(self) -> None:
+        mutations = (
+            (
+                "For an unconsumed local owner, the compiler inserts `Drop` at the "
+                "earliest\npost-dominating point after its last use",
+                "The compiler inserts end-of-scope `Drop` operations for "
+                "unconsumed local owners",
+                "linearity last-use Drop placement",
+            ),
+            (
+                "Lexical scope\nexit is the fallback only when no earlier valid "
+                "terminal point can be proved",
+                "Lexical scope exit is always the terminal point",
+                "linearity scope-exit fallback",
+            ),
+        )
+        path = self.root / "spec/04-type-system.md"
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_primitive_marker_erasure_preserves_verified_ownership(self) -> None:
+        mutations = (
+            (
+                "Source borrow syntax and primitive-DAG borrow markers\n"
+                "are erased before backend emission",
+                "Every ownership fact is erased before IR lowering",
+                "primitive source-marker erasure",
+            ),
+            (
+                "The resolved disposition of every use is not erased; ownership\n"
+                "lowering first records explicit borrow, move, clone, and terminal "
+                "`Drop` obligations\nin the verified ownership representation "
+                "consumed by every backend",
+                "Backends infer ownership from emitted addresses",
+                "primitive verified ownership preservation",
+            ),
+        )
+        path = self.root / "spec/05-risc-primitives.md"
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_compiled_ownership_keeps_the_complete_c_authority_range(self) -> None:
+        self.replace(
+            Path("spec/11-ffi.md"),
+            "governed by [05-OP-31..33]",
+            "governed by [05-OP-31] and [05-OP-33]",
+        )
+        self.assert_contract_fails("FFI complete C authority range")
+
+    def test_compiled_ownership_cannot_omit_option(self) -> None:
+        mutations = (
+            (
+                "    Option,\n    MappedFile,",
+                "    MappedFile,",
+                "Option heap kind",
+            ),
+            (
+                "| `Option<T>` where `T` has a target recursive-value representation "
+                "| `Option` | opaque `chelis_option *` handle and "
+                "`CHELIS_VALUE_OPTION` |",
+                "| `Option<T>` | none | legacy by-value carrier |",
+                "Option carrier mapping",
+            ),
+            (
+                "Every target-representable `Option<T>`, including `Option` of a "
+                "scalar, mapped\nresource, or another `Option`",
+                "Only an `Option` whose child is already a heap handle",
+                "recursive Option heap classification",
+            ),
+            (
+                "balanced tensor/string/List/tuple/dictionary/ADT/Option/mapped-file "
+                "ownership",
+                "balanced tensor/string/List/tuple/dictionary/ADT/mapped-file ownership",
+                "Option ownership fixtures",
+            ),
+            (
+                "omit `ConcreteHostType::Option` or `CHELIS_VALUE_OPTION`",
+                "omit an unrelated host variant",
+                "Option omission mutation",
+            ),
+        )
+        path = self.root / "spec/design/compiled_value_ownership.md"
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_compiled_ownership_rejects_recursive_function_values_exactly(
+        self,
+    ) -> None:
+        mutations = (
+            (
+                "Each identity has\nexactly one disposition: structurally nonheap, "
+                "target-rejected with an owning\ncapability issue, direct heap "
+                "carrier, tagged heap payload, or private heap\nallocation",
+                "First-class functions may be omitted from the ownership registry",
+                "closed target-rejection disposition",
+            ),
+            (
+                "A function\nstored in `Option`, `List`, tuple, dictionary, or ADT "
+                "is a `FirstClassValue`,\nnot a contextual callback",
+                "A function in an aggregate is treated as a contextual callback",
+                "recursive function placement",
+            ),
+            (
+                "`UnsupportedKind::HostAbi`, `Stage::Codegen(\"c\")`, and\n"
+                "`Unimplemented { issue: #879 }` before ownership verification "
+                "constructs a\nplan",
+                "an empty scalar before ownership verification constructs a plan",
+                "recursive function target rejection",
+            ),
+            (
+                "It is a target capability result, not a language type error, "
+                "scalar\nsubstitution, empty value, or permission to omit the type "
+                "from the registry",
+                "It is a permanent language rejection",
+                "function rejection semantics",
+            ),
+            (
+                "admit `Option[function]` or another recursive function container "
+                "without the\n  exact [#879] target rejection",
+                "admit every recursive function container",
+                "function-container omission mutation",
+            ),
+            (
+                "[#909]/[#879]:** own shared first-class function representation "
+                "and the\n  general C-host closure ABI",
+                "[#1286]:** owns the general C-host closure ABI",
+                "function-value external owners",
+            ),
+        )
+        path = self.root / "spec/design/compiled_value_ownership.md"
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_compiled_ownership_cannot_omit_recursive_mapped_file(self) -> None:
+        mutations = (
+            (
+                "| `MappedFile` resource | `MappedFile` | opaque "
+                "`chelis_mapped_file *` handle and `CHELIS_VALUE_MAPPED_FILE` |",
+                "| `MappedFile` resource | `MappedFile` | opaque "
+                "`chelis_mapped_file *`; never a `chelis_value` |",
+                "mapped-file carrier mapping",
+            ),
+            (
+                "`CHELIS_VALUE_MAPPED_FILE` is the exact tagged representation "
+                "when that handle\nis stored in `Option`, `List`, tuple, "
+                "dictionary, or ADT",
+                "The resource is never stored in a recursive aggregate",
+                "recursive mapped-file representation",
+            ),
+            (
+                "including `Option[MappedFile]`, nested resource aggregates",
+                "excluding resource aggregates",
+                "Option ownership fixtures",
+            ),
+            (
+                "omit `CHELIS_VALUE_MAPPED_FILE` or its `Option[MappedFile]` "
+                "fixture",
+                "omit an unrelated resource fixture",
+                "mapped-file omission mutation",
+            ),
+        )
+        path = self.root / "spec/design/compiled_value_ownership.md"
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_compiled_ownership_cannot_omit_string_or_tensor_tags(self) -> None:
+        mutations = (
+            (
+                "| `string` | `String` | opaque `chelis_string` handle and "
+                "`CHELIS_VALUE_STRING` |",
+                "| `string` | `String` | opaque `chelis_string` handle |",
+                "string carrier mapping",
+            ),
+            (
+                "| tensor value or internal tensor view | `Tensor` | opaque "
+                "`chelis_tensor *` handle and `CHELIS_VALUE_TENSOR` |",
+                "| tensor value or internal tensor view | `Tensor` | opaque "
+                "`chelis_tensor *` handle |",
+                "tensor carrier mapping",
+            ),
+            (
+                "tensor storage is the sole private heap allocation with no public "
+                "tag. Every\ndirectly carried public heap kind also has the table's "
+                "exact tagged\nrepresentation for recursive aggregates",
+                "Public heap kinds may omit tagged recursive representations",
+                "public heap tag totality",
+            ),
+        )
+        path = self.root / "spec/design/compiled_value_ownership.md"
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_compiled_ownership_metal_cannot_gain_unverified_reuse(self) -> None:
+        mutations = (
+            (
+                "typed `MetalNeverReuse` plan whose input cannot carry "
+                "`ReusableOwnedStorage`",
+                "Metal plan that accepts `ReusableOwnedStorage`",
+                "Metal typed no-reuse plan",
+            ),
+            (
+                "Metal emission with distinct storage for every produced node and "
+                "no input",
+                "Metal emission may alias produced nodes and input storage",
+                "Metal no-alias fixture",
+            ),
+            (
+                "let the Metal plan accept `ReusableOwnedStorage`",
+                "let an unrelated plan accept an unrelated token",
+                "Metal no-reuse mutation",
+            ),
+        )
+        path = self.root / "spec/design/compiled_value_ownership.md"
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_compiled_ownership_launch_gate_stays_narrower_than_class_closure(
+        self,
+    ) -> None:
+        mutations = (
+            (
+                "scripts/compiled_value_ownership_oracle.py --phase launch",
+                "scripts/compiled_value_ownership_oracle.py --phase complete "
+                "--require-hip",
+                "launch ownership oracle command",
+            ),
+            (
+                "COMPILED VALUE OWNERSHIP LAUNCH SUBSET: PASS",
+                "COMPILED VALUE OWNERSHIP ORACLE: PASS",
+                "launch ownership oracle success line",
+            ),
+            (
+                "The `complete --require-hip` invocation is the eventual [#1286] "
+                "class-closure\noracle. It is deliberately stronger than the "
+                "launch invocation",
+                "The launch invocation closes the entire class",
+                "launch and class-closure distinction",
+            ),
+        )
+        path = self.root / "spec/design/compiled_value_ownership.md"
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_compiled_ownership_keeps_external_issue_owners(self) -> None:
+        mutations = (
+            (
+                "The top-level tuple missing-`main` observation is [#545], not an "
+                "ownership-oracle row",
+                "The top-level tuple missing-`main` observation joins this oracle",
+                "top-level tuple external owner",
+            ),
+            (
+                "Runtime-valued `with seed` remains [#735] syntax/semantics work; "
+                "recursive-host operation support remains [#729]/[#730] capability "
+                "work",
+                "All secondary recursion observations join this oracle",
+                "recursive support external owners",
+            ),
+            (
+                "[#1172] owns the span-key cause that can over-broaden hints; Surf "
+                "reachability is exposure evidence",
+                "Every reachability observation joins this oracle",
+                "reachability external owner",
+            ),
+        )
+        path = self.root / "spec/design/compiled_value_ownership.md"
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_compiled_ownership_requires_runtime_seal_supersession(self) -> None:
+        self.replace(
+            Path("spec/design/compiled_value_ownership.md"),
+            "Phase 1 must\n  explicitly supersede its numbered-spec citations, "
+            "`runtime_representation.md`\n  target, guards, and public-layout "
+            "promise in the same atomic change",
+            "Both carrier contracts may coexist during migration",
+        )
+        self.assert_contract_fails("runtime representation supersession")
+
+    def test_implicit_linearity_distinguishes_current_and_successor_drop(self) -> None:
+        mutations = (
+            (
+                "The current C/HIP emitters still\n"
+                "treat the IR node as an emission no-op and reconstruct host "
+                "releases from backend-local\nstate",
+                "The current C/HIP emitters release every heap value at Drop",
+                "current Drop implementation status",
+            ),
+            (
+                "the successor verified-ownership lanes emit the matching heap "
+                "release at the\nterminal operation",
+                "the successor lanes may defer release until function exit",
+                "successor Drop release",
+            ),
+        )
+        path = self.root / "spec/design/implicit_linearity.md"
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_roadmap_cannot_replace_launch_subset_with_full_class_gate(self) -> None:
+        path = self.root / "spec/design/remediation_roadmap.md"
+        mutations = (
+            (
+                "[#1286]'s verified compiled ownership and opaque unified-heap ABI "
+                "through [#1362]'s C-lane `--phase launch` oracle",
+                "[#1286]'s ownership through the full HIP oracle",
+                "roadmap launch ownership gate",
+            ),
+            (
+                "full [#1286] class closure, including HIP and non-launch children, "
+                "remains tracker work and does not gate v0.19",
+                "full class closure gates v0.19",
+                "roadmap full ownership boundary",
+            ),
+        )
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_compiled_ownership_phase_one_cannot_skip_container_authority(self) -> None:
+        self.replace(
+            Path("spec/design/compiled_value_ownership.md"),
+            "The existing exact ABI remains [05-OP-31..33] and all three registries",
+            "The existing exact ABI remains [05-OP-31] and [05-OP-33]",
+        )
+        self.assert_contract_fails("complete C ABI authority chain")
+
+    def test_backend_cannot_accept_unverified_ownership(self) -> None:
+        self.replace(
+            Path("spec/design/compiled_value_ownership.md"),
+            "No arrow after verification may accept the pre-verification form",
+            "A backend may accept the pre-verification form as a fallback",
+        )
+        self.assert_contract_fails("verified backend boundary")
+
     def test_scalar_parse_nan_spelling_and_images_are_frozen(self) -> None:
         path = self.root / "spec/05-risc-primitives.md"
         mutations = (

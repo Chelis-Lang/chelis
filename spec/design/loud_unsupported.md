@@ -2255,6 +2255,13 @@ Same discipline as §I1; edits are bidirectional per B2.6.
   decodes through `chelis-vocab` on entry and that its rejections
   carry the §C2 brand; census row 27 records the current state
   ([#960]) and points at [#893] for the fix.
+- **[#1286] (compiled value ownership).** [#893] seals and types the tensor
+  representation; [#1286] owns the opaque handle's lifetime, the verified
+  borrow/move/clone boundary, last-use release, and the proof required before
+  any backend may write storage. This plan owns only loud failure when an
+  invalid handle, write state, or target capability is encountered. The
+  legacy `chelis_alloc_view`, `chelis_free`, and ambiguous value conversions
+  are deletion targets, not fallback routes.
 - **[#909] (host function values).** Owns the callable ABI only. Its
   contact with this plan is the callable-boundary substitution
   instances (the null-function-pointer emission shape recorded in the
@@ -2375,4 +2382,5 @@ and never depends on predicting a path.
 [#1152]: https://github.com/Chelis-Lang/chelis/issues/1152
 [#1192]: https://github.com/Chelis-Lang/chelis/issues/1192
 [#960]: https://github.com/Chelis-Lang/chelis/issues/960
+[#1286]: https://github.com/Chelis-Lang/chelis/issues/1286
 [#912]: https://github.com/Chelis-Lang/chelis/issues/912
