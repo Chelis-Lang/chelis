@@ -420,7 +420,7 @@ design doc under `spec/design/` or in `docs/investigations/`.
 
 Rules:
 
-- When filing issue, always check to see if it should be grouped under a relevant
+- When filing an issue, always check to see if it should be grouped under a relevant
   tracking issue.
 - An issue has **one** parent. When a defect splits across classes (the #689
   shape: a silent half and a support half), parent it to whichever class's
@@ -780,7 +780,7 @@ default workspace run.
 - Contention diagnostic: several unrelated tests FAILing at near-identical
   wall-clock times (for example all ~217s, nextest's slow-kill) means CPU
   starvation, not code breakage. Re-run on a quiet machine before treating those
-  as real failures; [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §3 has the
+  as real failures; [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §2 has the
   measured factor.
 - At session end, verify that task-owned background cargo, rustc, and nextest processes
   are gone. A stopped wrapper is not proof that its reparented children stopped; use

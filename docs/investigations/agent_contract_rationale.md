@@ -1,6 +1,6 @@
-# Why three rules in the agent contract exist
+# Why two rules in the agent contract exist
 
-`AGENTS.md` states rules. This file holds the incidents that produced three of
+`AGENTS.md` states rules. This file holds the incidents that produced two of
 them, because the evidence is instructive, ages differently from the rule, and
 would otherwise be paid for by every agent that loads the contract whole.
 
@@ -40,33 +40,7 @@ examples are here:
   `spec/design/dtype_semantics.md` §B1 calls amending the spec first "the
   protocol, not a failure."
 
-## 2. Why there is no META issue beside a tracker, behind "One Tracking Issue Per Class"
-
-The existing META/tracker pairs ([#727]/[#729], [#703]/[#730], and siblings) are
-historical, not a pattern to copy. The METAs were filed during the 2026-07 numeric
-audit as evidence records; the trackers were filed later, when the design docs
-were written, as delivery contracts.
-
-Three reasons the split stopped paying for itself:
-
-1. **It broke down.** Three of the five "METAs" are closed. #709 and #710 closed
-   while their class continues under an open #731, and neither was written as a
-   META: both are instance reports the class map promoted after the fact. #728
-   closed alongside its own tracker #732, so that pair carried no information the
-   tracker did not. (#732's closure was itself an accidental keyword auto-close
-   fired by narrative prose in PR #1250's body, which is a second reason not to
-   read the pattern as deliberate.)
-2. **Sub-issues do the job the pairing was improvising.** When the tracker is the
-   parent, "what belongs to this class" is a structural fact. A second issue whose
-   content is a list of instances duplicates the child list and drifts from it.
-3. **Two bodies means two things to keep honest**, and the evidence half has a
-   better home: `docs/investigations/` already holds the probe corpus and the audit
-   record.
-
-Reason 1 is itself evidence for keeping this out of the contract: its counts have
-already moved twice since it was written.
-
-## 3. The build-contention measurement, behind "Build Concurrency And Process Hygiene"
+## 2. The build-contention measurement, behind "Build Concurrency And Process Hygiene"
 
 Several unrelated tests failing at near-identical wall-clock times, for example all
 around 217s (nextest's slow-kill), means CPU starvation rather than code breakage.
@@ -76,12 +50,3 @@ contention against 24s on a quiet machine, a factor of about 100. That is the
 number to keep in mind before treating a wave of simultaneous timeouts as real
 failures.
 
-[#703]: https://github.com/Chelis-Lang/chelis/issues/703
-[#709]: https://github.com/Chelis-Lang/chelis/issues/709
-[#710]: https://github.com/Chelis-Lang/chelis/issues/710
-[#727]: https://github.com/Chelis-Lang/chelis/issues/727
-[#728]: https://github.com/Chelis-Lang/chelis/issues/728
-[#729]: https://github.com/Chelis-Lang/chelis/issues/729
-[#730]: https://github.com/Chelis-Lang/chelis/issues/730
-[#731]: https://github.com/Chelis-Lang/chelis/issues/731
-[#732]: https://github.com/Chelis-Lang/chelis/issues/732
