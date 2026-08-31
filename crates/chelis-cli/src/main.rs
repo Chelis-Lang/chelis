@@ -5407,11 +5407,27 @@ fn cmd_test_supervised(
                 deadline.saturating_duration_since(Instant::now()),
             );
             if !stderr_forwarded {
-                let _ = write_fallback_stream_bounded(
-                    OutputStream::Stdout,
-                    output_forwarding_failure_report(json, expect, suite_timeout_secs),
-                    Duration::from_secs(1),
+                const FAILURE_REPORT_GRACE: Duration = Duration::from_secs(1);
+                const SAME_STREAM_PROBE: Duration = Duration::from_millis(100);
+                let fallback_deadline = Instant::now()
+                    .checked_add(FAILURE_REPORT_GRACE)
+                    .unwrap_or_else(Instant::now);
+                // Missing the worker deadline does not prove that stderr is
+                // blocked: under scheduler pressure the worker may never run.
+                // Probe stderr on the caller before switching the only honest
+                // incomplete-output report to stdout.
+                let stderr_reported = write_fallback_stream_bounded(
+                    OutputStream::Stderr,
+                    output_forwarding_failure_diagnostic(suite_timeout_secs),
+                    SAME_STREAM_PROBE,
                 );
+                if !stderr_reported {
+                    let _ = write_fallback_stream_bounded(
+                        OutputStream::Stdout,
+                        output_forwarding_failure_report(json, expect, suite_timeout_secs),
+                        fallback_deadline.saturating_duration_since(Instant::now()),
+                    );
+                }
                 return Ok(1);
             }
             write_stream_bounded(
@@ -5712,6 +5728,10 @@ fn write_stream_bounded(stream: OutputStream, bytes: Vec<u8>, budget: Duration) 
     }
     let (done_tx, done_rx) = std::sync::mpsc::channel::<bool>();
     thread::spawn(move || {
+        if testing_hook_enabled("CHELIS_TEST_FAIL_BOUNDED_WRITER") {
+            let _ = done_tx.send(false);
+            return;
+        }
         if testing_hook_enabled("CHELIS_TEST_DELAY_BOUNDED_WRITER") {
             thread::sleep(Duration::from_secs(2));
         }
