@@ -45,6 +45,61 @@ Every child inherits one validated `PYO3_PYTHON`. Combined stdout/stderr is
 streamed live; a failed command's complete transcript and a 200-line replay
 are written under `target/gate-failures/`. Cargo output is pinned to this
 worktree, and nextest continues after failures to expose the complete set.
+
+Why three explicit rustdoc stages
+---------------------------------
+`cargo nextest` does not execute doctests, so a crate with a doctest
+contract needs an explicit `cargo test -p <crate> --doc` command or that
+contract runs nowhere. The `chelis-types` command runs the chelis#731
+`ErrorWitness` contracts; the `chelis-compiler-api` and
+`chelis-pipeline-core` commands run the compiler pipeline artifact
+contracts. The `backend-sanitizers` CI job separately runs an unfiltered
+`cargo test -p chelis-backend-c`, which picks up that crate's doctests.
+
+The gate deliberately does not use `--workspace --doc`: that would make
+every workspace doc example part of the gate without a reviewed scope
+change. Adding a crate is a deliberate act, one command at a time.
+
+Why the checkpoint script's own tests are not evidence
+------------------------------------------------------
+`check_checkpoint_compile_fail.py` checks the raw-offset fixture against
+exact Rust diagnostics. Its Python unit tests use fake runners and never
+execute the fixture, so they are evidence about decision logic only. The
+same is true of `unrepresentable_domain_oracle.py`, whose unit tests patch
+the command runners.
+
+Why the unrepresentable-domain oracle runs in `integration`
+-----------------------------------------------------------
+Two of chelis#908's obligations run `cargo nextest`, which the Rust-policy
+worker deliberately does not install, so the oracle cannot live in
+`lint-and-unit`. `scripts/test_gate.py` locks both the stage membership and
+the pairing between that stage and a nextest-installing job.
+
+The CHELIS_ORACLE_BINARY handoff (chelis#1322)
+----------------------------------------------
+The oracle builds its own `chelis` before its first `.dp` fixture. Inside a
+gate run that binary already exists, so the gate hands the built path over
+in `CHELIS_ORACLE_BINARY` and the oracle skips the build. The gate sets it
+only for a command list whose earlier `cargo run -p chelis-cli --bin chelis`
+command provably builds that bin target; the support-only integration slice
+used by hosted CI sets nothing and keeps the build-it-yourself behavior.
+`scripts/test_gate.py` locks the build-before-oracle ordering the handoff
+rests on, so a reorder cannot quietly turn the oracle cold again.
+
+The variable is an explicit override and is therefore authoritative: a path
+that is not an executable file is a loud failure, never a silent fall back
+to a build, and an explicit setting from the caller is never replaced. That
+is the same discipline applied to an explicit `PYO3_PYTHON`, timing
+included -- `gate_environment` validates an explicit handoff, so a bad one
+aborts before the first command rather than after the whole pre-push subset
+has run.
+
+Present-but-empty is a failure on both sides, not an off switch. Reading
+`export CHELIS_ORACLE_BINARY=` as "unset" would disable the handoff with no
+notice anywhere, so unset it entirely instead. The spelling itself lives in
+exactly one place: the oracle declares it and this script imports it,
+because two independent literals would let a rename keep every test green
+while the handoff was dead.
 """
 from __future__ import annotations
 

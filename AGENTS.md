@@ -681,22 +681,14 @@ remainder. The sanitizer, macOS-smoke, LOC-report, no-AI-authorship, docs, and
 smt-build CI jobs are out of scope for this script by design.
 
 The three explicit rustdoc stages exist because `cargo nextest` does not
-execute doctests. The `chelis-types` command runs the chelis#731
-`ErrorWitness` contracts. The other commands run the compiler pipeline
-artifact contracts.
-
-The gate does not use `--workspace --doc`. That command makes every
-workspace doc example part of the gate without a reviewed scope change.
+execute doctests, and the gate deliberately does not use `--workspace --doc`.
+`scripts/gate.py`'s module docstring records why, and what each stage covers.
 
 **Doctests only run where something invokes them.** The canonical gate
 invokes doctests for `chelis-types`, `chelis-compiler-api`, and
 `chelis-pipeline-core`. The `backend-sanitizers` job also runs
 `cargo test -p chelis-backend-c` without a filter. A `compile_fail` oracle in another crate runs nowhere until that
 crate gains an equivalent invocation in the same change set.
-
-The checkpoint script checks the raw-offset fixture against exact Rust
-diagnostics. Its Python unit tests use fake runners and do not execute
-the fixture.
 
 `scripts/unrepresentable_domain_oracle.py` is chelis#908's authoritative
 completion oracle, and the tracker requires every fix in that class to run
@@ -708,35 +700,9 @@ evidence about the script's decision logic and never a substitute for
 running it. It runs in the `integration` stage, which hosted CI executes
 exactly once on the second `workspace-tests-shard` worker before the
 fail-closed `Workspace Tests (Linux)` aggregate, on every non-docs-only pull
-request, and in the `--local` pre-push subset. That stage, not
-`lint-and-unit`, because two of its obligations run `cargo nextest`, which
-the Rust-policy worker deliberately does not install.
-`scripts/test_gate.py` locks both memberships and the pairing between the
-oracle's stage and a nextest-installing job.
-
-The oracle builds its own `chelis` before its first `.dp` fixture. Inside a
-gate run that binary already exists, so `gate.py` hands the built path over
-in `CHELIS_ORACLE_BINARY` and the oracle skips the build (chelis#1322). The
-gate sets it only for a command list whose earlier `cargo run -p chelis-cli
---bin chelis` command provably builds that bin target; the support-only
-integration slice used by hosted CI sets nothing and keeps the original
-build-it-yourself behavior. The variable is an explicit override and is
-therefore authoritative: a path that is not an executable file is a loud
-failure, never a silent fall back to a build, and an explicit setting from
-the caller is never replaced. That is the same discipline the gate applies
-to an explicit `PYO3_PYTHON`, timing included: the gate validates an
-explicit handoff in `gate_environment`, so a bad one aborts before the
-first command rather than after the whole pre-push subset has run.
-
-Present-but-empty is a failure on both sides, not an off switch. Reading
-`export CHELIS_ORACLE_BINARY=` as "unset" would disable the handoff with no
-notice anywhere, so unset it entirely instead. The spelling itself lives in
-exactly one place: the oracle declares it and `gate.py` imports it, because
-two independent literals would let a rename keep every test green while the
-handoff was dead.
-
-`scripts/test_gate.py` locks the build-before-oracle ordering the handoff
-rests on, so a reorder cannot quietly turn the oracle cold again.
+request, and in the `--local` pre-push subset. `scripts/gate.py`'s docstring
+records why that stage rather than `lint-and-unit`, and how the
+`CHELIS_ORACLE_BINARY` build handoff avoids a redundant rebuild.
 
 `--local` (chelis#360) runs the developer pre-push subset: workspace clippy
 (`-D warnings`, compile-only), `cargo fmt --check`, `chelis lint
