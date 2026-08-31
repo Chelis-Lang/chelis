@@ -305,6 +305,14 @@ allocate, free, or interpret tensor values. The schema generates:
    and
 4. the corresponding internal C/HIP device declaration.
 
+Delivery ownership is intentionally asymmetric. Phase 3 creates the shared
+schema and installs the generated host and public-C artifacts. That host slice
+depends only on Phase 1 and defines every shared field class needed by a later
+device renderer. Phase 2 requires Phase 3 and consumes that landed schema for
+the generated device descriptor and the Python/device/DLPack migration. It
+does not stage or install a private host descriptor ahead of the Phase 3 host
+consumer migration.
+
 The host and device descriptors share these schema field classes: opaque data
 pointer, dynamic shape/stride pointers, `int64` element count and byte capacity,
 `int32` rank, exact dtype tag, ownership, and reserved bytes. Device ownership
@@ -510,11 +518,12 @@ tests prove its sanctioned replacements work.
 - Phase 1 freezes `DTypeContract`, sealed element markers, exact capacity keys,
   and checked finite-count types. Later phases consume them without parallel
   tables.
-- Phase 2 freezes the generated host/device schema and public-layout parity.
-  Later field changes amend [05-OP-31] first when public, regenerate every
-  consumer, and move the freeze in one change.
-- Phase 3 freezes typed runtime ingress and the private data field. Reopening a
-  raw accessor is a design change, not a local optimization.
+- Phase 2 freezes the device renderer, generated device descriptor, and
+  binding-layout parity against the schema Phase 3 landed.
+- Phase 3 freezes the shared descriptor schema, generated host/public-C layout,
+  typed runtime ingress, and the private data field. Later public field changes
+  amend [05-OP-31] first and regenerate every consumer in one change. Reopening
+  a raw accessor is a design change, not a local optimization.
 - Phase 4 freezes the typed lane renderer and all-lanes representation probes.
   A new dtype or lane cannot land without extending both.
 - Phase 5 freezes the composite oracle and closure receipts. No individual
@@ -621,13 +630,16 @@ Final line: `RUNTIME REPRESENTATION PHASE 1: PASS`.
 
 ## Phase 2 — canonical ABI descriptors
 
-**Requires:** Phase 1.
+**Requires:** Phase 3, which includes Phase 1 and lands the shared schema plus
+the generated host/public-C descriptor.
 
-**Delivers:** C3 completely and the binding/device portion of C4: `chelis-abi`,
-generated host/device descriptors, freshness and layout probes, dynamic-rank
-exact metadata plus private validated Python/DLPack wrappers, and the deletion
-of every handwritten mirror. The current [#1289] public ABI and [#1347]
-zero-extent behavior are positive receipts.
+**Delivers:** C3's device half and the binding/device portion of C4: the device
+renderer over `chelis-abi`'s landed shared schema, the generated device
+descriptor, freshness and layout probes, dynamic-rank exact metadata plus
+private validated Python/DLPack wrappers, and the deletion of every handwritten
+device or binding mirror. Phase 2 requires Phase 3 and consumes that landed
+schema; it neither installs nor seals the raw host descriptor. The current
+[#1289] public ABI and [#1347] zero-extent behavior are positive receipts.
 
 **Issue exit:** [#1345] closes after Python host-to-device, device entry,
 device-to-host, and DLPack paths pass rank 0, 1, 8, and greater-than-8 cases,
@@ -645,16 +657,21 @@ Final line: `RUNTIME REPRESENTATION PHASE 2: PASS`.
 
 ## Phase 3 — typed host runtime access and the field seal
 
-**Requires:** Phase 1. It may run in parallel with Phase 2 and does not consume
-the Python or device descriptor.
+**Requires:** Phase 1. Phase 2 does not gate this phase. Phase 3 creates the
+shared `chelis-abi` field schema, host renderer, generated raw host descriptor,
+and generated public-C descriptor without consuming the Python or device
+descriptor.
 
-**Delivers:** the host-runtime and public-C portion of C4. Migrate
+**Delivers:** C3's shared-schema and host/public-C portion plus the host-runtime
+and public-C portion of C4. Migrate
 repository-owned allocation, views, elementwise kernels, reductions,
 formatting, collection ingress/egress, and ownership paths to validated typed
 views; foreign C entries use only the branded indexed access core. Delete
-public unchecked pointer helpers and broad raw-byte access. Make every raw host
-descriptor field private in the owner module as the last diff. Phase 2 owns the
-binding/device portion, and C4 is complete only when both phases are green.
+public unchecked pointer helpers and broad raw-byte access. Install the
+generated raw host descriptor only with that migrated consumer set, then make
+every raw host descriptor field private in the owner module as the last diff.
+Phase 2 later owns the binding/device portion, and C3/C4 are complete only when
+both phases are green.
 
 The exact-head compile after the seal must exercise every runtime target and
 test target. A compile-fail fixture outside the owner module attempts direct
@@ -672,8 +689,8 @@ Final line: `RUNTIME REPRESENTATION PHASE 3: PASS`.
 
 ## Phase 4 — typed lanes and Bool8 execution
 
-**Requires:** Phase 1 for the renderer and Phase 2 for device descriptors; it may
-run in parallel with Phase 3 but cannot exit before both are green.
+**Requires:** Phase 1 for the renderer and Phase 2 for device descriptors;
+Phase 2 already includes the Phase 3 host/schema prerequisite.
 
 **Delivers:** C5 completely across C, HIP, and Metal. Delete duplicate width and
 element-spelling tables, route loads/stores/casts through typed builders, and run

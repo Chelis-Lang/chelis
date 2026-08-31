@@ -266,6 +266,19 @@ fn run_invalid_case(case: &str) -> ! {
                     i64::MAX,
                 );
             }
+            "byte-overflow" => {
+                // The element count fits int64, but the exact I16 byte count
+                // does not. This is distinct from the product overflow above
+                // and must fail before inspecting the placeholder data.
+                let shape = [(i64::MAX / 2) + 1];
+                chelis_alloc_view(
+                    1,
+                    shape.as_ptr(),
+                    CHELIS_DTYPE_I16,
+                    8_usize as *mut _,
+                    i64::MAX,
+                );
+            }
             "view-capacity" => {
                 let mut backing = [0_u64; 2];
                 let shape = [2_i64];
@@ -325,6 +338,7 @@ fn malformed_foreign_carriers_and_tensor_metadata_fail_loudly() {
         "shape-null",
         "extent-negative",
         "shape-overflow",
+        "byte-overflow",
         "view-capacity",
         "view-null",
         "view-alignment",

@@ -182,7 +182,7 @@ PYTHON_VERSION_PROBE = (
 # The canonical CI-stage command list. The CI workflow
 # has Rust-policy and workspace worker jobs. The workspace test workers run
 # hash partitions of the integration stage's nextest command, while one
-# support worker runs its two non-test oracles exactly once.
+# support worker runs its non-test oracles exactly once.
 # The full developer gate substitutes the complete default nextest profile for
 # CI's split profile so the delegated census binaries are not dropped locally.
 # Every
@@ -353,6 +353,18 @@ UNREPRESENTABLE_DOMAIN_ORACLE: list[str] = [
     "scripts/unrepresentable_domain_oracle.py",
 ]
 
+# chelis#893 Phase 0. The structural inventory and detector mutations are
+# cheap, but its acceptance surface deliberately runs release-profile Rust
+# reproducers. Keep it in the nextest-equipped integration support slice so
+# CI executes the documented phase command itself rather than only its mocked
+# Python unit tests.
+RUNTIME_REPRESENTATION_ORACLE: list[str] = [
+    MANAGED_PYTHON,
+    "scripts/runtime_representation_oracle.py",
+    "--phase",
+    "0",
+]
+
 # chelis#1205's authoritative front-end complexity and parity oracle. It
 # reruns the focused structural counters after the workspace suite so their
 # 20/40/80/160 growth evidence has a named continuous acceptance marker.
@@ -406,6 +418,7 @@ STAGES: dict[str, list[list[str]]] = {
         NEXTEST_WORKSPACE_CI,
         COMPILER_FRONT_END_PERFORMANCE_ORACLE,
         UNREPRESENTABLE_DOMAIN_ORACLE,
+        RUNTIME_REPRESENTATION_ORACLE,
     ],
 }
 
@@ -438,6 +451,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     PIPELINE_CORE_DEPENDENCY_GUARD,
     PIPELINE_CORE_DOCUMENTATION_GUARD,
     UNREPRESENTABLE_DOMAIN_ORACLE,
+    RUNTIME_REPRESENTATION_ORACLE,
 ]
 
 LOCAL_ANNOTATION = "local + ci"
