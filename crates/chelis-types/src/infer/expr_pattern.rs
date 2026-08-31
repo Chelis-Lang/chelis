@@ -203,7 +203,9 @@ pub(super) fn pattern_bindings(
                     // diagnostic.
                     if constructor_pattern_out_of_scope(ctor_name, env, adt_reg) {
                         errors.push(CheckError::new(
-                            CheckErrorKind::UnknownConstructor,
+                            CheckErrorKind::UnknownConstructor {
+                                identifier: ctor_name.to_string(),
+                            },
                             with_macro_provenance(pat, format!("unknown constructor: {ctor_name}")),
                             vec![format!(
                                 "Constructor '{ctor_name}' is not in scope. Declare it \
@@ -320,7 +322,9 @@ pub(super) fn pattern_bindings(
                     // otherwise silently accept.
                     if constructor_pattern_out_of_scope(ctor_name, env, adt_reg) {
                         errors.push(CheckError::new(
-                            CheckErrorKind::UnknownConstructor,
+                            CheckErrorKind::UnknownConstructor {
+                                identifier: ctor_name.to_string(),
+                            },
                             with_macro_provenance(pat, format!("unknown constructor: {ctor_name}")),
                             vec![format!(
                                 "Constructor '{ctor_name}' is not in scope. Declare it \

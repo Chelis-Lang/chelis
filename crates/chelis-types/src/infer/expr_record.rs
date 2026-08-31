@@ -223,9 +223,14 @@ pub(super) fn infer_record(
         return report(
             errors,
             CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("unknown record constructor `{head}`"),
-                vec![format!("declare `type {head} = | {head} {{ ... }}`")],
+                CheckErrorKind::UnknownConstructor {
+                    identifier: head.to_string(),
+                },
+                format!("unknown constructor: {head}"),
+                vec![format!(
+                    "Constructor '{head}' is not in scope. Declare it locally or \
+                     add it to an import (e.g. `import Mod ({head})`)"
+                )],
             ),
         );
     };
@@ -249,7 +254,9 @@ pub(super) fn infer_record(
         return report(
             errors,
             CheckError::new(
-                CheckErrorKind::UnknownConstructor,
+                CheckErrorKind::UnknownConstructor {
+                    identifier: head.to_string(),
+                },
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
                     format!("unknown constructor: {head}"),

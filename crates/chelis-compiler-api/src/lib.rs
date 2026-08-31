@@ -33,7 +33,7 @@ pub use chelis_types::{LinkedProgramGuard, install_linked_program_guard};
 pub use compiler::{
     EVAL_CANCELLED_KIND, PreparedEvalInContext, check_in_context, compile_for_execution_in_context,
     eval_in_context, eval_in_context_with_bindings, eval_many_in_context, prepare_eval_in_context,
-    surf_source_has_import,
+    prepare_rewritten_entry_batch_in_context, surf_source_has_import,
 };
 pub use compiler::{add_function, replace_function_body};
 pub use context::{

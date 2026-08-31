@@ -2264,8 +2264,21 @@ fn compile_new_source_in_context(
     let rewritten =
         chelis_reef::rewrite_entry_decls_with_reef_graph(&context.reef_state, &flat_decls)
             .map_err(|err| stage_error("reef", err, GeneralKind::ReefError))?;
+    compile_rewritten_decls_in_context(context, &rewritten, target)
+}
+
+/// Compile declarations whose module identity and imports have already been
+/// resolved by Reef. Keeping this boundary separate prevents an isolated
+/// multi-entry batch from being flattened back into the synthetic eval module
+/// and rewritten a second time.
+fn compile_rewritten_decls_in_context(
+    context: &crate::context::CompiledContext,
+    rewritten: &[Decl],
+    target: Target,
+) -> Result<CompiledSource> {
+    let _linked = chelis_types::install_linked_program_guard();
     bail_if_cancelled("desugar")?;
-    let prepared = crate::pipeline::prepare_surf_decls(&rewritten, None).map_err(|error| {
+    let prepared = crate::pipeline::prepare_surf_decls(rewritten, None).map_err(|error| {
         pipeline_rejection_to_compiler_error(crate::pipeline::PipelineRejection::Preparation(error))
     })?;
     bail_if_cancelled("check")?;
@@ -2459,6 +2472,19 @@ pub fn prepare_eval_in_context(
     new_source: &str,
 ) -> Result<PreparedEvalInContext> {
     let compiled = compile_new_source_in_context(context, new_source, Target::Eval)?;
+    Ok(PreparedEvalInContext {
+        compiled: std::sync::Arc::new(compiled),
+    })
+}
+
+/// Prepare an independently Reef-rewritten entry batch against a cached
+/// context. The batch is consumed as linked declarations; it never re-enters
+/// `rewrite_entry_decls_with_reef_graph` as one flat eval scope.
+pub fn prepare_rewritten_entry_batch_in_context(
+    context: &crate::context::CompiledContext,
+    batch: &chelis_reef::RewrittenEntryBatch,
+) -> Result<PreparedEvalInContext> {
+    let compiled = compile_rewritten_decls_in_context(context, batch.declarations(), Target::Eval)?;
     Ok(PreparedEvalInContext {
         compiled: std::sync::Arc::new(compiled),
     })
@@ -5017,8 +5043,8 @@ pub(crate) fn check_error_diagnostic(error: &CheckError) -> Diagnostic {
         CheckErrorKind::PrecisionMismatch => GeneralKind::PrecisionMismatch,
         CheckErrorKind::DimensionMismatch => GeneralKind::DimensionMismatch,
         CheckErrorKind::ArityMismatch => GeneralKind::ArityMismatch,
-        CheckErrorKind::UnboundVariable => GeneralKind::UnboundVariable,
-        CheckErrorKind::UnknownConstructor => GeneralKind::UnknownConstructor,
+        CheckErrorKind::UnboundVariable { .. } => GeneralKind::UnboundVariable,
+        CheckErrorKind::UnknownConstructor { .. } => GeneralKind::UnknownConstructor,
         CheckErrorKind::NotAFunction => GeneralKind::NotAFunction,
         CheckErrorKind::NonExhaustiveMatch => GeneralKind::NonExhaustiveMatch,
         CheckErrorKind::OccursCheck => GeneralKind::OccursCheck,

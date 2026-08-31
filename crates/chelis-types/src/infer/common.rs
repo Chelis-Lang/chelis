@@ -313,17 +313,15 @@ pub(super) fn is_constructor_name(name: &str) -> bool {
 /// when the importing module declares it locally or imports it by name).
 ///
 /// Returns `true` when `name` looks like a constructor (PascalCase terminal)
-/// but is *not* bound exactly and is *only* reachable through the registry's
-/// fuzzy terminal-segment fallback (`lookup_terminal_unique`). That fallback
-/// is exactly the silent cross-module mis-resolution chelis#317 reports: a
-/// type-only import leaves the bare constructor un-rewritten, and the fuzzy
-/// match binds it to another module's mangled tag, deferring the failure to
-/// a runtime non-exhaustive match. Such a reference must be rejected at
-/// `check` as an unknown constructor instead.
+/// but is not bound exactly. Whether the package registry contains zero, one,
+/// or several foreign same-terminal constructors is deliberately irrelevant:
+/// consulting that global population would let unrelated modules change this
+/// reference's diagnostic kind. A type-only import can therefore neither
+/// fuzzy-bind to another module's mangled tag nor fall through as an ordinary
+/// unbound value. Every non-exact constructor reference is rejected at
+/// `check` as an unknown constructor.
 pub(super) fn constructor_out_of_scope(name: &str, env: &Env) -> bool {
-    is_constructor_name(name)
-        && env.lookup(name).is_none()
-        && env.lookup_terminal_unique(name).is_some()
+    is_constructor_name(name) && env.lookup(name).is_none()
 }
 
 /// Pattern-position counterpart of [`constructor_out_of_scope`]. A constructor
@@ -1103,7 +1101,9 @@ pub(super) fn report_orphan_defsigs(
                 .map(|module| format!("{module}.{name}"))
                 .unwrap_or_else(|| name.to_string());
             errors.push(CheckError::new(
-                CheckErrorKind::UnboundVariable,
+                CheckErrorKind::UnboundVariable {
+                    identifier: qualified.clone(),
+                },
                 format!(
                     "defsig `{qualified}` has no matching `def` in the same check unit: \
                      signatures describe Chelis definitions and do not declare runtime symbols"
@@ -1922,7 +1922,7 @@ pub(super) fn infer_top_level(
         // the permissive unify rule was implicitly tolerating.
         let body_has_unbound_diagnostic = errors
             .iter_since(body_diagnostic_checkpoint)
-            .any(|e| matches!(e.kind, CheckErrorKind::UnboundVariable));
+            .any(|e| matches!(e.kind, CheckErrorKind::UnboundVariable { .. }));
 
         // Enforce defsig: body must match declared signature.
         //

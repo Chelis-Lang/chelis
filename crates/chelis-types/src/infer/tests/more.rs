@@ -253,6 +253,22 @@ fn fix7_fitness_unresolved_names() {
     assert!(report.errors.iter().all(|e| e.severity > 0.0));
 }
 
+#[test]
+fn fitness_uses_the_structured_identifier_instead_of_rendered_prose() {
+    let exprs = chelis_deep::parser::parse_str("(def {} x (var {} unknown))").unwrap();
+    let mut result = crate::infer::infer_program(&exprs);
+    let error = result
+        .errors
+        .iter_mut()
+        .find(|error| matches!(error.kind, CheckErrorKind::UnboundVariable { .. }))
+        .expect("unbound diagnostic");
+    error.message = "localized name-resolution rendering".to_string();
+
+    let report = crate::fitness::FitnessReport::from_infer_result(&result);
+    assert_eq!(report.unresolved_names, vec!["unknown"]);
+    assert!(report.components.names < 1.0);
+}
+
 // Fix 7b: suggestions populated for UnboundVariable
 #[test]
 fn fix7b_suggestions_for_unbound() {
@@ -260,7 +276,7 @@ fn fix7b_suggestions_for_unbound() {
     let unbound_err = result
         .errors
         .iter()
-        .find(|e| matches!(e.kind, CheckErrorKind::UnboundVariable))
+        .find(|e| matches!(e.kind, CheckErrorKind::UnboundVariable { .. }))
         .expect("expected UnboundVariable error");
     assert!(
         !unbound_err.suggestions.is_empty(),
@@ -339,7 +355,7 @@ fn ir_preserves_unresolved_name_errors() {
         result
             .errors
             .iter()
-            .any(|error| matches!(error.kind, CheckErrorKind::UnboundVariable)),
+            .any(|error| matches!(error.kind, CheckErrorKind::UnboundVariable { .. })),
         "expected ir inference to preserve unresolved-name errors, got {:?}",
         result.errors
     );
@@ -381,7 +397,7 @@ fn ir_resolves_consistently_mangled_constructor_names() {
     assert!(
         !result.errors.iter().any(|error| matches!(
             error.kind,
-            CheckErrorKind::UnboundVariable | CheckErrorKind::UnknownConstructor
+            CheckErrorKind::UnboundVariable { .. } | CheckErrorKind::UnknownConstructor { .. }
         )),
         "expected the consistently mangled constructor to resolve clean, got {:?}",
         result.errors
@@ -407,13 +423,23 @@ fn ir_rejects_out_of_scope_terminal_constructor_name() {
 
     let result = infer_ir_program(&exprs);
     assert!(
-        result.errors.iter().any(
-            |error| matches!(error.kind, CheckErrorKind::UnknownConstructor)
-                && error.message.contains("KVCache")
-        ),
+        result.errors.iter().any(|error| matches!(
+            error.kind,
+            CheckErrorKind::UnknownConstructor { .. }
+        ) && error.message.contains("KVCache")),
         "expected an UnknownConstructor for the out-of-scope bare `KVCache`, got {:?}",
         result.errors
     );
+
+    let diagnostic = result
+        .errors
+        .iter()
+        .find(|error| matches!(error.kind, CheckErrorKind::UnknownConstructor { .. }))
+        .expect("unknown constructor diagnostic");
+    assert_eq!(diagnostic.kind.unresolved_identifier(), Some("KVCache"));
+    let report = crate::fitness::FitnessReport::from_infer_result(&result);
+    assert_eq!(report.unresolved_names, vec!["KVCache"]);
+    assert!(report.components.names < 1.0);
 }
 
 // Fix 8: typed params in Deep

@@ -290,7 +290,7 @@ fn spec_unbound_variable_is_error() {
     let has_unbound = result
         .errors
         .iter()
-        .any(|e| matches!(e.kind, CheckErrorKind::UnboundVariable));
+        .any(|e| matches!(e.kind, CheckErrorKind::UnboundVariable { .. }));
     assert!(
         has_unbound,
         "expected UnboundVariable error, got: {:?}",

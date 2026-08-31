@@ -703,7 +703,9 @@ fn lit_default_float() {
 fn unbound_variable() {
     check_err(
         "(def {} x (var {} unknown))",
-        CheckErrorKind::UnboundVariable,
+        CheckErrorKind::UnboundVariable {
+            identifier: "unknown".to_string(),
+        },
     );
 }
 

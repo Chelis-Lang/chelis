@@ -91,7 +91,7 @@ fn check_surf(source: &str) {
                 }
                 json.push_str(&format!(
                     "{{\"kind\":\"{}\",\"message\":\"{}\"}}",
-                    json_escape(&format!("{:?}", error.kind)),
+                    error.kind.diagnostic_name(),
                     json_escape(&error.message)
                 ));
             }
@@ -146,7 +146,7 @@ fn check_deep(source: &str) {
                 }
                 json.push_str(&format!(
                     "{{\"kind\":\"{}\",\"message\":\"{}\"}}",
-                    json_escape(&format!("{:?}", error.kind)),
+                    error.kind.diagnostic_name(),
                     json_escape(&error.message)
                 ));
             }

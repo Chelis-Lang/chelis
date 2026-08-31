@@ -2557,8 +2557,8 @@ fn assemble_check_json(
         .iter()
         .map(|e| {
             format!(
-                "{{\"kind\":\"{:?}\",\"message\":{},\"severity\":{}{}{}{}{}}}",
-                e.kind,
+                "{{\"kind\":\"{}\",\"message\":{},\"severity\":{}{}{}{}{}}}",
+                e.kind.diagnostic_name(),
                 serde_json::to_string(&e.message).unwrap_or_default(),
                 e.severity,
                 e.expected
@@ -2594,8 +2594,8 @@ fn assemble_check_json(
     }));
     errors_json.extend(linearity_errors.iter().map(|e| {
         format!(
-            "{{\"kind\":\"{:?}\",\"message\":{},\"severity\":{}{}{}}}",
-            e.kind,
+            "{{\"kind\":\"{}\",\"message\":{},\"severity\":{}{}{}}}",
+            e.kind.diagnostic_name(),
             serde_json::to_string(&e.message).unwrap_or_default(),
             e.severity,
             e.span_offset
@@ -8244,8 +8244,8 @@ fn run_test_batch<F>(
 where
     F: FnMut(&TestRow),
 {
-    let mut combined_decls = Vec::new();
-    let mut selected = Vec::<(String, String, chelis_deep::Span, String)>::new();
+    let mut entries = Vec::new();
+    let mut selected = Vec::<(usize, String, String)>::new();
     // Same admission rule the parent classifier applied, so this guard can only
     // reject a manifest the parent should never have built. A stricter guard
     // here would reject legitimate batches and turn them into silent per-file
@@ -8267,6 +8267,7 @@ where
             EnumerationOutcome::Tests(tests) => tests,
             EnumerationOutcome::Error(msg) => return Err(msg),
         };
+        let mut selected_roots = Vec::new();
         for test_name in &file.tests {
             let Some(test) = tests.iter().find(|candidate| candidate.name == *test_name) else {
                 return Err(format!(
@@ -8274,35 +8275,32 @@ where
                     file.rel_display
                 ));
             };
-            let synth_name = format!("__chelis_test_f{}_t{}", file.index, selected.len());
-            selected.push((
-                file.rel_display.clone(),
-                test.name.clone(),
-                test.span,
-                synth_name,
-            ));
+            selected.push((file.index, file.rel_display.clone(), test.name.clone()));
+            selected_roots.push(chelis_reef::SelectedEntryRoot {
+                name: test.name.clone(),
+                span: test.span,
+            });
         }
-        combined_decls.extend(flat);
-    }
-
-    for (_, test_name, span, synth_name) in &selected {
-        let call = chelis_surf::ast::Expr::Apply(
-            Box::new(chelis_surf::ast::Expr::Var(test_name.clone(), *span)),
-            Vec::new(),
-            *span,
-        );
-        combined_decls.push(Decl::LetDef {
-            name: synth_name.clone(),
-            ty: None,
-            value: call,
-            span: *span,
+        entries.push(chelis_reef::IsolatedEntryModule {
+            manifest_index: file.index,
+            declarations: flat,
+            selected_roots,
         });
     }
 
-    let prepared_eval = prepare_eval_in_exec_context(exec_context, &combined_decls)?;
+    let rewritten = chelis_reef::rewrite_isolated_entry_modules_with_reef_graph(
+        exec_context.reef_graph(),
+        &entries,
+    )?;
+    let prepared_eval = prepare_rewritten_batch_in_exec_context(exec_context, &rewritten)?;
 
-    for (rel_display, test_name, _, synth_name) in selected {
-        let root = synth_name.clone();
+    for (manifest_index, rel_display, test_name) in selected {
+        let root = rewritten
+            .exact_root(manifest_index, &test_name)
+            .ok_or_else(|| {
+                format!("isolated test entry {manifest_index} lost selected root `{test_name}`")
+            })?
+            .to_string();
         let handle = prepared_eval.clone();
         let outcome = run_test_with_timeout(
             move || Ok(handle.eval_root(BTreeMap::new(), &root)),
@@ -8734,6 +8732,47 @@ fn prepare_eval_in_exec_context(
                 err.errors
                     .iter()
                     .map(|d| d.message.clone())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+        }
+    }
+}
+
+/// Consume one batch product that Reef has already rewritten as independent
+/// modules. Both context variants use these exact declarations and roots;
+/// neither routes the combined batch through the flat eval-entry resolver.
+fn prepare_rewritten_batch_in_exec_context(
+    exec_context: &TestExecutionContext,
+    batch: &chelis_reef::RewrittenEntryBatch,
+) -> Result<PreparedTestEval, String> {
+    let _linked = chelis_types::install_linked_program_guard();
+    match exec_context {
+        TestExecutionContext::Context(ctx) => {
+            chelis_compiler_api::compiler::prepare_rewritten_entry_batch_in_context(ctx, batch)
+                .map(PreparedTestEval::InContext)
+                .map_err(|err| {
+                    err.errors
+                        .iter()
+                        .map(|diagnostic| diagnostic.message.clone())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                })
+        }
+        TestExecutionContext::ReefGraph(graph) => {
+            let prepared =
+                chelis_reef::compile_rewritten_entry_batch_with_reef_graph(graph, batch)?;
+            let source_text = chelis_surf::format::format_program(&prepared.decls);
+            #[allow(deprecated)]
+            let prepared_eval = chelis_compiler_api::compiler::prepare_eval(EvalRequest {
+                source_kind: SourceKind::Surf,
+                source: source_text,
+                bindings: BTreeMap::new(),
+            });
+            prepared_eval.map(PreparedTestEval::Legacy).map_err(|err| {
+                err.errors
+                    .iter()
+                    .map(|diagnostic| diagnostic.message.clone())
                     .collect::<Vec<_>>()
                     .join("; ")
             })
