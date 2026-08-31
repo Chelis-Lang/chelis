@@ -2605,6 +2605,16 @@ pub fn rewrite_isolated_entry_modules_with_reef_graph(
         let mut occupied = collect_symbol_kinds(&entry.declarations)
             .into_keys()
             .collect::<BTreeSet<_>>();
+        // A synthetic local shadows an unqualified import during ordinary
+        // rewriting. Reserve every prepared-graph source symbol as well as
+        // every entry-local declaration so adding the call roots cannot
+        // change the meaning of either selective or wildcard imports.
+        occupied.extend(
+            graph
+                .internal_maps
+                .values()
+                .flat_map(|symbols| symbols.keys().cloned()),
+        );
         let mut source_decls = entry.declarations.clone();
         let mut synthetic_roots = Vec::new();
 
@@ -11254,6 +11264,49 @@ module_prefix = "OrphanSig"
             error.contains("unbound variable: sibling_value"),
             "unexpected isolated-entry rejection: {error}"
         );
+    }
+
+    #[test]
+    fn isolated_roots_do_not_shadow_selectively_imported_bindings() {
+        let (_dir, root) = shared_graph_fixture();
+        write(
+            &root.join("mylib/src/math.ch"),
+            "module Mylib.Math\n\n\
+             export (add, __chelis_batch_root_0)\n\
+             def add(x: int32, y: int32) -> int32 = x + y\n\
+             def __chelis_batch_root_0() -> bool = true\n",
+        );
+        let graph = prepare_reef_graph(&root).expect("prepare graph");
+        let declarations = chelis_surf::parser::parse_str(
+            "import Mylib.Math (__chelis_batch_root_0)\n\
+             def test_imported() -> bool = __chelis_batch_root_0()\n",
+        )
+        .expect("parse selectively imported entry");
+        let entry = IsolatedEntryModule {
+            manifest_index: 0,
+            declarations: declarations.clone(),
+            selected_roots: vec![selected_entry_root(&declarations, "test_imported")],
+        };
+
+        let batch = rewrite_isolated_entry_modules_with_reef_graph(&graph, &[entry])
+            .expect("rewrite imported entry");
+        assert_eq!(
+            batch.exact_root(0, "test_imported"),
+            Some(
+                internal_name(
+                    "myapp",
+                    "Myapp.__ChelisTestBatch0",
+                    "__chelis_batch_root_0_1"
+                )
+                .as_str()
+            ),
+            "the inserted root must not shadow an imported binding"
+        );
+
+        let prepared = compile_rewritten_entry_batch_with_reef_graph(&graph, &batch)
+            .expect("append rewritten batch");
+        let deep = expanded_desugared_program(&prepared.decls).expect("desugar batch");
+        checked_program_with_effects(&deep).expect("selectively imported entry must type-check");
     }
 
     #[test]

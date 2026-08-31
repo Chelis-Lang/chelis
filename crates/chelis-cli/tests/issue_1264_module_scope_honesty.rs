@@ -251,6 +251,15 @@ fn unknown_constructor_is_counted_as_an_unresolved_name() {
     assert_check_name_error(&check, &report, "UnknownConstructor", "Payload");
 
     write_file(
+        &root.join("src/other.ch"),
+        "module Scope.Other\n\
+         export (Payload)\n\
+         type Payload = | Payload { other: int64 }\n",
+    );
+    let (check, report) = run_check(&root, &entry);
+    assert_check_name_error(&check, &report, "UnknownConstructor", "Payload");
+
+    write_file(
         &entry,
         "module Scope.Consumer\n\
          import Scope.Model (Payload)\n\
