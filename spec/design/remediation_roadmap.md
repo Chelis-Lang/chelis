@@ -22,7 +22,7 @@ The plan set: [`dtype_semantics.md`](dtype_semantics.md) ([#729]), [`loud_unsupp
 |---|---|---|
 | [#727] no dtype's semantics enforced at any single point ([#695] = its integer instance) | [`dtype_semantics.md`](dtype_semantics.md) - per-dtype finalizer behind private constructors, int/float kernel split, one storage decision, generated backend dispatch | [#729] |
 | [#703] unsupported cases substitute values instead of failing | [`loud_unsupported.md`](loud_unsupported.md) - Result-typed failure channels, the census sweep, dependency-bottom closed identities, fail-closed HostType/ABI states, structured emission, gates demoted to UX, and (2026-07-30) §C7 ratchet totality: derived-universe guards including Python/C consumers, typed/live exclusion authority with review-owned relevance, the typed kind/authority channel, and a non-shippable mutation-based panic-surfacing oracle | [#730] |
-| [#709] unrecognized constructs silently exempt from checking (+[#710]'s silent half) | [`checker_totality.md`](checker_totality.md) - loud wildcard + handle-effect case, ErrorWitness token (silent Type::Error unconstructible), totality invariant, DeepTag exhaustiveness | [#731] |
+| [#709] unrecognized constructs silently exempt from checking (+[#710]'s silent half) | [`checker_totality.md`](checker_totality.md) - loud wildcard + handle-effect case, ErrorWitness token (silent Type::Error unconstructible), totality invariant, DeepTag exhaustiveness, and PP4 exact module scope at package/test-batch boundaries | [#731] |
 | [#728] the observation channel is not dtype-faithful (**CLOSED 2026-08-21**) | [`faithful_observation.md`](faithful_observation.md) - one Rust formatter, generated C print helper, round-trip invariant, tolerance table; landable before [#729]; unblocks [#687] | [#732] (**CLOSED 2026-08-21**, on its own stated condition; [#728] closed with it) |
 | spec silence + stale claims ([#694]; the unauthored cells) | [`spec_provenance.md`](spec_provenance.md) - OpenSpec plans changes after Phase 0 activation, while a pinned Buoy shell and one-way Chelis adapter provide repository-independent authority, freshness, coverage, and impact enforcement; design/fixtures may proceed now, advisory execution waits for Buoy's final oracle, and blocking waits for the adapter and Chelis configuration oracles | [#733] |
 
@@ -30,6 +30,21 @@ This map is scoped to the 2026-07 numeric audit's plan set and stays that way.
 The `meta (the class)` column names a META issue per row; that pairing is
 historical and is NOT the pattern for a new class - `AGENTS.md` section Issue
 Tracking Conventions owns the one-tracker-per-class rule now.
+
+### #731 work after the original four phases
+
+[#731]'s Phases 0-3 and PP1-PP3 are delivered. Work discovered afterwards is
+recorded as independently landable PP items or separate residue; it does not
+extend the historical wave DAG with a fifth phase. The next selected slice is
+PP4 in [`checker_totality.md`](checker_totality.md): exact module scope at the
+package checker and batched-test boundaries.
+
+| disposition | issues | coordination record |
+|---|---|---|
+| PP4 | [#1264], plus the raw-flat-scope residue explicitly left by closed [#1261]/PR [#1273] | One scope-identity rule: a unique foreign terminal name is never an import, and independently rewritten test modules are combined only after they carry exact internal names. PP4 does not close [#1261] again. |
+| Later #731 residue, not PP4 | [#874]/[#887] Tier 1; [#1125]/[#1134]; [#1076]/[#672]; [#1247] | Keep these as separate mechanisms: tag-keyed vacuity, stamped-ingress parity, compiler-provided-name precedence, and integer type-application enforcement respectively. A PP4 repair must not absorb any of their contracts or tests. |
+| Owned or dispositioned elsewhere | [#850], [#609], [#1355] | [#850]'s checker half is delivered and its native-emission half remains [#730]/[#763] work. [#609] is already Slice A of [#1277]/`runtime_extents.md`, so duplicating it under PP4 would create two owners. [#1355] is the same diagonal-result extent family but is not yet in that design's issue map; an ownership amendment belongs there, not in PP4. |
+| Closed bookkeeping | [#1129] | Closed 2026-08-27 after its landing inventory was reconciled; it is not open checker-totality residue and creates no design deliverable. |
 
 **Sibling classes, tracked on their own issues, not here.** Listed only so a
 reader of the five plans above does not go looking inside them for work they
@@ -1036,3 +1051,15 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#1312]: https://github.com/Chelis-Lang/chelis/issues/1312
 [#1313]: https://github.com/Chelis-Lang/chelis/issues/1313
 [#1314]: https://github.com/Chelis-Lang/chelis/issues/1314
+[#609]: https://github.com/Chelis-Lang/chelis/issues/609
+[#672]: https://github.com/Chelis-Lang/chelis/issues/672
+[#1076]: https://github.com/Chelis-Lang/chelis/issues/1076
+[#1125]: https://github.com/Chelis-Lang/chelis/issues/1125
+[#1129]: https://github.com/Chelis-Lang/chelis/issues/1129
+[#1134]: https://github.com/Chelis-Lang/chelis/issues/1134
+[#1247]: https://github.com/Chelis-Lang/chelis/issues/1247
+[#1261]: https://github.com/Chelis-Lang/chelis/issues/1261
+[#1264]: https://github.com/Chelis-Lang/chelis/issues/1264
+[#1273]: https://github.com/Chelis-Lang/chelis/pull/1273
+[#1277]: https://github.com/Chelis-Lang/chelis/issues/1277
+[#1355]: https://github.com/Chelis-Lang/chelis/issues/1355

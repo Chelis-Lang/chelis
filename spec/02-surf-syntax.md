@@ -221,6 +221,16 @@ pattern, and type — a qualified reference whose head names an imported module
 but whose trailing name that module does not export is rejected with a
 `module \`M\` does not export \`N\`` error, not silently accepted.
 
+**Value scope (unqualified references).** A bare value reference is in scope
+only when it names a lexical binding, a value declared in the enclosing
+module, a builtin, or a value brought into unqualified scope by an `import`.
+An exported value in another linked module does not enter scope merely because
+its terminal name is a unique match. A bare name with no in-scope binding is an
+`unbound variable: X` error at `chelis check`; adding, removing, or renaming an
+unimported module cannot change that verdict. The qualified forms above remain
+available after importing the declaring module, and naming the value in a
+selective import brings it into unqualified scope.
+
 **Constructor scope (unqualified references).** A bare (unqualified)
 constructor reference — at a construction site (`Alpha`, `Alpha(x)`,
 `Alpha { ... }`) or in a `match` **pattern** (`| Alpha => ...`) — is in scope

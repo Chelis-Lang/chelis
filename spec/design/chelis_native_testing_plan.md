@@ -423,28 +423,30 @@ with `cargo test` and `pytest` ergonomics.
 
 Directory runs use `--batch-mode auto` by default. The parent builds the shared package
 context once, groups batch-eligible test files into a suite batch, compiles that batch
-once, and evaluates every selected test root from the shared handle. Files with top-level
-module-init bindings or top-level name collisions use the per-file worker path instead.
+once, and evaluates every selected test root from the shared handle. Sharing the package
+and evaluator does not merge source scope: before combination, each test file and its
+synthetic roots are rewritten as an independent module under a deterministic reserved
+identity, and the combined unit contains only exact internal names. A declaration in one
+test file is therefore invisible to another unless the language's ordinary import rule
+made it visible. Files with top-level module-init bindings or conservatively detected
+top-level name collisions may still use the per-file worker path instead.
 
 If the shared package context fails to compile, `chelis test` fails fast and does not fan
 out identical per-worker errors.
 
-#### What counts as a top-level name collision
+#### Batch admission is not scope authority
 
-The batch merges every batched file's flattened declarations into one compilation unit,
-so the batch has a single top-level scope. A collision is therefore any way two batched
-files can disagree about what one name means, not only two declarations of it:
+The parent keeps a conservative admission guard so obviously conflicting files can take
+the established per-file path without constructing a batch that will fail. It recognizes
+these conditions:
 
 - two files declare the same name (including ADT variant constructors, which share one
-  namespace in the merged unit);
+  namespace before isolated rewriting);
 - one file declares a name that another file explicitly imported, in either order. This
-  is the same defect either way round: the merged unit resolves the import to the
-  sibling's declaration, so a file is recompiled against a binding it never asked for
-  (chelis#1261);
+  is the chelis#1261 collision that the original raw merge misresolved;
 - two files import the same name from different modules;
 - a file carries a wildcard import, whose name set the runner cannot enumerate without
-  resolving the package graph, so it cannot prove no sibling declaration captures one of
-  those names.
+  resolving the package graph.
 
 Importing the same name from the same module is agreement, not collision, and must not
 demote either file: nearly every suite shares one assertion helper import, and demoting
@@ -454,6 +456,13 @@ on that would delete the batch path entirely. A file that repeats a name interna
 The parent's eligibility classifier and the batch worker's own duplicate guard admit
 files through one shared rule. A worker guard stricter than the classifier rejects
 manifests the parent already built, which surfaces only as an unexplained fallback.
+That rule is a performance/admission policy, not proof of language scope. It cannot
+enumerate a file's unresolved bare references, and a future declaration shape must not
+be able to confer scope merely because the guard has no arm for it. Correctness comes
+from independently rewriting each file through the ordinary module resolver, then
+combining only the rewritten declarations and exact synthetic-root identities. The
+cached-context and legacy prepared-graph workers consume the same isolated rewrite
+product, and neither re-runs the eval-entry rewriter over that product.
 
 Demotion is the sanctioned per-file path, not a degradation, and is not reported by
 default: `--batch-mode file` produces the same rows and the same exit code. The reason is
@@ -461,6 +470,13 @@ computed anyway, so it is available on demand. Setting `CHELIS_TEST_EXPLAIN_BATC
 prints one stderr line per demoted file naming the collision (or the read, parse,
 enumeration, or module-init reason). Without it, a maintainer whose suite quietly lost the
 batch path has to bisect the colliding names by hand.
+
+`--batch-mode auto` and `--batch-mode file` are verdict-equivalent: they emit the same
+file/test pass-fail rows and the same exit status for the same sources. A resolver or
+checker failure in an attempted batch may use the reported per-file fallback to recover
+source attribution, but it must remain a failing `<file>` row rather than becoming green
+after scope flattening. The fallback record and summary marker are additional execution-
+mode evidence and do not change that row/verdict equivalence.
 
 #### Reporting an abandoned batch
 
