@@ -33,6 +33,8 @@ CONTRACT_FILES = (
     "spec/design/loud_unsupported.md",
     "spec/design/spec_provenance.md",
     "spec/design/remediation_roadmap.md",
+    "spec/design/runtime_extents.md",
+    "spec/design/runtime_representation.md",
     "docs/CHELIS_SURFACE.md",
     "docs/investigations/remediation_status_2026_08_04.md",
     "openspec/specs/risc-primitives/spec.md",
@@ -53,7 +55,7 @@ FROZEN_FILE_DIGESTS = {
         "5e21649cf61087df1119040a971a60b5b499d40321d8647ce719e91b8571120a"
     ),
     "spec/04-type-system.md": (
-        "31b73a1cb6788769e98f021a34957ba22a7607da7b93ccba9780252da7d23dd3"
+        "8a339bc1fd08a15136dabae321bb9d2594a560613b14eb3cfb0011049dd61300"
     ),
     "spec/05-risc-primitives.md": (
         "10d64930ae6d9b3316ac9b0f35892052b2e0b1475c50097dd63ca5c0ba61ef6a"
@@ -65,13 +67,13 @@ FROZEN_FILE_DIGESTS = {
         "58f707d4e155d098962db224317061684b2c026816cab234ba026d560510a6da"
     ),
     "spec/design/capability_table.md": (
-        "a0ec07d22a5c26e2b81ffd9354dd0b055822a02689ccaed692592ec235ef6f09"
+        "ac8e3f8761f8470774e093ac4c15b0f35e547e84209659eae4f0eaf8667ccc62"
     ),
     "spec/design/dtype_semantics.md": (
-        "fbd3f18757b8eacbf6e5d9551d25bdb5b195c71f91c2d7b3adcc6aa7ea3513fc"
+        "0c07902dc58dda07a92030093b8123e3bd97b4e052172c86cdf2f65a27017314"
     ),
     "spec/design/loud_unsupported.md": (
-        "dec76721503b380278124b12448112d3e4bf754f8320f949642d32f7d30d5414"
+        "2e375ee9d67fdf3229126c3e2278f0df8ca1e16046e75680095c870000f6f2c4"
     ),
     "spec/design/spec_provenance.md": (
         "6e206f634ce6062d56701f0dea0bf57bcbdca4fbf630a6c12264a904f14ea426"
@@ -339,8 +341,11 @@ EXPECTED_OP_MANIFESTS = {
 FROZEN_ATOM_DIGESTS = {
     "04-NUM-2": "1aab318622574c9505ec5e85472b27bf333318657407c38b2311325962e19a96",
     "04-NUM-4": "685b5a3447a069f138877d357e65d1ab225e6b712e62b2a5bd38e1ef960636cb",
+    "04-NUM-8": "8887537f42a0c8263569296700826dc7466a0a3bf05e5c854ffff2406f075028",
+    "04-NUM-11": "903b437e9aaa98b7c4d7c0c019393bee203d8bf76621902fc2ad53d872945f3f",
     "04-NUM-14": "621e87291569ed74f24adf9a9a1a2092b67a6824ef985ceb2645f6502c63f786",
     "04-NUM-16": "939c10f9449bb91c3117ec6d66f8afde5bedb733dec88be1623c7110740b8053",
+    "04-SHAPE-1": "0f3f3f71731481b457b226bbcc8877d54962d268ec8787fbc6aa56ab4324d17c",
     "05-OP-1": "c2fb6c19db7ada4f86af7436f4f531ee0adb1395c7080ea94b25fe2e0f0b8d6c",
     "05-OP-2": "86fe2002cebd6192d15078ed0e8144936e38ba14f925802d2d526b7bf880ecd3",
     "05-OP-3": "b5a3ee9ca9a4f3161e20e729467d044878080ac8fb302af14b512bea66a58d3b",
@@ -401,7 +406,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/04-type-system.md",
         "## 9. Numeric Value Semantics",
         "## 10. Checker Totality",
-        "436433f8e9f0ed1f4a3529d1135ff4c7e76181a3ce2c0684c6708382105dae9f",
+        "cd8beb14a6a9763ae9bd9409035e04a44726da35fd94185748ce8c042b215215",
     ),
     "numeric primitive contracts": (
         "spec/05-risc-primitives.md",
@@ -443,7 +448,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/capability_table.md",
         "## The two-table design",
         "## Seed dispositions the table must ship with",
-        "fe07f1865a552ca283befa55b69b31e0345f6db486448d9f813f66fa5c2e0db9",
+        "3bc6269be8aa287feed0d4d32531cda421baf90443e41e34a5642f87e2093cb2",
     ),
     "capability seed dispositions": (
         "spec/design/capability_table.md",
@@ -473,7 +478,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/remediation_roadmap.md",
         "| **v0.19.0 - grounded dtype storage break",
         "| **v0.20.0 - behavior-preserving permanent guards**",
-        "d072d8df78f937b2b943c08caeaf1a3aa150409cb3aa2db3fa4aa82fe74ca533",
+        "ebf68cc4acbcc38039b3eb75489cac731ba4cf769e087b3e4ced70da82b720b4",
     ),
     "status dtype row": (
         "docs/investigations/remediation_status_2026_08_04.md",
@@ -843,6 +848,46 @@ def validate_normative_contract(
             "A pure bit-moving or selection operation preserves NaN payload bits "
             "only when its governing operation atom explicitly says it is "
             "bit-preserving",
+        ),
+        violations,
+    )
+    require_atom(
+        spec04_blocks,
+        "04-NUM-8",
+        (
+            "Every dtype declares a STORED REPRESENTATION and an ARITHMETIC WIDTH",
+            "Equal storage widths do not make two representations interchangeable",
+            "Every boundary and lane SHALL match the exact representation identity",
+            "No implementation may infer arithmetic width from storage width or "
+            "storage width from arithmetic width",
+        ),
+        violations,
+    )
+    require_atom(
+        spec04_blocks,
+        "04-NUM-11",
+        (
+            "A language binding or device descriptor SHALL preserve rank as int32 "
+            "and each extent, stride, element count, and byte capacity as int64",
+            "It SHALL carry the exact dtype tag and dynamic rank",
+            "a fixed-rank carrier, a narrower metadata field, or an element pointer "
+            "not coupled to the exact tag in the same validated descriptor is not a "
+            "conforming substitute",
+            "it SHALL NOT narrow, clamp, wrap, or fabricate metadata to make it fit",
+        ),
+        violations,
+    )
+    require_atom(
+        spec04_blocks,
+        "04-SHAPE-1",
+        (
+            "sound over the exact mathematical values of the complete typed extent "
+            "expressions",
+            "SHALL NOT wrap, saturate, truncate, or substitute an overflow sentinel "
+            "that can make unequal mathematical counts equal",
+            "Projection from the exact count into `int64`, `usize`, or a target "
+            "allocation-size domain SHALL be checked",
+            "a reuse decision is not exempt because no bytes have yet been touched",
         ),
         violations,
     )
@@ -2037,6 +2082,8 @@ def validate_schema_and_consumers(
     loud = docs["spec/design/loud_unsupported.md"]
     provenance = docs["spec/design/spec_provenance.md"]
     roadmap = docs["spec/design/remediation_roadmap.md"]
+    runtime_extents = docs["spec/design/runtime_extents.md"]
+    runtime = docs["spec/design/runtime_representation.md"]
     surface = docs["docs/CHELIS_SURFACE.md"]
     status = docs["docs/investigations/remediation_status_2026_08_04.md"]
 
@@ -2045,6 +2092,76 @@ def validate_schema_and_consumers(
         (
             ("introduces `IO`", "surface IO spelling"),
             ("| `IO` | file ops", "surface IO spelling"),
+        ),
+        violations,
+    )
+
+    require_all(
+        runtime,
+        (
+            (
+                "Division is a partial exact-integer operation, not rational arithmetic",
+                "runtime capacity validity domain",
+            ),
+            (
+                "`n / n` and `1`, and `0 / n` and `0` have\n"
+                "distinct keys absent such a proof",
+                "runtime capacity division red controls",
+            ),
+            (
+                "`0 * (1 / n)` retains the partial quotient and remains distinct "
+                "from zero\nunless `n != 0` and `n` divides 1 have both been proved",
+                "runtime zero-product validity domain",
+            ),
+            (
+                "`CapacityKey` is deliberately carrier-independent",
+                "runtime capacity carrier independence",
+            ),
+            (
+                "The set is deliberately closed against equality learned only by "
+                "passing a\n[#1277] runtime guard",
+                "runtime guard capacity boundary",
+            ),
+            (
+                "exact shrink-only transition-debt\nmanifest",
+                "runtime Phase 0 shrink-only debt",
+            ),
+            (
+                "A foreign carrier never constructs `TensorRef<T>`, `TensorMut<T>`, "
+                "`&[T]`, or\n`&mut [T]`",
+                "runtime foreign slice prohibition",
+            ),
+            (
+                "[#899] closes in this phase, not Phase 1",
+                "runtime representation consumer-complete exit",
+            ),
+            (
+                "consumers complete C1's consumer-exclusivity condition in Phase "
+                "4; their exact\nfrozen debt cannot grow before then",
+                "runtime C1 phase boundary",
+            ),
+            (
+                "--receipt-dir runtime-representation-receipts",
+                "runtime distributed exact-head receipts",
+            ),
+            (
+                "section-B blocker exit uses the Phase 1\nhost-capacity evidence, "
+                "the Phase 3 `--host` field-seal evidence, and the landed\n"
+                "[#1289]/[#1347] receipts",
+                "runtime launch-gate boundary",
+            ),
+        ),
+        violations,
+    )
+
+    require_all(
+        runtime_extents,
+        (
+            (
+                "capacity and reuse equality\nover typed extent expressions\n"
+                "([`runtime_representation.md`](runtime_representation.md), [#888])",
+                "runtime extent capacity boundary",
+            ),
         ),
         violations,
     )
@@ -2464,6 +2581,20 @@ def validate_schema_and_consumers(
     require_all(
         roadmap,
         (
+            (
+                "[`runtime_representation.md`](runtime_representation.md) ([#893])",
+                "runtime representation owner",
+            ),
+            (
+                "Its current children are [#899], [#889], [#1289], [#1345], "
+                "[#1360], and [#1364]",
+                "runtime representation child graph",
+            ),
+            (
+                "[#888] is an explicitly linked Phase 1 interlock and [#1347] a "
+                "landed zero-extent receipt",
+                "runtime representation interlocks",
+            ),
             ("[#1290] replaces noncanonical product/sum trees", "roadmap product owner"),
             ("[#1281] owns the remaining reduction rows", "roadmap reduction owner"),
             ("Phase 4B froze semantics", "roadmap Phase 4B boundary"),

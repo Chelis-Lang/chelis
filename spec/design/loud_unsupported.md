@@ -2150,6 +2150,12 @@ boundary, pinned:
   encoding and supplies its byte width. [#729] supplies the storage decision,
   finalization, operation semantics, and kernel behavior. Neither layer may
   duplicate the other.
+- [`runtime_representation.md`](runtime_representation.md) C1 makes
+  [04-NUM-8]'s arithmetic representation another closed projection of that
+  stable identity. It is not capability policy and does not make an
+  unsupported cell work. This plan continues to own the typed negative channel;
+  [#899] closes only after the runtime-representation Phase 4 removes every
+  duplicate backend consumer.
 - **Existing exact integer ABIs are not reclassified as unsupported.** C
   already has `int8_t` and `int16_t`, and the checked in-range controls use
   them without type erasure. Phase 2 therefore selects those exact
