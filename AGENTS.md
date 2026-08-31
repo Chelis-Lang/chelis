@@ -187,30 +187,19 @@ active OpenSpec change.
 - **Where the two disagree, the numbered spec wins and the design doc has a bug.** Say
   so in the doc when you find it rather than reconciling silently in code.
 
-**Why this matters, with a measured instance.** A design doc is a working artifact: it
-is read constantly while its phases are in flight and stops being read the moment they
-ship. A decision parked in one does not survive the work that made it. In 2026-07 that
-produced a three-level drift. `spec/04-type-system.md` [04-NUM-2] PERMITTED one narrow
-thing ("computing a single op in f64 and rounding once is a conforming
-implementation"); `spec/design/dtype_semantics.md` cited that permission to MANDATE
-f64 computation for every float op; the evaluator then extended the mandate to
-multi-step reductions and to comparison operands. Each step was a reasonable reading
-of the one above it, nobody re-checked against the numbered spec, and the result was a
-language that computed f32 programs in f64.
-
 Two rules follow, and both are cheap:
 
 1. **When a design doc states a rule that is really a language decision, lift it into
-   the numbered spec and leave a pointer behind.** `spec/05-risc-primitives.md` §8's
-   [05-OBS-1..5] is the worked example: the observation contract moved out of
-   `faithful_observation.md` and now survives independently of it. `spec/04` §9's
-   [04-NUM-9..11] and §9.1 followed, for the trap contract, the exactness guarantee,
-   and the per-dtype value table.
+   the numbered spec and leave a pointer behind.**
 2. **Watch for permission-to-mandate escalation.** "X is a conforming implementation"
    in a spec does not license "therefore we do X" in a design doc, and neither
    licenses "therefore we do X everywhere" in code. If your implementation needs a
-   stronger rule than the spec states, amend the spec first and say so in the PR;
-   `spec/design/dtype_semantics.md` §B1 calls that "the protocol, not a failure."
+   stronger rule than the spec states, amend the spec first and say so in the PR.
+
+A design doc is a working artifact: read constantly while its phases are in flight,
+unread once they ship, so a decision parked in one does not survive the work that made
+it. The 2026-07 three-level f64 drift that produced both rules, and the worked examples
+of each, are in [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §1.
 
 ### Challenge Written Designs Before Implementation
 
@@ -425,22 +414,8 @@ design doc under `spec/design/` or in `docs/investigations/`.
 
 **Do not create a separate META issue alongside it.** The existing META/tracker
 pairs ([#727]/[#729], [#703]/[#730], and siblings) are historical, not a pattern
-to copy: the METAs were filed during the 2026-07 numeric audit as evidence
-records, and the trackers were filed later, when the design docs were written,
-as delivery contracts. Three reasons the split has stopped paying for itself:
-
-1. **It has already broken down.** Three of the five "METAs" are closed. #709 and
-   #710 closed while their class continues under an open #731, and neither was
-   written as a META - both are instance reports the class map promoted after the
-   fact. #728 closed alongside its own tracker #732, so the pair carried no
-   information the tracker did not.
-2. **Sub-issues do the job the pairing was improvising.** When the tracker is
-   the parent, "what belongs to this class" is a structural fact. A second issue
-   whose content is a list of instances duplicates the child list and drifts
-   from it.
-3. **Two bodies means two things to keep honest**, and the evidence half has a
-   better home: `docs/investigations/` already holds the probe corpus and the
-   audit record.
+to copy. [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §2 records why the split
+stopped paying for itself.
 
 Rules:
 
@@ -792,9 +767,9 @@ default workspace run.
   but do not eliminate CPU starvation.
 - Contention diagnostic: several unrelated tests FAILing at near-identical
   wall-clock times (for example all ~217s, nextest's slow-kill) means CPU
-  starvation, not code breakage. Measured 2026-06-10: the 25-test
-  `rank_poly_tier3` suite took 2,434s under contention vs 24s on a quiet
-  machine. Re-run on a quiet machine before treating those as real failures.
+  starvation, not code breakage. Re-run on a quiet machine before treating those
+  as real failures; [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §3 has the
+  measured factor.
 - At session end, verify that task-owned background cargo, rustc, and nextest processes
   are gone. A stopped wrapper is not proof that its reparented children stopped; use
   the scoped `reap_orphans.py` dry run and kill only confirmed task-owned stragglers.
