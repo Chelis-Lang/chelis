@@ -313,17 +313,15 @@ pub(super) fn is_constructor_name(name: &str) -> bool {
 /// when the importing module declares it locally or imports it by name).
 ///
 /// Returns `true` when `name` looks like a constructor (PascalCase terminal)
-/// but is *not* bound exactly and is *only* reachable through the registry's
-/// fuzzy terminal-segment fallback (`lookup_terminal_unique`). That fallback
-/// is exactly the silent cross-module mis-resolution chelis#317 reports: a
-/// type-only import leaves the bare constructor un-rewritten, and the fuzzy
-/// match binds it to another module's mangled tag, deferring the failure to
-/// a runtime non-exhaustive match. Such a reference must be rejected at
-/// `check` as an unknown constructor instead.
+/// but is not bound exactly. Whether the package registry contains zero, one,
+/// or several foreign same-terminal constructors is deliberately irrelevant:
+/// consulting that global population would let unrelated modules change this
+/// reference's diagnostic kind. A type-only import can therefore neither
+/// fuzzy-bind to another module's mangled tag nor fall through as an ordinary
+/// unbound value. Every non-exact constructor reference is rejected at
+/// `check` as an unknown constructor.
 pub(super) fn constructor_out_of_scope(name: &str, env: &Env) -> bool {
-    is_constructor_name(name)
-        && env.lookup(name).is_none()
-        && env.lookup_terminal_unique(name).is_some()
+    is_constructor_name(name) && env.lookup(name).is_none()
 }
 
 /// Pattern-position counterpart of [`constructor_out_of_scope`]. A constructor

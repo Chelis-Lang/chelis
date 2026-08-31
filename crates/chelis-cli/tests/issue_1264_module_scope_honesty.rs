@@ -275,6 +275,63 @@ fn unknown_constructor_is_counted_as_an_unresolved_name() {
     assert!(errors(&report).is_empty(), "imported constructor: {report}");
 }
 
+#[test]
+fn unrelated_exporters_cannot_change_a_positional_constructor_kind() {
+    let (_dir, root) = make_package("pp4-positional-constructor-invariance");
+    let entry = root.join("src/consumer.ch");
+    write_file(
+        &entry,
+        "module Scope.Consumer\n\
+         def make() = Token(cast(1, int64))\n",
+    );
+
+    let (check, report) = run_check(&root, &entry);
+    assert_check_name_error(&check, &report, "UnknownConstructor", "Token");
+
+    for (path, source) in [
+        (
+            "src/model.ch",
+            "module Scope.Model\n\
+             export (Token)\n\
+             type Envelope = | Token(int64)\n",
+        ),
+        (
+            "src/other.ch",
+            "module Scope.Other\n\
+             export (Token)\n\
+             type OtherEnvelope = | Token(int64)\n",
+        ),
+        (
+            "src/third.ch",
+            "module Scope.Third\n\
+             export (Token)\n\
+             type ThirdEnvelope = | Token(int64)\n",
+        ),
+    ] {
+        write_file(&root.join(path), source);
+        let (check, report) = run_check(&root, &entry);
+        assert_check_name_error(&check, &report, "UnknownConstructor", "Token");
+    }
+
+    write_file(
+        &entry,
+        "module Scope.Consumer\n\
+         import Scope.Model (Token)\n\
+         def make() = Token(cast(1, int64))\n",
+    );
+    let (check, report) = run_check(&root, &entry);
+    assert!(
+        check.status.success(),
+        "imported positional constructor failed: {check:?}"
+    );
+    assert_eq!(report["components"]["names"], 1);
+    assert_eq!(report["unresolved_names"], serde_json::json!([]));
+    assert!(
+        errors(&report).is_empty(),
+        "imported positional constructor: {report}"
+    );
+}
+
 fn batch_rows(output: &Output) -> Vec<(String, String, String)> {
     String::from_utf8_lossy(&output.stdout)
         .lines()
