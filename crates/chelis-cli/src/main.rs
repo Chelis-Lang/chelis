@@ -5401,6 +5401,10 @@ fn cmd_test_supervised(
     let exit_code = output.output.status.code().unwrap_or(2);
     let output_forwarded = match suite_deadline {
         Some(deadline) => {
+            let deadline = effective_output_forwarding_deadline(
+                deadline,
+                testing_hook_enabled("CHELIS_TEST_EXPIRE_OUTPUT_FORWARDING_DEADLINE"),
+            );
             let stderr_forwarded = write_stream_bounded(
                 OutputStream::Stderr,
                 output.output.stderr,
@@ -5722,6 +5726,14 @@ enum OutputStream {
     Stderr,
 }
 
+fn effective_output_forwarding_deadline(deadline: Instant, force_expired: bool) -> Instant {
+    if force_expired {
+        Instant::now()
+    } else {
+        deadline
+    }
+}
+
 fn write_stream_bounded(stream: OutputStream, bytes: Vec<u8>, budget: Duration) -> bool {
     if bytes.is_empty() {
         return true;
@@ -5837,7 +5849,7 @@ fn write_fd_bounded(fd: std::os::fd::RawFd, bytes: &[u8], budget: Duration) -> b
 
 #[cfg(all(test, unix))]
 mod bounded_stream_write_tests {
-    use super::write_fd_bounded;
+    use super::{effective_output_forwarding_deadline, write_fd_bounded};
     use std::io::{ErrorKind, Read, Write};
     use std::os::fd::AsRawFd;
     use std::os::unix::net::UnixStream;
@@ -5893,6 +5905,17 @@ mod bounded_stream_write_tests {
 
         let restored_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
         assert_eq!(restored_flags, original_flags);
+    }
+
+    #[test]
+    fn forced_output_forwarding_deadline_is_expired_without_shortening_the_control() {
+        let future = Instant::now()
+            .checked_add(Duration::from_secs(30))
+            .expect("future deadline");
+
+        assert_eq!(effective_output_forwarding_deadline(future, false), future);
+        let forced = effective_output_forwarding_deadline(future, true);
+        assert!(forced <= Instant::now());
     }
 }
 
