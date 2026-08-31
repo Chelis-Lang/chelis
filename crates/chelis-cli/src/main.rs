@@ -5407,7 +5407,7 @@ fn cmd_test_supervised(
                 deadline.saturating_duration_since(Instant::now()),
             );
             if !stderr_forwarded {
-                let _ = write_stream_bounded(
+                let _ = write_fallback_stream_bounded(
                     OutputStream::Stdout,
                     output_forwarding_failure_report(json, expect, suite_timeout_secs),
                     Duration::from_secs(1),
@@ -5431,7 +5431,7 @@ fn cmd_test_supervised(
         }
     };
     if !output_forwarded {
-        let _ = write_stream_bounded(
+        let _ = write_fallback_stream_bounded(
             OutputStream::Stderr,
             output_forwarding_failure_diagnostic(suite_timeout_secs),
             Duration::from_secs(1),
@@ -5693,7 +5693,7 @@ fn write_timeout_report_bounded(stdout: Vec<u8>, stderr: Vec<u8>) {
             b"error: suite timeout report could not be written to stdout; suite incomplete\n",
         );
     }
-    let _ = write_stream_bounded(
+    let _ = write_fallback_stream_bounded(
         OutputStream::Stderr,
         stderr,
         deadline.saturating_duration_since(Instant::now()),
@@ -5712,6 +5712,9 @@ fn write_stream_bounded(stream: OutputStream, bytes: Vec<u8>, budget: Duration) 
     }
     let (done_tx, done_rx) = std::sync::mpsc::channel::<bool>();
     thread::spawn(move || {
+        if testing_hook_enabled("CHELIS_TEST_DELAY_BOUNDED_WRITER") {
+            thread::sleep(Duration::from_secs(2));
+        }
         let written = match stream {
             OutputStream::Stdout => {
                 let mut out = io::stdout().lock();
@@ -5727,6 +5730,150 @@ fn write_stream_bounded(stream: OutputStream, bytes: Vec<u8>, budget: Duration) 
     // The command dispatcher calls process::exit immediately after a failure
     // return, terminating a writer blocked by consumer backpressure.
     done_rx.recv_timeout(budget).unwrap_or(false)
+}
+
+fn write_fallback_stream_bounded(stream: OutputStream, bytes: Vec<u8>, budget: Duration) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+
+        let fd = match stream {
+            OutputStream::Stdout => io::stdout().as_raw_fd(),
+            OutputStream::Stderr => io::stderr().as_raw_fd(),
+        };
+        write_fd_bounded(fd, &bytes, budget)
+    }
+
+    #[cfg(not(unix))]
+    {
+        write_stream_bounded(stream, bytes, budget)
+    }
+}
+
+#[cfg(unix)]
+fn write_fd_bounded(fd: std::os::fd::RawFd, bytes: &[u8], budget: Duration) -> bool {
+    if bytes.is_empty() {
+        return true;
+    }
+
+    let original_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if original_flags < 0 {
+        return false;
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, original_flags | libc::O_NONBLOCK) } < 0 {
+        return false;
+    }
+
+    // This path already follows a primary writer timeout. It must not depend on
+    // another newly spawned writer thread being scheduled before the command
+    // dispatcher calls process::exit. Write on the calling thread instead,
+    // with O_NONBLOCK keeping the fallback diagnostic bounded when this stream
+    // is blocked too.
+    let deadline = Instant::now().checked_add(budget);
+    let wrote_all = (|| {
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let written = unsafe {
+                libc::write(
+                    fd,
+                    bytes[offset..].as_ptr().cast::<libc::c_void>(),
+                    bytes.len() - offset,
+                )
+            };
+            if written > 0 {
+                offset += written as usize;
+                continue;
+            }
+            if written == 0 {
+                return false;
+            }
+
+            let error = std::io::Error::last_os_error();
+            match error.kind() {
+                std::io::ErrorKind::Interrupted => continue,
+                std::io::ErrorKind::WouldBlock => {
+                    let Some(deadline) = deadline else {
+                        return false;
+                    };
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return false;
+                    }
+                    thread::sleep(
+                        deadline
+                            .saturating_duration_since(now)
+                            .min(Duration::from_millis(1)),
+                    );
+                }
+                _ => return false,
+            }
+        }
+        true
+    })();
+
+    let restored = unsafe { libc::fcntl(fd, libc::F_SETFL, original_flags) } >= 0;
+    wrote_all && restored
+}
+
+#[cfg(all(test, unix))]
+mod bounded_stream_write_tests {
+    use super::write_fd_bounded;
+    use std::io::{ErrorKind, Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn writable_descriptor_receives_the_complete_diagnostic() {
+        let (mut reader, writer) = UnixStream::pair().expect("socket pair");
+        let diagnostic = b"error: suite incomplete\n";
+
+        assert!(write_fd_bounded(
+            writer.as_raw_fd(),
+            diagnostic,
+            Duration::from_millis(50),
+        ));
+
+        let mut received = vec![0; diagnostic.len()];
+        reader.read_exact(&mut received).expect("read diagnostic");
+        assert_eq!(received, diagnostic);
+    }
+
+    #[test]
+    fn full_descriptor_is_bounded_and_restores_blocking_mode() {
+        let (_reader, mut writer) = UnixStream::pair().expect("socket pair");
+        writer.set_nonblocking(true).expect("set nonblocking");
+        let chunk = [b'x'; 4096];
+        loop {
+            match writer.write(&chunk) {
+                Ok(0) => panic!("socket stopped accepting bytes without reporting backpressure"),
+                Ok(_) => {}
+                Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+                Err(err) if err.kind() == ErrorKind::WouldBlock => break,
+                Err(err) => panic!("fill socket: {err}"),
+            }
+        }
+        writer.set_nonblocking(false).expect("restore blocking");
+
+        let fd = writer.as_raw_fd();
+        let original_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        assert!(original_flags >= 0, "read descriptor flags");
+        assert_eq!(original_flags & libc::O_NONBLOCK, 0);
+
+        let started = Instant::now();
+        assert!(!write_fd_bounded(
+            fd,
+            b"must not block",
+            Duration::from_millis(25),
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "bounded descriptor write exceeded its budget"
+        );
+
+        let restored_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        assert_eq!(restored_flags, original_flags);
+    }
 }
 
 fn output_forwarding_failure_diagnostic(timeout_secs: u64) -> Vec<u8> {

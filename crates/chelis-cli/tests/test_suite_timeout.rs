@@ -189,6 +189,7 @@ fn timeout_exit_is_bounded_when_stdout_consumer_stops_reading() {
         .env("CHELIS_TEST_INTERNAL_TESTING", "1")
         .env("CHELIS_TEST_PROGRESS_ROWS", "6000")
         .env("CHELIS_TEST_HANG_BEFORE_SUITE", "1")
+        .env("CHELIS_TEST_DELAY_BOUNDED_WRITER", "1")
         .args(["test", "tests/", "--json", "--suite-timeout", "1"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
