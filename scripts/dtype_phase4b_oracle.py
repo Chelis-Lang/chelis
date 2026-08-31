@@ -58,10 +58,10 @@ FROZEN_FILE_DIGESTS = {
         "5e21649cf61087df1119040a971a60b5b499d40321d8647ce719e91b8571120a"
     ),
     "spec/04-type-system.md": (
-        "9d2c22b1b756821d9ae4e16c1b953b0fad972bb4d70e791b213ae18dcfb3c4f1"
+        "6ec65dc7640e64119f056562fb3807b827af29f2d84a2880d42ed24043449d08"
     ),
     "spec/05-risc-primitives.md": (
-        "10d64930ae6d9b3316ac9b0f35892052b2e0b1475c50097dd63ca5c0ba61ef6a"
+        "e427fa744b313a3a8a7cad99e1ca92ed7df8e57db459bf53a499edb098dca86a"
     ),
     "spec/06-transformations.md": (
         "30a78217103d0a57d63b9e1a3d927d2e1079affa4d1d0641ef36a9afff34e25a"
@@ -76,16 +76,16 @@ FROZEN_FILE_DIGESTS = {
         "ac8e3f8761f8470774e093ac4c15b0f35e547e84209659eae4f0eaf8667ccc62"
     ),
     "spec/design/compiled_value_ownership.md": (
-        "c9056a00e329521034049525fa8fdb9b7cbf8c6dbfba9568fe61e8279421c6da"
+        "47a457e78b1e615b80848a637cb276aa6ca9e41540d33ba115dc4f6c45a3f542"
     ),
     "spec/design/dtype_semantics.md": (
-        "7822e4eb60c0f7b9042e198099db17c340e3fcb9280de72dd642216af0373327"
+        "2404679404fb438296707ea18873ded671b0ed5a920be5ad98b22c072e7d9d3f"
     ),
     "spec/design/implicit_linearity.md": (
         "f03302f4b328841d79824f6326f1edf2e954a9b98c0118992d4a3a1f2dfb67cf"
     ),
     "spec/design/loud_unsupported.md": (
-        "eb85be5512ab6127445c3d99260acc44358ef584fdae93950dfc0c4fc3ebe5d2"
+        "6c8c5dec977fb044ced99da0f424a2c3782cca404e7884239cd044567c551f71"
     ),
     "spec/design/spec_provenance.md": (
         "6e206f634ce6062d56701f0dea0bf57bcbdca4fbf630a6c12264a904f14ea426"
@@ -496,7 +496,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/remediation_roadmap.md",
         "| **v0.19.0 - grounded dtype storage break",
         "| **v0.20.0 - behavior-preserving permanent guards**",
-        "ecdccd48738ff26faaf4f4a850989cd09ed1db796b32b981ab7f04b53a3a6e1e",
+        "5916532d8cb8de3fbdcd1837702793e33a61e921d17bb0f31f4ecd90286eba1c",
     ),
     "status dtype row": (
         "docs/investigations/remediation_status_2026_08_04.md",
@@ -811,6 +811,34 @@ def validate_normative_contract(
                 "backend-neutral active primitive set",
             ),
             ("nine active tensor element dtypes", "nine tensor element dtypes"),
+            (
+                "For an unconsumed local owner, the compiler inserts `Drop` at the "
+                "earliest\npost-dominating point after its last use",
+                "linearity last-use Drop placement",
+            ),
+            (
+                "Lexical scope\nexit is the fallback only when no earlier valid "
+                "terminal point can be proved",
+                "linearity scope-exit fallback",
+            ),
+        ),
+        violations,
+    )
+    require_all(
+        spec05,
+        (
+            (
+                "Source borrow syntax and primitive-DAG borrow markers\n"
+                "are erased before backend emission",
+                "primitive source-marker erasure",
+            ),
+            (
+                "The resolved disposition of every use is not erased; ownership\n"
+                "lowering first records explicit borrow, move, clone, and terminal "
+                "`Drop` obligations\nin the verified ownership representation "
+                "consumed by every backend",
+                "primitive verified ownership preservation",
+            ),
         ),
         violations,
     )
@@ -880,7 +908,8 @@ def validate_normative_contract(
                 "closed host/carrier/heap classification",
             ),
             (
-                "Every `Option<T>`, including `Option` of a scalar or another `Option`",
+                "Every target-representable `Option<T>`, including `Option` of a "
+                "scalar, mapped\nresource, or another `Option`",
                 "recursive Option heap classification",
             ),
             ("    Option,\n    MappedFile,", "Option heap kind"),
@@ -895,8 +924,9 @@ def validate_normative_contract(
                 "tensor carrier mapping",
             ),
             (
-                "| `Option<T>` for every `T` | `Option` | opaque `chelis_option *` "
-                "handle and `CHELIS_VALUE_OPTION` |",
+                "| `Option<T>` where `T` has a target recursive-value representation "
+                "| `Option` | opaque `chelis_option *` handle and "
+                "`CHELIS_VALUE_OPTION` |",
                 "Option carrier mapping",
             ),
             (
@@ -915,6 +945,29 @@ def validate_normative_contract(
                 "tag. Every\ndirectly carried public heap kind also has the table's "
                 "exact tagged\nrepresentation for recursive aggregates",
                 "public heap tag totality",
+            ),
+            (
+                "Each identity has\nexactly one disposition: structurally nonheap, "
+                "target-rejected with an owning\ncapability issue, direct heap "
+                "carrier, tagged heap payload, or private heap\nallocation",
+                "closed target-rejection disposition",
+            ),
+            (
+                "A function\nstored in `Option`, `List`, tuple, dictionary, or ADT "
+                "is a `FirstClassValue`,\nnot a contextual callback",
+                "recursive function placement",
+            ),
+            (
+                "`UnsupportedKind::HostAbi`, `Stage::Codegen(\"c\")`, and\n"
+                "`Unimplemented { issue: #879 }` before ownership verification "
+                "constructs a\nplan",
+                "recursive function target rejection",
+            ),
+            (
+                "It is a target capability result, not a language type error, "
+                "scalar\nsubstitution, empty value, or permission to omit the type "
+                "from the registry",
+                "function rejection semantics",
             ),
             (
                 "`chelis_option_scalar` / `chelis_option_value` split",
@@ -938,6 +991,11 @@ def validate_normative_contract(
                 "omit `CHELIS_VALUE_MAPPED_FILE` or its `Option[MappedFile]` "
                 "fixture",
                 "mapped-file omission mutation",
+            ),
+            (
+                "admit `Option[function]` or another recursive function container "
+                "without the\n  exact [#879] target rejection",
+                "function-container omission mutation",
             ),
             (
                 "Only the planner constructs `ReusableOwnedStorage`",
@@ -998,9 +1056,15 @@ def validate_normative_contract(
                 "reachability external owner",
             ),
             (
-                "Coordination means explicit supersession;\n  the two carrier "
-                "contracts never coexist",
+                "Phase 1 must\n  explicitly supersede its numbered-spec citations, "
+                "`runtime_representation.md`\n  target, guards, and public-layout "
+                "promise in the same atomic change",
                 "runtime representation supersession",
+            ),
+            (
+                "[#909]/[#879]:** own shared first-class function representation "
+                "and the\n  general C-host closure ABI",
+                "function-value external owners",
             ),
             ("final manifest contains zero expected failures", "zero expected failures"),
             ("`Part of #1286`", "honest issue linkage"),

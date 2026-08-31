@@ -272,26 +272,45 @@ The final universe is exact:
 | tuple | `Tuple` | opaque `chelis_tuple *` handle and `CHELIS_VALUE_TUPLE` |
 | dictionary | `Dict` | opaque `chelis_dict *` handle and `CHELIS_VALUE_DICT` |
 | ADT | `Adt` | opaque `chelis_adt *` handle and `CHELIS_VALUE_ADT` |
-| `Option<T>` for every `T` | `Option` | opaque `chelis_option *` handle and `CHELIS_VALUE_OPTION` |
+| `Option<T>` where `T` has a target recursive-value representation | `Option` | opaque `chelis_option *` handle and `CHELIS_VALUE_OPTION` |
 | `MappedFile` resource | `MappedFile` | opaque `chelis_mapped_file *` handle and `CHELIS_VALUE_MAPPED_FILE` |
 
 The implementation derives one total, wildcard-free ownership classification
-over every `ConcreteHostType` variant, public carrier, heap `chelis_value` tag,
-private allocation, and `HeapKind`. Each identity has exactly one disposition:
-structurally nonheap, direct heap carrier, tagged heap payload, or private heap
+over every `ConcreteHostType` variant and, for `Function`, the closed
+`ConstructContext` from `host_function_values.md`, plus every public carrier,
+heap `chelis_value` tag, private allocation, and `HeapKind`. Each identity has
+exactly one disposition: structurally nonheap, target-rejected with an owning
+capability issue, direct heap carrier, tagged heap payload, or private heap
 allocation. Each heap disposition names exactly one kind and its one finalizer;
 tensor storage is the sole private heap allocation with no public tag. Every
 directly carried public heap kind also has the table's exact tagged
-representation for recursive aggregates. Numeric scalars, bool, unit, and
-function carriers are structurally nonheap.
-Every `Option<T>`, including `Option` of a scalar or another `Option`, is instead
-one immutable `Option` heap node: `None` owns no child and `Some(value)` owns
-exactly one tagged child. This deliberately replaces the current by-value
+representation for recursive aggregates. Numeric scalars, bool, unit, and a
+function in an already-supported `ContextualCallback` position are structurally
+nonheap.
+
+Every target-representable `Option<T>`, including `Option` of a scalar, mapped
+resource, or another `Option`, is one immutable `Option` heap node: `None` owns
+no child and `Some(value)` owns exactly one tagged child. This deliberately
+replaces the current by-value
 `chelis_option_scalar` / `chelis_option_value` split, whose type-recursive
-ownership cannot be recovered by the emitter. A new host type, value tag, or
-private allocation fails the same executable registry until it is classified;
-a heap classification is incomplete until its kind, validation, clone/retain
-rule, child walk, and finalizer are all present.
+ownership cannot be recovered by the emitter.
+
+Function and closure values remain valid Chelis logical values. A function
+stored in `Option`, `List`, tuple, dictionary, or ADT is a `FirstClassValue`,
+not a contextual callback. Until [#879] supplies the general closure carrier,
+the C-host projection rejects the complete recursively containing type with
+`UnsupportedKind::HostAbi`, `Stage::Codegen("c")`, and
+`Unimplemented { issue: #879 }` before ownership verification constructs a
+plan. The same rule applies to HIP or Metal builds that select the C-host
+fallback. It is a target capability result, not a language type error, scalar
+substitution, empty value, or permission to omit the type from the registry.
+This plan neither defines the closure ABI nor closes [#879] or its [#909]
+tracker.
+
+A new host type, placement, value tag, or private allocation fails the same
+executable registry until it is classified; a heap classification is
+incomplete until its kind, validation, clone/retain rule, child walk, and
+finalizer are all present.
 
 The real types remain private and may add validation metadata, but they may not
 split the kind, count, and finalizer authorities. Retain uses checked relaxed
@@ -333,7 +352,8 @@ target:
 - `chelis_tensor` and `chelis_tensor_write` are opaque;
 - `chelis_tensor_retain` and `chelis_tensor_release` are the sole public
   tensor lifetime operations;
-- every `Option<T>` uses an opaque `chelis_option *`; `chelis_option_retain`,
+- every target-representable `Option<T>` uses an opaque `chelis_option *`;
+  `chelis_option_retain`,
   `chelis_option_release`, and checked constructor/accessor operations share
   the tagged child clone/release authority, while `CHELIS_VALUE_OPTION` is its
   only `chelis_value` representation;
@@ -470,16 +490,19 @@ The complete run covers:
 2. balanced tensor/string/List/tuple/dictionary/ADT/Option/mapped-file ownership,
    including `Option[MappedFile]`, nested resource aggregates, and the exact
    size and nesting thresholds in [#543] and [#544];
-3. top-level aliases, argument/capture/fresh returns, mixed branch/match arms,
+3. exact `Unimplemented { issue: #879 }` C-host rejection for
+   `Option[function]` and every other recursive aggregate containing a
+   first-class function, with the same rejection through HIP/Metal host fallback;
+4. top-level aliases, argument/capture/fresh returns, mixed branch/match arms,
    fold-carried aliases, and repeated tensor insertion into aggregates;
-4. peak live bytes bounded by the verified working set at recursion depths 32,
+5. peak live bytes bounded by the verified working set at recursion depths 32,
    128, and 288;
-5. C and HIP rejection of entry-backed or shared-view in-place reuse;
-6. Metal emission with distinct storage for every produced node and no input,
+6. C and HIP rejection of entry-backed or shared-view in-place reuse;
+7. Metal emission with distinct storage for every produced node and no input,
    view, or intermediate alias;
-7. clean normal teardown with zero live allocations and no invalid release;
-8. the existing [#1222] and [#1344] regressions; and
-9. [#1339]'s initialization-order regression as a separately classified Tier
+8. clean normal teardown with zero live allocations and no invalid release;
+9. the existing [#1222] and [#1344] regressions; and
+10. [#1339]'s initialization-order regression as a separately classified Tier
    1 prerequisite, not as a member of this ownership class.
 
 Required mutations include:
@@ -489,6 +512,8 @@ Required mutations include:
   host/carrier/heap projection: compilation or the structural registry fails;
 - omit `CHELIS_VALUE_MAPPED_FILE` or its `Option[MappedFile]` fixture: the
   recursive-carrier registry or ownership balance fails;
+- admit `Option[function]` or another recursive function container without the
+  exact [#879] target rejection: the host-type/placement registry fails;
 - omit tensor cloning from `chelis_value_clone`: aggregate balance fails;
 - turn one branch clone into a borrow: verifier or runtime fixture fails;
 - permit `EntryBorrow` to mint `ReusableOwnedStorage`: C and HIP fixtures fail;
@@ -570,14 +595,17 @@ existing [#1222]/[#1344] regressions, and the open issue reproducers.
 - a test-only runtime allocation ledger with deterministic owner/byte counts;
 - compile/link/run helpers for generated C and the hardware HIP path;
 - exact positive and negative fixtures for all nine children;
-- scalar, heap-child, and recursively nested `Option` balance fixtures; and
+- scalar, heap-child, and recursively nested target-representable `Option`
+  balance fixtures;
+- negative `Option[function]` and recursive function-container fixtures that
+  require the exact [#879] target rejection; and
 - an explicit external-prerequisite row for [#1339].
 
 The current failing children are represented as typed expected failures. Closed
 [#1222] and [#1344] are green controls. No production ownership code changes.
 
-**Not this phase:** refcounts, ABI changes, ownership IR, release scheduling, or
-backend reuse fixes.
+**Not this phase:** refcounts, ABI changes, ownership IR, release scheduling,
+backend reuse fixes, or the general closure ABI owned by [#879].
 
 **Frozen at exit:** the complete initial fixture universe, detector semantics,
 ledger event schema, mutation identities, and zero-vacuity rule.
@@ -613,7 +641,8 @@ It coordinates the typed runtime seal with [#893] but does not claim that issue
 unless its own complete oracle is satisfied. [#543] remains open until its
 function-internal tensor-literal temporary is green in Phase 2.
 
-**Not this phase:** backend-local alias inference or final last-use scheduling.
+**Not this phase:** backend-local alias inference, final last-use scheduling,
+or the general closure ABI owned by [#879].
 
 **Frozen at exit:** one heap kind/count/finalizer authority and one public ABI.
 
@@ -721,13 +750,17 @@ exit zero and final line `COMPILED VALUE OWNERSHIP ORACLE: PASS`.
   [04-LIN-6] and this plan own what observing each already-manifested root does
   to ownership. Neither reconstructs the other's data.
 - **[#893]:** owns the typed runtime representation seal. PR #1400 freezes the
-  current layout-visible [05-OP-31] tensor carrier, while this plan selects an
-  incompatible opaque carrier for the ownership cut. If that design merges
-  first, Phase 1 must amend its numbered-spec citations, design, guards, and
-  public-layout promise in the same atomic change before either implementation
-  calls the representation sealed. Coordination means explicit supersession;
-  the two carrier contracts never coexist. This design does not mark [#893]
-  implemented.
+  current layout-visible [05-OP-31] tensor carrier on `main`, while this plan
+  selects an incompatible opaque carrier for the ownership cut. Phase 1 must
+  explicitly supersede its numbered-spec citations, `runtime_representation.md`
+  target, guards, and public-layout promise in the same atomic change before
+  the opaque implementation calls the representation sealed. The two carrier
+  contracts never coexist. This design does not mark [#893] implemented.
+- **[#909]/[#879]:** own shared first-class function representation and the
+  general C-host closure ABI. This plan imports their closed contextual-versus-
+  first-class placement decision and exact [#879] target rejection; it does not
+  invent a callable tag, environment layout, capture lifetime, or closure
+  copy/drop rule.
 - **[#763]/[#1351]:** lane-check may provide reusable compile/run machinery,
   but lane agreement cannot prove ownership balance or shared-lane defects. The
   ownership suite remains independently callable and spec-derived.
@@ -755,7 +788,9 @@ the future oracle, or make a child reproducer green. Its PR body says
 [#730]: https://github.com/Chelis-Lang/chelis/issues/730
 [#735]: https://github.com/Chelis-Lang/chelis/issues/735
 [#763]: https://github.com/Chelis-Lang/chelis/issues/763
+[#879]: https://github.com/Chelis-Lang/chelis/issues/879
 [#893]: https://github.com/Chelis-Lang/chelis/issues/893
+[#909]: https://github.com/Chelis-Lang/chelis/issues/909
 [#912]: https://github.com/Chelis-Lang/chelis/issues/912
 [#1172]: https://github.com/Chelis-Lang/chelis/issues/1172
 [#1206]: https://github.com/Chelis-Lang/chelis/issues/1206

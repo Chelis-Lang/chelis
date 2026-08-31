@@ -1163,6 +1163,61 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("FFI entry borrow")
 
+    def test_linearity_model_cannot_restore_scope_end_drop(self) -> None:
+        mutations = (
+            (
+                "For an unconsumed local owner, the compiler inserts `Drop` at the "
+                "earliest\npost-dominating point after its last use",
+                "The compiler inserts end-of-scope `Drop` operations for "
+                "unconsumed local owners",
+                "linearity last-use Drop placement",
+            ),
+            (
+                "Lexical scope\nexit is the fallback only when no earlier valid "
+                "terminal point can be proved",
+                "Lexical scope exit is always the terminal point",
+                "linearity scope-exit fallback",
+            ),
+        )
+        path = self.root / "spec/04-type-system.md"
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_primitive_marker_erasure_preserves_verified_ownership(self) -> None:
+        mutations = (
+            (
+                "Source borrow syntax and primitive-DAG borrow markers\n"
+                "are erased before backend emission",
+                "Every ownership fact is erased before IR lowering",
+                "primitive source-marker erasure",
+            ),
+            (
+                "The resolved disposition of every use is not erased; ownership\n"
+                "lowering first records explicit borrow, move, clone, and terminal "
+                "`Drop` obligations\nin the verified ownership representation "
+                "consumed by every backend",
+                "Backends infer ownership from emitted addresses",
+                "primitive verified ownership preservation",
+            ),
+        )
+        path = self.root / "spec/05-risc-primitives.md"
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
     def test_compiled_ownership_keeps_the_complete_c_authority_range(self) -> None:
         self.replace(
             Path("spec/11-ffi.md"),
@@ -1179,13 +1234,15 @@ class ContractValidationTests(unittest.TestCase):
                 "Option heap kind",
             ),
             (
-                "| `Option<T>` for every `T` | `Option` | opaque `chelis_option *` "
-                "handle and `CHELIS_VALUE_OPTION` |",
+                "| `Option<T>` where `T` has a target recursive-value representation "
+                "| `Option` | opaque `chelis_option *` handle and "
+                "`CHELIS_VALUE_OPTION` |",
                 "| `Option<T>` | none | legacy by-value carrier |",
                 "Option carrier mapping",
             ),
             (
-                "Every `Option<T>`, including `Option` of a scalar or another `Option`",
+                "Every target-representable `Option<T>`, including `Option` of a "
+                "scalar, mapped\nresource, or another `Option`",
                 "Only an `Option` whose child is already a heap handle",
                 "recursive Option heap classification",
             ),
@@ -1199,6 +1256,61 @@ class ContractValidationTests(unittest.TestCase):
                 "omit `ConcreteHostType::Option` or `CHELIS_VALUE_OPTION`",
                 "omit an unrelated host variant",
                 "Option omission mutation",
+            ),
+        )
+        path = self.root / "spec/design/compiled_value_ownership.md"
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_compiled_ownership_rejects_recursive_function_values_exactly(
+        self,
+    ) -> None:
+        mutations = (
+            (
+                "Each identity has\nexactly one disposition: structurally nonheap, "
+                "target-rejected with an owning\ncapability issue, direct heap "
+                "carrier, tagged heap payload, or private heap\nallocation",
+                "First-class functions may be omitted from the ownership registry",
+                "closed target-rejection disposition",
+            ),
+            (
+                "A function\nstored in `Option`, `List`, tuple, dictionary, or ADT "
+                "is a `FirstClassValue`,\nnot a contextual callback",
+                "A function in an aggregate is treated as a contextual callback",
+                "recursive function placement",
+            ),
+            (
+                "`UnsupportedKind::HostAbi`, `Stage::Codegen(\"c\")`, and\n"
+                "`Unimplemented { issue: #879 }` before ownership verification "
+                "constructs a\nplan",
+                "an empty scalar before ownership verification constructs a plan",
+                "recursive function target rejection",
+            ),
+            (
+                "It is a target capability result, not a language type error, "
+                "scalar\nsubstitution, empty value, or permission to omit the type "
+                "from the registry",
+                "It is a permanent language rejection",
+                "function rejection semantics",
+            ),
+            (
+                "admit `Option[function]` or another recursive function container "
+                "without the\n  exact [#879] target rejection",
+                "admit every recursive function container",
+                "function-container omission mutation",
+            ),
+            (
+                "[#909]/[#879]:** own shared first-class function representation "
+                "and the\n  general C-host closure ABI",
+                "[#1286]:** owns the general C-host closure ABI",
+                "function-value external owners",
             ),
         )
         path = self.root / "spec/design/compiled_value_ownership.md"
@@ -1386,8 +1498,9 @@ class ContractValidationTests(unittest.TestCase):
     def test_compiled_ownership_requires_runtime_seal_supersession(self) -> None:
         self.replace(
             Path("spec/design/compiled_value_ownership.md"),
-            "Coordination means explicit supersession;\n  the two carrier "
-            "contracts never coexist",
+            "Phase 1 must\n  explicitly supersede its numbered-spec citations, "
+            "`runtime_representation.md`\n  target, guards, and public-layout "
+            "promise in the same atomic change",
             "Both carrier contracts may coexist during migration",
         )
         self.assert_contract_fails("runtime representation supersession")

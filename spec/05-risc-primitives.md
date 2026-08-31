@@ -24,9 +24,12 @@ RISC primitives are built-in functions in the compiler's scope, not syntax tags.
 
 Read-only tensor primitive parameters are typed as `&tensor[...]` at the type-system
 surface. Owned tensor arguments auto-borrow at ordinary call sites and pipe stages.
-Outputs remain owned tensors. The borrow distinction is erased before IR and backend
-lowering: primitive DAG nodes and backend kernels carry values, not borrow markers.
-Consuming operations such as `realize` and explicit `drop` keep owned parameters.
+Outputs remain owned tensors. Source borrow syntax and primitive-DAG borrow markers
+are erased before backend emission: primitive nodes and kernels carry values, not
+source markers. The resolved disposition of every use is not erased; ownership
+lowering first records explicit borrow, move, clone, and terminal `Drop` obligations
+in the verified ownership representation consumed by every backend. Consuming
+operations such as `realize` and explicit `drop` keep owned parameters.
 
 The same observational rule covers the read-only `List` / `Dict` queries `len` and
 `index`: they auto-borrow their container argument rather than consuming it, so the

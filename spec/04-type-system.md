@@ -2162,7 +2162,9 @@ the `effects` key on checked `fn` nodes carries the inferred unhandled set.
 Chelis uses lightweight uniqueness, not a Rust-style ownership-and-lifetimes
 system. Tensor values are owned by default, but read-only calls borrow their tensor
 arguments. A consuming use makes the binding dead; a borrow leaves the owned binding
-live. The compiler inserts end-of-scope `Drop` operations for unconsumed local owners.
+live. For an unconsumed local owner, the compiler inserts `Drop` at the earliest
+post-dominating point after its last use, as [04-LIN-8] requires. Lexical scope
+exit is the fallback only when no earlier valid terminal point can be proved.
 
 ### 8.2 Type Representation
 
