@@ -4,31 +4,6 @@ Canonical agent instructions for this repository.
 `CLAUDE.md` should resolve to this file so Claude-style and Codex-style entry points do
 not drift.
 
-**Starting a task?** Read [Worktree And Branch Discipline](#worktree-and-branch-discipline),
-then [Build Toolchain](#build-toolchain), then
-[Build And Gate Commands](#build-and-gate-commands). Those three cover where to work, how
-to get an interpreter, and what to run before pushing.
-
-**Where everything else is.** The sections group into five subjects:
-
-- **Standards and review** - Quality Standards, Red Team Protocol.
-- **Specs and documentation** - Documentation And Spec Sync (which owns the numbered-spec
-  tier rule and the Numeric Surface Discipline ratchet), OpenSpec, Issue Tracking
-  Conventions.
-- **Testing doctrine** - Contract Invariants, Example Corpus Policy, Manual Gates,
-  CLI Surface Discipline.
-- **Working in the repo** - Scripting Language Policy, Worktree And Branch Discipline,
-  Build Toolchain, Local Git Hook, Commit And Pull Request Hygiene, Build And Gate
-  Commands, Build Concurrency And Process Hygiene, Local HIP Environment.
-- **The product** - Style Gate, Surf Style Guide, Chelis-Specific Rules, Toolchain And
-  Packaging Orchestration.
-
-Subagent Coordination And Delivery, Shared Local Skills, and Downstream Shell Contract
-cover work that leaves this session or this repository.
-
-Rules live here; the incidents behind three of them are in
-[`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md).
-
 ## Quality Standards
 
 ### Spec-First Development
@@ -112,7 +87,7 @@ Rules live here; the incidents behind three of them are in
 ### Pull Request Review Gate
 
 - Every pull request creation workflow, including documentation-only work, must include
-  at least one compliant red-team review of the exact PR head before merge.
+  at least one compliant red-team review of the PR before merge.
 - Classify every finding against the pull request's stated scope. A finding is in scope
   only when the pull request introduces it, worsens it, or claims to correct it. Mere
   discovery during review, including a pre-existing spec/implementation mismatch in an
@@ -123,13 +98,19 @@ Rules live here; the incidents behind three of them are in
   design document that misdescribes current `main`, or exposes a sequencing seam between
   delivery slices while leaving the normative contract and named deliverable achievable,
   is P2 and must be recorded as residual work rather than promoted to a merge blocker.
-- Only a confirmed in-scope P0 (critical) or P1 (high/major) finding blocks merge. Fix
-  that finding in the pull request, push the updated head, and run another fresh-context
-  red-team review against that exact head.
-- Repeat the fix-and-review cycle until the most recent exact-head red-team review
-  reports no in-scope P0 or P1 findings. A review of an earlier head does not satisfy
-  this gate. An out-of-scope P0 or P1 finding does not require a change to the pull
-  request or another red-team review.
+- If a review raises a confirmed in-scope P0 (critical) or P1 (high/major) finding,
+  another fresh-context red-team review must be run after the fix is made. Repeat the
+  fix-and-review cycle until the most recent red-team review reports no in-scope P0 or
+  P1 findings. Minor updates, bug fixes, or textual changes do not inherently merit
+  another round. A rebase whose overlap with your work is significant, either in changed
+  lines or in semantics, may merit a fresh-context red-team review of the intersection;
+  a rebase that only picks up an atom clearly consistent with, or irrelevant to, the
+  files you are working on does not. Use your best judgement.
+- When several red-team reviews find issues in the same area of your build or design,
+  stop and consider whether the approach is right, rather than filling the gaps each
+  review raises.
+- A non-major finding does not block merge, but if you are already rebasing or fixing
+  something else, fold in the other relevant issues reviewers raised.
 - Repairs under this gate may correct, remove, or narrow the pull request's existing
   content. They must not add new design scope, implementation responsibilities,
   inventories, mechanisms, or promises merely to absorb a finding. When a correction
@@ -437,13 +418,10 @@ A recurring defect class gets **one tracking issue**, which is also the GitHub
 oracles, freeze points, the class statement); its evidence lives in the owning
 design doc under `spec/design/` or in `docs/investigations/`.
 
-**Do not create a separate META issue alongside it.** The existing META/tracker
-pairs ([#727]/[#729], [#703]/[#730], and siblings) are historical, not a pattern
-to copy. [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §2 records why the split
-stopped paying for itself.
-
 Rules:
 
+- When filing issue, always check to see if it should be grouped under a relevant
+  tracking issue.
 - An issue has **one** parent. When a defect splits across classes (the #689
   shape: a silent half and a support half), parent it to whichever class's
   **oracle turns green when it is fixed**, and add an explicit `Also part of #N`
@@ -697,9 +675,7 @@ installation and Python-provisioning commands.
 
 The gate runs `cargo nextest run --no-fail-fast` (CI's actual runner), not
 `cargo test --workspace`, and includes `chelis lint --check .` (the §8.6 /
-§12 naming gate). All nextest profiles also set `fail-fast = false`, so direct
-and non-gate CI nextest runs expose every failure instead of cancelling the
-remainder. The sanitizer, macOS-smoke, LOC-report, no-AI-authorship, docs, and
+§12 naming gate). The sanitizer, macOS-smoke, LOC-report, no-AI-authorship, docs, and
 smt-build CI jobs are out of scope for this script by design.
 
 The three explicit rustdoc stages exist because `cargo nextest` does not
@@ -715,16 +691,7 @@ crate gains an equivalent invocation in the same change set.
 `scripts/unrepresentable_domain_oracle.py` is chelis#908's authoritative
 completion oracle, and the tracker requires every fix in that class to run
 it in a continuous job. Acceptance is exit 0 with a final `ORACLE: PASS`
-line. Every obligation drives compiled artifacts: the built `chelis`
-binary over `.dp` fixtures, and compiled test binaries through `cargo
-nextest`. Its Python unit tests patch the command runners, so they are
-evidence about the script's decision logic and never a substitute for
-running it. It runs in the `integration` stage, which hosted CI executes
-exactly once on the second `workspace-tests-shard` worker before the
-fail-closed `Workspace Tests (Linux)` aggregate, on every non-docs-only pull
-request, and in the `--local` pre-push subset. `scripts/gate.py`'s docstring
-records why that stage rather than `lint-and-unit`, and how the
-`CHELIS_ORACLE_BINARY` build handoff avoids a redundant rebuild.
+line.
 
 `--local` (chelis#360) runs the developer pre-push subset: workspace clippy
 (`-D warnings`, compile-only), `cargo fmt --check`, `chelis lint
@@ -778,10 +745,8 @@ not replace these shared-agent-skill checks.
 Default-gate discipline:
 
 - Use focused `cargo nextest run -p <crate> --test <file>` commands for the inner
-  development loop. Do not substitute a workspace-wide `cargo test` run for the
-  canonical gate.
-- For non-documentation changes, `python3 scripts/gate.py --local` is the pre-push
-  checkpoint; routine workspace execution is hosted-CI-owned.
+  development loop: that compiles only the one test target. Do not substitute a
+  workspace-wide `cargo test` run for the canonical gate.
 - tests that are slow or require heavyweight local prerequisites should be
   `#[ignore]` by default and invoked through a documented manual gate
 - every ignored test must have a concrete manual command and expected success condition in
@@ -857,10 +822,9 @@ default workspace run.
 
 ## Local HIP Environment
 
-This workstation has a reconciled AMD/ROCm HIP setup, so HIP manual gates are locally
-runnable. [`docs/local_hip_environment.md`](docs/local_hip_environment.md) is the
-authoritative runbook and holds the environment detail: the wheel ROCm stack, the
-`environment.d/hip.conf` overrides, and how to probe the local GPU.
+HIP manual gates are runnable on this workstation. See
+[`docs/local_hip_environment.md`](docs/local_hip_environment.md) for the authoritative
+runbook and the environment detail.
 
 **Run every HIP manual gate through** `scripts/hip_test.py` — for example
 `scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1`
@@ -914,6 +878,10 @@ development, and leave routine workspace execution to hosted CI.
 
 ## Surf Style Guide
 
+The authority is `spec/02-surf-syntax.md` §0.1
+(canonical forms and the bidirectional contract); §P10-P12 define the
+wider set of input spellings the parser still *accepts* but the
+formatter rewrites.
 When writing or rewriting Surf in this repository:
 
 - prefer `def ... -> T = ...` over `def ... : T = ...` (enforced by the
@@ -944,20 +912,6 @@ When writing or rewriting Surf in this repository:
 - function/value identifiers are snake_case (`surf-value-snake-case`, §3.2)
 - functions carrying the `Test` effect are named `test_*` or `example_*`
   (`surf-test-name-prefix`, §10.1)
-
-### Canonical Surf v0.19 (chelis#1031, shipped 0.18.4)
-
-**The grammar changed, and the style gate enforces it.** `chelis fmt
---check` runs ahead of `build`, `check`, `validate`, and `eval --file`,
-so Surf that was canonical under 0.18.3 can now fail before the
-front-end pipeline runs. The authority is `spec/02-surf-syntax.md` §0.1
-(canonical forms and the bidirectional contract); §P10-P12 define the
-wider set of input spellings the parser still *accepts* but the
-formatter rewrites.
-
-Read that section before authoring Surf or debugging a parse error that
-"should" work. The forms that most often bite:
-
 - **A nullary definition needs `()`: `def name() -> T`, not `def name ->
   T`.** This is the highest-frequency breakage — it turned every fixture
   in chelis#1176 into a hard parse error (`expected function parameter
@@ -980,22 +934,6 @@ Read that section before authoring Surf or debugging a parse error that
 - Canonical output omits trailing separators and prints the canonical
   literal spelling (shortest round-trippable float, no digit separators
   or redundant zeroes).
-
-**Migrating an existing tree:** `chelis migrate surf --from 0.18 --check
-<paths>...` reports, `--inplace` rewrites as a preflighted batch
-transaction (whole batch validated before any write; atomic replacement
-with rollback; symlinks and multiply-hard-linked files rejected).
-`--from 0.18` is the only accepted value. Identifiers that became
-reserved words are **not** guessed — the migrator stops and names the
-byte offset, and the rename is yours to author. Semantic boundaries are
-not migrated for you: suffix adoption, overflow, non-finite values,
-literal patterns, raw controls, invalid escapes, and structurally
-ambiguous legacy forms still reject.
-
-Do not reach for `--allow-style-violations` or
-`CHELIS_STYLE_GATE_DISABLE=1` to get past a v0.19 failure. Those exist
-for emergency local builds and the ad-hoc integration corpus
-respectively; migrate the source instead.
 
 ## Chelis-Specific Rules
 

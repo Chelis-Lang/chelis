@@ -2019,10 +2019,10 @@ class CiParityTests(unittest.TestCase):
             / "design"
             / "typecheck_levels_generalization_plan.md"
         ).read_text()
-        self.assertIn(
-            "second `workspace-tests-shard` worker before the",
-            agent_contract,
-        )
+        # AGENTS.md no longer describes which CI shard owns which stage: that
+        # topology belongs to the docs asserted below, and the contract keeps
+        # only what an agent runs. The remaining assertion is the one contract
+        # claim about this test's own subject.
         self.assertIn(
             "pins the complete ordered set of\nsingle-line `run:` commands",
             agent_contract,
