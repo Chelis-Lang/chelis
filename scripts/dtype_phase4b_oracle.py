@@ -32,6 +32,7 @@ CONTRACT_FILES = (
     "spec/design/capability_table.md",
     "spec/design/compiled_value_ownership.md",
     "spec/design/dtype_semantics.md",
+    "spec/design/implicit_linearity.md",
     "spec/design/loud_unsupported.md",
     "spec/design/spec_provenance.md",
     "spec/design/remediation_roadmap.md",
@@ -75,10 +76,13 @@ FROZEN_FILE_DIGESTS = {
         "ac8e3f8761f8470774e093ac4c15b0f35e547e84209659eae4f0eaf8667ccc62"
     ),
     "spec/design/compiled_value_ownership.md": (
-        "2e0e5d09821fc81a2b2a4dc2019e438d4a0f8ef9e31d9d793c3e0fa426ac6d7d"
+        "c9056a00e329521034049525fa8fdb9b7cbf8c6dbfba9568fe61e8279421c6da"
     ),
     "spec/design/dtype_semantics.md": (
         "7822e4eb60c0f7b9042e198099db17c340e3fcb9280de72dd642216af0373327"
+    ),
+    "spec/design/implicit_linearity.md": (
+        "f03302f4b328841d79824f6326f1edf2e954a9b98c0118992d4a3a1f2dfb67cf"
     ),
     "spec/design/loud_unsupported.md": (
         "eb85be5512ab6127445c3d99260acc44358ef584fdae93950dfc0c4fc3ebe5d2"
@@ -492,7 +496,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/remediation_roadmap.md",
         "| **v0.19.0 - grounded dtype storage break",
         "| **v0.20.0 - behavior-preserving permanent guards**",
-        "8491f8f73a847bcfb4216eaf426a173bc6f4dac2b9f002b679ae61d3395f7535",
+        "ecdccd48738ff26faaf4f4a850989cd09ed1db796b32b981ab7f04b53a3a6e1e",
     ),
     "status dtype row": (
         "docs/investigations/remediation_status_2026_08_04.md",
@@ -753,6 +757,7 @@ def validate_normative_contract(
     spec10 = docs["spec/10-serialization.md"]
     spec11 = docs["spec/11-ffi.md"]
     ownership_design = docs["spec/design/compiled_value_ownership.md"]
+    implicit_linearity = docs["spec/design/implicit_linearity.md"]
     captured_risc = docs["openspec/specs/risc-primitives/spec.md"]
     captured_transformations = docs["openspec/specs/transformations/spec.md"]
 
@@ -880,9 +885,36 @@ def validate_normative_contract(
             ),
             ("    Option,\n    MappedFile,", "Option heap kind"),
             (
+                "| `string` | `String` | opaque `chelis_string` handle and "
+                "`CHELIS_VALUE_STRING` |",
+                "string carrier mapping",
+            ),
+            (
+                "| tensor value or internal tensor view | `Tensor` | opaque "
+                "`chelis_tensor *` handle and `CHELIS_VALUE_TENSOR` |",
+                "tensor carrier mapping",
+            ),
+            (
                 "| `Option<T>` for every `T` | `Option` | opaque `chelis_option *` "
                 "handle and `CHELIS_VALUE_OPTION` |",
                 "Option carrier mapping",
+            ),
+            (
+                "| `MappedFile` resource | `MappedFile` | opaque "
+                "`chelis_mapped_file *` handle and `CHELIS_VALUE_MAPPED_FILE` |",
+                "mapped-file carrier mapping",
+            ),
+            (
+                "`CHELIS_VALUE_MAPPED_FILE` is the exact tagged representation "
+                "when that handle\nis stored in `Option`, `List`, tuple, "
+                "dictionary, or ADT",
+                "recursive mapped-file representation",
+            ),
+            (
+                "tensor storage is the sole private heap allocation with no public "
+                "tag. Every\ndirectly carried public heap kind also has the table's "
+                "exact tagged\nrepresentation for recursive aggregates",
+                "public heap tag totality",
             ),
             (
                 "`chelis_option_scalar` / `chelis_option_value` split",
@@ -894,7 +926,8 @@ def validate_normative_contract(
             ),
             (
                 "balanced tensor/string/List/tuple/dictionary/ADT/Option/mapped-file "
-                "ownership",
+                "ownership,\n   including `Option[MappedFile]`, nested resource "
+                "aggregates",
                 "Option ownership fixtures",
             ),
             (
@@ -902,15 +935,92 @@ def validate_normative_contract(
                 "Option omission mutation",
             ),
             (
+                "omit `CHELIS_VALUE_MAPPED_FILE` or its `Option[MappedFile]` "
+                "fixture",
+                "mapped-file omission mutation",
+            ),
+            (
                 "Only the planner constructs `ReusableOwnedStorage`",
                 "private reuse proof",
             ),
             (
-                "C, HIP, and Metal\nconsume the same proof-bearing plan",
-                "shared backend reuse proof",
+                "C and HIP consume\nthe same proof-bearing plan",
+                "shared C and HIP reuse proof",
+            ),
+            (
+                "typed `MetalNeverReuse` plan whose input cannot carry "
+                "`ReusableOwnedStorage`",
+                "Metal typed no-reuse plan",
+            ),
+            (
+                "Metal emission with distinct storage for every produced node and "
+                "no input",
+                "Metal no-alias fixture",
+            ),
+            (
+                "let the Metal plan accept `ReusableOwnedStorage`",
+                "Metal no-reuse mutation",
+            ),
+            (
+                "scripts/compiled_value_ownership_oracle.py --phase launch",
+                "launch ownership oracle command",
+            ),
+            (
+                "COMPILED VALUE OWNERSHIP LAUNCH SUBSET: PASS",
+                "launch ownership oracle success line",
+            ),
+            (
+                "The `complete --require-hip` invocation is the eventual [#1286] "
+                "class-closure\noracle. It is deliberately stronger than the "
+                "launch invocation",
+                "launch and class-closure distinction",
+            ),
+            (
+                "A support, syntax, diagnostic, or reachability observation outside\n"
+                "   this class must have an explicit external owner before phase "
+                "exit",
+                "external observation ownership",
+            ),
+            (
+                "The top-level tuple missing-`main` observation is [#545], not an "
+                "ownership-oracle row",
+                "top-level tuple external owner",
+            ),
+            (
+                "Runtime-valued `with seed` remains [#735] syntax/semantics work; "
+                "recursive-host operation support remains [#729]/[#730] capability "
+                "work",
+                "recursive support external owners",
+            ),
+            (
+                "[#1172] owns the span-key cause that can over-broaden hints; Surf "
+                "reachability is exposure evidence",
+                "reachability external owner",
+            ),
+            (
+                "Coordination means explicit supersession;\n  the two carrier "
+                "contracts never coexist",
+                "runtime representation supersession",
             ),
             ("final manifest contains zero expected failures", "zero expected failures"),
             ("`Part of #1286`", "honest issue linkage"),
+        ),
+        violations,
+    )
+    require_all(
+        implicit_linearity,
+        (
+            (
+                "The current C/HIP emitters still\n"
+                "treat the IR node as an emission no-op and reconstruct host "
+                "releases from backend-local\nstate",
+                "current Drop implementation status",
+            ),
+            (
+                "the successor verified-ownership lanes emit the matching heap "
+                "release at the\nterminal operation",
+                "successor Drop release",
+            ),
         ),
         violations,
     )
@@ -2779,6 +2889,16 @@ def validate_schema_and_consumers(
             ),
             ("first-class `count` [05-OP-29]", "roadmap count contract"),
             ("zero-exception census ([#1288])", "roadmap census prerequisite"),
+            (
+                "[#1286]'s verified compiled ownership and opaque unified-heap ABI "
+                "through [#1362]'s C-lane `--phase launch` oracle",
+                "roadmap launch ownership gate",
+            ),
+            (
+                "full [#1286] class closure, including HIP and non-launch children, "
+                "remains tracker work and does not gate v0.19",
+                "roadmap full ownership boundary",
+            ),
             ("WireDag v6 exact-only break", "roadmap wire v6 break"),
             (
                 "[#1295] owns all-active-float rounding/random parameter contracts "

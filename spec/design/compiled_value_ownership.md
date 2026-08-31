@@ -87,8 +87,9 @@ No arrow after verification may accept the pre-verification form.
   fields and validates every handle state it can observe.
 - Closing [#1339], [#763], [#893], or [#912] from this design change. Their
   contracts interlock with this plan, but their parentage and assignees remain.
-- Claiming the Tier 1 launch blocker fixed before the implementation phases and
-  final oracle are complete.
+- Claiming the Tier 1 launch subset fixed before its C-lane ownership rows and
+  [#1339] prerequisite are green. The stronger full-class oracle is not the
+  [#1362] release gate.
 
 ## Vocabulary
 
@@ -264,23 +265,25 @@ The final universe is exact:
 
 | compiled/runtime identity | `HeapKind` | public ownership carrier |
 |---|---|---|
-| `string` | `String` | opaque `chelis_string` handle |
-| tensor value or internal tensor view | `Tensor` | opaque `chelis_tensor *` handle |
+| `string` | `String` | opaque `chelis_string` handle and `CHELIS_VALUE_STRING` |
+| tensor value or internal tensor view | `Tensor` | opaque `chelis_tensor *` handle and `CHELIS_VALUE_TENSOR` |
 | tensor bytes | `TensorStorage` | private; reached only through a tensor descriptor |
 | `List` | `List` | opaque `chelis_list *` handle and `CHELIS_VALUE_LIST` |
 | tuple | `Tuple` | opaque `chelis_tuple *` handle and `CHELIS_VALUE_TUPLE` |
 | dictionary | `Dict` | opaque `chelis_dict *` handle and `CHELIS_VALUE_DICT` |
 | ADT | `Adt` | opaque `chelis_adt *` handle and `CHELIS_VALUE_ADT` |
 | `Option<T>` for every `T` | `Option` | opaque `chelis_option *` handle and `CHELIS_VALUE_OPTION` |
-| `MappedFile` resource | `MappedFile` | opaque `chelis_mapped_file *`; never a `chelis_value` |
+| `MappedFile` resource | `MappedFile` | opaque `chelis_mapped_file *` handle and `CHELIS_VALUE_MAPPED_FILE` |
 
 The implementation derives one total, wildcard-free ownership classification
 over every `ConcreteHostType` variant, public carrier, heap `chelis_value` tag,
 private allocation, and `HeapKind`. Each identity has exactly one disposition:
 structurally nonheap, direct heap carrier, tagged heap payload, or private heap
 allocation. Each heap disposition names exactly one kind and its one finalizer;
-private storage and untagged resource kinds need not invent a `chelis_value`
-tag. Numeric scalars, bool, unit, and function carriers are structurally nonheap.
+tensor storage is the sole private heap allocation with no public tag. Every
+directly carried public heap kind also has the table's exact tagged
+representation for recursive aggregates. Numeric scalars, bool, unit, and
+function carriers are structurally nonheap.
 Every `Option<T>`, including `Option` of a scalar or another `Option`, is instead
 one immutable `Option` heap node: `None` owns no child and `Some(value)` owns
 exactly one tagged child. This deliberately replaces the current by-value
@@ -300,8 +303,10 @@ updated.
 `MappedFile` is included even though no current [#1286] child names it. It is
 already a refcounted compiled heap value; leaving it on a separate counter with
 no exhaustive release edge would preserve the omission mechanism this plan
-claims to eliminate. It remains a resource handle and never becomes a
-`chelis_value` payload or numeric transport.
+claims to eliminate. Its direct ABI stays an opaque resource handle.
+`CHELIS_VALUE_MAPPED_FILE` is the exact tagged representation when that handle
+is stored in `Option`, `List`, tuple, dictionary, or ADT. It carries no numeric
+payload and does not turn the resource into numeric transport.
 
 Tensor descriptors and tensor storage are distinct heap kinds. A descriptor
 retains storage. A view owns a descriptor with shape/stride/offset metadata and
@@ -333,7 +338,8 @@ target:
   the tagged child clone/release authority, while `CHELIS_VALUE_OPTION` is its
   only `chelis_value` representation;
 - `chelis_mapped_file_retain` and `chelis_mapped_file_release` put the existing
-  mapped-file resource under the same lifetime authority;
+  mapped-file resource under the same lifetime authority, and
+  `CHELIS_VALUE_MAPPED_FILE` is its only recursively embedded representation;
 - `chelis_tensor_read_view` and `chelis_tensor_write_view` pair the pointer
   with its exact dtype and element count;
 - `chelis_tensor_begin_write` succeeds only for unique runtime storage and
@@ -380,15 +386,20 @@ Only the planner constructs `ReusableOwnedStorage`, and only when:
 6. consuming the operation is the source owner's terminal use.
 
 The token names the exact source owner, storage identity, and consuming node.
-It is moved into the fused operation and cannot be reused. C, HIP, and Metal
-consume the same proof-bearing plan. Backend-local `fused_in_place_spec`
-functions may select target mechanics only after receiving the proof; they may
-not decide ownership eligibility. The runtime checks the live strong counts
+It is moved into the fused operation and cannot be reused. C and HIP consume
+the same proof-bearing plan. Backend-local `fused_in_place_spec` functions may
+select target mechanics only after receiving the proof; they may not decide
+ownership eligibility. Metal consumes `VerifiedOwnershipProgram` through a
+typed `MetalNeverReuse` plan whose input cannot carry `ReusableOwnedStorage`;
+it allocates distinct storage for every produced node. Enabling Metal reuse is
+a later amendment to this frozen boundary and requires Metal positive/negative
+execution rows in the same change. The runtime checks the live strong counts
 and write state again before mutation.
 
 Removing any one condition must fail a controlled test for both C and HIP. The
 HIP hardware leg is mandatory on the repository workstation; compiling an
-ignored test is not execution evidence.
+ignored test is not execution evidence. Replacing `MetalNeverReuse` with an
+input that accepts a reuse token must fail the structural mutation suite.
 
 ## C7. Last-use reclamation
 
@@ -418,6 +429,19 @@ The repository will add one Python driver and one named CI suite:
 .venv/bin/python scripts/compiled_value_ownership_oracle.py --phase <N>
 ```
 
+The [#1362] Tier 1 A launch invocation is:
+
+```text
+.venv/bin/python scripts/compiled_value_ownership_oracle.py --phase launch
+```
+
+It requires the C-lane regressions for [#1344], [#1346], and [#1356], plus the
+separately classified [#1339] prerequisite, and exits zero only with final line
+`COMPILED VALUE OWNERSHIP LAUNCH SUBSET: PASS`. It excludes Python, HIP, Metal,
+and the non-launch child rows exactly as [#1362] does. The implementation phases
+may be structural prerequisites for those rows without making every issue they
+also serve a launch blocker.
+
 The final invocation is:
 
 ```text
@@ -435,19 +459,27 @@ expected outcomes, platform requirements, and controlled mutations. A missing,
 duplicate, skipped, or malformed row is a failure. An unavailable required HIP
 device reports `BLOCKED` and exits nonzero.
 
+The `complete --require-hip` invocation is the eventual [#1286] class-closure
+oracle. It is deliberately stronger than the launch invocation and does not
+delay v0.19 after the launch subset and the other independent [#1362] gates are
+green.
+
 The complete run covers:
 
 1. caller input bytes unchanged after every attempted reusable-input fusion;
 2. balanced tensor/string/List/tuple/dictionary/ADT/Option/mapped-file ownership,
-   including the exact size and nesting thresholds in [#543] and [#544];
+   including `Option[MappedFile]`, nested resource aggregates, and the exact
+   size and nesting thresholds in [#543] and [#544];
 3. top-level aliases, argument/capture/fresh returns, mixed branch/match arms,
    fold-carried aliases, and repeated tensor insertion into aggregates;
 4. peak live bytes bounded by the verified working set at recursion depths 32,
    128, and 288;
 5. C and HIP rejection of entry-backed or shared-view in-place reuse;
-6. clean normal teardown with zero live allocations and no invalid release;
-7. the existing [#1222] and [#1344] regressions; and
-8. [#1339]'s initialization-order regression as a separately classified Tier
+6. Metal emission with distinct storage for every produced node and no input,
+   view, or intermediate alias;
+7. clean normal teardown with zero live allocations and no invalid release;
+8. the existing [#1222] and [#1344] regressions; and
+9. [#1339]'s initialization-order regression as a separately classified Tier
    1 prerequisite, not as a member of this ownership class.
 
 Required mutations include:
@@ -455,9 +487,13 @@ Required mutations include:
 - add a `HeapKind` without clone/release/finalize handling: compilation fails;
 - omit `ConcreteHostType::Option` or `CHELIS_VALUE_OPTION` from the closed
   host/carrier/heap projection: compilation or the structural registry fails;
+- omit `CHELIS_VALUE_MAPPED_FILE` or its `Option[MappedFile]` fixture: the
+  recursive-carrier registry or ownership balance fails;
 - omit tensor cloning from `chelis_value_clone`: aggregate balance fails;
 - turn one branch clone into a borrow: verifier or runtime fixture fails;
 - permit `EntryBorrow` to mint `ReusableOwnedStorage`: C and HIP fixtures fail;
+- let the Metal plan accept `ReusableOwnedStorage`: the structural no-reuse
+  mutation fails;
 - delay a frame drop past the tail call: the peak-live-byte fixture fails; and
 - restore one backend-local ownership predicate: the structural boundary test
   fails even if the positive fixture remains green.
@@ -495,13 +531,17 @@ with a controlling spec stops the phase and amends the controlling document firs
 4. **No expected-failure laundering.** A receipt names an open issue and a
    detector that currently catches it; removing the detector is not progress.
 5. **No compatibility bridge.** Old and new tensor ABIs never coexist.
-6. **Both compiled backends.** A reuse rule is incomplete until C and HIP consume
-   the shared proof and HIP executes on hardware.
+6. **Every compiled backend is safe.** A reuse rule is incomplete until C and
+   HIP consume the shared proof and HIP executes on hardware. Metal remains a
+   typed no-reuse consumer until an amendment adds equivalent execution rows.
 7. **Independent semantics.** Lane agreement is supporting evidence only; exact
    ownership counts, bytes, and expected results come from the spec-derived
    ledger and fixtures.
-8. **Honest status.** A phase closes only the issue rows whose complete
-   reproductions and secondary observations are green.
+8. **Honest status.** A phase closes only the mapped ownership rows whose exact
+   ownership reproductions and ownership-specific secondary observations are
+   green. A support, syntax, diagnostic, or reachability observation outside
+   this class must have an explicit external owner before phase exit; this plan
+   neither absorbs its implementation nor waits for it to become green.
 
 ## B3. How to pick up a phase
 
@@ -615,7 +655,8 @@ exit zero and final line `COMPILED VALUE OWNERSHIP PHASE 2: PASS`.
 - post-dominance/last-use terminal placement;
 - release of non-carried frame owners before loop back-edges and tail calls;
 - `StorageProvenance` and private `ReusableOwnedStorage` construction;
-- shared memory-plan consumption by C, HIP, and Metal;
+- shared proof-bearing memory-plan consumption by C and HIP;
+- a typed `MetalNeverReuse` plan that cannot accept reusable storage;
 - runtime unique-write defense; and
 - executed C and HIP positive/negative reuse fixtures.
 
@@ -643,12 +684,16 @@ exit zero and final line `COMPILED VALUE OWNERSHIP PHASE 3: PASS`.
 - exact host/header/source/value-tag and heap-kind/consumer classifications;
 - zero expected-failure receipts in the ownership manifest;
 - the full example and embedding corpus under the allocation ledger; and
-- final exact-head red-team evidence across specs, IR, runtime, C, HIP, docs,
-  and the public header.
+- final exact-head red-team evidence across specs, IR, runtime, C, HIP, the
+  Metal no-reuse boundary, docs, and the public header.
 
-Every open child closes only after its own full thread, secondary observations,
-negative control, and positive regression are satisfied. [#1286] closes only
-after all children are closed and the final oracle is green.
+Every child ownership row closes only after its exact ownership reproduction,
+negative control, and positive regression are green. Before the child issue
+closes, every other observation in its full thread must be explicitly assigned
+outside this class or shown to be evidence rather than a separate obligation;
+the unrelated implementation is not added to this oracle. [#1286] closes only
+after every child ownership row and issue disposition is complete and the final
+oracle is green.
 
 **Authoritative oracle:**
 `.venv/bin/python scripts/compiled_value_ownership_oracle.py --phase complete --require-hip`;
@@ -660,10 +705,10 @@ exit zero and final line `COMPILED VALUE OWNERSHIP ORACLE: PASS`.
 
 | issue | phase and exact disposition |
 |---|---|
-| [#543] | Phase 1 adds tensor heap cloning/finalization; Phase 2 closes the function-internal tensor-literal temporary before the issue closes |
+| [#543] | Phase 1 adds tensor heap cloning/finalization; Phase 2 closes the function-internal tensor-literal temporary. The top-level tuple missing-`main` observation is [#545], not an ownership-oracle row |
 | [#544] | Phase 1 makes aggregate child clone/release balance independent of count, capacity growth, and nesting |
-| [#1206] | Phase 3 moves dead frame releases before tail calls and proves peak live bytes independent of recursion depth |
-| [#1214] | Phase 3 removes backend-local eligibility and executes the shared caller-storage negative on HIP hardware |
+| [#1206] | Phase 3 moves dead frame releases before tail calls and proves peak live bytes independent of recursion depth. Runtime-valued `with seed` remains [#735] syntax/semantics work; recursive-host operation support remains [#729]/[#730] capability work |
+| [#1214] | Phase 3 removes backend-local eligibility and executes the shared caller-storage negative on HIP hardware. [#1172] owns the span-key cause that can over-broaden hints; Surf reachability is exposure evidence, not another ownership mechanism |
 | [#1222] | closed instance; Phase 0 onward retains teardown/alias regressions |
 | [#1344] | closed instance; Phase 0 onward retains captured-borrow regressions |
 | [#1346] | Phase 2 represents fold state as one owned block parameter |
@@ -675,9 +720,14 @@ exit zero and final line `COMPILED VALUE OWNERSHIP ORACLE: PASS`.
 - **[#912]:** owns root identity, topology, order, lane, and artifact routing.
   [04-LIN-6] and this plan own what observing each already-manifested root does
   to ownership. Neither reconstructs the other's data.
-- **[#893]:** owns the typed runtime representation seal. Phase 1 should be one
-  coordinated implementation if its exact oracle remains aligned; this design
-  does not mark it implemented.
+- **[#893]:** owns the typed runtime representation seal. PR #1400 freezes the
+  current layout-visible [05-OP-31] tensor carrier, while this plan selects an
+  incompatible opaque carrier for the ownership cut. If that design merges
+  first, Phase 1 must amend its numbered-spec citations, design, guards, and
+  public-layout promise in the same atomic change before either implementation
+  calls the representation sealed. Coordination means explicit supersession;
+  the two carrier contracts never coexist. This design does not mark [#893]
+  implemented.
 - **[#763]/[#1351]:** lane-check may provide reusable compile/run machinery,
   but lane agreement cannot prove ownership balance or shared-lane defects. The
   ownership suite remains independently callable and spec-derived.
@@ -700,10 +750,14 @@ the future oracle, or make a child reproducer green. Its PR body says
 
 [#543]: https://github.com/Chelis-Lang/chelis/issues/543
 [#544]: https://github.com/Chelis-Lang/chelis/issues/544
+[#545]: https://github.com/Chelis-Lang/chelis/issues/545
 [#729]: https://github.com/Chelis-Lang/chelis/issues/729
+[#730]: https://github.com/Chelis-Lang/chelis/issues/730
+[#735]: https://github.com/Chelis-Lang/chelis/issues/735
 [#763]: https://github.com/Chelis-Lang/chelis/issues/763
 [#893]: https://github.com/Chelis-Lang/chelis/issues/893
 [#912]: https://github.com/Chelis-Lang/chelis/issues/912
+[#1172]: https://github.com/Chelis-Lang/chelis/issues/1172
 [#1206]: https://github.com/Chelis-Lang/chelis/issues/1206
 [#1214]: https://github.com/Chelis-Lang/chelis/issues/1214
 [#1222]: https://github.com/Chelis-Lang/chelis/issues/1222
@@ -714,3 +768,4 @@ the future oracle, or make a child reproducer green. Its PR body says
 [#1351]: https://github.com/Chelis-Lang/chelis/issues/1351
 [#1352]: https://github.com/Chelis-Lang/chelis/issues/1352
 [#1356]: https://github.com/Chelis-Lang/chelis/issues/1356
+[#1362]: https://github.com/Chelis-Lang/chelis/issues/1362

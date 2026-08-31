@@ -37,9 +37,11 @@ the loop require the existing loop-aware ownership rules; cases where the compil
 cannot prove a single terminal path remain hard errors.
 
 `Drop` is not a numerical computation. AD treats it as a gradient sink. Tensor slot
-planners close the dropped value's live range there, and heap-valued compiled lanes emit
-the matching release there. Independent liveness may refine allocation details but
-must not extend a program owner past the terminal operation.
+planners close the dropped value's live range there. The current C/HIP emitters still
+treat the IR node as an emission no-op and reconstruct host releases from backend-local
+state; the successor verified-ownership lanes emit the matching heap release at the
+terminal operation. Independent liveness may refine allocation details but must not
+extend a program owner past that operation.
 
 ## Copy Insertion
 
