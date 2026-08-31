@@ -1,8 +1,8 @@
 # Runtime Representation and Tensor-Access Safety
 
-**Status:** PROPOSED. This document specifies the complete implementation plan;
-no phase is implemented by this change. Tracking issue: [#893]. Code evidence was
-rechecked on `main` at `8190b6d8` unless a later receipt is named.
+**Status:** ACTIVE. Phase 0 is implemented and continuously enforced by its
+authoritative oracle; Phases 1–5 remain planned. Tracking issue: [#893]. Code
+evidence was rechecked on `main` at `8190b6d8` unless a later receipt is named.
 **Owning specs:** `spec/04-type-system.md` [04-NUM-4], [04-NUM-8],
 [04-NUM-10], [04-NUM-11], and [04-SHAPE-1], plus
 `spec/05-risc-primitives.md` [05-DIM-1], [05-DIM-2], [05-OP-31], and
@@ -575,10 +575,10 @@ code-generation text test.
 
 **Delivers:** the derived inventory and exact shrink-only transition-debt
 manifest in C6; release-profile reproducers for exact capacity collision,
-count/byte overflow, zero extents, and malformed foreign metadata; detection
-mutations for a new direct field access and incomplete dtype registration;
-source-only and hardware probe harnesses; all landed receipts as positive
-controls.
+count/byte overflow, zero extents, and malformed foreign metadata; one
+detection mutation for every source classifier, including a new direct field
+access and incomplete dtype registration; source-only and hardware probe
+harnesses; all landed receipts as positive controls.
 
 The inventory records identities, not mutable line numbers. Each enumerator has
 a mutation that plants a new hit in a different file/configuration. HIP and

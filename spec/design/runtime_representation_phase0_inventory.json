@@ -765,6 +765,13 @@
     "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/kernels.rs|owner=identity|signature=9f3b716dd41ec1c305bd|occurrence=1",
     "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/kernels.rs|owner=identity|signature=bde94f9a28e319e65039|occurrence=1",
     "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/kernels.rs|owner=identity|signature=c36ffdf0a38868bc3275|occurrence=1",
+    "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor|signature=35c039a33d8a4ff916ef|occurrence=1",
+    "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor|signature=593aeffc1e0b56828394|occurrence=1",
+    "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor|signature=60d31c8ac0ce8241fb06|occurrence=1",
+    "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor|signature=8f3216209550791a5b22|occurrence=1",
+    "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor|signature=ad4f4eb5d5d5a156dfb7|occurrence=1",
+    "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor|signature=b3cf0664d4ae232bb355|occurrence=1",
+    "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor|signature=f758c4e84f329964c422|occurrence=1",
     "kind=descriptor-field|path=crates/chelis-python/src/lib.rs|owner=ChelisGpuTensor|signature=5007f3b35f30d9d30ada|occurrence=1",
     "kind=descriptor-field|path=crates/chelis-python/src/lib.rs|owner=ChelisGpuTensor|signature=7ab9e76934c066a530ff|occurrence=1",
     "kind=descriptor-field|path=crates/chelis-python/src/lib.rs|owner=ChelisGpuTensor|signature=a7f36f5ebf3e5cb8f24b|occurrence=1",
@@ -788,7 +795,15 @@
     "kind=descriptor-field|path=crates/chelis-python/src/lib.rs|owner=DLTensor|signature=a674edb374add9c09739|occurrence=1",
     "kind=descriptor-field|path=crates/chelis-python/src/lib.rs|owner=DLTensor|signature=acde468a1b5145b31dd1|occurrence=1",
     "kind=descriptor-field|path=crates/chelis-python/src/lib.rs|owner=DLTensor|signature=f78952965cdaa688ca93|occurrence=1",
-    "kind=descriptor-field|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_mapped_file|signature=f122c10af34acd2b5f26|occurrence=1",
+    "kind=descriptor-field|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_tensor|signature=0cf2713c85d9e758ca96|occurrence=1",
+    "kind=descriptor-field|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_tensor|signature=1b21803136e3155d6423|occurrence=1",
+    "kind=descriptor-field|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_tensor|signature=35e01c005e21a7a1f84d|occurrence=1",
+    "kind=descriptor-field|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_tensor|signature=609c97f3deaf468527cb|occurrence=1",
+    "kind=descriptor-field|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_tensor|signature=63f89bed0c896d4db2f3|occurrence=1",
+    "kind=descriptor-field|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_tensor|signature=748538863466313cd407|occurrence=1",
+    "kind=descriptor-field|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_tensor|signature=ddce5adc52099f1cf9eb|occurrence=1",
+    "kind=descriptor-field|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_tensor|signature=dfa6677f8b3373906f18|occurrence=1",
+    "kind=descriptor-field|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_tensor|signature=f9b6e4b93cff8a945769|occurrence=1",
     "kind=descriptor-field|path=crates/chelis-runtime/src/lib.rs|owner=chelis_tensor|signature=11957f48820ba6691ef9|occurrence=1",
     "kind=descriptor-field|path=crates/chelis-runtime/src/lib.rs|owner=chelis_tensor|signature=19074072eeab00888db5|occurrence=1",
     "kind=descriptor-field|path=crates/chelis-runtime/src/lib.rs|owner=chelis_tensor|signature=5660a279f279a1e75bb9|occurrence=1",
@@ -1005,6 +1020,37 @@
     "kind=direct-data-access|path=crates/chelis-backend-c/src/host_emit.rs|owner=emit_unary_elementwise_arm|signature=5fdcce3bce3fa5f0e5a2|occurrence=1",
     "kind=direct-data-access|path=crates/chelis-backend-c/src/host_emit.rs|owner=emit_unary_func_elementwise_arm|signature=34ac36f212a7dc7f7156|occurrence=1",
     "kind=direct-data-access|path=crates/chelis-backend-c/src/host_emit.rs|owner=emit_unary_func_elementwise_arm|signature=5fdcce3bce3fa5f0e5a2|occurrence=1",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=26a6fc450bb8ccdef157|occurrence=1",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=3ac6a31a8e70fcfecb1f|occurrence=1",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=3ac6a31a8e70fcfecb1f|occurrence=2",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=3c58f1deba7fe87f0278|occurrence=1",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=40fa0da0a74c54d6c5df|occurrence=1",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=621a2747d4b9e8f1cb60|occurrence=1",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=621a2747d4b9e8f1cb60|occurrence=2",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=621a2747d4b9e8f1cb60|occurrence=3",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=621a2747d4b9e8f1cb60|occurrence=4",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=6c03f1067347436a2e40|occurrence=1",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=8979dfb8ff186dfa0ba1|occurrence=1",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=8979dfb8ff186dfa0ba1|occurrence=2",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=8979dfb8ff186dfa0ba1|occurrence=3",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=8979dfb8ff186dfa0ba1|occurrence=4",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=8e59dbb432da13a0843f|occurrence=1",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=8ecb5230d105657d912c|occurrence=1",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=9c1bfc7d30c019ae4a0b|occurrence=1",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=b9b0f8230564b39ef473|occurrence=1",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=b9b0f8230564b39ef473|occurrence=2",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=b9b0f8230564b39ef473|occurrence=3",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=b9b0f8230564b39ef473|occurrence=4",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=bccd0c61dea18d4ca4d1|occurrence=1",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=08b1dfe49477bf144081|occurrence=1",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=8eeb0921b4eb009d46b6|occurrence=1",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=8eeb0921b4eb009d46b6|occurrence=2",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=ca309e23de3e71bdc465|occurrence=1",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=ca309e23de3e71bdc465|occurrence=2",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=db3c7dd7380f8cd9658f|occurrence=1",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=db3c7dd7380f8cd9658f|occurrence=2",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=f30c5a4deed989dae5e5|occurrence=1",
+    "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=f6bd6dadf109a5a36ebe|occurrence=1",
     "kind=direct-data-access|path=crates/chelis-backend-hip/src/emit.rs|owner=emit_binary_launch|signature=0de66d6721078fecfa7b|occurrence=1",
     "kind=direct-data-access|path=crates/chelis-backend-hip/src/emit.rs|owner=emit_binary_launch|signature=8ee7c34d20232f784142|occurrence=1",
     "kind=direct-data-access|path=crates/chelis-backend-hip/src/emit.rs|owner=emit_binary_launch|signature=bf0ec65bae8299590d80|occurrence=1",
@@ -1153,6 +1199,9 @@
     "kind=dtype-contract|path=crates/chelis-vocab/src/lib.rs|owner=RuntimeDType|signature=f39f7c1273b2882fa797|occurrence=1",
     "kind=dtype-contract|path=crates/chelis-vocab/src/lib.rs|owner=RuntimeDType|signature=fccee85653670ed117f9|occurrence=1",
     "kind=dtype-contract|path=crates/chelis-vocab/src/lib.rs|owner=RuntimeDType|signature=fd5afe4f39b215051be1|occurrence=1",
+    "kind=fixed-rank-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=108126e52767ef2e08f3|occurrence=1",
+    "kind=fixed-rank-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=4f8ff5983040e1fc149a|occurrence=1",
+    "kind=fixed-rank-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=f758c4e84f329964c422|occurrence=1",
     "kind=fixed-rank-metadata|path=crates/chelis-backend-hip/src/emit.rs|owner=axis_const_arg_refs|signature=cfbaf454bf63041612a0|occurrence=1",
     "kind=fixed-rank-metadata|path=crates/chelis-backend-hip/src/emit.rs|owner=emit_axis_const_vars|signature=1f323ff66fd961047cbc|occurrence=1",
     "kind=fixed-rank-metadata|path=crates/chelis-backend-hip/src/emit.rs|owner=emit_shape_vars|signature=1f323ff66fd961047cbc|occurrence=1",
@@ -1237,6 +1286,19 @@
     "kind=load-store-template|path=crates/chelis-backend-metal/src/kernels.rs|owner=ChelisMatmulDims|signature=9bd41a9ad96f9af5a6dc|occurrence=1",
     "kind=load-store-template|path=crates/chelis-backend-metal/src/kernels.rs|owner=ChelisMatmulDims|signature=f574e722bef6b95c656c|occurrence=1",
     "kind=load-store-template|path=crates/chelis-backend-metal/src/kernels.rs|owner=reduce_full_kernel_for|signature=fdf1fd9eb40201b073cf|occurrence=1",
+    "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=06b445a624e25668157e|occurrence=1",
+    "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=1715dc96f1708f9a8bf2|occurrence=1",
+    "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=6e99dfb1f90ee4c6e3a6|occurrence=1",
+    "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=6e99dfb1f90ee4c6e3a6|occurrence=2",
+    "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=7d5a4ffa4bf32fdb90d1|occurrence=1",
+    "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=b3cf0664d4ae232bb355|occurrence=1",
+    "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=c0a6fdf6f8e4c16e244d|occurrence=1",
+    "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=cd7cd5a8b9118b1fc77a|occurrence=1",
+    "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=e45eaf3ac07d4cd61c01|occurrence=1",
+    "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=fd39aa32efa000abffb9|occurrence=1",
+    "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=06b445a624e25668157e|occurrence=1",
+    "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=83fdb1c5035296ccb426|occurrence=1",
+    "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=fd39aa32efa000abffb9|occurrence=1",
     "kind=narrow-metadata|path=crates/chelis-backend-hip/src/emit.rs|owner=emit_binary_launch|signature=267df245e287a6999821|occurrence=1",
     "kind=narrow-metadata|path=crates/chelis-backend-hip/src/emit.rs|owner=emit_binary_launch|signature=73161f19920c1bcff4b7|occurrence=1",
     "kind=narrow-metadata|path=crates/chelis-backend-hip/src/emit.rs|owner=emit_binary_launch|signature=814f15ab368d7f6e53c0|occurrence=1",
@@ -1576,6 +1638,15 @@
     "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=assign_tensor_call|signature=e65e78afdaafbc71d819|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=emit_sparse_gather_summary_body|signature=d807ac281b7ba1439ee8|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=emit_sparse_scatter_summary_body|signature=d807ac281b7ba1439ee8|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=08b1dfe49477bf144081|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=8eeb0921b4eb009d46b6|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=8eeb0921b4eb009d46b6|occurrence=2",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=ca309e23de3e71bdc465|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=ca309e23de3e71bdc465|occurrence=2",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=db3c7dd7380f8cd9658f|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=db3c7dd7380f8cd9658f|occurrence=2",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=f30c5a4deed989dae5e5|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=f6bd6dadf109a5a36ebe|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/emit.rs|owner=emit_const_tensor|signature=90266999e061edcff0e3|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/emit.rs|owner=emit_const_tensor|signature=ad0402b8967e0e0ebd94|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-metal/src/dtype.rs|owner=host_const_fill_body|signature=1114328745704ef0aa99|occurrence=1",
@@ -1656,6 +1727,12 @@
     "kind=width-arithmetic|path=crates/chelis-backend-c/src/host_emit.rs|owner=assign_sparse_summary|signature=c695279882176407d6f5|occurrence=2",
     "kind=width-arithmetic|path=crates/chelis-backend-c/src/host_emit.rs|owner=emit_sparse_scatter_summary_body|signature=59aa4e6f1f31a884d315|occurrence=1",
     "kind=width-arithmetic|path=crates/chelis-backend-c/src/host_emit.rs|owner=emit_sparse_scatter_summary_body|signature=69c61a8ae4f343587d37|occurrence=1",
+    "kind=width-arithmetic|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=26a6fc450bb8ccdef157|occurrence=1",
+    "kind=width-arithmetic|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=4a5c51d794468f36300e|occurrence=1",
+    "kind=width-arithmetic|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=6faa8bc0fd878f811cf9|occurrence=1",
+    "kind=width-arithmetic|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=b5effb90f49c74630bb8|occurrence=1",
+    "kind=width-arithmetic|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=bd0648c495974e24be0b|occurrence=1",
+    "kind=width-arithmetic|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=fd18901136b1091404a2|occurrence=1",
     "kind=width-arithmetic|path=crates/chelis-backend-hip/src/emit.rs|owner=emit_scatter_add_launch|signature=ba08f30255c3dd25e740|occurrence=1",
     "kind=width-arithmetic|path=crates/chelis-backend-hip/src/emit.rs|owner=emit_scatter_elements_launch|signature=41b3c1d983df41d0039c|occurrence=1",
     "kind=width-arithmetic|path=crates/chelis-backend-hip/src/emit.rs|owner=emit_scatter_replace_launch|signature=ba08f30255c3dd25e740|occurrence=1",
@@ -1767,7 +1844,7 @@
     ],
     "release_reproducers": [
       {
-        "command": "cargo nextest run --release -p chelis-ir --test dim_canon_adversarial --test dim_canonicalization",
+        "command": "cargo nextest run --release -p chelis-ir --test issue_888_capacity_collision",
         "name": "capacity collision release reproducer"
       },
       {
@@ -1784,8 +1861,16 @@
       "enumerator": "git ls-files plus closed source classifiers",
       "expected_success": "every hit is exact active debt from the frozen foundation",
       "mutations": [
-        "new direct chelis_tensor.data access in a tracked runtime module",
-        "new RuntimeDType variant without a complete contract"
+        "new backend-element-spelling hit in crates/chelis-backend-metal/src/emit.rs",
+        "new descriptor-field hit in crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
+        "new direct-data-access hit in crates/chelis-runtime/src/decimal_parse.rs",
+        "new dtype-contract hit in crates/chelis-vocab/src/lib.rs",
+        "new fixed-rank-metadata hit in crates/chelis-python/src/lib.rs",
+        "new load-store-template hit in crates/chelis-backend-c/src/host_emit.rs",
+        "new narrow-metadata hit in crates/chelis-backend-hip/src/emit.rs",
+        "new normalized-key-arithmetic hit in crates/chelis-ir/src/dag.rs",
+        "new raw-element-pointer hit in crates/chelis-runtime/src/ieee_narrow.rs",
+        "new width-arithmetic hit in crates/chelis-runtime/src/format_shortest.rs"
       ]
     }
   },
@@ -7912,6 +7997,62 @@
     },
     {
       "deletion_phase": 2,
+      "identity": "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor|signature=35c039a33d8a4ff916ef|occurrence=1",
+      "kind": "descriptor-field",
+      "occurrence": 1,
+      "owner": "chelis_gpu_tensor",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 2,
+      "identity": "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor|signature=593aeffc1e0b56828394|occurrence=1",
+      "kind": "descriptor-field",
+      "occurrence": 1,
+      "owner": "chelis_gpu_tensor",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 2,
+      "identity": "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor|signature=60d31c8ac0ce8241fb06|occurrence=1",
+      "kind": "descriptor-field",
+      "occurrence": 1,
+      "owner": "chelis_gpu_tensor",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 2,
+      "identity": "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor|signature=8f3216209550791a5b22|occurrence=1",
+      "kind": "descriptor-field",
+      "occurrence": 1,
+      "owner": "chelis_gpu_tensor",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 2,
+      "identity": "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor|signature=ad4f4eb5d5d5a156dfb7|occurrence=1",
+      "kind": "descriptor-field",
+      "occurrence": 1,
+      "owner": "chelis_gpu_tensor",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 2,
+      "identity": "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor|signature=b3cf0664d4ae232bb355|occurrence=1",
+      "kind": "descriptor-field",
+      "occurrence": 1,
+      "owner": "chelis_gpu_tensor",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 2,
+      "identity": "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor|signature=f758c4e84f329964c422|occurrence=1",
+      "kind": "descriptor-field",
+      "occurrence": 1,
+      "owner": "chelis_gpu_tensor",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 2,
       "identity": "kind=descriptor-field|path=crates/chelis-python/src/lib.rs|owner=ChelisGpuTensor|signature=5007f3b35f30d9d30ada|occurrence=1",
       "kind": "descriptor-field",
       "occurrence": 1,
@@ -8096,10 +8237,74 @@
     },
     {
       "deletion_phase": 3,
-      "identity": "kind=descriptor-field|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_mapped_file|signature=f122c10af34acd2b5f26|occurrence=1",
+      "identity": "kind=descriptor-field|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_tensor|signature=0cf2713c85d9e758ca96|occurrence=1",
       "kind": "descriptor-field",
       "occurrence": 1,
-      "owner": "chelis_mapped_file",
+      "owner": "chelis_tensor",
+      "path": "crates/chelis-runtime/include/chelis_runtime.h"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=descriptor-field|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_tensor|signature=1b21803136e3155d6423|occurrence=1",
+      "kind": "descriptor-field",
+      "occurrence": 1,
+      "owner": "chelis_tensor",
+      "path": "crates/chelis-runtime/include/chelis_runtime.h"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=descriptor-field|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_tensor|signature=35e01c005e21a7a1f84d|occurrence=1",
+      "kind": "descriptor-field",
+      "occurrence": 1,
+      "owner": "chelis_tensor",
+      "path": "crates/chelis-runtime/include/chelis_runtime.h"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=descriptor-field|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_tensor|signature=609c97f3deaf468527cb|occurrence=1",
+      "kind": "descriptor-field",
+      "occurrence": 1,
+      "owner": "chelis_tensor",
+      "path": "crates/chelis-runtime/include/chelis_runtime.h"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=descriptor-field|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_tensor|signature=63f89bed0c896d4db2f3|occurrence=1",
+      "kind": "descriptor-field",
+      "occurrence": 1,
+      "owner": "chelis_tensor",
+      "path": "crates/chelis-runtime/include/chelis_runtime.h"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=descriptor-field|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_tensor|signature=748538863466313cd407|occurrence=1",
+      "kind": "descriptor-field",
+      "occurrence": 1,
+      "owner": "chelis_tensor",
+      "path": "crates/chelis-runtime/include/chelis_runtime.h"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=descriptor-field|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_tensor|signature=ddce5adc52099f1cf9eb|occurrence=1",
+      "kind": "descriptor-field",
+      "occurrence": 1,
+      "owner": "chelis_tensor",
+      "path": "crates/chelis-runtime/include/chelis_runtime.h"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=descriptor-field|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_tensor|signature=dfa6677f8b3373906f18|occurrence=1",
+      "kind": "descriptor-field",
+      "occurrence": 1,
+      "owner": "chelis_tensor",
+      "path": "crates/chelis-runtime/include/chelis_runtime.h"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=descriptor-field|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_tensor|signature=f9b6e4b93cff8a945769|occurrence=1",
+      "kind": "descriptor-field",
+      "occurrence": 1,
+      "owner": "chelis_tensor",
       "path": "crates/chelis-runtime/include/chelis_runtime.h"
     },
     {
@@ -9832,6 +10037,254 @@
     },
     {
       "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=26a6fc450bb8ccdef157|occurrence=1",
+      "kind": "direct-data-access",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=3ac6a31a8e70fcfecb1f|occurrence=1",
+      "kind": "direct-data-access",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=3ac6a31a8e70fcfecb1f|occurrence=2",
+      "kind": "direct-data-access",
+      "occurrence": 2,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=3c58f1deba7fe87f0278|occurrence=1",
+      "kind": "direct-data-access",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=40fa0da0a74c54d6c5df|occurrence=1",
+      "kind": "direct-data-access",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=621a2747d4b9e8f1cb60|occurrence=1",
+      "kind": "direct-data-access",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=621a2747d4b9e8f1cb60|occurrence=2",
+      "kind": "direct-data-access",
+      "occurrence": 2,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=621a2747d4b9e8f1cb60|occurrence=3",
+      "kind": "direct-data-access",
+      "occurrence": 3,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=621a2747d4b9e8f1cb60|occurrence=4",
+      "kind": "direct-data-access",
+      "occurrence": 4,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=6c03f1067347436a2e40|occurrence=1",
+      "kind": "direct-data-access",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=8979dfb8ff186dfa0ba1|occurrence=1",
+      "kind": "direct-data-access",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=8979dfb8ff186dfa0ba1|occurrence=2",
+      "kind": "direct-data-access",
+      "occurrence": 2,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=8979dfb8ff186dfa0ba1|occurrence=3",
+      "kind": "direct-data-access",
+      "occurrence": 3,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=8979dfb8ff186dfa0ba1|occurrence=4",
+      "kind": "direct-data-access",
+      "occurrence": 4,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=8e59dbb432da13a0843f|occurrence=1",
+      "kind": "direct-data-access",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=8ecb5230d105657d912c|occurrence=1",
+      "kind": "direct-data-access",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=9c1bfc7d30c019ae4a0b|occurrence=1",
+      "kind": "direct-data-access",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=b9b0f8230564b39ef473|occurrence=1",
+      "kind": "direct-data-access",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=b9b0f8230564b39ef473|occurrence=2",
+      "kind": "direct-data-access",
+      "occurrence": 2,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=b9b0f8230564b39ef473|occurrence=3",
+      "kind": "direct-data-access",
+      "occurrence": 3,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=b9b0f8230564b39ef473|occurrence=4",
+      "kind": "direct-data-access",
+      "occurrence": 4,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=bccd0c61dea18d4ca4d1|occurrence=1",
+      "kind": "direct-data-access",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=08b1dfe49477bf144081|occurrence=1",
+      "kind": "direct-data-access",
+      "occurrence": 1,
+      "owner": "holds",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=8eeb0921b4eb009d46b6|occurrence=1",
+      "kind": "direct-data-access",
+      "occurrence": 1,
+      "owner": "holds",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=8eeb0921b4eb009d46b6|occurrence=2",
+      "kind": "direct-data-access",
+      "occurrence": 2,
+      "owner": "holds",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=ca309e23de3e71bdc465|occurrence=1",
+      "kind": "direct-data-access",
+      "occurrence": 1,
+      "owner": "holds",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=ca309e23de3e71bdc465|occurrence=2",
+      "kind": "direct-data-access",
+      "occurrence": 2,
+      "owner": "holds",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=db3c7dd7380f8cd9658f|occurrence=1",
+      "kind": "direct-data-access",
+      "occurrence": 1,
+      "owner": "holds",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=db3c7dd7380f8cd9658f|occurrence=2",
+      "kind": "direct-data-access",
+      "occurrence": 2,
+      "owner": "holds",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=f30c5a4deed989dae5e5|occurrence=1",
+      "kind": "direct-data-access",
+      "occurrence": 1,
+      "owner": "holds",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=f6bd6dadf109a5a36ebe|occurrence=1",
+      "kind": "direct-data-access",
+      "occurrence": 1,
+      "owner": "holds",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/src/emit.rs|owner=emit_binary_launch|signature=0de66d6721078fecfa7b|occurrence=1",
       "kind": "direct-data-access",
       "occurrence": 1,
@@ -11016,6 +11469,30 @@
     },
     {
       "deletion_phase": 2,
+      "identity": "kind=fixed-rank-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=108126e52767ef2e08f3|occurrence=1",
+      "kind": "fixed-rank-metadata",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 2,
+      "identity": "kind=fixed-rank-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=4f8ff5983040e1fc149a|occurrence=1",
+      "kind": "fixed-rank-metadata",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 2,
+      "identity": "kind=fixed-rank-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=f758c4e84f329964c422|occurrence=1",
+      "kind": "fixed-rank-metadata",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 2,
       "identity": "kind=fixed-rank-metadata|path=crates/chelis-backend-hip/src/emit.rs|owner=axis_const_arg_refs|signature=cfbaf454bf63041612a0|occurrence=1",
       "kind": "fixed-rank-metadata",
       "occurrence": 1,
@@ -11685,6 +12162,110 @@
       "occurrence": 1,
       "owner": "reduce_full_kernel_for",
       "path": "crates/chelis-backend-metal/src/kernels.rs"
+    },
+    {
+      "deletion_phase": 2,
+      "identity": "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=06b445a624e25668157e|occurrence=1",
+      "kind": "narrow-metadata",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 2,
+      "identity": "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=1715dc96f1708f9a8bf2|occurrence=1",
+      "kind": "narrow-metadata",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 2,
+      "identity": "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=6e99dfb1f90ee4c6e3a6|occurrence=1",
+      "kind": "narrow-metadata",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 2,
+      "identity": "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=6e99dfb1f90ee4c6e3a6|occurrence=2",
+      "kind": "narrow-metadata",
+      "occurrence": 2,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 2,
+      "identity": "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=7d5a4ffa4bf32fdb90d1|occurrence=1",
+      "kind": "narrow-metadata",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 2,
+      "identity": "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=b3cf0664d4ae232bb355|occurrence=1",
+      "kind": "narrow-metadata",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 2,
+      "identity": "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=c0a6fdf6f8e4c16e244d|occurrence=1",
+      "kind": "narrow-metadata",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 2,
+      "identity": "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=cd7cd5a8b9118b1fc77a|occurrence=1",
+      "kind": "narrow-metadata",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 2,
+      "identity": "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=e45eaf3ac07d4cd61c01|occurrence=1",
+      "kind": "narrow-metadata",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 2,
+      "identity": "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=fd39aa32efa000abffb9|occurrence=1",
+      "kind": "narrow-metadata",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 2,
+      "identity": "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=06b445a624e25668157e|occurrence=1",
+      "kind": "narrow-metadata",
+      "occurrence": 1,
+      "owner": "holds",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 2,
+      "identity": "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=83fdb1c5035296ccb426|occurrence=1",
+      "kind": "narrow-metadata",
+      "occurrence": 1,
+      "owner": "holds",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 2,
+      "identity": "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=fd39aa32efa000abffb9|occurrence=1",
+      "kind": "narrow-metadata",
+      "occurrence": 1,
+      "owner": "holds",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
     },
     {
       "deletion_phase": 2,
@@ -14400,6 +14981,78 @@
     },
     {
       "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=08b1dfe49477bf144081|occurrence=1",
+      "kind": "raw-element-pointer",
+      "occurrence": 1,
+      "owner": "holds",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=8eeb0921b4eb009d46b6|occurrence=1",
+      "kind": "raw-element-pointer",
+      "occurrence": 1,
+      "owner": "holds",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=8eeb0921b4eb009d46b6|occurrence=2",
+      "kind": "raw-element-pointer",
+      "occurrence": 2,
+      "owner": "holds",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=ca309e23de3e71bdc465|occurrence=1",
+      "kind": "raw-element-pointer",
+      "occurrence": 1,
+      "owner": "holds",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=ca309e23de3e71bdc465|occurrence=2",
+      "kind": "raw-element-pointer",
+      "occurrence": 2,
+      "owner": "holds",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=db3c7dd7380f8cd9658f|occurrence=1",
+      "kind": "raw-element-pointer",
+      "occurrence": 1,
+      "owner": "holds",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=db3c7dd7380f8cd9658f|occurrence=2",
+      "kind": "raw-element-pointer",
+      "occurrence": 2,
+      "owner": "holds",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=f30c5a4deed989dae5e5|occurrence=1",
+      "kind": "raw-element-pointer",
+      "occurrence": 1,
+      "owner": "holds",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=holds|signature=f6bd6dadf109a5a36ebe|occurrence=1",
+      "kind": "raw-element-pointer",
+      "occurrence": 1,
+      "owner": "holds",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 4,
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/emit.rs|owner=emit_const_tensor|signature=90266999e061edcff0e3|occurrence=1",
       "kind": "raw-element-pointer",
       "occurrence": 1,
@@ -15037,6 +15690,54 @@
       "occurrence": 1,
       "owner": "emit_sparse_scatter_summary_body",
       "path": "crates/chelis-backend-c/src/host_emit.rs"
+    },
+    {
+      "deletion_phase": 1,
+      "identity": "kind=width-arithmetic|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=26a6fc450bb8ccdef157|occurrence=1",
+      "kind": "width-arithmetic",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 1,
+      "identity": "kind=width-arithmetic|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=4a5c51d794468f36300e|occurrence=1",
+      "kind": "width-arithmetic",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 1,
+      "identity": "kind=width-arithmetic|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=6faa8bc0fd878f811cf9|occurrence=1",
+      "kind": "width-arithmetic",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 1,
+      "identity": "kind=width-arithmetic|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=b5effb90f49c74630bb8|occurrence=1",
+      "kind": "width-arithmetic",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 1,
+      "identity": "kind=width-arithmetic|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=bd0648c495974e24be0b|occurrence=1",
+      "kind": "width-arithmetic",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+    },
+    {
+      "deletion_phase": 1,
+      "identity": "kind=width-arithmetic|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=for|signature=fd18901136b1091404a2|occurrence=1",
+      "kind": "width-arithmetic",
+      "occurrence": 1,
+      "owner": "for",
+      "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
     },
     {
       "deletion_phase": 1,
@@ -15783,6 +16484,6 @@
       "path": "crates/chelis-vocab/src/lib.rs"
     }
   ],
-  "foundation_sha256": "bc7b89f99e1c4190304e081284fc79743903df921c5df33bee7bcaea3289e230",
+  "foundation_sha256": "88721b1ef511b7ed1638e83cb796e12236ae9b57b66ab13b7efd00f13b7eaca4",
   "schema_version": 1
 }

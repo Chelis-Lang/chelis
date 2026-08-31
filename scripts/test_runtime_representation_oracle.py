@@ -31,6 +31,19 @@ class InventoryContractTests(unittest.TestCase):
             },
         )
 
+    def test_inventory_covers_the_handwritten_hip_runtime_descriptor(self) -> None:
+        rows = oracle.inventory_rows(oracle.REPO_ROOT)
+        hip_runtime_rows = [
+            row
+            for row in rows
+            if row.path
+            == "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"
+        ]
+        self.assertTrue(hip_runtime_rows)
+        self.assertIn("descriptor-field", {row.kind for row in hip_runtime_rows})
+        self.assertIn("fixed-rank-metadata", {row.kind for row in hip_runtime_rows})
+        self.assertIn("narrow-metadata", {row.kind for row in hip_runtime_rows})
+
     def test_inventory_identities_do_not_use_mutable_line_numbers(self) -> None:
         rows = oracle.inventory_rows(oracle.REPO_ROOT)
         self.assertTrue(rows)
@@ -87,6 +100,32 @@ typedef struct { void *data; const int64_t *shape; const int64_t *strides;
 
 
 class MutationContractTests(unittest.TestCase):
+    def test_every_classifier_has_one_controlled_mutation(self) -> None:
+        inventory_kinds = {
+            row.kind for row in oracle.inventory_rows(oracle.REPO_ROOT)
+        }
+        probes = oracle.phase0_mutation_probes()
+        self.assertEqual(
+            [probe.expected_kind for probe in probes],
+            sorted(inventory_kinds),
+        )
+        self.assertEqual(len(probes), len({probe.expected_kind for probe in probes}))
+
+    def test_every_classifier_mutation_is_rejected_as_unclassified(self) -> None:
+        baseline = oracle.load_baseline()
+        for probe in oracle.phase0_mutation_probes():
+            with self.subTest(kind=probe.expected_kind):
+                path = oracle.REPO_ROOT / probe.path
+                original = path.read_bytes()
+                with oracle.temporary_mutation(path, probe.mutate):
+                    rows = oracle.inventory_rows(oracle.REPO_ROOT)
+                    with self.assertRaisesRegex(
+                        oracle.OracleFailure,
+                        rf"unclassified inventory hit: .*kind={probe.expected_kind}\|",
+                    ):
+                        oracle.validate_baseline(baseline, rows)
+                self.assertEqual(path.read_bytes(), original)
+
     def test_direct_access_mutation_creates_one_unclassified_identity(self) -> None:
         baseline = oracle.load_baseline()
         with oracle.temporary_mutation(
@@ -131,6 +170,9 @@ class PhaseZeroManifestTests(unittest.TestCase):
         )
         for leg in oracle.phase0_legs():
             self.assertIn("--release", leg.argv, leg.name)
+        capacity_leg = oracle.phase0_legs()[0]
+        self.assertIn("--test", capacity_leg.argv)
+        self.assertIn("issue_888_capacity_collision", capacity_leg.argv)
 
     def test_hardware_manifest_cannot_misreport_ignored_tests_as_executed(self) -> None:
         manifest = oracle.hardware_probe_manifest()
@@ -142,6 +184,26 @@ class PhaseZeroManifestTests(unittest.TestCase):
 
     def test_phase2_phase3_host_descriptor_ownership_is_unambiguous(self) -> None:
         oracle.validate_design_sequencing()
+
+    def test_phase2_phase3_guard_rejects_the_old_host_ownership(self) -> None:
+        current = oracle.DESIGN_PATH.read_text(encoding="utf-8")
+        contradiction = (
+            "\nPhase 2 installs the generated host descriptor and delivers C3 "
+            "completely before Phase 3.\n"
+        )
+        with tempfile.TemporaryDirectory() as raw_dir:
+            path = Path(raw_dir) / "runtime_representation.md"
+            path.write_text(current + contradiction, encoding="utf-8")
+            with mock.patch.object(oracle, "DESIGN_PATH", path):
+                with self.assertRaisesRegex(
+                    oracle.OracleFailure, "contradictory Phase 2/3 ownership"
+                ):
+                    oracle.validate_design_sequencing()
+
+    def test_design_status_records_phase0_as_implemented(self) -> None:
+        source = oracle.DESIGN_PATH.read_text(encoding="utf-8")
+        self.assertIn("Phase 0 is implemented", source)
+        self.assertNotIn("no phase is implemented", source)
 
     def test_phase_index_names_the_authoritative_continuous_command(self) -> None:
         phase_index = (oracle.REPO_ROOT / "docs/phase_oracles.md").read_text(

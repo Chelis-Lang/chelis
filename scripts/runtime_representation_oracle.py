@@ -29,7 +29,7 @@ DTYPE_MUTATION_SOURCE = Path("crates/chelis-vocab/src/lib.rs")
 # This is the reviewed Phase 0 foundation digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FOUNDATION_SHA256 = "bc7b89f99e1c4190304e081284fc79743903df921c5df33bee7bcaea3289e230"
+FOUNDATION_SHA256 = "88721b1ef511b7ed1638e83cb796e12236ae9b57b66ab13b7efd00f13b7eaca4"
 
 SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cu", ".h", ".metal", ".rs"}
 SOURCE_PREFIXES = (
@@ -40,11 +40,13 @@ SOURCE_PREFIXES = (
     "crates/chelis-python/src/",
     "crates/chelis-backend-c/src/",
     "crates/chelis-backend-hip/src/",
+    "crates/chelis-backend-hip/runtime/",
     "crates/chelis-backend-metal/src/",
 )
 BACKEND_PREFIXES = (
     "crates/chelis-backend-c/src/",
     "crates/chelis-backend-hip/src/",
+    "crates/chelis-backend-hip/runtime/",
     "crates/chelis-backend-metal/src/",
 )
 
@@ -64,7 +66,7 @@ RAW_POINTER_RE = re.compile(
     r"|\(\s*(?:const\s+)?(?:float|double|u?int(?:8|16|32|64)_t)\s*\*\s*\))"
 )
 FIXED_RANK_RE = re.compile(
-    r"(?:CHELIS_MAX_DIM|\bMAX_DIM\b|\[(?:i32|i64|int|int32_t|int64_t)\s*;\s*(?:[2-9][0-9]*|[A-Z][A-Z0-9_]*)\])"
+    r"(?:\b[A-Z][A-Z0-9_]*MAX_DIM\b|\bMAX_DIM\b|\[(?:i32|i64|int|int32_t|int64_t)\s*;\s*(?:[2-9][0-9]*|[A-Z][A-Z0-9_]*)\])"
 )
 NARROW_METADATA_RE = re.compile(
     r"(?:\b(?:rank|ndim|size|storage_size)\s*:\s*i32\b"
@@ -140,6 +142,13 @@ class OracleLeg:
     argv: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class MutationProbe:
+    expected_kind: str
+    path: Path
+    mutate: Callable[[str], str]
+
+
 def _tracked_source_paths(root: Path) -> tuple[Path, ...]:
     completed = subprocess.run(
         ("git", "ls-files", "-z"),
@@ -199,6 +208,33 @@ def descriptor_owner_names(source: str) -> set[str]:
     return owners
 
 
+def descriptor_field_signatures(source: str) -> tuple[tuple[str, str], ...]:
+    """Return descriptor field declarations with their structural owner."""
+
+    fields: list[tuple[str, str]] = []
+    owners = descriptor_owner_names(source)
+    for match in RUST_STRUCT_RE.finditer(source):
+        owner = match.group("name")
+        if owner not in owners:
+            continue
+        for line in match.group("body").splitlines():
+            if re.match(
+                r"^\s*(?:pub(?:\([^)]*\))?\s+)?"
+                r"[A-Za-z_][A-Za-z0-9_]*\s*:",
+                line,
+            ):
+                fields.append((owner, _normalized_signature(line)))
+    for match in C_STRUCT_RE.finditer(source):
+        owner = match.group("name")
+        if owner not in owners:
+            continue
+        for declaration in match.group("body").split(";"):
+            signature = _normalized_signature(declaration)
+            if signature and re.search(r"\b[A-Za-z_][A-Za-z0-9_]*\s*(?:\[[^]]*\])?$", signature):
+                fields.append((owner, signature + ";"))
+    return tuple(fields)
+
+
 def _deletion_phase(kind: str, path: str, owner: str) -> int:
     if kind in {"dtype-contract", "normalized-key-arithmetic", "width-arithmetic"}:
         return 1
@@ -206,19 +242,17 @@ def _deletion_phase(kind: str, path: str, owner: str) -> int:
         return 2
     if path.startswith("crates/chelis-python/src/"):
         return 2
+    if kind == "descriptor-field" and owner in {"ChelisGpuTensor", "chelis_gpu_tensor"}:
+        return 2
     if path.startswith(BACKEND_PREFIXES) or kind in {
         "backend-element-spelling",
         "load-store-template",
     }:
         return 4
-    if kind == "descriptor-field" and owner == "ChelisGpuTensor":
-        return 2
     return 3
 
 
-def _line_kinds(
-    path: str, owner: str, line: str, descriptor_owners: set[str]
-) -> tuple[str, ...]:
+def _line_kinds(path: str, owner: str, line: str) -> tuple[str, ...]:
     stripped = line.strip()
     if not stripped or stripped.startswith(("//", "///", "//!", "*", "/*")):
         return ()
@@ -227,16 +261,6 @@ def _line_kinds(
     is_backend = path.startswith(BACKEND_PREFIXES)
     is_python = path.startswith("crates/chelis-python/src/")
     is_runtime = path.startswith("crates/chelis-runtime/")
-
-    if (
-        owner in descriptor_owners
-        and re.match(r"^(?:pub\s+)?[A-Za-z_][A-Za-z0-9_]*\s*:", stripped)
-    ) or (
-        path.startswith("crates/chelis-runtime/include/")
-        and "typedef struct" in stripped
-        and any(name in stripped for name in descriptor_owners)
-    ):
-        kinds.append("descriptor-field")
 
     if DIRECT_DATA_RE.search(stripped) and (is_runtime or is_python or is_backend):
         kinds.append("direct-data-access")
@@ -281,7 +305,16 @@ def inventory_rows(root: Path) -> tuple[InventoryRow, ...]:
         path = relative.as_posix()
         owner = "module"
         source = (root / relative).read_text(encoding="utf-8")
-        descriptor_owners = descriptor_owner_names(source)
+        for descriptor_owner, signature in descriptor_field_signatures(source):
+            candidates.append(
+                (
+                    "descriptor-field",
+                    path,
+                    descriptor_owner,
+                    signature,
+                    _deletion_phase("descriptor-field", path, descriptor_owner),
+                )
+            )
         cfg_test_module = False
         for line in source.splitlines():
             stripped = line.strip()
@@ -292,7 +325,7 @@ def inventory_rows(root: Path) -> tuple[InventoryRow, ...]:
             cfg_test_module = stripped.startswith("#[cfg(test")
             owner = _owner_after_line(line, owner)
             signature = _normalized_signature(line)
-            for kind in _line_kinds(path, owner, line, descriptor_owners):
+            for kind in _line_kinds(path, owner, line):
                 candidates.append(
                     (kind, path, owner, signature, _deletion_phase(kind, path, owner))
                 )
@@ -320,8 +353,8 @@ def coverage_manifest() -> dict[str, object]:
             "enumerator": "git ls-files plus closed source classifiers",
             "expected_success": "every hit is exact active debt from the frozen foundation",
             "mutations": [
-                "new direct chelis_tensor.data access in a tracked runtime module",
-                "new RuntimeDType variant without a complete contract",
+                f"new {probe.expected_kind} hit in {probe.path.as_posix()}"
+                for probe in phase0_mutation_probes()
             ],
         },
         "release_reproducers": [
@@ -441,6 +474,140 @@ def mutate_incomplete_dtype(source: str) -> str:
     return source.replace(anchor, "    I16 = 8,\n    Phase0Probe = 127,\n}", 1)
 
 
+def _append_probe(source: str, marker: str, snippet: str) -> str:
+    if marker in source:
+        raise OracleFailure(f"{marker} mutation is already present")
+    mutation = f"\n\n{snippet}\n"
+    test_module = "\n#[cfg(test)]"
+    if test_module in source:
+        return source.replace(test_module, mutation + test_module, 1)
+    return source + mutation
+
+
+def mutate_backend_element_spelling(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_backend_spelling",
+        'const runtime_representation_phase0_backend_spelling: &str = "float";',
+    )
+
+
+def mutate_descriptor_field(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_descriptor",
+        """typedef struct {
+    void *data;
+    int64_t *shape;
+    int64_t *strides;
+    int64_t size;
+    int32_t rank;
+    uint8_t dtype;
+} runtime_representation_phase0_descriptor;""",
+    )
+
+
+def mutate_fixed_rank_metadata(source: str) -> str:
+    return _append_probe(
+        source,
+        "RUNTIME_REPRESENTATION_PHASE0_FIXED_RANK",
+        "const RUNTIME_REPRESENTATION_PHASE0_FIXED_RANK: [i32; 8] = [0; 8];",
+    )
+
+
+def mutate_load_store_template(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_load_store",
+        'let runtime_representation_phase0_load_store = format!("phase0 pointer");',
+    )
+
+
+def mutate_narrow_metadata(source: str) -> str:
+    return _append_probe(
+        source,
+        "RuntimeRepresentationPhase0Narrow",
+        "struct RuntimeRepresentationPhase0Narrow { ndim: i32 }",
+    )
+
+
+def mutate_normalized_key_arithmetic(source: str) -> str:
+    return _append_probe(
+        source,
+        "normalize_runtime_representation_phase0",
+        """fn normalize_runtime_representation_phase0() {
+    let atoms: Vec<DimExprKey> = Vec::new();
+}""",
+    )
+
+
+def mutate_raw_element_pointer(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_raw_pointer",
+        "fn runtime_representation_phase0_raw_pointer(_: *mut f32) {}",
+    )
+
+
+def mutate_width_arithmetic(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_byte_width",
+        "fn runtime_representation_phase0_byte_width() { let byte_width = 1usize; }",
+    )
+
+
+def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
+    return (
+        MutationProbe(
+            "backend-element-spelling",
+            Path("crates/chelis-backend-metal/src/emit.rs"),
+            mutate_backend_element_spelling,
+        ),
+        MutationProbe(
+            "descriptor-field",
+            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
+            mutate_descriptor_field,
+        ),
+        MutationProbe(
+            "direct-data-access",
+            DIRECT_ACCESS_MUTATION_SOURCE,
+            mutate_direct_data_access,
+        ),
+        MutationProbe("dtype-contract", DTYPE_MUTATION_SOURCE, mutate_incomplete_dtype),
+        MutationProbe(
+            "fixed-rank-metadata",
+            Path("crates/chelis-python/src/lib.rs"),
+            mutate_fixed_rank_metadata,
+        ),
+        MutationProbe(
+            "load-store-template",
+            Path("crates/chelis-backend-c/src/host_emit.rs"),
+            mutate_load_store_template,
+        ),
+        MutationProbe(
+            "narrow-metadata",
+            Path("crates/chelis-backend-hip/src/emit.rs"),
+            mutate_narrow_metadata,
+        ),
+        MutationProbe(
+            "normalized-key-arithmetic",
+            Path("crates/chelis-ir/src/dag.rs"),
+            mutate_normalized_key_arithmetic,
+        ),
+        MutationProbe(
+            "raw-element-pointer",
+            Path("crates/chelis-runtime/src/ieee_narrow.rs"),
+            mutate_raw_element_pointer,
+        ),
+        MutationProbe(
+            "width-arithmetic",
+            Path("crates/chelis-runtime/src/format_shortest.rs"),
+            mutate_width_arithmetic,
+        ),
+    )
+
+
 @contextmanager
 def temporary_mutation(path: Path, mutate: Callable[[str], str]) -> Iterator[None]:
     original = path.read_bytes()
@@ -454,15 +621,9 @@ def temporary_mutation(path: Path, mutate: Callable[[str], str]) -> Iterator[Non
 
 
 def _assert_mutation_sources_clean() -> None:
+    paths = tuple(dict.fromkeys(str(probe.path) for probe in phase0_mutation_probes()))
     completed = subprocess.run(
-        (
-            "git",
-            "status",
-            "--porcelain",
-            "--",
-            str(DIRECT_ACCESS_MUTATION_SOURCE),
-            str(DTYPE_MUTATION_SOURCE),
-        ),
+        ("git", "status", "--porcelain", "--", *paths),
         cwd=REPO_ROOT,
         check=False,
         capture_output=True,
@@ -493,16 +654,12 @@ def _expect_unclassified_mutation(
 
 def run_phase0_mutations() -> None:
     _assert_mutation_sources_clean()
-    _expect_unclassified_mutation(
-        REPO_ROOT / DIRECT_ACCESS_MUTATION_SOURCE,
-        mutate_direct_data_access,
-        "direct-data-access",
-    )
-    _expect_unclassified_mutation(
-        REPO_ROOT / DTYPE_MUTATION_SOURCE,
-        mutate_incomplete_dtype,
-        "dtype-contract",
-    )
+    for probe in phase0_mutation_probes():
+        _expect_unclassified_mutation(
+            REPO_ROOT / probe.path,
+            probe.mutate,
+            probe.expected_kind,
+        )
 
 
 def phase0_legs() -> tuple[OracleLeg, ...]:
@@ -517,9 +674,7 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "-p",
                 "chelis-ir",
                 "--test",
-                "dim_canon_adversarial",
-                "--test",
-                "dim_canonicalization",
+                "issue_888_capacity_collision",
             ),
         ),
         OracleLeg(
@@ -594,6 +749,17 @@ def validate_design_sequencing() -> None:
     for text in required:
         if text not in source:
             raise OracleFailure(f"Phase 2/3 descriptor sequencing drifted: missing {text!r}")
+    contradictions = (
+        r"Phase 2 (?:installs|owns|creates|generates) [^.]{0,100}host descriptor",
+        r"Phase 2 [^.]{0,120}delivers C3 completely",
+        r"Phase 2 creates the shared schema",
+        r"Phase 3 requires Phase 2",
+    )
+    for pattern in contradictions:
+        if re.search(pattern, source, flags=re.IGNORECASE):
+            raise OracleFailure(
+                f"contradictory Phase 2/3 ownership matched {pattern!r}"
+            )
 
 
 def _run_leg(leg: OracleLeg) -> None:
