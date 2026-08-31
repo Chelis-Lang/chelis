@@ -29,7 +29,7 @@ DTYPE_MUTATION_SOURCE = Path("crates/chelis-vocab/src/lib.rs")
 # This is the reviewed Phase 0 foundation digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FOUNDATION_SHA256 = "88721b1ef511b7ed1638e83cb796e12236ae9b57b66ab13b7efd00f13b7eaca4"
+FOUNDATION_SHA256 = "00a801ba11c0037068ca7809d2ca6c0fc473d1c542185badbcbeba62e1241196"
 
 SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cu", ".h", ".metal", ".rs"}
 SOURCE_PREFIXES = (
@@ -38,16 +38,9 @@ SOURCE_PREFIXES = (
     "crates/chelis-vocab/src/",
     "crates/chelis-ir/src/",
     "crates/chelis-python/src/",
-    "crates/chelis-backend-c/src/",
-    "crates/chelis-backend-hip/src/",
-    "crates/chelis-backend-hip/runtime/",
-    "crates/chelis-backend-metal/src/",
 )
-BACKEND_PREFIXES = (
-    "crates/chelis-backend-c/src/",
-    "crates/chelis-backend-hip/src/",
-    "crates/chelis-backend-hip/runtime/",
-    "crates/chelis-backend-metal/src/",
+BACKEND_SOURCE_RE = re.compile(
+    r"^crates/chelis-backend-[^/]+/(?:src|runtime|include)/"
 )
 
 DECLARATION_PATTERNS = (
@@ -59,11 +52,22 @@ DECLARATION_PATTERNS = (
     re.compile(r"^\s*macro_rules!\s+([A-Za-z_][A-Za-z0-9_]*)"),
 )
 
+C_ELEMENT_TYPE_RE = (
+    r"(?:float|double|half|__half|hip_bfloat16|bfloat|bool|"
+    r"u?int(?:8|16|32|64)_t|(?:signed\s+|unsigned\s+)?"
+    r"(?:char|short|int|long(?:\s+long)?))"
+)
+RUST_ELEMENT_TYPE_RE = (
+    r"(?:f(?:16|32|64)|i(?:8|16|32|64)|u(?:8|16|32|64)|"
+    r"half::(?:f16|bf16)|Bool8)"
+)
 DIRECT_DATA_RE = re.compile(r"(?:\.data\b|->data\b)")
 RAW_POINTER_RE = re.compile(
-    r"(?:as\s+\*(?:mut|const)\s+(?:f(?:16|32|64)|i(?:8|16|32|64)|u(?:8|16|32|64)|half::(?:f16|bf16)|Bool8)\b"
-    r"|\*(?:mut|const)\s+(?:f(?:16|32|64)|i(?:8|16|32|64)|u(?:8|16|32|64)|half::(?:f16|bf16)|Bool8)\b"
-    r"|\(\s*(?:const\s+)?(?:float|double|u?int(?:8|16|32|64)_t)\s*\*\s*\))"
+    rf"(?:as\s+\*(?:mut|const)\s+{RUST_ELEMENT_TYPE_RE}\b"
+    rf"|\*(?:mut|const)\s+{RUST_ELEMENT_TYPE_RE}\b"
+    rf"|\(\s*(?:const\s+)?{C_ELEMENT_TYPE_RE}\s*\*\s*\)"
+    rf"|\b(?:const\s+)?{C_ELEMENT_TYPE_RE}\s*\*+\s*"
+    r"(?:(?:__restrict__|restrict|CHELIS_RESTRICT)\s+)?[A-Za-z_][A-Za-z0-9_]*)"
 )
 FIXED_RANK_RE = re.compile(
     r"(?:\b[A-Z][A-Z0-9_]*MAX_DIM\b|\bMAX_DIM\b|\[(?:i32|i64|int|int32_t|int64_t)\s*;\s*(?:[2-9][0-9]*|[A-Z][A-Z0-9_]*)\])"
@@ -74,7 +78,9 @@ NARROW_METADATA_RE = re.compile(
     r"|(?:rank|ndim|size|storage_size)[^;\"']*\bi32::try_from)"
 )
 WIDTH_ARITHMETIC_RE = re.compile(
-    r"(?:byte_width|dtype_size|elem(?:ent)?_size|byte_capacity|checked_mul|saturating_mul)"
+    rf"(?:byte_width|dtype_size|elem(?:ent)?_size|byte_capacity|checked_mul|saturating_mul"
+    rf"|sizeof\s*\(\s*{C_ELEMENT_TYPE_RE}\s*\)"
+    rf"|size_of\s*::\s*<\s*{RUST_ELEMENT_TYPE_RE}\s*>)"
 )
 BACKEND_SPELLING_RE = re.compile(
     r'\"[^\"\n]*(?:float|double|half|__half|hip_bfloat16|bool|u?int(?:8|16|32|64)_t)[^\"\n]*\"'
@@ -161,7 +167,7 @@ def _tracked_source_paths(root: Path) -> tuple[Path, ...]:
         if not raw_path:
             continue
         relative = raw_path.decode("utf-8")
-        if not relative.startswith(SOURCE_PREFIXES):
+        if not relative.startswith(SOURCE_PREFIXES) and not _is_backend_source(relative):
             continue
         if PurePosixPath(relative).suffix not in SOURCE_SUFFIXES:
             continue
@@ -169,6 +175,10 @@ def _tracked_source_paths(root: Path) -> tuple[Path, ...]:
             continue
         paths.append(Path(relative))
     return tuple(sorted(paths))
+
+
+def _is_backend_source(path: str) -> bool:
+    return BACKEND_SOURCE_RE.match(path) is not None
 
 
 def _owner_after_line(line: str, owner: str) -> str:
@@ -244,7 +254,7 @@ def _deletion_phase(kind: str, path: str, owner: str) -> int:
         return 2
     if kind == "descriptor-field" and owner in {"ChelisGpuTensor", "chelis_gpu_tensor"}:
         return 2
-    if path.startswith(BACKEND_PREFIXES) or kind in {
+    if _is_backend_source(path) or kind in {
         "backend-element-spelling",
         "load-store-template",
     }:
@@ -258,7 +268,7 @@ def _line_kinds(path: str, owner: str, line: str) -> tuple[str, ...]:
         return ()
 
     kinds: list[str] = []
-    is_backend = path.startswith(BACKEND_PREFIXES)
+    is_backend = _is_backend_source(path)
     is_python = path.startswith("crates/chelis-python/src/")
     is_runtime = path.startswith("crates/chelis-runtime/")
 
@@ -557,6 +567,22 @@ def mutate_width_arithmetic(source: str) -> str:
     )
 
 
+def mutate_free_standing_c_element_pointer(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_c_element_pointer",
+        "extern void runtime_representation_phase0_c_element_pointer(float *payload);",
+    )
+
+
+def mutate_c_sizeof_width_authority(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_c_sizeof",
+        "static size_t runtime_representation_phase0_c_sizeof(void) { return sizeof(float); }",
+    )
+
+
 def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
     return (
         MutationProbe(
@@ -604,6 +630,21 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
             "width-arithmetic",
             Path("crates/chelis-runtime/src/format_shortest.rs"),
             mutate_width_arithmetic,
+        ),
+        MutationProbe(
+            "descriptor-field",
+            Path("crates/chelis-backend-metal/runtime/chelis_metal_runtime.h"),
+            mutate_descriptor_field,
+        ),
+        MutationProbe(
+            "raw-element-pointer",
+            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
+            mutate_free_standing_c_element_pointer,
+        ),
+        MutationProbe(
+            "width-arithmetic",
+            Path("crates/chelis-backend-metal/runtime/chelis_metal_runtime.h"),
+            mutate_c_sizeof_width_authority,
         ),
     )
 

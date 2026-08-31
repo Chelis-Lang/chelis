@@ -44,6 +44,44 @@ class InventoryContractTests(unittest.TestCase):
         self.assertIn("fixed-rank-metadata", {row.kind for row in hip_runtime_rows})
         self.assertIn("narrow-metadata", {row.kind for row in hip_runtime_rows})
 
+    def test_inventory_covers_the_metal_runtime_support_header(self) -> None:
+        rows = oracle.inventory_rows(oracle.REPO_ROOT)
+        metal_runtime_rows = [
+            row
+            for row in rows
+            if row.path
+            == "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h"
+        ]
+        self.assertTrue(metal_runtime_rows)
+        self.assertIn("width-arithmetic", {row.kind for row in metal_runtime_rows})
+
+    def test_every_tracked_backend_source_or_runtime_directory_is_scoped(self) -> None:
+        completed = oracle.subprocess.run(
+            ("git", "ls-files", "-z"),
+            cwd=oracle.REPO_ROOT,
+            check=True,
+            capture_output=True,
+        )
+        expected = {
+            raw.decode("utf-8")
+            for raw in completed.stdout.split(b"\0")
+            if raw
+            and oracle.re.match(
+                rb"crates/chelis-backend-[^/]+/(?:src|runtime|include)/",
+                raw,
+            )
+            and oracle.PurePosixPath(raw.decode("utf-8")).suffix
+            in oracle.SOURCE_SUFFIXES
+            and not oracle.PurePosixPath(raw.decode("utf-8")).name.endswith(
+                "_tests.rs"
+            )
+        }
+        observed = {
+            path.as_posix() for path in oracle._tracked_source_paths(oracle.REPO_ROOT)
+        }
+        self.assertTrue(expected)
+        self.assertEqual(expected - observed, set())
+
     def test_inventory_identities_do_not_use_mutable_line_numbers(self) -> None:
         rows = oracle.inventory_rows(oracle.REPO_ROOT)
         self.assertTrue(rows)
@@ -105,11 +143,41 @@ class MutationContractTests(unittest.TestCase):
             row.kind for row in oracle.inventory_rows(oracle.REPO_ROOT)
         }
         probes = oracle.phase0_mutation_probes()
+        self.assertEqual({probe.expected_kind for probe in probes}, inventory_kinds)
         self.assertEqual(
-            [probe.expected_kind for probe in probes],
-            sorted(inventory_kinds),
+            len(probes),
+            len({(probe.path, probe.mutate.__name__) for probe in probes}),
         )
-        self.assertEqual(len(probes), len({probe.expected_kind for probe in probes}))
+
+    def test_c_pointer_sizeof_and_metal_descriptor_edges_have_mutations(self) -> None:
+        probes = {
+            (probe.expected_kind, probe.path.as_posix(), probe.mutate.__name__)
+            for probe in oracle.phase0_mutation_probes()
+        }
+        self.assertIn(
+            (
+                "raw-element-pointer",
+                "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
+                "mutate_free_standing_c_element_pointer",
+            ),
+            probes,
+        )
+        self.assertIn(
+            (
+                "width-arithmetic",
+                "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
+                "mutate_c_sizeof_width_authority",
+            ),
+            probes,
+        )
+        self.assertIn(
+            (
+                "descriptor-field",
+                "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
+                "mutate_descriptor_field",
+            ),
+            probes,
+        )
 
     def test_every_classifier_mutation_is_rejected_as_unclassified(self) -> None:
         baseline = oracle.load_baseline()
