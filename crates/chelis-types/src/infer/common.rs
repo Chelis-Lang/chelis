@@ -1103,7 +1103,9 @@ pub(super) fn report_orphan_defsigs(
                 .map(|module| format!("{module}.{name}"))
                 .unwrap_or_else(|| name.to_string());
             errors.push(CheckError::new(
-                CheckErrorKind::UnboundVariable,
+                CheckErrorKind::UnboundVariable {
+                    identifier: qualified.clone(),
+                },
                 format!(
                     "defsig `{qualified}` has no matching `def` in the same check unit: \
                      signatures describe Chelis definitions and do not declare runtime symbols"
@@ -1922,7 +1924,7 @@ pub(super) fn infer_top_level(
         // the permissive unify rule was implicitly tolerating.
         let body_has_unbound_diagnostic = errors
             .iter_since(body_diagnostic_checkpoint)
-            .any(|e| matches!(e.kind, CheckErrorKind::UnboundVariable));
+            .any(|e| matches!(e.kind, CheckErrorKind::UnboundVariable { .. }));
 
         // Enforce defsig: body must match declared signature.
         //

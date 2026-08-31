@@ -517,6 +517,23 @@ fn collect_tvars(ty: &Type, vars: &mut Vec<TypeVar>) {
     }
 }
 
+#[cfg(test)]
+mod module_scope_tests {
+    use super::*;
+
+    #[test]
+    fn exact_lookup_does_not_promote_a_unique_terminal_match() {
+        let mut env = Env::new();
+        env.bind(
+            "pkg__demo__Provider__borrowed".to_string(),
+            Scheme::mono(Type::Prim(Prim::Int64)),
+        );
+
+        assert!(env.lookup("borrowed").is_none());
+        assert!(env.lookup_terminal_unique("borrowed").is_some());
+    }
+}
+
 /// Collect all free dimension variables in a type.
 pub fn free_dvars(ty: &Type) -> Vec<DimVar> {
     let mut vars = Vec::new();

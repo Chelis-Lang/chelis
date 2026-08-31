@@ -2486,6 +2486,233 @@ pub fn rewrite_entry_decls_with_reef_graph(
     )
 }
 
+/// One selected callable root in an independently scoped entry module.
+///
+/// The source name is resolved by that module's ordinary Reef resolver. The
+/// linker inserts a collision-free synthetic call binding and returns its
+/// exact internal name in [`RewrittenEntryBatch`].
+#[derive(Debug, Clone)]
+pub struct SelectedEntryRoot {
+    pub name: String,
+    pub span: chelis_deep::Span,
+}
+
+/// A source entry that must retain its own module scope while sharing one
+/// prepared package graph and evaluator with other entries.
+#[derive(Debug, Clone)]
+pub struct IsolatedEntryModule {
+    /// Stable namespace key supplied by the caller's manifest. Paths and
+    /// authored module names are deliberately not identity inputs.
+    pub manifest_index: usize,
+    pub declarations: Vec<Decl>,
+    pub selected_roots: Vec<SelectedEntryRoot>,
+}
+
+/// Opaque result of independently rewriting a set of entry modules.
+///
+/// Private fields prevent callers from manufacturing a purportedly rewritten
+/// batch from raw declarations. Consumers may inspect the rewritten decls and
+/// resolve selected roots, but construction always goes through
+/// [`rewrite_isolated_entry_modules_with_reef_graph`].
+#[derive(Debug, Clone)]
+pub struct RewrittenEntryBatch {
+    declarations: Vec<Decl>,
+    exact_roots: BTreeMap<(usize, String), String>,
+}
+
+impl RewrittenEntryBatch {
+    pub fn declarations(&self) -> &[Decl] {
+        &self.declarations
+    }
+
+    pub fn exact_root(&self, manifest_index: usize, source_name: &str) -> Option<&str> {
+        self.exact_roots
+            .get(&(manifest_index, source_name.to_string()))
+            .map(String::as_str)
+    }
+}
+
+fn isolated_entry_module_name(graph: &PreparedReefGraph, manifest_index: usize) -> String {
+    let reserved = format!("__ChelisTestBatch{manifest_index}");
+    if graph.eval_module_prefix.is_empty() {
+        reserved
+    } else {
+        format!("{}.{reserved}", graph.eval_module_prefix)
+    }
+}
+
+fn isolated_root_binding_name(occupied: &BTreeSet<String>, ordinal: usize) -> String {
+    let base = format!("__chelis_batch_root_{ordinal}");
+    if !occupied.contains(&base) {
+        return base;
+    }
+    for suffix in 1usize.. {
+        let candidate = format!("{base}_{suffix}");
+        if !occupied.contains(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("the finite source symbol set always leaves a synthetic root name")
+}
+
+/// Rewrite each entry through the ordinary module resolver before combining
+/// their declarations. Every resolver sees only its entry's local symbols,
+/// declared imports, and the prepared package graph; sibling entry symbols
+/// are never published into its scope.
+pub fn rewrite_isolated_entry_modules_with_reef_graph(
+    graph: &PreparedReefGraph,
+    entries: &[IsolatedEntryModule],
+) -> Result<RewrittenEntryBatch, String> {
+    let mut seen_indices = BTreeSet::new();
+    let mut declarations = Vec::new();
+    let mut exact_roots = BTreeMap::new();
+
+    for entry in entries {
+        if !seen_indices.insert(entry.manifest_index) {
+            return Err(format!(
+                "duplicate isolated entry manifest index {}",
+                entry.manifest_index
+            ));
+        }
+
+        let module_name = isolated_entry_module_name(graph, entry.manifest_index);
+        let module_key = (graph.graph.root_package.clone(), module_name.clone());
+        if graph.internal_maps.contains_key(&module_key) {
+            return Err(format!(
+                "reserved isolated entry module `{module_name}` collides with the prepared graph"
+            ));
+        }
+        for declaration in &entry.declarations {
+            if let Some(name) = entry_decl_binding_name(declaration)
+                && chelis_types::is_linker_format_name(name)
+            {
+                return Err(format!(
+                    "`{name}` uses the reef package-linker's reserved internal-name format \
+                     (`Pkg__`/`pkg__`...), which only the linker may produce; rename the declaration"
+                ));
+            }
+        }
+
+        let definitions = entry
+            .declarations
+            .iter()
+            .filter_map(|decl| match decl {
+                Decl::FunDef { name, .. } | Decl::LetDef { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let mut selected_names = BTreeSet::new();
+        let mut occupied = collect_symbol_kinds(&entry.declarations)
+            .into_keys()
+            .collect::<BTreeSet<_>>();
+        let mut source_decls = entry.declarations.clone();
+        let mut synthetic_roots = Vec::new();
+
+        for (ordinal, root) in entry.selected_roots.iter().enumerate() {
+            if !selected_names.insert(root.name.clone()) {
+                return Err(format!(
+                    "isolated entry {} selects root `{}` more than once",
+                    entry.manifest_index, root.name
+                ));
+            }
+            if !definitions.contains(&root.name) {
+                return Err(format!(
+                    "isolated entry {} selects missing root `{}`",
+                    entry.manifest_index, root.name
+                ));
+            }
+
+            let synthetic = isolated_root_binding_name(&occupied, ordinal);
+            occupied.insert(synthetic.clone());
+            let call = Expr::Apply(
+                Box::new(Expr::Var(root.name.clone(), root.span)),
+                Vec::new(),
+                root.span,
+            );
+            source_decls.push(Decl::LetDef {
+                name: synthetic.clone(),
+                ty: None,
+                value: call,
+                span: root.span,
+            });
+            synthetic_roots.push((root.name.clone(), synthetic));
+        }
+
+        validate_source_signature_pairs(&source_decls, &module_name)?;
+        let symbols = collect_symbol_kinds(&source_decls);
+        let local_map = symbols
+            .keys()
+            .map(|name| {
+                (
+                    name.clone(),
+                    internal_name(&graph.graph.root_package, &module_name, name),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut internal_maps = graph.internal_maps.clone();
+        internal_maps.insert(module_key, local_map.clone());
+        let module = ModuleSource {
+            package_name: graph.graph.root_package.clone(),
+            module_name,
+            decls: source_decls,
+            file_rel: PathBuf::from(format!("__test_batch_{}.ch", entry.manifest_index)),
+            source_root: "tests".to_string(),
+            exports: BTreeSet::new(),
+            symbols,
+        };
+        let rewritten =
+            rewrite_module_decls(&module, &graph.graph, &internal_maps, &graph.dep_shells)?;
+
+        for (source_name, synthetic) in synthetic_roots {
+            let exact = local_map.get(&synthetic).ok_or_else(|| {
+                format!(
+                    "isolated entry {} lost synthetic root `{synthetic}`",
+                    entry.manifest_index
+                )
+            })?;
+            exact_roots.insert((entry.manifest_index, source_name), exact.clone());
+        }
+        declarations.extend(rewritten);
+    }
+
+    Ok(RewrittenEntryBatch {
+        declarations,
+        exact_roots,
+    })
+}
+
+fn assemble_rewritten_entry_program(
+    graph: &PreparedReefGraph,
+    rewritten_entry_decls: &[Decl],
+) -> PreparedProgram {
+    let mut decls = graph.linked_library_decls.clone();
+    decls.extend(rewritten_entry_decls.iter().cloned());
+
+    let mut non_stdlib_decls = graph.linked_non_stdlib_library_decls.clone();
+    non_stdlib_decls.extend(rewritten_entry_decls.iter().cloned());
+
+    PreparedProgram {
+        decls,
+        entry_decls: rewritten_entry_decls.to_vec(),
+        package_root: graph.package_root.clone(),
+        stdlib_decls: graph.linked_stdlib_decls.clone(),
+        non_stdlib_decls,
+        dependency_decls: graph.linked_dependency_decls.clone(),
+    }
+}
+
+/// Append an already isolated and rewritten batch to the prepared library
+/// without routing it through the eval-entry rewriter a second time.
+pub fn compile_rewritten_entry_batch_with_reef_graph(
+    graph: &PreparedReefGraph,
+    batch: &RewrittenEntryBatch,
+) -> Result<PreparedProgram, String> {
+    Ok(assemble_rewritten_entry_program(
+        graph,
+        batch.declarations(),
+    ))
+}
+
 /// Compile an in-memory entry decl list against a previously prepared reef
 /// graph. This is the cheap per-file work: only the entry module is rewritten
 /// and appended to the cached library decls.
@@ -2494,24 +2721,10 @@ pub fn compile_with_reef_graph(
     entry_decls: &[Decl],
 ) -> Result<PreparedProgram, String> {
     let rewritten_entry_decls = rewrite_entry_decls_with_reef_graph(graph, entry_decls)?;
-
-    let mut decls = graph.linked_library_decls.clone();
-    decls.extend(rewritten_entry_decls.iter().cloned());
-
-    // The eval entry decls are not chelis-std; they join the non-stdlib
-    // partition. `stdlib_decls` is the graph's already-partitioned
-    // chelis-std slice.
-    let mut non_stdlib_decls = graph.linked_non_stdlib_library_decls.clone();
-    non_stdlib_decls.extend(rewritten_entry_decls.iter().cloned());
-
-    Ok(PreparedProgram {
-        decls,
-        entry_decls: rewritten_entry_decls,
-        package_root: graph.package_root.clone(),
-        stdlib_decls: graph.linked_stdlib_decls.clone(),
-        non_stdlib_decls,
-        dependency_decls: graph.linked_dependency_decls.clone(),
-    })
+    Ok(assemble_rewritten_entry_program(
+        graph,
+        &rewritten_entry_decls,
+    ))
 }
 
 /// Resolve a `PackageGraph` for eval: fast-path the lockfile when present,
@@ -10965,6 +11178,163 @@ module_prefix = "OrphanSig"
             chelis_surf::parser::parse_str("sig present: int32\ndef present() -> int32 = 1")
                 .expect("parse pair");
         compile_with_reef_graph(&graph, &paired).expect("paired entry signature must link");
+    }
+
+    fn selected_entry_root(declarations: &[Decl], name: &str) -> SelectedEntryRoot {
+        let span = declarations
+            .iter()
+            .find_map(|decl| match decl {
+                Decl::FunDef {
+                    name: candidate,
+                    span,
+                    ..
+                } if candidate == name => Some(*span),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing selected function `{name}`"));
+        SelectedEntryRoot {
+            name: name.to_string(),
+            span,
+        }
+    }
+
+    #[test]
+    fn isolated_entries_do_not_publish_symbols_and_roots_avoid_source_collisions() {
+        let (_dir, root) = shared_graph_fixture();
+        let graph = prepare_reef_graph(&root).expect("prepare graph");
+        let first = chelis_surf::parser::parse_str("def test_first() -> bool = sibling_value()\n")
+            .expect("parse first entry");
+        let second = chelis_surf::parser::parse_str(
+            "def sibling_value() -> bool = true\n\
+             def __chelis_batch_root_0() -> bool = true\n\
+             def test_second() -> bool = sibling_value()\n",
+        )
+        .expect("parse second entry");
+        let entries = vec![
+            IsolatedEntryModule {
+                manifest_index: 7,
+                declarations: first.clone(),
+                selected_roots: vec![selected_entry_root(&first, "test_first")],
+            },
+            IsolatedEntryModule {
+                manifest_index: 9,
+                declarations: second.clone(),
+                selected_roots: vec![selected_entry_root(&second, "test_second")],
+            },
+        ];
+
+        let batch = rewrite_isolated_entry_modules_with_reef_graph(&graph, &entries)
+            .expect("rewrite isolated entries");
+        assert_eq!(
+            batch.exact_root(7, "test_first"),
+            Some(
+                internal_name("myapp", "Myapp.__ChelisTestBatch7", "__chelis_batch_root_0")
+                    .as_str()
+            )
+        );
+        assert_eq!(
+            batch.exact_root(9, "test_second"),
+            Some(
+                internal_name(
+                    "myapp",
+                    "Myapp.__ChelisTestBatch9",
+                    "__chelis_batch_root_0_1"
+                )
+                .as_str()
+            ),
+            "an authored synthetic-prefix name must not collide with the inserted root"
+        );
+
+        let prepared = compile_rewritten_entry_batch_with_reef_graph(&graph, &batch)
+            .expect("append rewritten batch");
+        let deep = expanded_desugared_program(&prepared.decls).expect("desugar batch");
+        let error = checked_program_with_effects(&deep)
+            .expect_err("the first entry cannot borrow the second entry's declaration");
+        assert!(
+            error.contains("unbound variable: sibling_value"),
+            "unexpected isolated-entry rejection: {error}"
+        );
+    }
+
+    #[test]
+    fn isolated_entry_manifest_and_root_identity_fail_closed() {
+        let (_dir, root) = shared_graph_fixture();
+        let graph = prepare_reef_graph(&root).expect("prepare graph");
+        let declarations =
+            chelis_surf::parser::parse_str("def test_one() -> bool = true\n").expect("parse entry");
+        let entry = IsolatedEntryModule {
+            manifest_index: 3,
+            declarations: declarations.clone(),
+            selected_roots: vec![selected_entry_root(&declarations, "test_one")],
+        };
+        let duplicate_error =
+            rewrite_isolated_entry_modules_with_reef_graph(&graph, &[entry.clone(), entry.clone()])
+                .expect_err("duplicate manifest indices must be rejected");
+        assert!(duplicate_error.contains("duplicate isolated entry manifest index 3"));
+
+        let missing = IsolatedEntryModule {
+            manifest_index: 4,
+            declarations,
+            selected_roots: vec![SelectedEntryRoot {
+                name: "missing".to_string(),
+                span: chelis_deep::Span::new(0, 0),
+            }],
+        };
+        let missing_error = rewrite_isolated_entry_modules_with_reef_graph(&graph, &[missing])
+            .expect_err("missing selected roots must be rejected");
+        assert!(missing_error.contains("selects missing root `missing`"));
+
+        let reserved_declarations =
+            chelis_surf::parser::parse_str("def pkg__forged__Module__test_one() -> bool = true\n")
+                .expect("parse reserved-name entry");
+        let reserved = IsolatedEntryModule {
+            manifest_index: 5,
+            declarations: reserved_declarations.clone(),
+            selected_roots: vec![selected_entry_root(
+                &reserved_declarations,
+                "pkg__forged__Module__test_one",
+            )],
+        };
+        let reserved_error = rewrite_isolated_entry_modules_with_reef_graph(&graph, &[reserved])
+            .expect_err("authored reserved linker names must stay rejected in batch mode");
+        assert!(reserved_error.contains("only the linker may produce"));
+    }
+
+    #[test]
+    fn isolated_entry_local_map_covers_every_declaration_namespace() {
+        let (_dir, root) = shared_graph_fixture();
+        let graph = prepare_reef_graph(&root).expect("prepare graph");
+        let declarations = chelis_surf::parser::parse_str(
+            "dim n\n\
+             sig helper: int32 -> int32\n\
+             def helper(x: int32) -> int32 = x\n\
+             type Row = tensor[n, int32]\n\
+             type Boxed = | Wrap(Row)\n\
+             macro identity(x) = x\n\
+             @property stable forall(x: int32): helper(x) == x\n\
+             def test_all() -> bool = true\n",
+        )
+        .expect("parse every-namespace entry");
+        let entry = IsolatedEntryModule {
+            manifest_index: 11,
+            declarations: declarations.clone(),
+            selected_roots: vec![selected_entry_root(&declarations, "test_all")],
+        };
+
+        let batch = rewrite_isolated_entry_modules_with_reef_graph(&graph, &[entry])
+            .expect("rewrite every declaration namespace");
+        let names = collect_symbol_kinds(batch.declarations())
+            .into_keys()
+            .collect::<BTreeSet<_>>();
+        for source_name in [
+            "n", "helper", "Row", "Boxed", "Wrap", "identity", "stable", "test_all",
+        ] {
+            let exact = internal_name("myapp", "Myapp.__ChelisTestBatch11", source_name);
+            assert!(
+                names.contains(&exact),
+                "isolated local map omitted `{source_name}`: {names:?}"
+            );
+        }
     }
 
     // ---- chelis#157: module-scoped constructor resolution ----

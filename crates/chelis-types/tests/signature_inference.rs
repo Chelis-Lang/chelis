@@ -223,7 +223,7 @@ def caller(a, b: tensor[4, f32]) = missing_helper(a, b)
     assert_eq!(result.errors.len(), 1, "unknown helper owns one diagnostic");
     assert!(matches!(
         result.errors[0].kind,
-        chelis_types::errors::CheckErrorKind::UnboundVariable
+        chelis_types::errors::CheckErrorKind::UnboundVariable { .. }
     ));
 }
 

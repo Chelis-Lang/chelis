@@ -249,7 +249,9 @@ pub(super) fn infer_record(
         return report(
             errors,
             CheckError::new(
-                CheckErrorKind::UnknownConstructor,
+                CheckErrorKind::UnknownConstructor {
+                    identifier: head.to_string(),
+                },
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
                     format!("unknown constructor: {head}"),

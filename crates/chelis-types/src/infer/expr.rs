@@ -940,7 +940,9 @@ pub(super) fn infer_var(
         // is the mis-resolution path the issue reports.
         if constructor_out_of_scope(name, env) {
             let mut err = CheckError::new(
-                CheckErrorKind::UnknownConstructor,
+                CheckErrorKind::UnknownConstructor {
+                    identifier: name.to_string(),
+                },
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
                     format!("unknown constructor: {name}"),
@@ -958,10 +960,7 @@ pub(super) fn infer_var(
             }
             return report(errors, err);
         }
-        if let Some(scheme) = env
-            .lookup(name)
-            .or_else(|| env.lookup_terminal_unique(name))
-        {
+        if let Some(scheme) = env.lookup(name) {
             let scheme = scheme.clone();
             // spec/04 §3.1.1: inside a recursive binding group, record the
             // instantiation minted for an in-group reference so the group
@@ -987,7 +986,9 @@ pub(super) fn infer_var(
             resolved
         } else {
             let mut err = CheckError::new(
-                CheckErrorKind::UnboundVariable,
+                CheckErrorKind::UnboundVariable {
+                    identifier: name.to_string(),
+                },
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
                     format!("unbound variable: {name}"),

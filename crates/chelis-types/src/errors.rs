@@ -179,13 +179,15 @@ pub struct CheckError {
     pub span_id: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum CheckErrorKind {
     TypeMismatch,
     PrecisionMismatch,
     DimensionMismatch,
     ArityMismatch,
-    UnboundVariable,
+    UnboundVariable {
+        identifier: String,
+    },
     /// A constructor reference (uppercase-leading name in expression or
     /// pattern position) names an ADT variant that is not in scope: it is
     /// neither declared in the current module nor brought into scope by an
@@ -198,7 +200,9 @@ pub enum CheckErrorKind {
     /// reference to a foreign tag and deferred the failure to a runtime
     /// `non-exhaustive match`; this rejects it at `check` instead, the same
     /// way an `UnboundVariable` rejects an unknown value name.
-    UnknownConstructor,
+    UnknownConstructor {
+        identifier: String,
+    },
     NotAFunction,
     NonExhaustiveMatch,
     OccursCheck,
@@ -276,13 +280,62 @@ pub enum CheckErrorKind {
     Other,
 }
 
+impl std::fmt::Debug for CheckErrorKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.diagnostic_name())
+    }
+}
+
 impl CheckErrorKind {
+    /// Stable machine-facing spelling used by `chelis check`. This is
+    /// intentionally independent of `Debug`, because name diagnostics carry
+    /// structured data that must not leak into or invalidate the JSON kind.
+    pub fn diagnostic_name(&self) -> &'static str {
+        match self {
+            CheckErrorKind::TypeMismatch => "TypeMismatch",
+            CheckErrorKind::PrecisionMismatch => "PrecisionMismatch",
+            CheckErrorKind::DimensionMismatch => "DimensionMismatch",
+            CheckErrorKind::ArityMismatch => "ArityMismatch",
+            CheckErrorKind::UnboundVariable { .. } => "UnboundVariable",
+            CheckErrorKind::UnknownConstructor { .. } => "UnknownConstructor",
+            CheckErrorKind::NotAFunction => "NotAFunction",
+            CheckErrorKind::NonExhaustiveMatch => "NonExhaustiveMatch",
+            CheckErrorKind::OccursCheck => "OccursCheck",
+            CheckErrorKind::CastNonTensor => "CastNonTensor",
+            CheckErrorKind::TupleIndexOutOfBounds => "TupleIndexOutOfBounds",
+            CheckErrorKind::UseAfterConsume => "UseAfterConsume",
+            CheckErrorKind::UnconsumedLinear => "UnconsumedLinear",
+            CheckErrorKind::InvalidBorrow => "InvalidBorrow",
+            CheckErrorKind::CycleDetected => "CycleDetected",
+            CheckErrorKind::UnsupportedTensorPrecision => "UnsupportedTensorPrecision",
+            CheckErrorKind::DuplicateDefinition => "DuplicateDefinition",
+            CheckErrorKind::DuplicateModule => "DuplicateModule",
+            CheckErrorKind::OpaqueTypeViolation => "OpaqueTypeViolation",
+            CheckErrorKind::ReservedLinkerName => "ReservedLinkerName",
+            CheckErrorKind::BuiltinShadowing => "BuiltinShadowing",
+            CheckErrorKind::UnknownForm => "UnknownForm",
+            CheckErrorKind::MalformedForm => "MalformedForm",
+            CheckErrorKind::Other => "Other",
+        }
+    }
+
+    /// The exact unresolved source identifier carried by a name-resolution
+    /// diagnostic. Fitness accounting consumes this structured value instead
+    /// of attempting to recover it from the rendered diagnostic message.
+    pub fn unresolved_identifier(&self) -> Option<&str> {
+        match self {
+            CheckErrorKind::UnboundVariable { identifier }
+            | CheckErrorKind::UnknownConstructor { identifier } => Some(identifier),
+            _ => None,
+        }
+    }
+
     pub fn default_severity(&self) -> f64 {
         match self {
             CheckErrorKind::PrecisionMismatch | CheckErrorKind::DimensionMismatch => 0.8,
             CheckErrorKind::ArityMismatch => 0.7,
-            CheckErrorKind::UnboundVariable => 0.6,
-            CheckErrorKind::UnknownConstructor => 0.6,
+            CheckErrorKind::UnboundVariable { .. } => 0.6,
+            CheckErrorKind::UnknownConstructor { .. } => 0.6,
             CheckErrorKind::NotAFunction => 0.5,
             CheckErrorKind::TypeMismatch => 0.5,
             CheckErrorKind::NonExhaustiveMatch => 0.7,
@@ -372,7 +425,7 @@ impl From<TypeError> for CheckError {
         let severity = match &kind {
             CheckErrorKind::PrecisionMismatch | CheckErrorKind::DimensionMismatch => 0.8,
             CheckErrorKind::ArityMismatch => 0.7,
-            CheckErrorKind::UnboundVariable => 0.6,
+            CheckErrorKind::UnboundVariable { .. } => 0.6,
             _ => 0.5,
         };
         let mut suggestions = match &kind {

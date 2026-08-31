@@ -336,7 +336,7 @@ fn issue_1316_unknown_call_diagnostic_order_is_stable_across_drivers() {
             .expect_err("unknown calls must reject")
             .errors
             .into_iter()
-            .filter(|error| matches!(error.kind, CheckErrorKind::UnboundVariable))
+            .filter(|error| matches!(error.kind, CheckErrorKind::UnboundVariable { .. }))
             .map(|error| error.message)
             .collect::<Vec<_>>()
     };
