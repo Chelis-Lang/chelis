@@ -600,13 +600,35 @@ enforcement boundary.
 - Use plain conventional commit messages with the configured human author. Do not add
   `Claude-Session`, Codex/Claude attribution, AI co-authorship markers, or AI-session
   links to commit messages or PR bodies.
-- GitHub squash merges can concatenate every branch commit message into the final
-  commit. A closing keyword in any intermediate message can therefore close an issue
-  even when the PR was only partial work.
-- Use `Part of #N` or `Addresses #N` unless default-branch merge should close the issue.
-  Before squash merge, audit the complete branch message set and proposed squash text
-  for `close`, `fix`, or `resolve` immediately followed by an issue reference. Closing
-  keywords are intentional authority, never descriptive prose.
+
+### Issues Are Closed Manually
+
+Automatic issue closure is disabled for this repository. `Closes #N`, `Fixes #N`, and
+`Resolves #N` have no effect from a pull request body, from a branch commit message, or
+from the squashed default-branch commit. **Merging a pull request never closes an
+issue.**
+
+Close an issue as a separate, deliberate step, once the work is done and verified:
+`gh issue close N` with a comment naming the merged pull request, or the same action in
+the web UI. A pull request that finishes an issue still says so in its body; that
+sentence is a claim addressed to a reviewer, not an instruction to GitHub.
+
+Prefer `Part of #N` or `Addresses #N` when a pull request advances an issue without
+finishing it. That is the accurate phrasing either way, and it keeps intent legible if
+the repository setting is ever restored.
+
+**Why the setting is off.** GitHub parses `<keyword> #N` as a command wherever it
+appears, with no regard for the surrounding sentence. Negations, past-tense references,
+and inventories all read as directives: `does not close #1264` closed chelis#1264, `It
+does not close #1288` closed chelis#1288, and one design commit whose body listed
+`Fixes #727`, `Fixes #703`, `Fixes #709`, and `Fixes #728` under separate bullets closed
+five class trackers at once. About thirteen issues were closed this way and had to be
+reopened, nearly all of them TRACKING or META hubs, where a silent disappearance is
+hardest to notice because nobody works a hub directly. Auditing message text for
+keywords does not fix this: each spelling is the natural way to write its own kind of
+sentence, so the audit has to reject prose that is correct. Do not re-enable the setting
+without first replacing it with an explicit opt-in mechanism that reads a structured
+field rather than prose.
 
 ## Build And Gate Commands
 
