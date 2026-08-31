@@ -12089,6 +12089,28 @@ impl LowerCtx {
         let saved_callables = self.local_callables.clone();
         let saved_fn_typed_params = self.fn_typed_params.clone();
 
+        // The checker stamps the alias-expanded function type on the `fn`
+        // node while preserving the authored spelling on each parameter for
+        // source fidelity. Lowering must take its runtime tensor shapes from
+        // the checker-owned function type: a direct alias such as
+        // `type Row[n] = tensor[n, f32]` otherwise decodes from the authored
+        // `Row[2]` parameter as the rank-zero fallback even though checking
+        // already proved `tensor[2, f32]`.
+        let checked_param_types = elems
+            .get(1)
+            .and_then(|expr| match expr {
+                Expr::Map(meta, _) => meta
+                    .entries
+                    .iter()
+                    .find(|(key, _)| key == "type")
+                    .map(|(_, value)| value),
+                _ => None,
+            })
+            .and_then(stamped_parts)
+            .and_then(|(tag, _, kids)| (tag == DeepTag::TFn).then_some(kids))
+            .map(|kids| kids.split_last().map_or(&[][..], |(_, params)| params))
+            .unwrap_or_default();
+
         // Register params as Load nodes. For `t-fn`-typed params,
         // additionally track the name in `fn_typed_params` so
         // `resolve_callable_expr_inner` can surface
@@ -12098,8 +12120,9 @@ impl LowerCtx {
         // dispatch on the callable shape, not on the binding's
         // `LoweredValue`.
         if let Some((DeepTag::Params, _, params)) = stamped_parts(&elems[2]) {
-            for param in params {
-                if let Some((name, ty_expr)) = param_name_and_type_expr(param) {
+            for (index, param) in params.iter().enumerate() {
+                if let Some((name, authored_ty_expr)) = param_name_and_type_expr(param) {
+                    let ty_expr = checked_param_types.get(index).or(authored_ty_expr);
                     if Self::type_expr_is_fn(ty_expr) {
                         self.fn_typed_params.insert(name.clone());
                     }

@@ -20,9 +20,11 @@
 //!   the running binary; a mismatch is a clean miss (`Ok(None)`), never a
 //!   stale hit. A belt-and-braces inner-vs-envelope check rejects a
 //!   tampered identity as `CacheError::IdentityMismatch`.
-//! - The cache format version and magic are now 12. The current format adds
-//!   source positions to the deferred positional-expand and reshape obligations.
-//!   A stale V11-shaped file is rejected, never decoded.
+//! - The cache format version and magic are now 13. V11 added quantified
+//!   type-variable restrictions and the live substitution restriction ledger;
+//!   V12 added source positions to deferred obligations; V13 adds checker-owned
+//!   nominal parameter kinds and kinded arguments. Stale shapes are rejected,
+//!   never decoded.
 //! - `stdlib_cache_key` folds `COMPILER_VERSION` directly, so a binary
 //!   built from different compiler source does not stale-hit an older
 //!   binary's `StdLibContext`.

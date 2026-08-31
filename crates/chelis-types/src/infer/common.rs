@@ -1036,7 +1036,7 @@ fn collect_nominal_kind_evidence(
                 record(name, context, evidence);
             }
         }
-        DeepTag::DVar => {
+        DeepTag::DVar | DeepTag::DRank => {
             if let Some(name) = kids.first().and_then(symbol_name) {
                 record(name, Some(NominalParamKind::Dimension), evidence);
             }

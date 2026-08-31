@@ -1750,8 +1750,10 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
     let mut scope = HashMap::new();
     for (index, param) in children(params_list).iter().enumerate() {
         let pname = param_name(param)?;
-        let pty = param_host_type(param)
-            .or_else(|| declared_param_tys.get(index).cloned())
+        let pty = declared_param_tys
+            .get(index)
+            .cloned()
+            .or_else(|| param_host_type(param))
             .filter(|ty| !ty.is_unresolved())?;
         let tensor_ty = tensor_type_from_host_input(&pty)?;
         scope.insert(pname, tensor_ty);
@@ -3011,9 +3013,13 @@ fn lower_host_function(
     ty_expr: Option<&Expr>,
     program: &CheckedProgram,
 ) -> Result<Option<HostFunction>, crate::lower::LowerDiagnostic> {
-    let declared_fn_type_expr = ty_expr
-        .cloned()
-        .or_else(|| lookup_declared_type_expr(program, name));
+    // Host lowering consumes the checker's alias-expanded signature. The
+    // authored Deep annotation is a display/source artifact and can still
+    // contain a nominal alias whose erased dimension argument has no host ABI
+    // field. Preferring it here would reintroduce that alias as a rank-zero
+    // ADT after the checker had already proved its tensor shape.
+    let declared_fn_type_expr =
+        lookup_declared_type_expr(program, name).or_else(|| ty_expr.cloned());
     let fn_type_parts = declared_fn_type_expr
         .as_ref()
         .and_then(parse_fn_type_expr_parts);
@@ -3046,14 +3052,11 @@ fn lower_host_function(
                 let Some(pname) = param_name(param) else {
                     continue;
                 };
-                let pty = param_host_type(param)
+                let pty = param_tys
+                    .get(index)
+                    .cloned()
                     .filter(|ty| !ty.is_unresolved())
-                    .or_else(|| {
-                        param_tys
-                            .get(index)
-                            .cloned()
-                            .filter(|ty| !ty.is_unresolved())
-                    })
+                    .or_else(|| param_host_type(param).filter(|ty| !ty.is_unresolved()))
                     .unwrap_or_else(fresh_host_inference);
                 scope.insert(pname.clone(), pty.clone());
                 params.push(HostParam {
@@ -9672,6 +9675,25 @@ fn checked_authored_function_signature<'a>(
     matches.next().is_none().then_some(first)
 }
 
+/// Return the checker's canonical signature for host representation.
+///
+/// Unlike [`checked_authored_function_signature`], this deliberately uses
+/// `checked_signature`: nominal aliases are transparent after checking, and
+/// their dimension arguments may be erased from an ADT's runtime layout.
+fn checked_function_signature<'a>(program: &'a CheckedProgram, name: &str) -> Option<&'a Type> {
+    if let Some(inference) = program.signature_inference().functions.get(name) {
+        return Some(&inference.checked_signature);
+    }
+    let mut matches = program
+        .signature_inference()
+        .functions
+        .iter()
+        .filter(|(candidate, _)| terminal_name_matches(candidate, name))
+        .map(|(_, inference)| &inference.checked_signature);
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
 fn checker_type_has_stored_variable(
     ty: &Type,
     registry: &AdtRegistry,
@@ -11509,7 +11531,7 @@ fn lookup_type_expr<'a>(type_env: &'a HashMap<String, Expr>, name: &str) -> Opti
 }
 
 fn lookup_declared_type_expr(program: &CheckedProgram, name: &str) -> Option<Expr> {
-    checked_authored_function_signature(program, name)
+    checked_function_signature(program, name)
         .map(type_to_deep_expr)
         .or_else(|| lookup_type_expr(program.type_env(), name).cloned())
 }

@@ -92,7 +92,8 @@ use crate::stdlib_cache::{StdLibContext, cache_disabled, typecheck_cache_dir};
 /// ledger.
 /// V5 records canonical source positions on deferred positional-expand and
 /// reshape obligations inside `TypeEnv`.
-/// V6 adds serialized nominal parameter kinds and dimension arguments.
+/// V6 adds checker-owned nominal parameter kinds and kinded nominal arguments,
+/// including dimension-valued applications in dependency-library signatures.
 ///
 /// V2: the sub-context now stores a proof-bound `CheckedLibrary`, and decode
 /// reruns effect/linearity checks to rebind the proof (mirroring the stdlib

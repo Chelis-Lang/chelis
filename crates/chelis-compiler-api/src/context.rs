@@ -782,8 +782,9 @@ fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
 /// reshape obligations. Their serialized checker state is therefore
 /// structurally different from V11 even when a program has no cache-visible
 /// type changes.
-/// V13 records nominal parameter kinds and dimension arguments. A V12 payload
-/// has the ordered deferred-constraint state but predates this nominal shape.
+/// V13 adds checker-owned nominal parameter kinds and kinded nominal
+/// arguments, so dimension literals and variables survive a compiled-context
+/// round trip without being reinterpreted as ordinary type arguments.
 ///
 /// V9 unified two independent V8 formats. The pipeline-core
 /// extraction sealed the lowered-library proof identity into the cached

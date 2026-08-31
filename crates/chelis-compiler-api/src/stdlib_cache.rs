@@ -76,7 +76,8 @@ use crate::schema::{Diagnostic, GeneralKind};
 /// ledger.
 /// V8 records canonical source positions on deferred positional-expand and
 /// reshape obligations inside `TypeEnv`.
-/// V9 adds serialized nominal parameter kinds and dimension arguments.
+/// V9 adds checker-owned nominal parameter kinds and kinded nominal arguments,
+/// including dimension-valued applications in bundled-stdlib signatures.
 ///
 /// V5 unified two independent V4
 /// bumps: the pipeline-core `CheckedLibrary`/proof-identity products

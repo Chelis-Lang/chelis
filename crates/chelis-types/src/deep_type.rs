@@ -553,6 +553,16 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 .then(|| self.vg.fresh_tvar())
                 .ok_or_else(|| self.unbound("type", name));
         }
+        if matches!(
+            self.binder_mode,
+            BinderMode::ExplicitKinds(kinds)
+                if kinds.get(name) == Some(&NominalParamKind::Dimension)
+        ) {
+            return Err(self.type_error(format!(
+                "nominal parameter `{name}` has Dimension kind and cannot be used in a type slot in {}",
+                self.use_site.label()
+            )));
+        }
         if !self.allows_name(name) {
             return Err(self.unbound("type", name));
         }
@@ -569,6 +579,16 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 .then(|| self.vg.fresh_dvar())
                 .ok_or_else(|| self.unbound("dimension", name));
         }
+        if matches!(
+            self.binder_mode,
+            BinderMode::ExplicitKinds(kinds)
+                if kinds.get(name) == Some(&NominalParamKind::Type)
+        ) {
+            return Err(self.type_error(format!(
+                "nominal parameter `{name}` has Type kind and cannot be used in a dimension slot in {}",
+                self.use_site.label()
+            )));
+        }
         if !self.allows_name(name) {
             return Err(self.unbound("dimension", name));
         }
@@ -584,6 +604,15 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 .allows_hole()
                 .then(|| self.vg.fresh_rvar())
                 .ok_or_else(|| self.unbound("rank", name));
+        }
+        if matches!(
+            self.binder_mode,
+            BinderMode::ExplicitKinds(kinds) if kinds.contains_key(name)
+        ) {
+            return Err(self.type_error(format!(
+                "nominal parameter `{name}` cannot be used as a rank spread in {}; nominal parameters have only Type or Dimension kind",
+                self.use_site.label()
+            )));
         }
         if !self.allows_name(name) {
             return Err(self.unbound("rank", name));

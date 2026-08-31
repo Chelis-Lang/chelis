@@ -278,6 +278,52 @@ def good() -> Packet[int32, 2] = Packet { item: 7i32, payload: to_tensor([cast(1
 }
 
 #[test]
+fn conflicting_and_rank_spread_nominal_header_uses_reject() {
+    assert_check_rejects(
+        "type Bad[a] = | Bad { item: a, payload: tensor[a, f32] }\n",
+        "TypeMismatch",
+    );
+    assert_check_rejects(
+        "type Rows[r] = | Rows(tensor[..r, f32])\ndef keep(value: Rows[f32]) -> Rows[f32] = value\n",
+        "TypeMismatch",
+    );
+}
+
+#[test]
+fn chelis_test_rejects_conflicting_nominal_header_kinds() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).expect("create src");
+    fs::create_dir_all(root.join("tests")).expect("create tests");
+    write_file(
+        &root.join("reef.toml"),
+        &format!(
+            "[package]\nname = \"mixed-kind-test\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"MixedKind\"\n",
+            chelis_compiler_api::COMPILER_VERSION
+        ),
+    );
+    write_file(
+        &root.join("src/main.ch"),
+        "module MixedKind.Main\ndef noop() -> unit = test_assert(true, \"noop\")\n",
+    );
+    let path = root.join("tests/bad_test.ch");
+    write_file(
+        &path,
+        "module MixedKind.Bad\ntype Bad[a] = | Bad { item: a, payload: tensor[a, f32] }\ndef test_wrong() -> unit = test_assert(true, \"must not run\")\n",
+    );
+    Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(root)
+        .args(["test", "tests/bad_test.ch"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(
+            "cannot be used in a dimension slot",
+        ));
+}
+
+#[test]
 fn kinded_nominals_preserve_record_access_and_exhaustiveness_checks() {
     let access = "\
 type Frame[n] =
@@ -329,6 +375,51 @@ out = print(main())
         .assert()
         .success();
     let linked = common::link_generated(&out_dir, "positive.c", "run");
+    assert!(linked.success(), "generated C must link");
+    let output = StdCommand::new(out_dir.join("run"))
+        .output()
+        .expect("run C binary");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("3.0"));
+}
+
+#[test]
+fn direct_dimension_kinded_tensor_alias_evaluates_and_c_backend_runs() {
+    let source = "\
+type Row[n] = tensor[n, f32]
+def total(value: Row[2]) -> f32 = tensor_to_scalar(sum(value, cast(0, int32)))
+def main() -> f32 = total(to_tensor([cast(1.0, f32), cast(2.0, f32)]))
+out = print(main())
+";
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("direct_alias.ch");
+    let out_dir = dir.path().join("out");
+    write_file(&path, source);
+    Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("3.0"));
+    Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let linked = common::link_generated(&out_dir, "direct_alias.c", "run");
     assert!(linked.success(), "generated C must link");
     let output = StdCommand::new(out_dir.join("run"))
         .output()
