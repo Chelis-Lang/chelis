@@ -525,15 +525,20 @@ When a public surface has an implicit invariant, make it explicit and test it.
 - **Rust** where the task naturally fits a compiled workspace member.
 - **Never shell.** Do not write `.sh` scripts. If a CI step needs a one-liner, invoke
   Python instead. Shell is fragile and untestable.
-- **Shell exceptions.** Shell is permitted only for these artifacts:
-  - The published `chelisup.sh` bootstrap runs before Chelis, Cargo, or Python exists.
-  - The generated Nix `chelisup` launcher runs with only its package closure.
-  - The cargo-husky `commit-msg` hook locates a repository-managed Python interpreter.
-  Each artifact MUST use minimal POSIX `sh` and MUST pass `shellcheck` when
-  available. The bootstrap and the hook are checked with `sh -n`; the generated Nix
-  launcher is checked with `bash -n` by the `chelisupLauncherLint` flake check, so a
-  bash-ism there passes CI while still violating the POSIX-`sh` requirement above.
-  All other scripts remain Python.
+- **The exception list has one entry, and `spec/01-nomenclature.md` §2.9 controls it:**
+  `crates/chelisup/bootstrap/chelisup.sh`, the `curl ... | sh` one-liner that runs on a
+  bare machine before Chelis, Cargo, or Python exists. It is the only committed `.sh`
+  file in the repository and the only entry the `no-shell-scripts` lint exempts
+  (`style_gate.rs::exceptions()`). Adding a second entry is a numbered-spec change, not
+  a judgment call.
+- **Two other sanctioned shell artifacts exist and never reach that list**, because the
+  lint cannot see either: the Nix `chelisup` launcher is generated at build time rather
+  than committed, and `.cargo-husky/hooks/commit-msg` has no file extension, so
+  `chelis_lint`'s `Surface::classify` - which keys on the extension - never classifies
+  it. Both must still be minimal POSIX `sh` and `shellcheck`-clean. The bootstrap and
+  the hook are checked with `sh -n`; the generated launcher is checked with `bash -n` by
+  the `chelisupLauncherLint` flake check, so a bash-ism there passes CI while still
+  violating the POSIX-`sh` requirement. All other scripts remain Python.
 - Existing `scripts/` directory uses Python; follow that convention.
 - **Use a uv-managed Python**, not the system Python, for every script and every
   ad-hoc invocation. [Build Toolchain](#build-toolchain) owns provisioning, the
