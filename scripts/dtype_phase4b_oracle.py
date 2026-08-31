@@ -47,13 +47,13 @@ CONTRACT_FILES = (
 )
 FROZEN_FILE_DIGESTS = {
     "spec/02-surf-syntax.md": (
-        "15e690f490c57d1a5a9629f87901900accb07ae14f7ec83d22195eea1d26904c"
+        "826a5eff13de44b5fc208bac832dc4b98647f58c1670d81d4a38863ae5f4d3e3"
     ),
     "spec/03-deep-syntax.md": (
         "5e21649cf61087df1119040a971a60b5b499d40321d8647ce719e91b8571120a"
     ),
     "spec/04-type-system.md": (
-        "1734100d310353ca396d8d70ba507f50c367208fb701517cdd1051f687f4766b"
+        "31b73a1cb6788769e98f021a34957ba22a7607da7b93ccba9780252da7d23dd3"
     ),
     "spec/05-risc-primitives.md": (
         "10d64930ae6d9b3316ac9b0f35892052b2e0b1475c50097dd63ca5c0ba61ef6a"
@@ -68,7 +68,7 @@ FROZEN_FILE_DIGESTS = {
         "a0ec07d22a5c26e2b81ffd9354dd0b055822a02689ccaed692592ec235ef6f09"
     ),
     "spec/design/dtype_semantics.md": (
-        "aaabb21f82b86d8908e3112c679a96090c524b5e44383e215da18aecd3516ada"
+        "fbd3f18757b8eacbf6e5d9551d25bdb5b195c71f91c2d7b3adcc6aa7ea3513fc"
     ),
     "spec/design/loud_unsupported.md": (
         "dec76721503b380278124b12448112d3e4bf754f8320f949642d32f7d30d5414"
