@@ -1508,6 +1508,7 @@ tensor[a, b, f32]  (polymorphic)  ⟹  (t-tensor {} (d-var {} a) (d-var {} b) (t
 A -> B -> C                       ⟹  (t-fn {} A' B' C')  -- flat, last is return
 (A -> B) -> C                     ⟹  (t-fn {} (t-fn {} A' B') C')  -- arg is a function
 Option[f32]                       ⟹  (t-adt {} Option (t-prim {} f32))
+Frame[2]                          ⟹  (t-adt {} Frame (d-lit {} 2))
 (f32, f32)                        ⟹  (t-tuple {} (t-prim {} f32) (t-prim {} f32))
 unit                              ⟹  (t-unit {})
 ```

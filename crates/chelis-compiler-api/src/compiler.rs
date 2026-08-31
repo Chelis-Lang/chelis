@@ -5547,6 +5547,10 @@ fn wire_type_expr(ty: &TypeExpr) -> WireSurfTypeExpr {
             name: name.clone(),
             span: span(*s),
         },
+        TypeExpr::DimensionLiteral(value, s) => WireSurfTypeExpr::DimensionLiteral {
+            digits: value.to_string(),
+            span: span(*s),
+        },
         TypeExpr::Tensor(dims, precision, s) => WireSurfTypeExpr::Tensor {
             dims: dims.iter().map(wire_type_expr).collect(),
             precision: precision.clone(),

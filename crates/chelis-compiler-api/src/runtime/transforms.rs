@@ -6,7 +6,7 @@ use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_ir::dag::{DimInfo, TensorType};
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::lower::try_lower_subexpr_program_with_random_state_progress;
-use chelis_types::types::{Prim, TensorPrec, Type, TypeVar};
+use chelis_types::types::{NominalArg, Prim, TensorPrec, Type, TypeVar};
 
 use super::host_ops::terminal_name_matches;
 use super::named_axis::*;
@@ -609,10 +609,13 @@ fn registered_type_has_float(
         }
         visiting.push(key.clone());
         let substitutions = alias
-            .param_vars
+            .param_args
             .iter()
-            .copied()
             .zip(argument_flags)
+            .filter_map(|(argument, flag)| match argument {
+                NominalArg::Type(Type::Var(var)) => Some((*var, flag)),
+                _ => None,
+            })
             .collect::<HashMap<_, _>>();
         let result = stored_type_has_float(&alias.body, registry, &substitutions, visiting);
         debug_assert_eq!(visiting.pop().as_ref(), Some(&key));
@@ -627,10 +630,13 @@ fn registered_type_has_float(
     }
     visiting.push(key.clone());
     let substitutions = definition
-        .param_vars
+        .param_args
         .iter()
-        .copied()
         .zip(argument_flags)
+        .filter_map(|(argument, flag)| match argument {
+            NominalArg::Type(Type::Var(var)) => Some((*var, flag)),
+            _ => None,
+        })
         .collect::<HashMap<_, _>>();
     let result = definition.variants.iter().any(|variant| {
         variant
@@ -663,6 +669,20 @@ fn stored_type_has_float(
             arguments
                 .iter()
                 .map(|argument| stored_type_has_float(argument, registry, substitutions, visiting))
+                .collect(),
+            registry,
+            visiting,
+        ),
+        Type::KindedAdt(name, arguments) => registered_type_has_float(
+            name,
+            arguments
+                .iter()
+                .map(|argument| match argument {
+                    NominalArg::Type(ty) => {
+                        stored_type_has_float(ty, registry, substitutions, visiting)
+                    }
+                    NominalArg::Dimension(_) => false,
+                })
                 .collect(),
             registry,
             visiting,

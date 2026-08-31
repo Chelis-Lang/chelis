@@ -1500,6 +1500,7 @@ fn format_type_params(params: &[String]) -> String {
 fn format_type_expr(ty: &TypeExpr) -> String {
     match ty {
         TypeExpr::Named(name, _) => name.clone(),
+        TypeExpr::DimensionLiteral(value, _) => value.to_string(),
         TypeExpr::Tensor(items, precision, _) => {
             let inner = items
                 .iter()

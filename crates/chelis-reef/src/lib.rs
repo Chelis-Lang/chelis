@@ -1375,6 +1375,7 @@ fn collect_type_references(ty: &TypeExpr, out: &mut BTreeSet<String>) {
         TypeExpr::Named(name, _) | TypeExpr::RankSpread(name, _) => {
             out.insert(name.clone());
         }
+        TypeExpr::DimensionLiteral(_, _) => {}
         TypeExpr::Tensor(dims, _, _) | TypeExpr::Tuple(dims, _) => {
             for dim in dims {
                 collect_type_references(dim, out);
@@ -2214,7 +2215,7 @@ const PREPARED_GRAPH_CACHE_MAGIC: &[u8] = b"CHELIS_REEF_GRAPH_V1\n";
 // for multi-dependency graphs, changing the serialized decl order. Bumped so a
 // warm project does not load a stale old-order graph (which would make #1182
 // inert and make the same binary emit different C depending on cache state).
-const PREPARED_GRAPH_CACHE_VERSION: u32 = 2;
+const PREPARED_GRAPH_CACHE_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct PreparedGraphCacheEnvelope {
@@ -8088,7 +8089,7 @@ struct SchemeVariableRenamer {
 
 impl SchemeVariableRenamer {
     fn rewrite_type(&mut self, ty: &chelis_types::types::Type) -> chelis_types::types::Type {
-        use chelis_types::types::{TensorPrec, Type};
+        use chelis_types::types::{NominalArg, TensorPrec, Type};
 
         match ty {
             Type::Prim(prim) => Type::Prim(*prim),
@@ -8115,6 +8116,18 @@ impl SchemeVariableRenamer {
                 arguments
                     .iter()
                     .map(|argument| self.rewrite_type(argument))
+                    .collect(),
+            ),
+            Type::KindedAdt(name, arguments) => Type::KindedAdt(
+                name.clone(),
+                arguments
+                    .iter()
+                    .map(|argument| match argument {
+                        NominalArg::Type(ty) => NominalArg::Type(self.rewrite_type(ty)),
+                        NominalArg::Dimension(dim) => {
+                            NominalArg::Dimension(self.rewrite_dimension(dim))
+                        }
+                    })
                     .collect(),
             ),
             Type::Var(variable) => Type::Var(self.type_variable(*variable)),
@@ -9078,6 +9091,7 @@ fn rewrite_type(ty: &TypeExpr, resolver: &NameResolver) -> TypeExpr {
         // A rank variable `..r` is local to its def/sig and never a
         // module-qualified name, so it passes through name resolution as-is.
         TypeExpr::RankSpread(name, span) => TypeExpr::RankSpread(name.clone(), *span),
+        TypeExpr::DimensionLiteral(value, span) => TypeExpr::DimensionLiteral(*value, *span),
         TypeExpr::Tensor(parts, precision, span) => TypeExpr::Tensor(
             parts
                 .iter()

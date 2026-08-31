@@ -1889,6 +1889,7 @@ fn validate_surface_type(ty: &TypeExpr) -> Result<(), ResugarError> {
             let valid = name != "_" && (is_lower_identifier(name) || is_qualified_type_name(name));
             require_name(name, "type", |_| valid)?;
         }
+        TypeExpr::DimensionLiteral(_, _) => {}
         TypeExpr::Tensor(dimensions, precision, _) => {
             for dimension in dimensions {
                 validate_surface_dimension(dimension)?;
@@ -1905,7 +1906,10 @@ fn validate_surface_type(ty: &TypeExpr) -> Result<(), ResugarError> {
         TypeExpr::App(name, arguments, _) => {
             require_name(name, "type-constructor", is_qualified_type_name)?;
             for argument in arguments {
-                validate_surface_type(argument)?;
+                match argument {
+                    TypeExpr::DimensionLiteral(_, _) => {}
+                    _ => validate_surface_type(argument)?,
+                }
             }
         }
         TypeExpr::Tuple(types, _) => {
@@ -1924,6 +1928,7 @@ fn validate_surface_type(ty: &TypeExpr) -> Result<(), ResugarError> {
 fn validate_surface_dimension(dimension: &TypeExpr) -> Result<(), ResugarError> {
     match dimension {
         TypeExpr::Named(name, _) if name == "*" => Ok(()),
+        TypeExpr::DimensionLiteral(_, _) => Ok(()),
         TypeExpr::Named(name, _)
             if !name.is_empty()
                 && name.bytes().all(|byte| byte.is_ascii_digit())
@@ -3531,7 +3536,17 @@ fn resugar_type(expr: &DeepExpr) -> Result<TypeExpr, ResugarError> {
             let name = name_child(&node, 0)?.to_string();
             let arguments = node.children[1..]
                 .iter()
-                .map(resugar_type)
+                .map(|argument| {
+                    let tag = node_ref(argument)?.tag;
+                    if matches!(
+                        tag,
+                        DeepTag::DName | DeepTag::DVar | DeepTag::DLit | DeepTag::DRank
+                    ) {
+                        resugar_dimension(argument)
+                    } else {
+                        resugar_type(argument)
+                    }
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             if arguments.is_empty() {
                 Ok(TypeExpr::Named(name, node.span))
@@ -3600,9 +3615,10 @@ fn resugar_dimension(expr: &DeepExpr) -> Result<TypeExpr, ResugarError> {
             node.span,
         )),
         DeepTag::DLit => match &node.children[0] {
-            DeepExpr::Atom(Atom::Int(value), _) => {
-                Ok(TypeExpr::Named(value.to_string(), node.span))
-            }
+            DeepExpr::Atom(Atom::Int(value), _) => Ok(TypeExpr::DimensionLiteral(
+                crate::ast::DimensionLiteral::new(*value),
+                node.span,
+            )),
             _ => Err(ResugarError::InvalidChild {
                 tag: node.tag.as_str(),
                 index: 0,

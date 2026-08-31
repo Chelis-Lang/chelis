@@ -358,6 +358,7 @@ fn with_structural_span(expr: deep::Expr, span: Span) -> deep::Expr {
 fn type_expr_span(ty: &TypeExpr) -> Span {
     match ty {
         TypeExpr::Named(_, span)
+        | TypeExpr::DimensionLiteral(_, span)
         | TypeExpr::Tensor(_, _, span)
         | TypeExpr::Arrow(_, _, span)
         | TypeExpr::Ref(_, span)
@@ -813,6 +814,7 @@ fn pattern_mentions_name(pattern: &Pattern, name: &str) -> bool {
 fn type_mentions_name(ty: &TypeExpr, name: &str) -> bool {
     match ty {
         TypeExpr::Named(found, _) => found == name,
+        TypeExpr::DimensionLiteral(_, _) => false,
         TypeExpr::RankSpread(found, _) => found == name,
         TypeExpr::Tensor(items, precision, _) => {
             precision == name || items.iter().any(|item| type_mentions_name(item, name))
@@ -2419,6 +2421,7 @@ fn collect_sig_type_vars(ty: &TypeExpr, out: &mut HashSet<String>) {
                 out.insert(name.clone());
             }
         }
+        TypeExpr::DimensionLiteral(_, _) => {}
         // `..r` is a rank variable, not a type variable — it is collected
         // separately (the checker treats `(d-rank {} r)` as a bound rank var).
         TypeExpr::RankSpread(_, _) => {}
@@ -2497,6 +2500,7 @@ fn desugar_type_with_scope_mode(
     implicit_single_letter_dims: bool,
 ) -> deep::Expr {
     let desugared = match ty {
+        TypeExpr::DimensionLiteral(value, _) => node(DeepTag::DLit, vec![int(value.value())]),
         TypeExpr::Named(name, _) => {
             // The contextual rule for type-name positions:
             //
@@ -2538,6 +2542,9 @@ fn desugar_type_with_scope_mode(
             let mut children: Vec<deep::Expr> = dims
                 .iter()
                 .map(|d| match d {
+                    TypeExpr::DimensionLiteral(value, _) => {
+                        node(DeepTag::DLit, vec![int(value.value())])
+                    }
                     TypeExpr::Named(n, _) if n.parse::<i64>().is_ok() => {
                         node(DeepTag::DLit, vec![int(n.parse::<i64>().unwrap())])
                     }

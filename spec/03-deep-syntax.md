@@ -375,7 +375,7 @@ An opaque `deftype` may additionally carry a **declared invariant**
 | `t-fn` | `(t-fn {} arg₁ arg₂ ... ret)` | Function type; last child is return |
 | `t-tensor` | `(t-tensor {} dim₁ dim₂ ... precision)` | Tensor type; last child is precision |
 | `t-ref` | `(t-ref {} type)` | Read-only borrow type |
-| `t-adt` | `(t-adt {} Name type-arg...)` | ADT type application |
+| `t-adt` | `(t-adt {} Name nominal-arg...)` | ADT/type-alias application; each argument is a type expression or a non-rank dimension expression according to the target header |
 | `t-var` | `(t-var {} name)` | Type variable |
 | `t-unit` | `(t-unit {})` | Unit type |
 | `t-tuple` | `(t-tuple {} type₁ type₂ ...)` | Tuple type |
@@ -389,9 +389,15 @@ environment or a cached compiler context. Resolution is fail-closed:
   explicitly-reserved primitive vocabulary owned by `spec/04-type-system.md`
   §1.1. An unknown primitive name is a type error, not an inference hole.
 - `t-adt` has a symbol head naming a precollected `deftype` or `typealias`
-  header and exactly that header's declared number of type arguments. Headers
-  are collected before bodies are resolved, so self-recursive and forward
-  nominal references are legal; unknown names and wrong arities are errors.
+  header and exactly that header's declared number of nominal arguments.
+  A type-kinded slot contains a type expression. A dimension-kinded slot
+  contains `d-name`, `d-var`, or `d-lit`; `d-rank` is not a nominal argument.
+  A `t-var` emitted for a symbolic Surf argument is resolved as a dimension
+  variable only when the target header gives that slot dimension kind. Header
+  kinds are collected before bodies are resolved under [04-ADT-3], so
+  self-recursive, mutually recursive, alias-mediated, and forward nominal
+  references are legal; unknown names, wrong arities, and wrong argument kinds
+  are errors.
   The precollected header environment remains in scope for the entire check unit,
   including annotations in declaration bodies. A rejected declaration body is
   not installed in the reusable ADT/alias registry, but its already-declared

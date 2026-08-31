@@ -957,7 +957,7 @@ pub enum WireInferredType {
     /// arguments (empty `args` for a nullary ADT).
     Adt {
         name: String,
-        args: Vec<WireInferredType>,
+        args: Vec<WireInferredAdtArg>,
     },
     /// `Type::Var` — an unresolved inference type variable. `id` is the
     /// raw `TypeVar` index, matching the `?N` display rendering.
@@ -970,6 +970,24 @@ pub enum WireInferredType {
     /// the structured tree never silently drops a node; a consumer
     /// should treat this as "type unknown due to an upstream error".
     Error,
+}
+
+/// One nominal argument in structured inferred JSON. The enum is untagged so
+/// ordinary type arguments retain their established `WireInferredType` object
+/// shape; only dimension arguments add a new wrapper.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum WireInferredAdtArg {
+    Type(WireInferredType),
+    Dimension(WireInferredDimensionArg),
+}
+
+/// Closed wrapper that distinguishes a nominal dimension from an ordinary
+/// inferred type without changing the existing type-argument encoding.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireInferredDimensionArg {
+    Dimension { dim: WireInferredDim },
 }
 
 /// Structured tensor dimension, mirroring `chelis_types::types::Dim`.
@@ -1692,6 +1710,10 @@ pub enum WireLetPattern {
 pub enum WireSurfTypeExpr {
     Named {
         name: String,
+        span: Span,
+    },
+    DimensionLiteral {
+        digits: String,
         span: Span,
     },
     Tensor {

@@ -278,9 +278,34 @@ pub enum Pattern {
 
 // ===== Type Expressions =====
 
+/// A concrete dimension literal in a nominal type application.
+///
+/// The numeric carrier is private so an integer cannot be manufactured as an
+/// ordinary type expression by downstream crates. The parser is the sole
+/// source of this node; consumers may render it through [`Display`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DimensionLiteral(i64);
+
+impl DimensionLiteral {
+    pub(crate) fn new(value: i64) -> Self {
+        Self(value)
+    }
+
+    pub(crate) fn value(self) -> i64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for DimensionLiteral {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TypeExpr {
     Named(String, Span),                       // f32, bool, MyType
+    DimensionLiteral(DimensionLiteral, Span),  // integer only in Name[...]
     Tensor(Vec<TypeExpr>, String, Span),       // tensor[batch, hidden, f32]
     Arrow(Vec<TypeExpr>, Box<TypeExpr>, Span), // A -> B -> C (flat)
     Ref(Box<TypeExpr>, Span),                  // &T

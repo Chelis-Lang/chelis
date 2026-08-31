@@ -1617,6 +1617,14 @@ fn type_to_deep_expr_with(ty: &Type, make_node: NodeBuilder) -> deep::Expr {
             );
             make_node(DeepTag::TAdt, children)
         }
+        Type::KindedAdt(name, args) => {
+            let mut children = vec![symbol_expr(name)];
+            children.extend(args.iter().map(|argument| match argument {
+                NominalArg::Type(ty) => type_to_deep_expr_with(ty, make_node),
+                NominalArg::Dimension(dim) => dim_to_deep_expr_with(dim, make_node),
+            }));
+            make_node(DeepTag::TAdt, children)
+        }
         Type::Var(var) => make_node(DeepTag::TVar, vec![symbol_expr(&format!("t{}", var.0))]),
         Type::Tuple(types) => make_node(
             DeepTag::TTuple,
@@ -2899,6 +2907,9 @@ pub(super) fn type_carries_error(ty: &Type) -> bool {
         Type::Fn(args, ret) => args.iter().any(type_carries_error) || type_carries_error(ret),
         Type::Ref(inner) => type_carries_error(inner),
         Type::Adt(_, args) => args.iter().any(type_carries_error),
+        Type::KindedAdt(_, args) => args
+            .iter()
+            .any(|argument| argument.as_type().is_some_and(type_carries_error)),
         Type::Tuple(elems) => elems.iter().any(type_carries_error),
         Type::Prim(_) | Type::Tensor(_, _) | Type::Var(_) | Type::Unit => false,
     }

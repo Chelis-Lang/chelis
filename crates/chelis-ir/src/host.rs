@@ -10,7 +10,7 @@ use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_deep::decode_effect_kind;
 use chelis_types::adt::{AdtDef, AdtRegistry};
 use chelis_types::infer::type_to_deep_expr;
-use chelis_types::types::{Prim, TensorPrec, Type};
+use chelis_types::types::{Dim, NominalArg, Prim, TensorPrec, Type};
 use chelis_types::{BUILTIN_NAMES, CheckedProgram};
 use chelis_vocab::EffectKind;
 
@@ -9706,6 +9706,25 @@ fn checker_type_has_stored_variable(
                     .any(|ty| checker_type_has_stored_variable(ty, registry, visiting))
             }
         }
+        Type::KindedAdt(name, args) => {
+            if let Some(definition) = registry.lookup(name) {
+                args.iter()
+                    .enumerate()
+                    .any(|(index, argument)| match argument {
+                        NominalArg::Type(ty) => {
+                            checker_adt_parameter_is_stored(definition, index, registry, visiting)
+                                && checker_type_has_stored_variable(ty, registry, visiting)
+                        }
+                        NominalArg::Dimension(_) => false,
+                    })
+            } else {
+                args.iter().any(|argument| {
+                    argument
+                        .as_type()
+                        .is_some_and(|ty| checker_type_has_stored_variable(ty, registry, visiting))
+                })
+            }
+        }
         Type::Error(_) => true,
     }
 }
@@ -9724,6 +9743,11 @@ fn checker_type_has_variable(ty: &Type) -> bool {
         }
         Type::Ref(inner) => checker_type_has_variable(inner),
         Type::Adt(_, args) | Type::Tuple(args) => args.iter().any(checker_type_has_variable),
+        Type::KindedAdt(_, args) => args.iter().any(|argument| match argument {
+            NominalArg::Type(ty) => checker_type_has_variable(ty),
+            NominalArg::Dimension(Dim::Var(_) | Dim::Rank(_)) => true,
+            NominalArg::Dimension(_) => false,
+        }),
         Type::Prim(_) | Type::Unit => false,
         Type::Error(_) => true,
     }
@@ -9754,6 +9778,22 @@ fn checker_type_has_erased_adt_variable(
                     && checker_type_has_variable(arg))
                     || checker_type_has_erased_adt_variable(arg, registry, visiting)
             })
+        }
+        Type::KindedAdt(name, args) => {
+            let Some(definition) = registry.lookup(name) else {
+                return false;
+            };
+            args.iter()
+                .enumerate()
+                .any(|(index, argument)| match argument {
+                    NominalArg::Type(ty) => {
+                        (!checker_adt_parameter_is_stored(definition, index, registry, visiting)
+                            && checker_type_has_variable(ty))
+                            || checker_type_has_erased_adt_variable(ty, registry, visiting)
+                    }
+                    NominalArg::Dimension(Dim::Var(_) | Dim::Rank(_)) => true,
+                    NominalArg::Dimension(_) => false,
+                })
         }
         Type::Var(_) | Type::Tensor(_, _) | Type::Prim(_) | Type::Unit | Type::Error(_) => false,
     }
@@ -12841,14 +12881,22 @@ fn adt_constructor_definitions(program: &CheckedProgram) -> Vec<GenericAdtConstr
             continue;
         }
         let checker_parameter_names = definition
-            .param_vars
+            .param_args
             .iter()
             .zip(&definition.type_params)
-            .map(|(variable, name)| (format!("t{}", variable.0), name.clone()))
+            .filter_map(|(argument, name)| match argument {
+                NominalArg::Type(Type::Var(variable)) => {
+                    Some((format!("t{}", variable.0), name.clone()))
+                }
+                NominalArg::Dimension(Dim::Var(variable)) => {
+                    Some((format!("d{}", variable.0), name.clone()))
+                }
+                _ => None,
+            })
             .collect::<HashMap<_, _>>();
         let parameters = definition.type_params.clone();
         let stored_parameters = definition
-            .param_vars
+            .type_params
             .iter()
             .enumerate()
             .map(|(index, _)| {
@@ -12943,8 +12991,11 @@ fn checker_adt_parameter_is_stored(
     registry: &AdtRegistry,
     visiting: &mut HashSet<(String, usize)>,
 ) -> bool {
-    let Some(parameter) = definition.param_vars.get(parameter_index).copied() else {
+    let Some(argument) = definition.param_args.get(parameter_index) else {
         return true;
+    };
+    let NominalArg::Type(Type::Var(parameter)) = argument else {
+        return false;
     };
     let key = (definition.name.clone(), parameter_index);
     if !visiting.insert(key.clone()) {
@@ -12954,7 +13005,7 @@ fn checker_adt_parameter_is_stored(
         variant
             .fields
             .iter()
-            .any(|(_, field)| checker_type_stores_variable(field, parameter, registry, visiting))
+            .any(|(_, field)| checker_type_stores_variable(field, *parameter, registry, visiting))
     });
     visiting.remove(&key);
     stored
@@ -12990,6 +13041,25 @@ fn checker_type_stores_variable(
                 // Built-in/container ADTs have value-represented arguments.
                 args.iter()
                     .any(|ty| checker_type_stores_variable(ty, target, registry, visiting))
+            }
+        }
+        Type::KindedAdt(name, args) => {
+            if let Some(nested) = registry.lookup(name) {
+                args.iter()
+                    .enumerate()
+                    .any(|(index, argument)| match argument {
+                        NominalArg::Type(ty) => {
+                            checker_adt_parameter_is_stored(nested, index, registry, visiting)
+                                && checker_type_stores_variable(ty, target, registry, visiting)
+                        }
+                        NominalArg::Dimension(_) => false,
+                    })
+            } else {
+                args.iter().any(|argument| {
+                    argument.as_type().is_some_and(|ty| {
+                        checker_type_stores_variable(ty, target, registry, visiting)
+                    })
+                })
             }
         }
         // A checked program cannot carry Error, but fail closed if a legacy

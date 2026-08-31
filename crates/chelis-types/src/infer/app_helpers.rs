@@ -227,6 +227,19 @@ pub(super) fn types_structurally_equal(a: &Type, b: &Type) -> bool {
                     .zip(a2.iter())
                     .all(|(e1, e2)| types_structurally_equal(e1, e2))
         }
+        (Type::KindedAdt(n1, a1), Type::KindedAdt(n2, a2)) => {
+            n1 == n2
+                && a1.len() == a2.len()
+                && a1.iter().zip(a2).all(|(left, right)| match (left, right) {
+                    (NominalArg::Type(left), NominalArg::Type(right)) => {
+                        types_structurally_equal(left, right)
+                    }
+                    (NominalArg::Dimension(left), NominalArg::Dimension(right)) => {
+                        dims_identical(left, right)
+                    }
+                    _ => false,
+                })
+        }
         (Type::Fn(p1, r1), Type::Fn(p2, r2)) => {
             p1.len() == p2.len()
                 && p1

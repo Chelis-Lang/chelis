@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use crate::env::Env;
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::session::DiagnosticSink;
-use crate::types::{Prim, Scheme, Type, TypeVar, TypeVarRestriction};
+use crate::types::{NominalArg, Prim, Scheme, Type, TypeVar, TypeVarRestriction};
 use crate::unify::Subst;
 
 thread_local! {
@@ -381,6 +381,16 @@ fn render_type(ty: &Type, names: &HashMap<TypeVar, String>, fallback: Option<&st
                     .collect();
                 format!("{name}[{}]", rendered.join(", "))
             }
+        }
+        Type::KindedAdt(name, args) => {
+            let rendered = args
+                .iter()
+                .map(|argument| match argument {
+                    NominalArg::Type(ty) => render_type(ty, names, fallback),
+                    NominalArg::Dimension(dim) => dim.to_string(),
+                })
+                .collect::<Vec<_>>();
+            format!("{name}[{}]", rendered.join(", "))
         }
         Type::Fn(args, ret) => {
             let rendered: Vec<String> = args

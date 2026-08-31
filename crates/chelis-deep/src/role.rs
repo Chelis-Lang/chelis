@@ -40,6 +40,7 @@ pub enum ChildStampRole {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TypeSyntaxRole {
     Type,
+    NominalArgument,
     TensorElement,
     TensorAxis,
     Dimension,
@@ -126,7 +127,7 @@ pub fn type_syntax_node_role(tag: DeepTag) -> Option<TypeSyntaxRole> {
 /// Callers first prove that `tag` is in [`type_syntax_node_role`]. Returning
 /// `None` for every other vocabulary tag keeps the grammar fail-closed.
 pub fn type_syntax_child_role(tag: DeepTag, index: usize, arity: usize) -> Option<TypeSyntaxRole> {
-    use TypeSyntaxRole::{Integer, Name, TensorAxis, TensorElement, Type};
+    use TypeSyntaxRole::{Integer, Name, NominalArgument, TensorAxis, TensorElement, Type};
 
     match tag {
         DeepTag::TPrim | DeepTag::TVar => Some(Name),
@@ -142,7 +143,7 @@ pub fn type_syntax_child_role(tag: DeepTag, index: usize, arity: usize) -> Optio
             if index == 0 {
                 Some(Name)
             } else {
-                Some(Type)
+                Some(NominalArgument)
             }
         }
         // `t-unit` has no legal children. Returning a role lets Node's
@@ -206,10 +207,11 @@ pub fn type_syntax_child_role(tag: DeepTag, index: usize, arity: usize) -> Optio
 
 /// Whether `tag` is legal at the requested recursive type-syntax role.
 pub fn type_syntax_role_accepts_tag(role: TypeSyntaxRole, tag: DeepTag) -> bool {
-    use TypeSyntaxRole::{Dimension, Rank, TensorAxis, TensorElement, Type};
+    use TypeSyntaxRole::{Dimension, NominalArgument, Rank, TensorAxis, TensorElement, Type};
 
     match role {
         Type => type_syntax_node_role(tag) == Some(Type),
+        NominalArgument => matches!(type_syntax_node_role(tag), Some(Type | Dimension)),
         TensorElement => matches!(tag, DeepTag::TPrim | DeepTag::TVar),
         TensorAxis => matches!(type_syntax_node_role(tag), Some(Dimension | Rank)),
         Dimension => type_syntax_node_role(tag) == Some(Dimension),
@@ -834,6 +836,34 @@ mod tests {
                 tag
             ));
         }
+    }
+
+    #[test]
+    fn serialized_nominal_arguments_admit_types_and_dimensions_but_not_rank_spreads() {
+        assert_eq!(
+            type_syntax_child_role(DeepTag::TAdt, 1, 2),
+            Some(TypeSyntaxRole::NominalArgument)
+        );
+        for tag in [
+            DeepTag::TPrim,
+            DeepTag::TAdt,
+            DeepTag::DName,
+            DeepTag::DVar,
+            DeepTag::DLit,
+        ] {
+            assert!(type_syntax_role_accepts_tag(
+                TypeSyntaxRole::NominalArgument,
+                tag
+            ));
+        }
+        assert!(!type_syntax_role_accepts_tag(
+            TypeSyntaxRole::NominalArgument,
+            DeepTag::DRank
+        ));
+        assert!(!type_syntax_role_accepts_tag(
+            TypeSyntaxRole::Type,
+            DeepTag::DLit
+        ));
     }
 
     #[test]

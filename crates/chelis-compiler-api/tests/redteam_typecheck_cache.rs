@@ -37,7 +37,7 @@
 //! canonicalization equivalence (a wrong-canonicalization regression
 //! would be a NEW collision class), the `IdentityMismatch`
 //! envelope-vs-inner tamper guard, fingerprint sensitivity to every
-//! identity component, the format-version-11 magic rejection of a forged
+//! identity component, the format-version-12 magic rejection of a forged
 //! V10 file, and adversarial corruption shapes against the recompute
 //! fall-through.
 //!
@@ -424,7 +424,7 @@ fn load_if_fresh_never_panics_on_adversarial_byte_patterns() {
 
     let patterns: Vec<Vec<u8>> = vec![
         vec![],                                               // empty
-        b"CHELIS_CTX_V12\n".to_vec(),                         // current magic only, no envelope
+        b"CHELIS_CTX_V13\n".to_vec(),                         // current magic only, no envelope
         b"CHELIS_CTX_V9\n".to_vec(),                          // stale-version magic only
         b"not a cache file at all".to_vec(),                  // no magic
         vec![0u8; 4096],                                      // all zeros
@@ -432,7 +432,7 @@ fn load_if_fresh_never_panics_on_adversarial_byte_patterns() {
         (0..4096).map(|i| ((i * 31) ^ 0x5a) as u8).collect(), // pseudo-random
         {
             // valid (current) magic followed by garbage
-            let mut v = b"CHELIS_CTX_V12\n".to_vec();
+            let mut v = b"CHELIS_CTX_V13\n".to_vec();
             v.extend((0..512).map(|i| (i % 256) as u8));
             v
         },
@@ -478,25 +478,26 @@ fn truncation_at_every_prefix_length_never_silently_loads() {
 }
 
 // ---------------------------------------------------------------------
-// Format-version-12 bump. TypeEnv now serializes source-ordered deferred
-// constraints, so every V11 payload has the preceding bincode shape and
+// Format-version-13 bump. TypeEnv now serializes nominal parameter kinds and
+// dimension arguments in addition to source-ordered deferred constraints, so
+// every V12 payload has the preceding bincode shape and
 // must be rejected before decode.
 // ---------------------------------------------------------------------
 
 #[test]
 fn a_forged_stale_magic_file_is_rejected_not_decoded() {
-    // The current magic is `CHELIS_CTX_V12\n`. A leftover file carries a
-    // `CHELIS_CTX_V11\n` (or older) magic. Forge one from a real V12 payload.
+    // The current magic is `CHELIS_CTX_V13\n`. A leftover file carries a
+    // `CHELIS_CTX_V12\n` (or older) magic. Forge one from a real V13 payload.
     // load_if_fresh must reject it (the magic no longer matches), never
     // attempt to decode the stale-shaped envelope.
     let (_dir, cache_path, _ctx, bytes) = save_ctx("rt-stale-magic", TRIVIAL_MAIN);
     assert!(
-        bytes.starts_with(b"CHELIS_CTX_V12\n"),
-        "fixture must be written with the current V12 magic"
+        bytes.starts_with(b"CHELIS_CTX_V13\n"),
+        "fixture must be written with the current V13 magic"
     );
 
-    let mut forged = b"CHELIS_CTX_V11\n".to_vec();
-    forged.extend_from_slice(&bytes[b"CHELIS_CTX_V12\n".len()..]);
+    let mut forged = b"CHELIS_CTX_V12\n".to_vec();
+    forged.extend_from_slice(&bytes[b"CHELIS_CTX_V13\n".len()..]);
     fs::write(&cache_path, &forged).expect("write forged stale-magic file");
 
     let outcome =
@@ -524,11 +525,11 @@ fn a_bumped_envelope_version_byte_is_rejected_as_unsupported() {
     // envelope `version` field is the first field after the magic, so it
     // sits at bytes [magic.len() .. magic.len()+4].
     let (_dir, cache_path, _ctx, bytes) = save_ctx("rt-envver", TRIVIAL_MAIN);
-    let magic_len = b"CHELIS_CTX_V12\n".len();
+    let magic_len = b"CHELIS_CTX_V13\n".len();
     assert!(bytes.len() > magic_len + 4);
 
     let mut forged = bytes.clone();
-    // bincode encodes a u32 little-endian; bump the low byte well past 12.
+    // bincode encodes a u32 little-endian; bump the low byte well past 13.
     forged[magic_len] = forged[magic_len].wrapping_add(99);
     fs::write(&cache_path, &forged).expect("write bumped-version file");
 
@@ -624,14 +625,14 @@ fn stdlib_cache_key_folds_the_compiler_version() {
     let real = stdlib_cache_key(&decls);
 
     // Byte-for-byte mirror of `stdlib_cache_key`, parameterized on the
-    // compiler-version string. STDLIB_CACHE_FORMAT_VERSION is 8 (the
-    // serialized TypeEnv ordered-deferred-constraint bump); the
+    // compiler-version string. STDLIB_CACHE_FORMAT_VERSION is 9 (the
+    // serialized ordered-deferred-constraint and nominal-kind bumps); the
     // mirror is only valid while that holds, which assertion (a) below
     // verifies.
     let recompute = |compiler_version: &str| -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"chelis_std_typecheck_v");
-        hasher.update(8u32.to_le_bytes());
+        hasher.update(9u32.to_le_bytes());
         hasher.update(b"compiler_version");
         hasher.update((compiler_version.len() as u64).to_le_bytes());
         hasher.update(compiler_version.as_bytes());

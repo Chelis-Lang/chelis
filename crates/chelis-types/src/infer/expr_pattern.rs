@@ -115,7 +115,7 @@ pub(super) fn infer_match(
     // Exhaustiveness check (wildcard covers everything)
     if !has_wildcard {
         let resolved_scrutinee = subst.apply(&scrutinee_ty);
-        if let Type::Adt(ref adt_name, _) = resolved_scrutinee
+        if let Type::Adt(ref adt_name, _) | Type::KindedAdt(ref adt_name, _) = resolved_scrutinee
             && let Some(all_variants) = adt_reg.variant_names(adt_name)
         {
             let missing: Vec<&String> = all_variants

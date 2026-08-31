@@ -52,13 +52,13 @@ CONTRACT_FILES = (
 )
 FROZEN_FILE_DIGESTS = {
     "spec/02-surf-syntax.md": (
-        "826a5eff13de44b5fc208bac832dc4b98647f58c1670d81d4a38863ae5f4d3e3"
+        "84c7dc16efacf4efbd050a5a4d461352e122b0f92414fb59973d35ab50fa093a"
     ),
     "spec/03-deep-syntax.md": (
-        "5e21649cf61087df1119040a971a60b5b499d40321d8647ce719e91b8571120a"
+        "27b7cbf06d71243f6402055f4d7a6f1d2b589a49bec8b83a5554a1e2318b9b3a"
     ),
     "spec/04-type-system.md": (
-        "6ec65dc7640e64119f056562fb3807b827af29f2d84a2880d42ed24043449d08"
+        "21b3b2f3c8aafc52c975e86e1bf573a327f33e1be845f9093382fd61c45b3045"
     ),
     "spec/05-risc-primitives.md": (
         "e427fa744b313a3a8a7cad99e1ca92ed7df8e57db459bf53a499edb098dca86a"

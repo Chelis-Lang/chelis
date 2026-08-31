@@ -647,6 +647,7 @@ fn format_type(ty: &TypeExpr) -> String {
     match ty {
         TypeExpr::Named(name, _) if name == "unit" => "unit".to_string(),
         TypeExpr::Named(name, _) => name.clone(),
+        TypeExpr::DimensionLiteral(value, _) => value.to_string(),
         TypeExpr::RankSpread(name, _) => format!("..{name}"),
         TypeExpr::Tensor(parts, precision, _) => {
             let mut elems = parts.iter().map(format_type).collect::<Vec<_>>();

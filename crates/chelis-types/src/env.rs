@@ -457,6 +457,11 @@ fn type_carries_dim_name(ty: &Type, name: &str) -> bool {
         Type::Adt(_, args) | Type::Tuple(args) => {
             args.iter().any(|a| type_carries_dim_name(a, name))
         }
+        Type::KindedAdt(_, args) => args.iter().any(|argument| match argument {
+            NominalArg::Type(ty) => type_carries_dim_name(ty, name),
+            NominalArg::Dimension(Dim::Name(found)) => found == name,
+            NominalArg::Dimension(_) => false,
+        }),
         _ => false,
     }
 }
@@ -494,6 +499,13 @@ fn collect_tvars(ty: &Type, vars: &mut Vec<TypeVar>) {
         Type::Adt(_, args) => {
             for a in args {
                 collect_tvars(a, vars);
+            }
+        }
+        Type::KindedAdt(_, args) => {
+            for argument in args {
+                if let NominalArg::Type(ty) = argument {
+                    collect_tvars(ty, vars);
+                }
             }
         }
         Type::Tuple(ts) => {
@@ -564,6 +576,15 @@ fn collect_dvars(ty: &Type, vars: &mut Vec<DimVar>) {
                 collect_dvars(a, vars);
             }
         }
+        Type::KindedAdt(_, args) => {
+            for argument in args {
+                match argument {
+                    NominalArg::Type(ty) => collect_dvars(ty, vars),
+                    NominalArg::Dimension(Dim::Var(var)) => vars.push(*var),
+                    NominalArg::Dimension(_) => {}
+                }
+            }
+        }
         Type::Tuple(ts) => {
             for t in ts {
                 collect_dvars(t, vars);
@@ -593,6 +614,14 @@ pub fn collect_dims(ty: &Type, dims: &mut Vec<Dim>) {
         Type::Adt(_, args) => {
             for a in args {
                 collect_dims(a, dims);
+            }
+        }
+        Type::KindedAdt(_, args) => {
+            for argument in args {
+                match argument {
+                    NominalArg::Type(ty) => collect_dims(ty, dims),
+                    NominalArg::Dimension(dim) => dims.push(dim.clone()),
+                }
             }
         }
         Type::Tuple(ts) => {
@@ -632,6 +661,15 @@ fn collect_rvars(ty: &Type, vars: &mut Vec<RankVar>) {
         Type::Adt(_, args) => {
             for a in args {
                 collect_rvars(a, vars);
+            }
+        }
+        Type::KindedAdt(_, args) => {
+            for argument in args {
+                match argument {
+                    NominalArg::Type(ty) => collect_rvars(ty, vars),
+                    NominalArg::Dimension(Dim::Rank(var)) => vars.push(*var),
+                    NominalArg::Dimension(_) => {}
+                }
             }
         }
         Type::Tuple(ts) => {
