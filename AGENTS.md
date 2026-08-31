@@ -45,7 +45,6 @@ not drift.
 
 ### Baseline
 
-- Fresh review context is preferred when practical.
 - Red team against the spec, the code, the tests, the examples, and the CLI behavior.
 - Execute tests and commands; do not treat source inspection as sufficient proof.
 - For this repository, a requested "red team agent" means a fresh local subagent in a
@@ -137,7 +136,7 @@ Authority is subject-specific during the migration from numbered chapters to Ope
 
 A chapter transfers only through a reviewed change that records the transfer. The chapter must mark itself superseded and link the controlling capability.
 
-If a chapter has no complete transfer record, the numbered chapter remains controlling. `openspec/specs/spec-authority-migration/spec.md` defines the complete transfer contract.
+If a chapter has no complete transfer record, the numbered chapter remains controlling. The complete transfer contract is proposed, not in force: it lives in the active change at `openspec/changes/migrate-spec-authority/specs/spec-authority-migration/spec.md`.
 
 If active documents disagree, correct the document that controls the subject. Do not add a third explanation.
 
@@ -403,8 +402,8 @@ openspec validate --all --strict --no-interactive
 
 - The captured capabilities cite their source chapters. Capture alone does not
   transfer authority.
-- No numbered chapter is transferred in this pull request. Thus, the numbered
-  chapters remain controlling, and their captured capabilities are reference material.
+- No numbered chapter has been transferred. The numbered chapters therefore remain
+  controlling, and their captured capabilities are reference material.
 - Use the documentation authority rules above for all chapter and capability
   disagreements.
 - `spec/design/spec_provenance.md` § OpenSpec boundary blocks the first chapter
@@ -430,9 +429,11 @@ to copy: the METAs were filed during the 2026-07 numeric audit as evidence
 records, and the trackers were filed later, when the design docs were written,
 as delivery contracts. Three reasons the split has stopped paying for itself:
 
-1. **It has already broken down.** Two of the five "METAs" are closed (#709,
-   #710) while their class continues under an open #731, and neither was written
-   as a META - both are instance reports the class map promoted after the fact.
+1. **It has already broken down.** Three of the five "METAs" are closed. #709 and
+   #710 closed while their class continues under an open #731, and neither was
+   written as a META - both are instance reports the class map promoted after the
+   fact. #728 closed alongside its own tracker #732, so the pair carried no
+   information the tracker did not.
 2. **Sub-issues do the job the pairing was improvising.** When the tracker is
    the parent, "what belongs to this class" is a structural fact. A second issue
    whose content is a list of instances duplicates the child list and drifts
@@ -511,8 +512,11 @@ When a public surface has an implicit invariant, make it explicit and test it.
   - The published `chelisup.sh` bootstrap runs before Chelis, Cargo, or Python exists.
   - The generated Nix `chelisup` launcher runs with only its package closure.
   - The cargo-husky `commit-msg` hook locates a repository-managed Python interpreter.
-  Each artifact MUST use minimal POSIX `sh`. Each artifact MUST pass `sh -n` and
-  `shellcheck` when available. All other scripts remain Python.
+  Each artifact MUST use minimal POSIX `sh` and MUST pass `shellcheck` when
+  available. The bootstrap and the hook are checked with `sh -n`; the generated Nix
+  launcher is checked with `bash -n` by the `chelisupLauncherLint` flake check, so a
+  bash-ism there passes CI while still violating the POSIX-`sh` requirement above.
+  All other scripts remain Python.
 - Existing `scripts/` directory uses Python; follow that convention.
 - **Use a uv-managed Python**, not the system Python. Install uv from
   <https://docs.astral.sh/uv/getting-started/installation/>, verify it with
@@ -535,9 +539,13 @@ When a public surface has an implicit invariant, make it explicit and test it.
   scripting, uses a uv-managed interpreter.
   `scripts/test_bootstrapless_scripts.py` locks both properties.
 - Create a primary checkout's manual environment once with
-  `uv venv --python 3.11`. A dedicated git worktree does not need to copy or
-  symlink another checkout's `.venv`; for direct Cargo commands there, export
-  `PYO3_PYTHON="$(uv python find 3.11)"`. An explicit `PYO3_PYTHON` is
+  `uv venv --python 3.11`. Prefer the same in a dedicated git worktree: run
+  `uv venv --python 3.11` at its root, and never copy or symlink another
+  checkout's `.venv`. Test and gate code resolves an interpreter through
+  `tests/support/managed_python.rs`, which takes an explicit `PYO3_PYTHON` first
+  and falls back to the checkout's `.venv`, so exporting
+  `PYO3_PYTHON="$(uv python find 3.11)"` also works and is what direct Cargo
+  commands need. An explicit `PYO3_PYTHON` is
   authoritative and an invalid path must fail rather than fall back.
   `py/pyproject.toml` pins `requires-python = ">=3.11"`. See
   [`README.md`](README.md) for the full setup.
@@ -681,8 +689,8 @@ workspace doc example part of the gate without a reviewed scope change.
 
 **Doctests only run where something invokes them.** The canonical gate
 invokes doctests for `chelis-types`, `chelis-compiler-api`, and
-`chelis-pipeline-core`. The C-backend job also runs `cargo test -p chelis-backend-c` without a
-filter. A `compile_fail` oracle in another crate runs nowhere until that
+`chelis-pipeline-core`. The `backend-sanitizers` job also runs
+`cargo test -p chelis-backend-c` without a filter. A `compile_fail` oracle in another crate runs nowhere until that
 crate gains an equivalent invocation in the same change set.
 
 The checkpoint script checks the raw-offset fixture against exact Rust
@@ -729,16 +737,11 @@ handoff was dead.
 `scripts/test_gate.py` locks the build-before-oracle ordering the handoff
 rests on, so a reorder cannot quietly turn the oracle cold again.
 
-Local pre-push gate (chelis#360):
-
-```sh
-python3 scripts/gate.py --local
-```
-
-`--local` runs the developer pre-push subset: workspace clippy
+`--local` (chelis#360) runs the developer pre-push subset: workspace clippy
 (`-D warnings`, compile-only), `cargo fmt --check`, `chelis lint
---check .`, all three explicit rustdoc commands, the checkpoint fixture,
-the chelis#908 unrepresentable-domain oracle, and
+--check .`, the deterministic std-bundle regeneration check, all three
+explicit rustdoc commands, the checkpoint fixture, both pipeline-core
+guards, the chelis#908 unrepresentable-domain oracle, and
 `cargo nextest run -p <crate> --no-fail-fast` for each
 crate changed vs `origin/main` (committed diff plus uncommitted work;
 owning packages are resolved from each member's `Cargo.toml`, not the
@@ -790,7 +793,7 @@ Default-gate discipline:
   canonical gate.
 - For non-documentation changes, `python3 scripts/gate.py --local` is the pre-push
   checkpoint; routine workspace execution is hosted-CI-owned.
-- tests that exceed that budget or require heavyweight local prerequisites should be
+- tests that are slow or require heavyweight local prerequisites should be
   `#[ignore]` by default and invoked through a documented manual gate
 - every ignored test must have a concrete manual command and expected success condition in
   the owning phase docs
@@ -807,9 +810,6 @@ default workspace run.
   repo root or use an absolute path. Never share the primary `target/` with a
   session that may be building concurrently; cargo's target-dir lock serializes
   the builds and feature/profile differences invalidate each other's caches.
-- `scripts/gate.py` enforces this for gate runs: its target directory must
-  resolve inside the current worktree. An inherited absolute target in another
-  checkout fails before any command runs.
 - Before building, list orphaned cargo/rustc/cargo-nextest/chelis processes with
   `python3 scripts/reap_orphans.py` and reap them with
   `python3 scripts/reap_orphans.py --kill`. Inside Devenv, use
@@ -828,8 +828,6 @@ default workspace run.
   starvation, not code breakage. Measured 2026-06-10: the 25-test
   `rank_poly_tier3` suite took 2,434s under contention vs 24s on a quiet
   machine. Re-run on a quiet machine before treating those as real failures.
-- Recommended inner loop: `cargo nextest run -p <crate> --test <file>` compiles
-  only that test target.
 - At session end, verify that task-owned background cargo, rustc, and nextest processes
   are gone. A stopped wrapper is not proof that its reparented children stopped; use
   the scoped `reap_orphans.py` dry run and kill only confirmed task-owned stragglers.
@@ -885,23 +883,15 @@ default workspace run.
 ## Local HIP Environment
 
 This workstation has a reconciled AMD/ROCm HIP setup, so HIP manual gates are locally
-runnable. The authoritative runbook is [`docs/local_hip_environment.md`](docs/local_hip_environment.md).
+runnable. [`docs/local_hip_environment.md`](docs/local_hip_environment.md) is the
+authoritative runbook and holds the environment detail: the wheel ROCm stack, the
+`environment.d/hip.conf` overrides, and how to probe the local GPU.
 
-**For any HIP manual gate (especially hipBLAS-linked tests), run via**
-`scripts/hip_test.py` — e.g.
-`scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1`.
-Inside Devenv, use the equivalent `chelis-hip-test` command.
-The wrapper sets `HSA_OVERRIDE_GFX_VERSION=11.5.1`, the full `LD_LIBRARY_PATH`, and
-the full `HIPCC_COMPILE_FLAGS_APPEND` (including `-L` to the gfx1151 wheel lib that
-hipBLAS link resolution needs). Plain `cargo test --ignored` inherits only the
-`environment.d/hip.conf` defaults, which segfault hipBLAS-linked binaries at process
-exit with empty output — looks like a code regression but is purely environmental.
-
-Key durable invariant: the wheel ROCm stack is authoritative, and
-`~/.config/environment.d/hip.conf` provides the `HIPCC_COMPILE_FLAGS_APPEND` include
-override so non-interactive shells and `cargo test --workspace` resolve HIP headers from
-the `_rocm_sdk_core` wheel. Use `rocminfo` as the source of truth for local GPU probing;
-do not assume `rocm-smi` is installed.
+**Run every HIP manual gate through** `scripts/hip_test.py` — for example
+`scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1`
+— or `chelis-hip-test` inside Devenv. Plain `cargo test --ignored` inherits an
+incomplete environment and segfaults hipBLAS-linked binaries at process exit with empty
+output. That failure looks like a code regression and is not one.
 
 ## Manual Gates
 

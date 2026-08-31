@@ -178,8 +178,8 @@ NEXTEST_WORKSPACE_CI: list[str] = [
 # chelis#875: `cargo nextest` does not execute doctests. Each crate with
 # a compile-fail contract needs an explicit rustdoc command. The current
 # gate covers the type-system and compiler-pipeline contracts. The
-# C-backend CI job also runs that crate's doctests through an unfiltered
-# `cargo test -p chelis-backend-c` command.
+# `backend-sanitizers` CI job also runs that crate's doctests through an
+# unfiltered `cargo test -p chelis-backend-c` command.
 #
 # Do not replace these commands with `--workspace --doc`. That command
 # makes every workspace doc example part of the gate without a reviewed
