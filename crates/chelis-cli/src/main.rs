@@ -5693,7 +5693,7 @@ fn write_timeout_report_bounded(stdout: Vec<u8>, stderr: Vec<u8>) {
             b"error: suite timeout report could not be written to stdout; suite incomplete\n",
         );
     }
-    let _ = write_stream_bounded(
+    let _ = write_fallback_stream_bounded(
         OutputStream::Stderr,
         stderr,
         deadline.saturating_duration_since(Instant::now()),
@@ -5712,6 +5712,9 @@ fn write_stream_bounded(stream: OutputStream, bytes: Vec<u8>, budget: Duration) 
     }
     let (done_tx, done_rx) = std::sync::mpsc::channel::<bool>();
     thread::spawn(move || {
+        if testing_hook_enabled("CHELIS_TEST_DELAY_BOUNDED_WRITER") {
+            thread::sleep(Duration::from_secs(2));
+        }
         let written = match stream {
             OutputStream::Stdout => {
                 let mut out = io::stdout().lock();
