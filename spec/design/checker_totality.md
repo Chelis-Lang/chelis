@@ -1,6 +1,6 @@
 # Checker Totality: every construct is checked or loudly rejected
 
-**Status:** Phases 0-3 and PP1-PP3 are delivered. Phase 3 first shipped
+**Status:** Phases 0-3 and PP1-PP4 are delivered. Phase 3 first shipped
 `DeepTag` as derive-on-demand dispatch and was red-teamed in that form
 (round-1 QUALIFIED PASS with findings folded, round-2 PASS); a maintainer
 directive then superseded that record with the decode-once rework now in the
@@ -1139,16 +1139,16 @@ reserved-name screen in the desugarer does not satisfy it.
 
 ### PP4. Exact module scope at checker and test-batch boundaries ([#1264], residue of [#1261])
 
-**Opened 2026-08-31; decided below.** [#1264] and the residue explicitly left
-by PR [#1273] are two entry paths into one scope-identity defect.
+**Delivered 2026-08-31 by PR [#1402].** [#1264] and the residue explicitly left
+by PR [#1273] were two entry paths into one scope-identity defect.
 
-- In package checking, reef already rewrites every value that is genuinely in
+- Before PP4, package checking already rewrote every value that was genuinely in
   scope to its exact internal identity. A bare unimported value remains bare,
-  but `infer_var` follows a failed exact lookup with
+  but `infer_var` followed a failed exact lookup with
   `lookup_terminal_unique`, so one foreign export with the same terminal name
-  becomes an accidental binding. `chelis check` and `eval` therefore accept a
-  program whose build-side check rejects.
-- In suite batching, `run_test_batch` flattens the raw declarations from every
+  became an accidental binding. `chelis check` and `eval` therefore accepted a
+  program whose build-side check rejected.
+- Before PP4, suite batching flattened the raw declarations from every
   admitted file into one `combined_decls` unit before name resolution. PR
   [#1273] made explicit declared/imported collisions demote to per-file
   execution and made fallback visible, closing [#1261]. It deliberately could
@@ -1251,6 +1251,11 @@ Supporting unit tests pin the exact-vs-terminal environment edge and
 [04-FIT-2]'s two diagnostic kinds. The mutation receipt adds a foreign export
 to the negative package and independently makes the batch sibling declare the
 bare name; neither mutation may turn a red source module green.
+
+PR [#1402] carries the implementation and exact-head validation record. The
+command above remains the standing completion oracle after delivery;
+supporting unit coverage pins every isolated-entry declaration namespace and
+fail-closed synthetic identity in addition to the two checker edges above.
 
 ### Adjacent ledger rows delivered with the class change
 
@@ -1385,6 +1390,7 @@ constructor as fully resolved.
 [#1261]: https://github.com/Chelis-Lang/chelis/issues/1261
 [#1264]: https://github.com/Chelis-Lang/chelis/issues/1264
 [#1273]: https://github.com/Chelis-Lang/chelis/pull/1273
+[#1402]: https://github.com/Chelis-Lang/chelis/pull/1402
 [#1076]: https://github.com/Chelis-Lang/chelis/issues/1076
 [#672]: https://github.com/Chelis-Lang/chelis/issues/672
 [#1247]: https://github.com/Chelis-Lang/chelis/issues/1247
