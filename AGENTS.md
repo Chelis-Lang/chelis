@@ -600,13 +600,22 @@ enforcement boundary.
 - Use plain conventional commit messages with the configured human author. Do not add
   `Claude-Session`, Codex/Claude attribution, AI co-authorship markers, or AI-session
   links to commit messages or PR bodies.
-- GitHub squash merges can concatenate every branch commit message into the final
-  commit. A closing keyword in any intermediate message can therefore close an issue
-  even when the PR was only partial work.
-- Use `Part of #N` or `Addresses #N` unless default-branch merge should close the issue.
-  Before squash merge, audit the complete branch message set and proposed squash text
-  for `close`, `fix`, or `resolve` immediately followed by an issue reference. Closing
-  keywords are intentional authority, never descriptive prose.
+
+### Issues Are Closed Manually
+
+Automatic issue closure is disabled for this repository. `Closes #N`, `Fixes #N`, and
+`Resolves #N` have no effect from a pull request body, from a branch commit message, or
+from the squashed default-branch commit. **Merging a pull request never closes an
+issue.**
+
+Close an issue as a separate, deliberate step, once the work is done and verified:
+`gh issue close N` with a comment naming the merged pull request, or the same action in
+the web UI. A pull request that finishes an issue still says so in its body; that
+sentence is a claim addressed to a reviewer, not an instruction to GitHub.
+
+Prefer `Part of #N` or `Addresses #N` when a pull request advances an issue without
+finishing it. That is the accurate phrasing either way, and it keeps intent legible if
+the repository setting is ever restored.
 
 ## Build And Gate Commands
 
@@ -851,6 +860,13 @@ default workspace run.
   removal keeps the branch ref; branch deletion is a separate later decision. If macOS
   leaves a partially removed target or `.DS_Store`, re-inspect the exact path before an
   equally narrow cleanup command.
+- Close the issues the PR actually resolved, as a separate step; merging does not do it
+  (see [Issues Are Closed Manually](#issues-are-closed-manually)). Use
+  `gh issue close <N> --comment "resolved by #<PR>"`.
+- A merged PR is not proof its issues are resolved: confirm the behavior on current
+  `main` first, and when the PR only advanced an issue, leave it open with a comment on
+  what remains. Close a tracking hub only when every sub-issue is closed and the
+  condition the hub itself names is met.
 
 ## Subagent Coordination And Delivery
 
