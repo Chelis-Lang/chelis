@@ -4,6 +4,31 @@ Canonical agent instructions for this repository.
 `CLAUDE.md` should resolve to this file so Claude-style and Codex-style entry points do
 not drift.
 
+**Starting a task?** Read [Worktree And Branch Discipline](#worktree-and-branch-discipline),
+then [Build Toolchain](#build-toolchain), then
+[Build And Gate Commands](#build-and-gate-commands). Those three cover where to work, how
+to get an interpreter, and what to run before pushing.
+
+**Where everything else is.** The sections group into five subjects:
+
+- **Standards and review** - Quality Standards, Red Team Protocol.
+- **Specs and documentation** - Documentation And Spec Sync (which owns the numbered-spec
+  tier rule and the Numeric Surface Discipline ratchet), OpenSpec, Issue Tracking
+  Conventions.
+- **Testing doctrine** - Contract Invariants, Example Corpus Policy, Manual Gates,
+  CLI Surface Discipline.
+- **Working in the repo** - Scripting Language Policy, Worktree And Branch Discipline,
+  Build Toolchain, Local Git Hook, Commit And Pull Request Hygiene, Build And Gate
+  Commands, Build Concurrency And Process Hygiene, Local HIP Environment.
+- **The product** - Style Gate, Surf Style Guide, Chelis-Specific Rules, Toolchain And
+  Packaging Orchestration.
+
+Subagent Coordination And Delivery, Shared Local Skills, and Downstream Shell Contract
+cover work that leaves this session or this repository.
+
+Rules live here; the incidents behind three of them are in
+[`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md).
+
 ## Quality Standards
 
 ### Spec-First Development
@@ -476,6 +501,23 @@ When a public surface has an implicit invariant, make it explicit and test it.
 - Decide the executable-vs-illustrative split early in a phase, not after examples have
   already been used as proof artifacts.
 
+## Manual Gates
+
+- Every manual acceptance gate must have a documented command, expected success condition,
+  and owning phase.
+- If default CI does not run the gate, the docs must say so directly.
+- Ignored tests are allowed only when they clearly mirror a documented manual gate or an
+  environment-dependent prerequisite.
+- Phase summaries must not imply that a manual gate is part of the default workspace pass
+  when it is not.
+
+## CLI Surface Discipline
+
+- CLI commands are part of the product surface, not wrappers around library tests.
+- Formatter, decompiler, evaluator, checker, and build-command behavior should be tested
+  against a corpus, not only single happy-path examples.
+- For machine-facing CLI output, test both shape and semantic invariants.
+
 ## Scripting Language Policy
 
 - **Python** for all scripts, utilities, report generators, and automation helpers.
@@ -808,20 +850,6 @@ default workspace run.
   what remains. Close a tracking hub only when every sub-issue is closed and the
   condition the hub itself names is met.
 
-## Subagent Coordination And Delivery
-
-- Every subagent prompt must name the delivery mechanism and the complete expected
-  report. A locally written or plain-text report that is not sent through the platform's
-  parent-message/final-report channel has not been delivered.
-- A subagent must not end its turn merely to wait for a background build, monitor, CI,
-  or notification that cannot wake it. Keep ownership of a long command through the
-  platform's synchronous wait/poll mechanism, or return the honest partial result and
-  unfinished work.
-- If an agent returns "waiting" or goes idle without the deliverable, the orchestrator
-  resumes it immediately with the exact missing items. Prefer a clearly labelled partial
-  report over silence or an overstated completion claim, and deduplicate repeated reports
-  that race with a resume nudge.
-
 ## Local HIP Environment
 
 This workstation has a reconciled AMD/ROCm HIP setup, so HIP manual gates are locally
@@ -835,22 +863,19 @@ authoritative runbook and holds the environment detail: the wheel ROCm stack, th
 incomplete environment and segfaults hipBLAS-linked binaries at process exit with empty
 output. That failure looks like a code regression and is not one.
 
-## Manual Gates
+## Subagent Coordination And Delivery
 
-- Every manual acceptance gate must have a documented command, expected success condition,
-  and owning phase.
-- If default CI does not run the gate, the docs must say so directly.
-- Ignored tests are allowed only when they clearly mirror a documented manual gate or an
-  environment-dependent prerequisite.
-- Phase summaries must not imply that a manual gate is part of the default workspace pass
-  when it is not.
-
-## CLI Surface Discipline
-
-- CLI commands are part of the product surface, not wrappers around library tests.
-- Formatter, decompiler, evaluator, checker, and build-command behavior should be tested
-  against a corpus, not only single happy-path examples.
-- For machine-facing CLI output, test both shape and semantic invariants.
+- Every subagent prompt must name the delivery mechanism and the complete expected
+  report. A locally written or plain-text report that is not sent through the platform's
+  parent-message/final-report channel has not been delivered.
+- A subagent must not end its turn merely to wait for a background build, monitor, CI,
+  or notification that cannot wake it. Keep ownership of a long command through the
+  platform's synchronous wait/poll mechanism, or return the honest partial result and
+  unfinished work.
+- If an agent returns "waiting" or goes idle without the deliverable, the orchestrator
+  resumes it immediately with the exact missing items. Prefer a clearly labelled partial
+  report over silence or an overstated completion claim, and deduplicate repeated reports
+  that race with a resume nudge.
 
 ## Style Gate
 
