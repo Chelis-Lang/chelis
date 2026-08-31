@@ -213,6 +213,13 @@ pub enum CapacityKey {
 }
 ```
 
+`CapacityKey` is deliberately carrier-independent: it is built from the
+complete semantically typed extent expression, not from the IR enum that
+happens to carry that expression. `DimExpr`, `RtDim`, and `InputAxis` are
+carrier spellings, not key variants. Phase 1 consumes whichever carrier
+[#1277] has landed; it must not translate an `RtDim`/`InputAxis` edge back into
+`DimExpr` or recover it by name.
+
 Product-only regions flatten, sort, fold arbitrary-precision literals, and
 remove multiplicative identities. They may collapse a zero product only when
 every factor whose key would be discarded is statically total or its validity
@@ -237,6 +244,14 @@ the reuse site. Unproved predicates return `NotProvenEqual`; they are never
 assumed from a successful value seen on another execution. The key and its
 proof arithmetic are never projected to `u64`, `i64`, or `usize`. Equality is
 therefore exact over both value and validity domain.
+
+The set is deliberately closed against equality learned only by passing a
+[#1277] runtime guard. A passed guard establishes a fact for that execution
+but supplies no proof object with identity, dominance, and lifetime at the
+reuse site. Such
+equality therefore returns `NotProvenEqual`. A later optimization may add a
+proof-carrying predicate only if it structurally carries guard identity,
+dominance, and scope; observing equal runtime values is insufficient.
 
 The red controls include zero multiplied by a partial quotient, nested partial
 quotients under otherwise total products, and both operand orders. Evaluation
@@ -775,6 +790,20 @@ closure continues through the non-launch-gating device/binding Phases 2, 4,
 and 5. Parentage and landed receipts do not change. Any decision to make those
 later phases release blockers belongs in [#1362], not this document.
 
+## Interlock with runtime extents ([#1277])
+
+[#1277] and [`runtime_extents.md`](runtime_extents.md) own which extent a
+program has, the `RtDim`/`InputAxis` carrier, `output_axis_sources`, and
+`spec/04` §4.7's guarded-claim rule. A declared extent claim that is not
+statically proven adds an execution-time guard that traps `Domain`; it is never
+rejected merely because the proof is unavailable.
+
+This plan owns only whether two capacities may be proven equal for allocation
+or reuse. [04-SHAPE-1]'s conservative `NotProvenEqual` loses reuse, never
+correctness; it neither substitutes for nor discharges a §4.7 guard. Phase 1
+builds `CapacityKey` over the semantically typed extent expression regardless
+of which carrier [#1277] has landed.
+
 ## Interlock with dtype semantics ([#729])
 
 `dtype_semantics.md` owns what every dtype means and the permanent numeric
@@ -821,6 +850,7 @@ a new exact identity until classified by final authority.
 [#892]: https://github.com/Chelis-Lang/chelis/issues/892
 [#893]: https://github.com/Chelis-Lang/chelis/issues/893
 [#899]: https://github.com/Chelis-Lang/chelis/issues/899
+[#1277]: https://github.com/Chelis-Lang/chelis/issues/1277
 [#1288]: https://github.com/Chelis-Lang/chelis/issues/1288
 [#1289]: https://github.com/Chelis-Lang/chelis/issues/1289
 [#1345]: https://github.com/Chelis-Lang/chelis/issues/1345

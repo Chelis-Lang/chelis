@@ -3009,6 +3009,32 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("runtime zero-product validity domain")
 
+    def test_runtime_capacity_key_is_carrier_independent(self) -> None:
+        self.replace(
+            Path("spec/design/runtime_representation.md"),
+            "`CapacityKey` is deliberately carrier-independent",
+            "`CapacityKey` is coupled to `DimExpr`",
+        )
+        self.assert_contract_fails("runtime capacity carrier independence")
+
+    def test_runtime_guard_fact_stays_outside_capacity_predicates(self) -> None:
+        self.replace(
+            Path("spec/design/runtime_representation.md"),
+            "The set is deliberately closed against equality learned only by "
+            "passing a\n[#1277] runtime guard",
+            "A passed runtime guard silently proves every later capacity reuse",
+        )
+        self.assert_contract_fails("runtime guard capacity boundary")
+
+    def test_runtime_extent_plan_disclaims_capacity_equality(self) -> None:
+        self.replace(
+            Path("spec/design/runtime_extents.md"),
+            "capacity and reuse equality\nover typed extent expressions\n"
+            "([`runtime_representation.md`](runtime_representation.md), [#888])",
+            "capacity and reuse equality are part of this plan",
+        )
+        self.assert_contract_fails("runtime extent capacity boundary")
+
     def test_runtime_phase0_debt_is_shrink_only(self) -> None:
         self.replace(
             Path("spec/design/runtime_representation.md"),

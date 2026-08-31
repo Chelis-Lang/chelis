@@ -33,6 +33,7 @@ CONTRACT_FILES = (
     "spec/design/loud_unsupported.md",
     "spec/design/spec_provenance.md",
     "spec/design/remediation_roadmap.md",
+    "spec/design/runtime_extents.md",
     "spec/design/runtime_representation.md",
     "docs/CHELIS_SURFACE.md",
     "docs/investigations/remediation_status_2026_08_04.md",
@@ -54,7 +55,7 @@ FROZEN_FILE_DIGESTS = {
         "5e21649cf61087df1119040a971a60b5b499d40321d8647ce719e91b8571120a"
     ),
     "spec/04-type-system.md": (
-        "fd5ced29448e64d80ce53d98c3ee131cfae22cc18871b23354d4eff5ab888750"
+        "8a339bc1fd08a15136dabae321bb9d2594a560613b14eb3cfb0011049dd61300"
     ),
     "spec/05-risc-primitives.md": (
         "10d64930ae6d9b3316ac9b0f35892052b2e0b1475c50097dd63ca5c0ba61ef6a"
@@ -340,7 +341,7 @@ EXPECTED_OP_MANIFESTS = {
 FROZEN_ATOM_DIGESTS = {
     "04-NUM-2": "1aab318622574c9505ec5e85472b27bf333318657407c38b2311325962e19a96",
     "04-NUM-4": "685b5a3447a069f138877d357e65d1ab225e6b712e62b2a5bd38e1ef960636cb",
-    "04-NUM-8": "7e1aa7edaa6aeef17bb7545930c9d94432279f7f3c7c3da97619a2272e67917f",
+    "04-NUM-8": "8887537f42a0c8263569296700826dc7466a0a3bf05e5c854ffff2406f075028",
     "04-NUM-11": "903b437e9aaa98b7c4d7c0c019393bee203d8bf76621902fc2ad53d872945f3f",
     "04-NUM-14": "621e87291569ed74f24adf9a9a1a2092b67a6824ef985ceb2645f6502c63f786",
     "04-NUM-16": "939c10f9449bb91c3117ec6d66f8afde5bedb733dec88be1623c7110740b8053",
@@ -405,7 +406,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/04-type-system.md",
         "## 9. Numeric Value Semantics",
         "## 10. Checker Totality",
-        "c6f96ad56ce56b935102a80f55192b06469b7f53a1866c29992dbe6f4247e171",
+        "cd8beb14a6a9763ae9bd9409035e04a44726da35fd94185748ce8c042b215215",
     ),
     "numeric primitive contracts": (
         "spec/05-risc-primitives.md",
@@ -2081,6 +2082,7 @@ def validate_schema_and_consumers(
     loud = docs["spec/design/loud_unsupported.md"]
     provenance = docs["spec/design/spec_provenance.md"]
     roadmap = docs["spec/design/remediation_roadmap.md"]
+    runtime_extents = docs["spec/design/runtime_extents.md"]
     runtime = docs["spec/design/runtime_representation.md"]
     surface = docs["docs/CHELIS_SURFACE.md"]
     status = docs["docs/investigations/remediation_status_2026_08_04.md"]
@@ -2112,6 +2114,15 @@ def validate_schema_and_consumers(
                 "runtime zero-product validity domain",
             ),
             (
+                "`CapacityKey` is deliberately carrier-independent",
+                "runtime capacity carrier independence",
+            ),
+            (
+                "The set is deliberately closed against equality learned only by "
+                "passing a\n[#1277] runtime guard",
+                "runtime guard capacity boundary",
+            ),
+            (
                 "exact shrink-only transition-debt\nmanifest",
                 "runtime Phase 0 shrink-only debt",
             ),
@@ -2138,6 +2149,18 @@ def validate_schema_and_consumers(
                 "the Phase 3 `--host` field-seal evidence, and the landed\n"
                 "[#1289]/[#1347] receipts",
                 "runtime launch-gate boundary",
+            ),
+        ),
+        violations,
+    )
+
+    require_all(
+        runtime_extents,
+        (
+            (
+                "capacity and reuse equality\nover typed extent expressions\n"
+                "([`runtime_representation.md`](runtime_representation.md), [#888])",
+                "runtime extent capacity boundary",
             ),
         ),
         violations,

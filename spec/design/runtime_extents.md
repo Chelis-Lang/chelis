@@ -871,7 +871,9 @@ arithmetic ([#526]), grad's symbolic-window gaps ([#513]), runtime axes and
 windows ([#1298]), the rank-polymorphic legality half of [#578], the DAG
 rebuild integrity class ([#1372]), exact `i64` internal carriers ([#1373]),
 Metal `expand` emission and symbolic-dim `Load` support ([#1383]), sibling
-symbolic-dim defects not yet parented to [#1277], and
+symbolic-dim defects not yet parented to [#1277], capacity and reuse equality
+over typed extent expressions
+([`runtime_representation.md`](runtime_representation.md), [#888]), and
 dtype-semantics decisions.
 
 ## Considered and rejected
@@ -1021,6 +1023,7 @@ decides the underlying rule, and what replaces it.
 [#730]: https://github.com/Chelis-Lang/chelis/issues/730
 [#731]: https://github.com/Chelis-Lang/chelis/issues/731
 [#737]: https://github.com/Chelis-Lang/chelis/issues/737
+[#888]: https://github.com/Chelis-Lang/chelis/issues/888
 [#1112]: https://github.com/Chelis-Lang/chelis/issues/1112
 [#1265]: https://github.com/Chelis-Lang/chelis/issues/1265
 [#1266]: https://github.com/Chelis-Lang/chelis/issues/1266

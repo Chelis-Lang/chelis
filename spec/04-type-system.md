@@ -2433,10 +2433,10 @@ Scope:
 > dtype is a checker-level type error.
 
 > **[04-NUM-8]** Every dtype declares a STORED REPRESENTATION and an
-> ARITHMETIC WIDTH in addition to its storage width. Every op SHALL be performed at its operands'
-> arithmetic width and finalized to the storage width once per op, in
-> every lane and on every surface. No lane SHALL compute at any other
-> width. The representations and arithmetic widths are:
+> ARITHMETIC WIDTH in addition to its storage width. Every op SHALL be
+> performed at its operands' arithmetic width and finalized to the storage
+> width once per op, in every lane and on every surface. No lane SHALL compute
+> at any other width. The representations and arithmetic widths are:
 >
 > | dtype | stored representation | storage width | arithmetic width |
 > |---|---|---|---|
