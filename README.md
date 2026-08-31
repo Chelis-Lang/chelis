@@ -195,8 +195,11 @@ The shell also supplies these platform commands:
 Each command forwards its arguments to the applicable Python file under
 `scripts/`.
 
-Devenv installs the `no-ai-authorship` hook at the `commit-msg` stage. The hook
-runs `scripts/check_commit_message.py`.
+`.githooks/commit-msg` is the tracked commit-msg hook. It runs
+`scripts/check_commit_message.py` through Devenv, `.venv`, or a managed uv
+interpreter, in that order. Devenv copies it into the shared hooks directory on
+shell entry; the copy resolves its repository at run time, so one installed
+copy is correct from every worktree of a clone and on every branch.
 
 The manual setup retains cargo-husky as a fallback. `cargo test` installs a
 POSIX wrapper that invokes the same checker with `.venv/bin/python`.

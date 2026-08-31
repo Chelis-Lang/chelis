@@ -164,7 +164,9 @@ def parse_contributor_docs(text: str) -> None:
         "chelis-exec-preflight",
         "chelis-z3-test",
         "chelis-hip-test",
-        "no-ai-authorship",
+        # The check no longer runs as a devenv-installed prek hook; the
+        # contributor guide must name where it does run instead (chelis#1409).
+        ".githooks/commit-msg",
         "cargo-husky",
         "scripts/check_commit_message.py",
         ".devenv/state/venv",

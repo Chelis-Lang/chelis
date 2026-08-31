@@ -118,24 +118,26 @@ The `nixfmt` entry MUST remain inactive. The `rustfmt` entry MUST use check mode
 
 The `shellcheck` entry MUST select only `crates/chelisup/bootstrap/chelisup.sh`. The whitespace entry MUST preserve Markdown line breaks.
 
-Devenv MUST define one enabled custom hook named `no-ai-authorship`. This hook MUST use the `commit-msg` stage.
+Devenv MUST NOT define an enabled hook that installs a `commit-msg` hook of its own. An installer that records an absolute path to one worktree governs every worktree of a clone, because they share one hooks directory.
 
-The custom hook MUST invoke `scripts/check_commit_message.py` with the configured Python package. It MUST reject prohibited AI authorship markers.
+The repository MUST track a `commit-msg` hook at `.githooks/commit-msg`. It MUST resolve its repository at run time and MUST NOT name any single worktree.
 
-The custom hook MUST accept ordinary commit messages. It MUST report the matched marker when it rejects a message.
+The tracked hook MUST invoke `scripts/check_commit_message.py` with a repository-managed Python interpreter. It MUST reject prohibited AI authorship markers, MUST accept ordinary commit messages, and MUST report the matched marker when it rejects a message.
 
-Devenv MUST install the custom hook for contributors who use the Devenv shell.
+Devenv MUST copy the tracked hook into the shared hooks directory for contributors who use the Devenv shell. It MUST resolve that directory with `git rev-parse --git-common-dir` so a linked worktree installs to the same place. It MUST NOT reach the hook through `core.hooksPath`, which is repository-scoped while a tracked file is branch-scoped: a worktree on a branch without the file would then run no hook and accept the commit silently.
+
+Devenv MUST report when `core.hooksPath` is set to a location other than the shared hooks directory, because the installed hook cannot run there.
 
 The repository MUST retain the cargo-husky user hook and development dependency for contributors who use the manual setup.
 
 The cargo-husky hook MUST use minimal POSIX `sh`. It MUST invoke `scripts/check_commit_message.py` with a repository-managed Python interpreter.
 
-The repository MUST ignore `.pre-commit-config.yaml`. Devenv generates this local file when a contributor enters the shell.
+The repository MUST ignore `.pre-commit-config.yaml`. Devenv generates this local file only while a catalog hook is enabled; with every entry disabled it generates none.
 
 #### Scenario: A contributor enters the shell with the hook catalog
 - **WHEN** a contributor runs `devenv shell`
 - **THEN** no listed catalog hook is active
-- **AND** Devenv installs the custom `commit-msg` hook
+- **AND** Devenv copies the tracked `commit-msg` hook into the shared hooks directory
 
 #### Scenario: A contributor runs tests through the manual setup
 - **WHEN** a contributor runs `cargo test` outside Devenv
