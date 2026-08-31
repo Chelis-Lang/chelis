@@ -45,7 +45,6 @@ not drift.
 
 ### Baseline
 
-- Fresh review context is preferred when practical.
 - Red team against the spec, the code, the tests, the examples, and the CLI behavior.
 - Execute tests and commands; do not treat source inspection as sufficient proof.
 - For this repository, a requested "red team agent" means a fresh local subagent in a
@@ -88,7 +87,7 @@ not drift.
 ### Pull Request Review Gate
 
 - Every pull request creation workflow, including documentation-only work, must include
-  at least one compliant red-team review of the exact PR head before merge.
+  at least one compliant red-team review of the PR before merge.
 - Classify every finding against the pull request's stated scope. A finding is in scope
   only when the pull request introduces it, worsens it, or claims to correct it. Mere
   discovery during review, including a pre-existing spec/implementation mismatch in an
@@ -99,13 +98,22 @@ not drift.
   design document that misdescribes current `main`, or exposes a sequencing seam between
   delivery slices while leaving the normative contract and named deliverable achievable,
   is P2 and must be recorded as residual work rather than promoted to a merge blocker.
-- Only a confirmed in-scope P0 (critical) or P1 (high/major) finding blocks merge. Fix
-  that finding in the pull request, push the updated head, and run another fresh-context
-  red-team review against that exact head.
-- Repeat the fix-and-review cycle until the most recent exact-head red-team review
-  reports no in-scope P0 or P1 findings. A review of an earlier head does not satisfy
-  this gate. An out-of-scope P0 or P1 finding does not require a change to the pull
-  request or another red-team review.
+- If a review raises a confirmed in-scope P0 (critical) or P1 (high/major) finding,
+  another fresh-context red-team review must be run after the fix is made. Repeat the
+  fix-and-review cycle until the most recent red-team review reports no in-scope P0 or
+  P1 findings. This holds however small the fix is: a one-word repair of a P1 still
+  earns a round.
+- Absent an in-scope P0 or P1 finding, scale rounds to the change. Minor updates, bug
+  fixes, and textual changes do not inherently merit another round. A rebase whose
+  overlap with your work is significant, either in changed lines or in semantics, may
+  merit a fresh-context red-team review of the intersection; a rebase that only picks up
+  an atom clearly consistent with, or irrelevant to, the files you are working on does
+  not. Use your best judgement.
+- When several red-team reviews find issues in the same area of your build or design,
+  stop and consider whether the approach is right, rather than filling the gaps each
+  review raises.
+- A non-major finding does not block merge, but if you are already rebasing or fixing
+  something else, fold in the other relevant issues reviewers raised.
 - Repairs under this gate may correct, remove, or narrow the pull request's existing
   content. They must not add new design scope, implementation responsibilities,
   inventories, mechanisms, or promises merely to absorb a finding. When a correction
@@ -137,7 +145,7 @@ Authority is subject-specific during the migration from numbered chapters to Ope
 
 A chapter transfers only through a reviewed change that records the transfer. The chapter must mark itself superseded and link the controlling capability.
 
-If a chapter has no complete transfer record, the numbered chapter remains controlling. `openspec/specs/spec-authority-migration/spec.md` defines the complete transfer contract.
+If a chapter has no complete transfer record, the numbered chapter remains controlling. The complete transfer contract is proposed, not in force: it lives in the active change at `openspec/changes/migrate-spec-authority/specs/spec-authority-migration/spec.md`.
 
 If active documents disagree, correct the document that controls the subject. Do not add a third explanation.
 
@@ -188,30 +196,19 @@ active OpenSpec change.
 - **Where the two disagree, the numbered spec wins and the design doc has a bug.** Say
   so in the doc when you find it rather than reconciling silently in code.
 
-**Why this matters, with a measured instance.** A design doc is a working artifact: it
-is read constantly while its phases are in flight and stops being read the moment they
-ship. A decision parked in one does not survive the work that made it. In 2026-07 that
-produced a three-level drift. `spec/04-type-system.md` [04-NUM-2] PERMITTED one narrow
-thing ("computing a single op in f64 and rounding once is a conforming
-implementation"); `spec/design/dtype_semantics.md` cited that permission to MANDATE
-f64 computation for every float op; the evaluator then extended the mandate to
-multi-step reductions and to comparison operands. Each step was a reasonable reading
-of the one above it, nobody re-checked against the numbered spec, and the result was a
-language that computed f32 programs in f64.
-
 Two rules follow, and both are cheap:
 
 1. **When a design doc states a rule that is really a language decision, lift it into
-   the numbered spec and leave a pointer behind.** `spec/05-risc-primitives.md` §8's
-   [05-OBS-1..5] is the worked example: the observation contract moved out of
-   `faithful_observation.md` and now survives independently of it. `spec/04` §9's
-   [04-NUM-9..11] and §9.1 followed, for the trap contract, the exactness guarantee,
-   and the per-dtype value table.
+   the numbered spec and leave a pointer behind.**
 2. **Watch for permission-to-mandate escalation.** "X is a conforming implementation"
    in a spec does not license "therefore we do X" in a design doc, and neither
    licenses "therefore we do X everywhere" in code. If your implementation needs a
-   stronger rule than the spec states, amend the spec first and say so in the PR;
-   `spec/design/dtype_semantics.md` §B1 calls that "the protocol, not a failure."
+   stronger rule than the spec states, amend the spec first and say so in the PR.
+
+A design doc is a working artifact: read constantly while its phases are in flight,
+unread once they ship, so a decision parked in one does not survive the work that made
+it. The 2026-07 three-level f64 drift that produced both rules, and the worked examples
+of each, are in [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §1.
 
 ### Challenge Written Designs Before Implementation
 
@@ -403,8 +400,8 @@ openspec validate --all --strict --no-interactive
 
 - The captured capabilities cite their source chapters. Capture alone does not
   transfer authority.
-- No numbered chapter is transferred in this pull request. Thus, the numbered
-  chapters remain controlling, and their captured capabilities are reference material.
+- No numbered chapter has been transferred. The numbered chapters therefore remain
+  controlling, and their captured capabilities are reference material.
 - Use the documentation authority rules above for all chapter and capability
   disagreements.
 - `spec/design/spec_provenance.md` § OpenSpec boundary blocks the first chapter
@@ -420,29 +417,15 @@ openspec validate --all --strict --no-interactive
 ### One Tracking Issue Per Class
 
 A recurring defect class gets **one tracking issue**, which is also the GitHub
-**sub-issue parent** for every instance. Its body carries the plan (phases,
+**sub-issue parent** for every instance, and no second issue beside it: do not file a
+separate META issue to hold the class statement or the instance list. Its body carries the plan (phases,
 oracles, freeze points, the class statement); its evidence lives in the owning
 design doc under `spec/design/` or in `docs/investigations/`.
 
-**Do not create a separate META issue alongside it.** The existing META/tracker
-pairs ([#727]/[#729], [#703]/[#730], and siblings) are historical, not a pattern
-to copy: the METAs were filed during the 2026-07 numeric audit as evidence
-records, and the trackers were filed later, when the design docs were written,
-as delivery contracts. Three reasons the split has stopped paying for itself:
-
-1. **It has already broken down.** Two of the five "METAs" are closed (#709,
-   #710) while their class continues under an open #731, and neither was written
-   as a META - both are instance reports the class map promoted after the fact.
-2. **Sub-issues do the job the pairing was improvising.** When the tracker is
-   the parent, "what belongs to this class" is a structural fact. A second issue
-   whose content is a list of instances duplicates the child list and drifts
-   from it.
-3. **Two bodies means two things to keep honest**, and the evidence half has a
-   better home: `docs/investigations/` already holds the probe corpus and the
-   audit record.
-
 Rules:
 
+- When filing an issue, always check to see if it should be grouped under a relevant
+  tracking issue.
 - An issue has **one** parent. When a defect splits across classes (the #689
   shape: a silent half and a support half), parent it to whichever class's
   **oracle turns green when it is fixed**, and add an explicit `Also part of #N`
@@ -500,6 +483,23 @@ When a public surface has an implicit invariant, make it explicit and test it.
 - Decide the executable-vs-illustrative split early in a phase, not after examples have
   already been used as proof artifacts.
 
+## Manual Gates
+
+- Every manual acceptance gate must have a documented command, expected success condition,
+  and owning phase.
+- If default CI does not run the gate, the docs must say so directly.
+- Ignored tests are allowed only when they clearly mirror a documented manual gate or an
+  environment-dependent prerequisite.
+- Phase summaries must not imply that a manual gate is part of the default workspace pass
+  when it is not.
+
+## CLI Surface Discipline
+
+- CLI commands are part of the product surface, not wrappers around library tests.
+- Formatter, decompiler, evaluator, checker, and build-command behavior should be tested
+  against a corpus, not only single happy-path examples.
+- For machine-facing CLI output, test both shape and semantic invariants.
+
 ## Scripting Language Policy
 
 - **Python** for all scripts, utilities, report generators, and automation helpers.
@@ -507,22 +507,24 @@ When a public surface has an implicit invariant, make it explicit and test it.
 - **Rust** where the task naturally fits a compiled workspace member.
 - **Never shell.** Do not write `.sh` scripts. If a CI step needs a one-liner, invoke
   Python instead. Shell is fragile and untestable.
-- **Shell exceptions.** Shell is permitted only for these artifacts:
-  - The published `chelisup.sh` bootstrap runs before Chelis, Cargo, or Python exists.
-  - The generated Nix `chelisup` launcher runs with only its package closure.
-  - The cargo-husky `commit-msg` hook locates a repository-managed Python interpreter.
-  Each artifact MUST use minimal POSIX `sh`. Each artifact MUST pass `sh -n` and
-  `shellcheck` when available. All other scripts remain Python.
+- **The exception list has one entry, and `spec/01-nomenclature.md` §2.9 controls it:**
+  `crates/chelisup/bootstrap/chelisup.sh`, the `curl ... | sh` one-liner that runs on a
+  bare machine before Chelis, Cargo, or Python exists. It is the only committed `.sh`
+  file in the repository and the only entry the `no-shell-scripts` lint exempts
+  (`style_gate.rs::exceptions()`). Adding a second entry is a numbered-spec change, not
+  a judgment call.
+- **Two other sanctioned shell artifacts exist and never reach that list**, because the
+  lint cannot see either: the Nix `chelisup` launcher is generated at build time rather
+  than committed, and `.cargo-husky/hooks/commit-msg` has no file extension, so
+  `chelis_lint`'s `Surface::classify` - which keys on the extension - never classifies
+  it. Both must still be minimal POSIX `sh` and `shellcheck`-clean. The bootstrap and
+  the hook are checked with `sh -n`; the generated launcher is checked with `bash -n` by
+  the `chelisupLauncherLint` flake check, so a bash-ism there passes CI while still
+  violating the POSIX-`sh` requirement. All other scripts remain Python.
 - Existing `scripts/` directory uses Python; follow that convention.
-- **Use a uv-managed Python**, not the system Python. Install uv from
-  <https://docs.astral.sh/uv/getting-started/installation/>, verify it with
-  `uv --version`, and provision the project version with
-  `uv python install 3.11`. Inside Devenv, use the activated environment at
-  `.devenv/state/venv`. Outside Devenv, use `.venv/bin/python` or
-  `uv run --managed-python --python 3.11 --no-project python`.
-  `scripts/gate.py` is the one `python3` entry point that self-heals: it
-  re-executes through that uv command before running gate logic, so a bare
-  `python3 scripts/gate.py` is always safe.
+- **Use a uv-managed Python**, not the system Python, for every script and every
+  ad-hoc invocation. [Build Toolchain](#build-toolchain) owns provisioning, the
+  resolution order, and the direct-invocation forms.
 - **Two diagnostics are deliberately bootstrap-free.**
   `scripts/reap_orphans.py` and `scripts/preflight_exec_probe.py` are invoked
   as bare `python3` on purpose: they run *before* and independently of a
@@ -534,13 +536,6 @@ When a public surface has an implicit invariant, make it explicit and test it.
   exemption extends to any other script: everything else, and all ad-hoc
   scripting, uses a uv-managed interpreter.
   `scripts/test_bootstrapless_scripts.py` locks both properties.
-- Create a primary checkout's manual environment once with
-  `uv venv --python 3.11`. A dedicated git worktree does not need to copy or
-  symlink another checkout's `.venv`; for direct Cargo commands there, export
-  `PYO3_PYTHON="$(uv python find 3.11)"`. An explicit `PYO3_PYTHON` is
-  authoritative and an invalid path must fail rather than fall back.
-  `py/pyproject.toml` pins `requires-python = ">=3.11"`. See
-  [`README.md`](README.md) for the full setup.
 
 ## Worktree And Branch Discipline
 
@@ -551,8 +546,8 @@ When a public surface has an implicit invariant, make it explicit and test it.
   create or remove scratch artifacts in it.
 - Create a dedicated worktree before the first write for every task, including small
   documentation edits and throwaway probes. Keep its branch, target, and scratch state
-  task-owned. For direct Cargo commands, set
-  `PYO3_PYTHON="$(uv python find 3.11)"`; do not copy or symlink the primary `.venv`.
+  task-owned, and give it its own environment per
+  [Build Toolchain](#build-toolchain); never copy or symlink the primary `.venv`.
 - Do not repurpose an unrelated worktree because it appears idle. Reuse is allowed only
   for the same PR or immediate follow-up work after checking ownership, exact head,
   status, and active processes.
@@ -572,17 +567,35 @@ When a public surface has an implicit invariant, make it explicit and test it.
 
 ## Build Toolchain
 
-`chelis-python` links against `libpython`. Outside Devenv, `.cargo/config.toml`
-sets `PYO3_PYTHON` to `.venv/bin/python`. Devenv overrides that variable with
-`.devenv/state/venv/bin/python` and activates the same environment.
+A uv-managed Python is a hard prerequisite on every platform: `chelis-python` links
+against `libpython`, and the gate scripts and several tests need an interpreter. Install
+uv from <https://docs.astral.sh/uv/getting-started/installation/>, verify it with
+`uv --version`, and provision the version with `uv python install 3.11`.
+`py/pyproject.toml` pins `requires-python = ">=3.11"`. See [`README.md`](README.md) for
+the full setup.
 
-A managed Python is a hard prerequisite on every platform. Outside Devenv,
-direct `cargo build` for a crate that pulls pyo3 uses `.venv/` by default.
-Create it with `uv venv --python 3.11`, or set
-`PYO3_PYTHON="$(uv python find 3.11)"` in a dedicated worktree. On macOS,
-Apple's bundled Python reports a stale `sysconfig.LIBDIR` path; do not route
-PyO3 to it. `scripts/gate.py` sets `PYO3_PYTHON` to its uv-selected interpreter
-for every child command.
+**Provisioning.** Create a checkout's environment once with `uv venv --python 3.11`, at
+the root of the primary checkout and at the root of every dedicated worktree. Never copy
+or symlink another checkout's `.venv`. Inside Devenv, the activated environment at
+`.devenv/state/venv` serves the same purpose and needs no separate step.
+
+**Resolution.** Rust test and gate code resolves an interpreter through
+`tests/support/managed_python.rs`: an explicit `PYO3_PYTHON` wins outright, and the
+checkout's `.venv/bin/python` is the fallback. Outside Devenv, `.cargo/config.toml`
+points `PYO3_PYTHON` at `.venv/bin/python`; Devenv overrides it with
+`.devenv/state/venv/bin/python`. For direct Cargo commands in a dedicated worktree,
+export `PYO3_PYTHON="$(uv python find 3.11)"`. An explicit `PYO3_PYTHON` is
+authoritative: an invalid path must fail loudly rather than fall back.
+
+**Invoking Python directly.** Outside Devenv use `.venv/bin/python` or
+`uv run --managed-python --python 3.11 --no-project python`; inside Devenv use the
+activated environment. `scripts/gate.py` is the one `python3` entry point that
+self-heals, re-executing through that uv command before running gate logic, so a bare
+`python3 scripts/gate.py` is always safe; it also sets `PYO3_PYTHON` to its uv-selected
+interpreter for every child command.
+
+**macOS:** Apple's bundled Python reports a stale `sysconfig.LIBDIR` path. Do not route
+PyO3 to it.
 
 ## Local Git Hook
 
@@ -666,79 +679,30 @@ installation and Python-provisioning commands.
 
 The gate runs `cargo nextest run --no-fail-fast` (CI's actual runner), not
 `cargo test --workspace`, and includes `chelis lint --check .` (the §8.6 /
-§12 naming gate). All nextest profiles also set `fail-fast = false`, so direct
-and non-gate CI nextest runs expose every failure instead of cancelling the
-remainder. The sanitizer, macOS-smoke, LOC-report, no-AI-authorship, docs, and
+§12 naming gate). The sanitizer, macOS-smoke, LOC-report, no-AI-authorship, docs, and
 smt-build CI jobs are out of scope for this script by design.
 
 The three explicit rustdoc stages exist because `cargo nextest` does not
-execute doctests. The `chelis-types` command runs the chelis#731
-`ErrorWitness` contracts. The other commands run the compiler pipeline
-artifact contracts.
-
-The gate does not use `--workspace --doc`. That command makes every
-workspace doc example part of the gate without a reviewed scope change.
+execute doctests, and the gate deliberately does not use `--workspace --doc`.
+`scripts/gate.py`'s module docstring records why, and what each stage covers.
 
 **Doctests only run where something invokes them.** The canonical gate
 invokes doctests for `chelis-types`, `chelis-compiler-api`, and
-`chelis-pipeline-core`. The C-backend job also runs `cargo test -p chelis-backend-c` without a
-filter. A `compile_fail` oracle in another crate runs nowhere until that
-crate gains an equivalent invocation in the same change set.
-
-The checkpoint script checks the raw-offset fixture against exact Rust
-diagnostics. Its Python unit tests use fake runners and do not execute
-the fixture.
+`chelis-pipeline-core`. The `backend-sanitizers` job also runs
+`cargo test -p chelis-backend-c` without a filter. A `compile_fail` oracle in
+another crate runs nowhere until that crate gains an equivalent invocation in
+the same change set.
 
 `scripts/unrepresentable_domain_oracle.py` is chelis#908's authoritative
 completion oracle, and the tracker requires every fix in that class to run
 it in a continuous job. Acceptance is exit 0 with a final `ORACLE: PASS`
-line. Every obligation drives compiled artifacts: the built `chelis`
-binary over `.dp` fixtures, and compiled test binaries through `cargo
-nextest`. Its Python unit tests patch the command runners, so they are
-evidence about the script's decision logic and never a substitute for
-running it. It runs in the `integration` stage, which hosted CI executes
-exactly once on the second `workspace-tests-shard` worker before the
-fail-closed `Workspace Tests (Linux)` aggregate, on every non-docs-only pull
-request, and in the `--local` pre-push subset. That stage, not
-`lint-and-unit`, because two of its obligations run `cargo nextest`, which
-the Rust-policy worker deliberately does not install.
-`scripts/test_gate.py` locks both memberships and the pairing between the
-oracle's stage and a nextest-installing job.
+line.
 
-The oracle builds its own `chelis` before its first `.dp` fixture. Inside a
-gate run that binary already exists, so `gate.py` hands the built path over
-in `CHELIS_ORACLE_BINARY` and the oracle skips the build (chelis#1322). The
-gate sets it only for a command list whose earlier `cargo run -p chelis-cli
---bin chelis` command provably builds that bin target; the support-only
-integration slice used by hosted CI sets nothing and keeps the original
-build-it-yourself behavior. The variable is an explicit override and is
-therefore authoritative: a path that is not an executable file is a loud
-failure, never a silent fall back to a build, and an explicit setting from
-the caller is never replaced. That is the same discipline the gate applies
-to an explicit `PYO3_PYTHON`, timing included: the gate validates an
-explicit handoff in `gate_environment`, so a bad one aborts before the
-first command rather than after the whole pre-push subset has run.
-
-Present-but-empty is a failure on both sides, not an off switch. Reading
-`export CHELIS_ORACLE_BINARY=` as "unset" would disable the handoff with no
-notice anywhere, so unset it entirely instead. The spelling itself lives in
-exactly one place: the oracle declares it and `gate.py` imports it, because
-two independent literals would let a rename keep every test green while the
-handoff was dead.
-
-`scripts/test_gate.py` locks the build-before-oracle ordering the handoff
-rests on, so a reorder cannot quietly turn the oracle cold again.
-
-Local pre-push gate (chelis#360):
-
-```sh
-python3 scripts/gate.py --local
-```
-
-`--local` runs the developer pre-push subset: workspace clippy
+`--local` (chelis#360) runs the developer pre-push subset: workspace clippy
 (`-D warnings`, compile-only), `cargo fmt --check`, `chelis lint
---check .`, all three explicit rustdoc commands, the checkpoint fixture,
-the chelis#908 unrepresentable-domain oracle, and
+--check .`, the deterministic std-bundle regeneration check, all three
+explicit rustdoc commands, the checkpoint fixture, both pipeline-core
+guards, the chelis#908 unrepresentable-domain oracle, and
 `cargo nextest run -p <crate> --no-fail-fast` for each
 crate changed vs `origin/main` (committed diff plus uncommitted work;
 owning packages are resolved from each member's `Cargo.toml`, not the
@@ -786,11 +750,9 @@ not replace these shared-agent-skill checks.
 Default-gate discipline:
 
 - Use focused `cargo nextest run -p <crate> --test <file>` commands for the inner
-  development loop. Do not substitute a workspace-wide `cargo test` run for the
-  canonical gate.
-- For non-documentation changes, `python3 scripts/gate.py --local` is the pre-push
-  checkpoint; routine workspace execution is hosted-CI-owned.
-- tests that exceed that budget or require heavyweight local prerequisites should be
+  development loop: that compiles only the one test target. Do not substitute a
+  workspace-wide `cargo test` run for the canonical gate.
+- tests that are slow or require heavyweight local prerequisites should be
   `#[ignore]` by default and invoked through a documented manual gate
 - every ignored test must have a concrete manual command and expected success condition in
   the owning phase docs
@@ -807,9 +769,6 @@ default workspace run.
   repo root or use an absolute path. Never share the primary `target/` with a
   session that may be building concurrently; cargo's target-dir lock serializes
   the builds and feature/profile differences invalidate each other's caches.
-- `scripts/gate.py` enforces this for gate runs: its target directory must
-  resolve inside the current worktree. An inherited absolute target in another
-  checkout fails before any command runs.
 - Before building, list orphaned cargo/rustc/cargo-nextest/chelis processes with
   `python3 scripts/reap_orphans.py` and reap them with
   `python3 scripts/reap_orphans.py --kill`. Inside Devenv, use
@@ -825,11 +784,9 @@ default workspace run.
   but do not eliminate CPU starvation.
 - Contention diagnostic: several unrelated tests FAILing at near-identical
   wall-clock times (for example all ~217s, nextest's slow-kill) means CPU
-  starvation, not code breakage. Measured 2026-06-10: the 25-test
-  `rank_poly_tier3` suite took 2,434s under contention vs 24s on a quiet
-  machine. Re-run on a quiet machine before treating those as real failures.
-- Recommended inner loop: `cargo nextest run -p <crate> --test <file>` compiles
-  only that test target.
+  starvation, not code breakage. Re-run on a quiet machine before treating those
+  as real failures; [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §2 has the
+  measured factor.
 - At session end, verify that task-owned background cargo, rustc, and nextest processes
   are gone. A stopped wrapper is not proof that its reparented children stopped; use
   the scoped `reap_orphans.py` dry run and kill only confirmed task-owned stragglers.
@@ -868,6 +825,18 @@ default workspace run.
   what remains. Close a tracking hub only when every sub-issue is closed and the
   condition the hub itself names is met.
 
+## Local HIP Environment
+
+HIP manual gates are runnable on this workstation. See
+[`docs/local_hip_environment.md`](docs/local_hip_environment.md) for the authoritative
+runbook and the environment detail.
+
+**Run every HIP manual gate through** `scripts/hip_test.py` — for example
+`scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1`
+— or `chelis-hip-test` inside Devenv. Plain `cargo test --ignored` inherits an
+incomplete environment and segfaults hipBLAS-linked binaries at process exit with empty
+output. That failure looks like a code regression and is not one.
+
 ## Subagent Coordination And Delivery
 
 - Every subagent prompt must name the delivery mechanism and the complete expected
@@ -881,44 +850,6 @@ default workspace run.
   resumes it immediately with the exact missing items. Prefer a clearly labelled partial
   report over silence or an overstated completion claim, and deduplicate repeated reports
   that race with a resume nudge.
-
-## Local HIP Environment
-
-This workstation has a reconciled AMD/ROCm HIP setup, so HIP manual gates are locally
-runnable. The authoritative runbook is [`docs/local_hip_environment.md`](docs/local_hip_environment.md).
-
-**For any HIP manual gate (especially hipBLAS-linked tests), run via**
-`scripts/hip_test.py` — e.g.
-`scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1`.
-Inside Devenv, use the equivalent `chelis-hip-test` command.
-The wrapper sets `HSA_OVERRIDE_GFX_VERSION=11.5.1`, the full `LD_LIBRARY_PATH`, and
-the full `HIPCC_COMPILE_FLAGS_APPEND` (including `-L` to the gfx1151 wheel lib that
-hipBLAS link resolution needs). Plain `cargo test --ignored` inherits only the
-`environment.d/hip.conf` defaults, which segfault hipBLAS-linked binaries at process
-exit with empty output — looks like a code regression but is purely environmental.
-
-Key durable invariant: the wheel ROCm stack is authoritative, and
-`~/.config/environment.d/hip.conf` provides the `HIPCC_COMPILE_FLAGS_APPEND` include
-override so non-interactive shells and `cargo test --workspace` resolve HIP headers from
-the `_rocm_sdk_core` wheel. Use `rocminfo` as the source of truth for local GPU probing;
-do not assume `rocm-smi` is installed.
-
-## Manual Gates
-
-- Every manual acceptance gate must have a documented command, expected success condition,
-  and owning phase.
-- If default CI does not run the gate, the docs must say so directly.
-- Ignored tests are allowed only when they clearly mirror a documented manual gate or an
-  environment-dependent prerequisite.
-- Phase summaries must not imply that a manual gate is part of the default workspace pass
-  when it is not.
-
-## CLI Surface Discipline
-
-- CLI commands are part of the product surface, not wrappers around library tests.
-- Formatter, decompiler, evaluator, checker, and build-command behavior should be tested
-  against a corpus, not only single happy-path examples.
-- For machine-facing CLI output, test both shape and semantic invariants.
 
 ## Style Gate
 
@@ -935,10 +866,11 @@ the built-in gate.
   enforcement). The canonical formatter is `chelis_surf::format` for
   `.ch` and `chelis_deep::printer` for `.dp`.
 - Override flag: `--allow-style-violations` bypasses the gate with a
-  stderr warning. Use only for emergency local builds and one-off
-  migrations. CI must not pass it. The flag bypasses only the style
-  gate, not parse, type, effect, validation, evaluation, or backend
-  errors.
+  stderr warning. Use only for emergency local builds. CI must not pass
+  it, and it is not a way around a formatter or lint failure during a
+  migration: migrate the source instead. The flag bypasses only the
+  style gate, not parse, type, effect, validation, evaluation, or
+  backend errors.
 - Test override env var: `CHELIS_STYLE_GATE_DISABLE=1` disables the
   gate process-wide. Reserved for the integration-test corpus that
   synthesizes ad-hoc Surf to exercise type/effect/linearity behavior;
@@ -951,6 +883,11 @@ before pushing a non-documentation change, use focused nextest commands during
 development, and leave routine workspace execution to hosted CI.
 
 ## Surf Style Guide
+
+The authority is `spec/02-surf-syntax.md` §0.1
+(canonical forms and the bidirectional contract); §P10-P12 define the
+wider set of input spellings the parser still *accepts* but the
+formatter rewrites.
 
 When writing or rewriting Surf in this repository:
 
@@ -982,20 +919,6 @@ When writing or rewriting Surf in this repository:
 - function/value identifiers are snake_case (`surf-value-snake-case`, §3.2)
 - functions carrying the `Test` effect are named `test_*` or `example_*`
   (`surf-test-name-prefix`, §10.1)
-
-### Canonical Surf v0.19 (chelis#1031, shipped 0.18.4)
-
-**The grammar changed, and the style gate enforces it.** `chelis fmt
---check` runs ahead of `build`, `check`, `validate`, and `eval --file`,
-so Surf that was canonical under 0.18.3 can now fail before the
-front-end pipeline runs. The authority is `spec/02-surf-syntax.md` §0.1
-(canonical forms and the bidirectional contract); §P10-P12 define the
-wider set of input spellings the parser still *accepts* but the
-formatter rewrites.
-
-Read that section before authoring Surf or debugging a parse error that
-"should" work. The forms that most often bite:
-
 - **A nullary definition needs `()`: `def name() -> T`, not `def name ->
   T`.** This is the highest-frequency breakage — it turned every fixture
   in chelis#1176 into a hard parse error (`expected function parameter
@@ -1018,22 +941,6 @@ Read that section before authoring Surf or debugging a parse error that
 - Canonical output omits trailing separators and prints the canonical
   literal spelling (shortest round-trippable float, no digit separators
   or redundant zeroes).
-
-**Migrating an existing tree:** `chelis migrate surf --from 0.18 --check
-<paths>...` reports, `--inplace` rewrites as a preflighted batch
-transaction (whole batch validated before any write; atomic replacement
-with rollback; symlinks and multiply-hard-linked files rejected).
-`--from 0.18` is the only accepted value. Identifiers that became
-reserved words are **not** guessed — the migrator stops and names the
-byte offset, and the rename is yours to author. Semantic boundaries are
-not migrated for you: suffix adoption, overflow, non-finite values,
-literal patterns, raw controls, invalid escapes, and structurally
-ambiguous legacy forms still reject.
-
-Do not reach for `--allow-style-violations` or
-`CHELIS_STYLE_GATE_DISABLE=1` to get past a v0.19 failure. Those exist
-for emergency local builds and the ad-hoc integration corpus
-respectively; migrate the source instead.
 
 ## Chelis-Specific Rules
 

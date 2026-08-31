@@ -59,6 +59,16 @@ validation pass.
 
 ## Pull Request Finding Discipline
 
+- **Every pull request needs at least one compliant red-team review before it merges**,
+  documentation-only work included. Repeat the fix-and-review cycle until the most
+  recent review reports no in-scope P0 or P1 finding. That holds however small the fix
+  is: a one-word repair of a P1 still earns a round.
+- Absent an in-scope P0 or P1 finding, scale rounds to the change. Minor updates, bug
+  fixes, and textual changes do not inherently merit another round. A rebase whose
+  overlap with the reviewed work is significant, in changed lines or in semantics, may
+  merit a fresh-context review of the intersection; one that only picks up a change
+  clearly consistent with, or irrelevant to, the reviewed files does not. Use your best
+  judgement.
 - Classify every finding against the pull request's stated scope. It is in scope only
   when the pull request introduces it, worsens it, or claims to correct it. Mere
   discovery, including an unrelated pre-existing spec/implementation mismatch, does not
@@ -69,8 +79,13 @@ validation pass.
   while leaving the normative contract and named deliverable achievable, is P2 residual
   work rather than a merge blocker.
 - Only confirmed in-scope P0/P1 findings block the pull request and require repair plus
-  another fresh exact-head review. Do not repair an out-of-scope finding in the pull
-  request; link its existing issue or file one when it is not already tracked.
+  another fresh-context review after the fix. A non-major finding does not block merge,
+  but say so plainly enough that the author can fold it into a rebase already under way.
+  Do not repair an out-of-scope finding in the pull request; link its existing issue or
+  file one when it is not already tracked.
+- When successive reviews keep finding issues in the same area, say so in the report.
+  Repeated findings in one place are evidence the approach is wrong, not that another
+  gap needs filling.
 - A gate repair may correct, remove, or narrow existing pull-request content. It must not
   add design scope, implementation responsibilities, inventories, mechanisms, or
   promises merely to absorb a finding. Reduce the claim and track additional work
