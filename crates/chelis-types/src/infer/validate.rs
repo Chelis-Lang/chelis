@@ -3,6 +3,7 @@
 //! This module contains code moved from the former inference monolith.
 //! The extraction preserves control flow and diagnostic order.
 
+use super::shape_honesty::*;
 use super::*;
 
 pub(super) fn validate_ir_program(
@@ -13,6 +14,7 @@ pub(super) fn validate_ir_program(
     detect_top_level_binding_cycles(exprs, errors);
     detect_trivial_non_terminating_fns(exprs, errors);
     let mut static_env = UnordMap::new();
+    let declared_signatures = collect_declared_sig_metadata(top_level_decl_items(exprs));
     // Names of let-bindings whose RHS validation already emitted a
     // diagnostic (so their derived output type is unknown). Downstream
     // shape-sensitive calls that consume such a name emit a redundant
@@ -33,6 +35,7 @@ pub(super) fn validate_ir_program(
             type_env,
             &mut static_env,
             &mut failed_let_names,
+            &declared_signatures,
             errors,
         );
     }
@@ -1324,6 +1327,7 @@ pub(super) fn validate_ir_expr(
     type_env: &IrTypeEnv,
     static_env: &mut UnordMap<String, StaticValue>,
     failed_let_names: &mut UnordSet<String>,
+    declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
     errors: &mut DiagnosticSink<'_>,
 ) -> StaticValue {
     stack_guard!("validate_ir_expr", expr, StaticValue::Unknown);
@@ -1331,7 +1335,14 @@ pub(super) fn validate_ir_expr(
         deep::Expr::List(list, _) => {
             if get_tag(list) == Some(DeepTag::Module) {
                 for elem in list.elements.iter().skip(3) {
-                    validate_ir_expr(elem, type_env, static_env, failed_let_names, errors);
+                    validate_ir_expr(
+                        elem,
+                        type_env,
+                        static_env,
+                        failed_let_names,
+                        declared_signatures,
+                        errors,
+                    );
                 }
                 return StaticValue::Unknown;
             }
@@ -1343,8 +1354,21 @@ pub(super) fn validate_ir_expr(
                 let Some(value_expr) = kids.get(1) else {
                     return StaticValue::Unknown;
                 };
-                let value =
-                    validate_ir_expr(value_expr, type_env, static_env, failed_let_names, errors);
+                let signature_env = declared_signatures.get(name).map(|signature| {
+                    extend_ir_env_with_declared_fn_params(
+                        value_expr,
+                        &signature.param_types,
+                        type_env,
+                    )
+                });
+                let value = validate_ir_expr(
+                    value_expr,
+                    signature_env.as_ref().unwrap_or(type_env),
+                    static_env,
+                    failed_let_names,
+                    declared_signatures,
+                    errors,
+                );
                 static_env.insert(name.to_string(), value);
                 return StaticValue::Unknown;
             }
@@ -1358,6 +1382,7 @@ pub(super) fn validate_ir_expr(
                         &scoped_env,
                         &mut scoped_static_env,
                         failed_let_names,
+                        declared_signatures,
                         errors,
                     );
                 }
@@ -1413,6 +1438,7 @@ pub(super) fn validate_ir_expr(
                                 &scoped_type_env,
                                 &mut scoped_static_env,
                                 failed_let_names,
+                                declared_signatures,
                                 errors,
                             );
                             scoped_static_env.insert(name.to_string(), value);
@@ -1485,6 +1511,7 @@ pub(super) fn validate_ir_expr(
                         &scoped_type_env,
                         &mut scoped_static_env,
                         failed_let_names,
+                        declared_signatures,
                         errors,
                     );
                 }
@@ -1498,7 +1525,8 @@ pub(super) fn validate_ir_expr(
                 // (see `lower_par` and the `jit` lowering arm).
                 if tag == DeepTag::App
                     && let Some(func_name) = active_ir_builtin_name(list, static_env)
-                    && is_ir_shape_sensitive_builtin(func_name)
+                    && (is_ir_shape_sensitive_builtin(func_name)
+                        || crate::shape_class(func_name) == crate::ShapeClass::Identity)
                 {
                     validate_ir_builtin_symbolic_requirements(
                         list,
@@ -1530,7 +1558,14 @@ pub(super) fn validate_ir_expr(
                 return kids
                     .first()
                     .map(|inner| {
-                        validate_ir_expr(inner, type_env, static_env, failed_let_names, errors)
+                        validate_ir_expr(
+                            inner,
+                            type_env,
+                            static_env,
+                            failed_let_names,
+                            declared_signatures,
+                            errors,
+                        )
                     })
                     .unwrap_or(StaticValue::Unknown);
             }
@@ -1544,7 +1579,14 @@ pub(super) fn validate_ir_expr(
                     .iter()
                     .skip(1)
                     .map(|arg| {
-                        validate_ir_expr(arg, type_env, static_env, failed_let_names, errors)
+                        validate_ir_expr(
+                            arg,
+                            type_env,
+                            static_env,
+                            failed_let_names,
+                            declared_signatures,
+                            errors,
+                        )
                     })
                     .collect::<Vec<_>>();
                 if func_name == Some("Cons") && arg_values.len() == 2 {
@@ -1561,38 +1603,87 @@ pub(super) fn validate_ir_expr(
             }
 
             for elem in &list.elements {
-                validate_ir_expr(elem, type_env, static_env, failed_let_names, errors);
+                validate_ir_expr(
+                    elem,
+                    type_env,
+                    static_env,
+                    failed_let_names,
+                    declared_signatures,
+                    errors,
+                );
             }
             StaticValue::Unknown
         }
         deep::Expr::Map(map, _) => {
             for (_, value) in &map.entries {
-                validate_ir_expr(value, type_env, static_env, failed_let_names, errors);
+                validate_ir_expr(
+                    value,
+                    type_env,
+                    static_env,
+                    failed_let_names,
+                    declared_signatures,
+                    errors,
+                );
             }
             StaticValue::Unknown
         }
         deep::Expr::MetaExpr(meta, _) => {
             for (_, value) in &meta.entries {
-                validate_ir_expr(value, type_env, static_env, failed_let_names, errors);
+                validate_ir_expr(
+                    value,
+                    type_env,
+                    static_env,
+                    failed_let_names,
+                    declared_signatures,
+                    errors,
+                );
             }
-            validate_ir_expr(&meta.expr, type_env, static_env, failed_let_names, errors)
+            validate_ir_expr(
+                &meta.expr,
+                type_env,
+                static_env,
+                failed_let_names,
+                declared_signatures,
+                errors,
+            )
         }
         deep::Expr::Atom(_, _) => literal_static_value(expr),
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         deep::Expr::Node(node, span) => {
             let bridged = deep::Expr::List(node.to_list(*span), *span);
-            validate_ir_expr(&bridged, type_env, static_env, failed_let_names, errors)
+            validate_ir_expr(
+                &bridged,
+                type_env,
+                static_env,
+                failed_let_names,
+                declared_signatures,
+                errors,
+            )
         }
         deep::Expr::BareList(elems, _) => {
             let mut last = StaticValue::Unknown;
             for child in elems {
-                last = validate_ir_expr(child, type_env, static_env, failed_let_names, errors);
+                last = validate_ir_expr(
+                    child,
+                    type_env,
+                    static_env,
+                    failed_let_names,
+                    declared_signatures,
+                    errors,
+                );
             }
             last
         }
         deep::Expr::UnknownForm(data) => {
             for child in &data.children {
-                validate_ir_expr(child, type_env, static_env, failed_let_names, errors);
+                validate_ir_expr(
+                    child,
+                    type_env,
+                    static_env,
+                    failed_let_names,
+                    declared_signatures,
+                    errors,
+                );
             }
             StaticValue::Unknown
         }
@@ -2051,6 +2142,9 @@ pub(super) fn validate_ir_builtin_symbolic_requirements(
     failed_let_names: &UnordSet<String>,
     errors: &mut DiagnosticSink<'_>,
 ) {
+    if crate::shape_class(func_name) == crate::ShapeClass::Identity {
+        validate_identity_builtin_rank_requirements(list, func_name, type_env, errors);
+    }
     match func_name {
         "conv2d" => validate_conv2d_symbolic_requirements(list, type_env, failed_let_names, errors),
         "mean" if ir_builtin_axis_dim(list, type_env, 0, 1) == Some(DeepDimKind::NonConcrete) => {
@@ -2434,9 +2528,12 @@ pub(super) fn conv2d_output_extent(
 /// shape-PRESERVING unary and binary point-wise ops (relu, tanh,
 /// add, mul, etc.) so the canonical CNN layer pattern
 /// `y = relu(conv2d(...))` chains correctly into a downstream
-/// `conv2d(&y, ...)` (RT-205 round-2 F2). Reductions and movement
-/// ops are intentionally NOT handled here; they would need a
-/// separate per-op derivation because they change rank or shape.
+/// `conv2d(&y, ...)` (RT-205 round-2 F2). Reductions and most movement
+/// ops are intentionally NOT handled here; they need separate per-op
+/// derivation because they change rank or shape. The rank-only `stride`
+/// and `expand` arms below exist so a downstream identity op cannot lose a
+/// provable rank fact merely because the intermediate's exact runtime extents
+/// are not statically known.
 ///
 /// Returns `None` when the call shape is unrecognized, the args are
 /// non-concrete, or the derived output would be ill-formed (in which
@@ -2456,6 +2553,8 @@ pub(super) fn derive_ir_builtin_output_type(
     let func_name = active_ir_builtin_name(list, static_env)?;
     match func_name {
         "conv2d" => derive_conv2d_output_type(list, type_env),
+        "stride" => derive_movement_rank_output_type(list, type_env, 0),
+        "expand" => derive_movement_rank_output_type(list, type_env, 1),
         // Shape-preserving unary point-wise: output type == input type.
         // Each entry below is cross-verified against the lowerer's
         // accepted name set in `crates/chelis-ir/src/lower.rs` (the
@@ -2464,7 +2563,7 @@ pub(super) fn derive_ir_builtin_output_type(
         //
         // Reductions (sum, mean, max_reduce, argmax_reduce,
         // prod_reduce, min_reduce, argmin_reduce) and movement ops
-        // (reshape, permute, gather, pad, shrink, stride, expand) are
+        // (reshape, permute, gather, pad, shrink) are
         // EXCLUDED: they change rank or shape and need per-op
         // derivation.
         //
@@ -2777,79 +2876,6 @@ pub(super) fn ir_builtin_axis_dim(
         .and_then(extract_int_for_dim)?;
     let axis = normalize_static_axis(tensor_dims.len(), raw_axis)?;
     tensor_dims.get(axis).copied()
-}
-
-/// Resolve the tensor type expression of a callsite argument, peeking
-/// through a `(borrow {} <inner>)` wrapper if present.
-///
-/// Surf source idiomatically passes tensors to shape-sensitive IR
-/// builtins via borrows (e.g. the `School.Nn.Conv.conv2d_small` sig
-/// requires `&tensor[...]`). The validator's lookup helpers need to
-/// see through that wrapper to find the underlying tensor type in the
-/// IR type environment; otherwise the dim-concreteness checks in the
-/// `conv2d`, `mean`, and `layer_norm` arms silently no-op on borrowed
-/// inputs (see issue #186).
-pub(super) fn arg_tensor_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<deep::Expr> {
-    let inner = peel_borrow(expr);
-    expr_type_expr(inner, type_env)
-}
-
-pub(super) fn peel_borrow(expr: &deep::Expr) -> &deep::Expr {
-    // Recurses only through nested `borrow` wrappers (shallow in practice),
-    // but guarded for uniformity; bail value is the identity input.
-    stack_guard!("peel_borrow", expr, expr);
-    if let deep::Expr::List(list, _) = expr
-        && get_tag(list) == Some(DeepTag::Borrow)
-        && let Some(child) = children(list).first()
-    {
-        return peel_borrow(child);
-    }
-    expr
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DeepDimKind {
-    Lit(i64),
-    NonConcrete,
-}
-
-pub(super) fn tensor_dims_from_type_expr(expr: &deep::Expr) -> Option<Vec<DeepDimKind>> {
-    let list = match expr {
-        deep::Expr::List(list, _) => list,
-        _ => return None,
-    };
-    if get_tag(list) == Some(DeepTag::TRef) {
-        return children(list).first().and_then(tensor_dims_from_type_expr);
-    }
-    if get_tag(list) != Some(DeepTag::TTensor) {
-        return None;
-    }
-    let kids = children(list);
-    if kids.is_empty() {
-        return None;
-    }
-    let mut dims = Vec::new();
-    for kid in &kids[..kids.len().saturating_sub(1)] {
-        dims.push(match kid {
-            deep::Expr::List(dim_list, _) if get_tag(dim_list) == Some(DeepTag::DLit) => {
-                match children(dim_list).first() {
-                    Some(deep::Expr::Atom(deep::Atom::Int(n), _)) => DeepDimKind::Lit(*n),
-                    _ => DeepDimKind::NonConcrete,
-                }
-            }
-            _ => DeepDimKind::NonConcrete,
-        });
-    }
-    Some(dims)
-}
-
-pub(super) fn type_expr_is_ir_concrete(expr: &deep::Expr) -> bool {
-    match expr {
-        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::TPrim) => true,
-        _ => tensor_dims_from_type_expr(expr)
-            .map(|dims| dims.iter().all(|d| matches!(d, DeepDimKind::Lit(_))))
-            .unwrap_or(false),
-    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────

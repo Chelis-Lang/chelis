@@ -74,6 +74,7 @@ mod expr_record;
 mod expr_transform;
 mod program;
 pub(crate) mod recursion;
+mod shape_honesty;
 mod static_value;
 mod validate;
 

@@ -440,23 +440,29 @@ impl CEmitter {
     /// out when a movement-op runtime wildcard is involved (wildcards
     /// unify permissively, spec §4.5).
     ///
-    /// Scope: every operand pair is compared at EQUAL rank only — a rank-0
-    /// operand against a rank-N one is the backend's established
-    /// scalar-broadcast idiom on the strided path (`chelis_indices_to_flat`
-    /// with rank 0 resolves to element 0) and must not abort. The all-pairs
-    /// form matters for `FusedElem`: its first external input can be scalar,
-    /// so comparing only against that input would miss disagreement between
-    /// later tensor inputs. Skipped entirely when every extent of the output
-    /// and all inputs is a static literal: the checker proved those equal, and
-    /// fully static codegen stays byte-identical.
+    /// Scope: every positive-rank operand pair must have equal rank before
+    /// shape comparison. Rank-0 operands remain the backend's explicit scalar
+    /// input representation (for example, constants inside a fused kernel),
+    /// so this defensive guard does not reinterpret them as source-level
+    /// broadcasting. The all-pairs form matters for `FusedElem`: its first
+    /// external input can be scalar, so comparing only against that input
+    /// would miss disagreement between later tensor inputs. Fully static,
+    /// already-compatible input shapes stay byte-identical.
     fn emit_elementwise_operand_guard(&mut self, node: &DagNode, dag: &Dag) {
         let dims_static = |dims: &[DimInfo]| dims.iter().all(|d| matches!(d, DimInfo::Lit(_)));
-        let all_static = dims_static(&node.output_type.dims)
-            && node.inputs.iter().all(|input| {
-                dag.get(*input)
-                    .is_some_and(|n| dims_static(&n.output_type.dims))
-            });
-        if all_static || node.inputs.len() < 2 {
+        let input_dims = node
+            .inputs
+            .iter()
+            .filter_map(|input| dag.get(*input).map(|n| n.output_type.dims.as_slice()))
+            .collect::<Vec<_>>();
+        let all_static =
+            dims_static(&node.output_type.dims) && input_dims.iter().all(|dims| dims_static(dims));
+        let statically_compatible = input_dims.iter().enumerate().all(|(left_index, left)| {
+            input_dims[left_index + 1..]
+                .iter()
+                .all(|right| left.is_empty() || right.is_empty() || left == right)
+        });
+        if (all_static && statically_compatible) || node.inputs.len() < 2 {
             return;
         }
         let id = node.id.0;
@@ -465,7 +471,10 @@ impl CEmitter {
             for right in &node.inputs[left_index + 1..] {
                 let b = right.0;
                 self.line(&format!(
-                    "if (t{a}->rank == t{b}->rank) {{ for (int __d = 0; __d < t{a}->rank; __d++) {{ \
+                    "if (t{a}->rank > 0 && t{b}->rank > 0 && t{a}->rank != t{b}->rank) {{ \
+                     fprintf(stderr, \"chelis: elementwise operand rank mismatch at node {id}: %d vs %d\\n\", \
+                     t{a}->rank, t{b}->rank); abort(); }} \
+                     if (t{a}->rank == t{b}->rank) {{ for (int __d = 0; __d < t{a}->rank; __d++) {{ \
                      if (t{a}->shape[__d] != t{b}->shape[__d]) {{ fprintf(stderr, \"chelis: \
                      elementwise operand shape mismatch at node {id} axis %d\\n\", __d); abort(); \
                      }} }} }}"
