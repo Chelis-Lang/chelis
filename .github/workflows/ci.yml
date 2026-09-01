@@ -1177,13 +1177,27 @@ jobs:
   # partitions are disjoint before producing their validated timing report.
   # Dtype, generalization, and macOS producers validate and report the same
   # diagnostic thresholds before their own required aggregates.
+  #
+  # Every JUnit producer must have SUCCEEDED. This job downloads nine
+  # named artifacts with no fallback, and a producer that did not finish
+  # uploads none of its own: a hosted-runner allocation failure cancels
+  # the job before its first step, and a producer that dies at its own
+  # upload step leaves the artifact equally absent. Without that gate a
+  # run gains a second red job whose only message is `Artifact not found
+  # for name: junit-macos-workspace-1`, which reads as a repository
+  # defect rather than as the producer failure the required aggregate
+  # already reports. Skipping is safe here and only here: this is a
+  # non-required reporting aggregate, the run is already red from the
+  # producer itself, and each producer separately validates and reports
+  # its own lane timing through scripts/test_timing_check.py. Required
+  # aggregates keep `always()` and stay fail-closed.
   test-telemetry:
     name: CI Test Telemetry
     runs-on: ubuntu-latest
     permissions:
       contents: read
     needs: [changes, workspace-tests-shard, dtype-phase3-oracle, generalize-sweep-oracle-shard, macos-workspace-shard]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') && needs.workspace-tests-shard.result == 'success' && needs.dtype-phase3-oracle.result == 'success' && needs.generalize-sweep-oracle-shard.result == 'success' && needs.macos-workspace-shard.result == 'success' }}
     steps:
       - uses: actions/checkout@v6
 
