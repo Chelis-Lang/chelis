@@ -343,7 +343,9 @@ fn stamp_runtime_expr(raw: RawExpr) -> Result<Expr, StampError> {
 /// A bare identifier here is a name per [03-ROLE-1] (a dtype spelling, a
 /// type parameter), so atoms pass through; a non-empty list must decode
 /// to a vocabulary node, because type syntax is closed and an undecodable
-/// head has no type reading to fall back to.
+/// head has no type reading to fall back to. Nominal applications use the
+/// dedicated recursive type grammar so their argument slots cannot inherit
+/// the broader `Type` role and admit rank spreads ([04-ADT-4]).
 pub(crate) fn stamp_type(raw: RawExpr) -> Result<Expr, StampError> {
     match raw {
         RawExpr::Atom(atom, span) => Ok(Expr::Atom(convert_atom(atom), span)),
@@ -621,6 +623,14 @@ fn decode_list_head(elements: &[RawExpr]) -> (FormIdentity, Option<DeepTag>) {
 
 /// Build a Node from a raw list whose head decoded as `tag`.
 fn build_node(tag: DeepTag, elements: Vec<RawExpr>, span: Span) -> Result<Expr, StampError> {
+    // A nominal application carries its own recursive child grammar wherever
+    // it is decoded, including inside `type:` metadata that crosses a Syntax
+    // role. Centralizing the dispatch here prevents those alternate carriers
+    // from reopening rank spreads in nominal argument slots (chelis#1125).
+    if tag == DeepTag::TAdt {
+        return build_type_node(tag, elements, span);
+    }
+
     if elements.len() < 2 {
         return Err(StampError {
             kind: StampErrorKind::MissingMetaMap,
