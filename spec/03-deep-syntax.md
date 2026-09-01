@@ -885,7 +885,7 @@ Node        ← '(' Spacing Tag Spacing Meta Spacing Children ')' Spacing
 Tag         ← [a-z] [a-z0-9-]*                    # lowercase, hyphens allowed (pat-var, t-fn, etc.)
 Meta        ← '{' Spacing (MetaPair (',' Spacing MetaPair)*)? '}'
 MetaPair    ← MetaKey ':' Spacing MetaValue
-MetaKey     ← [a-z_] [A-Za-z0-9_]*                # §1.1 owns the key charset
+MetaKey     ← [A-Za-z_] [A-Za-z0-9_]*              # §1.1's declared charset
 MetaValue   ← Meta / Node / Literal / Identifier / TypeName
 Children    ← (Child Spacing)*
 Child       ← Node / BareList / Meta / BareName / Literal

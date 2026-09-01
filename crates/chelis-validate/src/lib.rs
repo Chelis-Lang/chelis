@@ -1153,6 +1153,27 @@ mod tests {
         }
     }
 
+    /// §1.1 declares the metadata key charset as `[A-Za-z_][A-Za-z0-9_]*`.
+    /// `dtype_bounds` needs the underscore; §7's PEG and this grammar are the
+    /// two implementations that have to agree with that sentence.
+    #[test]
+    fn deep_admits_the_declared_metadata_key_charset() {
+        for key in [
+            "dtype_bounds",
+            "chelis_role",
+            "surf_path",
+            "_leading",
+            "Upper",
+        ] {
+            let source = format!("(defsig {{{key}: x}} f (t-var {{}} p))\n");
+            validate_deep(&source)
+                .unwrap_or_else(|e| panic!("`{key}` is a legal metadata key: {e}"));
+        }
+        // The no-hyphen rule that keeps Deep symbols portable still holds.
+        validate_deep("(defsig {has-hyphen: x} f (t-var {} p))\n")
+            .expect_err("a hyphenated metadata key must still be rejected");
+    }
+
     /// The whole path the red team exercised: desugar a bounded declaration
     /// the way `chelis deep` does, print it, and validate the result. This is
     /// the control whose absence let the grammar regression reach a green

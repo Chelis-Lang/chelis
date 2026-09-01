@@ -55,7 +55,7 @@ FROZEN_FILE_DIGESTS = {
         "5552e1e7d63da4ca59fc5f69e7555877474e50d92f616c05e989b172c5e63cbb"
     ),
     "spec/03-deep-syntax.md": (
-        "e072d61a7492e26ede48691f38ea15d8d138a4a8f5ae4566a5a26894241d210a"
+        "6f1c879bc89ab901fff658b63457a6846e5b6f8ab6ea4a17fd24ec6da0427bd2"
     ),
     "spec/04-type-system.md": (
         "b8e504c9980b4ac1556fc918449ca2c636d28bfb3fd2b82bdcce083fb7b23a23"
@@ -79,7 +79,7 @@ FROZEN_FILE_DIGESTS = {
         "4a6013c2dc5a074d19ae12696c109a35218facfdb423d29ff07cef79fe6689b9"
     ),
     "spec/design/dtype_semantics.md": (
-        "fda55c86b7333e54febc2e599479d3f3ba3db3cb722ecce7cf385c9bf3af1e5e"
+        "a2499fba4dabba15a7019345642f98cb1a50ef6dd36edc9696afe628a3a8c146"
     ),
     "spec/design/implicit_linearity.md": (
         "f03302f4b328841d79824f6326f1edf2e954a9b98c0118992d4a3a1f2dfb67cf"
@@ -811,6 +811,10 @@ def validate_normative_contract(
                 "| `dtype_bounds` | metadata map | Dtype-family bounds on a "
                 "`defsig`'s binders; see §2.2 |",
                 "Deep dtype-family bound metadata key",
+            ),
+            (
+                "MetaKey     \u2190 [A-Za-z_] [A-Za-z0-9_]*",
+                "Deep grammar derives the declared metadata key charset",
             ),
             (
                 "MetaValue   \u2190 Meta / Node / Literal / Identifier / TypeName",

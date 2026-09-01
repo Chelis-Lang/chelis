@@ -1386,12 +1386,13 @@ no nested-`Meta` alternative and `MetaKey` admitted no underscore, so
 `{dtype_bounds: {p: int}}` was underivable on both counts, and
 `chelis validate --deep` - the second implementation of that grammar, in
 `crates/chelis-validate/src/deep.pest` - rejected every migrated stdlib module.
-Both productions are corrected, the validator's `meta_value` gains the same
-alternative, and its Surf grammar gains the binder list so the new syntax is
+Both productions are corrected to §1.1's declared charset and to admit a
+nested map, the validator's `meta_value` and `meta_key` gain the same two
+allowances, and its Surf grammar gains the binder list so the new syntax is
 not carried by that validator's "grammar rejects, parser accepts" rescue. The
 `MetaKey` correction is not new latitude: §1.1 has always declared the key
-charset, and `chelis_role`, `surf_path`, and `property_quantifiers` already
-relied on it. Separately, §5.9's stdlib obligation cited §5.4, whose rows are
+charset as `[A-Za-z_][A-Za-z0-9_]*`, and `chelis_role`, `surf_path`, and
+`property_quantifiers` already relied on it while §7 derived none of them. Separately, §5.9's stdlib obligation cited §5.4, whose rows are
 operation classes rather than signatures; it now cites the `[05-OP-35]`
 registry domain, which is the authority its next sentence already named and the
 one that actually derives every declared bound. This moves the v0.19.0

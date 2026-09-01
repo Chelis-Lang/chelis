@@ -7,7 +7,9 @@ unit_list = { "(" ~ spacing ~ ")" ~ spacing }
 meta = { "{" ~ spacing ~ (meta_pair ~ ("," ~ spacing ~ meta_pair)*)? ~ spacing ~ "}" }
 typed_meta = { "{" ~ spacing ~ "type" ~ spacing ~ ":" ~ spacing ~ meta_value ~ ("," ~ spacing ~ meta_pair)* ~ spacing ~ "}" }
 meta_pair = { meta_key ~ spacing ~ ":" ~ spacing ~ meta_value }
-meta_key = @{ ident_segment }
+// spec/03-deep-syntax.md §1.1: `[A-Za-z_][A-Za-z0-9_]*`. Wider than
+// `ident_segment`, which forbids an uppercase initial.
+meta_key = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 meta_value = { meta | bare_list | typed_helper | node | unit_list | literal | bare_name }
 bare_list = { "(" ~ spacing ~ (bare_list_item ~ spacing)* ~ ")" ~ spacing }
 bare_list_item = { typed_helper | node | unit_list | literal | bare_name }

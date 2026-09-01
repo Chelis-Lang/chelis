@@ -3878,6 +3878,21 @@ class ContractValidationTests(unittest.TestCase):
             "Deep grammar derives a map-valued metadata key"
         )
 
+    def test_deep_grammar_must_derive_the_declared_metadata_key_charset(
+        self,
+    ) -> None:
+        # §1.1 declares `[A-Za-z_][A-Za-z0-9_]*`; the pre-#1417 §7 production
+        # was `[a-z]+`, which derives neither `dtype_bounds` nor the four
+        # underscored keys already shipping.
+        self.replace(
+            Path("spec/03-deep-syntax.md"),
+            "MetaKey     \u2190 [A-Za-z_] [A-Za-z0-9_]*",
+            "MetaKey     \u2190 [a-z]+",
+        )
+        self.assert_contract_fails(
+            "Deep grammar derives the declared metadata key charset"
+        )
+
     def test_stdlib_bound_obligation_cannot_cite_the_operation_class_table(
         self,
     ) -> None:
