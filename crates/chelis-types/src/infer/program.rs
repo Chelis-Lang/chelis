@@ -1662,6 +1662,9 @@ fn prebind_source_ordered_signature_for_declaration(
     source_ordered_signatures: &SourceOrderedValueSignatures,
     env: &mut Env,
 ) {
+    let Some((DeepTag::Def, _, _)) = stamped_parts(expr) else {
+        return;
+    };
     let Some(name) = top_level_decl_name(expr) else {
         return;
     };

@@ -3,7 +3,10 @@
 
 use chelis_deep::parse_and_stamp;
 use chelis_surf::{desugar::desugar_program, parser::parse_str as parse_surf};
-use chelis_types::{TypeEnv, check_ir_program, check_ir_with_context, check_typed_program};
+use chelis_types::{
+    TypeEnv, build_type_env_from_library, check_ir_program, check_ir_with_context,
+    check_typed_program,
+};
 
 type Diagnostics = Vec<(String, String)>;
 
@@ -141,6 +144,30 @@ value: int32 = 7
 "#,
     );
     assert_rejects_identically(&program, "UnboundVariable", "later declared value");
+}
+
+#[test]
+fn a_separated_defsig_does_not_publish_a_future_eager_value() {
+    let program = deep_program(
+        "(defsig {} later (t-prim {} int32))\n\n\
+         (def {} capture (var {} later))\n\n\
+         (def {} later (lit {type: (t-prim {} int32)} 7))\n",
+    );
+    assert_rejects_identically(&program, "UnboundVariable", "separated future eager defsig");
+}
+
+#[test]
+fn a_separated_defsig_preserves_a_prior_context_binding_until_its_def() {
+    let library = deep_program("(def {} value (lit {type: (t-prim {} f32)} 1.0))\n");
+    let context = build_type_env_from_library(&library).expect("library context checks cleanly");
+    let program = deep_program(
+        "(defsig {} value (t-prim {} int32))\n\n\
+         (defsig {} capture (t-prim {} f32))\n\n\
+         (def {} capture (var {} value))\n\n\
+         (def {} value (lit {type: (t-prim {} int32)} 7))\n",
+    );
+    check_ir_with_context(&context, &program)
+        .expect("the prior f32 binding must remain visible until the new value def");
 }
 
 #[test]
