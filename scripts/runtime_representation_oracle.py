@@ -33,7 +33,7 @@ DTYPE_MUTATION_SOURCE = Path("crates/chelis-vocab/src/lib.rs")
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "8e48f40e30267db7529806c930f24244bc043861ed073260cbe5617160eca262"
+FREEZE_SHA256 = "221f337c6c0c6668bbafeec7ea023ad5c60b43d7169b3a03b40f49f8ada225d0"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -940,6 +940,16 @@ def mutate_cxx_enclosing_namespace(source: str) -> str:
     )
 
 
+def mutate_c_carrier_expression(source: str) -> str:
+    anchor = (
+        "static inline float chelis_sum_f32("
+        "const float * CHELIS_RESTRICT data, int n) {\n"
+    )
+    if source.count(anchor) != 1:
+        raise OracleFailure("C carrier expression anchor drifted")
+    return source.replace(anchor, anchor + "    (void)data;\n", 1)
+
+
 def mutate_c_atomic_element_pointer(source: str) -> str:
     anchor = "    float *C,"
     if source.count(anchor) < 1:
@@ -985,6 +995,18 @@ def mutate_objc_pointer_return(source: str) -> str:
         "RuntimeRepresentationPhase0Provider",
         "@interface RuntimeRepresentationPhase0Provider\n"
         "- (float *)runtimeRepresentationPhase0Values;\n"
+        "@end",
+    )
+
+
+def mutate_objc_numeric_ivar(source: str) -> str:
+    return _append_probe(
+        source,
+        "RuntimeRepresentationPhase0IvarProvider",
+        "@interface RuntimeRepresentationPhase0IvarProvider {\n"
+        "@public\n"
+        "    float *runtimeRepresentationPhase0Ivar;\n"
+        "}\n"
         "@end",
     )
 
@@ -1198,6 +1220,11 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
         ),
         MutationProbe(
             "raw-element-pointer",
+            Path("crates/chelis-runtime/include/chelis_simd.h"),
+            mutate_c_carrier_expression,
+        ),
+        MutationProbe(
+            "raw-element-pointer",
             Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
             mutate_c_atomic_element_pointer,
         ),
@@ -1220,6 +1247,11 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
             "raw-element-pointer",
             Path("crates/chelis-backend-metal/runtime/chelis_metal_runtime.h"),
             mutate_objc_pointer_return,
+        ),
+        MutationProbe(
+            "raw-element-pointer",
+            Path("crates/chelis-backend-metal/runtime/chelis_metal_runtime.h"),
+            mutate_objc_numeric_ivar,
         ),
         MutationProbe(
             "raw-element-pointer",

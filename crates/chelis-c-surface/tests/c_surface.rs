@@ -51,7 +51,7 @@ static size_t qualified_sizeof(void) {
 "#;
 
     let rows = scan_c_source(source, "fixture").expect("valid C-family source parses");
-    assert_eq!(signatures(&rows, "raw-element-pointer").len(), 4);
+    assert!(signatures(&rows, "raw-element-pointer").len() >= 4);
     assert_eq!(signatures(&rows, "width-arithmetic").len(), 2);
     assert!(
         signatures(&rows, "raw-element-pointer")
@@ -61,7 +61,7 @@ static size_t qualified_sizeof(void) {
     assert!(
         signatures(&rows, "raw-element-pointer")
             .iter()
-            .any(|signature| signature.contains("shape=cast-pointer"))
+            .any(|signature| signature.contains("ast=CStyleCastExpr"))
     );
 }
 
@@ -369,6 +369,100 @@ fn objective_c_method_results_use_the_same_structural_result_path() {
 }
 
 #[test]
+fn every_typed_declaration_category_is_admitted_structurally() {
+    let source = r#"
+float *global_value;
+struct RuntimeRepresentationRecord {
+    float *field_value;
+};
+typedef float *PointerTypedef;
+using PointerAlias = float *;
+template<float *TemplateValue>
+struct PointerTemplate {};
+@interface RuntimeRepresentationProvider {
+@public
+    float *ivar_value;
+}
+@property float *property_value;
+@end
+extern void consume(float *parameter_value);
+"#;
+    let rows = scan_c_source_at_path(
+        source,
+        "fixture.mm",
+        Path::new("fixture.mm"),
+        &collect_c_aliases(source),
+    )
+    .expect("every declaration category parses in Objective-C++");
+
+    for name in [
+        "global_value",
+        "field_value",
+        "PointerTypedef",
+        "PointerAlias",
+        "TemplateValue",
+        "ivar_value",
+        "property_value",
+        "parameter_value",
+    ] {
+        assert!(
+            rows.iter().any(|row| {
+                row.owner.contains(name) || row.signature.contains(&format!("name={name}"))
+            }),
+            "typed declaration {name} disappeared from the structural inventory: {rows:#?}"
+        );
+    }
+}
+
+#[test]
+fn numeric_carrier_expressions_are_admitted_by_ast_category_not_cast_kind() {
+    let rows = scan_c_source(
+        r#"
+static float *identity(float *payload) {
+    return payload;
+}
+"#,
+        "fixture",
+    )
+    .expect("valid pointer expression parses");
+
+    assert!(
+        rows.iter()
+            .any(|row| row.signature.contains("context=expression")),
+        "numeric carrier expressions still depend on a positive cast-kind list: {rows:#?}"
+    );
+}
+
+#[test]
+fn repeated_carrier_expressions_preserve_multiplicity_without_location_identity() {
+    let once = scan_c_source(
+        "static float *identity(float *payload) { payload; return payload; }",
+        "fixture",
+    )
+    .expect("single pointer use parses");
+    let twice = scan_c_source(
+        "static float *identity(float *payload) { payload; payload; return payload; }",
+        "fixture",
+    )
+    .expect("repeated pointer use parses");
+    assert!(
+        signatures(&twice, "raw-element-pointer").len()
+            > signatures(&once, "raw-element-pointer").len(),
+        "an identical carrier expression was deduplicated: once={once:#?}, twice={twice:#?}"
+    );
+
+    let shifted = scan_c_source(
+        "\n\nstatic float *identity(float *payload) { payload; return payload; }",
+        "fixture",
+    )
+    .expect("line-shifted pointer use parses");
+    assert_eq!(
+        once, shifted,
+        "source locations leaked into structural expression identity"
+    );
+}
+
+#[test]
 fn active_preprocessor_branch_cannot_hide_a_cxx_rvalue_reference() {
     let rows = scan_c_source(
         r#"
@@ -460,6 +554,43 @@ fn repository_alias_prelude_resolves_types_declared_in_included_headers() {
 }
 
 #[test]
+fn repository_alias_prelude_preserves_complete_carrier_shape() {
+    let aliases = collect_c_aliases(
+        r#"
+typedef float *runtime_pointer;
+typedef double runtime_array[4];
+typedef int (*runtime_callback)(float);
+"#,
+    );
+    let source = r#"
+extern void consume_pointer(runtime_pointer payload);
+extern void consume_array(runtime_array payload);
+extern void consume_callback(runtime_callback payload);
+"#;
+    let rows = scan_c_source_at_path(source, "fixture.cpp", Path::new("fixture.cpp"), &aliases)
+        .expect("cross-file carrier aliases parse");
+
+    assert!(
+        rows.iter()
+            .any(|row| row.signature.contains("name=payload")),
+        "cross-file pointer, array, and callback aliases lost their carrier shape: {rows:#?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.signature.contains("float *")),
+        "pointer alias lost its canonical shape: {rows:#?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.signature.contains("double[4]")),
+        "array alias lost its canonical extent: {rows:#?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.signature.contains("int (*)(float)")),
+        "function-pointer alias lost its callable signature: {rows:#?}"
+    );
+}
+
+#[test]
 fn nested_sizeof_type_names_are_parsed_without_confusing_expressions() {
     let source = r#"
 static size_t widths(float *payload, size_t index) {
@@ -492,7 +623,15 @@ fn the_compiler_prelude_supports_the_c_dialect() {
     )
     .expect("C11 source parses with the compiler prelude");
 
-    assert_eq!(signatures(&rows, "raw-element-pointer").len(), 1);
+    let raw = signatures(&rows, "raw-element-pointer");
+    assert!(
+        raw.iter()
+            .any(|signature| signature.contains("context=declaration"))
+    );
+    assert!(
+        raw.iter()
+            .any(|signature| signature.contains("context=expression"))
+    );
     assert_eq!(signatures(&rows, "width-arithmetic").len(), 1);
 }
 
@@ -505,7 +644,19 @@ static int arithmetic(int a, int b) { return a * b; }
 static int dereference(int *p) { return *p; }
 "#;
     let rows = scan_c_source(source, "fixture").expect("ordinary expressions parse");
-    assert_eq!(signatures(&rows, "raw-element-pointer").len(), 1);
+    let raw = signatures(&rows, "raw-element-pointer");
+    assert_eq!(
+        raw.iter()
+            .filter(|signature| signature.contains("context=declaration"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        raw.iter()
+            .filter(|signature| signature.contains("context=expression"))
+            .count(),
+        2
+    );
     assert!(signatures(&rows, "width-arithmetic").is_empty());
 }
 

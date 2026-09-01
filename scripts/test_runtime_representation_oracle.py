@@ -126,10 +126,10 @@ static size_t qualified_sizeof(void) { return sizeof(const float); }
             path.parent.mkdir(parents=True)
             path.write_text(source, encoding="utf-8")
             rows = oracle.c_surface_inventory_rows(root, (relative,))
-        self.assertEqual(
-            sum(kind == "raw-element-pointer" for kind, *_ in rows),
-            4,
-        )
+        raw = [signature for kind, _, _, signature in rows if kind == "raw-element-pointer"]
+        self.assertGreaterEqual(len(raw), 4)
+        self.assertTrue(any("context=declaration" in signature for signature in raw))
+        self.assertTrue(any("context=expression" in signature for signature in raw))
         self.assertEqual(
             sum(kind == "width-arithmetic" for kind, *_ in rows),
             1,
@@ -330,11 +330,13 @@ class MutationContractTests(unittest.TestCase):
                 "mutate_cxx_reference_and_template",
                 "mutate_c_declaration_relocation",
                 "mutate_cxx_enclosing_namespace",
+                "mutate_c_carrier_expression",
                 "mutate_c_atomic_element_pointer",
                 "mutate_cxx_rvalue_reference",
                 "mutate_c_complete_declarator_shapes",
                 "mutate_c_pointer_return",
                 "mutate_objc_pointer_return",
+                "mutate_objc_numeric_ivar",
                 "mutate_rust_dynamic_c_pointer",
                 "mutate_rust_positional_and_macro_rules_pointer",
                 "mutate_rust_split_c_pointer",
@@ -383,6 +385,30 @@ class MutationContractTests(unittest.TestCase):
             rows = oracle.inventory_rows(oracle.REPO_ROOT)
             with self.assertRaisesRegex(oracle.OracleFailure, "unclassified inventory hit"):
                 oracle.validate_baseline(baseline, rows)
+
+    def test_objc_ivar_and_repeated_c_expression_are_unclassified(self) -> None:
+        baseline = oracle.load_baseline()
+        for relative, mutate in [
+            (
+                "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
+                oracle.mutate_objc_numeric_ivar,
+            ),
+            (
+                "crates/chelis-runtime/include/chelis_simd.h",
+                oracle.mutate_c_carrier_expression,
+            ),
+        ]:
+            with self.subTest(mutation=mutate.__name__):
+                path = oracle.REPO_ROOT / relative
+                original = path.read_bytes()
+                with oracle.temporary_mutation(path, mutate):
+                    rows = oracle.inventory_rows(oracle.REPO_ROOT)
+                    with self.assertRaisesRegex(
+                        oracle.OracleFailure,
+                        "unclassified inventory hit",
+                    ):
+                        oracle.validate_baseline(baseline, rows)
+                self.assertEqual(path.read_bytes(), original)
 
     def test_incomplete_dtype_mutation_creates_one_unclassified_identity(self) -> None:
         baseline = oracle.load_baseline()

@@ -435,6 +435,28 @@ fn tokens(source: &str) -> Vec<String> {
     lex_c_tokens(source)
 }
 
+const ALIAS_DEFINITION_PREFIX: &str = "__chelis_alias_definition_";
+
+fn encode_alias_definition(definition: &str) -> String {
+    let mut encoded = String::from(ALIAS_DEFINITION_PREFIX);
+    for byte in definition.as_bytes() {
+        encoded.push_str(&format!("{byte:02x}"));
+    }
+    encoded
+}
+
+fn decode_alias_definition(word: &str) -> Option<String> {
+    let encoded = word.strip_prefix(ALIAS_DEFINITION_PREFIX)?;
+    if encoded.len() % 2 != 0 {
+        return None;
+    }
+    let bytes = (0..encoded.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&encoded[index..index + 2], 16).ok())
+        .collect::<Option<Vec<_>>>()?;
+    String::from_utf8(bytes).ok()
+}
+
 pub fn collect_typedefs(text: &str) -> BTreeMap<String, Vec<String>> {
     let mut aliases = BTreeMap::new();
     collect_aggregate_typedefs(text, &mut aliases);
@@ -455,13 +477,15 @@ pub fn collect_typedefs(text: &str) -> BTreeMap<String, Vec<String>> {
             continue;
         }
         if rest.contains('(') {
-            if let Some((name, target)) = function_pointer_typedef(&statement) {
+            if let Some((name, mut target)) = function_pointer_typedef(&statement) {
+                target.push(encode_alias_definition(&format!("{statement};")));
                 merge_alias_words(&mut aliases, name, target);
             }
             continue;
         }
         if rest.contains('[') {
-            if let Some((name, target)) = array_typedef(&statement) {
+            if let Some((name, mut target)) = array_typedef(&statement) {
+                target.push(encode_alias_definition(&format!("{statement};")));
                 merge_alias_words(&mut aliases, name, target);
             }
             continue;
@@ -479,6 +503,7 @@ pub fn collect_typedefs(text: &str) -> BTreeMap<String, Vec<String>> {
             {
                 words.truncate(1);
             }
+            words.push(encode_alias_definition(&format!("{statement};")));
             merge_alias_words(&mut aliases, name, words);
         }
     }
@@ -593,7 +618,12 @@ pub fn resolve_words(words: Vec<String>, aliases: &BTreeMap<String, Vec<String>>
         let mut next = Vec::with_capacity(output.len());
         for word in &output {
             if let Some(target) = aliases.get(word) {
-                next.extend(target.iter().cloned());
+                next.extend(
+                    target
+                        .iter()
+                        .filter(|word| decode_alias_definition(word).is_none())
+                        .cloned(),
+                );
                 changed = true;
             } else {
                 next.push(word.clone());
@@ -662,11 +692,12 @@ fn collect_macro_aliases(source: &str) -> BTreeMap<String, Vec<String>> {
             };
             replacement = &replacement[close + 1..];
         }
-        let words: Vec<String> = tokens(replacement)
+        let mut words: Vec<String> = tokens(replacement)
             .into_iter()
             .filter(|token| is_identifier(token))
             .collect();
         if !words.is_empty() {
+            words.push(encode_alias_definition(line.trim()));
             merge_alias_words(&mut aliases, name.to_string(), words);
         }
     }
@@ -790,7 +821,12 @@ fn resolve_words_checked(
         let mut next = Vec::with_capacity(output.len());
         for word in &output {
             if let Some(target) = aliases.get(word) {
-                next.extend(target.iter().cloned());
+                next.extend(
+                    target
+                        .iter()
+                        .filter(|word| decode_alias_definition(word).is_none())
+                        .cloned(),
+                );
                 changed = true;
             } else {
                 next.push(word.clone());
@@ -1755,6 +1791,17 @@ fn declaration_tokens(entity: Entity<'_>) -> String {
         .unwrap_or_default()
 }
 
+const INTERNAL_SOURCE_RANGE_MARKER: &str = ";__source-range=";
+
+fn internal_source_range(entity: Entity<'_>) -> String {
+    let Some(range) = entity.get_range() else {
+        return "0..0".to_string();
+    };
+    let start = range.get_start().get_expansion_location().offset;
+    let end = range.get_end().get_expansion_location().offset;
+    format!("{start}..{end}")
+}
+
 fn is_numeric_type_spelling(spelling: &str) -> bool {
     let words = tokens(spelling);
     words.iter().any(|word| {
@@ -1782,9 +1829,18 @@ fn has_carrier_shape(ty: Type<'_>) -> bool {
 
 fn type_is_numeric_carrier(entity: Entity<'_>, ty: Type<'_>, source: &str) -> bool {
     let authored = authored_type_identity(entity, ty, source);
-    if authored
-        .split_whitespace()
-        .any(|word| EXTERNAL_NONNUMERIC_C_TYPES.contains(&word))
+    let exposed = ty.get_display_name();
+    if [&authored, &exposed].into_iter().any(|spelling| {
+        tokens(spelling)
+            .iter()
+            .any(|word| EXTERNAL_NONNUMERIC_C_TYPES.contains(&word.as_str()))
+    }) || (tokens(&authored).iter().any(|word| word == "char")
+        && !tokens(&authored).iter().any(|word| {
+            matches!(
+                word.as_str(),
+                "int8_t" | "uint8_t" | "int_fast8_t" | "uint_fast8_t"
+            )
+        }))
     {
         return false;
     }
@@ -1869,22 +1925,30 @@ fn compiler_signature(
     let name = entity
         .get_name()
         .unwrap_or_else(|| "<abstract>".to_string());
-    let shape = if is_pointer_cast(entity) {
-        "cast-pointer"
+    let context = if entity.is_declaration() {
+        "declaration"
+    } else if entity.is_expression() {
+        "expression"
     } else {
-        declaration_shape(ty)
+        "typed-entity"
     };
     let mut signature = format!(
-        "shape={};resolved={};authored={};name={name};declarator={};enclosing={owner}",
-        shape,
+        "context={context};ast={:?};shape={};resolved={};authored={};name={name};declarator={};enclosing={owner}",
+        entity.get_kind(),
+        declaration_shape(ty),
         canonical.get_display_name(),
         authored_type_identity(entity, ty, source),
         declarator_details(entity, source),
     );
+    if entity.is_expression() {
+        signature.push_str(&format!(";expression={}", declaration_tokens(entity)));
+    }
     if let Some(context) = authored_context {
         signature.push_str(";emitted=");
         signature.push_str(&emitted_context_identity(context));
     }
+    signature.push_str(INTERNAL_SOURCE_RANGE_MARKER);
+    signature.push_str(&internal_source_range(entity));
     signature
 }
 
@@ -1914,6 +1978,8 @@ fn compiler_return_signature(
         signature.push_str(";emitted=");
         signature.push_str(&emitted_context_identity(context));
     }
+    signature.push_str(INTERNAL_SOURCE_RANGE_MARKER);
+    signature.push_str(&internal_source_range(entity));
     signature
 }
 
@@ -1966,11 +2032,14 @@ fn structural_owner_path(entity: Entity<'_>, source_owner: &str) -> Option<Strin
     let mut names = Vec::new();
     let mut current = Some(entity);
     while let Some(candidate) = current {
-        let parent = candidate.get_semantic_parent();
+        let parent = candidate
+            .get_semantic_parent()
+            .or_else(|| candidate.get_lexical_parent());
         if candidate.get_kind() == EntityKind::TranslationUnit || parent.is_none() {
             break;
         }
-        if candidate.get_name().as_deref() != Some("__chelis_surface_fragment")
+        if candidate.is_declaration()
+            && candidate.get_name().as_deref() != Some("__chelis_surface_fragment")
             && let Some(name) = structural_owner_name(candidate)
         {
             names.push(name);
@@ -1985,40 +2054,6 @@ fn structural_owner_path(entity: Entity<'_>, source_owner: &str) -> Option<Strin
     }
 }
 
-fn is_owner(entity: Entity<'_>) -> bool {
-    entity.get_result_type().is_some()
-        || matches!(
-            entity.get_kind(),
-            EntityKind::Constructor
-                | EntityKind::StructDecl
-                | EntityKind::UnionDecl
-                | EntityKind::ClassDecl
-                | EntityKind::TypedefDecl
-        )
-}
-
-fn is_carrier_declaration(entity: Entity<'_>) -> bool {
-    matches!(
-        entity.get_kind(),
-        EntityKind::ParmDecl
-            | EntityKind::FieldDecl
-            | EntityKind::VarDecl
-            | EntityKind::TypedefDecl
-    )
-}
-
-fn is_pointer_cast(entity: Entity<'_>) -> bool {
-    matches!(
-        entity.get_kind(),
-        EntityKind::CStyleCastExpr
-            | EntityKind::StaticCastExpr
-            | EntityKind::DynamicCastExpr
-            | EntityKind::ReinterpretCastExpr
-            | EntityKind::ConstCastExpr
-            | EntityKind::FunctionalCastExpr
-    )
-}
-
 fn walk_compiler_ast(
     entity: Entity<'_>,
     source_owner: &str,
@@ -2026,12 +2061,24 @@ fn walk_compiler_ast(
     source: &str,
     authored_context: Option<&str>,
     rows: &mut Vec<CarrierUse>,
-) {
+) -> Result<(), ScanError> {
     let in_main_file = entity
         .get_location()
         .is_some_and(|location| location.is_in_main_file());
-    let next_owner = if in_main_file
-        && is_owner(entity)
+    if in_main_file
+        && (!entity.get_kind().is_valid() || entity.get_kind() == EntityKind::NotImplemented)
+    {
+        return Err(ScanError::new(
+            ScanErrorKind::MalformedCandidate,
+            format!(
+                "libclang exposed an unsupported AST entity {:?}: {}",
+                entity.get_kind(),
+                declaration_tokens(entity)
+            ),
+        ));
+    }
+    let structural_owner = if in_main_file
+        && entity.is_declaration()
         && entity.get_name().as_deref() != Some("__chelis_surface_fragment")
     {
         structural_owner_path(entity, source_owner).unwrap_or_else(|| owner.to_string())
@@ -2040,14 +2087,14 @@ fn walk_compiler_ast(
     };
 
     if in_main_file
-        && (is_carrier_declaration(entity) || is_pointer_cast(entity))
+        && (entity.is_declaration() || entity.is_expression())
         && let Some(ty) = entity.get_type()
         && type_is_numeric_carrier(entity, ty, source)
     {
         rows.push(CarrierUse {
             kind: "raw-element-pointer".to_string(),
-            owner: owner.to_string(),
-            signature: compiler_signature(entity, ty, owner, source, authored_context),
+            owner: structural_owner.clone(),
+            signature: compiler_signature(entity, ty, &structural_owner, source, authored_context),
         });
     }
 
@@ -2057,11 +2104,11 @@ fn walk_compiler_ast(
     {
         rows.push(CarrierUse {
             kind: "raw-element-pointer".to_string(),
-            owner: next_owner.clone(),
+            owner: structural_owner.clone(),
             signature: compiler_return_signature(
                 entity,
                 return_type,
-                &next_owner,
+                &structural_owner,
                 source,
                 authored_context,
             ),
@@ -2081,10 +2128,11 @@ fn walk_compiler_ast(
                 .unwrap_or_default();
             rows.push(CarrierUse {
                 kind: "width-arithmetic".to_string(),
-                owner: owner.to_string(),
+                owner: structural_owner.clone(),
                 signature: format!(
-                    "shape=sizeof;resolved={};declaration={spelling}{emitted}",
-                    sizeof_resolved_type(&spelling)
+                    "shape=sizeof;resolved={};declaration={spelling}{emitted}{INTERNAL_SOURCE_RANGE_MARKER}{}",
+                    sizeof_resolved_type(&spelling),
+                    internal_source_range(entity),
                 ),
             });
         }
@@ -2094,11 +2142,28 @@ fn walk_compiler_ast(
         walk_compiler_ast(
             child,
             source_owner,
-            &next_owner,
+            &structural_owner,
             source,
             authored_context,
             rows,
+        )?;
+    }
+    Ok(())
+}
+
+fn preserve_structural_multiplicity(rows: &mut Vec<CarrierUse>) {
+    rows.sort();
+    rows.dedup();
+    let mut occurrences = BTreeMap::new();
+    for row in rows {
+        let marker = row.signature.rfind(INTERNAL_SOURCE_RANGE_MARKER).expect(
+            "compiler-produced carrier identity must retain its internal source range marker",
         );
+        row.signature.truncate(marker);
+        let key = (row.kind.clone(), row.owner.clone(), row.signature.clone());
+        let occurrence = occurrences.entry(key).or_insert(0usize);
+        row.signature.push_str(&format!(";occurrence={occurrence}"));
+        *occurrence += 1;
     }
 }
 
@@ -2215,7 +2280,8 @@ fn compiler_scan(
         &main_source,
         authored_context,
         &mut rows,
-    );
+    )?;
+    preserve_structural_multiplicity(&mut rows);
     rows.sort();
     rows.dedup();
     Ok(rows)
@@ -2250,6 +2316,27 @@ fn validate_supported_arithmetic_spelling(source: &str) -> Result<(), ScanError>
 fn aliases_as_compiler_prelude(aliases: &BTreeMap<String, Vec<String>>) -> String {
     let mut prelude = String::new();
     for (name, words) in aliases {
+        let mut definitions: Vec<String> = words
+            .iter()
+            .filter_map(|word| decode_alias_definition(word))
+            .collect();
+        definitions.sort();
+        definitions.dedup();
+        if let Some(definition) = definitions
+            .iter()
+            .find(|definition| {
+                let definition_tokens = tokens(definition);
+                has_candidate_anchor(&definition_tokens)
+                    && definition_tokens
+                        .iter()
+                        .any(|word| ELEMENT_C_TYPES.contains(&word.as_str()))
+            })
+            .or_else(|| definitions.first())
+        {
+            prelude.push_str(definition);
+            prelude.push('\n');
+            continue;
+        }
         let resolved = resolve_words(words.clone(), aliases);
         let target = if resolved
             .iter()
@@ -2272,9 +2359,6 @@ pub fn scan_c_source_with_aliases(
     owner: &str,
     aliases: &BTreeMap<String, Vec<String>>,
 ) -> Result<Vec<CarrierUse>, ScanError> {
-    if !has_candidate_anchor(&tokens(source)) {
-        return Ok(Vec::new());
-    }
     validate_supported_arithmetic_spelling(source)?;
     validate_c_lexical_closure(source)?;
     validate_balanced(&tokens(source))?;

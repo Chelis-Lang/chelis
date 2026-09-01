@@ -508,6 +508,18 @@ cannot collapse to one identity. The parser evaluates production
 preprocessor configurations explicitly; syntax rejected in every declared
 dialect fails closed rather than disappearing from the inventory.
 
+Carrier admission is category-total rather than an `EntityKind` allow-list.
+Every main-file cursor that libclang categorizes as a declaration or expression
+has its complete type inspected, and every cursor exposing a callable result has
+that result inspected independently. This covers declarations such as
+Objective-C ivars, C++ type aliases, and non-type template parameters without
+teaching the inventory their individual cursor kinds; numeric carrier
+expressions likewise do not depend on an enumerated cast-kind list. An invalid
+or unsupported main-file cursor is an oracle failure. Structurally identical
+hits retain occurrence ordinals so a repeated expression cannot disappear
+through set deduplication, while compiler source offsets stay outside the
+identity so formatting-only line movement does not churn the frozen ledger.
+
 Typedefs (including aggregate definitions) and object-like or function-like
 type macros are collected from every tracked C-family source as a conservative
 include prelude. Every definition of a name contributes to a monotone union:
@@ -515,6 +527,9 @@ a later macro redefinition or block-local typedef can add meaning but cannot
 erase an earlier numeric meaning. This intentionally over-approximates
 preprocessor and lexical scopes; a source-specific definition may expose a
 carrier for review, but it can never launder one out of the inventory.
+The compiler prelude preserves each selected typedef's complete declarator or
+macro definition, including pointer/function-pointer shape and every array
+extent; reducing an alias to only its base type would be a silent carrier loss.
 
 Rust emitters are parsed with `syn`. Ordinary/raw string literals,
 `stringify!` inputs, and `macro_rules!` token trees enter the same C-family
