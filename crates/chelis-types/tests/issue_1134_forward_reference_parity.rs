@@ -1,5 +1,5 @@
-//! chelis#1134 / [04-INF-4]: top-level declaration scope and inference order
-//! are identical at the stamped typed and serialized-IR checker ingresses.
+//! chelis#1134 / [04-INF-4]: top-level eager-value scope is identical at the
+//! stamped typed and serialized-IR checker ingresses.
 
 use chelis_deep::parse_and_stamp;
 use chelis_surf::{desugar::desugar_program, parser::parse_str as parse_surf};
@@ -52,12 +52,12 @@ fn assert_rejects_identically(program: &[chelis_deep::Expr], expected_kind: &str
 }
 
 #[test]
-fn defsig_less_forward_value_reference_is_legal_at_both_ingresses() {
+fn defsig_less_forward_value_reference_rejects_at_both_ingresses() {
     let program = deep_program(
         "(def {} use_base (var {} base))\n\n\
          (def {} base (lit {type: (t-prim {} int32)} 7))\n",
     );
-    assert_accepts_at_both_ingresses(&program, "defsig-less forward value");
+    assert_rejects_identically(&program, "UnboundVariable", "defsig-less forward value");
 }
 
 #[test]
@@ -67,18 +67,6 @@ fn backward_value_reference_remains_legal_at_both_ingresses() {
          (def {} use_base (var {} base))\n",
     );
     assert_accepts_at_both_ingresses(&program, "backward value");
-}
-
-#[test]
-fn bare_forward_generic_helper_is_inferred_before_all_callers() {
-    let program = surf_program(
-        r#"
-def use_int(x: int32) -> int32 = identity(x)
-def use_float(x: f32) -> f32 = identity(x)
-def identity(x) = x
-"#,
-    );
-    assert_accepts_at_both_ingresses(&program, "bare generic forward helper");
 }
 
 #[test]
@@ -92,6 +80,28 @@ def identity(x) = x
 "#,
     );
     assert_accepts_at_both_ingresses(&program, "module generic forward helper");
+}
+
+#[test]
+fn literal_external_input_self_reference_is_legal_at_both_ingresses() {
+    let program = surf_program("x = (x : tensor[4, f32])\n");
+    assert_accepts_at_both_ingresses(&program, "external input self-reference");
+}
+
+#[test]
+fn sequential_let_shadow_does_not_create_a_top_level_dependency() {
+    let program = surf_program(
+        r#"
+module ShadowParity
+def helper() = {
+  result = 1
+  copied = result
+  copied
+}
+result = helper()
+"#,
+    );
+    assert_accepts_at_both_ingresses(&program, "sequential let shadow");
 }
 
 #[test]
@@ -118,4 +128,33 @@ fn eager_top_level_value_cycle_rejects_as_cycle_at_both_ingresses() {
          (def {} second (var {} first))\n",
     );
     assert_rejects_identically(&program, "CycleDetected", "eager value cycle");
+}
+
+#[test]
+fn diagnostics_remain_in_source_order_when_a_value_mentions_a_later_value() {
+    let program = deep_program(
+        "(def {} first\n\
+           (let {}\n\
+             (bind {} dependency (var {} later))\n\
+             (app {} (var {} missing_first))))\n\n\
+         (def {} later (app {} (var {} missing_later)))\n",
+    );
+    let (ir, typed) = diagnostics(&program);
+    assert_eq!(ir, typed, "ingress diagnostics diverged");
+    let messages = ir
+        .iter()
+        .map(|(_, message)| message.as_str())
+        .collect::<Vec<_>>();
+    let first = messages
+        .iter()
+        .position(|message| message.contains("missing_first"))
+        .expect("missing_first diagnostic");
+    let later = messages
+        .iter()
+        .position(|message| message.contains("missing_later"))
+        .expect("missing_later diagnostic");
+    assert!(
+        first < later,
+        "diagnostics must retain source order: {ir:#?}"
+    );
 }

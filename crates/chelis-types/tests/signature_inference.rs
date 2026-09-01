@@ -106,17 +106,16 @@ def caller(a, b: tensor[4, f32]) = {
 }
 
 #[test]
-fn later_helper_is_scheduled_before_earlier_unconstrained_call() {
+fn later_helper_does_not_retroactively_make_earlier_unconstrained_call_read_only() {
     // The call to `helper(a, b)` here is truly unconstrained: no
     // ascription is placed on `z`, so the result type comes solely
-    // from `helper`'s scheme as known when `caller` is analyzed. Under
-    // [04-INF-4], the later textual declaration is inferred first because
-    // `caller` depends on it. Pre-chelis#159 the test had
+    // from `helper`'s scheme as known at the point `caller` is
+    // analyzed (forward reference). Pre-chelis#159 the test had
     // `z: tensor[4, f32]` but the let-binding ascription was silently
     // dropped, masking what the test claimed to assert. Post-fix
-    // dropping the ascription restores the intent: the helper's generalized
-    // scheme, rather than an expected result annotation, is what makes `a`
-    // read-only.
+    // dropping the ascription restores the intent: `z` stays
+    // unconstrained, `a` stays unconstrained, and read-only inference
+    // correctly defaults to owned for the unknown-type param.
     let checked = checked_surf(
         r#"
 def caller(a, b: tensor[4, f32]) = {
@@ -138,7 +137,7 @@ def helper(x, y: tensor[4, f32]) = add(x, y)
         .get("caller")
         .expect("caller metadata");
     assert!(helper.params[0].inferred_read_only);
-    assert!(caller.params[0].inferred_read_only);
+    assert!(!caller.params[0].inferred_read_only);
 }
 
 #[test]
@@ -151,9 +150,13 @@ fn module_wrapped_helper_signature_visible_to_caller_annotation() {
     // `(module {} name ...)` wrappers, which means the helper IS
     // visible at caller-annotation time in the wrapped case.
     //
-    // [04-INF-4] removes the former bare/module asymmetry. This wrapped
-    // control pins the same dependency-first result as the sibling bare
-    // declaration test.
+    // This test pins the post-fix behavior: for a module-wrapped
+    // version of `later_helper_does_not_retroactively_...`, caller's
+    // `a` becomes read-only because helper's read-only-`x` signature
+    // is visible by the time caller is annotated. (Bare-decl
+    // forward-reference semantics stay as-is in the sibling test
+    // above.) Together the two tests document the intentional
+    // asymmetry between bare-decl and module-wrapped programs.
     let checked = checked_surf(
         r#"
 module Foo

@@ -761,18 +761,19 @@ recursive binding group, whether the recursion is direct or mutual.
 > HIP, and Metal paths reject an offending program identically, before any
 > lane-specific stage runs.
 
-#### 3.1.2 Top-level declaration scope
+#### 3.1.2 Top-level value scope
 
-> **[04-INF-4]** A top-level `def` binding SHALL be in scope throughout its
-> exact declaration namespace, independent of textual declaration order.
-> After module, import, and link rewriting have established exact binding
-> identities, inference SHALL process a dependency before every declaration
-> that consumes it; it SHALL NOT resolve a dependency by terminal-name or
-> other fuzzy matching. Dependency scheduling does not change source or
-> emitted declaration order. Local `let` bindings remain sequential. A
-> recursive group containing only function definitions is governed by
-> [04-INF-2] and [04-INF-3]; an eager value cycle is a type error reported as
-> `CycleDetected`, not a recursive binding group.
+> **[04-INF-4]** A top-level non-function `def` SHALL become visible only after
+> its declaration in its exact declaration namespace. A reference to that
+> value from an earlier declaration is a type error reported as
+> `UnboundVariable` at both the
+> stamped typed and serialized-IR checker ingresses; body-type metadata SHALL
+> NOT make that later value visible. An exact literal self-reference `x = x`
+> or ascribed self-reference `x = (x : T)` declares an external input rather
+> than reading an eager value and SHALL remain legal at both ingresses. Local
+> `let` bindings are likewise sequential. Function recursion and inference
+> groups remain governed by [04-INF-2] and [04-INF-3], and an eager value cycle
+> remains a type error reported as `CycleDetected`.
 
 ### 3.2 Inference Rules
 

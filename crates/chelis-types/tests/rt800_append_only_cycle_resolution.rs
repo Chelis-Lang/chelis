@@ -98,10 +98,9 @@ def use_bool() = identity(true)
 }
 
 #[test]
-fn bare_acyclic_later_helper_uses_the_canonical_dependency_schedule() {
-    // Raw Deep carries no synthesized `defsig`, so this locks the same
-    // declaration-level forward-reference rule without relying on Surf
-    // annotations to make the later name visible during collection.
+fn bare_acyclic_later_helper_remains_textually_unavailable() {
+    // Raw Deep carries no synthesized `defsig`; [04-INF-4] does not widen
+    // the existing function-inference contract while aligning eager values.
     let deep = chelis_deep::parser::parse_str(
         r#"
 (def {} caller
@@ -113,6 +112,12 @@ fn bare_acyclic_later_helper_uses_the_canonical_dependency_schedule() {
 "#,
     )
     .expect("Deep fixture parses");
-    let result = check_ir_program(&deep);
-    assert!(result.is_ok(), "bare forward helper must check: {result:?}");
+    let result = check_ir_program(&deep).expect_err("bare forward helper remains unavailable");
+    assert!(
+        result.errors.iter().any(|error| matches!(
+            error.kind,
+            chelis_types::errors::CheckErrorKind::UnboundVariable { .. }
+        ) && error.message.contains("later")),
+        "bare forward helper must reject as unbound: {result:?}"
+    );
 }

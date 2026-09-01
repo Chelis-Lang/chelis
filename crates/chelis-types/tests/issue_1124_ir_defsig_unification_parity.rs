@@ -59,11 +59,10 @@ const MATCHING: &str = "(defsig {} k (t-prim {} f32))\n\n\
 const NO_DEFSIG: &str = "(def {} k (lit {type: (t-prim {} int32)} 1))\n";
 
 /// A `defsig`-less def (`use_base`) that forward-references another
-/// `defsig`-less def (`base`) declared later. chelis#1134 / [04-INF-4] makes
-/// this legal at both ingresses. The authoritative parity coverage lives in
-/// `issue_1134_forward_reference_parity`; this fixture remains the chelis#1124
-/// sentinel that preserving an authored `defsig` never strips the independent
-/// defsig-less cross-reference mechanism.
+/// `defsig`-less def (`base`) declared later. chelis#1134 / [04-INF-4]
+/// requires both ingresses to reject it rather than letting serialized body
+/// metadata manufacture value scope. The authoritative parity coverage lives
+/// in `issue_1134_forward_reference_parity`.
 const DEFSIG_LESS_CROSS_REF: &str = "(def {} use_base (var {} base))\n\n\
                                      (def {} base (lit {type: (t-prim {} int32)} 7))\n";
 
@@ -129,19 +128,17 @@ fn ir_ingress_still_binds_defsig_less_def_from_body_stamp() {
     );
 }
 
-/// Cross-issue regression sentinel: chelis#1124's `defsig`-name skip must not
-/// disturb chelis#1134's legal defsig-less forward reference at either
-/// ingress.
+/// Cross-issue regression sentinel: chelis#1124's body-stamp prebind must not
+/// bypass chelis#1134's sequential top-level value scope.
 #[test]
-fn both_ingresses_resolve_defsig_less_forward_cross_reference() {
+fn both_ingresses_reject_defsig_less_forward_cross_reference() {
     let ir = ir_diagnostics(DEFSIG_LESS_CROSS_REF);
     let typed = typed_diagnostics(DEFSIG_LESS_CROSS_REF);
 
     assert_eq!(ir, typed, "chelis#1134 requires ingress parity");
     assert!(
-        ir.is_empty(),
-        "a defsig-less forward cross-reference must remain accepted by the IR \
-         and typed ingresses, \
-         got: {ir:?}"
+        ir.iter()
+            .any(|diagnostic| diagnostic.starts_with("UnboundVariable:")),
+        "a defsig-less forward cross-reference must reject at both ingresses: {ir:?}"
     );
 }
