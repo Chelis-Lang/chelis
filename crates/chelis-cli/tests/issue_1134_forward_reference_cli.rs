@@ -93,6 +93,7 @@ fn check_accepts_backward_values_module_helpers_and_external_inputs() {
          def identity(x) = x\n",
     );
     assert_clean_report("external_input", "ch", "x = (x : tensor[4, f32])\n");
+    assert_clean_report("declared_external_input", "ch", "x: tensor[4, f32] = x\n");
 }
 
 #[test]

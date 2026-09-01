@@ -141,8 +141,8 @@ The current implementation has one explicit ownership chain:
    acyclic forward calls retain textual semantics, and no diagnostic is
    erased after it has been reported. Top-level eager values are inferred in
    source order at both checker ingresses; serialized body-type metadata does
-   not make a later value visible. An ascribed self-reference receives its
-   external-input type only while its own declaration is checked; bare
+   not make a later value visible. An explicitly typed self-reference receives
+   its external-input type only while its own declaration is checked; bare
    self-reference remains an eager cycle.
 
 ## Why the default is the bug, not the instance
@@ -1370,7 +1370,7 @@ vacuity, or [#1076]/[#672]'s compiler-provided-name precedence work.
 stamped typed and serialized-IR checker ingresses reject a reference to a
 later top-level value as `UnboundVariable`; body-type metadata is evidence
 about a declaration, not permission to manufacture earlier scope. Backward
-value references remain legal, and the exactly ascribed self-reference used
+value references remain legal, and an explicitly typed self-reference used
 for an external input receives declaration-local type availability before its
 binding becomes ordinary scope for later declarations. Bare `x = x` remains
 an eager cycle. Existing function inference and recursive SCC behavior remains
@@ -1476,7 +1476,7 @@ name-precedence work.
 | PP4 | [#1264] and [#1261]'s raw-flat-test-scope residue; exact module scope in every checker/test entry |
 | [#1247] residue | integer nominal arguments are kind-checked and concrete dimensions constrain every checker/test/compiler lane; [#1258] round trips the same representation |
 | [#1125] nominal-rank ingress residual | ordinary `.dp` ingress, `surf`, and `validate --deep` reject `d-rank` in nominal argument slots while preserving legal dimension arguments and tensor rank spreads; the broader reader-audit/lint issue remains open |
-| [#1134] forward-reference residual | both checker ingresses reject eager forward values, accept backward values and declaration-local ascribed external inputs, retain sequential local scope, and reject bare self-reference/eager value cycles identically |
+| [#1134] forward-reference residual | both checker ingresses reject eager forward values, accept backward values and declaration-local explicitly typed external inputs, retain sequential local scope, and reject bare self-reference/eager value cycles identically |
 
 ## Decisions and remaining questions
 
@@ -1490,7 +1490,7 @@ name-precedence work.
 | 6 | whether two closures may each consume one underlying value through two user-visible names (`y = x`, one capture per name), or capture forwards through the alias chain generally | DECIDED 2026-08-21: preserved and made normative. A capture consumes the binding it names; distinct user-visible bindings of one value are distinct for capture; only a destructured component (or an alias of one) forwards to its carrier. Nautilus `lu_solve` and coral depend on the spelling; the reviewer guidance on [#1209] was to specify the choice explicitly and keep any tightening separate | [04-LIN-2] + PP3 |
 | 7 | whether one linked module's uniquely matching terminal name or one batched test file's declaration can confer unimported scope on another file | DECIDED 2026-08-31: no. Value lookup is exact-only after reef rewriting; batch entries are independently module-rewritten before combination; terminal matching is diagnostic-only | spec/02 P2 + [04-FIT-2] + PP4 |
 | 8 | whether an unannotated nominal parameter is a type, a dimension, or contextually reinterpreted per application | DECIDED 2026-08-31: one checker-owned header kind is fixed before body resolution. Dimension-only evidence selects `Dimension`; mixed use rejects; unused defaults to `Type`; transitive nominal uses propagate by least fixed point | [04-ADT-3]/[04-ADT-4] + [#1247] residue |
-| 9 | whether a top-level eager value may refer to a later value, and whether the two checker ingresses may differ | DECIDED 2026-09-01: no. Both ingresses reject a later eager value as unbound; serialized body metadata cannot create scope. Only an exactly ascribed self-reference receives a declaration-local external-input type; bare self-reference remains an eager cycle. Function inference groups remain separately governed by [04-INF-2]/[04-INF-3] | [04-INF-4] + [#1134] residue |
+| 9 | whether a top-level eager value may refer to a later value, and whether the two checker ingresses may differ | DECIDED 2026-09-01: no. Both ingresses reject a later eager value as unbound; serialized body metadata cannot create scope. Only an explicitly typed self-reference receives a declaration-local external-input type; bare self-reference remains an eager cycle. Function inference groups remain separately governed by [04-INF-2]/[04-INF-3] | [04-INF-4] + [#1134] residue |
 
 ## Contract summary
 
@@ -1513,7 +1513,7 @@ the corresponding structural grammar at ordinary `.dp` doors: a nominal
 argument is a type or non-rank dimension, never a rank spread.
 The [#1134] residual applies the same ingress-honesty rule to top-level eager
 value scope: textual order, never compiler metadata availability, decides
-which other values are visible. Exactly ascribed self-reference retains its
+which other values are visible. Explicitly typed self-reference retains its
 declaration-local external-input meaning, while bare self-reference, local
 forward bindings, and eager value cycles remain errors.
 

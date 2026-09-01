@@ -89,6 +89,12 @@ fn ascribed_external_input_self_reference_is_legal_at_both_ingresses() {
 }
 
 #[test]
+fn declaration_typed_self_reference_is_an_external_input_at_both_ingresses() {
+    let program = surf_program("x: tensor[4, f32] = x\n");
+    assert_accepts_at_both_ingresses(&program, "declaration-typed external input");
+}
+
+#[test]
 fn bare_self_reference_is_not_an_external_input_at_either_ingress() {
     let program = surf_program("x = x\n");
     assert_rejects_identically(&program, "CycleDetected", "bare self-reference");

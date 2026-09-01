@@ -768,10 +768,11 @@ recursive binding group, whether the recursion is direct or mutual.
 > value from an earlier declaration is a type error reported as
 > `UnboundVariable` at both the
 > stamped typed and serialized-IR checker ingresses; body-type metadata SHALL
-> NOT make that later value visible. An exactly ascribed self-reference
-> `x = (x : T)` declares an external input rather than reading an eager value;
-> its type is available only while checking its own declaration, and the
-> binding becomes visible to later declarations afterward. The untyped
+> NOT make that later value visible. An explicitly typed self-reference,
+> spelled either `x: T = x` or `x = (x : T)`, declares an external input
+> rather than reading an eager value; its type is available only while checking
+> its own declaration, and the binding becomes visible to later declarations
+> afterward. The untyped
 > spelling `x = x` is an ordinary eager self-reference and is not an external
 > input declaration. Local `let` bindings are likewise sequential. Function
 > recursion and inference groups remain governed by [04-INF-2] and [04-INF-3],
