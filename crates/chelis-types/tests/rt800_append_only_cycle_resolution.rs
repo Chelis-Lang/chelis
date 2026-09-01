@@ -98,10 +98,10 @@ def use_bool() = identity(true)
 }
 
 #[test]
-fn bare_acyclic_later_helper_remains_textually_unavailable() {
-    // Raw Deep deliberately carries no predeclared `defsig`; a Surf
-    // parameter annotation would synthesize one and make the name visible
-    // during declaration collection for a reason unrelated to SCC prebinding.
+fn bare_acyclic_later_helper_uses_the_canonical_dependency_schedule() {
+    // Raw Deep carries no synthesized `defsig`, so this locks the same
+    // declaration-level forward-reference rule without relying on Surf
+    // annotations to make the later name visible during collection.
     let deep = chelis_deep::parser::parse_str(
         r#"
 (def {} caller
@@ -113,22 +113,6 @@ fn bare_acyclic_later_helper_remains_textually_unavailable() {
 "#,
     )
     .expect("Deep fixture parses");
-    let result =
-        check_ir_program(&deep).expect_err("bare forward helpers retain textual semantics");
-    let unbound = result
-        .errors
-        .iter()
-        .filter(|error| {
-            matches!(
-                error.kind,
-                chelis_types::errors::CheckErrorKind::UnboundVariable { .. }
-            )
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        unbound.len(),
-        1,
-        "forward root owns one diagnostic: {result:?}"
-    );
-    assert!(unbound[0].message.contains("later"));
+    let result = check_ir_program(&deep);
+    assert!(result.is_ok(), "bare forward helper must check: {result:?}");
 }
