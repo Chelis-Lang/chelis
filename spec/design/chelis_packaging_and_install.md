@@ -279,9 +279,11 @@ A direct real-binary copy has no Nix root management. Nix does not scan files
 outside the store, so garbage collection can remove its store dependencies.
 
 The launcher is generated shell: it runs where only the package closure exists,
-so Python is not available to it. The `chelisupLauncherLint` flake check gates
-the built launcher with `bash -n` plus `shellcheck`, mirroring the static gate
-on the bootstrap installer.
+so Python is not available to it. The `chelisupLauncherLint` flake check runs
+`bash -n` plus `shellcheck` over the built launcher, but since chelis#1450 it
+fires only on `workflow_dispatch` or a published release, so it gates nothing
+pre-merge. The bootstrap installer has no counterpart static gate at all: the
+`shellcheck` hook that selects it is disabled.
 
 ## 6. Layer 1 — binary distribution (chelis#468)
 

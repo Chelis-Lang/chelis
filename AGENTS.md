@@ -518,11 +518,15 @@ When a public surface has an implicit invariant, make it explicit and test it.
   time rather than committed, and `.githooks/commit-msg` and
   `.cargo-husky/hooks/commit-msg` have no file extension, so `chelis_lint`'s
   `Surface::classify` - which keys on the extension - never classifies them. All three
-  must still be minimal POSIX `sh` and `shellcheck`-clean. The bootstrap and the two
-  hooks are checked with `sh -n`. The generated launcher's only check is
-  `chelisupLauncherLint`, which uses `bash -n`, so a bash-ism there satisfies it while
-  still violating the POSIX-`sh` requirement. Since chelis#1450 no routine CI runs that
-  check at all, neither fault is caught before merge. It is a manual gate:
+  must still be minimal POSIX `sh` and `shellcheck`-clean, but almost nothing enforces
+  that. Only the two hooks are checked: `scripts/test_commit_hook.py` and
+  `scripts/test_check_commit_message.py` run `sh -n` over them, inside the routine
+  `unittest discover -s scripts` CI job. The bootstrap is checked by nothing - the
+  `shellcheck` hook that selects it is `enable = false`. The generated launcher's only
+  static check is `chelisupLauncherLint`, which uses `bash -n`, so a bash-ism there
+  passes it while still violating the POSIX-`sh` requirement; and since chelis#1450 no
+  routine CI runs that check, neither the bash-ism nor a `shellcheck` finding is caught
+  before a merge. It is a manual gate:
   `nix build .#checks.<system>.chelisupLauncherLint`, expected exit 0, or dispatch the
   `Nix Packages` workflow. All other scripts remain Python.
 - Existing `scripts/` directory uses Python; follow that convention.
