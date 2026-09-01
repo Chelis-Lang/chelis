@@ -640,6 +640,42 @@ fn type_ingress_rejects_every_non_type_carrier_and_role_swap() {
 }
 
 #[test]
+fn file_ingress_rejects_rank_spreads_in_nominal_argument_slots() {
+    for source in [
+        "(defsig {} bad (t-fn {} (t-adt {} Rows (d-rank {} r)) (t-unit {})))",
+        "(def {} bad (fn {} (params {} (x {type: (t-adt {} Rows (d-rank {} r))})) (var {} x)))",
+    ] {
+        let error = chelis_deep::parse_and_stamp_file(source)
+            .expect_err("[04-ADT-4] forbids a rank spread in a nominal argument slot");
+        let chelis_deep::StampOrParseError::Stamp(stamp) = error else {
+            panic!("expected a stamp rejection, got: {error:?}");
+        };
+        assert!(
+            matches!(
+                stamp.kind,
+                StampErrorKind::RequiresTypeSyntaxRole {
+                    expected: chelis_deep::role::TypeSyntaxRole::NominalArgument,
+                    ref got,
+                } if *got == FormIdentity::Head("d-rank".to_string())
+            ),
+            "expected the nominal-argument role to reject d-rank, got: {:?}",
+            stamp.kind
+        );
+    }
+}
+
+#[test]
+fn file_ingress_keeps_nominal_dimensions_and_tensor_rank_spreads_legal() {
+    for source in [
+        "(defsig {} sized (t-fn {} (t-adt {} Rows (d-lit {} 3)) (t-unit {})))",
+        "(defsig {} ranked (t-fn {} (t-tensor {} (d-rank {} r) (t-prim {} f32)) (t-unit {})))",
+    ] {
+        chelis_deep::parse_and_stamp_file(source)
+            .unwrap_or_else(|error| panic!("spec-valid file ingress was rejected: {error}"));
+    }
+}
+
+#[test]
 fn declaration_ingress_rejects_a_module_wrapper_a_file_ingress_admits() {
     // The two whole-text entry points are deliberately different languages:
     // `parse_and_stamp` is a declaration bundle, `parse_and_stamp_file` is a

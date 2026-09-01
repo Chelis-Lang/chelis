@@ -1,8 +1,8 @@
 # Checker Totality: every construct is checked or loudly rejected
 
-**Status:** Phases 0-3 and PP1-PP4 are delivered. The separately owned [#1247]
-kinded nominal-application residue is not another phase; PR [#1406] is its
-delivery vehicle. Phase 3 first shipped
+**Status:** Phases 0-3 and PP1-PP4 are delivered. PR [#1406] delivered the
+separately owned [#1247] kinded nominal-application residue; it is not another
+phase. Phase 3 first shipped
 `DeepTag` as derive-on-demand dispatch and was red-teamed in that form
 (round-1 QUALIFIED PASS with findings folded, round-2 PASS); a maintainer
 directive then superseded that record with the decode-once rework now in the
@@ -1261,11 +1261,11 @@ fail-closed synthetic identity in addition to the two checker edges above.
 
 ### Later residue: kinded nominal applications ([#1247], with [#1258])
 
-**Delivery vehicle: PR [#1406].** This is a separately landable #731 residue
+**Delivered by PR [#1406].** This is a separately landable #731 residue
 mechanism, not PP4 or a fifth historical phase. [#1247] owns checker honesty;
 [#1258] is the same boundary viewed from #1024's Surf/Deep round-trip
-contract. Completion requires the PR's acceptance oracle and merge; this
-design record alone does not claim delivery.
+contract. The PR merged after its acceptance oracle passed; the command below
+remains the standing regression oracle.
 
 Before this slice, Surf correctly admitted an integer only inside a nominal
 argument such as `Column[3]`, but desugared it as `(t-var {} 3)`. Nominal
@@ -1326,6 +1326,38 @@ This slice does not absorb the remaining tag-keyed vacuity
 ([#874]/[#887] Tier 1), stamped-ingress parity ([#1125]/[#1134]), or
 compiler-provided-name precedence ([#1076]/[#672]). Their contracts and tests
 remain independently owned.
+
+### Later residue: nominal-argument file-ingress parity ([#1125])
+
+The kinded nominal-application delivery exposed one bounded stamped-ingress
+instance: the serialized-type boundary rejected a `d-rank` rank spread under
+`t-adt`, while ordinary `.dp` program ingress stamped the same form through
+the broader `Type` role. Consequently both `chelis surf` and
+`chelis validate --deep` accepted and rendered a nominal application such as
+`Rows[..r]`, contrary to `spec/03-deep-syntax.md` §2.5.1 and [04-ADT-4].
+
+Program ingress now routes every decoded `t-adt` through the existing
+recursive type grammar. Its nominal argument children therefore accept type
+or non-rank dimension syntax and reject rank spreads at the boundary. This is
+an ingress repair only: `d-rank` remains legal in tensor-axis slots, and
+concrete or symbolic dimensions remain legal nominal arguments.
+
+The authoritative oracle for this bounded residual is:
+
+```sh
+cargo nextest run -p chelis-cli --test issue_1125_nominal_rank_ingress --no-fail-fast
+```
+
+It drives both `surf` and `validate --deep`, with the invalid nominal-rank
+case and positive nominal-dimension and tensor-rank controls. Supporting
+`chelis-deep` integration tests pin the same role decision directly at
+`parse_and_stamp_file`.
+
+This slice is only **part of [#1125]**. It does not complete that issue's
+whole-module carrier-reader audit or its carrier-complete structural lint and
+justified escape hatch. It also does not absorb [#1134]'s independent
+pass-set/forward-reference decision, [#874]/[#887]'s tag-keyed vacuity, or
+[#1076]/[#672]'s compiler-provided-name precedence work.
 
 ### Adjacent ledger rows delivered with the class change
 
@@ -1403,6 +1435,7 @@ remain independently owned.
 | PP3 | [#1209]/[#1211]/[#1212]'s name-keyed binding-identity channel |
 | PP4 | [#1264] and [#1261]'s raw-flat-test-scope residue; exact module scope in every checker/test entry |
 | [#1247] residue | integer nominal arguments are kind-checked and concrete dimensions constrain every checker/test/compiler lane; [#1258] round trips the same representation |
+| [#1125] nominal-rank ingress residual | ordinary `.dp` ingress, `surf`, and `validate --deep` reject `d-rank` in nominal argument slots while preserving legal dimension arguments and tensor rank spreads; the broader reader-audit/lint issue remains open |
 
 ## Decisions and remaining questions
 
@@ -1433,7 +1466,9 @@ constructor as fully resolved.
 The separately owned [#1247] residue applies the same honesty rule to
 nominal arguments: integer syntax is either an exact checked dimension or a
 kind error, never an inference wildcard, and every downstream checker/test
-signal preserves that decision.
+signal preserves that decision. The bounded [#1125] ingress residual applies
+the corresponding structural grammar at ordinary `.dp` doors: a nominal
+argument is a type or non-rank dimension, never a rank spread.
 
 [#696]: https://github.com/Chelis-Lang/chelis/pull/696
 [#703]: https://github.com/Chelis-Lang/chelis/issues/703

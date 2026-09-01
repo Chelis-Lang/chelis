@@ -8,6 +8,12 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Deep nominal arguments now use the recursive type grammar at ordinary
+  `.dp` ingress (chelis#1125, part of chelis#731).** `chelis surf` and
+  `chelis validate --deep` reject a rank spread such as `Rows[..r]` instead of
+  accepting a `d-rank` below `t-adt`. Concrete dimension arguments remain
+  valid, and rank spreads remain valid in tensor-axis slots.
+
 - **BREAKING (checker/CLI): nominal type applications now enforce parameter
   kinds and concrete dimensions (chelis#1247, chelis#1258).** Declaration
   headers acquire checker-owned `Type`/`Dimension` kinds by a deterministic
