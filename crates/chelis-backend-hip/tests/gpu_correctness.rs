@@ -444,6 +444,139 @@ int main(void) {{
     )
 }
 
+fn build_caller_preservation_main_cpp(
+    func_name: &str,
+    input_labels: &[String],
+    n_out: usize,
+    inputs: &[TestInput],
+) -> String {
+    assert_eq!(input_labels, &["x"], "caller-preservation probe expects x");
+    assert_eq!(n_out, 1, "caller-preservation probe expects one output");
+    let input = inputs
+        .iter()
+        .find(|candidate| candidate.name == "x")
+        .expect("caller-preservation probe requires x");
+    assert_eq!(input.dtype, Prim::F32);
+    assert_eq!(input.shape, vec![4]);
+    let initialization = input
+        .data
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            format!(
+                "    ((float *)host_input->data)[{index}] = chelis_f32_from_bits(0x{:08x}u);",
+                value.to_bits()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        r#"#include "chelis_runtime.h"
+#include "chelis_hip_runtime.h"
+extern "C" void {func_name}_device(chelis_gpu_tensor **inputs, int n_in, chelis_gpu_tensor **outputs, int n_out);
+
+int main(void) {{
+    int64_t host_shape[1] = {{ 4 }};
+    int device_shape[1] = {{ 4 }};
+    chelis_tensor *host_input = chelis_alloc(1, host_shape, CHELIS_DTYPE_F32);
+{initialization}
+    chelis_gpu_tensor *device_input = chelis_gpu_alloc(1, device_shape, CHELIS_DTYPE_F32);
+    chelis_host_to_device(device_input, host_input);
+    chelis_gpu_tensor *device_inputs[1] = {{ device_input }};
+    chelis_gpu_tensor *device_outputs[1] = {{ 0 }};
+    {func_name}_device(device_inputs, 1, device_outputs, 1);
+
+    chelis_tensor *host_output = chelis_alloc(1, host_shape, CHELIS_DTYPE_F32);
+    chelis_tensor *host_after = chelis_alloc(1, host_shape, CHELIS_DTYPE_F32);
+    chelis_device_to_host(host_output, device_outputs[0]);
+    chelis_device_to_host(host_after, device_input);
+    for (int i = 0; i < 4; i++) {{
+        if (i > 0) printf(" ");
+        printf("%.6f", ((float *)host_output->data)[i]);
+    }}
+    printf("\n");
+    for (int i = 0; i < 4; i++) {{
+        if (i > 0) printf(" ");
+        printf("%.6f", ((float *)host_after->data)[i]);
+    }}
+    printf("\n");
+
+    chelis_free(host_input);
+    chelis_free(host_output);
+    chelis_free(host_after);
+    chelis_gpu_free(device_outputs[0]);
+    chelis_gpu_free(device_input);
+    return 0;
+}}
+"#,
+        initialization = initialization,
+    )
+}
+
+fn compile_and_run_output_and_inputs(
+    dag: &Dag,
+    func_name: &str,
+    inputs: &[TestInput],
+) -> Vec<Vec<f32>> {
+    require_hipcc();
+    let result = codegen_hip(dag, func_name).unwrap();
+    assert_eq!(result.output_labels.len(), 1);
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let hip_rt = hip_runtime_src_dir();
+    write_temp_file(
+        tmp.path(),
+        "chelis_hip_runtime.h",
+        &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
+    );
+    copy_runtime_artifacts(tmp.path());
+    write_temp_file(tmp.path(), "model.cpp", &result.c_source);
+    write_temp_file(
+        tmp.path(),
+        "main.cpp",
+        &build_caller_preservation_main_cpp(
+            func_name,
+            &result.input_labels,
+            result.output_labels.len(),
+            inputs,
+        ),
+    );
+
+    let bin_path = tmp.path().join("caller_preservation_bin");
+    let mut compile_cmd = Command::new("hipcc");
+    compile_cmd.arg("-O2");
+    compile_cmd.args(&result.compile_flags);
+    compile_cmd.arg(tmp.path().join("main.cpp"));
+    compile_cmd.arg(tmp.path().join("model.cpp"));
+    compile_cmd.arg(format!("-L{}", tmp.path().display()));
+    compile_cmd.arg("-lchelis_runtime");
+    compile_cmd.arg("-lpthread");
+    compile_cmd.arg("-ldl");
+    compile_cmd.args(&result.link_flags);
+    compile_cmd.arg("-o");
+    compile_cmd.arg(&bin_path);
+    let compile = compile_cmd.output().expect("run hipcc");
+    assert!(
+        compile.status.success(),
+        "hipcc failed:\nstderr: {}\nsource:\n{}",
+        String::from_utf8_lossy(&compile.stderr),
+        result.c_source
+    );
+
+    let run = Command::new(&bin_path).output().expect("run gpu binary");
+    assert_gpu_binary_success(&run, &result.link_flags);
+    String::from_utf8(run.stdout)
+        .expect("utf8 stdout")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            line.split_whitespace()
+                .map(|token| token.parse::<f32>().expect("parse output float"))
+                .collect()
+        })
+        .collect()
+}
+
 fn compile_and_run_single_output(dag: &Dag, func_name: &str, inputs: &[TestInput]) -> Vec<f32> {
     require_hipcc();
     let result = codegen_hip(dag, func_name).unwrap();
@@ -1905,6 +2038,54 @@ fn gf3_fused_in_place_fan_in_gpu_matches_cpu() {
             TestInput::new("y", &[8], &[0.5, 4.0, -1.5, 2.25, -0.25, 1.5, -2.0, 4.0]),
             TestInput::new("z", &[8], &[2.0, 3.0, -1.5, 4.0, -2.5, 1.0, 0.5, -0.5]),
         ],
+    );
+}
+
+/// chelis#1214 Phase 0 expected failure: executing a reusable-input fusion
+/// must leave the caller's original device-backed input bytes unchanged.
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn compiled_value_ownership_caller_bytes_unchanged() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let scale = dag.add_node(
+        RiscOp::synth_const(Prim::F32, 2.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let fused = dag.add_node(
+        RiscOp::FusedElem {
+            ops: vec![chelis_ir::dag::FusedStep {
+                op: chelis_ir::dag::FusedStepOp::Mul,
+                input_indices: vec![
+                    chelis_ir::dag::FusedInput::External(0),
+                    chelis_ir::dag::FusedInput::External(1),
+                ],
+            }],
+        },
+        vec![x, scale],
+        vec_f32(4),
+        None,
+    );
+    dag.set_reusable_input(fused, x);
+    dag.add_root(fused);
+
+    let lines = compile_and_run_output_and_inputs(
+        &dag,
+        "compiled_value_ownership_caller_bytes_unchanged",
+        &[TestInput::new("x", &[4], &[1.0, 2.0, 3.0, 4.0])],
+    );
+    assert_eq!(
+        lines.len(),
+        2,
+        "one output and one caller input are required"
+    );
+    assert_close_vec(&lines[0], &[2.0, 4.0, 6.0, 8.0]);
+    assert_eq!(
+        lines[1],
+        vec![1.0, 2.0, 3.0, 4.0],
+        "the compiled HIP entry point mutated caller-owned bytes"
     );
 }
 

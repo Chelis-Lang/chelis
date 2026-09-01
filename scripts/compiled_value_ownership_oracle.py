@@ -21,7 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Iterable, Sequence
+from typing import Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +30,118 @@ LEDGER_SCHEMA = "compiled-value-ownership-ledger-v1"
 OWNERSHIP_CHILD_ISSUES = frozenset(
     {543, 544, 1206, 1214, 1222, 1344, 1346, 1352, 1356}
 )
+FROZEN_OWNERSHIP_CHILD_ISSUES = frozenset(
+    {543, 544, 1206, 1214, 1222, 1344, 1346, 1352, 1356}
+)
+FROZEN_FIXTURE_IDS = frozenset(
+    """
+    oracle-self-tests runtime-ledger-process-tests
+    aggregate-tensor-list aggregate-tensor-tuple aggregate-tensor-dict
+    aggregate-tensor-adt aggregate-tensor-nested-repeated aggregate-scalar-control
+    list-string-4-threshold-control list-string-5-threshold
+    tuple-string-1-threshold-control tuple-string-2-threshold
+    nested-string-1-threshold-control nested-string-2-threshold
+    dict-string-1-threshold-control dict-string-2-threshold
+    aggregate-refcount-scalar-control recursive-depth-1-control
+    recursive-scalar-control recursive-depth-32 recursive-depth-128
+    recursive-depth-288 c-caller-owned-reuse c-caller-owned-view-reuse
+    hip-caller-owned-reuse hip-caller-owned-view-reuse hip-no-reuse-control
+    hip-caller-bytes-unchanged-hardware root-alias-clean distinct-roots-clean
+    captured-copy-clean fresh-function-binding-clean fold-alias-single-owner
+    fold-fresh-control if-mixed-fresh-arm match-adt-mixed-fresh-arm
+    match-option-mixed-fresh-control if-alias-control fresh-call-argument
+    nested-fresh-call-argument variable-call-argument-control
+    forward-captured-list forward-captured-tensor
+    unannotated-forward-capture-control option-scalar-some option-scalar-none
+    option-string option-nested-string mapped-file-direct option-mapped-file
+    option-nested-mapped-file reject-option-function-c reject-list-function-c
+    reject-tuple-function-c reject-dict-function-c reject-adt-function-c
+    contextual-callback-c reject-option-function-hip reject-list-function-hip
+    reject-tuple-function-hip reject-dict-function-hip reject-adt-function-hip
+    contextual-callback-hip reject-option-function-metal
+    reject-list-function-metal reject-tuple-function-metal
+    reject-dict-function-metal reject-adt-function-metal
+    contextual-callback-metal
+    """.split()
+)
+FROZEN_COUNTERPARTS = {
+    543: {
+        "positive": frozenset(
+            {
+                "aggregate-tensor-list",
+                "aggregate-tensor-tuple",
+                "aggregate-tensor-dict",
+                "aggregate-tensor-adt",
+                "aggregate-tensor-nested-repeated",
+            }
+        ),
+        "negative": frozenset({"aggregate-scalar-control"}),
+    },
+    544: {
+        "positive": frozenset(
+            {
+                "list-string-4-threshold-control",
+                "list-string-5-threshold",
+                "tuple-string-1-threshold-control",
+                "tuple-string-2-threshold",
+                "nested-string-1-threshold-control",
+                "nested-string-2-threshold",
+                "dict-string-1-threshold-control",
+                "dict-string-2-threshold",
+            }
+        ),
+        "negative": frozenset({"aggregate-refcount-scalar-control"}),
+    },
+    1206: {
+        "positive": frozenset(
+            {
+                "recursive-depth-1-control",
+                "recursive-depth-32",
+                "recursive-depth-128",
+                "recursive-depth-288",
+            }
+        ),
+        "negative": frozenset({"recursive-scalar-control"}),
+    },
+    1214: {
+        "positive": frozenset(
+            {
+                "c-caller-owned-reuse",
+                "c-caller-owned-view-reuse",
+                "hip-caller-owned-reuse",
+                "hip-caller-owned-view-reuse",
+                "hip-caller-bytes-unchanged-hardware",
+            }
+        ),
+        "negative": frozenset({"hip-no-reuse-control"}),
+    },
+    1222: {
+        "positive": frozenset({"root-alias-clean"}),
+        "negative": frozenset({"distinct-roots-clean"}),
+    },
+    1344: {
+        "positive": frozenset({"captured-copy-clean"}),
+        "negative": frozenset({"fresh-function-binding-clean"}),
+    },
+    1346: {
+        "positive": frozenset({"fold-alias-single-owner"}),
+        "negative": frozenset({"fold-fresh-control"}),
+    },
+    1352: {
+        "positive": frozenset(
+            {"if-mixed-fresh-arm", "match-adt-mixed-fresh-arm"}
+        ),
+        "negative": frozenset(
+            {"if-alias-control", "match-option-mixed-fresh-control"}
+        ),
+    },
+    1356: {
+        "positive": frozenset(
+            {"fresh-call-argument", "nested-fresh-call-argument"}
+        ),
+        "negative": frozenset({"variable-call-argument-control"}),
+    },
+}
 
 
 class OracleFailure(RuntimeError):
@@ -73,7 +185,6 @@ class Action(str, Enum):
     BUILD_ONLY = "build-only"
     BUILD_REJECT = "build-reject"
     CHECK_REJECT = "check-reject"
-    HIP_SOURCE_CONTRACT = "hip-source-contract"
     HIP_HARDWARE = "hip-hardware"
 
 
@@ -98,6 +209,7 @@ class LedgerReceipt:
     live_kinds: tuple[tuple[str, int], ...] = ()
     peak_live_bytes: int | None = None
     invalid_operations: int | None = None
+    invalid_event: str | None = None
 
 
 @dataclass(frozen=True)
@@ -135,6 +247,8 @@ class Fixture:
     peak_bound: int | None = None
     ledger_receipt: LedgerReceipt | None = None
     command: tuple[str, ...] = ()
+    listed_test: str | None = None
+    containing_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -143,6 +257,96 @@ class Mutation:
     activation_phase: int
     detector: Detector
     canary: str
+
+
+FROZEN_MUTATION_SPECS = frozenset(
+    {
+        (
+            "heap-kind-without-finalizer",
+            1,
+            Detector.SOURCE_CONTRACT,
+            "future structural registry",
+        ),
+        (
+            "option-host-carrier-omitted",
+            1,
+            Detector.SOURCE_CONTRACT,
+            "frozen option fixture census",
+        ),
+        (
+            "mapped-file-carrier-omitted",
+            1,
+            Detector.MANIFEST,
+            "mapped-file fixture census",
+        ),
+        (
+            "recursive-function-rejection-weakened",
+            0,
+            Detector.EXACT_REJECTION,
+            "exact #879 matrix",
+        ),
+        (
+            "tensor-clone-omitted",
+            1,
+            Detector.LEDGER_LEAK,
+            "aggregate tensor balance",
+        ),
+        (
+            "branch-clone-borrowed",
+            2,
+            Detector.LEDGER_LEAK,
+            "branch fixture parity",
+        ),
+        (
+            "entry-borrow-reuse-admitted",
+            3,
+            Detector.SOURCE_CONTRACT,
+            "C and HIP caller-storage negatives",
+        ),
+        (
+            "metal-reuse-admitted",
+            3,
+            Detector.SOURCE_CONTRACT,
+            "typed Metal no-reuse contract",
+        ),
+        (
+            "tail-drop-delayed",
+            3,
+            Detector.PEAK_BOUND,
+            "depth 32/128/288 peak bound",
+        ),
+        (
+            "backend-local-ownership-predicate-restored",
+            2,
+            Detector.SOURCE_CONTRACT,
+            "verified backend boundary",
+        ),
+        (
+            "ledger-release-omitted",
+            0,
+            Detector.LEDGER_LEAK,
+            "balanced process ledger test",
+        ),
+        (
+            "ledger-release-duplicated",
+            0,
+            Detector.INVALID_RELEASE,
+            "duplicate-release process test",
+        ),
+        (
+            "ledger-event-stream-emptied",
+            0,
+            Detector.ZERO_VACUITY,
+            "empty-ledger parser test",
+        ),
+        (
+            "manifest-receipt-omitted",
+            0,
+            Detector.MANIFEST,
+            "receipt bijection",
+        ),
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -161,6 +365,7 @@ class Ledger:
     summary: LedgerSummary
     kind_allocations: Counter[str]
     live_kind_counts: Counter[str]
+    invalid_events: Counter[str]
 
 
 @dataclass(frozen=True)
@@ -185,6 +390,7 @@ def ledger_receipt(
     live_kinds: dict[str, int] | None = None,
     peak_live_bytes: int | None = None,
     invalid_operations: int | None = None,
+    invalid_event: str | None = None,
 ) -> LedgerReceipt:
     return LedgerReceipt(
         live_owners=live_owners,
@@ -192,6 +398,7 @@ def ledger_receipt(
         live_kinds=tuple(sorted((live_kinds or {}).items())),
         peak_live_bytes=peak_live_bytes,
         invalid_operations=invalid_operations,
+        invalid_event=invalid_event,
     )
 
 
@@ -214,6 +421,8 @@ def _fixture(
     diagnostic_fragments: Sequence[str] = (),
     peak_bound: int | None = None,
     command: Sequence[str] = (),
+    listed_test: str | None = None,
+    containing_type: str | None = None,
 ) -> Fixture:
     return Fixture(
         id=id,
@@ -233,6 +442,8 @@ def _fixture(
         diagnostic_fragments=tuple(diagnostic_fragments),
         peak_bound=peak_bound,
         command=tuple(command),
+        listed_test=listed_test,
+        containing_type=containing_type,
     )
 
 
@@ -413,15 +624,92 @@ def fixture_manifest() -> tuple[Fixture, ...]:
     rows.extend(
         [
             _fixture(
+                "c-caller-owned-reuse",
+                1214,
+                Polarity.POSITIVE,
+                Detector.SOURCE_CONTRACT,
+                MustPass(),
+                Action.COMMAND,
+                backend=Backend.C,
+                platform=Platform.ANY,
+                command=(
+                    "cargo",
+                    "test",
+                    "-p",
+                    "chelis-backend-c",
+                    "--lib",
+                    "emit::tests::fused_in_place_does_not_alias_a_caller_owned_input",
+                    "--",
+                    "--exact",
+                ),
+                listed_test="emit::tests::fused_in_place_does_not_alias_a_caller_owned_input",
+            ),
+            _fixture(
+                "c-caller-owned-view-reuse",
+                1214,
+                Polarity.POSITIVE,
+                Detector.SOURCE_CONTRACT,
+                MustPass(),
+                Action.COMMAND,
+                backend=Backend.C,
+                platform=Platform.ANY,
+                command=(
+                    "cargo",
+                    "test",
+                    "-p",
+                    "chelis-backend-c",
+                    "--lib",
+                    "emit::tests::fused_in_place_does_not_alias_a_view_of_a_caller_owned_input",
+                    "--",
+                    "--exact",
+                ),
+                listed_test="emit::tests::fused_in_place_does_not_alias_a_view_of_a_caller_owned_input",
+            ),
+            _fixture(
                 "hip-caller-owned-reuse",
                 1214,
                 Polarity.POSITIVE,
                 Detector.SOURCE_CONTRACT,
                 xfail(1214, Detector.SOURCE_CONTRACT),
-                Action.HIP_SOURCE_CONTRACT,
+                Action.COMMAND,
                 backend=Backend.HIP,
                 platform=Platform.ANY,
                 green_by=3,
+                command=(
+                    "cargo",
+                    "test",
+                    "-p",
+                    "chelis-backend-hip",
+                    "--lib",
+                    "emit::tests::fused_in_place_does_not_alias_a_caller_owned_input",
+                    "--",
+                    "--ignored",
+                    "--exact",
+                ),
+                listed_test="emit::tests::fused_in_place_does_not_alias_a_caller_owned_input",
+            ),
+            _fixture(
+                "hip-caller-owned-view-reuse",
+                1214,
+                Polarity.POSITIVE,
+                Detector.SOURCE_CONTRACT,
+                xfail(1214, Detector.SOURCE_CONTRACT),
+                Action.COMMAND,
+                backend=Backend.HIP,
+                platform=Platform.ANY,
+                green_by=3,
+                command=(
+                    "cargo",
+                    "test",
+                    "-p",
+                    "chelis-backend-hip",
+                    "--lib",
+                    "emit::tests::fused_in_place_does_not_alias_a_view_of_a_caller_owned_input",
+                    "--",
+                    "--ignored",
+                    "--exact",
+                ),
+                listed_test="emit::tests::fused_in_place_does_not_alias_a_view_of_a_caller_owned_input",
             ),
             _fixture(
                 "hip-no-reuse-control",
@@ -462,6 +750,7 @@ def fixture_manifest() -> tuple[Fixture, ...]:
                     "--ignored",
                     "--test-threads=1",
                 ),
+                listed_test="compiled_value_ownership_caller_bytes_unchanged",
             ),
         ]
     )
@@ -708,25 +997,38 @@ def fixture_manifest() -> tuple[Fixture, ...]:
         )
 
     recursive_function_sources = {
-        "option": "reject_option_function.ch",
-        "list": "reject_list_function.ch",
-        "tuple": "reject_tuple_function.ch",
-        "dict": "reject_dict_function.ch",
-        "adt": "reject_adt_function.ch",
+        "option": ("reject_option_function.ch", "Option[int8 -> int8]"),
+        "list": ("reject_list_function.ch", "List[int8 -> int8]"),
+        "tuple": ("reject_tuple_function.ch", "(int8 -> int8, int64)"),
+        "dict": ("reject_dict_function.ch", "Dict[string, int8 -> int8]"),
+        "adt": ("reject_adt_function.ch", "CallbackBox"),
     }
     for backend in (Backend.C, Backend.HIP, Backend.METAL):
-        for container, source in recursive_function_sources.items():
+        for container, (source, containing_type) in recursive_function_sources.items():
+            expected: Expected = MustPass()
+            green_by = 0
+            if backend is Backend.METAL:
+                expected = xfail(879, Detector.EXACT_REJECTION)
+                green_by = 1
             rows.append(
                 _fixture(
                     f"reject-{container}-function-{backend.value}",
                     879,
                     Polarity.NEGATIVE,
                     Detector.EXACT_REJECTION,
-                    MustPass(),
+                    expected,
                     Action.BUILD_REJECT,
                     source,
                     backend=backend,
                     platform=Platform.ANY,
+                    green_by=green_by,
+                    diagnostic_fragments=(
+                        "unsupported:",
+                        "Function([Scalar(Int8)], Scalar(Int8))",
+                        "C host ABI value selection (codegen:c)",
+                        "unimplemented chelis#879:",
+                    ),
+                    containing_type=containing_type,
                 )
             )
         rows.append(
@@ -801,15 +1103,21 @@ def fixture_manifest() -> tuple[Fixture, ...]:
         "recursive-depth-32": ledger_receipt(peak_live_bytes=4736),
         "recursive-depth-128": ledger_receipt(peak_live_bytes=18560),
         "recursive-depth-288": ledger_receipt(peak_live_bytes=41600),
-        "fold-alias-single-owner": ledger_receipt(invalid_operations=1),
+        "fold-alias-single-owner": ledger_receipt(
+            invalid_operations=1, invalid_event="invalid_release"
+        ),
         "if-mixed-fresh-arm": ledger_receipt(
             live_owners=1, live_bytes=48, live_kinds={"List": 1}
         ),
         "match-adt-mixed-fresh-arm": ledger_receipt(
             live_owners=4, live_bytes=21, live_kinds={"String": 3}
         ),
-        "fresh-call-argument": ledger_receipt(invalid_operations=1),
-        "nested-fresh-call-argument": ledger_receipt(invalid_operations=1),
+        "fresh-call-argument": ledger_receipt(
+            invalid_operations=1, invalid_event="invalid_release"
+        ),
+        "nested-fresh-call-argument": ledger_receipt(
+            invalid_operations=1, invalid_event="invalid_release"
+        ),
         "option-string": ledger_receipt(
             live_owners=6, live_bytes=30, live_kinds={"String": 6}
         ),
@@ -819,7 +1127,72 @@ def fixture_manifest() -> tuple[Fixture, ...]:
             live_owners=2, live_bytes=29, live_kinds={"MappedFile": 1, "String": 1}
         ),
     }
-    return tuple(replace(row, ledger_receipt=receipts.get(row.id)) for row in rows)
+    outputs = {
+        "aggregate-tensor-list": "make = [tensor(shape=[2], data=[1.0, 2.0]), tensor(shape=[2], data=[3.0, 4.0])]\nout = [tensor(shape=[2], data=[1.0, 2.0]), tensor(shape=[2], data=[3.0, 4.0])]",
+        "aggregate-tensor-tuple": "make = [(tensor(shape=[2], data=[1.0, 2.0]), 1), (tensor(shape=[2], data=[3.0, 4.0]), 2)]\nout = [(tensor(shape=[2], data=[1.0, 2.0]), 1), (tensor(shape=[2], data=[3.0, 4.0]), 2)]",
+        "aggregate-tensor-dict": "out = dict(first: tensor(shape=[2], data=[1.0, 2.0]), second: tensor(shape=[2], data=[3.0, 4.0]))",
+        "aggregate-tensor-adt": "out.value = tensor(shape=[2], data=[1.0, 2.0])",
+        "aggregate-tensor-nested-repeated": "make = [[tensor(shape=[2], data=[1.0, 2.0]), tensor(shape=[2], data=[1.0, 2.0])], [tensor(shape=[2], data=[1.0, 2.0]), tensor(shape=[2], data=[1.0, 2.0])]]\nout = [[tensor(shape=[2], data=[1.0, 2.0]), tensor(shape=[2], data=[1.0, 2.0])], [tensor(shape=[2], data=[1.0, 2.0]), tensor(shape=[2], data=[1.0, 2.0])]]",
+        "aggregate-scalar-control": "out = [(1, 2), (3, 4)]",
+        "list-string-4-threshold-control": "values = [a, b, c, d]\nout = 4",
+        "list-string-5-threshold": "values = [a, b, c, d, e]\nout = 5",
+        "tuple-string-1-threshold-control": "values = [(a, 1)]\nout = 1",
+        "tuple-string-2-threshold": "values = [(a, 1), (b, 2)]\nout = 2",
+        "nested-string-1-threshold-control": "values = [[a, b]]\nout = 1",
+        "nested-string-2-threshold": "values = [[a, b], [c, d]]\nout = 2",
+        "dict-string-1-threshold-control": "values = dict(a: 1)\nout = 1",
+        "dict-string-2-threshold": "values = dict(a: 1, b: 2)\nout = 2",
+        "aggregate-refcount-scalar-control": "out = [(1, 2), (3, 4)]",
+        "recursive-depth-1-control": "out = tensor(shape=[4], data=[1.0, 1.0, 1.0, 1.0])",
+        "recursive-scalar-control": "value = 288\nout = [288, 288]",
+        "recursive-depth-32": "out = tensor(shape=[4], data=[32.0, 32.0, 32.0, 32.0])",
+        "recursive-depth-128": "out = tensor(shape=[4], data=[128.0, 128.0, 128.0, 128.0])",
+        "recursive-depth-288": "out = tensor(shape=[4], data=[288.0, 288.0, 288.0, 288.0])",
+        "root-alias-clean": "original = [1, 2]\nalias = [1, 2]",
+        "distinct-roots-clean": "first = [1]\nsecond = [2]",
+        "captured-copy-clean": "global_values = [1, 2]\ntake_length = 2\nout = 2",
+        "fresh-function-binding-clean": "make_length = 2\nout = 2",
+        "fold-alias-single-owner": "values = [1, 2]\nbase.0 = 0.0\nbase.1 = 0.0\npicked.0 = 0.0\npicked.1 = 0.0",
+        "if-mixed-fresh-arm": "original = [1]\nselected = [2, 3]",
+        "match-adt-mixed-fresh-arm": "selected = [2, 3]",
+        "match-option-mixed-fresh-control": "selected = [2, 3]",
+        "if-alias-control": "original = [1]\nselected = [1]",
+        "fresh-call-argument": "out = [1, 2]",
+        "nested-fresh-call-argument": "out = [[1], [2]]",
+        "variable-call-argument-control": "source = [1, 2]\nout = [1, 2]",
+        "option-string": "option_length = 6\nout = 6",
+        "option-nested-string": "option_length = 6\nout = 6",
+        "mapped-file-direct": "out = 18",
+        "option-mapped-file": "out = 18",
+        "option-nested-mapped-file": "out = 18",
+    }
+    invalid_process_receipts = {
+        "fold-alias-single-owner": (
+            1,
+            ("compiled ownership ledger detected invalid tuple release",),
+        ),
+        "fresh-call-argument": (
+            1,
+            ("compiled ownership ledger detected invalid list release",),
+        ),
+        "nested-fresh-call-argument": (
+            1,
+            ("compiled ownership ledger detected invalid list release",),
+        ),
+    }
+    frozen_rows = []
+    for row in rows:
+        expected_exit, diagnostics = invalid_process_receipts.get(row.id, (row.expected_exit, row.diagnostic_fragments))
+        frozen_rows.append(
+            replace(
+                row,
+                ledger_receipt=receipts.get(row.id),
+                expected_output=outputs.get(row.id, row.expected_output),
+                expected_exit=expected_exit,
+                diagnostic_fragments=diagnostics,
+            )
+        )
+    return tuple(frozen_rows)
 
 
 def mutation_manifest() -> tuple[Mutation, ...]:
@@ -841,7 +1214,12 @@ def mutation_manifest() -> tuple[Mutation, ...]:
     )
 
 
-def validate_manifest(fixtures: Sequence[Fixture], mutations: Sequence[Mutation]) -> None:
+def validate_manifest(
+    fixtures: Sequence[Fixture],
+    mutations: Sequence[Mutation],
+    *,
+    repository_root: Path = REPO_ROOT,
+) -> None:
     ids = [fixture.id for fixture in fixtures]
     if len(ids) != len(set(ids)):
         raise OracleFailure("fixture manifest contains duplicate identities")
@@ -850,6 +1228,36 @@ def validate_manifest(fixtures: Sequence[Fixture], mutations: Sequence[Mutation]
         raise OracleFailure("mutation manifest contains duplicate identities")
     if not fixtures or not mutations:
         raise OracleFailure("fixture and mutation manifests must be non-empty")
+    if set(ids) != FROZEN_FIXTURE_IDS:
+        raise OracleFailure(
+            "frozen fixture universe drifted: "
+            f"missing={sorted(FROZEN_FIXTURE_IDS - set(ids))}, "
+            f"extra={sorted(set(ids) - FROZEN_FIXTURE_IDS)}"
+        )
+    if OWNERSHIP_CHILD_ISSUES != FROZEN_OWNERSHIP_CHILD_ISSUES:
+        raise OracleFailure("frozen ownership child universe drifted")
+    mutation_specs = {
+        (mutation.id, mutation.activation_phase, mutation.detector, mutation.canary)
+        for mutation in mutations
+    }
+    if mutation_specs != FROZEN_MUTATION_SPECS:
+        raise OracleFailure("frozen mutation activation mapping drifted")
+    declared_sources = {
+        Path(fixture.source)
+        for fixture in fixtures
+        if fixture.source is not None
+    }
+    checked_in_sources = {
+        path.relative_to(repository_root)
+        for path in (repository_root / FIXTURE_ROOT).glob("*.ch")
+        if path.is_file()
+    }
+    if checked_in_sources != declared_sources:
+        raise OracleFailure(
+            "fixture directory drift: "
+            f"undeclared={sorted(str(path) for path in checked_in_sources - declared_sources)}, "
+            f"missing={sorted(str(path) for path in declared_sources - checked_in_sources)}"
+        )
     for fixture in fixtures:
         if not fixture.id or fixture.issue <= 0:
             raise OracleFailure(f"malformed fixture row: {fixture!r}")
@@ -875,21 +1283,43 @@ def validate_manifest(fixtures: Sequence[Fixture], mutations: Sequence[Mutation]
                 raise OracleFailure(
                     f"{fixture.id}: host nonzero expected failure has no exact exit/diagnostic receipt"
                 )
-        if fixture.source is not None and not (REPO_ROOT / fixture.source).is_file():
+        if fixture.source is not None and not (repository_root / fixture.source).is_file():
             raise OracleFailure(f"{fixture.id}: missing fixture source {fixture.source}")
         if fixture.action is Action.COMMAND and not fixture.command:
             raise OracleFailure(f"{fixture.id}: command action has no argv")
+        if fixture.listed_test is not None and not (
+            fixture.command[:2] == ("cargo", "test")
+            or "scripts/hip_test.py" in fixture.command
+        ):
+            raise OracleFailure(f"{fixture.id}: listed test row is not a test command")
+        if fixture.action is Action.LEDGER_BUILD_RUN and fixture.expected_output is None:
+            raise OracleFailure(f"{fixture.id}: ledger executable has no exact stdout receipt")
+        if fixture.action is Action.BUILD_REJECT:
+            if fixture.containing_type is None or not fixture.diagnostic_fragments:
+                raise OracleFailure(
+                    f"{fixture.id}: recursive rejection lacks exact type/diagnostic receipt"
+                )
         if fixture.detector is Detector.PEAK_BOUND and fixture.peak_bound is None:
             raise OracleFailure(f"{fixture.id}: peak detector has no bound")
         if fixture.launch and (fixture.backend is not Backend.C or fixture.issue not in {1339, 1344, 1346, 1356}):
             raise OracleFailure(f"{fixture.id}: launch membership exceeds the frozen subset")
         if fixture.external_prerequisite != (fixture.issue == 1339):
             raise OracleFailure(f"{fixture.id}: external prerequisite classification is inconsistent")
-    for issue in OWNERSHIP_CHILD_ISSUES:
+    for issue in FROZEN_OWNERSHIP_CHILD_ISSUES:
         issue_rows = [fixture for fixture in fixtures if fixture.issue == issue]
         polarities = {fixture.polarity for fixture in issue_rows}
         if polarities != {Polarity.POSITIVE, Polarity.NEGATIVE}:
             raise OracleFailure(f"issue #{issue} lacks exact positive/negative parity")
+        counterparts = {
+            polarity.value: frozenset(
+                fixture.id
+                for fixture in issue_rows
+                if fixture.polarity is polarity
+            )
+            for polarity in Polarity
+        }
+        if counterparts != FROZEN_COUNTERPARTS[issue]:
+            raise OracleFailure(f"issue #{issue} counterpart identities drifted")
     launch_issues = {fixture.issue for fixture in fixtures if fixture.launch}
     if launch_issues != {1339, 1344, 1346, 1356}:
         raise OracleFailure(f"launch subset drifted: {sorted(launch_issues)}")
@@ -970,6 +1400,24 @@ def _required_int(record: dict[str, object], key: str, context: str) -> int:
     return value
 
 
+def _require_exact_keys(
+    record: dict[str, object], required: frozenset[str], context: str
+) -> None:
+    actual = frozenset(record)
+    if actual != required:
+        raise OracleFailure(
+            f"{context}: exact keys required; "
+            f"missing={sorted(required - actual)}, extra={sorted(actual - required)}"
+        )
+
+
+def _required_site(record: dict[str, object], context: str) -> str:
+    site = record.get("site")
+    if not isinstance(site, str) or not site:
+        raise OracleFailure(f"{context}: site must be a non-empty string")
+    return site
+
+
 def load_ledger(path: Path, *, minimum_allocations: int = 0) -> Ledger:
     try:
         lines = path.read_text().splitlines()
@@ -1001,6 +1449,7 @@ def load_ledger(path: Path, *, minimum_allocations: int = 0) -> Ledger:
     computed_live_bytes = 0
     computed_peak = 0
     invalid_operations = 0
+    invalid_events: Counter[str] = Counter()
     allocation_count = 0
 
     allowed_kinds = {"Tensor", "TensorStorage", "String", "List", "Tuple", "Dict", "Adt", "MappedFile"}
@@ -1008,6 +1457,22 @@ def load_ledger(path: Path, *, minimum_allocations: int = 0) -> Ledger:
         event = record.get("event")
         context = f"ownership ledger line {index}"
         if event == "allocate":
+            _require_exact_keys(
+                record,
+                frozenset(
+                    {
+                        "event",
+                        "id",
+                        "kind",
+                        "bytes",
+                        "owners_before",
+                        "owners_after",
+                        "site",
+                    }
+                ),
+                context,
+            )
+            _required_site(record, context)
             identity = _required_int(record, "id", context)
             if identity != allocation_count + 1 or identity in owners:
                 raise OracleFailure(f"{context}: allocation identities are not deterministic and contiguous")
@@ -1026,11 +1491,36 @@ def load_ledger(path: Path, *, minimum_allocations: int = 0) -> Ledger:
             computed_live_bytes += size
             computed_peak = max(computed_peak, computed_live_bytes)
         elif event in {"retain", "release"}:
+            _require_exact_keys(
+                record,
+                frozenset(
+                    {
+                        "event",
+                        "id",
+                        "kind",
+                        "bytes",
+                        "owners_before",
+                        "owners_after",
+                        "site",
+                    }
+                ),
+                context,
+            )
+            _required_site(record, context)
             identity = _required_int(record, "id", context)
-            if identity not in owners or identity in finalized:
+            if (
+                identity not in owners
+                or owners[identity] == 0
+                or identity in finalized
+            ):
                 raise OracleFailure(f"{context}: transition references an unknown/finalized allocation")
             before = _required_int(record, "owners_before", context)
             after = _required_int(record, "owners_after", context)
+            if (
+                record.get("kind") != kind_by_id[identity]
+                or record.get("bytes") != bytes_by_id[identity]
+            ):
+                raise OracleFailure(f"{context}: transition kind/bytes do not match allocation")
             delta = 1 if event == "retain" else -1
             if before != owners[identity] or after != before + delta or after < 0:
                 raise OracleFailure(f"{context}: invalid {event} owner transition")
@@ -1042,31 +1532,98 @@ def load_ledger(path: Path, *, minimum_allocations: int = 0) -> Ledger:
             elif before == 1 and after == 0:
                 computed_live_bytes -= bytes_by_id[identity]
         elif event == "resize":
+            _require_exact_keys(
+                record,
+                frozenset(
+                    {"event", "id", "kind", "bytes_before", "bytes_after", "site"}
+                ),
+                context,
+            )
+            _required_site(record, context)
             identity = _required_int(record, "id", context)
             if identity not in owners or owners[identity] == 0 or identity in finalized:
                 raise OracleFailure(f"{context}: resize references a dead allocation")
             before = _required_int(record, "bytes_before", context)
             after = _required_int(record, "bytes_after", context)
-            if before != bytes_by_id[identity]:
+            if record.get("kind") != kind_by_id[identity] or before != bytes_by_id[identity]:
                 raise OracleFailure(f"{context}: resize byte transition does not match prior state")
             bytes_by_id[identity] = after
             computed_live_bytes = computed_live_bytes - before + after
             computed_peak = max(computed_peak, computed_live_bytes)
         elif event == "finalize":
+            _require_exact_keys(
+                record,
+                frozenset(
+                    {
+                        "event",
+                        "id",
+                        "kind",
+                        "bytes",
+                        "owners_before",
+                        "owners_after",
+                        "site",
+                    }
+                ),
+                context,
+            )
+            _required_site(record, context)
             identity = _required_int(record, "id", context)
             if identity not in owners or owners[identity] != 0 or identity in finalized:
                 raise OracleFailure(f"{context}: finalization requires one live zero-owner allocation")
+            if (
+                record.get("kind") != kind_by_id[identity]
+                or record.get("bytes") != bytes_by_id[identity]
+                or record.get("owners_before") != 0
+                or record.get("owners_after") != 0
+            ):
+                raise OracleFailure(f"{context}: finalization kind/bytes/owners do not match allocation")
             finalized.add(identity)
         elif event == "borrow":
+            _require_exact_keys(
+                record,
+                frozenset({"event", "id", "kind", "site"}),
+                context,
+            )
+            _required_site(record, context)
             identity = _required_int(record, "id", context)
             if identity not in owners or owners[identity] == 0 or identity in finalized:
                 raise OracleFailure(f"{context}: borrow references a dead allocation")
+            if record.get("kind") != kind_by_id[identity]:
+                raise OracleFailure(f"{context}: borrow kind does not match allocation")
         elif event in {"invalid_allocate", "invalid_retain", "invalid_release", "invalid_finalize", "invalid_resize", "invalid_borrow"}:
+            _require_exact_keys(
+                record,
+                frozenset({"event", "id", "site"}),
+                context,
+            )
+            _required_site(record, context)
+            identity = record.get("id")
+            if identity is not None:
+                if type(identity) is not int or identity <= 0 or identity not in owners:
+                    raise OracleFailure(
+                        f"{context}: invalid-event identity must be null or a known positive integer"
+                    )
             invalid_operations += 1
+            invalid_events[str(event)] += 1
         else:
             raise OracleFailure(f"{context}: unknown event {event!r}")
 
     summary_record = summaries[0]
+    _require_exact_keys(
+        summary_record,
+        frozenset(
+            {
+                "event",
+                "allocations",
+                "finalized",
+                "live_owners",
+                "live_bytes",
+                "peak_live_bytes",
+                "invalid_operations",
+            }
+        ),
+        "ownership summary",
+    )
     summary = LedgerSummary(
         allocations=_required_int(summary_record, "allocations", "ownership summary"),
         finalized=_required_int(summary_record, "finalized", "ownership summary"),
@@ -1102,7 +1659,13 @@ def load_ledger(path: Path, *, minimum_allocations: int = 0) -> Ledger:
         for identity, count in owners.items()
         if count > 0 and identity not in finalized
     )
-    return Ledger(tuple(records), summary, kind_allocations, live_kind_counts)
+    return Ledger(
+        tuple(records),
+        summary,
+        kind_allocations,
+        live_kind_counts,
+        invalid_events,
+    )
 
 
 def _command_text(argv: Sequence[str]) -> str:
@@ -1255,6 +1818,11 @@ def assert_ledger_receipt(fixture: Fixture, ledger: Ledger) -> None:
         "live_kinds": tuple(sorted(ledger.live_kind_counts.items())),
         "peak_live_bytes": ledger.summary.peak_live_bytes,
         "invalid_operations": ledger.summary.invalid_operations,
+        "invalid_event": (
+            next(iter(ledger.invalid_events))
+            if len(ledger.invalid_events) == 1
+            else None
+        ),
     }
     expected = {
         "live_owners": receipt.live_owners,
@@ -1262,6 +1830,7 @@ def assert_ledger_receipt(fixture: Fixture, ledger: Ledger) -> None:
         "live_kinds": receipt.live_kinds or None,
         "peak_live_bytes": receipt.peak_live_bytes,
         "invalid_operations": receipt.invalid_operations,
+        "invalid_event": receipt.invalid_event,
     }
     drift = {
         field: (value, observed[field])
@@ -1272,18 +1841,52 @@ def assert_ledger_receipt(fixture: Fixture, ledger: Ledger) -> None:
         raise OracleFailure(f"{fixture.id}: frozen ledger receipt drift: {drift}")
 
 
+def _process_receipt_detection(
+    fixture: Fixture, run: subprocess.CompletedProcess[str]
+) -> Detection | None:
+    expected_exit = fixture.expected_exit if fixture.expected_exit is not None else 0
+    diagnostic = f"{run.stdout}\n{run.stderr}"
+    if run.returncode != expected_exit:
+        return Detection.failure(
+            Detector.NONZERO_EXIT,
+            f"expected exit {expected_exit}, got {run.returncode}: {run.stderr.strip()}",
+        )
+    if fixture.diagnostic_fragments and not all(
+        fragment in diagnostic for fragment in fixture.diagnostic_fragments
+    ):
+        return Detection.failure(
+            Detector.MANIFEST,
+            "compiled process diagnostic drifted from its frozen receipt",
+        )
+    if fixture.expected_output is None:
+        return Detection.failure(
+            Detector.MANIFEST,
+            "compiled process has no frozen stdout receipt",
+        )
+    if run.stdout.strip() != fixture.expected_output:
+        return Detection.failure(
+            Detector.OUTPUT_MISMATCH,
+            f"expected stdout={fixture.expected_output!r}; got {run.stdout.strip()!r}",
+        )
+    return None
+
+
 def _ledger_detection(fixture: Fixture, run: subprocess.CompletedProcess[str], path: Path) -> Detection:
+    process_failure = _process_receipt_detection(fixture, run)
+    if process_failure is not None:
+        return process_failure
     ledger = load_ledger(path, minimum_allocations=1)
     if ledger.summary.invalid_operations:
-        detection = Detection.failure(
-            Detector.INVALID_RELEASE,
-            f"{ledger.summary.invalid_operations} invalid ownership operation(s)",
-        )
-    elif run.returncode != 0:
-        detection = Detection.failure(
-            Detector.NONZERO_EXIT,
-            f"compiled process exited {run.returncode}: {run.stderr.strip()}",
-        )
+        if set(ledger.invalid_events) == {"invalid_release"}:
+            detection = Detection.failure(
+                Detector.INVALID_RELEASE,
+                f"{ledger.summary.invalid_operations} invalid release operation(s)",
+            )
+        else:
+            detection = Detection.failure(
+                Detector.MANIFEST,
+                f"wrong invalid ownership event class: {dict(ledger.invalid_events)}",
+            )
     elif fixture.peak_bound is not None and ledger.summary.peak_live_bytes > fixture.peak_bound:
         detection = Detection.failure(
             Detector.PEAK_BOUND,
@@ -1303,51 +1906,65 @@ def _ledger_detection(fixture: Fixture, run: subprocess.CompletedProcess[str], p
     return detection
 
 
-def _hip_source_detection(context: PhaseContext) -> Detection:
-    result = _run(
-        (
-            "cargo",
-            "test",
-            "-p",
-            "chelis-backend-hip",
-            "fused_reusable_input_emits_hip_in_place_restrict_shape",
-        ),
-        environment=context.environment,
-        timeout=600,
-    )
+def _listed_test_command(fixture: Fixture, argv: Sequence[str]) -> tuple[str, ...]:
+    if fixture.action is Action.HIP_HARDWARE:
+        if len(argv) < 3:
+            raise OracleFailure(f"{fixture.id}: malformed HIP hardware command")
+        command = ["cargo", "test", *argv[2:]]
+    else:
+        command = list(argv)
+    if "--" in command:
+        command.append("--list")
+    else:
+        command.extend(("--", "--list"))
+    return tuple(command)
+
+
+def _execute_command(context: PhaseContext, fixture: Fixture) -> Detection:
+    argv = tuple(sys.executable if item == "{python}" else item for item in fixture.command)
+    if fixture.listed_test is not None:
+        listed = _run(
+            _listed_test_command(fixture, argv),
+            environment=context.environment,
+            timeout=1200,
+        )
+        if listed.returncode != 0:
+            return Detection.failure(
+                Detector.NONZERO_EXIT,
+                f"test-list preflight failed: {listed.stderr.strip()}",
+            )
+        names = [
+            line.removesuffix(": test")
+            for line in listed.stdout.splitlines()
+            if line.endswith(": test")
+        ]
+        if names != [fixture.listed_test]:
+            return Detection.failure(
+                Detector.ZERO_VACUITY,
+                f"expected exactly test {fixture.listed_test!r}, listed={names}",
+            )
+    result = _run(argv, environment=context.environment, timeout=1200)
     if result.returncode != 0:
+        diagnostic = f"{result.stdout}\n{result.stderr}"
+        if (
+            fixture.listed_test is not None
+            and fixture.listed_test in diagnostic
+            and "test result: FAILED" in diagnostic
+        ):
+            return Detection.failure(
+                fixture.detector,
+                f"listed behavioral test failed for the current known issue: {fixture.listed_test}",
+            )
         return Detection.failure(
-            Detector.NONZERO_EXIT,
-            f"HIP reusable-input executable control failed: {result.stderr.strip()}",
+            detect_nonzero(fixture, result.returncode, diagnostic),
+            f"command exited {result.returncode}: {result.stderr.strip()}",
         )
-    fusion = (REPO_ROOT / "crates/chelis-backend-hip/src/fusion.rs").read_text()
-    emitter = (REPO_ROOT / "crates/chelis-backend-hip/src/emit.rs").read_text()
-    if "pub(crate) fn fused_in_place_spec" not in fusion:
-        return Detection.failure(Detector.SOURCE_CONTRACT, "HIP fused ownership predicate disappeared")
-    if "borrows_caller_storage" not in fusion and "fused_reusable_input_emits_hip_in_place_restrict_shape" in emitter:
-        return Detection.failure(
-            Detector.SOURCE_CONTRACT,
-            "HIP admits a Load-backed reusable input and its executable test asserts the aliasing shape",
-        )
-    return Detection.success("HIP caller-owned storage guard rejects the unsafe shape")
+    return Detection.success("command completed")
 
 
 def execute_fixture(context: PhaseContext, fixture: Fixture) -> Detection:
     if fixture.action in {Action.COMMAND, Action.HIP_HARDWARE}:
-        argv = tuple(sys.executable if item == "{python}" else item for item in fixture.command)
-        result = _run(argv, environment=context.environment, timeout=1200)
-        if result.returncode != 0:
-            return Detection.failure(
-                detect_nonzero(
-                    fixture,
-                    result.returncode,
-                    f"{result.stdout}\n{result.stderr}",
-                ),
-                f"command exited {result.returncode}: {result.stderr.strip()}",
-            )
-        return Detection.success("command completed")
-    if fixture.action is Action.HIP_SOURCE_CONTRACT:
-        return _hip_source_detection(context)
+        return _execute_command(context, fixture)
     if fixture.action is Action.CHECK_REJECT:
         context.prepare()
         source = context.source_copy(fixture)
@@ -1367,8 +1984,14 @@ def execute_fixture(context: PhaseContext, fixture: Fixture) -> Detection:
     if fixture.action is Action.BUILD_REJECT:
         diagnostic = f"{artifact.build.stdout}\n{artifact.build.stderr}"
         emitted = list(artifact.output_dir.glob("*")) if artifact.output_dir.is_dir() else []
-        required = ("unsupported:", "function value", "unimplemented chelis#879:")
-        if artifact.build.returncode != 0 and all(fragment in diagnostic for fragment in required) and not emitted:
+        source = (REPO_ROOT / fixture.source).read_text() if fixture.source else ""
+        if (
+            artifact.build.returncode != 0
+            and fixture.containing_type is not None
+            and fixture.containing_type in source
+            and all(fragment in diagnostic for fragment in fixture.diagnostic_fragments)
+            and not emitted
+        ):
             return Detection.success("exact recursive function-container #879 rejection")
         return Detection.failure(
             Detector.EXACT_REJECTION,

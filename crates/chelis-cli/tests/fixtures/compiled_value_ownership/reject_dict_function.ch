@@ -1,2 +1,3 @@
-value: Dict[string, int8 -> int8] = dict_of([("callback", fn (item: int8) -> item)])
+def identity(item: int8) -> int8 = item
+value: Dict[string, int8 -> int8] = dict_of([("callback", identity)])
 out = "unreachable"

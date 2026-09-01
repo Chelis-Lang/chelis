@@ -7,13 +7,150 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import compiled_value_ownership_oracle as oracle  # noqa: E402
+
+
+EXPECTED_CHILD_ISSUES = frozenset(
+    {543, 544, 1206, 1214, 1222, 1344, 1346, 1352, 1356}
+)
+
+EXPECTED_FIXTURE_IDS = frozenset(
+    """
+    oracle-self-tests runtime-ledger-process-tests
+    aggregate-tensor-list aggregate-tensor-tuple aggregate-tensor-dict
+    aggregate-tensor-adt aggregate-tensor-nested-repeated aggregate-scalar-control
+    list-string-4-threshold-control list-string-5-threshold
+    tuple-string-1-threshold-control tuple-string-2-threshold
+    nested-string-1-threshold-control nested-string-2-threshold
+    dict-string-1-threshold-control dict-string-2-threshold
+    aggregate-refcount-scalar-control recursive-depth-1-control
+    recursive-scalar-control recursive-depth-32 recursive-depth-128
+    recursive-depth-288 c-caller-owned-reuse c-caller-owned-view-reuse
+    hip-caller-owned-reuse hip-caller-owned-view-reuse hip-no-reuse-control
+    hip-caller-bytes-unchanged-hardware root-alias-clean distinct-roots-clean
+    captured-copy-clean fresh-function-binding-clean fold-alias-single-owner
+    fold-fresh-control if-mixed-fresh-arm match-adt-mixed-fresh-arm
+    match-option-mixed-fresh-control if-alias-control fresh-call-argument
+    nested-fresh-call-argument variable-call-argument-control
+    forward-captured-list forward-captured-tensor
+    unannotated-forward-capture-control option-scalar-some option-scalar-none
+    option-string option-nested-string mapped-file-direct option-mapped-file
+    option-nested-mapped-file reject-option-function-c reject-list-function-c
+    reject-tuple-function-c reject-dict-function-c reject-adt-function-c
+    contextual-callback-c reject-option-function-hip reject-list-function-hip
+    reject-tuple-function-hip reject-dict-function-hip reject-adt-function-hip
+    contextual-callback-hip reject-option-function-metal
+    reject-list-function-metal reject-tuple-function-metal
+    reject-dict-function-metal reject-adt-function-metal
+    contextual-callback-metal
+    """.split()
+)
+
+EXPECTED_MUTATIONS = frozenset(
+    {
+        ("heap-kind-without-finalizer", 1, oracle.Detector.SOURCE_CONTRACT, "future structural registry"),
+        ("option-host-carrier-omitted", 1, oracle.Detector.SOURCE_CONTRACT, "frozen option fixture census"),
+        ("mapped-file-carrier-omitted", 1, oracle.Detector.MANIFEST, "mapped-file fixture census"),
+        ("recursive-function-rejection-weakened", 0, oracle.Detector.EXACT_REJECTION, "exact #879 matrix"),
+        ("tensor-clone-omitted", 1, oracle.Detector.LEDGER_LEAK, "aggregate tensor balance"),
+        ("branch-clone-borrowed", 2, oracle.Detector.LEDGER_LEAK, "branch fixture parity"),
+        ("entry-borrow-reuse-admitted", 3, oracle.Detector.SOURCE_CONTRACT, "C and HIP caller-storage negatives"),
+        ("metal-reuse-admitted", 3, oracle.Detector.SOURCE_CONTRACT, "typed Metal no-reuse contract"),
+        ("tail-drop-delayed", 3, oracle.Detector.PEAK_BOUND, "depth 32/128/288 peak bound"),
+        ("backend-local-ownership-predicate-restored", 2, oracle.Detector.SOURCE_CONTRACT, "verified backend boundary"),
+        ("ledger-release-omitted", 0, oracle.Detector.LEDGER_LEAK, "balanced process ledger test"),
+        ("ledger-release-duplicated", 0, oracle.Detector.INVALID_RELEASE, "duplicate-release process test"),
+        ("ledger-event-stream-emptied", 0, oracle.Detector.ZERO_VACUITY, "empty-ledger parser test"),
+        ("manifest-receipt-omitted", 0, oracle.Detector.MANIFEST, "receipt bijection"),
+    }
+)
+
+EXPECTED_COUNTERPARTS = {
+    543: {
+        "positive": frozenset(
+            {
+                "aggregate-tensor-list",
+                "aggregate-tensor-tuple",
+                "aggregate-tensor-dict",
+                "aggregate-tensor-adt",
+                "aggregate-tensor-nested-repeated",
+            }
+        ),
+        "negative": frozenset({"aggregate-scalar-control"}),
+    },
+    544: {
+        "positive": frozenset(
+            {
+                "list-string-4-threshold-control",
+                "list-string-5-threshold",
+                "tuple-string-1-threshold-control",
+                "tuple-string-2-threshold",
+                "nested-string-1-threshold-control",
+                "nested-string-2-threshold",
+                "dict-string-1-threshold-control",
+                "dict-string-2-threshold",
+            }
+        ),
+        "negative": frozenset({"aggregate-refcount-scalar-control"}),
+    },
+    1206: {
+        "positive": frozenset(
+            {
+                "recursive-depth-1-control",
+                "recursive-depth-32",
+                "recursive-depth-128",
+                "recursive-depth-288",
+            }
+        ),
+        "negative": frozenset({"recursive-scalar-control"}),
+    },
+    1214: {
+        "positive": frozenset(
+            {
+                "c-caller-owned-reuse",
+                "c-caller-owned-view-reuse",
+                "hip-caller-owned-reuse",
+                "hip-caller-owned-view-reuse",
+                "hip-caller-bytes-unchanged-hardware",
+            }
+        ),
+        "negative": frozenset({"hip-no-reuse-control"}),
+    },
+    1222: {
+        "positive": frozenset({"root-alias-clean"}),
+        "negative": frozenset({"distinct-roots-clean"}),
+    },
+    1344: {
+        "positive": frozenset({"captured-copy-clean"}),
+        "negative": frozenset({"fresh-function-binding-clean"}),
+    },
+    1346: {
+        "positive": frozenset({"fold-alias-single-owner"}),
+        "negative": frozenset({"fold-fresh-control"}),
+    },
+    1352: {
+        "positive": frozenset(
+            {"if-mixed-fresh-arm", "match-adt-mixed-fresh-arm"}
+        ),
+        "negative": frozenset(
+            {"if-alias-control", "match-option-mixed-fresh-control"}
+        ),
+    },
+    1356: {
+        "positive": frozenset(
+            {"fresh-call-argument", "nested-fresh-call-argument"}
+        ),
+        "negative": frozenset({"variable-call-argument-control"}),
+    },
+}
 
 
 class ManifestContractTests(unittest.TestCase):
@@ -24,9 +161,65 @@ class ManifestContractTests(unittest.TestCase):
         self.assertEqual(len({fixture.id for fixture in fixtures}), len(fixtures))
         self.assertEqual(len({mutation.id for mutation in mutations}), len(mutations))
 
+    def test_frozen_fixture_child_and_mutation_universes_are_literal(self) -> None:
+        fixtures = oracle.fixture_manifest()
+        mutations = oracle.mutation_manifest()
+        self.assertEqual({fixture.id for fixture in fixtures}, EXPECTED_FIXTURE_IDS)
+        self.assertEqual(oracle.OWNERSHIP_CHILD_ISSUES, EXPECTED_CHILD_ISSUES)
+        self.assertEqual(
+            {
+                (row.id, row.activation_phase, row.detector, row.canary)
+                for row in mutations
+            },
+            EXPECTED_MUTATIONS,
+        )
+
+    def test_child_counterpart_identities_are_frozen(self) -> None:
+        fixtures = oracle.fixture_manifest()
+        observed = {
+            issue: {
+                polarity.value: frozenset(
+                    row.id
+                    for row in fixtures
+                    if row.issue == issue and row.polarity is polarity
+                )
+                for polarity in oracle.Polarity
+            }
+            for issue in EXPECTED_CHILD_ISSUES
+        }
+        self.assertEqual(observed, EXPECTED_COUNTERPARTS)
+
+    def test_removing_a_child_and_all_its_rows_fails_closed(self) -> None:
+        fixtures = tuple(row for row in oracle.fixture_manifest() if row.issue != 543)
+        with mock.patch.object(
+            oracle,
+            "OWNERSHIP_CHILD_ISSUES",
+            oracle.OWNERSHIP_CHILD_ISSUES - {543},
+        ):
+            with self.assertRaisesRegex(oracle.OracleFailure, "frozen fixture universe"):
+                oracle.validate_manifest(fixtures, oracle.mutation_manifest())
+
+    def test_undeclared_fixture_file_fails_closed(self) -> None:
+        fixtures = oracle.fixture_manifest()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for source in {row.source for row in fixtures if row.source is not None}:
+                assert source is not None
+                path = root / source
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("fixture\n")
+            extra = root / oracle.FIXTURE_ROOT / "undeclared.ch"
+            extra.write_text("out = 0i64\n")
+            with self.assertRaisesRegex(oracle.OracleFailure, "fixture directory drift"):
+                oracle.validate_manifest(
+                    fixtures,
+                    oracle.mutation_manifest(),
+                    repository_root=root,
+                )
+
     def test_every_child_has_positive_and_negative_parity(self) -> None:
         fixtures = oracle.fixture_manifest()
-        for issue in oracle.OWNERSHIP_CHILD_ISSUES:
+        for issue in EXPECTED_CHILD_ISSUES:
             rows = [fixture for fixture in fixtures if fixture.issue == issue]
             with self.subTest(issue=issue):
                 self.assertTrue(any(row.polarity is oracle.Polarity.POSITIVE for row in rows))
@@ -41,7 +234,7 @@ class ManifestContractTests(unittest.TestCase):
 
     def test_open_children_use_typed_expected_failures(self) -> None:
         fixtures = oracle.fixture_manifest()
-        open_children = oracle.OWNERSHIP_CHILD_ISSUES - {1222, 1344}
+        open_children = EXPECTED_CHILD_ISSUES - {1222, 1344}
         for issue in open_children:
             rows = [fixture for fixture in fixtures if fixture.issue == issue]
             with self.subTest(issue=issue):
@@ -178,6 +371,55 @@ class ManifestContractTests(unittest.TestCase):
                 with self.subTest(fixture=fixture.id):
                     self.assertTrue((oracle.REPO_ROOT / fixture.source).is_file())
 
+    def test_every_ledger_executable_freezes_exact_stdout(self) -> None:
+        for fixture in oracle.fixture_manifest():
+            if fixture.action is oracle.Action.LEDGER_BUILD_RUN:
+                with self.subTest(fixture=fixture.id):
+                    self.assertIsNotNone(fixture.expected_output)
+
+    def test_recursive_function_fixtures_reach_named_value_projection(self) -> None:
+        for source in {
+            row.source
+            for row in oracle.fixture_manifest()
+            if row.detector is oracle.Detector.EXACT_REJECTION
+            and row.action is oracle.Action.BUILD_REJECT
+        }:
+            assert source is not None
+            text = (oracle.REPO_ROOT / source).read_text()
+            with self.subTest(source=source):
+                self.assertIn("def identity", text)
+                self.assertNotIn("fn (", text)
+
+    def test_recursive_function_metal_rows_are_typed_expected_failures(self) -> None:
+        rows = [
+            row
+            for row in oracle.fixture_manifest()
+            if row.action is oracle.Action.BUILD_REJECT
+        ]
+        self.assertTrue(rows)
+        for row in rows:
+            with self.subTest(fixture=row.id):
+                if row.backend is oracle.Backend.METAL:
+                    self.assertEqual(
+                        row.expected,
+                        oracle.ExpectedFailure(879, oracle.Detector.EXACT_REJECTION),
+                    )
+                else:
+                    self.assertIsInstance(row.expected, oracle.MustPass)
+
+    def test_c_and_hip_reuse_rows_name_exact_behavioral_tests(self) -> None:
+        rows = {row.id: row for row in oracle.fixture_manifest()}
+        for fixture_id in (
+            "c-caller-owned-reuse",
+            "c-caller-owned-view-reuse",
+            "hip-caller-owned-reuse",
+            "hip-caller-owned-view-reuse",
+            "hip-caller-bytes-unchanged-hardware",
+        ):
+            with self.subTest(fixture=fixture_id):
+                self.assertIn(fixture_id, rows)
+                self.assertIsNotNone(rows[fixture_id].listed_test)
+
     def test_mutation_identity_set_is_frozen(self) -> None:
         self.assertEqual(
             {mutation.id for mutation in oracle.mutation_manifest()},
@@ -280,6 +522,100 @@ class LedgerContractTests(unittest.TestCase):
         with self.assertRaisesRegex(oracle.OracleFailure, "summary"):
             oracle.load_ledger(path)
 
+    def test_transition_missing_schema_fields_fails_closed(self) -> None:
+        path = self.write_ledger(
+            [
+                {"event": "header", "schema": oracle.LEDGER_SCHEMA},
+                {
+                    "event": "allocate",
+                    "id": 1,
+                    "kind": "String",
+                    "bytes": 6,
+                    "owners_before": 0,
+                    "owners_after": 1,
+                    "site": "test",
+                },
+                {
+                    "event": "release",
+                    "id": 1,
+                    "owners_before": 1,
+                    "owners_after": 0,
+                },
+                {
+                    "event": "finalize",
+                    "id": 1,
+                    "owners_before": 0,
+                    "owners_after": 0,
+                },
+                {
+                    "event": "summary",
+                    "allocations": 1,
+                    "finalized": 1,
+                    "live_owners": 0,
+                    "live_bytes": 0,
+                    "peak_live_bytes": 6,
+                    "invalid_operations": 0,
+                },
+            ]
+        )
+        with self.assertRaisesRegex(oracle.OracleFailure, "exact keys"):
+            oracle.load_ledger(path)
+
+    def test_transition_kind_and_bytes_must_match_allocation(self) -> None:
+        path = self.write_ledger(
+            [
+                {"event": "header", "schema": oracle.LEDGER_SCHEMA},
+                {
+                    "event": "allocate",
+                    "id": 1,
+                    "kind": "String",
+                    "bytes": 6,
+                    "owners_before": 0,
+                    "owners_after": 1,
+                    "site": "test",
+                },
+                {
+                    "event": "release",
+                    "id": 1,
+                    "kind": "List",
+                    "bytes": 99,
+                    "owners_before": 1,
+                    "owners_after": 0,
+                    "site": "test",
+                },
+                {
+                    "event": "summary",
+                    "allocations": 1,
+                    "finalized": 0,
+                    "live_owners": 0,
+                    "live_bytes": 0,
+                    "peak_live_bytes": 6,
+                    "invalid_operations": 0,
+                },
+            ]
+        )
+        with self.assertRaisesRegex(oracle.OracleFailure, "kind/bytes"):
+            oracle.load_ledger(path)
+
+    def test_invalid_event_requires_exact_identity_and_site_schema(self) -> None:
+        path = self.write_ledger(
+            [
+                {"event": "header", "schema": oracle.LEDGER_SCHEMA},
+                {"event": "invalid_release"},
+                {
+                    "event": "summary",
+                    "allocations": 0,
+                    "finalized": 0,
+                    "live_owners": 0,
+                    "live_bytes": 0,
+                    "peak_live_bytes": 0,
+                    "invalid_operations": 1,
+                },
+            ]
+        )
+        with self.assertRaisesRegex(oracle.OracleFailure, "exact keys"):
+            oracle.load_ledger(path)
+
 
 class ReceiptContractTests(unittest.TestCase):
     def test_ledger_receipt_count_drift_fails_closed(self) -> None:
@@ -295,6 +631,7 @@ class ReceiptContractTests(unittest.TestCase):
             live_kind_counts=oracle.Counter(
                 {"List": 4, "Tensor": 4, "TensorStorage": 4}
             ),
+            invalid_events=oracle.Counter(),
         )
         with self.assertRaisesRegex(oracle.OracleFailure, "frozen ledger receipt drift"):
             oracle.assert_ledger_receipt(fixture, ledger)
@@ -358,6 +695,58 @@ class ReceiptContractTests(unittest.TestCase):
                 oracle.Detection.failure(oracle.Detector.NONZERO_EXIT, "exit 1"),
                 "fixture",
             )
+
+    def test_invalid_retain_cannot_satisfy_invalid_release_receipt(self) -> None:
+        fixture = next(
+            row
+            for row in oracle.fixture_manifest()
+            if row.id == "fresh-call-argument"
+        )
+        ledger = oracle.Ledger(
+            records=(),
+            summary=oracle.LedgerSummary(1, 0, 0, 0, 1, 1),
+            kind_allocations=oracle.Counter({"List": 1}),
+            live_kind_counts=oracle.Counter(),
+            invalid_events=oracle.Counter({"invalid_retain": 1}),
+        )
+        with mock.patch.object(oracle, "load_ledger", return_value=ledger):
+            detection = oracle._ledger_detection(
+                fixture,
+                oracle.subprocess.CompletedProcess(
+                    args=("fixture",),
+                    returncode=1,
+                    stdout=fixture.expected_output or "",
+                    stderr="compiled ownership ledger detected invalid list release",
+                ),
+                Path("unused.jsonl"),
+            )
+        self.assertIs(detection.detector, oracle.Detector.MANIFEST)
+
+    def test_balanced_ledger_cannot_hide_wrong_stdout(self) -> None:
+        fixture = next(
+            row
+            for row in oracle.fixture_manifest()
+            if row.id == "aggregate-scalar-control"
+        )
+        ledger = oracle.Ledger(
+            records=(),
+            summary=oracle.LedgerSummary(1, 1, 0, 0, 1, 0),
+            kind_allocations=oracle.Counter({"List": 1}),
+            live_kind_counts=oracle.Counter(),
+            invalid_events=oracle.Counter(),
+        )
+        with mock.patch.object(oracle, "load_ledger", return_value=ledger):
+            detection = oracle._ledger_detection(
+                fixture,
+                oracle.subprocess.CompletedProcess(
+                    args=("fixture",),
+                    returncode=0,
+                    stdout="wrong output\n",
+                    stderr="",
+                ),
+                Path("unused.jsonl"),
+            )
+        self.assertIs(detection.detector, oracle.Detector.OUTPUT_MISMATCH)
 
 
 if __name__ == "__main__":

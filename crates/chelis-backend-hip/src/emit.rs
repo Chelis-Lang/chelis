@@ -4356,6 +4356,66 @@ mod tests {
         assert!(hip.contains("const float *__restrict__ ext1"));
     }
 
+    /// chelis#1214 Phase 0 expected failure: a reusable program input is
+    /// caller-owned and must not supply the produced tensor's storage.
+    #[test]
+    #[ignore = "chelis#1214: HIP does not yet reject caller-owned reuse"]
+    fn fused_in_place_does_not_alias_a_caller_owned_input() {
+        let dag = fused_mul_reusable_input_dag();
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
+
+        assert!(
+            !hip.contains("d_t0->data, d_t0->storage_size"),
+            "the fused output must not reuse caller-owned input bytes; got:\n{hip}"
+        );
+    }
+
+    /// chelis#1214 Phase 0 expected failure: metadata views preserve the
+    /// caller-owned provenance of their source storage.
+    #[test]
+    #[ignore = "chelis#1214: HIP does not yet reject caller-owned view reuse"]
+    fn fused_in_place_does_not_alias_a_view_of_a_caller_owned_input() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            mat_f32(2, 2),
+            None,
+        );
+        let flat = dag.add_node(
+            RiscOp::Reshape {
+                new_shape: vec![RtDim::Lit(4)],
+            },
+            vec![x],
+            vec_f32(4),
+            None,
+        );
+        let scale = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 2.0),
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        let fused = dag.add_node(
+            RiscOp::FusedElem {
+                ops: vec![FusedStep {
+                    op: FusedStepOp::Mul,
+                    input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+                }],
+            },
+            vec![flat, scale],
+            vec_f32(4),
+            None,
+        );
+        dag.set_reusable_input(fused, flat);
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
+
+        assert!(
+            !hip.contains("d_t1->data, d_t1->storage_size"),
+            "the fused output must not reuse a caller-owned view's bytes; got:\n{hip}"
+        );
+    }
+
     /// Negative: a FusedElem with no `reusable_input` set must still
     /// emit the legacy non-`__restrict__` kernel parameter list.
     /// The in-place shape is opt-in via the upstream linearity-marked
