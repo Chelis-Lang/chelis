@@ -179,6 +179,12 @@ pub enum RuntimeValue {
         param_types: Vec<Option<Expr>>,
         body: Expr,
         env: HashMap<String, RuntimeValue>,
+        /// Concrete precision variables active when the closure was
+        /// created. Call application extends this map from the declared
+        /// parameter types and the tagged runtime arguments, so a generic
+        /// `cast(_, p)` retains the checked call's concrete dtype in the
+        /// host evaluator.
+        precision_env: HashMap<String, Prim>,
     },
     /// A captured `grad(f)` / `vmap(f)` waiting to be applied to args. The
     /// `transform_expr` holds the original `(grad ...)` or `(vmap ...)`
@@ -497,6 +503,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     let mut ctx = EvalContext {
         bindings: HashMap::new(),
         binding_types: HashMap::new(),
+        precision_bindings: HashMap::new(),
         named_axis_route_cache: HashMap::new(),
         named_axis_route_visiting: HashSet::new(),
         top_level_defs,
@@ -880,6 +887,10 @@ struct EvalContext<'a> {
     /// same-named top-level `type_env` entry so a local shadow is never
     /// typed with the outer binding's type (chelis#338 named-axis routing).
     binding_types: HashMap<String, Option<Expr>>,
+    /// Call-frame actualizations for precision variables used by generic
+    /// casts. Values come only from tagged scalar/tensor arguments matched
+    /// against checker-owned declared parameter types.
+    precision_bindings: HashMap<String, Prim>,
     /// Memoized per-def result of [`Self::def_requires_named_axis_routing`].
     named_axis_route_cache: HashMap<String, bool>,
     /// Cycle guard for the recursive routing detection walk.

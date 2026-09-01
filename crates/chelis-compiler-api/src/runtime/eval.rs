@@ -82,6 +82,93 @@ fn float_element_is_nan(value: ElementRef) -> bool {
     }
 }
 
+fn bind_runtime_precision(
+    name: &str,
+    prim: Prim,
+    bindings: &mut HashMap<String, Prim>,
+) -> Result<(), String> {
+    match bindings.get(name) {
+        Some(existing) if *existing != prim => Err(format!(
+            "generic precision `{name}` actualized as both `{}` and `{}`",
+            existing.name(),
+            prim.name()
+        )),
+        Some(_) => Ok(()),
+        None => {
+            bindings.insert(name.to_string(), prim);
+            Ok(())
+        }
+    }
+}
+
+fn bind_runtime_precision_expr(
+    precision: &Expr,
+    prim: Prim,
+    bindings: &mut HashMap<String, Prim>,
+) -> Result<(), String> {
+    let Expr::List(list, _) = precision else {
+        return Ok(());
+    };
+    if tag(list) != Some(DeepTag::TVar) {
+        return Ok(());
+    }
+    let Some(name) = children(list).first().and_then(symbol_name) else {
+        return Ok(());
+    };
+    bind_runtime_precision(name, prim, bindings)
+}
+
+/// Match a checker-owned declared parameter type against its tagged runtime
+/// argument and collect only concrete numeric precision actualizations.
+/// Empty containers contribute no guess; another scalar/tensor argument must
+/// establish the variable before a generic cast can use it.
+fn collect_runtime_precision_bindings(
+    declared: &Expr,
+    value: &RuntimeValue,
+    bindings: &mut HashMap<String, Prim>,
+) -> Result<(), String> {
+    let Expr::List(list, _) = declared else {
+        return Ok(());
+    };
+    let declared_children = children(list);
+    match (tag(list), value) {
+        (Some(DeepTag::TVar), RuntimeValue::Scalar(payload)) => {
+            let Some(name) = declared_children.first().and_then(symbol_name) else {
+                return Ok(());
+            };
+            bind_runtime_precision(name, payload.dtype(), bindings)
+        }
+        (Some(DeepTag::TRef), value) => declared_children.first().map_or(Ok(()), |inner| {
+            collect_runtime_precision_bindings(inner, value, bindings)
+        }),
+        (Some(DeepTag::TTensor), RuntimeValue::Tensor(tensor)) => {
+            declared_children.last().map_or(Ok(()), |precision| {
+                bind_runtime_precision_expr(precision, tensor.precision, bindings)
+            })
+        }
+        (Some(DeepTag::TAdt), RuntimeValue::List(items))
+            if declared_children.first().and_then(symbol_name) == Some("List") =>
+        {
+            let Some(element_type) = declared_children.get(1) else {
+                return Ok(());
+            };
+            for item in items {
+                collect_runtime_precision_bindings(element_type, item, bindings)?;
+            }
+            Ok(())
+        }
+        (Some(DeepTag::TTuple), RuntimeValue::Tuple(items))
+            if declared_children.len() == items.len() =>
+        {
+            for (item_type, item) in declared_children.iter().zip(items) {
+                collect_runtime_precision_bindings(item_type, item, bindings)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 fn render_shape(shape: &[usize]) -> String {
     let dimensions = shape
         .iter()
@@ -554,6 +641,7 @@ impl<'a> EvalContext<'a> {
                 .filter(|(name, _)| !self.top_level_defs.contains_key(*name))
                 .map(|(name, value)| (name.clone(), value.clone()))
                 .collect(),
+            precision_env: self.precision_bindings.clone(),
         })
     }
 
@@ -942,6 +1030,7 @@ impl<'a> EvalContext<'a> {
                 param_types,
                 body,
                 env,
+                precision_env,
             } => {
                 if params.len() != args.len() {
                     return Err(format!(
@@ -952,31 +1041,43 @@ impl<'a> EvalContext<'a> {
                 }
                 let saved = self.bindings.clone();
                 let saved_types = std::mem::take(&mut self.binding_types);
+                let saved_precisions = std::mem::take(&mut self.precision_bindings);
                 self.bindings = env;
-                for (index, (param, arg)) in params.into_iter().zip(args).enumerate() {
-                    let declared = param_types
-                        .get(index)
-                        .cloned()
-                        .flatten()
-                        .or_else(|| arg_type_exprs.get(index).cloned().flatten());
-                    // chelis#729 Phase 1: a tensor argument ingress-finalizes
-                    // at the param's DECLARED element dtype (the host-lane
-                    // mirror of the DAG evaluator's Load ingress). Without
-                    // this, an Int64-tagged `to_tensor` literal flows into an
-                    // int8-typed param and the arithmetic runs at the wrong
-                    // width (the chelis#718 eval-tensor cell).
-                    let arg = match (declared.as_ref().and_then(declared_tensor_prim), arg) {
-                        (Some(prim), RuntimeValue::Tensor(tensor)) => {
-                            RuntimeValue::Tensor(ingress_tensor_to_declared(tensor, prim)?)
+                self.precision_bindings = precision_env;
+                let value = (|| {
+                    for (index, (param, arg)) in params.into_iter().zip(args).enumerate() {
+                        let declared = param_types
+                            .get(index)
+                            .cloned()
+                            .flatten()
+                            .or_else(|| arg_type_exprs.get(index).cloned().flatten());
+                        if let Some(declared) = declared.as_ref() {
+                            collect_runtime_precision_bindings(
+                                declared,
+                                &arg,
+                                &mut self.precision_bindings,
+                            )?;
                         }
-                        (_, arg) => arg,
-                    };
-                    self.binding_types.insert(param.clone(), declared);
-                    self.bindings.insert(param, arg);
-                }
-                let value = self.eval_expr(&body);
+                        // chelis#729 Phase 1: a tensor argument ingress-finalizes
+                        // at the param's DECLARED element dtype (the host-lane
+                        // mirror of the DAG evaluator's Load ingress). Without
+                        // this, an Int64-tagged `to_tensor` literal flows into an
+                        // int8-typed param and the arithmetic runs at the wrong
+                        // width (the chelis#718 eval-tensor cell).
+                        let arg = match (declared.as_ref().and_then(declared_tensor_prim), arg) {
+                            (Some(prim), RuntimeValue::Tensor(tensor)) => {
+                                RuntimeValue::Tensor(ingress_tensor_to_declared(tensor, prim)?)
+                            }
+                            (_, arg) => arg,
+                        };
+                        self.binding_types.insert(param.clone(), declared);
+                        self.bindings.insert(param, arg);
+                    }
+                    self.eval_expr(&body)
+                })();
                 self.bindings = saved;
                 self.binding_types = saved_types;
+                self.precision_bindings = saved_precisions;
                 value
             }
             RuntimeValue::Transform {
@@ -1005,6 +1106,7 @@ impl<'a> EvalContext<'a> {
         // f8e4m3 (spec/04-type-system.md §1.1.1) at this point so the
         // host eval lane just needs to pick the right re-pack.
         let target_prim = prim_from_name(target)
+            .or_else(|| self.precision_bindings.get(target).copied())
             .ok_or_else(|| format!("cast target `{target}` is not a recognized primitive type"))?;
         // [05-OP-6]: the truncating rung has its own sealed kernel and
         // its own trap brand. The checker has already pinned the pair to

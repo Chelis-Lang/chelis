@@ -804,6 +804,7 @@ pub(crate) fn revalidate_adt_value(
     let mut ctx = EvalContext {
         bindings: HashMap::new(),
         binding_types: HashMap::new(),
+        precision_bindings: HashMap::new(),
         named_axis_route_cache: HashMap::new(),
         named_axis_route_visiting: HashSet::new(),
         top_level_defs: module_constants.clone(),
