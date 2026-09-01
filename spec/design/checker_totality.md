@@ -1379,8 +1379,10 @@ owned by [04-INF-2]/[04-INF-3]. Local `let` scope is likewise sequential.
 This narrower decision is required by the executable compiler boundary. A
 general value dependency schedule would make [#1339]'s release-blocking
 compiled wrong-answer path newly reachable without its formerly required
-annotation. This residual therefore does not absorb compiled-value ownership
-or legalize a construct that the backends cannot execute faithfully.
+annotation. Sequential eager scope instead closes that prerequisite at the
+checker: annotated and unannotated forward captures reject before any backend
+artifact exists. This residual does not add dependency-ordered global
+initialization or absorb the compiled-value ownership class.
 
 The authoritative oracle for this residual is:
 
