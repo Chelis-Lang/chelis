@@ -521,7 +521,11 @@ When a public surface has an implicit invariant, make it explicit and test it.
   must still be minimal POSIX `sh` and `shellcheck`-clean. The bootstrap and the two
   hooks are checked with `sh -n`; the generated launcher is checked with `bash -n` by
   the `chelisupLauncherLint` flake check, so a bash-ism there passes CI while still
-  violating the POSIX-`sh` requirement. All other scripts remain Python.
+  violating the POSIX-`sh` requirement. That flake check runs in `nix-packages.yml`,
+  which is path-filtered to the Nix and build-input surface plus nightly on `main` -
+  not on every pull request - so a bash-ism introduced from an unfiltered path is
+  caught by the nightly run rather than by the PR that adds it (chelis#1441). All
+  other scripts remain Python.
 - Existing `scripts/` directory uses Python; follow that convention.
 - **Use a uv-managed Python**, not the system Python, for every script and every
   ad-hoc invocation. [Build Toolchain](#build-toolchain) owns provisioning, the

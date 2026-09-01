@@ -3,7 +3,25 @@ name: Nix Packages
 on:
   push:
     branches: [main]
+  # The package checks build Rust from source, so a path filter alone cannot
+  # cover them: compilerBehavior, the shape contracts, and runtimeConsumer can
+  # break from any Rust change. Nightly on main bounds that blast radius to one
+  # day, while the pull_request filter keeps the hour off PRs that cannot
+  # affect the Nix build (chelis#1441).
+  schedule:
+    - cron: "0 7 * * *"
   pull_request:
+    paths:
+      - "nix/**"
+      - "devenv/**"
+      - "devenv.nix"
+      - "devenv.yaml"
+      - "devenv.lock"
+      - "flake.nix"
+      - "flake.lock"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/nix-packages.yml"
   workflow_dispatch:
 
 concurrency:
@@ -17,9 +35,14 @@ jobs:
   # Same docs-only detector as ci.yml's `changes` job (chelis#419). The
   # Nix package build lives in its own workflow file, so `needs:` cannot
   # reach ci.yml's changes job; this replicates it here so the
-  # `Nix Packages (x86_64-linux)` context skips on a docs-only PR (a
-  # skipped required job reports success) while running on every code PR
-  # and push. The darwin job keeps its own manual-dispatch gate.
+  # `Nix Packages (x86_64-linux)` context skips on a docs-only PR while
+  # running on every code PR and push that clears the paths filter above.
+  # The darwin job keeps its own manual-dispatch gate.
+  #
+  # `Nix Packages (x86_64-linux)` is NOT one of branch protection's required
+  # contexts, contrary to what this comment claimed before chelis#1441. Do not
+  # make it required while the paths filter stands: a required check that never
+  # runs on a PR outside the filter would block that PR permanently.
   changes:
     name: Detect docs-only changes (nix)
     runs-on: ubuntu-latest
@@ -55,8 +78,8 @@ jobs:
     name: Nix Packages (x86_64-linux)
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    # Skip on docs-only PRs (chelis#419); a skipped required job reports
-    # success, and the `if` fails safe (runs when the changes job did
+    # Skip on docs-only PRs (chelis#419). The `if` fails safe (runs when
+    # the changes job did
     # not succeed) so a broken detector never skips the build on a code
     # PR. Only package derivations are content-addressed away from
     # prose; the runner still cold-builds them, so a pure-prose PR
