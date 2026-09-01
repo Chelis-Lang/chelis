@@ -494,8 +494,11 @@ stale or unmatched entry fails and an issue citation does not authorize a raw
 path.
 
 The C-family portion is parsed by the shared `chelis-c-surface` crate through
-libclang's compiler AST and preprocessor for the source's declared dialect,
-rather than matched as declaration text. Every carrier row is owned by its
+libclang major 18's compiler AST and preprocessor for the source's declared
+dialect, rather than matched as declaration text. The executable rejects any
+other libclang major, and Devenv and hosted Linux CI provide the same pinned
+parser. Parser version is therefore part of the Phase-0 inventory contract, not
+workstation state. Every carrier row is owned by its
 complete semantic enclosing-declaration chain, including C++ namespaces and
 classes and Objective-C interfaces; identical method selectors in different
 containers therefore remain distinct. Its identity includes the authored
@@ -505,16 +508,26 @@ Relocating an unchanged carrier between functions, changing one extent of a
 multidimensional array, or changing `float *` to `_Atomic(float) *` therefore
 changes identity. Width-equal spellings such as `int` and `unsigned int`
 cannot collapse to one identity. The parser evaluates production
-preprocessor configurations explicitly; syntax rejected in every declared
-dialect fails closed rather than disappearing from the inventory.
+preprocessor configurations explicitly: compiler-provided macros are cleared,
+every external macro named by a source conditional is forced both disabled and
+enabled, and the union of those boolean assignments is scanned. Macros defined
+by the source itself are not configuration dimensions. More than eight external
+dimensions fails closed instead of growing an unbounded scan, and syntax
+rejected in any enumerated configuration fails instead of disappearing from the
+inventory.
 
 Carrier admission is category-total rather than an `EntityKind` allow-list.
 Every main-file cursor that libclang categorizes as a declaration or expression
-has its complete type inspected, and every cursor exposing a callable result has
-that result inspected independently. This covers declarations such as
-Objective-C ivars, C++ type aliases, and non-type template parameters without
-teaching the inventory their individual cursor kinds; numeric carrier
-expressions likewise do not depend on an enumerated cast-kind list. Width
+has its complete type inspected, and every cursor whose exposed type is callable
+has that type's result inspected independently. Result projection uses the
+function-or-method type operation first. Objective-C methods do not expose a
+callable type through libclang, so declaration-category cursors also use the
+cursor-result operation as a fallback; expression cursors never do, because its
+answer for non-callable expressions is not a callable contract. This covers
+declarations such as Objective-C ivars, C++ type aliases, and non-type template
+parameters without teaching the inventory their individual cursor kinds;
+numeric carrier expressions likewise do not depend on an enumerated cast-kind
+list. Width
 operations project from every valid main-file cursor because libclang does not
 categorize every version-specific width cursor as an expression; they therefore
 have no declaration, expression, or unary-kind admission gate. An invalid or

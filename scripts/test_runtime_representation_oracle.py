@@ -341,6 +341,7 @@ class MutationContractTests(unittest.TestCase):
                 "mutate_c_carrier_expression",
                 "mutate_c_atomic_element_pointer",
                 "mutate_cxx_rvalue_reference",
+                "mutate_external_preprocessor_configuration",
                 "mutate_c_complete_declarator_shapes",
                 "mutate_c_pointer_return",
                 "mutate_objc_pointer_return",
@@ -353,6 +354,20 @@ class MutationContractTests(unittest.TestCase):
                 "mutate_direct_data_access_after_test_module",
             }
             <= names
+        )
+
+    def test_coverage_manifest_freezes_the_c_parser_environment(self) -> None:
+        parser = oracle.coverage_manifest()["source_inventory"]["parser"]
+        self.assertEqual(
+            parser,
+            {
+                "engine": "chelis-c-surface",
+                "libclang_major": 18,
+                "configuration_model": (
+                    "clear compiler builtins and enumerate every boolean "
+                    "assignment of source-referenced external macros"
+                ),
+            },
         )
 
     def test_every_classifier_mutation_is_rejected_for_its_intended_reason(self) -> None:

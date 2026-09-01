@@ -33,7 +33,7 @@ DTYPE_MUTATION_SOURCE = Path("crates/chelis-vocab/src/lib.rs")
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "0a98b50c7257e7354ec4232f0f9098e85ceaf3e6fb24f87629b24971a1c573fb"
+FREEZE_SHA256 = "34b3330e9f6fe998b868751f9bb58588f39f970bb595ae4898dc46fa4b92d24c"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -605,6 +605,14 @@ def coverage_manifest(
         "source_inventory": {
             "artifact": "tracked runtime, ABI, IR-capacity, binding, and backend sources",
             "enumerator": "git ls-files plus closed source classifiers",
+            "parser": {
+                "engine": "chelis-c-surface",
+                "libclang_major": 18,
+                "configuration_model": (
+                    "clear compiler builtins and enumerate every boolean assignment "
+                    "of source-referenced external macros"
+                ),
+            },
             "expected_success": "every hit is exact active debt from the frozen foundation",
             "command": PHASE0_COMMAND,
             "mutations": mutation_manifest(probes),
@@ -977,6 +985,18 @@ def mutate_cxx_rvalue_reference(source: str) -> str:
     )
 
 
+def mutate_external_preprocessor_configuration(source: str) -> str:
+    anchor = "#ifdef __AVX2__\n#include <immintrin.h>\n"
+    if source.count(anchor) != 1:
+        raise OracleFailure("external preprocessor configuration anchor drifted")
+    return source.replace(
+        anchor,
+        anchor
+        + "extern float *runtime_representation_phase0_avx_configuration(void);\n",
+        1,
+    )
+
+
 def mutate_c_complete_declarator_shapes(source: str) -> str:
     return _append_probe(
         source,
@@ -1247,6 +1267,11 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
             "raw-element-pointer",
             Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
             mutate_cxx_rvalue_reference,
+        ),
+        MutationProbe(
+            "raw-element-pointer",
+            Path("crates/chelis-runtime/include/chelis_simd.h"),
+            mutate_external_preprocessor_configuration,
         ),
         MutationProbe(
             "raw-element-pointer",

@@ -1621,10 +1621,7 @@
     "kind=raw-element-pointer|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_binary_reduced_f::__out_0|signature=7ad87e1158224ac21311|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_binary|signature=475bdccde1b46165b6b6|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_blas_matmul_reduced_f::t_af|signature=22a91808f2c3166eb7a6|occurrence=1",
-    "kind=raw-element-pointer|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_blas_matmul_reduced_f::t_af|signature=c90cee2a0d3ba6644f5d|occurrence=1",
-    "kind=raw-element-pointer|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_blas_matmul_reduced_f::t_bf|signature=8731a6d39806c464f22e|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_blas_matmul_reduced_f::t_bf|signature=8f2a22eeed9e174ba1d0|occurrence=1",
-    "kind=raw-element-pointer|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_blas_matmul_reduced_f::t_cf|signature=214de3979dbae6613870|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_blas_matmul_reduced_f::t_cf|signature=f2babcf20b21aa7dd94a|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_blas_matmul_reduced_f|signature=199a90cfbafeadf44394|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_blas_matmul_reduced_f|signature=199a90cfbafeadf44394|occurrence=2",
@@ -1882,10 +1879,6 @@
     "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_activation_helpers::x_mul|signature=b1c5cf0623556f869ff2|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_activation_helpers|signature=9ac37522a8802a6e71ad|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_json_canonical_object_helpers::order|signature=9b24c070d409bc44d095|occurrence=1",
-    "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_scalar_conversion_helpers|signature=3dde8569c7e5c0ba1e6a|occurrence=1",
-    "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_scalar_conversion_helpers|signature=5c8ed225a55453bd2074|occurrence=1",
-    "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_scalar_conversion_helpers|signature=f385f271c5258e28deef|occurrence=1",
-    "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_tensor_reshape_helper::shape|signature=c6d07ba4647dcb3853e6|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_tensor_reshape_helper::shape|signature=d6ea4f05986d361a520b|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=c_decl::chelis_dynamic_name|signature=42722c5e1af781d8be1d|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=c_decl|signature=ca2f14b1b3b2e3238552|occurrence=1",
@@ -1896,9 +1889,10 @@
     "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=emit_main|signature=ccd1359d45015523b028|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=emitted_function_name|signature=2bcfb6435b9cb88f8063|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=reject_duplicate_emitted_function_names|signature=a546e1a3198edfbf0c15|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h::chelis_compile_kernel(const char *, const char *)::compile_opts|signature=195bdf5602d49fae3152|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h::chelis_compile_kernel(const char *, const char *)::compile_opts|signature=2d4d1d0cdcc1fd37e4b0|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h::chelis_compile_kernel(const char *, const char *)|signature=3e75b456a9dbdbb1fecd|occurrence=1",
-    "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h::chelis_compile_kernel(const char *, const char *)|signature=918873de5061f3876a3e|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h::chelis_compile_kernel(const char *, const char *)|signature=cea9c1b43dc415508ed0|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h::chelis_gpu_alloc(int, const int *, int)::shape|signature=a830b1ec0d897255ae19|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h::chelis_gpu_alloc(int, const int *, int)|signature=5c46ed5268f5cbd3bee1|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h::chelis_gpu_alloc(int, const int *, int)|signature=8f5058fbc384c2d6fd2a|occurrence=1",
@@ -1956,8 +1950,6 @@
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/emit.rs|owner=HipEmitter::cast_kernel_name|signature=84aa38a0bf098754bed9|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/emit.rs|owner=HipEmitter::emit_binary_launch|signature=6cd53989a5d2beab2742|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/emit.rs|owner=HipEmitter::emit_const_tensor::__host_data|signature=0612f0c0695e9ff9439f|occurrence=1",
-    "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/emit.rs|owner=HipEmitter::emit_const_tensor::__host_data|signature=2d4ce1d6023981fa789b|occurrence=1",
-    "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/emit.rs|owner=HipEmitter::emit_const_tensor::__host_data|signature=4b91c1696a5504ee565e|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/emit.rs|owner=HipEmitter::emit_const_tensor::__host_data|signature=9aeb422aac89740b8b29|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/emit.rs|owner=HipEmitter::emit_const|signature=08955b4b417ee1319d86|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/emit.rs|owner=HipEmitter::emit_const|signature=33dd5d5825327b6bb017|occurrence=1",
@@ -2040,6 +2032,7 @@
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=fused_elementwise|signature=d9ce86d50f920d588419|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=fused_step_lines::chelis_dynamic_name|signature=a86ae805a12d2668be41|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=int_params|signature=0a20f9c1fff99f5736dc|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_bounds_guard(int, int, int)|signature=b6bde67a3e437605dd91|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_flat_to_indices(int, const int *, int, int *)::out|signature=3a2c3c0b2727ba78e87a|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_flat_to_indices(int, const int *, int, int *)::shape|signature=d22ef3e6c9cd4cdc026b|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_flat_to_indices(int, const int *, int, int *)|signature=056e87d8ef9a0dffe3c5|occurrence=1",
@@ -2054,6 +2047,7 @@
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_indices_to_flat(const int *, const int *, int)|signature=2b68b5d8e53975c9b2a3|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_indices_to_flat(const int *, const int *, int)|signature=2f5e813463c6f849f9b8|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_indices_to_flat(const int *, const int *, int)|signature=ec0fd399551897dca67f|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_record_failure(int)|signature=4135f2063be967132822|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=reduce_fused::chelis_dynamic_name|signature=e114e9b4a2b7af5048cf|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=reduce_fused::out|signature=2b0091d178c3aa6fe66a|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=reduce_fused|signature=49df028f14a1d50293f3|occurrence=1",
@@ -2237,34 +2231,92 @@
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_argmin_f32(const float *, int)|signature=346f26e21940761cb5cf|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_argmin_f32(const float *, int)|signature=8fb3e50301014e4a81b4|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_argmin_f32(const float *, int)|signature=ece6e536d37eb839847e|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::buf|signature=9ffe3c8edc1665843a37|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::data|signature=3a0c2ac926699334ab77|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::result|signature=46c4518dd6e7ef5b17f2|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::result|signature=a3197c741f61cf3fd951|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::result|signature=eb917a59bd9b4622deaa|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::vacc|signature=7f89c21bb41cf07ae28e|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::vacc|signature=f31ff426e94bfb903b59|occurrence=1",
-    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::v|signature=714ecddad4ffab117ba9|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::v|signature=266d590fbea1236e8192|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::v|signature=84ba71730016cf11fb66|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::v|signature=88b8ac17600371047a26|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::v|signature=8bbabf1bcd2415062310|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::v|signature=b2da371fc433a6a5588b|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::v|signature=c279af419196b6ae5fed|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=0cc33766a968f26d22f9|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=10557b8cfba610092573|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=171daef27f7adc815bc0|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=1ed659c20a1fca1050af|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=2a97126ee8f1968dfea5|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=304af2e6da3fe5c43de3|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=320478e03d40b03bd53e|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=34f3c081bccb2a011503|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=3c1658715f0f1af4d824|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=3c535fdd07a64bb3ad01|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=49491de0aa7e83ccd3f6|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=591a81b1e2cfd0db1ac5|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=a18d71527cf139873123|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=a4753b654f9d6ed350d5|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=a6705ad931fb61118491|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=a7c220a61451021e71d1|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=a8674fca333e4438457c|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=a9a22655f2d9f59b5849|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=bf8d5a5f09710da23e0b|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=c5089256ade3fa55c00e|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=c8b3bc9d3e698f3a17a5|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=cb0d5d880c8a01218cfa|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=cb7501ac74aae01783f7|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=d21cdd1158478708c49a|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=d8837fdc99f766933ddf|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=df62928e68a364184598|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=e4ba4e49b44ef7de2e03|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=ea7df5127ec85bb84941|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=f74f002c68895d0fa077|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=fb735e528368f00bb422|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::buf|signature=cfc89c0d24c1dc2fff61|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::data|signature=c03cb1adb521b4acaace|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::result|signature=44601f6c43a945b2ce27|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::result|signature=559a7e16a2da1b3ce014|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::result|signature=6dda648fcfeb7b6af1ef|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::vacc|signature=8364b57692fb893900a5|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::vacc|signature=f9a33b3d0b9d3c9ad38f|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::v|signature=4045ab8dea8ad5e4cb99|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::v|signature=452fce06ff3dba273b40|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::v|signature=5c3efb7a7d655ff973b0|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::v|signature=746af16c63577625cb10|occurrence=1",
-    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::v|signature=c0e77ceab8cae85078b8|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::v|signature=a3221f66373a15cfc251|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::v|signature=af71a3ee908bc03be295|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=056881cb5e715c27f78e|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=082422ce5d9c16d905e9|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=11b36ea6913d15895c89|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=28e46e117d6d189e9d7c|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=3307d322f4128e3d06f2|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=3562b3743967b64ff770|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=3dc17e9ebfab29f3abfa|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=3e2d01cff6df53120f58|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=500589a5da52a6cbe056|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=59230e947dae3be3967e|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=5e16baf83b8bd580d0d7|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=67ab3548a9e9e1a1c0f6|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=6946e54701c3cf6804c1|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=6f353bafaa622a0485c7|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=76f6273eca29d16d0b82|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=8430547678692f5ef0a7|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=a18da3cd3c51e954f9a1|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=a6370894cf49527b294f|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=a7b7602ae484e57213f4|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=b6618fc13fae0ef3ba68|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=ba484f0c4b418665e7fb|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=baeeb46841bdf077d340|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=c665b7091e803d7a637c|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=c9e322e34d477105a241|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=ced1150d413fc5deb3af|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=ddeb86a56e18603b94a8|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=f2ae853dc197eed1331a|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=f74bf9f6ef3786e66dda|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=fb9cd868fef1d263b72c|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=fbe40509ad438672aaba|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_sum_f32(const float *, int)::data|signature=6cf9677da0e69a8e6002|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_sum_f32(const float *, int)|signature=3e95207e3b820d3f842a|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_sum_f32(const float *, int)|signature=3f3eef63e20f412d3c20|occurrence=1",
@@ -2345,7 +2397,6 @@
     "kind=width-arithmetic|path=crates/chelis-backend-c/src/emit.rs|owner=emit_sparse_scatter_replace|signature=bc16eb76816a7fbd3fa5|occurrence=1",
     "kind=width-arithmetic|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_sparse_summary|signature=285bbd595a5a173f4a63|occurrence=1",
     "kind=width-arithmetic|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_tensor_print_helper|signature=06621976cc9bca784166|occurrence=1",
-    "kind=width-arithmetic|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_tensor_reshape_helper::shape|signature=ad4adf096fe6ecd8e16a|occurrence=1",
     "kind=width-arithmetic|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_tensor_reshape_helper|signature=ffc27afa893de277f836|occurrence=1",
     "kind=width-arithmetic|path=crates/chelis-backend-c/src/host_emit.rs|owner=assign_builtin|signature=09b2c48280b2cdbcd8aa|occurrence=1",
     "kind=width-arithmetic|path=crates/chelis-backend-c/src/host_emit.rs|owner=assign_sparse_summary|signature=833e89f71fcca791bc53|occurrence=1",
@@ -2377,10 +2428,6 @@
     "kind=width-arithmetic|path=crates/chelis-backend-metal/src/dtype.rs|owner=host_sizeof_expr|signature=f08b9236366c7a7f61c2|occurrence=1",
     "kind=width-arithmetic|path=crates/chelis-backend-metal/src/dtype.rs|owner=host_sizeof_expr|signature=f72a8420aa6f9d6697c7|occurrence=1",
     "kind=width-arithmetic|path=crates/chelis-backend-metal/src/dtype.rs|owner=metal_elem_size|signature=23b14bc719fe6c2d6982|occurrence=1",
-    "kind=width-arithmetic|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_binary|signature=41d09fdf5d2f7a74e9d0|occurrence=1",
-    "kind=width-arithmetic|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_pad|signature=f46b8b16409f995e88a2|occurrence=1",
-    "kind=width-arithmetic|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_reduce|signature=9a2c1fe71f374efebc8e|occurrence=1",
-    "kind=width-arithmetic|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_unary|signature=fe7ed5c61278ab8e9318|occurrence=1",
     "kind=width-arithmetic|path=crates/chelis-backend-metal/src/emit.rs|owner=elem_size|signature=2defa86e577996e5a9a2|occurrence=1",
     "kind=width-arithmetic|path=crates/chelis-backend-metal/src/emit.rs|owner=elem_size|signature=939cc4d5884350da753d|occurrence=1",
     "kind=width-arithmetic|path=crates/chelis-backend-metal/src/emit.rs|owner=emit_matmul|signature=ce3795d12fa780f3f278|occurrence=1",
@@ -2870,6 +2917,17 @@
             "reason_prefix": "unclassified inventory hit"
           },
           "expected_kind": "raw-element-pointer",
+          "implementation_sha256": "e3ff4f2aea8a042042d2424e39334e515569364dda83a060e979bdcdaed822be",
+          "path": "crates/chelis-runtime/include/chelis_simd.h",
+          "witness_id": "phase0.mutate_external_preprocessor_configuration"
+        },
+        {
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+          "expected_failure": {
+            "code": "inventory.unclassified",
+            "reason_prefix": "unclassified inventory hit"
+          },
+          "expected_kind": "raw-element-pointer",
           "implementation_sha256": "d6951af38142d62ecb4827a55882795430dd363948c29aae352a0419ce676ff5",
           "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
           "witness_id": "phase0.mutate_c_complete_declarator_shapes"
@@ -2940,7 +2998,12 @@
           "path": "crates/chelis-runtime/src/decimal_parse.rs",
           "witness_id": "phase0.mutate_direct_data_access_after_test_module"
         }
-      ]
+      ],
+      "parser": {
+        "configuration_model": "clear compiler builtins and enumerate every boolean assignment of source-referenced external macros",
+        "engine": "chelis-c-surface",
+        "libclang_major": 18
+      }
     }
   },
   "foundation_rows": [
@@ -9430,19 +9493,7 @@
     },
     {
       "deletion_phase": 4,
-      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_blas_matmul_reduced_f::t_af|signature=c90cee2a0d3ba6644f5d|occurrence=1"
-    },
-    {
-      "deletion_phase": 4,
-      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_blas_matmul_reduced_f::t_bf|signature=8731a6d39806c464f22e|occurrence=1"
-    },
-    {
-      "deletion_phase": 4,
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_blas_matmul_reduced_f::t_bf|signature=8f2a22eeed9e174ba1d0|occurrence=1"
-    },
-    {
-      "deletion_phase": 4,
-      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_blas_matmul_reduced_f::t_cf|signature=214de3979dbae6613870|occurrence=1"
     },
     {
       "deletion_phase": 4,
@@ -10474,22 +10525,6 @@
     },
     {
       "deletion_phase": 4,
-      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_scalar_conversion_helpers|signature=3dde8569c7e5c0ba1e6a|occurrence=1"
-    },
-    {
-      "deletion_phase": 4,
-      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_scalar_conversion_helpers|signature=5c8ed225a55453bd2074|occurrence=1"
-    },
-    {
-      "deletion_phase": 4,
-      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_scalar_conversion_helpers|signature=f385f271c5258e28deef|occurrence=1"
-    },
-    {
-      "deletion_phase": 4,
-      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_tensor_reshape_helper::shape|signature=c6d07ba4647dcb3853e6|occurrence=1"
-    },
-    {
-      "deletion_phase": 4,
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_tensor_reshape_helper::shape|signature=d6ea4f05986d361a520b|occurrence=1"
     },
     {
@@ -10530,6 +10565,10 @@
     },
     {
       "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h::chelis_compile_kernel(const char *, const char *)::compile_opts|signature=195bdf5602d49fae3152|occurrence=1"
+    },
+    {
+      "deletion_phase": 4,
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h::chelis_compile_kernel(const char *, const char *)::compile_opts|signature=2d4d1d0cdcc1fd37e4b0|occurrence=1"
     },
     {
@@ -10538,7 +10577,7 @@
     },
     {
       "deletion_phase": 4,
-      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h::chelis_compile_kernel(const char *, const char *)|signature=918873de5061f3876a3e|occurrence=1"
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h::chelis_compile_kernel(const char *, const char *)|signature=cea9c1b43dc415508ed0|occurrence=1"
     },
     {
       "deletion_phase": 4,
@@ -10767,14 +10806,6 @@
     {
       "deletion_phase": 4,
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/emit.rs|owner=HipEmitter::emit_const_tensor::__host_data|signature=0612f0c0695e9ff9439f|occurrence=1"
-    },
-    {
-      "deletion_phase": 4,
-      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/emit.rs|owner=HipEmitter::emit_const_tensor::__host_data|signature=2d4ce1d6023981fa789b|occurrence=1"
-    },
-    {
-      "deletion_phase": 4,
-      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/emit.rs|owner=HipEmitter::emit_const_tensor::__host_data|signature=4b91c1696a5504ee565e|occurrence=1"
     },
     {
       "deletion_phase": 4,
@@ -11106,6 +11137,10 @@
     },
     {
       "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_bounds_guard(int, int, int)|signature=b6bde67a3e437605dd91|occurrence=1"
+    },
+    {
+      "deletion_phase": 4,
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_flat_to_indices(int, const int *, int, int *)::out|signature=3a2c3c0b2727ba78e87a|occurrence=1"
     },
     {
@@ -11159,6 +11194,10 @@
     {
       "deletion_phase": 4,
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_indices_to_flat(const int *, const int *, int)|signature=ec0fd399551897dca67f|occurrence=1"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_record_failure(int)|signature=4135f2063be967132822|occurrence=1"
     },
     {
       "deletion_phase": 4,
@@ -11894,7 +11933,27 @@
     },
     {
       "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::buf|signature=9ffe3c8edc1665843a37|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::data|signature=3a0c2ac926699334ab77|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::result|signature=46c4518dd6e7ef5b17f2|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::result|signature=a3197c741f61cf3fd951|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::result|signature=eb917a59bd9b4622deaa|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::vacc|signature=7f89c21bb41cf07ae28e|occurrence=1"
     },
     {
       "deletion_phase": 3,
@@ -11902,7 +11961,7 @@
     },
     {
       "deletion_phase": 3,
-      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::v|signature=714ecddad4ffab117ba9|occurrence=1"
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::v|signature=266d590fbea1236e8192|occurrence=1"
     },
     {
       "deletion_phase": 3,
@@ -11910,11 +11969,51 @@
     },
     {
       "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::v|signature=88b8ac17600371047a26|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::v|signature=8bbabf1bcd2415062310|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::v|signature=b2da371fc433a6a5588b|occurrence=1"
     },
     {
       "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)::v|signature=c279af419196b6ae5fed|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=0cc33766a968f26d22f9|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=10557b8cfba610092573|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=171daef27f7adc815bc0|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=1ed659c20a1fca1050af|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=2a97126ee8f1968dfea5|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=304af2e6da3fe5c43de3|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=320478e03d40b03bd53e|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=34f3c081bccb2a011503|occurrence=1"
     },
     {
       "deletion_phase": 3,
@@ -11930,7 +12029,31 @@
     },
     {
       "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=591a81b1e2cfd0db1ac5|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=a18d71527cf139873123|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=a4753b654f9d6ed350d5|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=a6705ad931fb61118491|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=a7c220a61451021e71d1|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=a8674fca333e4438457c|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=a9a22655f2d9f59b5849|occurrence=1"
     },
     {
       "deletion_phase": 3,
@@ -11946,7 +12069,43 @@
     },
     {
       "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=cb0d5d880c8a01218cfa|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=cb7501ac74aae01783f7|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=d21cdd1158478708c49a|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=d8837fdc99f766933ddf|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=df62928e68a364184598|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=e4ba4e49b44ef7de2e03|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=ea7df5127ec85bb84941|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=f74f002c68895d0fa077|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_max_f32(const float *, int)|signature=fb735e528368f00bb422|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::buf|signature=cfc89c0d24c1dc2fff61|occurrence=1"
     },
     {
       "deletion_phase": 3,
@@ -11954,7 +12113,23 @@
     },
     {
       "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::result|signature=44601f6c43a945b2ce27|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::result|signature=559a7e16a2da1b3ce014|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::result|signature=6dda648fcfeb7b6af1ef|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::vacc|signature=8364b57692fb893900a5|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::vacc|signature=f9a33b3d0b9d3c9ad38f|occurrence=1"
     },
     {
       "deletion_phase": 3,
@@ -11962,15 +12137,59 @@
     },
     {
       "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::v|signature=452fce06ff3dba273b40|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::v|signature=5c3efb7a7d655ff973b0|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::v|signature=746af16c63577625cb10|occurrence=1"
     },
     {
       "deletion_phase": 3,
-      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::v|signature=c0e77ceab8cae85078b8|occurrence=1"
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::v|signature=a3221f66373a15cfc251|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)::v|signature=af71a3ee908bc03be295|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=056881cb5e715c27f78e|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=082422ce5d9c16d905e9|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=11b36ea6913d15895c89|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=28e46e117d6d189e9d7c|occurrence=1"
     },
     {
       "deletion_phase": 3,
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=3307d322f4128e3d06f2|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=3562b3743967b64ff770|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=3dc17e9ebfab29f3abfa|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=3e2d01cff6df53120f58|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=500589a5da52a6cbe056|occurrence=1"
     },
     {
       "deletion_phase": 3,
@@ -11982,11 +12201,51 @@
     },
     {
       "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=67ab3548a9e9e1a1c0f6|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=6946e54701c3cf6804c1|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=6f353bafaa622a0485c7|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=76f6273eca29d16d0b82|occurrence=1"
     },
     {
       "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=8430547678692f5ef0a7|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=a18da3cd3c51e954f9a1|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=a6370894cf49527b294f|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=a7b7602ae484e57213f4|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=b6618fc13fae0ef3ba68|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=ba484f0c4b418665e7fb|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=baeeb46841bdf077d340|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=c665b7091e803d7a637c|occurrence=1"
     },
     {
       "deletion_phase": 3,
@@ -12003,6 +12262,18 @@
     {
       "deletion_phase": 3,
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=f2ae853dc197eed1331a|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=f74bf9f6ef3786e66dda|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=fb9cd868fef1d263b72c|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=crates/chelis-runtime/include/chelis_simd.h::chelis_min_f32(const float *, int)|signature=fbe40509ad438672aaba|occurrence=1"
     },
     {
       "deletion_phase": 3,
@@ -12326,10 +12597,6 @@
     },
     {
       "deletion_phase": 1,
-      "identity": "kind=width-arithmetic|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_tensor_reshape_helper::shape|signature=ad4adf096fe6ecd8e16a|occurrence=1"
-    },
-    {
-      "deletion_phase": 1,
       "identity": "kind=width-arithmetic|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_tensor_reshape_helper|signature=ffc27afa893de277f836|occurrence=1"
     },
     {
@@ -12451,22 +12718,6 @@
     {
       "deletion_phase": 1,
       "identity": "kind=width-arithmetic|path=crates/chelis-backend-metal/src/dtype.rs|owner=metal_elem_size|signature=23b14bc719fe6c2d6982|occurrence=1"
-    },
-    {
-      "deletion_phase": 1,
-      "identity": "kind=width-arithmetic|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_binary|signature=41d09fdf5d2f7a74e9d0|occurrence=1"
-    },
-    {
-      "deletion_phase": 1,
-      "identity": "kind=width-arithmetic|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_pad|signature=f46b8b16409f995e88a2|occurrence=1"
-    },
-    {
-      "deletion_phase": 1,
-      "identity": "kind=width-arithmetic|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_reduce|signature=9a2c1fe71f374efebc8e|occurrence=1"
-    },
-    {
-      "deletion_phase": 1,
-      "identity": "kind=width-arithmetic|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_unary|signature=fe7ed5c61278ab8e9318|occurrence=1"
     },
     {
       "deletion_phase": 1,
@@ -12873,6 +13124,6 @@
       "identity": "kind=width-arithmetic|path=crates/chelis-vocab/src/lib.rs|owner=byte_width|signature=c5366b92e40f3eadb6cd|occurrence=1"
     }
   ],
-  "freeze_sha256": "0a98b50c7257e7354ec4232f0f9098e85ceaf3e6fb24f87629b24971a1c573fb",
+  "freeze_sha256": "34b3330e9f6fe998b868751f9bb58588f39f970bb595ae4898dc46fa4b92d24c",
   "schema_version": 3
 }

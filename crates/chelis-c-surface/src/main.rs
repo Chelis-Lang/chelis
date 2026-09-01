@@ -23,6 +23,37 @@ struct ScanOutput {
     production_rust_sources: BTreeMap<String, String>,
 }
 
+const REQUIRED_LIBCLANG_MAJOR: u32 = 18;
+
+fn libclang_major(version: &str) -> Option<u32> {
+    version
+        .split_once("clang version ")
+        .and_then(|(_, release)| {
+            release
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .ok()
+        })
+}
+
+fn validate_libclang_version(version: &str) -> Result<(), String> {
+    match libclang_major(version) {
+        Some(REQUIRED_LIBCLANG_MAJOR) => Ok(()),
+        _ => Err(format!(
+            "runtime-representation inventory requires libclang major \
+             {REQUIRED_LIBCLANG_MAJOR}; loaded {version:?}"
+        )),
+    }
+}
+
+fn validate_loaded_libclang() -> Result<(), String> {
+    let _clang = clang::Clang::new()
+        .map_err(|error| format!("cannot load libclang for version check: {error}"))?;
+    validate_libclang_version(&clang::get_version())
+}
+
 fn usage() -> ! {
     eprintln!("usage: chelis-c-surface --repo <repository-root>");
     std::process::exit(2);
@@ -68,6 +99,7 @@ fn located(path: &str, rows: Vec<CarrierUse>) -> impl Iterator<Item = LocatedCar
 
 fn run() -> Result<(), String> {
     let root = parse_root();
+    validate_loaded_libclang()?;
     let mut input = String::new();
     io::stdin()
         .read_to_string(&mut input)
@@ -127,5 +159,32 @@ fn main() {
     if let Err(error) = run() {
         eprintln!("C SURFACE SCAN: FAIL: {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn libclang_major_parser_uses_the_clang_release_not_other_numbers() {
+        assert_eq!(
+            libclang_major("Debian 12 clang version 18.1.8 (release build)"),
+            Some(18)
+        );
+        assert_eq!(
+            libclang_major("Apple clang version 21.0.0 (clang-2100.0.0.1)"),
+            Some(21)
+        );
+        assert_eq!(libclang_major("LLVM version 18.1.8"), None);
+    }
+
+    #[test]
+    fn runtime_inventory_requires_libclang_major_18() {
+        assert!(validate_libclang_version("clang version 18.1.8").is_ok());
+        let error = validate_libclang_version("Apple clang version 21.0.0")
+            .expect_err("an unpinned parser must be rejected");
+        assert!(error.contains("requires libclang major 18"), "{error}");
+        assert!(error.contains("Apple clang version 21.0.0"), "{error}");
     }
 }

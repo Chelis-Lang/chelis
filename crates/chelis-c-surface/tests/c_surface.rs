@@ -285,6 +285,88 @@ fn numeric_pointer_return_declarators_get_an_identity() {
 }
 
 #[test]
+fn scalar_function_results_do_not_inherit_pointer_operand_types() {
+    let rows = scan_c_source(
+        r#"
+static inline float max_value(const float *values, int count) {
+    float result = values[0];
+    for (int index = 1; index < count; index++) {
+        if (values[index] > result) result = values[index];
+    }
+    return result;
+}
+"#,
+        "fixture",
+    )
+    .expect("scalar-return function with pointer operands parses");
+
+    assert!(
+        rows.iter()
+            .filter(|row| row.owner.contains("max_value"))
+            .all(|row| !row.signature.contains("shape=return-")),
+        "a pointer operand was projected as the scalar function result: {rows:#?}"
+    );
+}
+
+#[test]
+fn external_preprocessor_configurations_are_enumerated_not_host_selected() {
+    let rows = scan_c_source(
+        r#"
+static long *always_scanned(void);
+
+#if defined(__AVX2__)
+static float *selected_backend(void);
+#elif defined(__ARM_NEON)
+static double *selected_backend(void);
+#else
+static int *selected_backend(void);
+#endif
+"#,
+        "fixture",
+    )
+    .expect("every external preprocessor configuration parses");
+
+    let unconditional: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            row.owner.contains("always_scanned") && row.signature.contains("shape=return-pointer")
+        })
+        .collect();
+    assert_eq!(
+        unconditional.len(),
+        1,
+        "enumerating configurations duplicated one authored carrier: {rows:#?}"
+    );
+
+    let returns: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            row.owner.contains("selected_backend") && row.signature.contains("shape=return-pointer")
+        })
+        .collect();
+    assert_eq!(
+        returns.len(),
+        3,
+        "the scanner inherited one host configuration instead of enumerating all branches: {rows:#?}"
+    );
+    assert!(
+        returns
+            .iter()
+            .any(|row| row.signature.contains("return=float *"))
+    );
+    assert!(
+        returns
+            .iter()
+            .any(|row| row.signature.contains("return=double *"))
+    );
+    assert!(
+        returns
+            .iter()
+            .any(|row| row.signature.contains("return=int *"))
+    );
+}
+
+#[test]
 fn cxx_method_result_identities_include_the_full_enclosing_declaration_chain() {
     let rows = scan_c_source(
         r#"

@@ -92,6 +92,11 @@ Status legend:
 | Compiler-vs-interpreter closure follow-up | `cargo test -p chelis-cli --test cli cross_function_seed_local_wrapper_uses_handler_seed_in_c_backend -- --exact` + `cargo test -p chelis-cli --test cli build_c_mnist_loss_tail_tensor_pipeline_compiles_object -- --exact` + `cargo test -p chelis-cli --test parity parity_mnist_library_only -- --exact --nocapture` (the `std_nn_build_acceptance cross_function_seed_stdlib` leg was removed with the ML-module cut to School, #331) | `spec/upstream-bugs/compiler-vs-interpreter-closure-2026-05-07.md` §Follow-up work | default gate |
 | Compiled value ownership Phase 0 | `.venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 0` (final line `COMPILED VALUE OWNERSHIP PHASE 0: PASS`) | `spec/design/compiled_value_ownership.md` §Phase 0 | dedicated CI gate (`compiled-value-ownership-phase0-oracle`; hardware-independent, with HIP hardware deferred to Phase 3) |
 
+The runtime-representation Phase 0 command requires libclang major 18. An active
+Devenv shell exports the pinned `LIBCLANG_PATH`; outside Devenv, point that variable at
+a libclang 18 library directory before invoking the oracle. The scanner rejects other
+majors instead of producing a version-dependent inventory.
+
 ## Phase A (Reef Distribution Unblock)
 
 | Phase | Oracle command | Owning spec doc | Status |

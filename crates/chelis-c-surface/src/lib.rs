@@ -1642,12 +1642,129 @@ typedef void *NSString;
 #endif
 "#;
 
-fn compiler_arguments(path: &Path) -> Vec<&'static str> {
+const MAX_EXTERNAL_CONFIGURATION_MACROS: usize = 8;
+
+fn preprocessor_macro_name(source: &str) -> Option<String> {
+    tokens(source)
+        .into_iter()
+        .find(|token| is_identifier(token))
+}
+
+fn source_defined_macros(source: &str) -> BTreeSet<String> {
+    source
+        .lines()
+        .filter_map(|line| {
+            line.trim_start()
+                .strip_prefix('#')?
+                .trim_start()
+                .strip_prefix("define")
+                .filter(|rest| rest.starts_with(char::is_whitespace))
+                .and_then(preprocessor_macro_name)
+        })
+        .collect()
+}
+
+fn conditional_expression_macros(source: &str) -> BTreeSet<String> {
+    let expression_tokens = tokens(source);
+    let mut macros = BTreeSet::new();
+    let mut index = 0usize;
+    while index < expression_tokens.len() {
+        if expression_tokens[index] == "__has_include" {
+            index += 1;
+            if expression_tokens.get(index).map(String::as_str) == Some("(")
+                && let Ok(close) = matching_close(&expression_tokens, index, "(", ")")
+            {
+                index = close + 1;
+            }
+            continue;
+        }
+        if expression_tokens[index] == "defined" {
+            index += 1;
+            if expression_tokens.get(index).map(String::as_str) == Some("(") {
+                index += 1;
+            }
+            if let Some(name) = expression_tokens.get(index)
+                && is_identifier(name)
+            {
+                macros.insert(name.clone());
+            }
+            index += 1;
+            continue;
+        }
+        if is_identifier(&expression_tokens[index]) {
+            macros.insert(expression_tokens[index].clone());
+        }
+        index += 1;
+    }
+    macros
+}
+
+fn external_configuration_macros(source: &str) -> Result<Vec<String>, ScanError> {
+    let locally_defined = source_defined_macros(source);
+    let mut macros = BTreeSet::new();
+    for line in source.lines() {
+        let Some(directive) = line.trim_start().strip_prefix('#').map(str::trim_start) else {
+            continue;
+        };
+        if let Some(rest) = directive
+            .strip_prefix("ifdef")
+            .or_else(|| directive.strip_prefix("ifndef"))
+            .filter(|rest| rest.starts_with(char::is_whitespace))
+        {
+            if let Some(name) = preprocessor_macro_name(rest) {
+                macros.insert(name);
+            }
+            continue;
+        }
+        if let Some(rest) = directive
+            .strip_prefix("elif")
+            .or_else(|| directive.strip_prefix("if"))
+            .filter(|rest| rest.starts_with(char::is_whitespace))
+        {
+            macros.extend(conditional_expression_macros(rest));
+        }
+    }
+    macros.retain(|name| {
+        !locally_defined.contains(name)
+            && !matches!(name.as_str(), "__cplusplus" | "__OBJC__" | "__has_include")
+    });
+    if macros.len() > MAX_EXTERNAL_CONFIGURATION_MACROS {
+        return Err(ScanError::new(
+            ScanErrorKind::MalformedCandidate,
+            format!(
+                "C-family source has {} external conditional macros; explicit configuration enumeration is capped at {MAX_EXTERNAL_CONFIGURATION_MACROS}: {}",
+                macros.len(),
+                macros.into_iter().collect::<Vec<_>>().join(", ")
+            ),
+        ));
+    }
+    Ok(macros.into_iter().collect())
+}
+
+fn compiler_configurations(macros: &[String]) -> Vec<BTreeSet<String>> {
+    (0..(1usize << macros.len()))
+        .map(|mask| {
+            macros
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| mask & (1usize << index) != 0)
+                .map(|(_, name)| name.clone())
+                .collect()
+        })
+        .collect()
+}
+
+fn compiler_arguments(
+    path: &Path,
+    configuration_macros: &[String],
+    enabled_macros: &BTreeSet<String>,
+) -> Vec<String> {
     let extension = path
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or("");
-    if path.to_string_lossy().contains("backend-metal") || matches!(extension, "m" | "mm" | "metal")
+    let base = if path.to_string_lossy().contains("backend-metal")
+        || matches!(extension, "m" | "mm" | "metal")
     {
         vec![
             "-xobjective-c++",
@@ -1670,7 +1787,16 @@ fn compiler_arguments(path: &Path) -> Vec<&'static str> {
             "-Drestrict=__restrict",
             "-D__cplusplus=201703L",
         ]
+    };
+    let mut arguments = base.into_iter().map(str::to_string).collect::<Vec<_>>();
+    arguments.push("-undef".to_string());
+    for name in configuration_macros {
+        arguments.push(format!("-U{name}"));
+        if enabled_macros.contains(name) {
+            arguments.push(format!("-D{name}=1"));
+        }
     }
+    arguments
 }
 
 fn source_without_includes(source: &str, cxx: bool) -> String {
@@ -2101,6 +2227,18 @@ fn width_arithmetic_row(
     })
 }
 
+fn callable_result_type(entity: Entity<'_>) -> Option<Type<'_>> {
+    entity
+        .get_type()
+        .and_then(|ty| ty.get_result_type())
+        .or_else(|| {
+            entity
+                .is_declaration()
+                .then(|| entity.get_result_type())
+                .flatten()
+        })
+}
+
 fn project_compiler_entity(
     entity: Entity<'_>,
     source_owner: &str,
@@ -2146,7 +2284,7 @@ fn project_compiler_entity(
     }
 
     if in_main_file
-        && let Some(return_type) = entity.get_result_type()
+        && let Some(return_type) = callable_result_type(entity)
         && type_is_numeric_carrier(entity, return_type, source)
     {
         rows.push(CarrierUse {
@@ -2253,6 +2391,8 @@ fn compiler_scan(
     {
         materialized.push(';');
     }
+    let configuration_macros = external_configuration_macros(&materialized)?;
+    let configurations = compiler_configurations(&configuration_macros);
     let language_prefix = if cxx {
         "#ifndef __cplusplus\n#define __cplusplus 201703L\n#endif\n"
     } else {
@@ -2268,64 +2408,80 @@ fn compiler_scan(
         Unsaved::new(&virtual_path, &main_source),
         Unsaved::new(prelude_path, prelude),
     ];
-    let mut parser = index.parser(&virtual_path);
-    parser
-        .arguments(&compiler_arguments(path))
-        .unsaved(&unsaved)
-        .detailed_preprocessing_record(true);
-    let translation_unit = parser.parse().map_err(|error| {
-        ScanError::new(
-            ScanErrorKind::MalformedCandidate,
-            format!("libclang could not parse C-family source: {error:?}"),
-        )
-    })?;
-    for diagnostic in translation_unit.get_diagnostics() {
-        if diagnostic.get_severity() < Severity::Error
-            || !diagnostic.get_location().is_in_main_file()
-        {
-            continue;
-        }
-        let message = diagnostic.get_text();
-        let location = diagnostic.get_location().get_spelling_location();
-        let source_line = main_source
-            .lines()
-            .nth(location.line.saturating_sub(1) as usize)
-            .unwrap_or_default();
-        let located_message = format!(
-            "line {} column {}: {message}; source: {source_line:?}",
-            location.line, location.column
-        );
-        if authored_context.is_none()
-            && (message.contains("unknown type name")
-                || message.contains("no template named")
-                || message.contains("decimal type")
-                || message.contains("unknown type")
-                || source.contains("__new_"))
-        {
-            return Err(ScanError::new(ScanErrorKind::UnknownType, located_message));
-        }
-        if diagnostic.get_severity() == Severity::Fatal
-            || (authored_context.is_none()
-                && (message.contains("expected")
-                    || message.contains("unterminated")
-                    || message.contains("extraneous"))
-                && !message.starts_with("expected method"))
-        {
-            return Err(ScanError::new(
-                ScanErrorKind::MalformedCandidate,
-                located_message,
-            ));
-        }
-    }
     let mut rows = Vec::new();
-    walk_compiler_ast(
-        translation_unit.get_entity(),
-        source_owner,
-        source_owner,
-        &main_source,
-        authored_context,
-        &mut rows,
-    )?;
+    for enabled_macros in configurations {
+        let arguments = compiler_arguments(path, &configuration_macros, &enabled_macros);
+        let mut parser = index.parser(&virtual_path);
+        parser
+            .arguments(&arguments)
+            .unsaved(&unsaved)
+            .detailed_preprocessing_record(true);
+        let translation_unit = parser.parse().map_err(|error| {
+            ScanError::new(
+                ScanErrorKind::MalformedCandidate,
+                format!(
+                    "libclang could not parse C-family source under configuration [{}]: {error:?}",
+                    enabled_macros
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )
+        })?;
+        for diagnostic in translation_unit.get_diagnostics() {
+            if diagnostic.get_severity() < Severity::Error
+                || !diagnostic.get_location().is_in_main_file()
+            {
+                continue;
+            }
+            let message = diagnostic.get_text();
+            let location = diagnostic.get_location().get_spelling_location();
+            let source_line = main_source
+                .lines()
+                .nth(location.line.saturating_sub(1) as usize)
+                .unwrap_or_default();
+            let located_message = format!(
+                "line {} column {} under configuration [{}]: {message}; source: {source_line:?}",
+                location.line,
+                location.column,
+                enabled_macros
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            if authored_context.is_none()
+                && (message.contains("unknown type name")
+                    || message.contains("no template named")
+                    || message.contains("decimal type")
+                    || message.contains("unknown type")
+                    || source.contains("__new_"))
+            {
+                return Err(ScanError::new(ScanErrorKind::UnknownType, located_message));
+            }
+            if diagnostic.get_severity() == Severity::Fatal
+                || (authored_context.is_none()
+                    && (message.contains("expected")
+                        || message.contains("unterminated")
+                        || message.contains("extraneous"))
+                    && !message.starts_with("expected method"))
+            {
+                return Err(ScanError::new(
+                    ScanErrorKind::MalformedCandidate,
+                    located_message,
+                ));
+            }
+        }
+        walk_compiler_ast(
+            translation_unit.get_entity(),
+            source_owner,
+            source_owner,
+            &main_source,
+            authored_context,
+            &mut rows,
+        )?;
+    }
     preserve_structural_multiplicity(&mut rows);
     rows.sort();
     rows.dedup();

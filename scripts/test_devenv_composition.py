@@ -103,6 +103,17 @@ def parse_python_module(text: str) -> DevenvPython:
     )
 
 
+def parse_libclang_toolchain(text: str) -> int:
+    required = (
+        "pkgs.llvmPackages_18.libclang",
+        'LIBCLANG_PATH = "${pkgs.llvmPackages_18.libclang.lib}/lib";',
+    )
+    missing = [fragment for fragment in required if fragment not in text]
+    if missing:
+        raise ValueError(f"the Devenv libclang contract is incomplete: {missing!r}")
+    return 18
+
+
 def parse_commands_module(text: str) -> DevenvCommands:
     # Presence alone would still pass if the exec were re-pointed at the
     # adapter's own interpreter, which is exactly the reported defect.
@@ -222,6 +233,10 @@ class DevenvCompositionTests(unittest.TestCase):
         self.assertTrue(parsed.manages_venv)
         self.assertTrue(parsed.pyo3_uses_venv)
 
+    def test_devenv_pins_the_runtime_inventory_parser(self) -> None:
+        text = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
+        self.assertEqual(parse_libclang_toolchain(text), 18)
+
     def test_devenv_exposes_the_python_command_facade(self) -> None:
         text = (REPO_ROOT / "devenv/commands.nix").read_text(encoding="utf-8")
         self.assertEqual(
@@ -267,6 +282,12 @@ class DevenvCompositionTests(unittest.TestCase):
         mutated = text.replace("venv.enable = true;", "venv.enable = false;")
         with self.assertRaisesRegex(ValueError, "Python contract is incomplete"):
             parse_python_module(mutated)
+
+    def test_missing_libclang_pin_fails_at_the_parse_boundary(self) -> None:
+        text = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
+        mutated = text.replace("pkgs.llvmPackages_18.libclang", "pkgs.libclang")
+        with self.assertRaisesRegex(ValueError, "libclang contract is incomplete"):
+            parse_libclang_toolchain(mutated)
 
     def test_missing_command_fails_at_the_parse_boundary(self) -> None:
         text = (REPO_ROOT / "devenv/commands.nix").read_text(encoding="utf-8")

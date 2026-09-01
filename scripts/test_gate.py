@@ -526,7 +526,8 @@ GATE_WORKER_RUN_COMMANDS = {
         "python3 scripts/gate.py lint-and-unit",
     ),
     "workspace-tests-shard": (
-        "python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1",
+        "python3 scripts/ci_apt_get.py gcc libclang-18-dev libopenblas-dev "
+        "libasan8 libubsan1",
         "python3 scripts/ci_setup_uv_python.py",
         "python3 scripts/gate.py integration --tests-only "
         "--partition hash:${{ matrix.shard }}/2",
@@ -1885,6 +1886,12 @@ class CiParityTests(unittest.TestCase):
 
     def test_ci_file_exists(self):
         self.assertTrue(CI_YML.is_file(), f"missing {CI_YML}")
+
+    def test_phase0_inventory_jobs_pin_libclang_18(self):
+        for job in ("script-unit", "workspace-tests-shard"):
+            block = _ci_job_block(job)
+            self.assertIn("LIBCLANG_PATH: /usr/lib/llvm-18/lib", block)
+            self.assertIn("libclang-18-dev", block)
 
     def test_gate_jobs_call_gate_py(self):
         # Every run scalar in a gate-owned worker is reviewed here. This is a

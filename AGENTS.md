@@ -598,6 +598,13 @@ interpreter for every child command.
 **macOS:** Apple's bundled Python reports a stale `sysconfig.LIBDIR` path. Do not route
 PyO3 to it.
 
+**Phase 0 runtime-representation inventory:** the C-surface parser contract is pinned
+to libclang major 18. Devenv supplies it and exports `LIBCLANG_PATH`; the Linux CI jobs
+that execute the inventory install the same major explicitly. Outside Devenv, set
+`LIBCLANG_PATH` to a libclang 18 library directory before running the Phase 0 oracle or
+the canonical local gate. The inventory executable rejects every other major rather
+than accepting version-dependent AST identities.
+
 ## Local Git Hook
 
 `.githooks/commit-msg` is the tracked commit-msg hook. It runs
