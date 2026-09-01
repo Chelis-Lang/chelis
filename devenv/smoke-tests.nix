@@ -22,6 +22,7 @@
       rustc --version
       cargo --version
       cargo nextest --version
+      cargo llvm-cov --version
       uv --version
       cmake --version
       git --version

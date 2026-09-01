@@ -38,10 +38,7 @@ in
   packages =
     with pkgs;
     [
-      # cargo-llvm-cov is deliberately absent. Nothing in this repository runs
-      # it: no CI job, no script, and the coverage baseline that would use it
-      # is chelis#803, still open. Re-add it there, pinned and exercised by a
-      # gate, rather than carrying a shell promise nothing checks (chelis#1441).
+      cargo-llvm-cov
       cargo-nextest
       cmake
       git
