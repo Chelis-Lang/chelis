@@ -102,8 +102,10 @@ cast  cast_trunc  par  do  quote  unquote  splice  true  false
 **Total: 29.**
 
 `property`, `forall`, `where`, `opaque`, `invariant`, `wrt`, `axis`,
-`seed`, `device`, and the property-option names are contextual words only in
-the productions that name them. `effect`, `handler`, `perform`, `resume`, and
+`seed`, `device`, the dtype-family names `Float`, `Int`, and `Numeric`, and
+the property-option names are contextual words only in the productions that
+name them. A dtype-family name is a family only in a type binder's bound
+position; everywhere else it is an ordinary type name. `effect`, `handler`, `perform`, `resume`, and
 `borrow` are reserved words and cannot be used as identifiers.
 The read-only borrow expression is spelled `&expr`.
 
@@ -359,6 +361,14 @@ def multi_head_attn(q, k, v, mask) = ...
 
 **⟹** `(defsig {} multi_head_attn (t-fn {} ...arg_types... ret_type))`
 
+A `sig` may carry the same bracketed binder list a `def` carries, in the
+same position — immediately after the declared name:
+
+```text
+sig arange[p: Int]: p -> p -> tensor[n, p]
+def arange(start, stop) = ...
+```
+
 `sig` must precede its corresponding `def`. Arrow chain reads as: arg₁ -> arg₂ -> ... -> return. Always flat in Deep (`t-fn` with last child as return type). The arrow is right-associative, so `a -> b -> c` is the curried 3-ary `a -> (b -> c)`. A function-typed argument must be parenthesized: `(a -> b) -> c` is a distinct, 1-ary type whose single argument is itself a function, and the formatter and decompiler preserve those grouping parentheses (a bare arrow in return position keeps no redundant parens).
 
 Effect annotations are optional suffixes on either `sig` or `def`:
@@ -414,6 +424,41 @@ dim-var or a precision tvar depending on its position inside a
 `tensor[..]` type: the dim slots resolve to `d-var` and the
 precision slot resolves to `t-var`. Position determines kind; the
 quantifier list is unkinded.
+
+#### P4c: Dtype-Family Bounds
+
+A binder in a `[..]` clause may declare a **dtype-family bound**,
+written after the binder name:
+
+```text
+sig linspace[p: Float]: p -> p -> int64 -> tensor[n, p]
+def linspace(start, stop, count) = ...
+
+def arange_values[p: Int](current: p, stop: p, out: List[p]) -> List[p] = ...
+```
+
+The bound is one of `Float`, `Int`, or `Numeric`, and it restricts the
+binder to the active dtypes of that family per
+`spec/04-type-system.md` §5.9 [04-DTYPE-2]. Any other name in the
+bound position is a syntax error, so an ADT name never becomes a
+silent bound and a user type named `Float` is unaffected outside this
+position. A binder with no bound keeps its existing meaning: an
+unconstrained type variable, not a dtype.
+
+A `sig`'s `[..]` clause is **partial**. It declares bounds for the
+names it lists; every other name in the sig's type is implicitly
+quantified exactly as above, so dimension names and `..r` rank spreads
+need no entry. A listed name must occur in the declared type. A bound
+belongs to one binder list per declaration: when a standalone `sig`
+declares the name, the bound goes on the `sig`, and a bound in that
+`def`'s `[..]` clause is an error.
+
+A bounded binder is a type binder only. Using one in a dimension slot
+or as a rank spread is an error, since a dtype family cannot name an
+extent.
+
+The formatter prints a bound as `name: Family` with one space after the
+colon and preserves the authored binder order.
 
 A name in a def's `[..]` clause is also a **general type variable**
 wherever it appears as a type by itself — as a bare parameter type, a
@@ -1064,7 +1109,7 @@ FieldDecl     <- Ident S ':' S TypeExpr
 #  TYPE SIGNATURES
 # ═══════════════════════════════════════════════════
 
-SigDecl       <- 'sig' S Ident S ':' S TypeExpr EffectClause?
+SigDecl       <- 'sig' S Ident TypeBinders? S ':' S TypeExpr EffectClause?
 
 # ═══════════════════════════════════════════════════
 #  PROPERTY DECLARATIONS
@@ -1109,10 +1154,17 @@ proof. The source bridges for `std.quantile.range` and
 #  FUNCTION DEFINITIONS
 # ═══════════════════════════════════════════════════
 
-FunDecl       <- 'def' S Ident DimParams? Params
+FunDecl       <- 'def' S Ident TypeBinders? Params
                   ReturnType? EffectClause? S '=' S Expr
 
-DimParams     <- '[' S Ident (S ',' S Ident)* (S ',')? S ']'
+# The declaration binder list. It is unkinded (§P4b): a listed name
+# resolves to a dimension variable, a precision type variable, or a
+# general type variable according to its position. A bound restricts
+# the binder to one dtype family (§P4b, spec/04-type-system.md §5.9);
+# `TypeParams` on a `type` declaration has no bound production.
+TypeBinders   <- '[' S TypeBinder (S ',' S TypeBinder)* (S ',')? S ']'
+TypeBinder    <- Ident (S ':' S DtypeFamily)?
+DtypeFamily   <- 'Float' / 'Int' / 'Numeric'
 Params        <- '(' S (Param (S ',' S Param)* (S ',')?)? S ')'
 Param         <- Ident (S ':' S TypeExpr)?
 ReturnType    <- S '->' S TypeExpr

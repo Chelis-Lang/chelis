@@ -36,6 +36,7 @@ portable across Surf and Reef boundaries.
 | `type` | type-expr node | Type annotation (checked, not trusted) |
 | `loc` | `(loc file line col)` | Source location for error reporting |
 | `eff` | effect-set | Declared effect annotation on `t-fn` type expressions |
+| `dtype_bounds` | metadata map | Dtype-family bounds on a `defsig` or `def` binder; see §2.2 |
 | `effects` | effect-set | Inferred effect annotation on checked `fn` nodes |
 | `source` | macro invocation | Provenance: the macro call this node expanded from |
 | `span` | string | External-source span identifier (see §1.1.1) |
@@ -287,6 +288,26 @@ records whose bodies remain in the supplying artifact. Those records are not
 an authored check unit, use the linker's reserved-name/provenance channel, and
 cannot be produced by source-level `defsig` syntax.
 
+A `defsig` or `def` may carry `dtype_bounds` metadata restricting its
+implicitly bound type variables to a dtype family
+(`spec/04-type-system.md` §5.9 [04-DTYPE-2]):
+
+```lisp
+(defsig {dtype_bounds: {p: int}} arange
+  (t-fn {} (t-var {} p) (t-var {} p)
+    (t-tensor {} (d-var {} n) (t-var {} p))))
+```
+
+The value is a metadata map whose keys are binder names and whose values
+are the family names `float`, `int`, and `numeric`, spelled lowercase as
+effect names are. A key naming a variable the declaration does not bind, a
+key naming a `d-var` or `d-rank`, an unknown family name, and a value that
+is not a family name are each type-resolution errors. Bounds ride in
+metadata for the same reason an opaque invariant does: a `defsig` *child*
+node would change its fixed two-child shape and grow the closed tag
+vocabulary. A `def` carries the key only when no same-name `defsig`
+declares the binder; the two never both carry a bound for one declaration.
+
 `deftype` may carry `opaque: true` metadata:
 
 ```lisp
@@ -411,7 +432,10 @@ environment or a cached compiler context. Resolution is fail-closed:
   explicitly admits holes; it is not a way to leave a declaration field or
   alias body unresolved.
 - A `defsig` implicitly binds each well-formed `t-var`/`d-var`/`d-rank` name on
-  first occurrence and reuses that binding throughout the signature. A
+  first occurrence and reuses that binding throughout the signature. Its
+  `dtype_bounds` metadata attaches a dtype family to a named `t-var` binder;
+  the bound restricts every occurrence of that name, and a bounded name used
+  in a dimension or rank position is an error. A
   `deftype` or `typealias` binds only names in its explicit parameter list and
   assigns each one exactly one header kind, `Type` or single `Dimension`, under
   [04-ADT-3]; a declaration parameter cannot bind a `d-rank` spread. An

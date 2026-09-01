@@ -3817,6 +3817,61 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("captured extrema tie rule")
 
+    def test_dtype_family_bound_production_is_a_closed_three_name_set(
+        self,
+    ) -> None:
+        self.replace(
+            Path("spec/02-surf-syntax.md"),
+            "DtypeFamily   <- 'Float' / 'Int' / 'Numeric'",
+            "DtypeFamily   <- TypeName",
+        )
+        self.assert_contract_fails("Surf dtype-family bound production")
+
+    def test_a_bound_cannot_be_written_in_two_binder_lists(self) -> None:
+        self.replace(
+            Path("spec/02-surf-syntax.md"),
+            "A bound\nbelongs to one binder list per declaration",
+            "A bound\nmay be repeated in both binder lists when they agree",
+        )
+        self.assert_contract_fails("Surf single bound binder list")
+
+    def test_deep_carries_dtype_bounds_as_a_defined_metadata_key(self) -> None:
+        self.replace(
+            Path("spec/03-deep-syntax.md"),
+            "| `dtype_bounds` | metadata map | Dtype-family bounds on a "
+            "`defsig` or `def` binder; see §2.2 |",
+            "| `dtype_bounds` | string | Producer-specific bound provenance |",
+        )
+        self.assert_contract_fails("Deep dtype-family bound metadata key")
+
+    def test_bounded_variables_unify_by_intersection_not_equality(self) -> None:
+        self.replace(
+            Path("spec/04-type-system.md"),
+            "Unifying two bounded variables SHALL\n> yield the intersection "
+            "of their families.",
+            "Unifying two bounded variables SHALL\n> require identical families.",
+        )
+        self.assert_contract_fails("dtype-family bound intersection")
+
+    def test_an_unbounded_binder_is_not_narrowed_to_a_dtype(self) -> None:
+        self.replace(
+            Path("spec/04-type-system.md"),
+            "A binder that declares no bound\n> remains an unconstrained type "
+            "variable admitting every type, not only a\n> dtype.",
+            "A binder that declares no bound\n> ranges over every active dtype.",
+        )
+        self.assert_contract_fails(
+            "unbounded binder stays a general type variable"
+        )
+
+    def test_numeric_family_is_the_union_of_float_and_int(self) -> None:
+        self.replace(
+            Path("spec/04-type-system.md"),
+            "| `Numeric` | the union of `Float` and `Int` |",
+            "| `Numeric` | every active float dtype of §1.1 |",
+        )
+        self.assert_contract_fails("dtype-family membership table")
+
 
 class RunnerTests(unittest.TestCase):
     @mock.patch.object(oracle.subprocess, "run")

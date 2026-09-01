@@ -52,13 +52,13 @@ CONTRACT_FILES = (
 )
 FROZEN_FILE_DIGESTS = {
     "spec/02-surf-syntax.md": (
-        "7eb644de9c58a57400f588c0f411123096013448e8f6f6e088fb1972d14f9b48"
+        "d9be2537f612a3813d91f51966b210b461ddc9abcadc468f7bfb60c9f769084c"
     ),
     "spec/03-deep-syntax.md": (
-        "efb29e77a338c94bb6c6c6b9adc6c4bb236f5d78c0c329f3775a0b48b8640348"
+        "994f4bc55d0889503098c2b132e0f1e94e490d43e64bf5cfbccbadb77a4c4b9e"
     ),
     "spec/04-type-system.md": (
-        "21b3b2f3c8aafc52c975e86e1bf573a327f33e1be845f9093382fd61c45b3045"
+        "fbae91dc1efa5382c432710f8f6f3c30e6e6b4a3e0cb3327232e22b1d38f3491"
     ),
     "spec/05-risc-primitives.md": (
         "e427fa744b313a3a8a7cad99e1ca92ed7df8e57db459bf53a499edb098dca86a"
@@ -79,7 +79,7 @@ FROZEN_FILE_DIGESTS = {
         "4a6013c2dc5a074d19ae12696c109a35218facfdb423d29ff07cef79fe6689b9"
     ),
     "spec/design/dtype_semantics.md": (
-        "61092ac8978986d2819febf6add1cebc9f11f48a26e151d09c389646d89dc6bb"
+        "f0ffd7d8f1479976fa0481754751ff0b519b6557036e0dacb21ae45305a2650a"
     ),
     "spec/design/implicit_linearity.md": (
         "f03302f4b328841d79824f6326f1edf2e954a9b98c0118992d4a3a1f2dfb67cf"
@@ -788,6 +788,14 @@ def validate_normative_contract(
                 "`count`\nlowers once with its complete named-axis vector",
                 "Surf count multi-axis lowering",
             ),
+            (
+                "DtypeFamily   <- 'Float' / 'Int' / 'Numeric'",
+                "Surf dtype-family bound production",
+            ),
+            (
+                "A bound\nbelongs to one binder list per declaration",
+                "Surf single bound binder list",
+            ),
         ),
         violations,
     )
@@ -799,6 +807,11 @@ def validate_normative_contract(
                 "Deep literal exclusion",
             ),
             ("**Reduce:** `sum`, `count`, `max_reduce`", "Deep count builtin"),
+            (
+                "| `dtype_bounds` | metadata map | Dtype-family bounds on a "
+                "`defsig` or `def` binder; see §2.2 |",
+                "Deep dtype-family bound metadata key",
+            ),
         ),
         violations,
     )
@@ -820,6 +833,20 @@ def validate_normative_contract(
                 "Lexical scope\nexit is the fallback only when no earlier valid "
                 "terminal point can be proved",
                 "linearity scope-exit fallback",
+            ),
+            (
+                "Unifying two bounded variables SHALL\n> yield the intersection "
+                "of their families.",
+                "dtype-family bound intersection",
+            ),
+            (
+                "A binder that declares no bound\n> remains an unconstrained type "
+                "variable admitting every type, not only a\n> dtype.",
+                "unbounded binder stays a general type variable",
+            ),
+            (
+                "| `Numeric` | the union of `Float` and `Int` |",
+                "dtype-family membership table",
             ),
         ),
         violations,

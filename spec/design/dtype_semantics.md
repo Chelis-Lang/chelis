@@ -1344,6 +1344,26 @@ count to the eighty-four the `[05-OP-35]` registry and the census already
 carry, and settles the `capability_table.md` seed row that still cited the
 closed [#691] as an `Unimplemented` owner.
 
+[#1417] adds `spec/04-type-system.md` §5.9 and its [04-DTYPE-2] atom, which
+give the language an explicit dtype-family bound on a declaration's type
+binders, plus the `spec/02-surf-syntax.md` §P4c surface spelling (a `sig` gains
+the same binder list a `def` already has) and the `spec/03-deep-syntax.md`
+`dtype_bounds` metadata key that carries it. The stdlib signatures for `arange`
+and `linspace` spelled [05-OP-35]'s `p_int` and `p_float` metavariables as
+ordinary unconstrained binders, so each accepted the opposite family; the
+families are now expressible and those signatures declare them. This
+deliberately moves the complete-file digests for `spec/02-surf-syntax.md`,
+`spec/03-deep-syntax.md`, `spec/04-type-system.md`, and this document, and adds
+one atom to the generated rejection registry. It authors no `[05-OP]` atom and
+moves no `[05-OP]`, `[04-NUM]`, or region digest: [05-OP-35]'s metavariables
+already denoted these domains, and §5.9 names the families they denote rather
+than restating them. It changes no Table-A/Table-B cell, no §C1 semantics row,
+and no numeric-surface identity. It does bump the §C3 shell wire schema, whose
+`TypeVariableDomain` gains the two new families, so `SHELL_FORMAT_VERSION`
+moves 2 -> 3 with the encoder, decoder, and regenerated bundle artifacts in the
+same change set. Six required-literal anchors with matching mutation tests
+defend the new normative rules; connective prose rests on the file digests.
+
 ## B2. Invariants that hold across every boundary
 
 1. **Controls never move.** Every green control in the audit test files
