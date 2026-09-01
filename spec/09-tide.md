@@ -60,39 +60,6 @@ The shipped surface includes `/parse`, `/desugar`, `/check`, `/lower`, `/compile
 The public contract uses explicit wire-model types rather than serialized compiler
 internals.
 
-#### Source-qualified diagnostic wire
-
-> **[09-SRC-1]** Every public request field that contains source text is a
-> distinct source buffer. Its ingress namespace and field role are the
-> logical identity used with the exact bytes to derive [03-SRC-1]'s immutable
-> source unit. Ordinary pipeline endpoints use their named source field;
-> `replace_function_body` uses distinct `module` and `new_body` identities;
-> `add_function` uses distinct `module` and `new_decls` identities. LSP uses
-> the document URI plus the exact version bytes. A splice preserves the unit
-> and node keys of each originating buffer rather than relabelling the new
-> body/declarations as offsets in the module buffer.
-
-> **[09-SRC-2]** A source-bearing response carries
-> `source_identity_version: 1` and a `source_units` table. Each table row has
-> the canonical `su1:<64 lowercase hex>` unit ID, request-field role, optional
-> display name, and lowercase SHA-256 of the exact bytes. A diagnostic's
-> optional `source` object has independent `site` and `node` fields. `site`
-> contains `{unit, start, end}`. `node`, when an AST/IR node exists, contains
-> `{key, origin, external_span_id}` where `key` uses [03-SRC-4]'s `nk1`
-> encoding and `origin` is the closed tagged union `parsed {site}`,
-> `synthesized {pass, contributors}`, or `unavailable`. Parser failures may
-> have `site` with `node: null`; a diagnostic with neither is `source: null`.
-> An offset-zero parsed site is never encoded as null.
-
-> **[09-SRC-3]** The compiler API exposes source-aware entry points that take
-> `(logical identity, exact bytes)` rather than a caller-constructed raw
-> `SourceUnitId`. Tide, MCP, LSP, Reef composition, batch requests, and cache
-> decode route through those entry points. A response unit must resolve in
-> that response's table, and cache-backed diagnostics/facts are returned only
-> after the source table and provenance-sensitive cache digest match the
-> current request. Adding a source-bearing endpoint without source-unit and
-> parse-error coverage is a conformance failure.
-
 ### `chelis tide mcp`
 
 Launch the MCP server on stdio.

@@ -228,10 +228,15 @@ produce the parse error from `chelis-deep`, not a silent fallback to Surf.
 
 ### 2.6 Source-qualified identity (S7; chelis#1172)
 
-The normative identity, location, cache-attribution, and generated-comment
-rules are [03-SRC-1..4]. The public diagnostic wire is [09-SRC-1..3]. This
-section selects the implementation types, ingress inventory, sequencing, and
-oracles for those rules; it does not independently define the public contract.
+No numbered specification currently defines source-unit identity, qualified
+node identity, or the source-qualified diagnostic wire. This section records
+the implementation candidate that S7 must submit to the normative tier; it is
+not an in-force language, wire, or generated-artifact contract. S7.0 is a
+mandatory prerequisite: a separate numbered-spec change must establish the
+rules in the chapters that own Deep identity/generated-source attribution and
+Tide's public wire before any implementation or public output change lands.
+Because `spec/03-deep-syntax.md` is frozen by the numeric-remediation guard,
+that prerequisite must also follow the full freeze protocol named in S7.0.
 
 The source model has three independent concepts. They must not share one
 string or integer field:
@@ -270,15 +275,17 @@ pub struct DiagnosticSourceRef {
 ```
 
 - `SourceUnitId` identifies one immutable input snapshot, not a logical module
-  across edits. Its private constructor hashes a versioned, domain-separated
-  encoding of `(ingress namespace, caller-supplied logical identity, exact
-  source bytes)`. Re-parsing unchanged bytes at the same logical identity
-  produces the same unit; changing even one byte produces a different unit;
-  identical bytes in two paths, request fields, or package modules remain
-  distinct. File-based CLI adapters supply the canonical module/input
-  identity. Compiler-api, Tide, Reef, and cache adapters supply an explicit
-  logical identity for every input buffer; callers never inject unchecked raw
-  digest bytes. A byte offset or display filename is not a unit ID.
+  across edits. Let `lp(x)` be the unsigned 64-bit little-endian byte length of
+  `x` followed by the bytes of `x`. A parsed unit is exactly
+  `SHA256(b"chelis-source-unit-v1\0" || lp(namespace_utf8) ||
+  lp(logical_identity_utf8) || lp(exact_source_bytes))`. Re-parsing unchanged
+  bytes at the same logical identity produces the same unit; changing even one
+  byte produces a different unit; identical bytes in two paths, request fields,
+  or package modules remain distinct. File-based CLI adapters supply the
+  canonical module/input identity. Compiler-api, Tide, Reef, and cache adapters
+  supply an explicit logical identity for every input buffer; callers never
+  inject unchecked raw digest bytes. A byte offset or display filename is not
+  a unit ID.
 - `NodeKey` is the source-qualified semantic identity used by checker and
   lowering maps. Its representation is structurally
   `(SourceUnitId, NonZeroU64)`, so two arenas that both allocate local key `1`
@@ -288,19 +295,34 @@ pub struct DiagnosticSourceRef {
   is private to `SourceArena`; a producer cannot restart a counter for an
   existing unit.
 - A later pass creates one deterministic synthesized arena per output artifact
-  and pass. Its unit is the domain-separated hash of the stable pass identity,
-  the ordered input-artifact identity, and the ordered contributing source
-  units. The arena allocates local IDs in canonical output traversal order.
-  A helper with contributors from multiple units therefore belongs to a fresh
-  synthesized unit rather than borrowing one contributor's unit or restarting
-  any parsed-unit counter. `NodeOrigin::Synthesized` still records the actual
-  contributor sites.
-- Programmatic source-less construction still uses a qualified key: the
-  builder must supply a stable construction namespace and artifact identity
-  to a domain-separated unavailable arena. Its nodes carry
+  and pass. Its unit is exactly
+  `SHA256(b"chelis-synth-unit-v1\0" || lp(stable_closed_pass_id_utf8) ||
+  lp(pass_schema_version_le_u64) || lp(input_semantic_artifact_digest) ||
+  contributor_count_le_u64 || lp(contributor_1_raw_unit_bytes) || ... ||
+  lp(contributor_n_raw_unit_bytes))`. The input semantic-artifact digest is
+  computed by a private builder from the pass's immutable input artifact and
+  excludes source identity; a caller cannot inject it. Contributor units are
+  deduplicated and sorted lexicographically by their raw 32 bytes before the
+  count and rows are encoded; call order is never an identity input. The arena
+  allocates local IDs in canonical output traversal order. A helper with
+  contributors from multiple units therefore belongs to a
+  fresh synthesized unit rather than borrowing one contributor's unit or
+  restarting any parsed-unit counter. `NodeOrigin::Synthesized` still records
+  the actual contributor sites. An unchanged deterministic pass over unchanged
+  semantic input reproduces its unit and node keys; a pass-schema, semantic-
+  input, or contributor change cannot alias the prior arena.
+- Programmatic source-less construction still uses a qualified key. Its unit is
+  exactly `SHA256(b"chelis-unavailable-unit-v1\0" ||
+  lp(closed_construction_namespace_utf8) || lp(builder_schema_version_le_u64)
+  || lp(semantic_artifact_digest))`. The private builder first constructs the
+  source-less semantic tree, computes its canonical digest excluding source
+  identity, then attaches keys in canonical traversal order. Neither a raw
+  digest nor a counter is accepted from public callers. Its nodes carry
   `NodeOrigin::Unavailable`; there is no process-global counter and no zero
-  unit. The compiler API rejects a builder that supplies neither parsed,
-  synthesized, nor unavailable arena context.
+  unit. An unchanged rebuild reproduces keys, while any semantic-tree or
+  builder-schema change mints a different unit. The compiler API rejects a
+  builder that supplies neither parsed, synthesized, nor unavailable arena
+  context.
 - `SourceSite` is a human location. `Span` remains a byte range in exactly one
   identified source unit; it is not meaningful without that unit.
 - `external_span_id` is the existing opaque producer audit label from Deep
@@ -324,11 +346,12 @@ semantic `expanded_deep_digest` exclude them. Any artifact that stores node-
 keyed facts instead uses a provenance-sensitive `SourceIdentityDigest` over
 the cache-format version, the ordered source-unit table, and the semantic
 digest. Decode validates that digest and the source table before exposing any
-linearity or diagnostic facts. The S7 implementation bumps the three current
-formats that can retain these facts (compiled context V13, library cache V6,
-and stdlib cache V9) to their next live versions and adds preceding-version
-rejection tests. If one advances before implementation, S7 allocates the next
-then-live version rather than reusing it.
+linearity or diagnostic facts. The S7 implementation bumps all four current
+formats that can retain source declarations or node-keyed facts: compiled
+context V13, library cache V6, stdlib cache V9, and
+`PreparedReefGraph` V3. Each moves to its next live version and gains
+preceding-version rejection tests. If one advances before implementation, S7
+allocates the next then-live version rather than reusing it.
 
 #### Attribution rules
 
@@ -356,6 +379,51 @@ origin kind, contributor sites, and external audit ID as distinct fields.
 Human rendering may abbreviate them, but cannot invent a node for a parse
 error or a range for `Unavailable`/`Synthesized`.
 
+The candidate public JSON is exact rather than an abstract Rust-enum sketch.
+Every source-bearing response has `"source_identity_version": 1` and a
+`"source_units"` array sorted by `unit`, with duplicate units forbidden.
+Every unit referenced by a node key, site, origin, or contributor must resolve
+to exactly one row in that array. Rows use the required `kind` discriminator
+and exactly one of these shapes:
+
+```json
+{"kind":"parsed","unit":"su1:<64-lowercase-hex>","role":"<closed-endpoint.field>","display_name":null,"sha256":"<64-lowercase-hex>"}
+{"kind":"synthesized","unit":"su1:<64-lowercase-hex>","pass":"<closed-pass-id>","pass_schema_version":1,"input_artifact_digest":"sha256:<64-lowercase-hex>","contributors":["su1:<64-lowercase-hex>"]}
+{"kind":"unavailable","unit":"su1:<64-lowercase-hex>","construction_namespace":"<closed-builder-id>","builder_schema_version":1,"semantic_artifact_digest":"sha256:<64-lowercase-hex>"}
+```
+
+`display_name` is required on a parsed row and is a string or explicit
+`null`; it is presentation-only and is excluded from identity. Parsed
+`role` is the manifest identity below, not free text. Synthesized and
+unavailable rows have no request role or source-byte hash. Variant-inapplicable
+fields are omitted, never emitted as `null`. Synthesized contributor units are
+sorted and deduplicated by raw unit bytes, exactly as in the identity input.
+Schema versions are unsigned JSON integers in the exact `u64` range.
+
+A diagnostic's `source` value is either `null` or an object with both
+`site` and `node` keys present. Each key is independently an object or
+explicit `null`:
+
+```json
+{"source":{"site":{"unit":"su1:<64-lowercase-hex>","start":0,"end":1},"node":null}}
+{"source":{"site":null,"node":{"key":"nk1:<64-lowercase-hex>:<nonzero-decimal>","origin":{"kind":"unavailable"},"external_span_id":null}}}
+```
+
+`external_span_id` is always present and is a string or explicit `null`.
+`origin` is exactly one of:
+
+```json
+{"kind":"parsed","site":{"unit":"su1:<64-lowercase-hex>","start":0,"end":1}}
+{"kind":"synthesized","pass":"<closed-pass-id>","contributors":[{"unit":"su1:<64-lowercase-hex>","start":0,"end":1}]}
+{"kind":"unavailable"}
+```
+
+No extra variant fields are accepted. Ranges are half-open byte ranges with
+`start <= end`. The 32-byte unit embedded in `key` must equal the unit of
+the row describing that node arena. Parser-only, parsed-node, synthesized-node,
+and unavailable-node fixtures lock the literal JSON and generated schema,
+including null-versus-omission and referential-integrity failures.
+
 `LinearityInfo` is keyed by `NodeKey`, replacing
 `HashMap<usize, usize>`. `mark_reusable_input` records the checked app node's
 qualified key and lowering queries that same qualified key. Merging separately
@@ -363,28 +431,80 @@ checked programs is then an ordinary disjoint-key union; an equal byte offset
 or equal local node counter in two files is not a collision and no
 library-half-wins rule is needed.
 
-Generated source keeps `// span: <external-id>` for the external audit chain
-and emits the numbered-spec `// chelis-source:` record separately. The
-comment uses only the canonical lowercase-hex source-unit encoding and decimal
-local key, never a display path or unvalidated caller string. Consumers can
-therefore distinguish a Deep parser range from an opaque external ID and can
-trace two Surf files that use the same local byte range without aliasing them.
+The candidate generated-source format keeps `// span: <external-id>` for the
+external audit chain and emits source identity separately. Unit text is
+`su1:<64 lowercase hexadecimal digits>`; node-key text is
+`nk1:<the same 64 hexadecimal digits>:<nonzero decimal local id>`. The exact
+comment rows are:
+
+```text
+// chelis-source: <node-key> parsed <source-unit> <start>..<end>
+// chelis-source: <node-key> synthesized <closed-pass-id>
+// chelis-source-contributor: <source-unit> <start>..<end>
+// chelis-source: <node-key> unavailable
+```
+
+A synthesized row is followed by its contributor rows sorted and deduplicated
+by `(raw unit bytes, start, end)`. Closed pass and builder IDs match
+`[a-z0-9][a-z0-9._-]*`; no whitespace, newline, comment delimiter, display
+path, or unvalidated caller string can enter a record. Consumers can therefore
+distinguish a Deep parser range from an opaque external ID and trace two Surf
+files that use the same local byte range without aliasing them.
 
 #### Public-ingress inventory
 
-S7 closes every row below in the same implementation change. The inventory is
-derived by entry-point enumeration; adding a public source-bearing entry point
-without a row makes the S7 oracle red.
+S7 closes every row below. The manifest is generated from public request
+schemas and adapter registrations; a hand-edited expected list cannot certify
+itself. Every listed source field gets a distinct parsed unit and both a
+successful-node fixture and a parse-before-node diagnostic fixture.
 
-| ingress | source-unit rule | response/freshness rule |
+| compiler API request/function | source fields | HTTP route | MCP tool | batch role |
+|---|---|---|---|---|
+| `parse(ParseRequest)` | `source` | `/parse` | — | `requests[i].parse.source` |
+| `desugar(DesugarRequest)` | `source` | `/desugar` | `chelis_desugar` | `requests[i].desugar.source` |
+| `check(CheckRequest)` | `source` | `/check` | `chelis_check` | `requests[i].check.source` |
+| `lower(LowerRequest)` | `source` | `/lower` | — | `requests[i].lower.source` |
+| `compile(CompileRequest)` | `source` | `/compile` | `chelis_compile` | `requests[i].compile.source` |
+| `eval(EvalRequest)` | `source` | `/eval` | `chelis_eval` | `requests[i].eval.source` |
+| `grad(GradRequest)` | `source` | `/grad` | `chelis_grad` | `requests[i].grad.source` |
+| `validate(ValidateRequest)` | `source` | `/validate` | `chelis_validate` | `requests[i].validate.source` |
+| `decompile(DecompileRequest)` | `source` | `/decompile` | `chelis_decompile` | `requests[i].decompile.source` |
+| `replace_function_body(ReplaceFunctionBodyRequest)` | `module`, `new_body` | `/replace_function_body` | `chelis_replace_function_body` | — |
+| `add_function(AddFunctionRequest)` | `module`, `new_decls` | `/add_function` | `chelis_add_function` | — |
+| `deep_outline(DeepOutlineRequest)` | `module` | `/deep_outline` | `chelis_deep_outline` | — |
+| `deep_references(DeepReferencesRequest)` | `module` | `/deep_references` | `chelis_deep_references` | — |
+| `deep_call_graph(DeepCallGraphRequest)` | `module` | `/deep_call_graph` | `chelis_deep_call_graph` | — |
+| `replace_function(ReplaceFunctionRequest)` | `module`, `new_decls` | `/replace_function` | `chelis_replace_function` | — |
+| `rename(RenameRequest)` | `module` | `/rename` | `chelis_rename` | — |
+| `change_signature(ChangeSignatureRequest)` | `module`, `new_defsig`, `new_params` | `/change_signature` | `chelis_change_signature` | — |
+| `add_property(AddPropertyRequest)` | `module`, `new_decls` | `/add_property` | `chelis_add_property` | — |
+
+HTTP and MCP deserialize these shared request structs and therefore must consume
+the same generated endpoint/field manifest rather than maintain independent
+copies. Batch roles include the request index so two equal variants in one
+envelope cannot alias. Compiler-API direct calls use
+`compiler_api.<function>.<field>`; HTTP and MCP use
+`http.<route>.<field>` and `mcp.<tool>.<field>`, respectively. Those closed
+role strings, plus the caller-supplied logical request identity, are inputs to
+the parsed-unit namespace; transport display labels are not.
+
+The remaining adapters have these exact source boundaries:
+
+| adapter | source fields | identity and freshness |
 |---|---|---|
-| Surf and Deep parser APIs | require logical identity plus exact bytes; allocate one parsed arena | parse failures carry `SourceSite` with no fabricated node |
-| CLI files, imports, and stdin | canonical module/input identity plus exact bytes; stdin receives an explicit invocation-scoped logical identity | diagnostics name the serialized unit and the display-name table separately |
-| compiler-api pipeline entry points | every source-bearing argument is a distinct named buffer | response includes a `source_units` table mapping unit encoding to argument role/display name |
-| Tide/LSP documents | document URI plus exact version bytes; changed bytes mint a new unit | stale-version facts cannot be reused; diagnostics resolve through the response table |
-| Tide edit requests (`module`, `new_body`, `new_decls`) | field role is part of logical identity, so independently parsed buffers cannot collide | splice preserves each node's original unit; response maps every field unit |
-| Reef/package composition | package identity, canonical module identity, and exact module bytes | composition unions qualified keys and retains the package/module display table |
-| compiled-context, library, and stdlib cache decode | deserialize the source table and provenance-sensitive digest | version, digest, or caller-source mismatch rejects the cache before facts are visible |
+| Surf and Deep parser APIs | source byte slice | require a logical identity; parse failures carry `SourceSite` and no fabricated node |
+| CLI file/stdin/import | each file's exact bytes; stdin bytes; each imported module | canonical package/module or input identity; stdin adds an invocation nonce; response keeps identity separate from display path |
+| LSP `didOpen` | `textDocument.uri`, `textDocument.version`, `textDocument.text` | URI and version are carried into analysis; equal URI with changed version/bytes cannot reuse facts |
+| LSP `didChange` (FULL sync) | `textDocument.uri`, `textDocument.version`, `contentChanges[0].text` | exactly one full-text change is admitted; stale/nonmonotonic versions fail before analysis |
+| Reef package composition | every discovered module's package identity, canonical inventory path, and exact bytes | composition unions qualified keys and retains the package/module display table |
+| cache decode | compiled context, library, stdlib, and `PreparedReefGraph` source tables and provenance digest | format, source table, semantic digest, or caller-source mismatch rejects before facts are exposed |
+
+Generated tests enumerate HTTP router registrations, MCP tool registrations,
+`BatchRequest` variants, public compiler functions/request schemas, LSP sync
+handlers, Reef module ingestion, and all four cache decoders. The enumerated
+set must be bijective with this typed manifest. Adding a source-bearing field,
+endpoint, adapter, or cache without a role and both test polarities makes the
+S7 oracle red.
 
 No fallback reparses `surf:<start>..<end>`, uses `Expr::span().offset` as an
 identity, or treats `Span::new(0, 0)` as both a real location and a missing
@@ -526,28 +646,51 @@ gap between sidecar and emitted C breaks the trust stack.
 
 ### S7 — Source-qualified node identity (chelis#1172)
 
-S7 is delivered test-first in four dependency-ordered slices:
+S7 is delivered test-first in five dependency-ordered slices:
 
+0. Submit the candidate contract in §2.6 as a separately reviewed numbered-
+   spec amendment to `spec/03-deep-syntax.md` and `spec/09-tide.md`. That
+   normative change fixes the identity byte encodings, lifetime/equality
+   boundaries, exact public JSON, generated-comment encoding, external-ID
+   separation, compatibility/versioning, and the closed ingress roles before
+   implementation begins. It runs
+   `.venv/bin/python scripts/generate_rejection_registries.py --write` and
+   commits the generated registry. Because `spec/03-deep-syntax.md` is a
+   frozen Phase 4B input, the same change amends
+   `spec/design/dtype_semantics.md` and tracker #729, deliberately updates
+   the full-file digest, and runs
+   `.venv/bin/python scripts/dtype_phase4b_oracle.py` to the exact final line
+   `DTYPE PHASE 4B ORACLE: PASS`. Until this slice lands, the remaining
+   bullets are proposed implementation work and no source-identity wire or
+   generated-comment promise is in force.
 1. Add failing source-identity tests, then introduce `SourceUnitId`,
    `LocalNodeId`, qualified `NodeKey`, `SourceSite`, `NodeOrigin`, `NodeRef`,
-   and `DiagnosticSourceRef` in `chelis-deep`.
-   Source-aware Surf and Deep parser entry points allocate nonzero node keys;
-   source-less construction requires an explicit unavailable/synthesized
-   origin rather than the zero-span sentinel.
+   and `DiagnosticSourceRef` in `chelis-deep`. Private parsed,
+   synthesized, and unavailable builders implement the exact encodings from
+   S7.0 and prohibit caller-injected unit bytes, artifact digests, and local
+   counters. Source-aware Surf and Deep parser entry points allocate nonzero
+   node keys; source-less construction requires an explicit unavailable or
+   synthesized builder rather than the zero-span sentinel.
 2. Thread the source unit and origin through every Surf declaration,
    expression, pattern, type, and desugaring helper. Lock exact nested
    expression ranges and the attribution table in §2.6, including helpers
-   created for declarations, destructuring, pipes, and annotations.
+   created for declarations, destructuring, pipes, and annotations. Lock
+   unchanged-rebuild determinism and changed semantic-artifact non-aliasing
+   for both synthesized and unavailable arenas.
 3. Replace diagnostic scalar offsets/IDs and `LinearityInfo`'s bare-offset
    key with typed `DiagnosticSourceRef`/qualified `NodeKey`. Serialize the
    source table and provenance-sensitive digest with checked and reusable
-   contexts; bump compiled-context, library-cache, and stdlib-cache formats
-   and lock rejection of their immediate predecessors. Delete every semantic
-   call to `parse_span_offset` and every source-unit merge policy based on
-   numeric offset precedence.
+   contexts; bump compiled-context, library-cache, stdlib-cache, and
+   `PreparedReefGraph` formats and lock rejection of every immediate
+   predecessor plus source-table/digest mismatches. Delete every semantic call
+   to `parse_span_offset` and every source-unit merge policy based on numeric
+   offset precedence.
 4. Thread the same carrier through lowering, IR, host IR, generated-source
-   emission, and compiler-api wire output. Keep opaque external audit IDs
-   separate from textual source ranges and synthesized provenance.
+   emission, and the exact compiler-api/Tide/MCP/batch/LSP/Reef ingress
+   manifest and JSON wire in §2.6. Keep opaque external audit IDs separate
+   from textual source ranges and synthesized provenance. Serialization and
+   schema tests lock parser-only, parsed-node, synthesized-node, and
+   unavailable-node responses byte-for-byte.
 
 Each slice includes positive/negative parity. Required counterexamples are:
 
@@ -557,16 +700,28 @@ Each slice includes positive/negative parity. Required counterexamples are:
 - reparsing the same logical file after a one-byte edit mints a new unit and
   rejects a serialized reusable-input record from the prior snapshot, while
   an unchanged reparse keeps deterministic keys;
+- rebuilding a synthesized or unavailable tree with the same pass/builder
+  schema and semantic input reproduces its unit and keys, while one semantic
+  input change produces a distinct unit and no reusable-fact alias;
 - a Surf or Deep parse error before AST construction carries a qualified
   source range and no node key;
-- Tide `replace_function_body` and `add_function` preserve separate units for
-  `module`, `new_body`, and `new_decls`, and their response source table maps
-  every diagnostic back to the originating request field;
+- every field in the compiler-api/HTTP/MCP/batch manifest has a successful
+  parse and parse-before-node failure; in particular,
+  `replace_function_body` keeps `module` and `new_body` distinct,
+  `replace_function`/`add_function`/`add_property` keep `module` and
+  `new_decls` distinct, and `change_signature` keeps `module`,
+  `new_defsig`, and `new_params` distinct;
+- parser-only, parsed-node, synthesized-node, and unavailable-node diagnostics
+  serialize to the exact JSON shapes in §2.6, reject wrong
+  null-versus-omission/discriminator shapes, and resolve every referenced unit;
 - an offset-zero parsed token remains a real `Parsed` site, while a helper
   node is explicitly `Synthesized` and missing provenance is
   `Unavailable`—the three states never compare or render alike;
 - an opaque external span ID that looks numeric is never interpreted as a
   text range;
+- compiled-context, library, stdlib, and prepared-Reef-graph caches reject
+  their immediate predecessor version and any stale source table or provenance
+  digest before exposing a declaration, diagnostic, or reusable-input fact;
 - deleting a source qualifier, restoring `HashMap<usize, usize>`, or replacing
   synthesized origin with `Span::new(0, 0)` makes the suite red.
 
