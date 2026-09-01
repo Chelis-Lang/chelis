@@ -74,10 +74,6 @@ DEVENV_SETUP_ACTION = (
     "73f017c4d3179dc313844e9d5f08d17a7879c824"
 )
 PORTABLE_DEVENV_SHELL = "devenv-ci bash --noprofile --norc -e -o pipefail {0}"
-DOCS_ONLY_GATE_IF = (
-    "if: ${{ !cancelled() && (needs.changes.result != 'success' "
-    "|| needs.changes.outputs.docs_only != 'true') }}"
-)
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 CARCARA_FULL_SUITE_COMMAND = (
     "cargo test -p chelis-prove --features carcara -- --test-threads=1"
