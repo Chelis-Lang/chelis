@@ -6,6 +6,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 import hashlib
+import json
 from pathlib import Path
 from pathlib import PurePosixPath
 import posixpath
@@ -34,15 +35,15 @@ DIRECT_PATH_ATTRIBUTE_PATTERN = re.compile(
 PATH_MODULE_ITEM_PATTERN = re.compile(
     r"\s*(?:#\s*\[[^\]]*\]\s*)*mod\s+[A-Za-z_][A-Za-z0-9_]*\s*;"
 )
-MACRO_RULES_PATTERN = re.compile(
-    r"\bmacro_rules\s*!\s*(?:r#)?[A-Za-z_][A-Za-z0-9_]*\s*"
-    r"(?P<opener>[({\[])"
+RUST_LITERAL_HELPER_COMMAND = (
+    "cargo",
+    "run",
+    "--quiet",
+    "-p",
+    "chelis-lint",
+    "--bin",
+    "hash-order-rust-literals",
 )
-MACRO_ATTRIBUTE_TEMPLATE_PATTERN = re.compile(
-    r"#\s*\[[^\]]*\$[^\]]*\]", re.DOTALL
-)
-DELIMITER_PAIRS = {"(": ")", "[": "]", "{": "}"}
-DELIMITER_CLOSERS = frozenset(DELIMITER_PAIRS.values())
 
 
 @dataclass(frozen=True, order=True)
@@ -312,247 +313,70 @@ def _strip_comments_and_strings(text: str) -> str:
     return "".join(output)
 
 
-def _char_literal_end(text: str, index: int) -> int | None:
-    """Return the end of a char literal, without mistaking a lifetime for one."""
+def _rust_utf8_string_literals_by_path(
+    sources: Mapping[str, str],
+) -> dict[str, tuple[str, ...]]:
+    """Decode Rust UTF-8 literals through proc-macro tokenization."""
 
-    quote = index + 1 if text.startswith("b'", index) else index
-    if text[quote : quote + 1] != "'":
-        return None
-    cursor = quote + 1
-    escaped = False
-    while cursor < len(text) and text[cursor] != "\n":
-        char = text[cursor]
-        cursor += 1
-        if char == "'" and not escaped:
-            return cursor
-        if char == "\\" and not escaped:
-            escaped = True
-        else:
-            escaped = False
-    return None
-
-
-def _normal_rust_string(
-    path: str, text: str, quote_index: int
-) -> tuple[str, int]:
-    """Decode one ordinary UTF-8 Rust string and return its exclusive end."""
-
-    value: list[str] = []
-    cursor = quote_index + 1
-    while cursor < len(text):
-        char = text[cursor]
-        if char == '"':
-            return "".join(value), cursor + 1
-        if char != "\\":
-            value.append(char)
-            cursor += 1
-            continue
-
-        escape_start = cursor
-        cursor += 1
-        if cursor >= len(text):
-            break
-        escaped = text[cursor]
-        simple = {
-            "0": "\0",
-            "t": "\t",
-            "n": "\n",
-            "r": "\r",
-            '"': '"',
-            "'": "'",
-            "\\": "\\",
-        }
-        if escaped in simple:
-            value.append(simple[escaped])
-            cursor += 1
-            continue
-        if escaped == "\n":
-            cursor += 1
-            while cursor < len(text) and text[cursor].isspace():
-                cursor += 1
-            continue
-        if escaped == "\r" and text[cursor : cursor + 2] == "\r\n":
-            cursor += 2
-            while cursor < len(text) and text[cursor].isspace():
-                cursor += 1
-            continue
-        if escaped == "x":
-            digits = text[cursor + 1 : cursor + 3]
-            if len(digits) == 2 and all(digit in "0123456789abcdefABCDEF" for digit in digits):
-                value.append(chr(int(digits, 16)))
-                cursor += 3
-                continue
-        if escaped == "u" and text[cursor + 1 : cursor + 2] == "{":
-            close = text.find("}", cursor + 2)
-            if close >= 0:
-                digits = text[cursor + 2 : close].replace("_", "")
-                if 1 <= len(digits) <= 6 and all(
-                    digit in "0123456789abcdefABCDEF" for digit in digits
-                ):
-                    try:
-                        value.append(chr(int(digits, 16)))
-                    except ValueError:
-                        pass
-                    else:
-                        cursor = close + 1
-                        continue
+    if not sources:
+        return {}
+    payload = json.dumps(
+        [
+            {"path": path, "source": source}
+            for path, source in sorted(sources.items())
+        ],
+        ensure_ascii=False,
+    )
+    completed = subprocess.run(
+        RUST_LITERAL_HELPER_COMMAND,
+        cwd=REPO_ROOT,
+        input=payload,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
         raise HashOrderDeterminismFailure(
-            f"unsupported Rust string escape at {path}:"
-            f"{text.count(chr(10), 0, escape_start) + 1}"
+            "compiled Rust literal census failed"
+            + (f": {detail}" if detail else "")
         )
-    raise HashOrderDeterminismFailure(
-        f"unterminated Rust string at {path}:"
-        f"{text.count(chr(10), 0, quote_index) + 1}"
-    )
+    try:
+        decoded = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise HashOrderDeterminismFailure(
+            f"compiled Rust literal census returned invalid JSON: {error}"
+        ) from error
+    if not isinstance(decoded, list):
+        raise HashOrderDeterminismFailure(
+            "compiled Rust literal census did not return a source list"
+        )
 
-
-def _block_comment_end(path: str, text: str, index: int) -> int:
-    """Return the exclusive end of a nested Rust block comment."""
-
-    depth = 1
-    cursor = index + 2
-    while cursor < len(text):
-        if text.startswith("/*", cursor):
-            depth += 1
-            cursor += 2
-        elif text.startswith("*/", cursor):
-            depth -= 1
-            cursor += 2
-            if depth == 0:
-                return cursor
-        else:
-            cursor += 1
-    raise HashOrderDeterminismFailure(
-        f"unterminated Rust block comment at {path}:"
-        f"{text.count(chr(10), 0, index) + 1}"
-    )
-
-
-def _rust_utf8_string_literals(path: str, text: str) -> tuple[str, ...]:
-    """Extract source and compiler-desugared UTF-8 string literal tokens."""
-
-    literals: list[str] = []
-    index = 0
-    while index < len(text):
-        if text.startswith("//", index):
-            end = text.find("\n", index)
-            end = len(text) if end < 0 else end
-            is_outer_doc = text.startswith("///", index) and not text.startswith(
-                "////", index
+    expected = set(sources)
+    observed: dict[str, tuple[str, ...]] = {}
+    for row in decoded:
+        if not isinstance(row, dict) or set(row) != {"path", "literals"}:
+            raise HashOrderDeterminismFailure(
+                "compiled Rust literal census returned an invalid source row"
             )
-            if is_outer_doc or text.startswith("//!", index):
-                literals.append(text[index + 3 : end])
-            index = end
-            continue
-        if text.startswith("/*", index):
-            end = _block_comment_end(path, text, index)
-            is_outer_doc = text.startswith("/**", index) and not text.startswith(
-                "/***", index
+        path = row["path"]
+        literals = row["literals"]
+        if (
+            not isinstance(path, str)
+            or path not in expected
+            or path in observed
+            or not isinstance(literals, list)
+            or any(not isinstance(literal, str) for literal in literals)
+        ):
+            raise HashOrderDeterminismFailure(
+                "compiled Rust literal census returned invalid path/literal data"
             )
-            if is_outer_doc or text.startswith("/*!", index):
-                literals.append(text[index + 3 : end - 2])
-            index = end
-            continue
-
-        char_end = _char_literal_end(text, index)
-        if char_end is not None:
-            index = char_end
-            continue
-
-        raw_match = RAW_STRING_PREFIX_PATTERN.match(text, index)
-        if raw_match is not None:
-            opener = raw_match.group(0)
-            hashes = raw_match.group("hashes")
-            terminator = f'"{hashes}'
-            body_start = index + len(opener)
-            body_end = text.find(terminator, body_start)
-            if body_end < 0:
-                raise HashOrderDeterminismFailure(
-                    f"unterminated raw Rust string at {path}:"
-                    f"{text.count(chr(10), 0, index) + 1}"
-                )
-            if opener.startswith("r"):
-                literals.append(text[body_start:body_end])
-            index = body_end + len(terminator)
-            continue
-
-        if text[index] == '"':
-            value, index = _normal_rust_string(path, text, index)
-            literals.append(value)
-            continue
-        if text.startswith(('b"', 'c"'), index):
-            _, index = _normal_rust_string(path, text, index + 1)
-            continue
-        index += 1
-    return tuple(literals)
-
-
-def _token_tree_end(path: str, text: str, open_index: int) -> int:
-    """Return the exclusive end of one balanced Rust token tree."""
-
-    opener = text[open_index]
-    if opener not in DELIMITER_PAIRS:
-        raise AssertionError(f"not a token-tree opener: {opener!r}")
-    stack = [opener]
-    index = open_index + 1
-    while index < len(text):
-        char_end = _char_literal_end(text, index)
-        if char_end is not None:
-            index = char_end
-            continue
-        char = text[index]
-        if char in DELIMITER_PAIRS:
-            stack.append(char)
-        elif char in DELIMITER_CLOSERS:
-            expected = DELIMITER_PAIRS[stack[-1]]
-            if char != expected:
-                raise HashOrderDeterminismFailure(
-                    f"unbalanced macro token tree at {path}:"
-                    f"{text.count(chr(10), 0, index) + 1}"
-                )
-            stack.pop()
-            if not stack:
-                return index + 1
-        index += 1
-    raise HashOrderDeterminismFailure(
-        f"unterminated macro token tree at {path}:"
-        f"{text.count(chr(10), 0, open_index) + 1}"
-    )
-
-
-def _reject_macro_generated_attributes(path: str, sanitized: str) -> None:
-    """Forbid local macro transcribers from constructing Rust attributes."""
-
-    cursor = 0
-    while match := MACRO_RULES_PATTERN.search(sanitized, cursor):
-        body_end = _token_tree_end(path, sanitized, match.start("opener"))
-        body = sanitized[match.end("opener") : body_end - 1]
-        for arrow in re.finditer(r"=>", body):
-            transcriber_start = arrow.end()
-            while (
-                transcriber_start < len(body)
-                and body[transcriber_start].isspace()
-            ):
-                transcriber_start += 1
-            if (
-                transcriber_start >= len(body)
-                or body[transcriber_start] not in DELIMITER_PAIRS
-            ):
-                continue
-            transcriber_end = _token_tree_end(path, body, transcriber_start)
-            transcriber = body[transcriber_start + 1 : transcriber_end - 1]
-            generated = MACRO_ATTRIBUTE_TEMPLATE_PATTERN.search(transcriber)
-            if generated is not None:
-                absolute_start = (
-                    match.end("opener") + transcriber_start + 1 + generated.start()
-                )
-                raise HashOrderDeterminismFailure(
-                    f"macro-generated external-module attribute risk at {path}:"
-                    f"{sanitized.count(chr(10), 0, absolute_start) + 1}; "
-                    "local macro transcribers may not interpolate Rust attributes "
-                    "because they can synthesize an unscanned #[path] module"
-                )
-        cursor = body_end
+        observed[path] = tuple(literals)
+    if set(observed) != expected:
+        raise HashOrderDeterminismFailure(
+            "compiled Rust literal census omitted or invented a source"
+        )
+    return observed
 
 
 def _item_for_line(lines: Sequence[str], line_index: int) -> str:
@@ -596,7 +420,6 @@ def _path_module_targets(path: str, text: str) -> tuple[str, ...]:
     """Return every direct `#[path] mod` target, rejecting opaque forms."""
 
     sanitized = _strip_comments_and_strings(text)
-    _reject_macro_generated_attributes(path, sanitized)
     direct_by_start = {
         match.start(): match for match in DIRECT_PATH_ATTRIBUTE_PATTERN.finditer(text)
     }
@@ -761,31 +584,37 @@ def tracked_rust_sources(repo_root: Path = REPO_ROOT) -> dict[str, str]:
     pending = list(sorted(sources))
     while pending:
         while pending:
-            owner = pending.pop()
-            source = sources[owner]
-            literals_by_owner[owner] = tuple(
-                literal
-                for literal in _rust_utf8_string_literals(owner, source)
-                if literal.endswith(".rs") and "\0" not in literal
+            batch = tuple(sorted(set(pending)))
+            pending.clear()
+            decoded = _rust_utf8_string_literals_by_path(
+                {owner: sources[owner] for owner in batch}
             )
-            for target in _path_module_targets(owner, source):
-                if target in sources:
-                    continue
-                candidate = repo_root / target
-                try:
-                    resolved = candidate.resolve(strict=True)
-                    resolved.relative_to(repo_root)
-                except (FileNotFoundError, ValueError) as error:
-                    raise HashOrderDeterminismFailure(
-                        f"#[path] target {target!r} referenced by {owner} is missing or "
-                        "escapes the repository"
-                    ) from error
-                if not resolved.is_file():
-                    raise HashOrderDeterminismFailure(
-                        f"#[path] target {target!r} referenced by {owner} is not a file"
-                    )
-                sources[target] = resolved.read_text(encoding="utf-8")
-                pending.append(target)
+            for owner in batch:
+                source = sources[owner]
+                literals_by_owner[owner] = tuple(
+                    literal
+                    for literal in decoded[owner]
+                    if literal.endswith(".rs") and "\0" not in literal
+                )
+                for target in _path_module_targets(owner, source):
+                    if target in sources:
+                        continue
+                    candidate = repo_root / target
+                    try:
+                        resolved = candidate.resolve(strict=True)
+                        resolved.relative_to(repo_root)
+                    except (FileNotFoundError, ValueError) as error:
+                        raise HashOrderDeterminismFailure(
+                            f"#[path] target {target!r} referenced by {owner} is "
+                            "missing or escapes the repository"
+                        ) from error
+                    if not resolved.is_file():
+                        raise HashOrderDeterminismFailure(
+                            f"#[path] target {target!r} referenced by {owner} is "
+                            "not a file"
+                        )
+                    sources[target] = resolved.read_text(encoding="utf-8")
+                    pending.append(target)
 
         # A declarative macro may move a string literal from its definition or
         # invocation into an attribute at another source location. Resolve each

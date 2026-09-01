@@ -215,7 +215,7 @@ class HashOrderTokenTripwireTests(unittest.TestCase):
                     sources, allowed=(), approved_build_scripts=()
                 )
 
-    def test_rejects_macro_generated_ignored_path_module(self) -> None:
+    def test_scans_interpolated_macro_path_attribute_target(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
             (root / "src/generated").mkdir(parents=True)
@@ -255,11 +255,8 @@ class HashOrderTokenTripwireTests(unittest.TestCase):
                 capture_output=True,
             )
 
-            with self.assertRaisesRegex(
-                ORACLE.HashOrderDeterminismFailure,
-                "macro-generated external-module attribute",
-            ):
-                ORACLE.tracked_rust_sources(repo_root=root)
+            sources = ORACLE.tracked_rust_sources(repo_root=root)
+            self.assertIn("src/generated/escape.rs", sources)
 
     def test_scans_grouped_macro_path_attribute_target(self) -> None:
         sources = self.compiled_macro_path_sources(
@@ -402,6 +399,45 @@ class HashOrderTokenTripwireTests(unittest.TestCase):
             ),
         )
         self.assertIn("src/generated/escape.rs", sources)
+
+    def test_scans_macro_path_literal_between_lifetime_tokens(self) -> None:
+        sources = self.compiled_macro_path_sources(
+            cfg="lifetime_literal",
+            source=(
+                "macro_rules! load_path_between_lifetimes {\n"
+                "    ($pound:tt, $before:lifetime, $target:literal, $after:lifetime) => {\n"
+                "        $pound[path = $target]\n"
+                "        mod escaped;\n"
+                "    };\n"
+                "}\n"
+                "#[cfg(lifetime_literal)]\n"
+                "load_path_between_lifetimes!(\n"
+                "    #, 'before, \"generated/escape.rs\", 'after\n"
+                ");\n"
+            ),
+        )
+        self.assertIn("src/generated/escape.rs", sources)
+
+    def test_literal_provenance_uses_the_compiled_token_parser_only(self) -> None:
+        self.assertEqual(
+            ORACLE.RUST_LITERAL_HELPER_COMMAND,
+            (
+                "cargo",
+                "run",
+                "--quiet",
+                "-p",
+                "chelis-lint",
+                "--bin",
+                "hash-order-rust-literals",
+            ),
+        )
+        for handwritten_lexer in (
+            "_char_literal_end",
+            "_normal_rust_string",
+            "_block_comment_end",
+            "_token_tree_end",
+        ):
+            self.assertFalse(hasattr(ORACLE, handwritten_lexer))
 
     def test_non_doc_line_comment_is_not_a_literal_source(self) -> None:
         sources = self.compiled_macro_path_sources(
