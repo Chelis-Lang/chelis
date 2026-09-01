@@ -1,6 +1,9 @@
 //! Rank-only type facts used by the post-inference shape validator.
 
-use super::validate::{expr_type_expr, node_expr, tensor_precision_expr, validator_error};
+use super::validate::{
+    derive_ir_builtin_output_type, expr_type_expr, node_expr, tensor_precision_expr,
+    validator_error,
+};
 use super::*;
 
 /// Bind a Surf function's parameter names to the standalone `defsig`
@@ -125,7 +128,12 @@ pub(super) fn arg_tensor_rank_type_expr(
     type_env: &IrTypeEnv,
 ) -> Option<deep::Expr> {
     let inner = peel_borrow(expr);
-    expr_type_expr(inner, type_env)
+    // An inline identity application can carry a stamped wildcard tensor
+    // type even when its operands prove a concrete rank. Prefer structural
+    // derivation for recognized builtins before consulting that stamp. This
+    // is the same resolver used for let-bound values, so introducing or
+    // removing a binding cannot change rank-honesty validation (chelis#668).
+    derive_ir_builtin_output_type(inner, type_env).or_else(|| expr_type_expr(inner, type_env))
 }
 
 pub(super) fn type_expr_is_rank_only(expr: &deep::Expr) -> bool {

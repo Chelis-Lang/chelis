@@ -122,3 +122,77 @@ fn matching_rank_identity_chain_still_checks() {
     assert_eq!(report["score"], 1, "clean control must score perfectly");
     assert_eq!(report["errors"], serde_json::json!([]));
 }
+
+#[test]
+fn inline_unary_identity_preserves_rank_in_both_argument_orders() {
+    for rhs in ["mul(relu(s), e)", "mul(e, relu(s))", "add(e, neg(s))"] {
+        let (status, report) = check(&rank_divergent_source(rhs));
+        assert!(
+            !status.success(),
+            "inline unary rank evidence must survive in `{rhs}`: {report}"
+        );
+        assert!(
+            report["errors"].as_array().is_some_and(|errors| errors
+                .iter()
+                .any(|error| error["kind"] == "DimensionMismatch")),
+            "expected a dimension mismatch for `{rhs}`: {report}"
+        );
+    }
+}
+
+#[test]
+fn nested_inline_identity_chain_preserves_rank() {
+    let (status, report) = check(&rank_divergent_source("add(relu(neg(s)), e)"));
+    assert!(
+        !status.success(),
+        "nested inline identity rank evidence must survive: {report}"
+    );
+    assert!(
+        report["errors"].as_array().is_some_and(|errors| errors
+            .iter()
+            .any(|error| error["kind"] == "DimensionMismatch")),
+        "expected a dimension mismatch after nested identities: {report}"
+    );
+}
+
+#[test]
+fn inline_binary_identity_preserves_rank() {
+    let (status, report) = check(&rank_divergent_source("add(mul(s, s), e)"));
+    assert!(
+        !status.success(),
+        "inline binary identity rank evidence must survive: {report}"
+    );
+    assert!(
+        report["errors"].as_array().is_some_and(|errors| errors
+            .iter()
+            .any(|error| error["kind"] == "DimensionMismatch")),
+        "expected a dimension mismatch after inline mul: {report}"
+    );
+}
+
+#[test]
+fn inline_comparison_cannot_hide_rank_mismatch_in_discarded_binding() {
+    let source = rank_divergent_source("ignored = eq(e, neg(s))\n  s");
+    let (status, report) = check(&source);
+    assert!(
+        !status.success(),
+        "a discarded comparison must still validate its operand ranks: {report}"
+    );
+    assert!(
+        report["errors"].as_array().is_some_and(|errors| errors
+            .iter()
+            .any(|error| error["kind"] == "DimensionMismatch")),
+        "expected a dimension mismatch in discarded comparison: {report}"
+    );
+}
+
+#[test]
+fn matching_inline_identity_chain_still_checks() {
+    let (status, report) = check(&rank_divergent_source("add(relu(neg(s)), mul(s, s))"));
+    assert!(
+        status.success(),
+        "matching inline ranks must remain valid: {report}"
+    );
+    assert_eq!(report["score"], 1, "clean control must score perfectly");
+    assert_eq!(report["errors"], serde_json::json!([]));
+}
