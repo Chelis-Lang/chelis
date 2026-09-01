@@ -76,22 +76,20 @@ use crate::schema::{Diagnostic, GeneralKind};
 /// is a clean miss rather than a positional bincode decode.
 /// V7 adds quantified type-variable restrictions and their live substitution
 /// ledger.
-/// V9 canonicalizes every unordered collection that can reach stdlib-cache
-/// payload and key bytes (chelis#1341 Phase B).
-/// V10 requires the prepared graph's exact-source digest in the key, so a
+/// V11 combines the chelis#1341 cache format with chelis#1247's independent V9
+/// nominal-kind format. The hash-order lineage canonicalizes every unordered
+/// collection that can reach payload and key bytes and requires the prepared
+/// graph's exact-source digest, so a
 /// trivia-only source edit cannot stale-hit the same parsed declarations.
 ///
 /// V8 records canonical source positions on deferred positional-expand and
 /// reshape obligations inside `TypeEnv`.
-/// V9 adds checker-owned nominal parameter kinds and kinded nominal arguments,
-/// including dimension-valued applications in bundled-stdlib signatures.
-///
 /// V5 unified two independent V4
 /// bumps: the pipeline-core `CheckedLibrary`/proof-identity products
 /// (branch) and chelis#942's serialized positional-expand obligations
 /// inside `TypeEnv` (main). Bincode is positional, so a V4 entry from
 /// either side is a clean miss.
-const STDLIB_CACHE_FORMAT_VERSION: u32 = 10;
+const STDLIB_CACHE_FORMAT_VERSION: u32 = 11;
 
 /// The typechecked + lowered chelis-std library sub-context.
 ///
@@ -545,19 +543,19 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 10);
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 11);
     }
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 10);
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 11);
     }
 
     #[test]
     fn preceding_payload_version_is_a_clean_cache_miss() {
         let decls = sample_decls("preceding_version");
         let current_key = stdlib_cache_key(&decls, TEST_SOURCE_DIGEST);
-        let preceding_key = stdlib_cache_key_at_version(&decls, TEST_SOURCE_DIGEST, 9);
+        let preceding_key = stdlib_cache_key_at_version(&decls, TEST_SOURCE_DIGEST, 10);
         assert_ne!(current_key, preceding_key);
 
         let dir = tempfile::tempdir().expect("tempdir");

@@ -90,20 +90,19 @@ use crate::stdlib_cache::{StdLibContext, cache_disabled, typecheck_cache_dir};
 /// `TypeEnv`; a V2 dependency-library payload is a clean miss.
 /// V4 adds quantified type-variable restrictions and their live substitution
 /// ledger.
-/// V6 canonicalizes every unordered collection that can reach library-cache
-/// payload and key bytes (chelis#1341 Phase B).
+/// V7 combines two independent V6 formats: chelis#1341 canonicalizes every
+/// unordered collection that can reach payload and key bytes, while
+/// chelis#1247 adds checker-owned nominal parameter kinds and kinded nominal
+/// arguments. Either V6 payload clean-misses.
 ///
 /// V5 records canonical source positions on deferred positional-expand and
 /// reshape obligations inside `TypeEnv`.
-/// V6 adds checker-owned nominal parameter kinds and kinded nominal arguments,
-/// including dimension-valued applications in dependency-library signatures.
-///
 /// V2: the sub-context now stores a proof-bound `CheckedLibrary`, and decode
 /// reruns effect/linearity checks to rebind the proof (mirroring the stdlib
 /// and compiled-context caches). The wire `CheckedProgram` also grew the
 /// library-proof-identity fields. A V1 `chelis-lib-*.tc` written by a
 /// pre-extraction binary at the same compiler version is a clean miss.
-const LIBRARY_CACHE_FORMAT_VERSION: u32 = 6;
+const LIBRARY_CACHE_FORMAT_VERSION: u32 = 7;
 
 /// The typechecked composed `chelis-std ++ dependency-packages`
 /// sub-context.
@@ -601,7 +600,7 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
-        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 6);
+        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 7);
     }
 
     #[test]
@@ -610,7 +609,7 @@ mod tests {
         let decls = sample_decls("preceding_version");
         let stdlib_key = key(5);
         let current_key = library_cache_key(&decls, stdlib_key);
-        let preceding_key = library_cache_key_at_version(&decls, stdlib_key, 5);
+        let preceding_key = library_cache_key_at_version(&decls, stdlib_key, 6);
         assert_ne!(current_key, preceding_key);
 
         let context = build_library_context(&stdlib_context, &decls)

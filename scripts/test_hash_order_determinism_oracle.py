@@ -26,6 +26,44 @@ class HashOrderTokenTripwireTests(unittest.TestCase):
                 {path: text}, allowed=(), approved_build_scripts=()
             )
 
+    def compiled_macro_path_sources(
+        self,
+        *,
+        source: str,
+        cfg: str,
+        target: str = "src/generated/escape.rs",
+    ) -> dict[str, str]:
+        raw_root = tempfile.TemporaryDirectory()
+        self.addCleanup(raw_root.cleanup)
+        root = Path(raw_root.name)
+        target_path = root / target
+        target_path.parent.mkdir(parents=True)
+        (root / ".gitignore").write_text("src/generated/\n", encoding="utf-8")
+        (root / "src").mkdir(exist_ok=True)
+        (root / "src/lib.rs").write_text(source, encoding="utf-8")
+        target_path.write_text(
+            "pub type Escape = std::collections::HashMap<u8, u8>;\n",
+            encoding="utf-8",
+        )
+        subprocess.run(("git", "init", "-q"), cwd=root, check=True)
+        subprocess.run(("git", "add", ".gitignore", "src/lib.rs"), cwd=root, check=True)
+        subprocess.run(
+            (
+                "rustc",
+                "--crate-type",
+                "lib",
+                "--cfg",
+                cfg,
+                "src/lib.rs",
+                "-o",
+                str(root / "probe.rlib"),
+            ),
+            cwd=root,
+            check=True,
+            capture_output=True,
+        )
+        return ORACLE.tracked_rust_sources(repo_root=root)
+
     def test_rejects_library_target(self) -> None:
         self.assert_rejected("crates/demo/src/lib.rs", "type M = HashMap<String, i32>;")
 
@@ -222,6 +260,93 @@ class HashOrderTokenTripwireTests(unittest.TestCase):
                 "macro-generated external-module attribute",
             ):
                 ORACLE.tracked_rust_sources(repo_root=root)
+
+    def test_scans_grouped_macro_path_attribute_target(self) -> None:
+        sources = self.compiled_macro_path_sources(
+            cfg="round5_group_escape",
+            source=(
+                "macro_rules! load_grouped_path_module {\n"
+                "    ($attribute:tt) => {\n"
+                "        #$attribute\n"
+                "        mod escaped;\n"
+                "    };\n"
+                "}\n"
+                "#[cfg(round5_group_escape)]\n"
+                'load_grouped_path_module!([path = "generated/escape.rs"]);\n'
+            ),
+        )
+        self.assertIn("src/generated/escape.rs", sources)
+        with self.assertRaisesRegex(
+            ORACLE.HashOrderDeterminismFailure, "unlisted token 'HashMap'"
+        ):
+            ORACLE.validate_sources(sources, allowed=(), approved_build_scripts=())
+
+    def test_scans_split_macro_path_attribute_target(self) -> None:
+        sources = self.compiled_macro_path_sources(
+            cfg="round5_split_escape",
+            source=(
+                "macro_rules! load_split_path_module {\n"
+                "    ($pound:tt) => {\n"
+                '        $pound[path = "generated/escape.rs"]\n'
+                "        mod escaped;\n"
+                "    };\n"
+                "}\n"
+                "#[cfg(round5_split_escape)]\n"
+                "load_split_path_module!(#);\n"
+            ),
+        )
+        self.assertIn("src/generated/escape.rs", sources)
+        with self.assertRaisesRegex(
+            ORACLE.HashOrderDeterminismFailure, "unlisted token 'HashMap'"
+        ):
+            ORACLE.validate_sources(sources, allowed=(), approved_build_scripts=())
+
+    def test_scans_escaped_rs_literal_target(self) -> None:
+        sources = self.compiled_macro_path_sources(
+            cfg="escaped_literal",
+            source=(
+                "macro_rules! load_grouped_path_module {\n"
+                "    ($attribute:tt) => {\n"
+                "        #$attribute\n"
+                "        mod escaped;\n"
+                "    };\n"
+                "}\n"
+                "#[cfg(escaped_literal)]\n"
+                'load_grouped_path_module!([path = "generated/\\u{65}scape.rs"]);\n'
+            ),
+        )
+        self.assertIn("src/generated/escape.rs", sources)
+
+    def test_scans_raw_rs_literal_target(self) -> None:
+        sources = self.compiled_macro_path_sources(
+            cfg="raw_literal",
+            source=(
+                "macro_rules! load_grouped_path_module {\n"
+                "    ($attribute:tt) => {\n"
+                "        #$attribute\n"
+                "        mod escaped;\n"
+                "    };\n"
+                "}\n"
+                "#[cfg(raw_literal)]\n"
+                'load_grouped_path_module!([path = r"generated/escape.rs"]);\n'
+            ),
+        )
+        self.assertIn("src/generated/escape.rs", sources)
+
+    def test_ordinary_missing_rs_literal_does_not_expand_source_set(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            (root / "src").mkdir()
+            (root / "src/lib.rs").write_text(
+                'const FIXTURE_NAME: &str = "not/a/module.rs";\n', encoding="utf-8"
+            )
+            subprocess.run(("git", "init", "-q"), cwd=root, check=True)
+            subprocess.run(("git", "add", "src/lib.rs"), cwd=root, check=True)
+
+            self.assertEqual(
+                ORACLE.tracked_rust_sources(repo_root=root),
+                {"src/lib.rs": 'const FIXTURE_NAME: &str = "not/a/module.rs";\n'},
+            )
 
     def test_allows_macro_attribute_matcher_when_transcriber_discards_it(self) -> None:
         ORACLE.validate_sources(

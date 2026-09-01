@@ -170,16 +170,21 @@ feature or a platform `cfg` is invisible to it, and such carriers exist today
 `smt`, `carcara`, and `z3`). The completeness lock is therefore a text scan.
 
 `scripts/hash_order_determinism_oracle.py` scans every tracked `.rs` file and every
-untracked, non-ignored local `.rs` file in the repository (`git ls-files`), then
+untracked, non-ignored local `.rs` file in the repository (`git ls-files`). It
 recursively loads every direct `#[path = "relative/file.rs"] mod` target even when
-that target is ignored. A path-bearing attribute the loader cannot resolve exactly,
-a missing target, and a target that escapes the repository all fail closed. This
-includes a structural ban on interpolated attributes in workspace-local
-`macro_rules!` transcribers: an invocation may carry a literal attribute that the
-scanner can see, but a transcriber cannot turn an opaque metavariable into
-`#[path]`. A compile-backed negative passes the attribute name and ignored target
-through macro metavariables, proves that `rustc --cfg` would load the target, and
-requires the scan to reject the macro before expansion. The resulting source set is
+that target is ignored. It also decodes every ordinary and raw UTF-8 Rust string
+literal ending in `.rs` and resolves it against every scanned source directory,
+recursing into each existing in-repository target. A declarative macro may split
+the `#`, attribute group, `path` name, and literal across metavariables, but it
+cannot invent the final string-literal token; this literal-reachability closure
+therefore scans the target without attempting to enumerate expansion spellings.
+Missing ordinary fixture-name strings do not become inputs. An existing target
+outside the repository, an opaque direct path-bearing attribute, a missing direct
+target, and a direct target that escapes the repository fail closed. The existing
+ban on a contiguous interpolated attribute template remains defense in depth, not
+the source-closure mechanism. Compile-backed negatives cover direct attributes,
+contiguous interpolation, grouped `#$attribute`, split `$pound[path = ...]`, raw
+strings, and escaped string literals. The resulting source set is
 a superset of every committed Cargo target of every kind, every build script, and
 every committed path outside `src/`, and is blind to the feature or `cfg` that gates
 a file, a target, or a function. It matches the source
@@ -201,10 +206,10 @@ spellings, and `use ...::include as ...` aliases; a method selector named
 script is therefore an explicit registry review, and generated Rust cannot enter
 a workspace crate through Cargo's output directory. Negative controls approve a
 malicious composed-string generator and prove that both direct and imported-alias
-macro spellings are rejected. A compile-backed ignored-`#[path]` fixture proves the
-scanner loads and rejects a source file that `rustc --cfg` can compile but
-`git ls-files --others --exclude-standard` alone cannot see; its macro-generated
-twin proves a local transcriber cannot hide that ingress.
+macro spellings are rejected. The ignored-`#[path]` fixtures prove the scanner
+loads and rejects source files that `rustc --cfg` can compile but
+`git ls-files --others --exclude-standard` alone cannot see, including when a local
+transcriber composes the attribute across token boundaries.
 Migrated code behind a feature compiles in the workflows that already
 build those features (`smt-full-prove.yml`; the `generalize-sweep-oracle` job in
 `ci.yml`); this plan cites that evidence and adds no per-PR feature-matrix Clippy
@@ -301,8 +306,10 @@ The named test builds complete payloads through several filesystem insertion
 orders and serializes them in 24 fresh processes; the bytes and digests must match
 exactly. The stdlib cache key carries both canonical parsed declarations and the
 prepared graph's exact manifest/inventory/source-byte determinant, so a comment-only
-edit clean-misses even though the AST bytes do not change. Phase B advances the
-stdlib cache format to V10 and the prepared-graph cache to V4. At reviewed head
+edit clean-misses even though the AST bytes do not change. After rebasing over the
+independent nominal-kind formats, Phase B advances the compiled-context cache to
+V14, the library cache to V7, the stdlib cache to V11, and the prepared-graph cache
+to V5 so neither branch-specific predecessor can decode as current. At reviewed head
 `5b2dfd14`, eight fixed-source
 `CompiledContext::encode` probes produced eight distinct SHA-256 digests; that probe
 is the regression. The relevant cache format version is bumped whenever canonical

@@ -320,6 +320,141 @@ def _char_literal_end(text: str, index: int) -> int | None:
     return None
 
 
+def _normal_rust_string(
+    path: str, text: str, quote_index: int
+) -> tuple[str, int]:
+    """Decode one ordinary UTF-8 Rust string and return its exclusive end."""
+
+    value: list[str] = []
+    cursor = quote_index + 1
+    while cursor < len(text):
+        char = text[cursor]
+        if char == '"':
+            return "".join(value), cursor + 1
+        if char != "\\":
+            value.append(char)
+            cursor += 1
+            continue
+
+        escape_start = cursor
+        cursor += 1
+        if cursor >= len(text):
+            break
+        escaped = text[cursor]
+        simple = {
+            "0": "\0",
+            "t": "\t",
+            "n": "\n",
+            "r": "\r",
+            '"': '"',
+            "'": "'",
+            "\\": "\\",
+        }
+        if escaped in simple:
+            value.append(simple[escaped])
+            cursor += 1
+            continue
+        if escaped == "\n":
+            cursor += 1
+            while cursor < len(text) and text[cursor].isspace():
+                cursor += 1
+            continue
+        if escaped == "\r" and text[cursor : cursor + 2] == "\r\n":
+            cursor += 2
+            while cursor < len(text) and text[cursor].isspace():
+                cursor += 1
+            continue
+        if escaped == "x":
+            digits = text[cursor + 1 : cursor + 3]
+            if len(digits) == 2 and all(digit in "0123456789abcdefABCDEF" for digit in digits):
+                value.append(chr(int(digits, 16)))
+                cursor += 3
+                continue
+        if escaped == "u" and text[cursor + 1 : cursor + 2] == "{":
+            close = text.find("}", cursor + 2)
+            if close >= 0:
+                digits = text[cursor + 2 : close].replace("_", "")
+                if 1 <= len(digits) <= 6 and all(
+                    digit in "0123456789abcdefABCDEF" for digit in digits
+                ):
+                    try:
+                        value.append(chr(int(digits, 16)))
+                    except ValueError:
+                        pass
+                    else:
+                        cursor = close + 1
+                        continue
+        raise HashOrderDeterminismFailure(
+            f"unsupported Rust string escape at {path}:"
+            f"{text.count(chr(10), 0, escape_start) + 1}"
+        )
+    raise HashOrderDeterminismFailure(
+        f"unterminated Rust string at {path}:"
+        f"{text.count(chr(10), 0, quote_index) + 1}"
+    )
+
+
+def _rust_utf8_string_literals(path: str, text: str) -> tuple[str, ...]:
+    """Extract decoded ordinary and raw UTF-8 string literal tokens."""
+
+    literals: list[str] = []
+    index = 0
+    block_depth = 0
+    while index < len(text):
+        if block_depth:
+            if text.startswith("/*", index):
+                block_depth += 1
+                index += 2
+            elif text.startswith("*/", index):
+                block_depth -= 1
+                index += 2
+            else:
+                index += 1
+            continue
+        if text.startswith("//", index):
+            end = text.find("\n", index)
+            index = len(text) if end < 0 else end
+            continue
+        if text.startswith("/*", index):
+            block_depth = 1
+            index += 2
+            continue
+
+        char_end = _char_literal_end(text, index)
+        if char_end is not None:
+            index = char_end
+            continue
+
+        raw_match = RAW_STRING_PREFIX_PATTERN.match(text, index)
+        if raw_match is not None:
+            opener = raw_match.group(0)
+            hashes = raw_match.group("hashes")
+            terminator = f'"{hashes}'
+            body_start = index + len(opener)
+            body_end = text.find(terminator, body_start)
+            if body_end < 0:
+                raise HashOrderDeterminismFailure(
+                    f"unterminated raw Rust string at {path}:"
+                    f"{text.count(chr(10), 0, index) + 1}"
+                )
+            if opener.startswith("r"):
+                literals.append(text[body_start:body_end])
+            index = body_end + len(terminator)
+            continue
+
+        if text[index] == '"':
+            value, index = _normal_rust_string(path, text, index)
+            literals.append(value)
+            continue
+        if text.startswith(('b"', 'c"'), index):
+            _, index = _normal_rust_string(path, text, index + 1)
+            continue
+        index += 1
+    if block_depth:
+        raise HashOrderDeterminismFailure(f"unterminated Rust block comment at {path}")
+    return tuple(literals)
+
+
 def _token_tree_end(path: str, text: str, open_index: int) -> int:
     """Return the exclusive end of one balanced Rust token tree."""
 
@@ -590,27 +725,72 @@ def tracked_rust_sources(repo_root: Path = REPO_ROOT) -> dict[str, str]:
     for path in completed.stdout.splitlines():
         sources[path] = (repo_root / path).read_text(encoding="utf-8")
 
+    literals_by_owner: dict[str, tuple[str, ...]] = {}
     pending = list(sorted(sources))
     while pending:
-        owner = pending.pop()
-        for target in _path_module_targets(owner, sources[owner]):
-            if target in sources:
-                continue
-            candidate = repo_root / target
-            try:
-                resolved = candidate.resolve(strict=True)
-                resolved.relative_to(repo_root)
-            except (FileNotFoundError, ValueError) as error:
-                raise HashOrderDeterminismFailure(
-                    f"#[path] target {target!r} referenced by {owner} is missing or "
-                    "escapes the repository"
-                ) from error
-            if not resolved.is_file():
-                raise HashOrderDeterminismFailure(
-                    f"#[path] target {target!r} referenced by {owner} is not a file"
-                )
-            sources[target] = resolved.read_text(encoding="utf-8")
-            pending.append(target)
+        while pending:
+            owner = pending.pop()
+            source = sources[owner]
+            literals_by_owner[owner] = tuple(
+                literal
+                for literal in _rust_utf8_string_literals(owner, source)
+                if literal.endswith(".rs") and "\0" not in literal
+            )
+            for target in _path_module_targets(owner, source):
+                if target in sources:
+                    continue
+                candidate = repo_root / target
+                try:
+                    resolved = candidate.resolve(strict=True)
+                    resolved.relative_to(repo_root)
+                except (FileNotFoundError, ValueError) as error:
+                    raise HashOrderDeterminismFailure(
+                        f"#[path] target {target!r} referenced by {owner} is missing or "
+                        "escapes the repository"
+                    ) from error
+                if not resolved.is_file():
+                    raise HashOrderDeterminismFailure(
+                        f"#[path] target {target!r} referenced by {owner} is not a file"
+                    )
+                sources[target] = resolved.read_text(encoding="utf-8")
+                pending.append(target)
+
+        # A declarative macro may move a string literal from its definition or
+        # invocation into an attribute at another source location. Resolve each
+        # Rust-source literal against every scanned source directory. Existing
+        # in-repository targets form a conservative source-reachability closure;
+        # missing ordinary fixture-name strings do not create source inputs.
+        source_directories = {
+            PurePosixPath(path).parent for path in sources
+        }
+        discovered: dict[str, str] = {}
+        for owner, literals in sorted(literals_by_owner.items()):
+            for literal in literals:
+                if posixpath.isabs(literal):
+                    candidate_bases = (PurePosixPath("."),)
+                else:
+                    candidate_bases = tuple(sorted(source_directories))
+                for base in candidate_bases:
+                    candidate = Path(literal) if posixpath.isabs(literal) else repo_root / base / literal
+                    try:
+                        resolved = candidate.resolve(strict=True)
+                    except FileNotFoundError:
+                        continue
+                    try:
+                        relative = resolved.relative_to(repo_root)
+                    except ValueError as error:
+                        raise HashOrderDeterminismFailure(
+                            f"Rust-source literal {literal!r} at {owner} resolves outside "
+                            "the repository and cannot be scanned"
+                        ) from error
+                    if not resolved.is_file():
+                        continue
+                    target = relative.as_posix()
+                    if target not in sources:
+                        discovered[target] = resolved.read_text(encoding="utf-8")
+        if discovered:
+            sources.update(discovered)
+            pending.extend(sorted(discovered))
     return sources
 
 

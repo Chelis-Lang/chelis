@@ -409,10 +409,10 @@ fn cache_roots_are_exact_bytes_across_24_fresh_processes() {
         .expect("compiled saved bytes are part of the artifact set")
         .1
         .clone();
-    assert!(saved.starts_with(b"CHELIS_CTX_V13\n"));
-    let mut preceding = b"CHELIS_CTX_V12\n".to_vec();
-    preceding.extend_from_slice(&saved[b"CHELIS_CTX_V13\n".len()..]);
-    let preceding_path = scratch.path().join("compiled-context-v12.ctx");
+    assert!(saved.starts_with(b"CHELIS_CTX_V14\n"));
+    let mut preceding = b"CHELIS_CTX_V13\n".to_vec();
+    preceding.extend_from_slice(&saved[b"CHELIS_CTX_V14\n".len()..]);
+    let preceding_path = scratch.path().join("compiled-context-v13.ctx");
     fs::write(&preceding_path, preceding).expect("write preceding-format fixture");
     assert!(matches!(
         CompiledContext::load_if_fresh(&preceding_path, scratch.path(), &package_root),

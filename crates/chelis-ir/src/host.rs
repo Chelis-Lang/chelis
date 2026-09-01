@@ -11063,7 +11063,7 @@ fn expand_host_type_aliases(program: &CheckedProgram, ty: HostTypeTerm) -> HostT
     fn expand(
         program: &CheckedProgram,
         ty: HostTypeTerm,
-        visiting: &mut HashSet<String>,
+        visiting: &mut UnordSet<String>,
     ) -> HostTypeTerm {
         match ty {
             HostTypeTerm::Adt(name, args) => {
@@ -11090,11 +11090,11 @@ fn expand_host_type_aliases(program: &CheckedProgram, ty: HostTypeTerm) -> HostT
                         }
                         _ => None,
                     })
-                    .collect::<HashMap<_, _>>();
+                    .collect::<UnordMap<_, _>>();
                 let body = rename_host_type_variables(
                     decode_host_type_or_raise(
                         &type_to_deep_expr(&program.adt_registry().expand_aliases(&alias.body)),
-                        &HashMap::new(),
+                        &UnordMap::new(),
                     ),
                     &checker_parameter_names,
                 );
@@ -11103,8 +11103,8 @@ fn expand_host_type_aliases(program: &CheckedProgram, ty: HostTypeTerm) -> HostT
                 } else {
                     Cow::Owned(vec![NominalParamKind::Type; alias.params.len()])
                 };
-                let mut type_substitutions = HashMap::new();
-                let mut dimension_substitutions = HashMap::new();
+                let mut type_substitutions = UnordMap::new();
+                let mut dimension_substitutions = UnordMap::new();
                 for ((parameter, kind), argument) in
                     alias.params.iter().zip(parameter_kinds.iter()).zip(args)
                 {
@@ -11157,7 +11157,7 @@ fn expand_host_type_aliases(program: &CheckedProgram, ty: HostTypeTerm) -> HostT
         }
     }
 
-    expand(program, ty, &mut HashSet::new())
+    expand(program, ty, &mut UnordSet::new())
 }
 
 /// Replace every bound `TypeVariable` in a host type (chelis#1201).
@@ -11831,8 +11831,8 @@ fn decode_expanded_host_type_expr(program: &CheckedProgram, expr: &Expr) -> Opti
         } else {
             Cow::Owned(vec![NominalParamKind::Type; alias.params.len()])
         };
-        let mut type_substitutions = HashMap::new();
-        let mut dimension_substitutions = HashMap::new();
+        let mut type_substitutions = UnordMap::new();
+        let mut dimension_substitutions = UnordMap::new();
         for ((parameter, kind), argument) in alias
             .params
             .iter()
@@ -11865,7 +11865,7 @@ fn decode_expanded_host_type_expr(program: &CheckedProgram, expr: &Expr) -> Opti
                 }
                 _ => None,
             })
-            .collect::<HashMap<_, _>>();
+            .collect::<UnordMap<_, _>>();
         let body = rename_host_type_variables(
             decode_host_type(&type_to_deep_expr(
                 &program.adt_registry().expand_aliases(&alias.body),
@@ -11984,7 +11984,7 @@ fn substitute_host_type_term(
 
 fn substitute_host_dimension_terms(
     term: HostTypeTerm,
-    subst: &HashMap<String, DimInfo>,
+    subst: &UnordMap<String, DimInfo>,
 ) -> HostTypeTerm {
     let substitute_dim = |dim: DimInfo| match dim {
         DimInfo::Named(name, _) if subst.contains_key(&name) => subst[&name].clone(),

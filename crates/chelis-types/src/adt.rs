@@ -527,11 +527,11 @@ impl AdtRegistry {
     /// infinite recursion on a (mutually) recursive alias chain, matching the
     /// `infer.rs` guard.
     pub fn expand_aliases(&self, ty: &Type) -> Type {
-        let mut seen = chelis_unord::UnordSet::new();
+        let mut seen = UnordSet::new();
         self.expand_aliases_inner(ty, &mut seen)
     }
 
-    fn expand_aliases_inner(&self, ty: &Type, seen: &mut chelis_unord::UnordSet<String>) -> Type {
+    fn expand_aliases_inner(&self, ty: &Type, seen: &mut UnordSet<String>) -> Type {
         match ty {
             Type::Adt(name, args) => {
                 let resolved_args: Vec<Type> = args

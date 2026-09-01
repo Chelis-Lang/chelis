@@ -2260,7 +2260,10 @@ const PREPARED_GRAPH_CACHE_MAGIC: &[u8] = b"CHELIS_REEF_GRAPH_V1\n";
 // v4 (chelis#1341 Phase B): the filename key and envelope carry the exact
 // running compiler build identity, not the release version shared by distinct
 // builds. V3 envelopes cannot prove that identity and must clean-miss.
-const PREPARED_GRAPH_CACHE_VERSION: u32 = 4;
+// v5 combines that V4 lineage with chelis#1247's independent V3 payload, whose
+// declarations can carry dimension-valued nominal arguments. Either preceding
+// branch format clean-misses before positional bincode decoding.
+const PREPARED_GRAPH_CACHE_VERSION: u32 = 5;
 const PREPARED_GRAPH_CACHE_KEY_DOMAIN: &[u8] = b"chelis-prepared-graph-cache-key-v1\0";
 
 #[derive(Serialize, Deserialize)]
@@ -12991,6 +12994,11 @@ module_prefix = "RegistryLib"
     }
 
     #[test]
+    fn prepared_graph_cache_version_tracks_both_branch_formats() {
+        assert_eq!(PREPARED_GRAPH_CACHE_VERSION, 5);
+    }
+
+    #[test]
     fn prepared_graph_cache_rejects_the_preceding_positional_format() {
         let _guard = lock_reef_home_env();
         let (dir, root) = shared_graph_fixture();
@@ -13018,7 +13026,7 @@ module_prefix = "RegistryLib"
         let error = load_prepared_graph_cache(&cache_path, &root)
             .expect_err("preceding positional payload must be rejected before decode");
         assert!(
-            error.contains("format version 3 unsupported (expected 4)"),
+            error.contains("format version 4 unsupported (expected 5)"),
             "unexpected version diagnostic: {error}"
         );
     }
