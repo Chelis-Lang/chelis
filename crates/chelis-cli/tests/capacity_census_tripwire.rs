@@ -36,6 +36,9 @@ use chelis_deep::{Atom, DtypeFamily, Expr, List};
 use chelis_types::types::Prim;
 use serde::{Deserialize, Serialize};
 
+#[path = "../../../tests/support/c_lexical.rs"]
+mod c_lexical;
+
 #[path = "../../../tests/support/capacity_census_authority.rs"]
 mod capacity_census_authority;
 use capacity_census_authority::{
@@ -3102,7 +3105,7 @@ fn assert_context_invariant_headers(include_dir: &Path, roots: &[&str]) {
 }
 
 fn strip_c_comments(text: &str) -> String {
-    chelis_c_surface::strip_c_comments(text)
+    c_lexical::strip_c_comments(text)
 }
 
 fn normalize_ws(s: &str) -> String {
@@ -3112,7 +3115,7 @@ fn normalize_ws(s: &str) -> String {
 /// Tokenize the declaration subset of C used by published headers. Identity
 /// is the token sequence, never a preprocessor's incidental whitespace.
 fn canonical_c_tokens(s: &str) -> String {
-    chelis_c_surface::canonical_c_tokens(s)
+    c_lexical::canonical_c_tokens(s)
 }
 
 fn canonical_inventory_id(id: &str) -> String {
@@ -3269,7 +3272,7 @@ fn active_legacy_permanent_plain_sample() -> &'static FrozenDispositionRow {
 /// conservative numeric candidates too; the three existing bare-int
 /// control/layout exports are removed only by the exact reviewed seam-disposition
 /// intersection in `apply_exact_integer_plumbing_exemption`.
-const NUMERIC_C_TYPES: &[&str] = chelis_c_surface::NUMERIC_C_TYPES;
+const NUMERIC_C_TYPES: &[&str] = c_lexical::NUMERIC_C_TYPES;
 
 /// The FROZEN set of type words a published declaration may use that carry
 /// no arithmetic width: storage/qualifier noise, the aggregate keywords, and
@@ -3287,7 +3290,7 @@ const NUMERIC_C_TYPES: &[&str] = chelis_c_surface::NUMERIC_C_TYPES;
 /// words that are known not to carry a dtype. A new arithmetic spelling
 /// then arrives as a build failure naming the unknown word, which is the
 /// same footing an unresolvable typedef already has.
-const NON_NUMERIC_C_TYPE_WORDS: &[&str] = chelis_c_surface::NON_NUMERIC_C_TYPE_WORDS;
+const NON_NUMERIC_C_TYPE_WORDS: &[&str] = c_lexical::NON_NUMERIC_C_TYPE_WORDS;
 
 /// The flags that make a row a capacity SEAM (subject to the grandfather
 /// freeze). `numeric-op` is classification, not a seam.
@@ -3429,14 +3432,51 @@ fn function_pointer_typedef(stmt: &str) -> Option<(String, Vec<String>)> {
     Some((name, target))
 }
 
-/// Expand typedef aliases (transitively, depth-capped) so classification
-/// operates on resolved spellings.
 /// Classification shapes the enforcement rule a row falls under; the
 /// citation requirement applies to EVERY inventory change, so renaming a
 /// parameter to dodge a flag dodges nothing, and typedef/macro spellings
-/// are resolved before classifying.
+/// are resolved before classifying (transitively, depth-capped, inside
+/// `c_lexical::resolve_words`).
 fn classify(sig: &str, typedefs: &BTreeMap<String, Vec<String>>) -> Vec<String> {
-    chelis_c_surface::classify(sig, typedefs)
+    c_lexical::classify(sig, typedefs)
+}
+
+/// Lock the shared lexical primitives against the exact spellings the census
+/// depends on. These moved out of the tripwire body into
+/// `tests/support/c_lexical.rs` so every census leg shares one implementation;
+/// the composition through THIS file's `collect_typedefs` is the real consumer
+/// path, so that is what this pins.
+#[test]
+fn shared_capacity_census_primitives_keep_their_contract() {
+    assert_eq!(
+        c_lexical::canonical_c_tokens("const  bool * value;"),
+        "const _Bool * value ;"
+    );
+    assert_eq!(
+        c_lexical::strip_c_comments("float /* x */ *p; // y\n"),
+        "float   *p; \n"
+    );
+    let typedefs = collect_typedefs("typedef double sample; typedef sample alias;");
+    assert_eq!(
+        classify("alias *value", &typedefs),
+        vec!["float-carrier", "numeric-op"]
+    );
+}
+
+/// A comment or literal must never hide a declaration from the census, and a
+/// declarator inside a string must never enter it. This is the behavior that
+/// widened when the stripper moved: the previous inline copy was byte-based
+/// and had no literal awareness.
+#[test]
+fn comment_stripping_respects_string_and_character_literals() {
+    assert_eq!(
+        c_lexical::strip_c_comments(r#"const char *s = "a /* not a comment */ b";"#),
+        r#"const char *s = "a /* not a comment */ b";"#
+    );
+    assert_eq!(
+        c_lexical::strip_c_comments("char c = '/'; // tail\n"),
+        "char c = '/'; \n"
+    );
 }
 
 fn apply_exact_integer_plumbing_exemption(id: &str, flags: &mut Vec<String>) {

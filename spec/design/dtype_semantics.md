@@ -813,6 +813,25 @@ Deliverables, with phase homes:
    release cuts and red-team passes remain additional manual
    invocations, not the only ones.
 
+   The census's lexical primitives live in
+   `tests/support/c_lexical.rs`, shared by `#[path]` the way
+   `capacity_census_authority.rs` already is: `strip_c_comments`,
+   `canonical_c_tokens`, `lex_c_tokens`, `resolve_words`, `classify`,
+   `NUMERIC_C_TYPES`, and the closed `NON_NUMERIC_C_TYPE_WORDS`. They moved
+   out of the tripwire body so the runtime-representation inventory
+   (chelis#893) could read the two backend runtime headers with the SAME
+   classifier rather than standing up a second one; B2 invariant 3 of
+   `spec/design/runtime_representation.md` forbids a second authority for one
+   question. Two behaviors widened in that move and are locked by
+   `shared_capacity_census_primitives_keep_their_contract` and
+   `comment_stripping_respects_string_and_character_literals`: the stripper now
+   respects string, character, and C++ raw-string literals, so a comment
+   sequence inside a literal no longer truncates a declaration, and the
+   tokenizer recognizes `...` and the compound assignment operators. Both are
+   strictly more conservative. The rule that a type word in neither list is a
+   build failure is unchanged, and moving these primitives is a numbered-spec
+   change under the same review discipline as the chapter that owns them.
+
    `coverage_manifest()` in
    `crates/chelis-cli/tests/capacity_census_tripwire.rs` is the fixed
    executable coverage contract. Its typed `CoverageManifest` records
