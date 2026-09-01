@@ -518,17 +518,10 @@ When a public surface has an implicit invariant, make it explicit and test it.
   time rather than committed, and `.githooks/commit-msg` and
   `.cargo-husky/hooks/commit-msg` have no file extension, so `chelis_lint`'s
   `Surface::classify` - which keys on the extension - never classifies them. All three
-  must still be minimal POSIX `sh` and `shellcheck`-clean, but almost nothing enforces
-  that. Only the two hooks are checked: `scripts/test_commit_hook.py` and
-  `scripts/test_check_commit_message.py` run `sh -n` over them, inside the routine
-  `unittest discover -s scripts` CI job. The bootstrap is checked by nothing - the
-  `shellcheck` hook that selects it is `enable = false`. The generated launcher's only
-  static check is `chelisupLauncherLint`, which uses `bash -n`, so a bash-ism there
-  passes it while still violating the POSIX-`sh` requirement; and since chelis#1450 no
-  routine CI runs that check, neither the bash-ism nor a `shellcheck` finding is caught
-  before a merge. It is a manual gate:
-  `nix build .#checks.<system>.chelisupLauncherLint`, expected exit 0, or dispatch the
-  `Nix Packages` workflow. All other scripts remain Python.
+  must still be minimal POSIX `sh` and `shellcheck`-clean, and you have to verify that
+  yourself: CI checks only the two hooks, with `sh -n`. Nothing checks the bootstrap,
+  and the launcher's `chelisupLauncherLint` uses `bash -n` rather than `sh -n` and has
+  not run on a pull request since chelis#1450. All other scripts remain Python.
 - Existing `scripts/` directory uses Python; follow that convention.
 - **Use a uv-managed Python**, not the system Python, for every script and every
   ad-hoc invocation. [Build Toolchain](#build-toolchain) owns provisioning, the
