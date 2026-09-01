@@ -34,10 +34,15 @@ SHARED_INPUT_URL_PREFIXES = {
     "nixpkgs": "github:cachix/devenv-nixpkgs/",
     "rust-overlay": "github:oxalica/rust-overlay/",
 }
-EXPECTED_ACTIVE_GIT_HOOKS = frozenset({"no-ai-authorship"})
+# The authorship check no longer runs as a devenv-installed prek hook: devenv
+# copies the tracked `.githooks/commit-msg` into the shared hooks directory
+# (chelis#1409). The install-task assertions in `parse_git_hook_catalog` are
+# what now keep it from being silently dropped.
+EXPECTED_ACTIVE_GIT_HOOKS: frozenset[str] = frozenset()
 EXPECTED_DISABLED_GIT_HOOKS = frozenset(
     {
         "actionlint",
+        "no-ai-authorship",
         "check-added-large-files",
         "check-case-conflicts",
         "check-executables-have-shebangs",
@@ -187,21 +192,38 @@ def parse_git_hook_catalog(text: str) -> GitHookCatalog:
     )
     if whitespace is None:
         raise ValueError("the whitespace hook must preserve Markdown line breaks")
-    custom = re.search(
-        (
-            r"(?ms)^    no-ai-authorship = \{\n"
-            r".*?^      enable = true;$"
-            r".*?^      entry = \"\$\{config\.languages\.python\.package\}"
-            r"/bin/python \$\{commitMessageChecker\}\";$"
-            r".*?^      language = \"system\";$"
-            r".*?^      pass_filenames = true;$"
-            r".*?^      stages = \[ \"commit-msg\" \];$"
-            r".*?^    \};$"
-        ),
+    revived = re.search(
+        r"(?ms)^    no-ai-authorship = \{\n.*?^      enable = true;$",
         body,
     )
-    if custom is None:
-        raise ValueError("the active authorship hook must use the commit-msg stage")
+    if revived is not None:
+        raise ValueError(
+            "no-ai-authorship must stay disabled here: installing it writes an "
+            "absolute --config path into the shared .git/hooks (chelis#1409)"
+        )
+    install = re.search(
+        r'(?ms)^  tasks\."chelis:install-commit-hook" = \{\n.*?^  \};$',
+        text,
+    )
+    if install is None:
+        raise ValueError(
+            "the Git hook module must define the chelis:install-commit-hook task"
+        )
+    task = install.group(0)
+    for fragment, why in (
+        ('after = [ "devenv:enterShell" ];', "run on shell entry"),
+        ("--path-format=absolute --git-common-dir", "resolve the shared hooks directory absolutely"),
+        (".githooks/commit-msg", "install from the tracked template"),
+        ('cp "$template"', "copy the template rather than reference it"),
+        ('mktemp "$hooks_dir/commit-msg.XXXXXX"', "stage under a unique name"),
+        ('mv "$staged"', "install by atomic rename"),
+        ("fi\n      # Unconditionally", "chmod outside the copy branch"),
+        ("core.hooksPath", "warn when core.hooksPath would override the install"),
+    ):
+        if fragment not in task:
+            raise ValueError(
+                f"the commit-hook install task must {why}: missing {fragment!r}"
+            )
     return GitHookCatalog(
         disabled_names=EXPECTED_DISABLED_GIT_HOOKS,
         active_names=EXPECTED_ACTIVE_GIT_HOOKS,
@@ -477,13 +499,39 @@ class DevenvVersionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must define the hook catalog"):
             parse_git_hook_catalog(mutated)
 
-    def test_inactive_custom_hook_fails_at_the_parse_boundary(self) -> None:
+    def test_reactivating_the_prek_authorship_hook_fails_at_the_parse_boundary(
+        self,
+    ) -> None:
         config = GIT_HOOKS_MODULE.read_text(encoding="utf-8")
         mutated = config.replace(
-            "      enable = true;\n      name = \"Reject AI authorship markers\";",
-            "      enable = false;\n      name = \"Reject AI authorship markers\";",
+            '      enable = false;\n      name = "Reject AI authorship markers";',
+            '      enable = true;\n      name = "Reject AI authorship markers";',
         )
-        with self.assertRaisesRegex(ValueError, "must remain active"):
+        with self.assertRaisesRegex(ValueError, "must remain inactive"):
+            parse_git_hook_catalog(mutated)
+
+    def test_gutting_the_install_task_fails_at_the_parse_boundary(self) -> None:
+        """Each fragment is one way the install could be silently defeated."""
+        config = GIT_HOOKS_MODULE.read_text(encoding="utf-8")
+        for fragment in (
+            'after = [ "devenv:enterShell" ];',
+            "--path-format=absolute --git-common-dir",
+            ".githooks/commit-msg",
+            'cp "$template"',
+            'mktemp "$hooks_dir/commit-msg.XXXXXX"',
+            'mv "$staged"',
+        ):
+            with self.subTest(fragment=fragment):
+                mutated = config.replace(fragment, "")
+                with self.assertRaises(ValueError):
+                    parse_git_hook_catalog(mutated)
+
+    def test_removing_the_install_task_fails_at_the_parse_boundary(self) -> None:
+        config = GIT_HOOKS_MODULE.read_text(encoding="utf-8")
+        mutated = config.replace(
+            'tasks."chelis:install-commit-hook"', 'tasks."chelis:something-else"'
+        )
+        with self.assertRaisesRegex(ValueError, "install-commit-hook"):
             parse_git_hook_catalog(mutated)
 
     def test_git_hooks_input_without_nixpkgs_follow_fails_at_parse_boundary(

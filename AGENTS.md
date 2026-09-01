@@ -513,12 +513,13 @@ When a public surface has an implicit invariant, make it explicit and test it.
   file in the repository and the only entry the `no-shell-scripts` lint exempts
   (`style_gate.rs::exceptions()`). Adding a second entry is a numbered-spec change, not
   a judgment call.
-- **Two other sanctioned shell artifacts exist and never reach that list**, because the
-  lint cannot see either: the Nix `chelisup` launcher is generated at build time rather
-  than committed, and `.cargo-husky/hooks/commit-msg` has no file extension, so
-  `chelis_lint`'s `Surface::classify` - which keys on the extension - never classifies
-  it. Both must still be minimal POSIX `sh` and `shellcheck`-clean. The bootstrap and
-  the hook are checked with `sh -n`; the generated launcher is checked with `bash -n` by
+- **Three other sanctioned shell artifacts exist and never reach that list**, because
+  the lint cannot see any of them: the Nix `chelisup` launcher is generated at build
+  time rather than committed, and `.githooks/commit-msg` and
+  `.cargo-husky/hooks/commit-msg` have no file extension, so `chelis_lint`'s
+  `Surface::classify` - which keys on the extension - never classifies them. All three
+  must still be minimal POSIX `sh` and `shellcheck`-clean. The bootstrap and the two
+  hooks are checked with `sh -n`; the generated launcher is checked with `bash -n` by
   the `chelisupLauncherLint` flake check, so a bash-ism there passes CI while still
   violating the POSIX-`sh` requirement. All other scripts remain Python.
 - Existing `scripts/` directory uses Python; follow that convention.
@@ -599,12 +600,32 @@ PyO3 to it.
 
 ## Local Git Hook
 
-Devenv installs the `no-ai-authorship` hook at the `commit-msg` stage. The hook
-runs `scripts/check_commit_message.py`.
+`.githooks/commit-msg` is the tracked commit-msg hook. It runs
+`scripts/check_commit_message.py` through Devenv, `.venv`, or
+`uv run --managed-python --python 3.11 --no-project`, in that precedence order.
 
-Cargo-husky remains the fallback for the manual setup. `cargo test` installs its
-POSIX wrapper, which runs the same Python checker through Devenv, `.venv`, or
-`uv run --managed-python --python 3.11 --no-project` in that precedence order.
+Devenv **copies** it into the shared hooks directory on shell entry, resolved
+with `git rev-parse --git-common-dir` so a linked worktree installs to the same
+place. The installed copy names no worktree and resolves its repository at run
+time, so one copy is correct from every worktree and on every branch, including
+branches predating it.
+
+Do not reach the hook through `core.hooksPath` instead. That config is
+repository-scoped while a tracked file is branch-scoped, so a worktree on a
+branch without `.githooks` would run no hook at all and accept the commit
+silently, with the `.git/hooks` fallback disabled by the same config. Do not
+reinstate an installer that writes an absolute path either: that names one
+worktree for every worktree, and all of them lose the ability to commit once it
+is deleted (chelis#1409).
+`scripts/test_commit_hook.py` locks the tracked path, the absence of any
+absolute path, and the accept/reject behavior.
+
+Cargo-husky remains the fallback for the manual setup: `cargo test` installs
+`.cargo-husky/hooks/commit-msg`, a POSIX wrapper that runs the same checker through
+Devenv, `.venv`, or `uv run --managed-python --python 3.11 --no-project`. It is
+worktree-agnostic for the same reason the tracked hook is, and the two are compatible
+because both resolve the repository at run time rather than naming one worktree.
+
 All formatting and lint hooks remain disabled. CI remains the remote
 enforcement boundary.
 
