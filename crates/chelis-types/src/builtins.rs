@@ -2530,8 +2530,9 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
     let option_tvar = vg.fresh_tvar();
     let option_type = Type::Adt("Option".to_string(), vec![Type::Var(option_tvar)]);
 
-    env.bind(
+    env.bind_constructor(
         "Some".to_string(),
+        "Option".to_string(),
         Scheme {
             tvars: vec![option_tvar],
             tvar_restrictions: vec![],
@@ -2540,8 +2541,9 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
             body: Type::Fn(vec![Type::Var(option_tvar)], Box::new(option_type.clone())),
         },
     );
-    env.bind(
+    env.bind_constructor(
         "None".to_string(),
+        "Option".to_string(),
         Scheme {
             tvars: vec![option_tvar],
             tvar_restrictions: vec![],
@@ -2577,8 +2579,9 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
     let list_tvar = vg.fresh_tvar();
     let list_type = Type::Adt("List".to_string(), vec![Type::Var(list_tvar)]);
 
-    env.bind(
+    env.bind_constructor(
         "Cons".to_string(),
+        "List".to_string(),
         Scheme {
             tvars: vec![list_tvar],
             tvar_restrictions: vec![],
@@ -2590,8 +2593,9 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
             ),
         },
     );
-    env.bind(
+    env.bind_constructor(
         "Nil".to_string(),
+        "List".to_string(),
         Scheme {
             tvars: vec![list_tvar],
             tvar_restrictions: vec![],

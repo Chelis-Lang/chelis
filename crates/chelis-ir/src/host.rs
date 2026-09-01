@@ -7842,7 +7842,7 @@ fn lower_app_host_expr(
         }));
     }
     let ctor_definition = match active_compiler_name
-        .map(|_| resolve_adt_constructor_definition(program, &name))
+        .map(|_| resolve_adt_constructor_definition_for_type(program, &name, &explicit_ty))
         .unwrap_or(AdtConstructorResolution::Missing)
     {
         AdtConstructorResolution::Unique(definition) => Some(definition),
@@ -7928,7 +7928,11 @@ fn lower_app_host_expr(
             return Ok(HostExpr::new(HostExprKind::List(items, ty)));
         }
     }
-    if active_compiler_name == Some("Some") && kids.len() == 2 {
+    // `Some` has a dedicated Option ABI only when no checked user ADT
+    // constructor owns this application. A local `Wrapper::Some` shares the
+    // spelling but lowers through the generic ADT path below; raw-name
+    // dispatch would contradict the checker's nominal result type.
+    if active_compiler_name == Some("Some") && kids.len() == 2 && ctor_definition.is_none() {
         let arg = lower_host_expr(&kids[1], program, scope, tensor_helpers)?;
         return Ok(HostExpr::new(HostExprKind::Builtin {
             name,
@@ -8265,9 +8269,7 @@ fn lower_app_host_expr(
     } else {
         inferred_ret_ty.clone()
     };
-    if let Some(definition) = ctor_definition
-        && !matches!(name.as_str(), "Some" | "None")
-    {
+    if let Some(definition) = ctor_definition {
         let instantiated = instantiate_adt_constructor(program, &definition, &construct_ty)
             .map_err(|error| {
                 host_expr_lowering_error(
@@ -13653,7 +13655,45 @@ fn resolve_adt_constructor_definition(
 ) -> AdtConstructorResolution {
     let definitions = adt_constructor_definitions(program);
     let owning = definitions_owning(&definitions, ctor_name, constructor_name_of);
-    match (&owning, owning.candidates()) {
+    resolve_adt_constructor_candidates(&owning)
+}
+
+/// Resolve a positional construction using the nominal result already
+/// established by the checker. Two ADTs may deliberately share an exact
+/// constructor name; the checked result type is the structural owner receipt
+/// that lowering needs, whereas the sorted registry population is not scope.
+fn resolve_adt_constructor_definition_for_type(
+    program: &CheckedProgram,
+    ctor_name: &str,
+    checked_ty: &HostTypeTerm,
+) -> AdtConstructorResolution {
+    let definitions = adt_constructor_definitions(program);
+    let owning = definitions_owning(&definitions, ctor_name, constructor_name_of);
+    if let HostTypeTerm::Adt(adt_name, _) = checked_ty {
+        let exact_owner = owning
+            .candidates()
+            .iter()
+            .copied()
+            .filter(|definition| definition.adt_name == *adt_name)
+            .collect::<Vec<_>>();
+        if let [only] = exact_owner.as_slice() {
+            return AdtConstructorResolution::Unique((*only).clone());
+        }
+        let terminal_owner = owning
+            .candidates()
+            .iter()
+            .copied()
+            .filter(|definition| terminal_name_matches(&definition.adt_name, adt_name))
+            .collect::<Vec<_>>();
+        if let [only] = terminal_owner.as_slice() {
+            return AdtConstructorResolution::Unique((*only).clone());
+        }
+    }
+    resolve_adt_constructor_candidates(&owning)
+}
+
+fn resolve_adt_constructor_candidates(owning: &NameMatch<'_>) -> AdtConstructorResolution {
+    match (owning, owning.candidates()) {
         (_, []) => AdtConstructorResolution::Missing,
         (_, [only]) => AdtConstructorResolution::Unique((*only).clone()),
         // Two declarations carrying the SAME name are not a

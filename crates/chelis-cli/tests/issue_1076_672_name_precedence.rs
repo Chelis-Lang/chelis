@@ -66,6 +66,14 @@ def keep(N: f64) -> f64 = N
 out = keep(7.0f64)
 ";
 
+const LOCAL_CONSTRUCTOR_COLLIDES_WITH_PRELUDE: &str = "\
+type Wrapper =
+  | Empty
+  | Some(f64)
+def wrap(x: f64) -> Wrapper = Some(x)
+out = wrap(1.0f64)
+";
+
 const UNKNOWN_APPLIED_UPPERCASE: &str = "\
 def apply_n(N: (f64 -> f64), x: f64) -> f64 = N(x)
 def add_hundred(x: f64) -> f64 = add(x, 100.0f64)
@@ -183,6 +191,15 @@ fn bare_uppercase_name_remains_an_ordinary_value_binding() {
         BARE_UPPERCASE_BINDING,
         "bare_uppercase_binding",
         "out = 7.0\n",
+    );
+}
+
+#[test]
+fn local_constructor_identity_wins_over_same_named_prelude_constructor() {
+    assert_eval_and_c(
+        LOCAL_CONSTRUCTOR_COLLIDES_WITH_PRELUDE,
+        "local_constructor_collides_with_prelude",
+        "out = Some(1.0)\n",
     );
 }
 

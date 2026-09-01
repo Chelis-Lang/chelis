@@ -137,41 +137,31 @@ pub(super) fn infer_app(
         );
     }
 
-    let ctor_lookup_name = match prepare_constructor_application(&func_name, env, adt_reg, errors) {
-        Ok(name) => name,
+    match prepare_constructor_application(&func_name, env, adt_reg, errors) {
+        Ok(_) => {}
         Err(rejected) => return rejected,
-    };
+    }
 
     // Applied uppercase heads are constructor syntax, even when a value
     // binder with the same spelling is present (spec/01 §3.2). Do not send a
     // resolved constructor back through the string-keyed value environment:
-    // a parameter named `N` would replace the constructor scheme there. The
-    // registry is the structural constructor authority and already owns the
-    // collision-safe instantiation path used by record construction.
+    // a parameter named `N` would replace the constructor scheme there.
+    // Conversely, do not rediscover an owner by scanning the ADT registry:
+    // two positional constructors may share a name (`Option::Some` and a
+    // local `Wrapper::Some`), and registry order is not scope. The separate
+    // constructor authority preserves the active declaration/import owner
+    // and scheme across ordinary lexical shadowing.
     let applied_constructor_head = source_func_name.as_deref().is_some_and(is_constructor_name);
     let func_ty = if applied_constructor_head {
         let source_name = source_func_name.as_deref().unwrap();
         let resolved_constructor = if constructor_out_of_scope(source_name, env) {
             None
         } else {
-            ctor_lookup_name.as_deref().and_then(|ctor_name| {
-                adt_reg
-                    .lookup_variant_preferring_shape(ctor_name, CallShape::Positional)
-                    .or_else(|| adt_reg.lookup_variant_terminal_unique(ctor_name))
-                    .and_then(|(adt_name, variant)| {
-                        adt_reg.lookup(adt_name).map(|adt_def| (adt_def, variant))
-                    })
-            })
+            env.lookup_constructor(source_name)
+                .map(|(_, scheme)| env.instantiate(scheme, vg, subst))
         };
         match resolved_constructor {
-            Some((adt_def, variant)) => {
-                let (args, ret) = instantiate_variant_of(adt_def, variant, vg);
-                if args.is_empty() {
-                    ret
-                } else {
-                    Type::Fn(args, Box::new(ret))
-                }
-            }
+            Some(constructor_type) => constructor_type,
             None => {
                 let name = source_func_name.as_deref().unwrap();
                 report(

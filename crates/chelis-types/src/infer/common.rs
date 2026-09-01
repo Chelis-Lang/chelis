@@ -306,11 +306,12 @@ pub(super) fn is_constructor_name(name: &str) -> bool {
         .is_some_and(|c| c.is_ascii_uppercase())
 }
 
-/// A constructor reference is *in scope* only when its exact name is bound
-/// in `env` — either a bare builtin constructor (`Some`/`None`/`Cons`/`Nil`,
-/// registered bare by `register_prelude_adts`) or a reef-mangled in-scope
-/// constructor (chelis#157/#316 rewrite the reference to its mangled name
-/// when the importing module declares it locally or imports it by name).
+/// A constructor reference is *in scope* only when its exact name is present
+/// in `env`'s constructor authority — either a bare builtin constructor
+/// (`Some`/`None`/`Cons`/`Nil`, registered bare by
+/// `register_prelude_adts`) or a reef-mangled in-scope constructor
+/// (chelis#157/#316 rewrite the reference to its mangled name when the
+/// importing module declares it locally or imports it by name).
 ///
 /// Returns `true` when `name` looks like a constructor (PascalCase terminal)
 /// but is not bound exactly. Whether the package registry contains zero, one,
@@ -321,16 +322,17 @@ pub(super) fn is_constructor_name(name: &str) -> bool {
 /// unbound value. Every non-exact constructor reference is rejected at
 /// `check` as an unknown constructor.
 pub(super) fn constructor_out_of_scope(name: &str, env: &Env) -> bool {
-    is_constructor_name(name) && env.lookup(name).is_none()
+    is_constructor_name(name) && env.lookup_constructor(name).is_none()
 }
 
 /// Pattern-position counterpart of [`constructor_out_of_scope`]. A constructor
 /// **pattern** head (`| Alpha =>`, `| Alpha { .. } =>`) is in scope only when it
-/// resolves through an *exact* binding — either the type env (`env.lookup`, for
-/// builtins and reef-mangled in-scope constructors) or the ADT registry
-/// (`adt_reg.lookup_variant`, the exact mangled variant key). The terminal-unique
-/// fallbacks (`env.lookup_terminal_unique` / `lookup_variant_terminal_unique`)
-/// are diagnostic-only fuzzy matches, never an in-scope binding.
+/// resolves through an *exact* binding — either the type env's constructor
+/// authority (`env.lookup_constructor`, for builtins and reef-mangled
+/// in-scope constructors) or the ADT registry (`adt_reg.lookup_variant`, the
+/// exact mangled variant key). The terminal-unique fallbacks
+/// (`env.lookup_terminal_unique` / `lookup_variant_terminal_unique`) are
+/// diagnostic-only fuzzy matches, never an in-scope binding.
 ///
 /// Returns `true` when `name` is a PascalCase constructor that resolves through
 /// *neither* exact path. This rejects two out-of-scope cases the bare
@@ -357,7 +359,7 @@ pub(super) fn constructor_pattern_out_of_scope(
     adt_reg: &AdtRegistry,
 ) -> bool {
     is_constructor_name(name)
-        && env.lookup(name).is_none()
+        && env.lookup_constructor(name).is_none()
         && adt_reg.lookup_variant(name).is_none()
 }
 
@@ -1532,11 +1534,20 @@ pub(super) fn collect_declarations(
             {
                 errors.push(crate::opacity::unmoduled_opaque_error(name));
             }
+            let adt_name = kids.first().and_then(symbol_name).map(str::to_string);
             if let Ok(ctors) =
                 adt_reg.register_deftype(kids, vg, headers, errors, opaque, defining_module)
             {
                 for (name, scheme) in ctors {
-                    env.bind(name, scheme);
+                    if let Some(owner) = &adt_name {
+                        env.bind_constructor(name, owner.clone(), scheme);
+                    } else {
+                        // `register_deftype` reports malformed declarations;
+                        // retain the former defensive binding behavior if a
+                        // future parser shape can return constructors without
+                        // an authored owner name.
+                        env.bind(name, scheme);
+                    }
                 }
             }
         }
