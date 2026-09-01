@@ -34,6 +34,15 @@ DIRECT_PATH_ATTRIBUTE_PATTERN = re.compile(
 PATH_MODULE_ITEM_PATTERN = re.compile(
     r"\s*(?:#\s*\[[^\]]*\]\s*)*mod\s+[A-Za-z_][A-Za-z0-9_]*\s*;"
 )
+MACRO_RULES_PATTERN = re.compile(
+    r"\bmacro_rules\s*!\s*(?:r#)?[A-Za-z_][A-Za-z0-9_]*\s*"
+    r"(?P<opener>[({\[])"
+)
+MACRO_ATTRIBUTE_TEMPLATE_PATTERN = re.compile(
+    r"#\s*\[[^\]]*\$[^\]]*\]", re.DOTALL
+)
+DELIMITER_PAIRS = {"(": ")", "[": "]", "{": "}"}
+DELIMITER_CLOSERS = frozenset(DELIMITER_PAIRS.values())
 
 
 @dataclass(frozen=True, order=True)
@@ -291,6 +300,94 @@ def _strip_comments_and_strings(text: str) -> str:
     return "".join(output)
 
 
+def _char_literal_end(text: str, index: int) -> int | None:
+    """Return the end of a char literal, without mistaking a lifetime for one."""
+
+    quote = index + 1 if text.startswith("b'", index) else index
+    if text[quote : quote + 1] != "'":
+        return None
+    cursor = quote + 1
+    escaped = False
+    while cursor < len(text) and text[cursor] != "\n":
+        char = text[cursor]
+        cursor += 1
+        if char == "'" and not escaped:
+            return cursor
+        if char == "\\" and not escaped:
+            escaped = True
+        else:
+            escaped = False
+    return None
+
+
+def _token_tree_end(path: str, text: str, open_index: int) -> int:
+    """Return the exclusive end of one balanced Rust token tree."""
+
+    opener = text[open_index]
+    if opener not in DELIMITER_PAIRS:
+        raise AssertionError(f"not a token-tree opener: {opener!r}")
+    stack = [opener]
+    index = open_index + 1
+    while index < len(text):
+        char_end = _char_literal_end(text, index)
+        if char_end is not None:
+            index = char_end
+            continue
+        char = text[index]
+        if char in DELIMITER_PAIRS:
+            stack.append(char)
+        elif char in DELIMITER_CLOSERS:
+            expected = DELIMITER_PAIRS[stack[-1]]
+            if char != expected:
+                raise HashOrderDeterminismFailure(
+                    f"unbalanced macro token tree at {path}:"
+                    f"{text.count(chr(10), 0, index) + 1}"
+                )
+            stack.pop()
+            if not stack:
+                return index + 1
+        index += 1
+    raise HashOrderDeterminismFailure(
+        f"unterminated macro token tree at {path}:"
+        f"{text.count(chr(10), 0, open_index) + 1}"
+    )
+
+
+def _reject_macro_generated_attributes(path: str, sanitized: str) -> None:
+    """Forbid local macro transcribers from constructing Rust attributes."""
+
+    cursor = 0
+    while match := MACRO_RULES_PATTERN.search(sanitized, cursor):
+        body_end = _token_tree_end(path, sanitized, match.start("opener"))
+        body = sanitized[match.end("opener") : body_end - 1]
+        for arrow in re.finditer(r"=>", body):
+            transcriber_start = arrow.end()
+            while (
+                transcriber_start < len(body)
+                and body[transcriber_start].isspace()
+            ):
+                transcriber_start += 1
+            if (
+                transcriber_start >= len(body)
+                or body[transcriber_start] not in DELIMITER_PAIRS
+            ):
+                continue
+            transcriber_end = _token_tree_end(path, body, transcriber_start)
+            transcriber = body[transcriber_start + 1 : transcriber_end - 1]
+            generated = MACRO_ATTRIBUTE_TEMPLATE_PATTERN.search(transcriber)
+            if generated is not None:
+                absolute_start = (
+                    match.end("opener") + transcriber_start + 1 + generated.start()
+                )
+                raise HashOrderDeterminismFailure(
+                    f"macro-generated external-module attribute risk at {path}:"
+                    f"{sanitized.count(chr(10), 0, absolute_start) + 1}; "
+                    "local macro transcribers may not interpolate Rust attributes "
+                    "because they can synthesize an unscanned #[path] module"
+                )
+        cursor = body_end
+
+
 def _item_for_line(lines: Sequence[str], line_index: int) -> str:
     current = lines[line_index].strip()
     if current.startswith("#["):
@@ -332,6 +429,7 @@ def _path_module_targets(path: str, text: str) -> tuple[str, ...]:
     """Return every direct `#[path] mod` target, rejecting opaque forms."""
 
     sanitized = _strip_comments_and_strings(text)
+    _reject_macro_generated_attributes(path, sanitized)
     direct_by_start = {
         match.start(): match for match in DIRECT_PATH_ATTRIBUTE_PATTERN.finditer(text)
     }

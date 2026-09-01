@@ -174,9 +174,15 @@ untracked, non-ignored local `.rs` file in the repository (`git ls-files`), then
 recursively loads every direct `#[path = "relative/file.rs"] mod` target even when
 that target is ignored. A path-bearing attribute the loader cannot resolve exactly,
 a missing target, and a target that escapes the repository all fail closed. This
-source set is a superset of every committed Cargo target of every kind, every build
-script, and every committed path outside `src/`, and is blind to the feature or
-`cfg` that gates a file, a target, or a function. It matches the source
+includes a structural ban on interpolated attributes in workspace-local
+`macro_rules!` transcribers: an invocation may carry a literal attribute that the
+scanner can see, but a transcriber cannot turn an opaque metavariable into
+`#[path]`. A compile-backed negative passes the attribute name and ignored target
+through macro metavariables, proves that `rustc --cfg` would load the target, and
+requires the scan to reject the macro before expansion. The resulting source set is
+a superset of every committed Cargo target of every kind, every build script, and
+every committed path outside `src/`, and is blind to the feature or `cfg` that gates
+a file, a target, or a function. It matches the source
 spellings `HashMap`, `HashSet`, `hash_map::`, `hash_set::`, `FxHashMap`,
 `FxHashSet`, `rustc_hash::`, `fxhash::`, `ahash::`, `hashbrown::`, and
 `indexmap::` outside the wrapper module, and every `#[allow(clippy::disallowed_types)]`
@@ -197,7 +203,8 @@ a workspace crate through Cargo's output directory. Negative controls approve a
 malicious composed-string generator and prove that both direct and imported-alias
 macro spellings are rejected. A compile-backed ignored-`#[path]` fixture proves the
 scanner loads and rejects a source file that `rustc --cfg` can compile but
-`git ls-files --others --exclude-standard` alone cannot see.
+`git ls-files --others --exclude-standard` alone cannot see; its macro-generated
+twin proves a local transcriber cannot hide that ingress.
 Migrated code behind a feature compiles in the workflows that already
 build those features (`smt-full-prove.yml`; the `generalize-sweep-oracle` job in
 `ci.yml`); this plan cites that evidence and adds no per-PR feature-matrix Clippy

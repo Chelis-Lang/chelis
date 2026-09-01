@@ -177,6 +177,68 @@ class HashOrderTokenTripwireTests(unittest.TestCase):
                     sources, allowed=(), approved_build_scripts=()
                 )
 
+    def test_rejects_macro_generated_ignored_path_module(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            (root / "src/generated").mkdir(parents=True)
+            (root / ".gitignore").write_text("src/generated/\n", encoding="utf-8")
+            (root / "src/lib.rs").write_text(
+                "macro_rules! load_path_module {\n"
+                "    ($attribute:ident, $target:literal) => {\n"
+                "        #[$attribute = $target]\n"
+                "        mod escaped;\n"
+                "    };\n"
+                "}\n"
+                "#[cfg(round4_escape)]\n"
+                'load_path_module!(path, "generated/escape.rs");\n',
+                encoding="utf-8",
+            )
+            (root / "src/generated/escape.rs").write_text(
+                "pub type Escape = std::collections::HashMap<u8, u8>;\n",
+                encoding="utf-8",
+            )
+            subprocess.run(("git", "init", "-q"), cwd=root, check=True)
+            subprocess.run(
+                ("git", "add", ".gitignore", "src/lib.rs"), cwd=root, check=True
+            )
+            subprocess.run(
+                (
+                    "rustc",
+                    "--crate-type",
+                    "lib",
+                    "--cfg",
+                    "round4_escape",
+                    "src/lib.rs",
+                    "-o",
+                    str(root / "probe.rlib"),
+                ),
+                cwd=root,
+                check=True,
+                capture_output=True,
+            )
+
+            with self.assertRaisesRegex(
+                ORACLE.HashOrderDeterminismFailure,
+                "macro-generated external-module attribute",
+            ):
+                ORACLE.tracked_rust_sources(repo_root=root)
+
+    def test_allows_macro_attribute_matcher_when_transcriber_discards_it(self) -> None:
+        ORACLE.validate_sources(
+            {
+                "crates/demo/src/lib.rs": (
+                    "macro_rules! declare_names {\n"
+                    "    ($(#[$meta:meta])* $name:ident) => {\n"
+                    "        enum Names { $name }\n"
+                    "    };\n"
+                    "}\n"
+                    "declare_names!(#[doc = \"kept at the call site\"] One);\n"
+                )
+            },
+            allowed=(),
+            approved_build_scripts=(),
+        )
+
     def test_rejects_composed_generated_rust_from_a_build_script(self) -> None:
         build_path = "crates/demo/build.rs"
         generated_build = (
