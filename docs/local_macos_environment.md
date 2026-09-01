@@ -46,6 +46,52 @@ the hour once a workspace build mass-launched fresh binaries).
 The sections below explain the symptom, the diagnosis, and the mitigations;
 read them when the loop looks wedged, not on the happy path.
 
+## Managed tree-sitter compiler check
+
+The Devenv shell sets `CC_aarch64_apple_darwin` and
+`CXX_aarch64_apple_darwin` to the pinned, SDK-aware Nixpkgs compiler wrapper.
+It also sets `CRATE_CC_NO_DEFAULTS=1`, so the `cc` crate does not inject the
+redundant `arm64-apple-macosx` alias for an already-native build. This retains
+the wrapper's macOS SDK and C++ headers without emitting a multi-target warning.
+
+`devenv test` runs the clean compiler and parser-agreement control. To run that
+leg directly from an active shell:
+
+```sh
+.devenv/state/venv/bin/python scripts/darwin_tree_sitter_smoke.py
+```
+
+Success means a fresh target builds all three tree-sitter C/C++ sources with
+no target-mismatch warning and the complete `tree-sitter-chelis` test suite
+passes.
+
+## Domain-oracle child timeout
+
+The repository-owned cause of chelis#1429 was path amplification before the
+compiler child reached its semantic work: `chelis check <fixture>` ran advisory
+lint over the fixture's parent directory. Oracle fixtures live in the shared
+system temporary directory, so one check could recursively inspect unrelated
+temporary trees. The check path now gives advisory lint the explicit input file
+as both its traversal scope and fixability-probe target.
+
+The unrepresentable-domain oracle runs each `chelis check` and `chelis
+validate --deep` fixture as a bounded child. A timeout is not a semantic
+rejection. The oracle kills and reaps the whole child process group and reports
+the exact obligation, command, PID, state, elapsed time, timeout, termination,
+stdout, and stderr.
+
+When this fails on macOS, keep the `chelis-exec-preflight` result as a separate
+control: a small C executable can be admitted while a newly linked large Rust
+binary is still delayed. Sample the named PID before the 60-second bound when
+possible. `_dyld_start` with negligible child CPU points to the first-exec
+failure class below; frames in Chelis or a filesystem/compiler call identify a
+different stall and should be investigated from that frame rather than by
+raising the timeout.
+
+The acceptance sequence is recorded in [`manual_gates.md`](manual_gates.md):
+two direct oracle passes, the planted hung-child termination test, the exec
+preflight, and the orphan reaper must all agree.
+
 ## Symptom
 
 - Freshly linked binaries hang in `_dyld_start` on their **first** exec, for

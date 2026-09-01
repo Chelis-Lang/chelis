@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 
+import concurrent.futures
+import os
+import shutil
+import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -47,6 +52,82 @@ FIXTURE_CELL = oracle.RedCell(
     fragment="boxed f32 elements must render shortest at their own width",
     owner="chelis#729/#686 capacity family",
 )
+
+
+class OracleEnvironmentTests(unittest.TestCase):
+    def test_explicit_cargo_target_dir_remains_authoritative(self) -> None:
+        with mock.patch.dict(
+            oracle.os.environ,
+            {"CARGO_TARGET_DIR": "/caller/owned/target"},
+            clear=True,
+        ):
+            env = oracle.oracle_environment(oracle.Path("/worktree/one"))
+        self.assertEqual(env["CARGO_TARGET_DIR"], "/caller/owned/target")
+
+    def test_distinct_worktrees_receive_distinct_defaults(self) -> None:
+        with mock.patch.dict(oracle.os.environ, {}, clear=True):
+            first = oracle.oracle_environment(oracle.Path("/worktree/one"))
+            second = oracle.oracle_environment(oracle.Path("/worktree/two"))
+        self.assertNotEqual(first["CARGO_TARGET_DIR"], second["CARGO_TARGET_DIR"])
+
+    def test_one_worktree_receives_a_stable_default_inside_its_target(self) -> None:
+        root = oracle.Path("/worktree/one")
+        with mock.patch.dict(oracle.os.environ, {}, clear=True):
+            first = oracle.oracle_environment(root)
+            second = oracle.oracle_environment(root)
+        expected = root / "target" / "oracles" / "faithful-observation-phase2"
+        self.assertEqual(oracle.Path(first["CARGO_TARGET_DIR"]), expected)
+        self.assertEqual(first["CARGO_TARGET_DIR"], second["CARGO_TARGET_DIR"])
+
+    def test_distinct_worktree_roots_run_minimal_cargo_legs_concurrently(self) -> None:
+        cargo = shutil.which("cargo")
+        if cargo is None:
+            self.skipTest("Cargo is required for the concurrency integration probe")
+
+        with tempfile.TemporaryDirectory() as raw_directory:
+            roots = [oracle.Path(raw_directory) / name for name in ("one", "two")]
+            for index, root in enumerate(roots):
+                (root / "src").mkdir(parents=True)
+                (root / "Cargo.toml").write_text(
+                    f'[package]\nname = "phase2-target-{index}"\n'
+                    'version = "0.0.0"\nedition = "2024"\n',
+                    encoding="utf-8",
+                )
+                (root / "src/main.rs").write_text(
+                    "fn main() {}\n",
+                    encoding="utf-8",
+                )
+
+            previous_target = os.environ.pop("CARGO_TARGET_DIR", None)
+            try:
+                environments = [oracle.oracle_environment(root) for root in roots]
+            finally:
+                if previous_target is not None:
+                    os.environ["CARGO_TARGET_DIR"] = previous_target
+
+            targets = [
+                oracle.Path(environment["CARGO_TARGET_DIR"])
+                for environment in environments
+            ]
+            self.assertNotEqual(*targets)
+
+            def run_leg(index: int) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [cargo, "check", "--quiet"],
+                    cwd=roots[index],
+                    env=environments[index],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                )
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(run_leg, range(2)))
+            for result in results:
+                self.assertEqual(result.returncode, 0, result.stdout)
+            for target in targets:
+                self.assertTrue((target / ".rustc_info.json").is_file(), target)
 
 # Parser-only sample for `ignored_cells`. It is deliberately NOT checked
 # against the shipped ledger: its job is to keep both attribute spellings

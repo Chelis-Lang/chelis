@@ -16,15 +16,31 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GIT_HOOKS_MODULE = REPO_ROOT / "devenv/git-hooks.nix"
 SMOKE_TEST_MODULE = REPO_ROOT / "devenv/smoke-tests.nix"
-EXPECTED_URL = "github:cachix/devenv/v2.2?dir=src/modules"
-EXPECTED_REF = "v2.2"
-EXPECTED_REVISION = "ffce215a42d09c6375c3d60dd9c4110438fc4d87"
+EXPECTED_URL = "github:cachix/devenv/v2.2.2?dir=src/modules"
+EXPECTED_REF = "v2.2.2"
+EXPECTED_REVISION = "b8030c58deafc013fc51791377fe8fea4dadcb00"
+EXPECTED_CLI_VERSION = "2.2.2"
+EXPECTED_CLI_REQUIREMENT = ">=2.2.0, <=2.2.2"
 EXPECTED_TEST_TASKS = (
     "chelis:toolchain-test",
     "chelis:python-test",
     "chelis:c-compiler-test",
     "chelis:cpp-compiler-test",
+    "chelis:kache-test",
+    "chelis:pyright-test",
+    "chelis:docs-test",
+    "chelis:darwin-tree-sitter-test",
 )
+EXPECTED_TEST_TASK_PREREQUISITES = {
+    "chelis:toolchain-test": frozenset(),
+    "chelis:python-test": frozenset({"devenv:python:virtualenv"}),
+    "chelis:c-compiler-test": frozenset({"devenv:files"}),
+    "chelis:cpp-compiler-test": frozenset({"devenv:files"}),
+    "chelis:kache-test": frozenset({"devenv:python:virtualenv"}),
+    "chelis:pyright-test": frozenset({"devenv:python:virtualenv"}),
+    "chelis:docs-test": frozenset(),
+    "chelis:darwin-tree-sitter-test": frozenset({"devenv:python:virtualenv"}),
+}
 EXPECTED_GIT_HOOKS_URL = "github:cachix/git-hooks.nix"
 # Shared inputs must pin an exact revision so `devenv update` cannot
 # drift them away from the flake pins that check_nix_lock_parity.py
@@ -77,12 +93,13 @@ class DevenvPin:
 
 @dataclass(frozen=True)
 class DevenvCliVersionRequirement:
-    matches_modules: bool
+    constraint: str
 
 
 @dataclass(frozen=True)
 class DevenvTestTasks:
     names: frozenset[str]
+    prerequisites: dict[str, frozenset[str]]
 
 
 @dataclass(frozen=True)
@@ -105,21 +122,44 @@ class SharedInputPin:
 
 
 def parse_devenv_test_tasks(text: str) -> DevenvTestTasks:
-    raw_names = re.findall(r'(?m)^\s{2}tasks\."([^"]+)" = \{$', text)
+    task_blocks = re.findall(
+        r'(?ms)^  tasks\."([^"]+)" = \{\n(.*?)^  \};$',
+        text,
+    )
+    raw_names = [name for name, _ in task_blocks]
     names = frozenset(raw_names)
     if len(raw_names) != len(names):
         raise ValueError("the smoke-test module must not define a duplicate task")
     if names != frozenset(EXPECTED_TEST_TASKS):
         raise ValueError(f"the smoke-test module must define the named tasks: {names!r}")
-    if text.count('after = [ "devenv:enterShell" ];') != len(names):
-        raise ValueError("each named test task must run after devenv:enterShell")
+    if 'after = [ "devenv:enterShell" ];' in text:
+        raise ValueError("test tasks must not run during ordinary shell entry")
     if text.count('before = [ "devenv:enterTest" ];') != len(names):
         raise ValueError("each named test task must run before devenv:enterTest")
     if re.search(r"(?m)^\s*enterTest\s*=", text):
         raise ValueError("the smoke-test module must not define enterTest")
     if "processes." in text or "services." in text:
         raise ValueError("the Devenv smoke check must not define a service or process")
-    return DevenvTestTasks(names=names)
+
+    prerequisites: dict[str, frozenset[str]] = {}
+    for name, body in task_blocks:
+        after_values = re.findall(r'(?m)^    after = \[([^]]*)\];$', body)
+        if len(after_values) > 1:
+            raise ValueError(f"test task {name} must define at most one after list")
+        parsed = (
+            frozenset(re.findall(r'"([^"]+)"', after_values[0]))
+            if after_values
+            else frozenset()
+        )
+        expected = EXPECTED_TEST_TASK_PREREQUISITES[name]
+        if parsed != expected:
+            raise ValueError(
+                f"test task {name} must follow its generated prerequisites: "
+                f"expected {sorted(expected)!r}, got {sorted(parsed)!r}"
+            )
+        prerequisites[name] = parsed
+
+    return DevenvTestTasks(names=names, prerequisites=prerequisites)
 
 
 def parse_git_hook_catalog(text: str) -> GitHookCatalog:
@@ -263,9 +303,13 @@ def parse_cli_version_requirement(text: str) -> DevenvCliVersionRequirement:
     declarations = tuple(
         line for line in text.splitlines() if line.lstrip().startswith("require_version:")
     )
-    if declarations != ("require_version: true",):
-        raise ValueError("devenv.yaml must require CLI and module version parity")
-    return DevenvCliVersionRequirement(matches_modules=True)
+    expected = f'require_version: "{EXPECTED_CLI_REQUIREMENT}"'
+    if declarations != (expected,):
+        raise ValueError(
+            "devenv.yaml must require the reviewed CLI range "
+            f"{EXPECTED_CLI_REQUIREMENT}"
+        )
+    return DevenvCliVersionRequirement(constraint=EXPECTED_CLI_REQUIREMENT)
 
 
 def parse_git_hooks_input(text: str) -> str:
@@ -402,33 +446,54 @@ def require_v22(pin: DevenvPin) -> None:
 
 
 class DevenvVersionTests(unittest.TestCase):
+    def test_local_module_corrects_the_release_cli_version_metadata(self) -> None:
+        module = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
+        self.assertIn(
+            f'devenv.latestVersion = "{EXPECTED_CLI_VERSION}";',
+            module,
+        )
+
     def test_repository_pins_devenv_v22(self) -> None:
         yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
         lock_data = json.loads((REPO_ROOT / "devenv.lock").read_text(encoding="utf-8"))
         require_v22(parse_devenv_pin(yaml_text, lock_data))
 
-    def test_repository_requires_cli_and_module_version_parity(self) -> None:
+    def test_repository_requires_the_reviewed_cli_range(self) -> None:
         yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
-        self.assertTrue(parse_cli_version_requirement(yaml_text).matches_modules)
+        self.assertEqual(
+            parse_cli_version_requirement(yaml_text).constraint,
+            EXPECTED_CLI_REQUIREMENT,
+        )
 
     def test_absent_cli_version_requirement_fails_at_the_parse_boundary(self) -> None:
         yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
-        mutated = yaml_text.replace("require_version: true\n", "")
-        with self.assertRaisesRegex(ValueError, "must require CLI"):
+        mutated = yaml_text.replace(
+            f'require_version: "{EXPECTED_CLI_REQUIREMENT}"\n',
+            "",
+        )
+        with self.assertRaisesRegex(ValueError, "reviewed CLI range"):
             parse_cli_version_requirement(mutated)
 
     def test_false_cli_version_requirement_fails_at_the_parse_boundary(self) -> None:
         yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
-        mutated = yaml_text.replace("require_version: true", "require_version: false")
-        with self.assertRaisesRegex(ValueError, "must require CLI"):
+        mutated = yaml_text.replace(
+            f'require_version: "{EXPECTED_CLI_REQUIREMENT}"',
+            "require_version: false",
+        )
+        with self.assertRaisesRegex(ValueError, "reviewed CLI range"):
+            parse_cli_version_requirement(mutated)
+
+    def test_different_cli_range_fails_at_the_parse_boundary(self) -> None:
+        yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
+        mutated = yaml_text.replace(EXPECTED_CLI_REQUIREMENT, ">=2.2.1, <=2.2.2", 1)
+        with self.assertRaisesRegex(ValueError, re.escape(EXPECTED_CLI_REQUIREMENT)):
             parse_cli_version_requirement(mutated)
 
     def test_repository_uses_named_tasks_for_the_devenv_test_contract(self) -> None:
         config = SMOKE_TEST_MODULE.read_text(encoding="utf-8")
-        self.assertEqual(
-            parse_devenv_test_tasks(config).names,
-            frozenset(EXPECTED_TEST_TASKS),
-        )
+        tasks = parse_devenv_test_tasks(config)
+        self.assertEqual(tasks.names, frozenset(EXPECTED_TEST_TASKS))
+        self.assertEqual(tasks.prerequisites, EXPECTED_TEST_TASK_PREREQUISITES)
 
     def test_repository_declares_the_git_hook_policy(self) -> None:
         config = GIT_HOOKS_MODULE.read_text(encoding="utf-8")
@@ -571,14 +636,38 @@ class DevenvVersionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must define the named tasks"):
             parse_devenv_test_tasks(mutated)
 
-    def test_missing_enter_shell_dependency_fails_at_the_parse_boundary(self) -> None:
+    def test_shell_entry_dependency_fails_at_the_parse_boundary(self) -> None:
         config = SMOKE_TEST_MODULE.read_text(encoding="utf-8")
         mutated = config.replace(
-            'after = [ "devenv:enterShell" ];\n',
+            'before = [ "devenv:enterTest" ];',
+            'after = [ "devenv:enterShell" ];\n    before = [ "devenv:enterTest" ];',
+            1,
+        )
+        with self.assertRaisesRegex(ValueError, "must not run during ordinary shell entry"):
+            parse_devenv_test_tasks(mutated)
+
+    def test_missing_python_virtualenv_dependency_fails_at_the_parse_boundary(
+        self,
+    ) -> None:
+        config = SMOKE_TEST_MODULE.read_text(encoding="utf-8")
+        mutated = config.replace(
+            '    after = [ "devenv:python:virtualenv" ];\n',
             "",
             1,
         )
-        with self.assertRaisesRegex(ValueError, "must run after devenv:enterShell"):
+        with self.assertRaisesRegex(ValueError, "generated prerequisites"):
+            parse_devenv_test_tasks(mutated)
+
+    def test_missing_generated_files_dependency_fails_at_the_parse_boundary(
+        self,
+    ) -> None:
+        config = SMOKE_TEST_MODULE.read_text(encoding="utf-8")
+        mutated = config.replace(
+            '    after = [ "devenv:files" ];\n',
+            "",
+            1,
+        )
+        with self.assertRaisesRegex(ValueError, "generated prerequisites"):
             parse_devenv_test_tasks(mutated)
 
     def test_missing_devenv_input_fails_at_the_parse_boundary(self) -> None:

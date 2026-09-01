@@ -71,9 +71,12 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Sequence
 
@@ -428,12 +431,98 @@ def run_chelis_check(fixture_path: Path) -> subprocess.CompletedProcess[str]:
         )
     else:
         cmd = chelis_check_command() + (str(fixture_path),)
-    return subprocess.run(
+    return run_bounded_child(
+        f"chelis check fixture {fixture_path.name}",
         cmd,
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
         timeout=60,
+    )
+
+
+def run_bounded_child(
+    obligation: str,
+    command: Sequence[str],
+    *,
+    timeout: float,
+    cwd: Path = REPO_ROOT,
+) -> subprocess.CompletedProcess[str]:
+    """Run one oracle child, reaping its process group on timeout.
+
+    The failure is deliberately field-oriented: retained gate transcripts must
+    identify which obligation stalled, which child was alive, and whether the
+    termination itself completed. A timeout is never reinterpreted as a
+    semantic rejection.
+    """
+
+    started = time.monotonic()
+    try:
+        process = subprocess.Popen(
+            tuple(command),
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=os.name == "posix",
+        )
+    except OSError as error:
+        raise OracleFailure(
+            "\n".join(
+                (
+                    f"obligation={obligation}",
+                    f"command={shlex.join(command)}",
+                    "state=spawn_failed",
+                    f"error={error}",
+                )
+            )
+        ) from error
+
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        termination = "SIGKILL" if os.name == "posix" else "kill"
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except ProcessLookupError:
+            termination = "already_exited"
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired as error:
+            raise OracleFailure(
+                "\n".join(
+                    (
+                        f"obligation={obligation}",
+                        f"command={shlex.join(command)}",
+                        f"pid={process.pid}",
+                        "state=termination_failed",
+                        f"elapsed={time.monotonic() - started:.3f}s",
+                        f"timeout={timeout:.3f}s",
+                        f"termination={termination}",
+                    )
+                )
+            ) from error
+        raise OracleFailure(
+            "\n".join(
+                (
+                    f"obligation={obligation}",
+                    f"command={shlex.join(command)}",
+                    f"pid={process.pid}",
+                    "state=timed_out",
+                    f"elapsed={time.monotonic() - started:.3f}s",
+                    f"timeout={timeout:.3f}s",
+                    f"termination={termination}",
+                    f"stdout={stdout.rstrip()}",
+                    f"stderr={stderr.rstrip()}",
+                )
+            )
+        )
+
+    return subprocess.CompletedProcess(
+        args=tuple(command),
+        returncode=process.returncode,
+        stdout=stdout,
+        stderr=stderr,
     )
 
 
@@ -474,11 +563,9 @@ def run_chelis_validate(fixture_path: Path) -> subprocess.CompletedProcess[str]:
         )
     else:
         cmd = chelis_validate_command() + (str(fixture_path),)
-    return subprocess.run(
+    return run_bounded_child(
+        f"chelis validate fixture {fixture_path.name}",
         cmd,
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
         timeout=60,
     )
 
