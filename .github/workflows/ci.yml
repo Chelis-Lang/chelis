@@ -1420,3 +1420,38 @@ jobs:
 
       - name: Build mdBook
         run: mdbook build docs/book
+
+  # Rule-id: CI-SCOPE-NIX-STATIC -- the two flake checks that need no package
+  # build. `nix/checks.nix` stays the authoritative definition of both; this
+  # job only selects them, so the `.nix` file list is not duplicated here.
+  #
+  # Unconditional, like `no-ai-authorship` and `docs`: a formatting or
+  # lock-parity regression can arrive in any PR, and both checks are cheap.
+  # The expensive checks in the same file build Rust from source and stay in
+  # `nix-packages.yml`, which is path-filtered and scheduled nightly.
+  #
+  # Selecting these two attributes does not force the `built` package set and
+  # therefore does not trigger the crate2nix import-from-derivation. Measured
+  # on aarch64-darwin and x86_64-linux: both evaluate to a derivation under
+  # `--option allow-import-from-derivation false`, while `chelisShape`,
+  # `crate2nixGeneration`, and `runtimeConsumer` fail under the identical
+  # invocation citing import-from-derivation. Preserve that when editing.
+  # a check added here that needs `built` would silently make this job cost an
+  # hour (chelis#1441).
+  nix-static:
+    name: Nix Static Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NIX_CONFIG: |
+        sandbox = true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
+
+      # nixfmt over the tracked `.nix` files, and flake.lock/devenv.lock
+      # revision parity for the inputs both files share.
+      - name: Build the static flake checks
+        run: nix build --print-build-logs .#checks.x86_64-linux.nixFormat .#checks.x86_64-linux.lockParity

@@ -424,6 +424,12 @@ NON_GATE_JOBS = {
     "backend-sanitizers",
     "no-ai-authorship",
     "docs",
+    # Rule-id: GATE-SCOPE-NIX-STATIC -- the static flake checks build two
+    # derivations from nix/checks.nix (nixfmt over the tracked .nix files and
+    # flake.lock/devenv.lock revision parity). The job runs `nix build` and no
+    # cargo or chelis command the per-PR gate owns, so it is out of gate.py
+    # scope by design (chelis#1441).
+    "nix-static",
     # Rule-id: GATE-SCOPE-CHANGES -- the changes job computes the
     # docs_only output that gates the heavy jobs' `if` (chelis#419). It
     # runs scripts/ci_detect_docs_only.py, no cargo/chelis command, so it
@@ -3136,6 +3142,10 @@ class DocsOnlySkipTests(unittest.TestCase):
         "no-ai-authorship",
         "docs",
         "changes",
+        # The two flake checks that need no package build are cheap enough to
+        # run unconditionally, and a docs-only PR is exactly the shape whose
+        # `.nix` formatting nobody else would check (chelis#1441).
+        "nix-static",
     }
 
     def test_changes_job_exists_and_is_ungated(self):
