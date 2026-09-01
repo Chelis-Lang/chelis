@@ -129,6 +129,25 @@ fn explicit_deftype_rank_binder_is_rejected() {
 }
 
 #[test]
+fn explicit_kinded_deftype_field_rejects_inference_hole() {
+    assert_one_type_resolution_error(
+        "(deftype {} Hole (a)
+           (variant {} Hole (field {} value (t-var {} _))))",
+        "undeclared type variable `_`",
+        "explicit kinded deftype field inference hole",
+    );
+}
+
+#[test]
+fn explicit_kinded_typealias_body_rejects_inference_hole() {
+    assert_one_type_resolution_error(
+        "(typealias {} Hole (a) (t-var {} _))",
+        "undeclared type variable `_`",
+        "explicit kinded typealias body inference hole",
+    );
+}
+
+#[test]
 fn parameterized_typealias_type_and_dimension_binders_are_accepted() {
     assert_surf_accepts(
         "type Matrix[p, rows] = tensor[rows, p]\n\

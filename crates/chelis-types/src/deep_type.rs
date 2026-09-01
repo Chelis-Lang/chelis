@@ -633,7 +633,10 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
     }
 
     fn allows_hole(&self) -> bool {
-        !matches!(self.binder_mode, BinderMode::Explicit(_))
+        !matches!(
+            self.binder_mode,
+            BinderMode::Explicit(_) | BinderMode::ExplicitKinds(_)
+        )
     }
 
     /// Decode-once (chelis#731 Phase 3): the decoded tag drives dispatch;
