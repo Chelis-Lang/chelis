@@ -120,12 +120,15 @@ pub(super) fn arg_tensor_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> O
 /// rank-only facts. Exact-shape validators deliberately use
 /// `arg_tensor_type_expr` instead, so a synthetic rank never masquerades as a
 /// proved symbolic extent.
-fn arg_tensor_rank_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<deep::Expr> {
+pub(super) fn arg_tensor_rank_type_expr(
+    expr: &deep::Expr,
+    type_env: &IrTypeEnv,
+) -> Option<deep::Expr> {
     let inner = peel_borrow(expr);
     expr_type_expr(inner, type_env)
 }
 
-fn type_expr_is_rank_only(expr: &deep::Expr) -> bool {
+pub(super) fn type_expr_is_rank_only(expr: &deep::Expr) -> bool {
     let Some((tag, _, kids)) = stamped_parts(expr) else {
         return false;
     };

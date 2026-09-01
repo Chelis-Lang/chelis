@@ -78,3 +78,47 @@ fn matching_runtime_rank_control_still_checks() {
         "perfect success must have no errors"
     );
 }
+
+#[test]
+fn unary_identity_cannot_erase_rank_evidence() {
+    let source = rank_divergent_source("sn = neg(s)\n  add(sn, e)");
+    let (status, report) = check(&source);
+    assert!(
+        !status.success(),
+        "rank evidence must survive neg: {report}"
+    );
+    assert!(
+        report["errors"].as_array().is_some_and(|errors| errors
+            .iter()
+            .any(|error| error["kind"] == "DimensionMismatch")),
+        "expected a dimension mismatch after neg: {report}"
+    );
+}
+
+#[test]
+fn binary_identity_cannot_erase_rank_evidence() {
+    let source = rank_divergent_source("ss = add(s, s)\n  add(ss, e)");
+    let (status, report) = check(&source);
+    assert!(
+        !status.success(),
+        "rank evidence must survive an equal-rank add: {report}"
+    );
+    assert!(
+        report["errors"].as_array().is_some_and(|errors| errors
+            .iter()
+            .any(|error| error["kind"] == "DimensionMismatch")),
+        "expected a dimension mismatch after add: {report}"
+    );
+}
+
+#[test]
+fn matching_rank_identity_chain_still_checks() {
+    let source = rank_divergent_source("ss = add(s, s)\n  neg(ss)");
+    let (status, report) = check(&source);
+    assert!(
+        status.success(),
+        "matching-rank identity chain failed: {report}"
+    );
+    assert_eq!(report["score"], 1, "clean control must score perfectly");
+    assert_eq!(report["errors"], serde_json::json!([]));
+}

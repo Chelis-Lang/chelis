@@ -2609,7 +2609,7 @@ pub(super) fn derive_unary_shape_passthrough(
     static_env: &UnordMap<String, StaticValue>,
 ) -> Option<deep::Expr> {
     let arg = list.elements.get(3)?;
-    resolve_let_value_tensor_type(arg, type_env, static_env)
+    resolve_let_value_tensor_rank_type(arg, type_env, static_env)
 }
 
 /// Derive the output tensor type of a shape-preserving binary
@@ -2624,24 +2624,24 @@ pub(super) fn derive_binary_shape_passthrough(
     static_env: &UnordMap<String, StaticValue>,
 ) -> Option<deep::Expr> {
     let lhs = list.elements.get(3)?;
-    if let Some(ty) = resolve_let_value_tensor_type(lhs, type_env, static_env) {
+    if let Some(ty) = resolve_let_value_tensor_rank_type(lhs, type_env, static_env) {
         return Some(ty);
     }
     let rhs = list.elements.get(4)?;
-    resolve_let_value_tensor_type(rhs, type_env, static_env)
+    resolve_let_value_tensor_rank_type(rhs, type_env, static_env)
 }
 
-/// Resolve the tensor type expression of a let-binding RHS or any
-/// nested sub-expression: try the borrow-aware var/lit lookup first,
-/// and if that fails recurse into the sub-expression as another
-/// recognized shape-sensitive call. Used by the unary and binary
-/// passthrough helpers (RT-205 round-2 F2).
-pub(super) fn resolve_let_value_tensor_type(
+/// Resolve a tensor type for an identity op's output, retaining a rank-only
+/// movement fact when no exact shape is available.  This path is deliberately
+/// separate from the exact-shape argument lookup: shape-sensitive consumers
+/// must not interpret the synthetic axes as proved extents, while identity
+/// producers must carry the still-proved rank to their own consumers.
+fn resolve_let_value_tensor_rank_type(
     expr: &deep::Expr,
     type_env: &IrTypeEnv,
     static_env: &UnordMap<String, StaticValue>,
 ) -> Option<deep::Expr> {
-    if let Some(ty) = arg_tensor_type_expr(expr, type_env) {
+    if let Some(ty) = arg_tensor_rank_type_expr(expr, type_env) {
         return Some(ty);
     }
     // Peek through borrow before recursing in case a wrapper op
