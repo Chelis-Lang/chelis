@@ -11503,11 +11503,23 @@ impl LowerCtx {
                 let saved_seed = self.random_seed;
                 let saved_counter = self.random_counter;
                 let seed = self.extract_u64_value(&elems[2]).unwrap_or_else(|| {
+                    let unsupported = Unsupported::new(
+                        UnsupportedKind::Construct(
+                            "an explicit random seed that is not a statically-resolvable signed \
+                             int64 value"
+                                .to_owned(),
+                        ),
+                        "`with seed(...)` in IR lowering",
+                        Stage::Lowering,
+                        chelis_types::deliberate_rejection!(
+                            "[05-RNG-1]",
+                            "an explicit random seed is a signed int64 value; lowering \
+                             reinterprets its two's-complement bits as uint64 and never \
+                             substitutes zero or ambient state (Chelis-Lang/chelis#794)"
+                        ),
+                    );
                     raise_fatal_lowering_error(
-                        "`with seed(...)` requires a statically-resolvable non-negative \
-                         int64 seed. The DAG lowering must not replace an invalid explicit \
-                         seed with 0 or inherit an outer seed ([05-RNG-1]; \
-                         Chelis-Lang/chelis#794)",
+                        unsupported.to_string(),
                         Some(elems[2].span()),
                         elems[2].span_id().map(ToOwned::to_owned),
                     )
@@ -11534,7 +11546,30 @@ impl LowerCtx {
     }
 
     fn extract_u64_value(&self, expr: &Expr) -> Option<u64> {
-        extract_int_for_dim(expr).and_then(|value| u64::try_from(value).ok())
+        // [05-RNG-1] owns a signed int64 seed, not a dimension-like integer.
+        // Require that exact checked type before recognizing the static leaf;
+        // `extract_int_for_dim` would also accept a float-typed `(lit ... 7)`
+        // by looking only at its payload. Reinterpret the accepted signed
+        // value as two's-complement bits; negative seeds are conforming.
+        let declared = expr_type_metadata(expr)
+            .and_then(Self::try_extract_prim)
+            .or_else(|| {
+                let (DeepTag::Cast, _, kids) = stamped_parts(expr)? else {
+                    return None;
+                };
+                Self::try_extract_prim(kids.get(1)?)
+            });
+        if declared != Some(Prim::Int64) {
+            return None;
+        }
+        let signed = match extract_numeric_leaf(expr)? {
+            StagedScalar::Raw(chelis_types::RawScalar::Int(value)) => value,
+            StagedScalar::Typed(value) if value.prim() == Prim::Int64 => value.as_i64_exact()?,
+            StagedScalar::Raw(chelis_types::RawScalar::Float(_)) | StagedScalar::Typed(_) => {
+                return None;
+            }
+        };
+        Some(signed as u64)
     }
 
     /// Extract a compile-time-constant f64 from an expression, seeing through
@@ -15541,7 +15576,7 @@ mod tests {
     }
 
     #[test]
-    fn issue_794_negative_explicit_seed_is_a_fatal_lowering_error() {
+    fn issue_794_negative_explicit_seed_reinterprets_signed_int64_bits() {
         let expr = chelis_deep::parser::parse_str(
             "(handle-effect {effect: random} \
                 (lit {type: (t-prim {} int64)} -1) \
@@ -15558,20 +15593,21 @@ mod tests {
             let mut ctx = LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
             ctx.random_seed = Some(7);
             let _ = ctx.lower_expr(&expr);
+            ctx.dag
         });
-        let Err(diagnostic) = outcome else {
-            panic!(
-                "an explicit negative seed must not silently inherit outer seed 7 or default to 0"
-            );
-        };
-        assert!(
-            diagnostic.fatal,
-            "the host fallback must not swallow the error"
-        );
-        let message = diagnostic.to_string();
-        assert!(
-            message.contains("non-negative") && message.contains("seed"),
-            "the rejection must name the unsupported explicit seed: {message}"
+        let dag = outcome.expect("signed int64 seeds are valid");
+        let seed = dag
+            .nodes()
+            .iter()
+            .find_map(|node| match node.op {
+                RiscOp::UniformLike { seed, .. } => Some(seed),
+                _ => None,
+            })
+            .expect("handled body contains a uniform_like node");
+        assert_eq!(
+            seed,
+            u64::MAX,
+            "[05-RNG-1] reinterprets -1i64 as its uint64 two's-complement bits"
         );
     }
 
@@ -15597,6 +15633,70 @@ mod tests {
         assert!(
             outcome.is_ok(),
             "non-negative seed control must lower: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn issue_794_wrong_typed_explicit_seed_uses_typed_unsupported_channel() {
+        let expr = chelis_deep::parser::parse_str(
+            "(handle-effect {effect: random} \
+                (lit {type: (t-prim {} f64)} 7) \
+                (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} \
+                     (var {} uniform_like) \
+                     (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 0.0) \
+                     (lit {type: (t-prim {} f64)} 0.0) \
+                     (lit {type: (t-prim {} f64)} 1.0)))",
+        )
+        .expect("parse handled random expression")
+        .pop()
+        .expect("one expression");
+        let outcome = catch_lowering(move || {
+            let mut ctx = LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
+            ctx.random_seed = Some(7);
+            let _ = ctx.lower_expr(&expr);
+        });
+        let diagnostic = outcome.expect_err("an f64 seed is not an int64 seed");
+        assert!(
+            diagnostic.fatal,
+            "host fallback must not swallow the rejection"
+        );
+        let message = diagnostic.to_string();
+        assert!(message.starts_with("unsupported:"), "{message}");
+        assert!(
+            message.contains("[05-RNG-1]") && message.contains("int64"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn issue_794_runtime_explicit_seed_uses_typed_unsupported_channel() {
+        let expr = chelis_deep::parser::parse_str(
+            "(handle-effect {effect: random} \
+                (var {type: (t-prim {} int64)} runtime_seed) \
+                (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} \
+                     (var {} uniform_like) \
+                     (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 0.0) \
+                     (lit {type: (t-prim {} f64)} 0.0) \
+                     (lit {type: (t-prim {} f64)} 1.0)))",
+        )
+        .expect("parse handled random expression")
+        .pop()
+        .expect("one expression");
+        let outcome = catch_lowering(move || {
+            let mut ctx = LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
+            ctx.random_seed = Some(7);
+            let _ = ctx.lower_expr(&expr);
+        });
+        let diagnostic = outcome.expect_err("a runtime seed is not statically resolvable");
+        assert!(
+            diagnostic.fatal,
+            "host fallback must not swallow the rejection"
+        );
+        let message = diagnostic.to_string();
+        assert!(message.starts_with("unsupported:"), "{message}");
+        assert!(
+            message.contains("[05-RNG-1]") && message.contains("int64"),
+            "{message}"
         );
     }
 
