@@ -228,12 +228,21 @@ produce the parse error from `chelis-deep`, not a silent fallback to Surf.
 
 ### 2.6 Source-qualified identity (S7; chelis#1172)
 
+The normative identity, location, cache-attribution, and generated-comment
+rules are [03-SRC-1..4]. The public diagnostic wire is [09-SRC-1..3]. This
+section selects the implementation types, ingress inventory, sequencing, and
+oracles for those rules; it does not independently define the public contract.
+
 The source model has three independent concepts. They must not share one
 string or integer field:
 
 ```rust
-pub struct SourceUnitId(/* opaque, serializable identity */);
-pub struct NodeKey(/* opaque identity allocated by SourceArena */);
+pub struct SourceUnitId([u8; 32]);
+pub struct LocalNodeId(NonZeroU64);
+pub struct NodeKey {
+    pub unit: SourceUnitId,
+    pub local: LocalNodeId,
+}
 pub struct SourceSite {
     pub unit: SourceUnitId,
     pub range: Span,
@@ -248,24 +257,50 @@ pub enum NodeOrigin {
     Unavailable,
 }
 
-pub struct SourceRef {
-    pub node: NodeKey,
+pub struct NodeRef {
+    pub key: NodeKey,
     pub origin: NodeOrigin,
     pub external_span_id: Option<String>,
 }
+
+pub struct DiagnosticSourceRef {
+    pub site: Option<SourceSite>,
+    pub node: Option<NodeRef>,
+}
 ```
 
-- `SourceUnitId` identifies one compiler input. File-based CLI entry points
-  derive it from the canonical module/input identity; compiler-api and cache
-  entry points must supply it explicitly. It is serialized with checked and
-  reusable artifacts. A byte offset or display filename is not a unit ID.
-- `NodeKey` is the semantic identity used by checker and lowering maps. The
-  parser/desugarer allocates every Deep node a nonzero local identity from its
-  source unit, including compiler-authored helper nodes. It is never derived
-  from a byte offset, an external span string, or structural equality.
-  Construction is private to one `SourceArena` per unit; the arena carries
-  its next value through macro/desugar production and serialization so two
-  producers cannot restart a local counter and collide.
+- `SourceUnitId` identifies one immutable input snapshot, not a logical module
+  across edits. Its private constructor hashes a versioned, domain-separated
+  encoding of `(ingress namespace, caller-supplied logical identity, exact
+  source bytes)`. Re-parsing unchanged bytes at the same logical identity
+  produces the same unit; changing even one byte produces a different unit;
+  identical bytes in two paths, request fields, or package modules remain
+  distinct. File-based CLI adapters supply the canonical module/input
+  identity. Compiler-api, Tide, Reef, and cache adapters supply an explicit
+  logical identity for every input buffer; callers never inject unchecked raw
+  digest bytes. A byte offset or display filename is not a unit ID.
+- `NodeKey` is the source-qualified semantic identity used by checker and
+  lowering maps. Its representation is structurally
+  `(SourceUnitId, NonZeroU64)`, so two arenas that both allocate local key `1`
+  cannot collide. The parser/desugarer allocates every Deep node a nonzero
+  local identity in canonical construction order. It is never derived from a
+  byte offset, an external span string, or structural equality. Construction
+  is private to `SourceArena`; a producer cannot restart a counter for an
+  existing unit.
+- A later pass creates one deterministic synthesized arena per output artifact
+  and pass. Its unit is the domain-separated hash of the stable pass identity,
+  the ordered input-artifact identity, and the ordered contributing source
+  units. The arena allocates local IDs in canonical output traversal order.
+  A helper with contributors from multiple units therefore belongs to a fresh
+  synthesized unit rather than borrowing one contributor's unit or restarting
+  any parsed-unit counter. `NodeOrigin::Synthesized` still records the actual
+  contributor sites.
+- Programmatic source-less construction still uses a qualified key: the
+  builder must supply a stable construction namespace and artifact identity
+  to a domain-separated unavailable arena. Its nodes carry
+  `NodeOrigin::Unavailable`; there is no process-global counter and no zero
+  unit. The compiler API rejects a builder that supplies neither parsed,
+  synthesized, nor unavailable arena context.
 - `SourceSite` is a human location. `Span` remains a byte range in exactly one
   identified source unit; it is not meaningful without that unit.
 - `external_span_id` is the existing opaque producer audit label from Deep
@@ -276,6 +311,24 @@ pub struct SourceRef {
   API inputs. It never renders as offset zero. Once a parsed source unit has
   entered the compiler, later passes may produce only `Parsed` or
   `Synthesized`; dropping to `Unavailable` is an invariant failure.
+- `NodeRef` is the provenance carrier of an AST/IR node. A diagnostic uses
+  `DiagnosticSourceRef` instead: lexer and parser errors may carry an exact
+  `SourceSite` before any node exists, while a node-backed diagnostic may
+  additionally carry its `NodeRef`. If both exist, `site` is the exact blame
+  range and need not equal the node's wider parsed origin. No diagnostic
+  fabricates a `NodeKey` merely to report a source range.
+
+`NodeKey` and provenance are compiler identity, not language semantics.
+`Expr::PartialEq`, canonical Deep printing, parse/reprint comparison, and the
+semantic `expanded_deep_digest` exclude them. Any artifact that stores node-
+keyed facts instead uses a provenance-sensitive `SourceIdentityDigest` over
+the cache-format version, the ordered source-unit table, and the semantic
+digest. Decode validates that digest and the source table before exposing any
+linearity or diagnostic facts. The S7 implementation bumps the three current
+formats that can retain these facts (compiled context V13, library cache V6,
+and stdlib cache V9) to their next live versions and adds preceding-version
+rejection tests. If one advances before implementation, S7 allocates the next
+then-live version rather than reusing it.
 
 #### Attribution rules
 
@@ -296,22 +349,42 @@ external ID.
 
 #### Consumer rules
 
-`CheckError`, lowering diagnostics, compiler-api diagnostics, and cached
-linearity data carry the typed `SourceRef`. Machine output exposes the source
-unit, range/origin kind, node key, and external audit ID as distinct fields.
-Human rendering may abbreviate them, but cannot invent a range for
-`Unavailable` or `Synthesized`.
+`CheckError`, lowering diagnostics, and compiler-api diagnostics carry the
+typed `DiagnosticSourceRef`; AST, IR, and cached linearity records carry
+`NodeRef`/`NodeKey`. Machine output exposes source unit, blame range, node key,
+origin kind, contributor sites, and external audit ID as distinct fields.
+Human rendering may abbreviate them, but cannot invent a node for a parse
+error or a range for `Unavailable`/`Synthesized`.
 
 `LinearityInfo` is keyed by `NodeKey`, replacing
 `HashMap<usize, usize>`. `mark_reusable_input` records the checked app node's
-key and lowering queries that same key. Merging separately checked programs
-is then an ordinary disjoint-key union; an equal byte offset in two files is
-not a collision and no library-half-wins rule is needed.
+qualified key and lowering queries that same qualified key. Merging separately
+checked programs is then an ordinary disjoint-key union; an equal byte offset
+or equal local node counter in two files is not a collision and no
+library-half-wins rule is needed.
 
 Generated source keeps `// span: <external-id>` for the external audit chain
-and emits source-qualified comments separately. Consumers can therefore
-distinguish a Deep parser range from an opaque external ID and can trace two
-Surf files that use the same local byte range without aliasing them.
+and emits the numbered-spec `// chelis-source:` record separately. The
+comment uses only the canonical lowercase-hex source-unit encoding and decimal
+local key, never a display path or unvalidated caller string. Consumers can
+therefore distinguish a Deep parser range from an opaque external ID and can
+trace two Surf files that use the same local byte range without aliasing them.
+
+#### Public-ingress inventory
+
+S7 closes every row below in the same implementation change. The inventory is
+derived by entry-point enumeration; adding a public source-bearing entry point
+without a row makes the S7 oracle red.
+
+| ingress | source-unit rule | response/freshness rule |
+|---|---|---|
+| Surf and Deep parser APIs | require logical identity plus exact bytes; allocate one parsed arena | parse failures carry `SourceSite` with no fabricated node |
+| CLI files, imports, and stdin | canonical module/input identity plus exact bytes; stdin receives an explicit invocation-scoped logical identity | diagnostics name the serialized unit and the display-name table separately |
+| compiler-api pipeline entry points | every source-bearing argument is a distinct named buffer | response includes a `source_units` table mapping unit encoding to argument role/display name |
+| Tide/LSP documents | document URI plus exact version bytes; changed bytes mint a new unit | stale-version facts cannot be reused; diagnostics resolve through the response table |
+| Tide edit requests (`module`, `new_body`, `new_decls`) | field role is part of logical identity, so independently parsed buffers cannot collide | splice preserves each node's original unit; response maps every field unit |
+| Reef/package composition | package identity, canonical module identity, and exact module bytes | composition unions qualified keys and retains the package/module display table |
+| compiled-context, library, and stdlib cache decode | deserialize the source table and provenance-sensitive digest | version, digest, or caller-source mismatch rejects the cache before facts are visible |
 
 No fallback reparses `surf:<start>..<end>`, uses `Expr::span().offset` as an
 identity, or treats `Span::new(0, 0)` as both a real location and a missing
@@ -456,7 +529,8 @@ gap between sidecar and emitted C breaks the trust stack.
 S7 is delivered test-first in four dependency-ordered slices:
 
 1. Add failing source-identity tests, then introduce `SourceUnitId`,
-   `NodeKey`, `SourceSite`, `NodeOrigin`, and `SourceRef` in `chelis-deep`.
+   `LocalNodeId`, qualified `NodeKey`, `SourceSite`, `NodeOrigin`, `NodeRef`,
+   and `DiagnosticSourceRef` in `chelis-deep`.
    Source-aware Surf and Deep parser entry points allocate nonzero node keys;
    source-less construction requires an explicit unavailable/synthesized
    origin rather than the zero-span sentinel.
@@ -465,9 +539,12 @@ S7 is delivered test-first in four dependency-ordered slices:
    expression ranges and the attribution table in §2.6, including helpers
    created for declarations, destructuring, pipes, and annotations.
 3. Replace diagnostic scalar offsets/IDs and `LinearityInfo`'s bare-offset
-   key with typed `SourceRef`/`NodeKey`. Serialize the key with checked and
-   reusable contexts. Delete every semantic call to `parse_span_offset` and
-   every source-unit merge policy based on numeric offset precedence.
+   key with typed `DiagnosticSourceRef`/qualified `NodeKey`. Serialize the
+   source table and provenance-sensitive digest with checked and reusable
+   contexts; bump compiled-context, library-cache, and stdlib-cache formats
+   and lock rejection of their immediate predecessors. Delete every semantic
+   call to `parse_span_offset` and every source-unit merge policy based on
+   numeric offset precedence.
 4. Thread the same carrier through lowering, IR, host IR, generated-source
    emission, and compiler-api wire output. Keep opaque external audit IDs
    separate from textual source ranges and synthesized provenance.
@@ -477,6 +554,14 @@ Each slice includes positive/negative parity. Required counterexamples are:
 - two nested expressions on one line retain their exact distinct ranges;
 - two source units with the same local offsets retain distinct node keys,
   diagnostics, and reusable-input facts after composition;
+- reparsing the same logical file after a one-byte edit mints a new unit and
+  rejects a serialized reusable-input record from the prior snapshot, while
+  an unchanged reparse keeps deterministic keys;
+- a Surf or Deep parse error before AST construction carries a qualified
+  source range and no node key;
+- Tide `replace_function_body` and `add_function` preserve separate units for
+  `module`, `new_body`, and `new_decls`, and their response source table maps
+  every diagnostic back to the originating request field;
 - an offset-zero parsed token remains a real `Parsed` site, while a helper
   node is explicitly `Synthesized` and missing provenance is
   `Unavailable`—the three states never compare or render alike;
@@ -496,8 +581,9 @@ lowering → diagnostic and generated-source output for every counterexample
 above. Supporting crate tests do not replace this end-to-end oracle.
 
 🔴 **Red-team gate after S7.** A fresh local subagent executes the oracle,
-plants the three representation regressions named above, and checks all
-public compiler-api and cache entry points for an unqualified source path.
+  plants the qualified-key, changed-snapshot, and fabricated-parser-node
+  regressions named above, and checks the complete public-ingress inventory
+  and cache entry points for an unqualified source path.
 S7 is not complete while any entry point can construct a parsed program
 without a source unit or while any semantic map remains offset-keyed.
 
@@ -530,9 +616,10 @@ metadata-preserving path for producer-supplied Deep metadata beyond parser
 byte ranges); runtime trace tooling; Octant-side
 changes; span survival through external compilation/linking (DWARF,
 post-roadmap); span performance optimization until profiling shows cost.
-S7 does not define IDE document-version protocols or path canonicalization
-outside the compiler ingestion boundary; it requires those callers to supply
-the opaque `SourceUnitId` that keeps their inputs distinct.
+S7 does not define an IDE synchronization protocol or path-canonicalization
+policy outside the compiler ingestion boundary. It does require each adapter
+to supply the stable logical identity and exact bytes from which the private
+`SourceUnitId` constructor derives an immutable snapshot identity.
 
 ## 6. Backward compatibility
 

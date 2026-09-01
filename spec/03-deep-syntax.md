@@ -97,7 +97,9 @@ ordinary Surf expression bodies and emits opaque byte-range IDs of the form
 `surf:<start>..<end>`. These IDs follow the same preservation and validation
 rules as producer-supplied Deep spans. If a programmatic Surf AST has no real
 source byte range, the desugarer omits `span` and downstream synthesized-node
-fallbacks remain available.
+fallbacks remain available. The spelling remains an external audit label
+only: no checker, lowering pass, cache, diagnostic, or generated-source
+consumer may parse it to recover a byte range or semantic node identity.
 
 The `span_*` prefix is the extension namespace for richer span data. Embedded
 byte offsets or file identifiers (rather than sidecar references) MUST use the
@@ -192,6 +194,64 @@ Every IR field that admits a producer-supplied string (module names, type names,
 effect names, and similar values) follows the same pattern. Each emission context must
 apply a context-appropriate sanitizer, including separate comment and format-string
 handling.
+
+#### 1.1.3 Source-qualified compiler identity
+
+> **[03-SRC-1]** A parsed compiler input has an immutable
+> `SourceUnitId`. The canonical value is SHA-256 over the ASCII domain
+> `chelis-source-unit-v1\0` followed by the ingress namespace, logical input
+> identity, and exact source bytes, with each component prefixed by its
+> unsigned 64-bit little-endian byte length. Re-parsing unchanged bytes under
+> the same logical identity reproduces the unit; any byte change changes the
+> unit; two paths, package modules, or request fields remain distinct even
+> when their bytes are equal. A semantic node key is the structural pair
+> `(SourceUnitId, NonZeroU64 local_node_id)`, allocated in canonical
+> construction order by a private arena. A byte offset, display filename,
+> external `span` value, or unqualified local counter is never a node key.
+>
+> A transforming pass that creates nodes from more than one source uses a
+> synthesized source unit, domain-separated by `chelis-synth-unit-v1\0` and
+> derived from the stable pass spelling, ordered input-artifact digest, and
+> ordered contributing source units. It allocates nonzero local IDs in
+> canonical output traversal order and records contributor sites separately.
+> Source identity and provenance do not affect language equality, canonical
+> Deep printing, or the semantic expanded-Deep digest.
+> Programmatic source-less construction uses a separately domain-separated
+> unavailable arena derived from an explicit construction namespace and
+> artifact identity; it never uses a process-global counter or all-zero unit.
+
+> **[03-SRC-2]** Source location and node identity are independent typed
+> fields. A source site is `(SourceUnitId, byte range)`. A parsed or
+> synthesized node additionally has its qualified node key and origin. A
+> lexer or parser diagnostic may carry a source site before any node exists;
+> it must not fabricate a node key. A node-backed diagnostic may carry both
+> an exact blame site and the node provenance, and the ranges need not be
+> equal. Missing location, synthesized origin, and a real zero-offset parsed
+> range are three distinct states.
+
+> **[03-SRC-3]** The `span` metadata value is an opaque external audit ID.
+> It remains byte-for-byte separate from `SourceUnitId`, node key, textual
+> source site, and synthesized contributors. No consumer parses a numeric or
+> `surf:<start>..<end>`-looking value into any of those fields. A cache or
+> reusable artifact that stores node-keyed facts carries an ordered source-
+> unit table and a provenance-sensitive digest over its format version,
+> source-unit table, and semantic digest; decode validates all three before
+> exposing facts from the artifact.
+
+> **[03-SRC-4]** Generated C, HIP, and Metal preserve the existing external
+> audit record `// span: <external-id>` and emit compiler source identity on
+> separate canonical lines. `SourceUnitId` wire text is
+> `su1:<64 lowercase hexadecimal digits>` and node-key text is
+> `nk1:<the same 64 hexadecimal digits>:<nonzero decimal local id>`.
+> A parsed node emits
+> `// chelis-source: <node-key> parsed <source-unit> <start>..<end>`; a
+> synthesized node emits
+> `// chelis-source: <node-key> synthesized <pass>` followed by sorted,
+> deduplicated
+> `// chelis-source-contributor: <source-unit> <start>..<end>` lines; an
+> unavailable-origin node emits
+> `// chelis-source: <node-key> unavailable`. These records contain no display
+> path or unvalidated caller string.
 
 **Provenance metadata.** After macro expansion, each node in the expanded
 form may carry a `source` key in its metadata map indicating the macro invocation it
