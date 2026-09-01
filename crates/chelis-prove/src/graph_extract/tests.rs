@@ -830,8 +830,8 @@ fn entry_scoping_does_not_change_an_already_lowerable_program() {
     // (The bytes need not be identical to the unscoped form -- pruning may
     // drop unreachable roots -- but the target entry must still extract.)
     let scoped = box_range_goal_from_source_entry(
-        "out = (mul(x, x) : tensor[f32])\n\
-         x = (x : tensor[f32])\n",
+        "x = (x : tensor[f32])\n\
+         out = (mul(x, x) : tensor[f32])\n",
         SourceKind::Surf,
         "out",
         input_box(&[("x", -1.0, 1.0)]),
