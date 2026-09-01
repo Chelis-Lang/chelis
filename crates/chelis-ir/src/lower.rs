@@ -4374,6 +4374,41 @@ fn extract_numeric_leaf(expr: &Expr) -> Option<StagedScalar> {
     }
 }
 
+/// Whether a statically foldable numeric spelling ultimately originates in
+/// an integer or floating-point atom rather than a boolean atom.
+///
+/// `extract_numeric_leaf` deliberately maps booleans onto `RawScalar::Int`
+/// for general scalar folding. A random seed has a narrower source contract:
+/// [05-RNG-1] requires an actual signed `int64` value. Keep that source-kind
+/// distinction until an explicit cast has produced the checked `int64`.
+fn seed_has_non_bool_numeric_source(expr: &Expr) -> bool {
+    match expr {
+        Expr::Atom(Atom::Int(_) | Atom::Float(_), _) => true,
+        Expr::Atom(Atom::Bool(_) | Atom::Str(_) | Atom::Name(_) | Atom::Tag(_), _) => false,
+        Expr::List(_, _) | Expr::Node(_, _) => {
+            let Some((tag, _, kids)) = stamped_parts(expr) else {
+                return false;
+            };
+            match tag {
+                DeepTag::Lit => matches!(
+                    kids.first(),
+                    Some(Expr::Atom(Atom::Int(_) | Atom::Float(_), _))
+                ),
+                DeepTag::Cast => kids.first().is_some_and(seed_has_non_bool_numeric_source),
+                DeepTag::App => {
+                    kids.first()
+                        .is_some_and(|callee| expr_is_var_named(callee, "neg"))
+                        && kids.get(1).is_some_and(seed_has_non_bool_numeric_source)
+                }
+                _ => false,
+            }
+        }
+        Expr::Map(_, _) | Expr::MetaExpr(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => {
+            false
+        }
+    }
+}
+
 /// Return true iff any element of `dims` is a wildcard placeholder
 /// dim (a `Named("*", _)` or `Named("", _)` entry that
 /// `crates/chelis-backend-c/src/emit.rs`'s `rename_anonymous_dims`
@@ -11562,6 +11597,9 @@ impl LowerCtx {
         if declared != Some(Prim::Int64) {
             return None;
         }
+        if !seed_has_non_bool_numeric_source(expr) {
+            return None;
+        }
         let signed = match extract_numeric_leaf(expr)? {
             StagedScalar::Raw(chelis_types::RawScalar::Int(value)) => value,
             StagedScalar::Typed(value) if value.prim() == Prim::Int64 => value.as_i64_exact()?,
@@ -15637,6 +15675,36 @@ mod tests {
     }
 
     #[test]
+    fn issue_794_signed_int64_seed_boundaries_and_exact_cast_stay_admitted() {
+        let cases = [
+            (
+                "(lit {type: (t-prim {} int64)} -9223372036854775808)",
+                i64::MIN as u64,
+            ),
+            (
+                "(lit {type: (t-prim {} int64)} 9223372036854775807)",
+                i64::MAX as u64,
+            ),
+            (
+                "(cast {} (lit {type: (t-prim {} int32)} 7) (t-prim {} int64))",
+                7,
+            ),
+        ];
+        let ctx = LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
+        for (source, expected) in cases {
+            let expr = chelis_deep::parser::parse_str(source)
+                .unwrap_or_else(|error| panic!("parse seed control {source}: {error}"))
+                .pop()
+                .expect("one seed control");
+            assert_eq!(
+                ctx.extract_u64_value(&expr),
+                Some(expected),
+                "signed int64 seed control must remain admitted: {source}"
+            );
+        }
+    }
+
+    #[test]
     fn issue_794_wrong_typed_explicit_seed_uses_typed_unsupported_channel() {
         let expr = chelis_deep::parser::parse_str(
             "(handle-effect {effect: random} \
@@ -15656,6 +15724,38 @@ mod tests {
             let _ = ctx.lower_expr(&expr);
         });
         let diagnostic = outcome.expect_err("an f64 seed is not an int64 seed");
+        assert!(
+            diagnostic.fatal,
+            "host fallback must not swallow the rejection"
+        );
+        let message = diagnostic.to_string();
+        assert!(message.starts_with("unsupported:"), "{message}");
+        assert!(
+            message.contains("[05-RNG-1]") && message.contains("int64"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn issue_794_bool_payload_stamped_int64_uses_typed_unsupported_channel() {
+        let expr = chelis_deep::parser::parse_str(
+            "(handle-effect {effect: random} \
+                (lit {type: (t-prim {} int64)} true) \
+                (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} \
+                     (var {} uniform_like) \
+                     (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 0.0) \
+                     (lit {type: (t-prim {} f64)} 0.0) \
+                     (lit {type: (t-prim {} f64)} 1.0)))",
+        )
+        .expect("parse handled random expression")
+        .pop()
+        .expect("one expression");
+        let outcome = catch_lowering(move || {
+            let mut ctx = LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
+            ctx.random_seed = Some(7);
+            let _ = ctx.lower_expr(&expr);
+        });
+        let diagnostic = outcome.expect_err("a bool payload is not an int64 seed");
         assert!(
             diagnostic.fatal,
             "host fallback must not swallow the rejection"
