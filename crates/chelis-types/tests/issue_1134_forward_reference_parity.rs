@@ -3,7 +3,7 @@
 
 use chelis_deep::parse_and_stamp;
 use chelis_surf::{desugar::desugar_program, parser::parse_str as parse_surf};
-use chelis_types::{check_ir_program, check_typed_program};
+use chelis_types::{TypeEnv, check_ir_program, check_ir_with_context, check_typed_program};
 
 type Diagnostics = Vec<(String, String)>;
 
@@ -83,9 +83,47 @@ def identity(x) = x
 }
 
 #[test]
-fn literal_external_input_self_reference_is_legal_at_both_ingresses() {
+fn ascribed_external_input_self_reference_is_legal_at_both_ingresses() {
     let program = surf_program("x = (x : tensor[4, f32])\n");
     assert_accepts_at_both_ingresses(&program, "external input self-reference");
+}
+
+#[test]
+fn bare_self_reference_is_not_an_external_input_at_either_ingress() {
+    let program = deep_program("(def {} x (var {type: (t-prim {} int32)} x))\n");
+    assert_rejects_identically(&program, "CycleDetected", "bare self-reference");
+}
+
+#[test]
+fn a_later_external_input_is_not_visible_to_an_earlier_declaration() {
+    let program = surf_program(
+        r#"
+module ExternalScope
+def capture() -> int32 = x
+x = (x : int32)
+"#,
+    );
+    assert_rejects_identically(&program, "UnboundVariable", "later external input");
+}
+
+#[test]
+fn context_check_cannot_prebind_a_later_external_input_globally() {
+    let program = surf_program(
+        r#"
+module ExternalContext
+def capture() -> int32 = x
+x = (x : int32)
+"#,
+    );
+    let result = check_ir_with_context(&TypeEnv::empty(), &program)
+        .expect_err("later external input must remain unavailable in context checks");
+    assert!(
+        result.errors.iter().any(|error| matches!(
+            error.kind,
+            chelis_types::errors::CheckErrorKind::UnboundVariable { .. }
+        ) && error.message.contains("x")),
+        "expected x to remain unbound: {result:#?}"
+    );
 }
 
 #[test]

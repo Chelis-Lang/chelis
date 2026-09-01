@@ -67,6 +67,14 @@ fn check_rejects_forward_values_on_deep_and_surf_surfaces() {
          base = 7\n",
         "UnboundVariable",
     );
+    assert_failed_report(
+        "later_external_input",
+        "ch",
+        "module ExternalCli\n\
+         def capture() -> int32 = x\n\
+         x = (x : int32)\n",
+        "UnboundVariable",
+    );
 }
 
 #[test]
@@ -152,4 +160,38 @@ fn eval_and_build_reject_forward_values_before_execution_or_lowering() {
         "C build must reject the forward value as unbound; stdout={} stderr={build_stderr}",
         String::from_utf8_lossy(&build.stdout)
     );
+}
+
+#[test]
+fn eval_and_build_reject_a_later_external_input_before_lowering() {
+    let directory = tempdir().expect("tempdir");
+    let path = directory.path().join("later_external_input.ch");
+    write_file(
+        &path,
+        "module ExternalCli\n\
+         def capture() -> int32 = x\n\
+         x = (x : int32)\n",
+    );
+    for command in [
+        vec!["eval", "--file", path.to_str().expect("UTF-8 fixture path")],
+        vec![
+            "build",
+            path.to_str().expect("UTF-8 fixture path"),
+            "--target",
+            "c",
+        ],
+    ] {
+        let output = Command::cargo_bin("chelis")
+            .expect("chelis binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(command)
+            .output()
+            .expect("chelis command must run");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success() && stderr.contains("unbound variable: x"),
+            "command must reject the later external input; stdout={} stderr={stderr}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
 }
