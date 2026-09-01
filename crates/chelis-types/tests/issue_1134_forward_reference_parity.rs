@@ -108,34 +108,66 @@ fn type_stamped_deep_self_reference_is_an_explicit_external_input() {
 
 #[test]
 fn a_later_external_input_is_not_visible_to_an_earlier_declaration() {
-    let program = surf_program(
-        r#"
+    for (label, source) in [
+        (
+            "later ascribed external input",
+            r#"
 module ExternalScope
 def capture() -> int32 = x
 x = (x : int32)
 "#,
+        ),
+        (
+            "later declaration-typed external input",
+            r#"
+module DeclaredExternalScope
+def capture() -> int32 = x
+x: int32 = x
+"#,
+        ),
+    ] {
+        let program = surf_program(source);
+        assert_rejects_identically(&program, "UnboundVariable", label);
+    }
+}
+
+#[test]
+fn a_declaration_typed_value_is_not_visible_before_its_source_position() {
+    let program = surf_program(
+        r#"
+module DeclaredValueScope
+def capture() -> int32 = value
+value: int32 = 7
+"#,
     );
-    assert_rejects_identically(&program, "UnboundVariable", "later external input");
+    assert_rejects_identically(&program, "UnboundVariable", "later declared value");
 }
 
 #[test]
 fn context_check_cannot_prebind_a_later_external_input_globally() {
-    let program = surf_program(
+    for source in [
         r#"
 module ExternalContext
 def capture() -> int32 = x
 x = (x : int32)
 "#,
-    );
-    let result = check_ir_with_context(&TypeEnv::empty(), &program)
-        .expect_err("later external input must remain unavailable in context checks");
-    assert!(
-        result.errors.iter().any(|error| matches!(
-            error.kind,
-            chelis_types::errors::CheckErrorKind::UnboundVariable { .. }
-        ) && error.message.contains("x")),
-        "expected x to remain unbound: {result:#?}"
-    );
+        r#"
+module DeclaredExternalContext
+def capture() -> int32 = x
+x: int32 = x
+"#,
+    ] {
+        let program = surf_program(source);
+        let result = check_ir_with_context(&TypeEnv::empty(), &program)
+            .expect_err("later external input must remain unavailable in context checks");
+        assert!(
+            result.errors.iter().any(|error| matches!(
+                error.kind,
+                chelis_types::errors::CheckErrorKind::UnboundVariable { .. }
+            ) && error.message.contains("x")),
+            "expected x to remain unbound: {result:#?}"
+        );
+    }
 }
 
 #[test]
