@@ -1328,6 +1328,22 @@ gains the new [04-FIT-2] atom. The full Phase 4B oracle is rerun so every
 numeric matrix and frozen numeric region remains executable evidence rather
 than an inference from scope.
 
+The 2026-09-01 ledger-and-scope change narrows the [#1296] composite pre-4C
+entry set so a child leg proves executable `eval`/`c-host`/`c-dag` behavior and
+carries a typed `Unimplemented { issue }` receipt for every unbuilt `hip` or
+`metal` cell. It deliberately moves the complete-file digests for this document
+and `capability_table.md` and the `capability schema`, `capability seed
+dispositions`, `Phase 4 handoff`, and `roadmap ownership` region digests. It
+authors no atom, moves no `[04-NUM]`, `[05-OP]`, or other numbered-spec atom or
+region digest, changes no Table-A/Table-B key or cell type, and leaves the
+generated rejection registry at byte agreement. The named consumers of the
+pre-4C composite are this document and `capability_table.md`; both are amended
+here, and the release ledger in `remediation_roadmap.md` records the same
+narrowing. The same change corrects the stale eighty-three-definition stdlib
+count to the eighty-four the `[05-OP-35]` registry and the census already
+carry, and settles the `capability_table.md` seed row that still cited the
+closed [#691] as an `Unimplemented` owner.
+
 ## B2. Invariants that hold across every boundary
 
 1. **Controls never move.** Every green control in the audit test files
@@ -1737,7 +1753,7 @@ callable from bypassing review while the capability tables are built.
    tensor carriers; byte-exact recursive runtime List/tuple/Dict/ADT
    observation; every active signed-integer sparse-index width across IR and
    public C; canonical gradient consumer-edge order by forward node ordinal
-   and input slot; the 83-definition stdlib manifest; legal compiled host
+   and input slot; the 84-definition stdlib manifest; legal compiled host
    effects with the exact language spelling `IO`; and target-independent
    runtime reduction windows. Logical
    operations are bool-only and do not alias numeric primitives; arithmetic
@@ -1837,6 +1853,30 @@ skipped, stale, nonzero, or success-line-free leg and includes the structural
 mutations named by each child. It is wired to the normal gate; prose coverage
 or a manual waiver is not an entry receipt.
 
+**Amended 2026-09-01: what each leg must prove.** A child oracle satisfies this
+composite when the language contract executes on `eval`, `c-host`, and
+`c-dag`, and every `hip` or `metal` cell it leaves unbuilt carries the typed
+`Unimplemented { issue }` receipt its owner cites. Device execution is not an
+entry condition. That disposition is the one the frozen schema already
+assigns: `capability_table.md` states that current backend capacity "is never
+design authority and therefore uses `Unimplemented` under an open
+implementation owner", so an unbuilt device cell is an authored row rather
+than a hole in the composite. This narrows the entry set only. It weakens no
+host leg, narrows no Table-A signature, and still admits no host fallback,
+inert stub, silent default, zero adjoint, or target-shaped language
+restriction.
+
+Two consequences are accepted deliberately. Phase 4E asserts the typed
+diagnostic for each device cell this narrowing leaves unbuilt rather than
+executing it. For Metal that is already the only available outcome ([#737]:
+that runtime has never been executed). For HIP it reaches only the cells that
+stay `Unimplemented`: the backend has real kernels and a documented hardware
+gate (`scripts/hip_test.py`), and an `Implemented { kernel_id }` cell still
+owes that gate rather than a diagnostic. And [#1291] and the device residual of
+[#1306] stay open while their cells cite them, so the rejection-authority
+liveness gate keeps reporting honestly. Neither closes on this narrowing; each
+closes when its kernels land and its own hardware gate is green.
+
 The [#1287] child command is
 `.venv/bin/python scripts/dtype_count_oracle.py`; success ends with
 `DTYPE COUNT ORACLE: PASS`. It owns the checker grammar, dedicated non-alias
@@ -1852,11 +1892,13 @@ wired to the normal gate. It includes [#1294]'s exact builtin-atom closure and
 every acceptance oracle in the `v0.19 behavior` row of the issue map. In
 particular, chelis#1288's zero-exception census,
 chelis#893/chelis#1289's typed carrier, chelis#1290's balanced reductions,
-chelis#1287/chelis#1291's first-class count cells, chelis#1292's own-width
-tensor comparison, chelis#1293's complete 83-definition stdlib alignment,
+chelis#1287's first-class count cells, chelis#1292's own-width
+tensor comparison, chelis#1293's complete 84-definition stdlib alignment,
 chelis#1295's all-active-float random/rounding rules, chelis#1297's compiled
 host effects, chelis#1298's runtime-axis/window operations, and chelis#1306's
-direct subtraction/extrema identities have landed.
+direct subtraction/extrema identities have landed on the host lanes, with
+every unbuilt device cell carrying the typed receipt the composite gate
+admits above.
 No grandfather, permanent-disposition, successor-override,
 integer-plumbing, bare numeric-carrier, legacy callable, or semantics-divergent
 registered identity remains. Phase 4C may not populate tables around a
@@ -2043,7 +2085,7 @@ operation exists and what it computes.
 | 3 | [#714], [#715] dtype rows, [#716], [#718] C cells, [#723], [#728]; [#687] fully unblocked |
 | 4A-4B | §C6 capacity detection; [#898] reduction authorities; [#753]/[#759]/[#965] language decisions; [05-OP-29] first-class `count` authority; [05-OP-40..41] direct extrema/subtraction authority; canonical reduction-order authority; WireDag v6 schema freeze |
 | pre-4C authority and executable closure | [#1294] closed exhaustive `BuiltinDecl` domain/case declarations plus exact `[05-OP-N]` authority for every discovered Table-A IR/RISC operation and sibling-builtin identity; [#1296] one normal-gate composite over every prerequisite oracle and structural mutation; no machine key/cell type, authoring macro, or row may land first |
-| v0.19 behavior | [#1290] balanced sum/product backend work (also part of [#170]); [#1281] mean/extrema/argument-reduction and windowed-extrema behavior; [#722] remaining compiled integer unary/AD cells; [#753]/[#759]/[#965] numeric callables; [#1282] [05-OP-25] scalar/tensor/recursive-List `to_string` domain; [#1059] compiled C-host Tensor/List rendering cells; [#1284] typed non-numeric logical/comparison/`where` lowering; [#893]/[#1289] typed C carrier; [#1288] zero-exception census; [#1287]/[#1291] exact-only WireDag v6 plus first-class count delivery; [#1292] own-width tensor-close assertions; [#1293] the exact 83-definition stdlib, sole public JSON surface, pathwise random/List adjoints, and stub removal; [#1295] all-active-float `round_to`/`uniform_like`/`dropout` and all-dtype padding; [#1297] legal compiled host-effect operations; [#1298] runtime-axis shape and target-independent window reductions; [#1306] direct checked subtraction and stored-bit extrema selection across every admitted surface and lane |
+| v0.19 behavior | [#1290] balanced sum/product backend work (also part of [#170]); [#1281] mean/extrema/argument-reduction and windowed-extrema behavior; [#722] remaining compiled integer unary/AD cells; [#753]/[#759]/[#965] numeric callables; [#1282] [05-OP-25] scalar/tensor/recursive-List `to_string` domain; [#1059] compiled C-host Tensor/List rendering cells; [#1284] typed non-numeric logical/comparison/`where` lowering; [#893]/[#1289] typed C carrier; [#1288] zero-exception census; [#1287] exact-only WireDag v6 plus first-class count delivery in eval/C, with [#1291]'s device kernels outside the Phase 4C entry set; [#1292] own-width tensor-close assertions; [#1293] the exact 84-definition stdlib, sole public JSON surface, pathwise random/List adjoints, and stub removal; [#1295] all-active-float `round_to`/`uniform_like`/`dropout` and all-dtype padding; [#1297] legal compiled host-effect operations; [#1298] runtime-axis shape and target-independent window reductions; [#1306] direct checked subtraction and stored-bit extrema selection across every admitted surface and lane |
 | 4C-4E | [#692], [#712], [#715] lane-skew mechanisms; [#724]/[#726] generated policy; future lane skew as a class |
 | maintenance | [#878] delivered the internal typed Pad carrier but not the exact-only v6 break owned by [#1287]; [#937] delivered the earlier f64 sampler repair but [#1295] owns the final same-dtype parameter contract; [#1150]/[#1152] are one checked-cast source x target construction with [#730] LU6 owning only host-emission totality and rejection rendering |
 
