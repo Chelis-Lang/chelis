@@ -2705,6 +2705,17 @@
             "reason_prefix": "unclassified inventory hit"
           },
           "expected_kind": "raw-element-pointer",
+          "implementation_sha256": "e047b1a2ed8925c80683c8ac6ac52fa3d559e3ee36f325857ae383971f4ee479",
+          "path": "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
+          "witness_id": "phase0.mutate_objc_pointer_return"
+        },
+        {
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+          "expected_failure": {
+            "code": "inventory.unclassified",
+            "reason_prefix": "unclassified inventory hit"
+          },
+          "expected_kind": "raw-element-pointer",
           "implementation_sha256": "c9e3123e1d4be6a126b7c93eb77f4f93eb6aa80c57cbc43dc9c42e1ea98e8b04",
           "path": "crates/chelis-backend-hip/src/kernels.rs",
           "witness_id": "phase0.mutate_rust_unconstrained_c_source"
@@ -12048,6 +12059,6 @@
       "identity": "kind=width-arithmetic|path=crates/chelis-vocab/src/lib.rs|owner=byte_width|signature=c5366b92e40f3eadb6cd|occurrence=1"
     }
   ],
-  "freeze_sha256": "6cf2f67ba6ee8008d0a188db8cbe33bdd98f7bc1129215092b8354cab49e9a0f",
+  "freeze_sha256": "6cd0147af6601599d43fe025cfda7742c4320d20aa7177f54f50fd463cb438f9",
   "schema_version": 3
 }

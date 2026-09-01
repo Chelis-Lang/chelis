@@ -285,6 +285,33 @@ fn numeric_pointer_return_declarators_get_an_identity() {
 }
 
 #[test]
+fn objective_c_method_results_use_the_same_structural_result_path() {
+    let rows = scan_c_source(
+        r#"
+@interface RuntimeRepresentationProvider
+- (float *)values;
++ (double *)sharedValues;
+- (NSString *)label;
+@end
+"#,
+        "fixture",
+    )
+    .expect("Objective-C++ method declarations parse");
+    let raw = signatures(&rows, "raw-element-pointer");
+    assert_eq!(
+        raw.len(),
+        2,
+        "Objective-C method result disappeared: {rows:#?}"
+    );
+    assert!(raw.iter().any(|signature| signature.contains("values")));
+    assert!(
+        raw.iter()
+            .any(|signature| signature.contains("sharedValues"))
+    );
+    assert!(raw.iter().all(|signature| !signature.contains("label")));
+}
+
+#[test]
 fn active_preprocessor_branch_cannot_hide_a_cxx_rvalue_reference() {
     let rows = scan_c_source(
         r#"

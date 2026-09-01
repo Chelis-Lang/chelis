@@ -33,7 +33,7 @@ DTYPE_MUTATION_SOURCE = Path("crates/chelis-vocab/src/lib.rs")
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "6cf2f67ba6ee8008d0a188db8cbe33bdd98f7bc1129215092b8354cab49e9a0f"
+FREEZE_SHA256 = "6cd0147af6601599d43fe025cfda7742c4320d20aa7177f54f50fd463cb438f9"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -968,6 +968,16 @@ def mutate_c_pointer_return(source: str) -> str:
     )
 
 
+def mutate_objc_pointer_return(source: str) -> str:
+    return _append_probe(
+        source,
+        "RuntimeRepresentationPhase0Provider",
+        "@interface RuntimeRepresentationPhase0Provider\n"
+        "- (float *)runtimeRepresentationPhase0Values;\n"
+        "@end",
+    )
+
+
 def mutate_rust_dynamic_c_pointer(source: str) -> str:
     return _append_probe(
         source,
@@ -1189,6 +1199,11 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
             "raw-element-pointer",
             Path("crates/chelis-runtime/include/chelis_simd.h"),
             mutate_c_pointer_return,
+        ),
+        MutationProbe(
+            "raw-element-pointer",
+            Path("crates/chelis-backend-metal/runtime/chelis_metal_runtime.h"),
+            mutate_objc_pointer_return,
         ),
         MutationProbe(
             "raw-element-pointer",

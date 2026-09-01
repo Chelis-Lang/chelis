@@ -333,6 +333,7 @@ class MutationContractTests(unittest.TestCase):
                 "mutate_cxx_rvalue_reference",
                 "mutate_c_complete_declarator_shapes",
                 "mutate_c_pointer_return",
+                "mutate_objc_pointer_return",
                 "mutate_rust_dynamic_c_pointer",
                 "mutate_rust_positional_and_macro_rules_pointer",
                 "mutate_rust_split_c_pointer",

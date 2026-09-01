@@ -1963,18 +1963,15 @@ fn structural_owner_name(entity: Entity<'_>) -> Option<String> {
 }
 
 fn is_owner(entity: Entity<'_>) -> bool {
-    matches!(
-        entity.get_kind(),
-        EntityKind::FunctionDecl
-            | EntityKind::FunctionTemplate
-            | EntityKind::Method
-            | EntityKind::Constructor
-            | EntityKind::ConversionFunction
-            | EntityKind::StructDecl
-            | EntityKind::UnionDecl
-            | EntityKind::ClassDecl
-            | EntityKind::TypedefDecl
-    )
+    entity.get_result_type().is_some()
+        || matches!(
+            entity.get_kind(),
+            EntityKind::Constructor
+                | EntityKind::StructDecl
+                | EntityKind::UnionDecl
+                | EntityKind::ClassDecl
+                | EntityKind::TypedefDecl
+        )
 }
 
 fn is_carrier_declaration(entity: Entity<'_>) -> bool {
@@ -1984,16 +1981,6 @@ fn is_carrier_declaration(entity: Entity<'_>) -> bool {
             | EntityKind::FieldDecl
             | EntityKind::VarDecl
             | EntityKind::TypedefDecl
-    )
-}
-
-fn is_function_declaration(entity: Entity<'_>) -> bool {
-    matches!(
-        entity.get_kind(),
-        EntityKind::FunctionDecl
-            | EntityKind::FunctionTemplate
-            | EntityKind::Method
-            | EntityKind::ConversionFunction
     )
 }
 
@@ -2045,7 +2032,6 @@ fn walk_compiler_ast(
     }
 
     if in_main_file
-        && is_function_declaration(entity)
         && let Some(return_type) = entity.get_result_type()
         && type_is_numeric_carrier(entity, return_type, source)
     {
