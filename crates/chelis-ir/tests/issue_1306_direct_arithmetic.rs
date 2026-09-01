@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use chelis_ir::dag::{Dag, ExtremaKind, ExtremaOperand, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor};
@@ -157,7 +157,7 @@ fn extrema_adjoint_routes_ties_and_nan_cotangents_to_the_forward_selected_operan
             (1.0, f64::from_bits(0x7ff8_abcd_1234_5678), 0.0, 1.0),
         ];
         for (left_value, right_value, expected_left, expected_right) in cases {
-            let inputs = HashMap::from([
+            let inputs = UnordMap::from([
                 ("left".to_string(), exact_f64(left_value)),
                 ("right".to_string(), exact_f64(right_value)),
             ]);

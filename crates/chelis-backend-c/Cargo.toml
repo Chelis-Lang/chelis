@@ -10,6 +10,7 @@ repository.workspace = true
 sleef = []
 
 [dependencies]
+chelis-unord.workspace = true
 chelis-ir = { path = "../chelis-ir" }
 chelis-types = { path = "../chelis-types" }
 chelis-vocab.workspace = true

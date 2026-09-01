@@ -9,7 +9,7 @@
 //! 4. Node-ID disjointness — library-max + 1 ≤ min(new-code-node IDs).
 //! 5. Library DAG is not mutated (`&context_dag` is `&` only).
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use chelis_deep::Expr;
 use chelis_ir::dag::{Dag, NodeId};
@@ -54,7 +54,7 @@ fn check_monolithic(combined_src: &str) -> CheckedProgram {
     check_linearity(&checked).expect("monolithic linearity clean")
 }
 
-fn eval_dag_root_values(dag: &Dag, inputs: &HashMap<String, TensorValue>) -> Vec<TensorValue> {
+fn eval_dag_root_values(dag: &Dag, inputs: &UnordMap<String, TensorValue>) -> Vec<TensorValue> {
     let roots: Vec<NodeId> = dag.roots().to_vec();
     let values = eval_tensor_roots_with(dag, &roots, |name| inputs.get(name).cloned())
         .expect("eval succeeds");
@@ -71,9 +71,9 @@ fn eval_dag_root_values(dag: &Dag, inputs: &HashMap<String, TensorValue>) -> Vec
 
 fn eval_named_roots(
     dag: &Dag,
-    inputs: &HashMap<String, TensorValue>,
+    inputs: &UnordMap<String, TensorValue>,
     interesting: &[&str],
-) -> HashMap<String, TensorValue> {
+) -> UnordMap<String, TensorValue> {
     // Collect the (single) root index per requested name. For a library
     // `(def {} foo body)` the root is the body's NodeId. For tuple-decomposed
     // defs the roots are Store nodes whose `name` is `foo.N`. We iterate roots
@@ -86,7 +86,7 @@ fn eval_named_roots(
     let values = eval_tensor_roots_with(dag, roots, |name| inputs.get(name).cloned())
         .expect("eval succeeds");
 
-    let mut out = HashMap::new();
+    let mut out = UnordMap::new();
     for &root in roots {
         if let Some(node) = dag.get(root)
             && let RiscOp::Store { name } = &node.op
@@ -183,14 +183,14 @@ fn parity_monolithic_vs_composed_for_library_snippet_pairs() {
         // Monolithic baseline.
         let mono_checked = check_monolithic(&combined_src);
         let mono_dag = lower_program(&mono_checked);
-        let mono_roots = eval_dag_root_values(&mono_dag, &HashMap::new());
+        let mono_roots = eval_dag_root_values(&mono_dag, &UnordMap::new());
 
         // Composed.
         let (_lib_exprs, ctx, lib_checked) = check_lib(case.library_src);
         let library: LoweredLibrary = lower_program_to_library(&lib_checked);
         let new_checked = check_with_ctx(&ctx, case.new_src);
         let composed_dag = lower_program_with_context(&library, &new_checked);
-        let composed_roots = eval_dag_root_values(&composed_dag, &HashMap::new());
+        let composed_roots = eval_dag_root_values(&composed_dag, &UnordMap::new());
 
         // The new-code root must be present in BOTH and agree.
         let mono_root = mono_roots
@@ -347,8 +347,8 @@ fn library_dag_is_not_mutated_by_lower_program_with_context() {
     // And the composed call is repeatable (no hidden state) — running again
     // must produce the same result.
     let again = lower_program_with_context(&library, &new_checked);
-    let evaled_a = eval_dag_root_values(&_composed_dag, &HashMap::new());
-    let evaled_b = eval_dag_root_values(&again, &HashMap::new());
+    let evaled_a = eval_dag_root_values(&_composed_dag, &UnordMap::new());
+    let evaled_b = eval_dag_root_values(&again, &UnordMap::new());
     assert_eq!(
         evaled_a.last().map(|v| v.to_f64_lossy_vec().clone()),
         evaled_b.last().map(|v| v.to_f64_lossy_vec().clone()),

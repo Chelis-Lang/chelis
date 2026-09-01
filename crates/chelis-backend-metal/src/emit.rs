@@ -62,14 +62,14 @@ use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use crate::blas;
 use crate::dtype;
 use crate::kernels;
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
 
 /// Distinct input labels in DAG order.
 ///
 /// Mirrors `chelis_backend_hip::emit::HipEmitter::input_labels`.
 pub fn input_labels(dag: &Dag) -> Vec<String> {
     let mut labels = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = chelis_unord::UnordSet::new();
     for node in dag.nodes() {
         if let RiscOp::Load { name } = &node.op
             && seen.insert(name.as_str().to_string())
@@ -97,7 +97,7 @@ struct OutputSpec {
 /// remaining roots that aren't already covered.
 fn output_specs(dag: &Dag) -> Vec<OutputSpec> {
     let mut specs = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = chelis_unord::UnordSet::new();
 
     for node in dag.nodes() {
         if let RiscOp::Store { name } = &node.op
@@ -333,10 +333,10 @@ struct Emitter {
     /// DAG nodes that participate in a detected matmul subgraph as the
     /// Expand or Mul intermediate. The emitter skips these when walking
     /// the DAG; the matmul kernel emits at the Sum node instead.
-    matmul_consumed: HashSet<usize>,
+    matmul_consumed: UnordSet<usize>,
     /// Sum-node-id → MatmulInfo. emit_node looks up the MatmulInfo here
     /// when reaching the Sum and emits a matmul kernel + dispatch.
-    matmuls: HashMap<usize, blas::MatmulInfo>,
+    matmuls: UnordMap<usize, blas::MatmulInfo>,
 }
 
 impl Emitter {
@@ -346,8 +346,8 @@ impl Emitter {
             body: Vec::new(),
             kernels: Vec::new(),
             plans: Vec::new(),
-            matmul_consumed: HashSet::new(),
-            matmuls: HashMap::new(),
+            matmul_consumed: UnordSet::new(),
+            matmuls: UnordMap::new(),
         }
     }
 

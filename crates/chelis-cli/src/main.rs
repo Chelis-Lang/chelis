@@ -12,10 +12,11 @@ use chelis_deep::DeepTag;
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr};
 use chelis_surf::ast::{Decl, ImportKind};
 use chelis_types::types::{Dim, Effect, EffectSet, NominalArg, TensorPrec, Type};
+use chelis_unord::{UnordMap, UnordSet};
 use chelis_vocab::DiagnosticKind;
 use clap::{ArgAction, ArgGroup, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
@@ -2390,8 +2391,12 @@ fn cmd_check_one_on_grown_stack(
         if chelis_compiler_api::cache_disabled() {
             None
         } else {
-            chelis_compiler_api::check_layered(&prepared.stdlib_decls, &prepared.non_stdlib_decls)
-                .map_err(|e| boxed_string_error(compiler_error_messages(&e)))?
+            chelis_compiler_api::check_layered(
+                &prepared.stdlib_decls,
+                prepared.stdlib_source_digest,
+                &prepared.non_stdlib_decls,
+            )
+            .map_err(|e| boxed_string_error(compiler_error_messages(&e)))?
         }
     } else {
         None
@@ -3116,6 +3121,7 @@ fn cmd_build(
                 let (dependency_decls, entry_layer_decls) = prepared.dependency_entry_partition();
                 chelis_compiler_api::check_layered_for_build(
                     &prepared.stdlib_decls,
+                    prepared.stdlib_source_digest,
                     dependency_decls,
                     entry_layer_decls,
                 )
@@ -5580,7 +5586,7 @@ fn render_incomplete_test_suite(
     let mut child_expect_summary = None::<(usize, usize)>;
 
     if json {
-        let mut seen = HashSet::<String>::new();
+        let mut seen = UnordSet::<String>::new();
         let records = batch_progress.into_iter().chain(
             stdout
                 .lines()
@@ -6745,7 +6751,7 @@ fn group_batch_rows_by_file(
     let index_by_file = batch_jobs
         .iter()
         .map(|job| (job.rel_display.clone(), job.index))
-        .collect::<HashMap<_, _>>();
+        .collect::<UnordMap<_, _>>();
     for row in rows {
         let Some(index) = index_by_file.get(&row.file).copied() else {
             return Some(BatchFallbackReason::IncompleteRows(format!(
@@ -6920,9 +6926,9 @@ fn test_file_scope_names(decls: &[Decl]) -> TestFileScopeNames {
 #[derive(Default)]
 struct BatchScope {
     /// Declared name to the file that declared it.
-    declared: HashMap<String, String>,
+    declared: UnordMap<String, String>,
     /// Imported name to the module it came from and the file that imported it.
-    imported: HashMap<String, (String, String)>,
+    imported: UnordMap<String, (String, String)>,
 }
 
 impl BatchScope {
@@ -9035,7 +9041,7 @@ fn enumerate_test_fns(
     rel_display: &str,
 ) -> EnumerationOutcome {
     let mut out = Vec::new();
-    let mut seen: HashMap<String, bool> = HashMap::new();
+    let mut seen: UnordMap<String, bool> = UnordMap::new();
     for decl in decls {
         let Decl::FunDef {
             name,
@@ -10146,7 +10152,7 @@ fn fallback_symbolic_dims(
 fn lowered_root_names_from_decls(
     decls: &[Decl],
     program_exprs: &[DeepExpr],
-    type_env: &HashMap<String, DeepExpr>,
+    type_env: &BTreeMap<String, DeepExpr>,
 ) -> Vec<String> {
     let deep_exprs = chelis_surf::desugar::desugar_program(decls);
     lowered_root_names_from_selected_exprs(&deep_exprs, program_exprs, type_env)
@@ -10157,7 +10163,7 @@ fn manifest_root_names_from_decls(
     checked: &chelis_types::CheckedProgram,
     target: chelis_types::types::Target,
 ) -> Vec<String> {
-    fn collect_decl_names(expr: &DeepExpr, names: &mut HashSet<String>) {
+    fn collect_decl_names(expr: &DeepExpr, names: &mut UnordSet<String>) {
         match expr {
             DeepExpr::List(list, _) if list.tag() == Some(DeepTag::Module) => {
                 for child in list.elements.iter().skip(3) {
@@ -10176,7 +10182,7 @@ fn manifest_root_names_from_decls(
         }
     }
 
-    let mut selected_defs = HashSet::new();
+    let mut selected_defs = UnordSet::new();
     for expr in chelis_surf::desugar::desugar_program(decls) {
         collect_decl_names(&expr, &mut selected_defs);
     }
@@ -10194,7 +10200,7 @@ fn manifest_root_names_from_decls(
 
 fn lowered_root_names_from_exprs(
     exprs: &[DeepExpr],
-    type_env: &HashMap<String, DeepExpr>,
+    type_env: &BTreeMap<String, DeepExpr>,
 ) -> Vec<String> {
     lowered_root_names_from_selected_exprs(exprs, exprs, type_env)
 }
@@ -10202,7 +10208,7 @@ fn lowered_root_names_from_exprs(
 fn lowered_root_names_from_selected_exprs(
     selected_exprs: &[DeepExpr],
     program_exprs: &[DeepExpr],
-    type_env: &HashMap<String, DeepExpr>,
+    type_env: &BTreeMap<String, DeepExpr>,
 ) -> Vec<String> {
     let mut out = Vec::new();
     for expr in selected_exprs {
@@ -10214,7 +10220,7 @@ fn lowered_root_names_from_selected_exprs(
 fn collect_lowered_root_names_from_expr(
     expr: &DeepExpr,
     program_exprs: &[DeepExpr],
-    type_env: &HashMap<String, DeepExpr>,
+    type_env: &BTreeMap<String, DeepExpr>,
     out: &mut Vec<String>,
 ) {
     match expr {
@@ -10331,12 +10337,12 @@ fn drop_unreachable_eval_only_defs(
     exprs: Vec<DeepExpr>,
     entry_exprs: &[DeepExpr],
 ) -> Vec<DeepExpr> {
-    use std::collections::{HashMap, HashSet};
+    use chelis_unord::{UnordMap, UnordSet};
 
     let reachable = prune_build_program_to_reachable_defs(&exprs, entry_exprs)
         .iter()
         .filter_map(|expr| deep_named_decl_name(expr).map(str::to_string))
-        .collect::<HashSet<_>>();
+        .collect::<UnordSet<_>>();
 
     // Reverse index over the UNREACHABLE named defs, borrowing from `exprs` (no
     // per-def String clones): referenced-name -> the unreachable defs that
@@ -10345,7 +10351,7 @@ fn drop_unreachable_eval_only_defs(
     // eval-only use is preserved for the build gate), and reachability is
     // transitive, so a dropped (unreachable) def is only ever referenced by
     // another unreachable def — the closure stays within this set.
-    let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut dependents: UnordMap<&str, Vec<&str>> = UnordMap::new();
     let mut worklist: Vec<&str> = Vec::new();
     for expr in &exprs {
         let Some(name) = deep_named_decl_name(expr) else {
@@ -10370,7 +10376,7 @@ fn drop_unreachable_eval_only_defs(
     // a dropped name pulls in every unreachable def that references it. Dropping
     // only the DIRECT eval-only users would leave an unreachable wrapper with a
     // dangling reference to a dropped def (see the doc comment).
-    let mut drop_borrowed: HashSet<&str> = HashSet::new();
+    let mut drop_borrowed: UnordSet<&str> = UnordSet::new();
     while let Some(name) = worklist.pop() {
         if !drop_borrowed.insert(name) {
             continue;
@@ -10382,7 +10388,13 @@ fn drop_unreachable_eval_only_defs(
 
     // Materialize the (typically small) dropped set as owned strings so the
     // borrows into `exprs` end before the move below.
-    let drop_names: HashSet<String> = drop_borrowed.into_iter().map(String::from).collect();
+    let drop_names: UnordSet<String> = drop_borrowed
+        .into_sorted()
+        .into_iter()
+        .map(String::from)
+        .collect();
+    drop(worklist);
+    drop(dependents);
 
     exprs
         .into_iter()
@@ -10447,7 +10459,7 @@ fn apply_manifest_display_roots(
     // path evaluates it and renders every dotted leaf. This consumes the
     // manifest before emission; the backend never scans generated C to guess
     // whether an entry point is owed.
-    let mut seen_host_defs = HashSet::new();
+    let mut seen_host_defs = UnordSet::new();
     let host_defs = manifest
         .entries
         .iter()
@@ -10459,7 +10471,7 @@ fn apply_manifest_display_roots(
         .map(|entry| entry.def_name.as_str())
         .collect::<Vec<_>>();
 
-    let mut observation_defs = HashMap::<String, String>::new();
+    let mut observation_defs = UnordMap::<String, String>::new();
     for (observation_index, def_name) in host_defs.into_iter().enumerate() {
         let entries = manifest
             .entries
@@ -10784,7 +10796,7 @@ fn cmd_lint(
         }
     }
     if let Some(ids) = rules_filter {
-        let selected: HashSet<&str> = ids
+        let selected: BTreeSet<&str> = ids
             .split(',')
             .map(str::trim)
             .filter(|id| !id.is_empty())
@@ -10793,7 +10805,7 @@ fn cmd_lint(
             return Err("--rules requires at least one rule id".into());
         }
         rules.retain(|r| selected.contains(r.id()));
-        let found: HashSet<&str> = rules.iter().map(|r| r.id()).collect();
+        let found: BTreeSet<&str> = rules.iter().map(|r| r.id()).collect();
         let missing: Vec<&str> = selected.difference(&found).copied().collect();
         if !missing.is_empty() {
             return Err(format!("no rule with id(s) '{}'", missing.join(",")).into());

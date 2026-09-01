@@ -34,7 +34,7 @@
 //! `wait-timeout`, `std::process`, `serde_json`, `sha2`) are transport
 //! utilities.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -114,7 +114,7 @@ impl BeaconOracleMode {
 /// hash) — see the module docs.
 #[derive(Debug, Clone, Default)]
 pub struct WireDagByteStore {
-    inner: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    inner: Arc<Mutex<UnordMap<String, Vec<u8>>>>,
 }
 
 impl WireDagByteStore {

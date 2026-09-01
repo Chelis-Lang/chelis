@@ -1,6 +1,6 @@
 //! Dedicated Count IR semantics for chelis#1287 / [05-OP-29].
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor};
@@ -48,7 +48,7 @@ fn evaluator_counts_multi_axis_groups_in_original_row_major_order() {
         vec![1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 1],
     )
     .expect("bool fixture");
-    let values = eval_tensor(&dag, &HashMap::from([("x".into(), input)])).expect("count eval");
+    let values = eval_tensor(&dag, &UnordMap::from([("x".into(), input)])).expect("count eval");
     let output = &values[&chelis_ir::dag::NodeId(1)];
     assert_eq!(output.shape, vec![3]);
     assert_eq!(output.to_f64_lossy_vec(), vec![3.0, 3.0, 2.0]);
@@ -61,7 +61,7 @@ fn evaluator_returns_zero_for_a_selected_zero_extent() {
     assert!(verify::verify(&dag).is_empty());
     let input = TensorValue::finalize_from_wide_int("test", Prim::Bool, vec![2, 0, 3], vec![])
         .expect("empty bool fixture");
-    let values = eval_tensor(&dag, &HashMap::from([("x".into(), input)])).expect("count eval");
+    let values = eval_tensor(&dag, &UnordMap::from([("x".into(), input)])).expect("count eval");
     assert_eq!(
         values[&chelis_ir::dag::NodeId(1)].to_f64_lossy_vec(),
         vec![0.0; 6]

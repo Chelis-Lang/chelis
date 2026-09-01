@@ -576,6 +576,7 @@ fn prove_surf_file(
                                 .partition(|decl| prepared.stdlib_decls.contains(decl));
                         let check_status = obligation_run::check_linked_decls(
                             &reachable_stdlib,
+                            prepared.stdlib_source_digest,
                             &reachable_non_stdlib,
                             options,
                             totals,

@@ -1092,7 +1092,7 @@ fn cross_backend_bf16_add_mul_chain_agrees_with_evaluator() {
     dag.add_node(RiscOp::Mul, vec![add, c], vec_ty(n, Prim::Bf16), None);
 
     // Evaluator
-    let mut inputs = std::collections::HashMap::new();
+    let mut inputs = chelis_unord::UnordMap::new();
     let a_eval = chelis_ir::eval::TensorValue::from_vec(
         vec![n],
         vec![0.5, 1.5, 2.5, -0.25, 1.0, 2.0, -1.0, 0.125],

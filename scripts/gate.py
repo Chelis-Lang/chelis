@@ -268,6 +268,15 @@ HASH_ORDER_COMPILE_FAIL: list[str] = [
     MANAGED_PYTHON,
     "scripts/check_hash_order_compile_fail.py",
 ]
+# chelis#1341 Phase B: scan every Rust source independent of Cargo features
+# and reject raw hash carriers or unreviewed lint allowances. The full
+# executable oracle remains the phase acceptance command; this scan-only form
+# is the cheap continuous completeness lock.
+HASH_ORDER_TOKEN_TRIPWIRE: list[str] = [
+    MANAGED_PYTHON,
+    "scripts/hash_order_determinism_oracle.py",
+    "--scan-only",
+]
 # The pipeline-core boundary guards. Before this, they ran only in the manual
 # `compiler_pipeline_oracle.py`, so a forbidden dependency, a false no_std
 # claim, or a broken facade compile-fail boundary passed hosted CI green. The
@@ -350,6 +359,7 @@ STAGES: dict[str, list[list[str]]] = {
         DOCTEST_PIPELINE_CORE,
         CHECKPOINT_COMPILE_FAIL,
         HASH_ORDER_COMPILE_FAIL,
+        HASH_ORDER_TOKEN_TRIPWIRE,
         PIPELINE_CORE_DEPENDENCY_GUARD,
         PIPELINE_CORE_DOCUMENTATION_GUARD,
         PIPELINE_CORE_COMPILE_FAIL,
@@ -383,6 +393,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     DOCTEST_PIPELINE_CORE,
     CHECKPOINT_COMPILE_FAIL,
     HASH_ORDER_COMPILE_FAIL,
+    HASH_ORDER_TOKEN_TRIPWIRE,
     PIPELINE_CORE_DEPENDENCY_GUARD,
     PIPELINE_CORE_DOCUMENTATION_GUARD,
     UNREPRESENTABLE_DOMAIN_ORACLE,

@@ -22,8 +22,9 @@
 //! `infer_top_level` for stamping), every hook is a no-op, so the
 //! drivers that install it remain the single source of violations.
 
+use chelis_unord::UnordSet;
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -44,16 +45,16 @@ pub(crate) struct OpacityModuleMeta {
     /// package linker historically stripped `Export` decls during
     /// rewrite (survey section 2), and modules absent here are never
     /// the source of a sixth-rejection flag (see `bindings`).
-    pub exports: HashMap<String, BTreeSet<String>>,
+    pub exports: BTreeMap<String, BTreeSet<String>>,
     /// Top-level binding name -> defining module key, for bindings
     /// declared inside lexical module wrappers. Used by the sixth
     /// rejection; names absent from this map are never flagged
     /// (fail-open for unattributable names, so package-linked
     /// exported producers stay callable).
-    pub bindings: HashMap<String, String>,
+    pub bindings: BTreeMap<String, String>,
     /// Opaque ADT name -> formatted producer entries
     /// ("name: sig"), unioned across phases, for error text.
-    pub producer_entries: HashMap<String, BTreeSet<String>>,
+    pub producer_entries: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl OpacityModuleMeta {
@@ -257,10 +258,7 @@ fn terminal_segment(name: &str) -> &str {
 /// reference's terminal segment. Terminal ambiguity yields `None`
 /// (fail-open) -- which matches inference, since an ambiguous bare
 /// reference does not resolve cleanly there either.
-fn resolve_binding_key<'a>(
-    name: &str,
-    bindings: &'a std::collections::HashMap<String, String>,
-) -> Option<&'a str> {
+fn resolve_binding_key<'a>(name: &str, bindings: &'a BTreeMap<String, String>) -> Option<&'a str> {
     if let Some((key, _)) = bindings.get_key_value(name) {
         return Some(key.as_str());
     }
@@ -447,7 +445,7 @@ pub(crate) fn demangle_type(ty: &Type) -> Type {
 /// unexported `helper() -> WrapRec` where the non-opaque `WrapRec`
 /// carries a `Probability` field mentions `Probability`.
 pub(crate) fn type_mentions_adt(ty: &Type, target: &str, adt_reg: &AdtRegistry) -> bool {
-    let mut seen = HashSet::new();
+    let mut seen = UnordSet::new();
     mentions_inner(ty, target, adt_reg, &mut seen)
 }
 
@@ -455,7 +453,7 @@ fn mentions_inner(
     ty: &Type,
     target: &str,
     adt_reg: &AdtRegistry,
-    seen: &mut HashSet<String>,
+    seen: &mut UnordSet<String>,
 ) -> bool {
     match ty {
         Type::Adt(name, args) => {

@@ -21,7 +21,7 @@
 //! `nn/embedding.ch`. See the gdb backtrace recorded in this commit's
 //! body for the canonical reproducer.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -89,17 +89,17 @@ pub enum TypeErrorKind {
 /// [`Subst::insert_dim`] to record new bindings during unification.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Subst {
-    types: Mutex<HashMap<TypeVar, Type>>,
+    types: Mutex<UnordMap<TypeVar, Type>>,
     /// Semantic domains attached to unresolved type variables. This is
     /// serialized with reusable checking contexts: a constrained function
     /// value must not become unconstrained after a cache round trip.
     #[serde(default)]
-    tvar_restrictions: Mutex<HashMap<TypeVar, TypeVarRestriction>>,
-    dims: Mutex<HashMap<DimVar, Dim>>,
+    tvar_restrictions: Mutex<UnordMap<TypeVar, TypeVarRestriction>>,
+    dims: Mutex<UnordMap<DimVar, Dim>>,
     /// Rank-variable bindings: a `RankVar` binds to the *entire* shape vector
     /// it stands for (Tier-2 rank polymorphism). A binding to `[Dim::Rank(r2)]`
     /// is a rank-to-rank alias resolved transitively by `resolve_rvar`.
-    ranks: Mutex<HashMap<RankVar, Vec<Dim>>>,
+    ranks: Mutex<UnordMap<RankVar, Vec<Dim>>>,
     /// Issue #256 soundness ledger. The `borrow` inference arm accepts a
     /// borrow whose inner type is still an unresolved `Type::Var`,
     /// deferring the tensor-or-carrier classification to subsequent
@@ -148,11 +148,11 @@ pub struct Subst {
     level_transitions: Vec<LevelTransition>,
     /// Sparse overrides for variables unified into an older scope.
     #[serde(default)]
-    lowered_tvar_levels: HashMap<TypeVar, u32>,
+    lowered_tvar_levels: UnordMap<TypeVar, u32>,
     #[serde(default)]
-    lowered_dvar_levels: HashMap<DimVar, u32>,
+    lowered_dvar_levels: UnordMap<DimVar, u32>,
     #[serde(default)]
-    lowered_rvar_levels: HashMap<RankVar, u32>,
+    lowered_rvar_levels: UnordMap<RankVar, u32>,
     /// IDs below these floors came from an earlier persisted check and are
     /// always level zero in the resumed check.
     #[serde(default)]
@@ -269,27 +269,46 @@ mod deferred_order {
         }
     }
 
-    fn prepare_store_for_downstream<T>(store: &mut HashMap<TypeVar, Vec<Sourced<T>>>) {
+    fn prepare_store_for_downstream<T>(store: &mut UnordMap<TypeVar, Vec<Sourced<T>>>) {
         let mut positions = store
-            .iter_mut()
+            .to_sorted()
+            .into_iter()
             .flat_map(|(var, constraints)| {
                 let var_id = var.0;
                 constraints
-                    .iter_mut()
+                    .iter()
                     .enumerate()
-                    .map(move |(constraint_index, entry)| (var_id, constraint_index, entry))
+                    .map(move |(constraint_index, entry)| {
+                        (
+                            entry.position.composition_key(),
+                            var_id,
+                            constraint_index,
+                            *var,
+                        )
+                    })
             })
             .collect::<Vec<_>>();
-        positions.sort_by_key(|(var_id, constraint_index, entry)| {
-            (entry.position.composition_key(), *var_id, *constraint_index)
+        positions.sort_by_key(|(position, var_id, constraint_index, _)| {
+            (*position, *var_id, *constraint_index)
         });
-        for (library_ordinal, (_, _, entry)) in positions.into_iter().enumerate() {
+        for (library_ordinal, (_, _, constraint_index, var)) in positions.into_iter().enumerate() {
+            let entry = &mut store
+                .get_mut(&var)
+                .expect("recorded deferred variable remains present")[constraint_index];
             entry.position = DeferredSourcePosition::Imported {
                 first_reference: None,
                 library_ordinal: library_ordinal as u64,
             };
         }
-        for constraints in store.values_mut() {
+        let vars = store
+            .to_sorted()
+            .into_iter()
+            .map(|(var, _)| *var)
+            .collect::<Vec<_>>();
+        for var in vars {
+            let constraints = store
+                .get_mut(&var)
+                .expect("collected deferred variable remains present");
             constraints.sort_by_key(|entry| entry.position.sort_key());
         }
     }
@@ -297,7 +316,7 @@ mod deferred_order {
     #[derive(Debug, Clone, Default, Serialize, Deserialize)]
     #[serde(transparent)]
     pub(super) struct DeferredExpandConstraints(
-        HashMap<TypeVar, Vec<Sourced<DeferredExpandConstraint>>>,
+        UnordMap<TypeVar, Vec<Sourced<DeferredExpandConstraint>>>,
     );
 
     impl DeferredExpandConstraints {
@@ -339,7 +358,8 @@ mod deferred_order {
         pub(super) fn settlement_order(&self) -> Vec<TypeVar> {
             let mut vars = self
                 .0
-                .iter()
+                .to_sorted()
+                .into_iter()
                 .filter_map(|(var, constraints)| {
                     constraints
                         .first()
@@ -375,7 +395,7 @@ mod deferred_order {
     #[derive(Debug, Clone, Default, Serialize, Deserialize)]
     #[serde(transparent)]
     pub(super) struct DeferredReshapeConstraints(
-        HashMap<TypeVar, Vec<Sourced<DeferredReshapeConstraint>>>,
+        UnordMap<TypeVar, Vec<Sourced<DeferredReshapeConstraint>>>,
     );
 
     impl DeferredReshapeConstraints {
@@ -563,12 +583,33 @@ impl Subst {
         let floors = var_gen.watermarks();
         self.resume_floors = floors;
         self.level_transitions.clear();
-        self.lowered_tvar_levels
-            .retain(|var, _| var.0 >= floors.next_tvar);
-        self.lowered_dvar_levels
-            .retain(|var, _| var.0 >= floors.next_dvar);
-        self.lowered_rvar_levels
-            .retain(|var, _| var.0 >= floors.next_rvar);
+        let stale_tvars = self
+            .lowered_tvar_levels
+            .to_sorted()
+            .into_iter()
+            .filter_map(|(var, _)| (var.0 < floors.next_tvar).then_some(*var))
+            .collect::<Vec<_>>();
+        for var in stale_tvars {
+            self.lowered_tvar_levels.remove(&var);
+        }
+        let stale_dvars = self
+            .lowered_dvar_levels
+            .to_sorted()
+            .into_iter()
+            .filter_map(|(var, _)| (var.0 < floors.next_dvar).then_some(*var))
+            .collect::<Vec<_>>();
+        for var in stale_dvars {
+            self.lowered_dvar_levels.remove(&var);
+        }
+        let stale_rvars = self
+            .lowered_rvar_levels
+            .to_sorted()
+            .into_iter()
+            .filter_map(|(var, _)| (var.0 < floors.next_rvar).then_some(*var))
+            .collect::<Vec<_>>();
+        for var in stale_rvars {
+            self.lowered_rvar_levels.remove(&var);
+        }
         self.level_transitions.push(LevelTransition {
             kind: LevelTransitionKind::Resume,
             level: 0,
@@ -689,12 +730,12 @@ impl Subst {
 
     /// Snapshot of the type-variable bindings (cloned out of the lock).
     /// Useful for serialization, tests, and read-only inspection.
-    pub fn types_snapshot(&self) -> HashMap<TypeVar, Type> {
+    pub fn types_snapshot(&self) -> UnordMap<TypeVar, Type> {
         self.types.lock().expect("subst.types poisoned").clone()
     }
 
     /// Snapshot of the dim-variable bindings.
-    pub fn dims_snapshot(&self) -> HashMap<DimVar, Dim> {
+    pub fn dims_snapshot(&self) -> UnordMap<DimVar, Dim> {
         self.dims.lock().expect("subst.dims poisoned").clone()
     }
 
@@ -753,7 +794,7 @@ impl Subst {
             .copied()
     }
 
-    fn tvar_restrictions_snapshot(&self) -> HashMap<TypeVar, TypeVarRestriction> {
+    fn tvar_restrictions_snapshot(&self) -> UnordMap<TypeVar, TypeVarRestriction> {
         self.tvar_restrictions
             .lock()
             .expect("subst.tvar_restrictions poisoned")
@@ -1100,7 +1141,7 @@ impl Subst {
     }
 
     /// Snapshot of the rank-variable bindings.
-    pub fn ranks_snapshot(&self) -> HashMap<RankVar, Vec<Dim>> {
+    pub fn ranks_snapshot(&self) -> UnordMap<RankVar, Vec<Dim>> {
         self.ranks.lock().expect("subst.ranks poisoned").clone()
     }
 
@@ -1312,9 +1353,9 @@ impl Subst {
     fn apply_excluding(
         &self,
         ty: &Type,
-        quantified_tvars: &std::collections::HashSet<TypeVar>,
-        quantified_dvars: &std::collections::HashSet<DimVar>,
-        quantified_rvars: &std::collections::HashSet<RankVar>,
+        quantified_tvars: &chelis_unord::UnordSet<TypeVar>,
+        quantified_dvars: &chelis_unord::UnordSet<DimVar>,
+        quantified_rvars: &chelis_unord::UnordSet<RankVar>,
     ) -> Type {
         match ty {
             Type::Var(v) if quantified_tvars.contains(v) => ty.clone(),
@@ -1442,7 +1483,7 @@ impl Subst {
     fn resolve_tvar_excluding(
         &self,
         start: TypeVar,
-        quantified: &std::collections::HashSet<TypeVar>,
+        quantified: &chelis_unord::UnordSet<TypeVar>,
     ) -> Type {
         let map = self.types.lock().expect("subst.types poisoned");
         let mut current = start;
@@ -1461,11 +1502,7 @@ impl Subst {
         Type::Var(current)
     }
 
-    fn apply_dim_excluding(
-        &self,
-        dim: &Dim,
-        quantified: &std::collections::HashSet<DimVar>,
-    ) -> Dim {
+    fn apply_dim_excluding(&self, dim: &Dim, quantified: &chelis_unord::UnordSet<DimVar>) -> Dim {
         let Dim::Var(start) = dim else {
             return dim.clone();
         };
@@ -1489,7 +1526,7 @@ impl Subst {
     fn resolve_rvar_excluding(
         &self,
         start: RankVar,
-        quantified: &std::collections::HashSet<RankVar>,
+        quantified: &chelis_unord::UnordSet<RankVar>,
     ) -> Vec<Dim> {
         let map = self.ranks.lock().expect("subst.ranks poisoned");
         let mut current = start;
@@ -1554,7 +1591,7 @@ impl Subst {
         trial.compose_bindings(other);
 
         let mut restrictions = self.tvar_restrictions_snapshot();
-        for (var, incoming) in other.tvar_restrictions_snapshot() {
+        for (var, incoming) in other.tvar_restrictions_snapshot().into_sorted() {
             if let Some(existing) = restrictions.get(&var).copied() {
                 merge_tvar_restrictions(existing, incoming)?;
             } else {
@@ -1567,9 +1604,7 @@ impl Subst {
             .lock()
             .expect("subst.tvar_restrictions poisoned")
             .clear();
-        let mut ordered = restrictions.into_iter().collect::<Vec<_>>();
-        ordered.sort_by_key(|(var, _)| var.0);
-        for (source, restriction) in ordered {
+        for (source, restriction) in restrictions.into_sorted() {
             let resolved = trial.resolve_tvar(source);
             ensure_tvar_restriction(restriction, &resolved)?;
             if let Type::Var(target) = resolved {
@@ -1691,13 +1726,29 @@ impl Subst {
         // helper runs on a clone, so it is distinct even for `s.compose(&s)`.
         {
             let mut self_types = self.types.lock().expect("subst.types poisoned");
-            for val in self_types.values_mut() {
+            let vars = self_types
+                .to_sorted()
+                .into_iter()
+                .map(|(var, _)| *var)
+                .collect::<Vec<_>>();
+            for var in vars {
+                let val = self_types
+                    .get_mut(&var)
+                    .expect("collected type variable remains present");
                 *val = other.apply(val);
             }
         }
         {
             let mut self_dims = self.dims.lock().expect("subst.dims poisoned");
-            for val in self_dims.values_mut() {
+            let vars = self_dims
+                .to_sorted()
+                .into_iter()
+                .map(|(var, _)| *var)
+                .collect::<Vec<_>>();
+            for var in vars {
+                let val = self_dims
+                    .get_mut(&var)
+                    .expect("collected dimension variable remains present");
                 *val = other.apply_dim(val);
             }
         }
@@ -1707,7 +1758,15 @@ impl Subst {
             // silently drop rank substitutions through a compose — a Tier-3
             // footgun since ranks are now load-bearing.
             let mut self_ranks = self.ranks.lock().expect("subst.ranks poisoned");
-            for val in self_ranks.values_mut() {
+            let vars = self_ranks
+                .to_sorted()
+                .into_iter()
+                .map(|(var, _)| *var)
+                .collect::<Vec<_>>();
+            for var in vars {
+                let val = self_ranks
+                    .get_mut(&var)
+                    .expect("collected rank variable remains present");
                 *val = val.iter().map(|d| other.apply_dim(d)).collect();
             }
         }
@@ -1716,19 +1775,19 @@ impl Subst {
         let other_ranks = other.ranks_snapshot();
         {
             let mut self_types = self.types.lock().expect("subst.types poisoned");
-            for (k, v) in other_types {
+            for (k, v) in other_types.into_sorted() {
                 self_types.entry(k).or_insert(v);
             }
         }
         {
             let mut self_dims = self.dims.lock().expect("subst.dims poisoned");
-            for (k, v) in other_dims {
+            for (k, v) in other_dims.into_sorted() {
                 self_dims.entry(k).or_insert(v);
             }
         }
         {
             let mut self_ranks = self.ranks.lock().expect("subst.ranks poisoned");
-            for (k, v) in other_ranks {
+            for (k, v) in other_ranks.into_sorted() {
                 self_ranks.entry(k).or_insert(v);
             }
         }

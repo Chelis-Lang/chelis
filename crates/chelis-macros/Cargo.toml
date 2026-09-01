@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+chelis-unord.workspace = true
 chelis-deep.workspace = true
 thiserror.workspace = true
 

@@ -1,11 +1,11 @@
 # Hash-Order Determinism: observable behavior never depends on hash iteration order
 
-**Status:** ACTIVE. Phase A is implemented; Phase B remains proposed. Tracking
-issue: [#1341].
+**Status:** IMPLEMENTED. Phases A and B are implemented. Tracking issue: [#1341].
 Amended 2026-08-28: the mechanism moved from the census enumerator that PR #1366
 merged to a type-level ban, then was cut to what defends a known instance or a spec
 sentence; see § Rationale and alternatives set aside. Phase A was implemented and
-its named oracle passed on 2026-08-31. Function names are the durable anchors.
+its named oracle passed on 2026-08-31. Phase B's named oracle passed on
+2026-09-01. Function names are the durable anchors.
 **Owning specs:** `spec/00-context.md` §5 states the rule this plan implements:
 for fixed program text, compiler build, target, and declared inputs, every check,
 evaluation, and build result is a function of those inputs. `spec/04-type-system.md`
@@ -55,7 +55,7 @@ carries no false-pass probability claim.
 | ADT variant dispatch (`adt.rs`, `lookup_variant_preferring_shape`) | hash order selected the first matching variant | resolved by sorting candidates by ADT name |
 | input-validation preamble (C and HIP emitters) | validation-block order changed emitted bytes | resolved at `17a28b9`; regression in `codegen_determinism.rs` |
 | Load pre-creation (`chelis-ir`, `lower_subexpr_program_inner`) | input-slot order and emitted C bytes varied after lowering | resolved in the chelis#469 wave; CLI regression in `rank_poly_tier3` |
-| `CompiledContext::{encode, save}` and CLI worker handoff | identical fixed-source package contexts produced eight distinct encoded digests in eight fresh processes | OPEN - Phase B |
+| `CompiledContext::{encode, save}` and CLI worker handoff | identical fixed-source package contexts produced eight distinct encoded digests in eight fresh processes | resolved in Phase B by canonical collection serialization and a 24-process exact-byte oracle |
 
 The escalation is the class evidence: presentation and persisted bytes, ABI slot
 assignment, dispatch and linearity verdicts, and now the type checker's accept/reject
@@ -109,10 +109,11 @@ all caught; Phase B proves each spelling with a compile-fail fixture rather than
 citation. The ban applies to every target Clippy compiles, tests included: a test
 whose expected value passes through a hash walk is itself a coin flip, and a retried
 flake is the CI-hiding failure mode [#1341] records. Exactly one production
-`#[allow(clippy::disallowed_types)]` exists, on the wrapper's private field, where
+`#[allow(clippy::disallowed_types)]` exists, on the wrapper's private raw-storage module, where
 `clippy::iter_over_hash_type` is also denied. The perturbation fixtures of C3.2
-need raw maps to construct fresh hash states; each carries a narrow allow and an
-allow-list entry.
+exercise fresh hash states through the wrapper. The disallowed-type compile-fail
+fixture intentionally names raw maps and each spelling has an exact tripwire
+allow-list entry; it carries no lint allowance because rejection is the test.
 
 #### C2.2 The order-free workspace map and set
 
@@ -120,29 +121,44 @@ The wrapper lives in a new leaf crate, `chelis-unord`, that depends on `std` and
 `serde` only. `chelis-vocab` cannot host it: that crate is `#![no_std]`,
 dependency-free, and purity-locked by `crates/chelis-vocab/tests/crate_purity.rs`.
 Every crate whose sources carry a hash map (types, ir, the C, HIP, and Metal
-backends, compiler-api, cli, effects, deep, surf, prove, lint, pipeline-core, lsp,
+backends, compiler-api, cli, effects, surf, prove, lint, pipeline-core, lsp,
 validate, reef, macros, e2e) gains one direct dependency edge in Phase B, and
 `scripts/pipeline_core_dependency_guard.py` adds the crate to
 `APPROVED_DIRECT_DEPENDENCIES` in the same change. A test-only hit
-(`chelis-tide/tests/mcp.rs`) migrates to `BTreeMap` without the edge.
+(`chelis-deep/src/tag.rs` and `chelis-tide/tests/mcp.rs`) migrates to an ordered
+collection without the edge.
 
-The API is hashed lookup and mutation (`insert`, `get`, `get_mut`, `remove`,
-`contains_key`, `len`, `is_empty`, `entry`, `extend`, `FromIterator`),
-order-insensitive queries (`all`, `any`, `count`, `map_values`, `merge`), one
-ordered exit `to_sorted_by_key` whose key must be injective over the contents (a
-tie would fall back to hash order, so a tying key panics in debug builds), and
-`Serialize` as the key-sorted sequence with a `Deserialize` that rejects a duplicate
-key, so a wrapper field under derived Serde is canonical without an adapter. There
-is no `iter`, `keys`, `values`, `drain`, `IntoIterator`, or `Deref` to the inner
-map, and a test pins the public method set so an order-exposing method cannot be
-added without changing this document.
+The API is hashed lookup and mutation (`insert`, `get`, `get_key_value`,
+`get_mut`, `remove`, `contains_key`, `len`, `is_empty`, `entry`, `clear`,
+`extend`, `FromIterator`, and `merge`) plus borrowed and consuming forms of one
+no-callback ordered exit (`to_sorted`, `into_sorted`). A key used in lookup or
+mutation has `Ord` as well as `Eq + Hash`: its owning authority defines that
+order as canonical identity order, never as semantic priority. The wrapper
+stores only randomized `u64 -> Vec<usize>` buckets in the raw hash table; user
+keys and values live in indexed slots, and a separate vector of slot indices is
+maintained in canonical key order at mutation time. Application code therefore
+never runs while raw table order is observable. `Clone`, `PartialEq`, the ordered
+exits, `Serialize`, `clear`, and destruction all walk the maintained canonical
+index rather than collecting a raw walk and sorting afterward. There is no
+callback-bearing query, mutation, or projection exit: even an apparently
+read-only closure can observe visitation order through interior mutability,
+logging, or atomics. `Debug` reports only the wrapper kind and length.
+`Serialize` emits a key-sorted sequence and `Deserialize` rejects a duplicate
+key, so a wrapper field under derived Serde is canonical without an adapter.
+There is no `iter`, `keys`, `values`, `drain`, `IntoIterator`, or `Deref` to the
+inner map; tests pin the public inherent and trait sets and exercise lawful
+side-effectful trait implementations across 64 equivalent fresh hash states.
 
 Most hash-map uses in the workspace are lookup-only and move to the wrapper
-unchanged; the rest iterate and move to `BTreeMap` when their key is `Ord` and the
-canonical order, or to `to_sorted_by_key` with the numeric payload of `TypeVar`,
-`DimVar`, `RankVar`, or `NodeId`, which C3.1 classifies as byte or cache order,
-never semantic authority. Hot lookup paths (`Subst::apply` and `apply_dim`,
-`Env::bindings`, the `lower.rs` symbol tables, `dag.rs` remaps) stay hashed.
+unchanged; the rest iterate and move to `BTreeMap` when their key is `Ord` and
+the canonical order, or materialize the wrapper's key-sorted exit before any
+application callback runs. Numeric identity keys such as `TypeVar`, `DimVar`,
+`RankVar`, and `NodeId` implement `Ord` by their payload; `Prim` uses its
+canonical dtype spelling and `LoadStoreName` its validated string payload. C3.1
+classifies each as byte or cache order, never semantic authority. A consumer that needs value
+order first materializes key order, then sorts the resulting ordinary vector.
+Hot lookup paths (`Subst::apply` and `apply_dim`, `Env::bindings`, the
+`lower.rs` symbol tables, `dag.rs` remaps) stay hashed.
 
 #### C2.3 The token tripwire
 
@@ -151,10 +167,11 @@ feature or a platform `cfg` is invisible to it, and such carriers exist today
 (`chelis-prove/src/tier_b.rs`, `carcara_audit.rs`, and `z3_engine.rs` behind
 `smt`, `carcara`, and `z3`). The completeness lock is therefore a text scan.
 
-`scripts/hash_order_determinism_oracle.py` scans every tracked `.rs` file in the
-repository (`git ls-files`), which is a superset of every Cargo target of every
-kind, every build script, and every path outside `src/`, and is blind to the
-feature or `cfg` that gates a file, a target, or a function. It matches the source
+`scripts/hash_order_determinism_oracle.py` scans every tracked `.rs` file and every
+untracked, non-ignored local `.rs` file in the repository (`git ls-files`), which is
+a superset of every committed Cargo target of every kind, every build script, and
+every committed path outside `src/`, and is blind to the feature or `cfg` that
+gates a file, a target, or a function. It matches the source
 spellings `HashMap`, `HashSet`, `hash_map::`, `hash_set::`, `FxHashMap`,
 `FxHashSet`, `rustc_hash::`, `fxhash::`, `ahash::`, `hashbrown::`, and
 `indexmap::` outside the wrapper module, and every `#[allow(clippy::disallowed_types)]`
@@ -163,7 +180,18 @@ site. Every hit must appear in the script's allow-list, a constant of
 unlisted hit fail alike. The script's `unittest` twin plants a raw map in a library
 target, behind a non-default feature (`checkpoint-compile-probe`), in a `build.rs`,
 in a test target, and as a new `#[allow]` without an entry, and asserts each is
-rejected. Migrated code behind a feature compiles in the workflows that already
+rejected. Because a build script can compose a forbidden spelling inside a string
+and write Rust to `OUT_DIR`, the scanner also freezes every workspace `build.rs`
+by exact path and SHA-256 and reserves the standalone Rust identifier `include`
+across tracked source. That rejects the built-in `include!` macro, qualified
+spellings, and `use ...::include as ...` aliases; a method selector named
+`.include` is not macro ingress and remains valid. Adding or changing a build
+script is therefore an explicit registry review, and generated Rust cannot enter
+a workspace crate through Cargo's output directory. Negative controls approve a
+malicious composed-string generator and prove that both direct and imported-alias
+macro spellings are rejected.
+itself and still rejects its `include!(concat!(env!("OUT_DIR"), ...))` consumer.
+Migrated code behind a feature compiles in the workflows that already
 build those features (`smt-full-prove.yml`; the `generalize-sweep-oracle` job in
 `ci.yml`); this plan cites that evidence and adds no per-PR feature-matrix Clippy
 run.
@@ -240,10 +268,22 @@ bytes follow from the types; one exact-byte test per root keeps that executable.
 The roots are `cache_envelope::save<T>` payload and envelope bytes for
 `LibraryContext` and `StdLibContext`, `CompiledContext::encode` public bytes,
 `CompiledContext::save` payload and envelope, the CLI worker handoff that writes
-encoded `CompiledContext` bytes, and the serialized inputs to the stdlib, library,
-compiled-context, and lowering cache keys. Each test builds a complete payload
-through several insertion orders and serializes it in 24 fresh processes; the bytes
-and digests must match exactly. At reviewed head `5b2dfd14`, eight fixed-source
+encoded `CompiledContext` bytes, `PreparedReefGraph::encode`, the prepared-graph
+payload/envelope, its cache filename and serialized key inputs, its persisted
+chelis-std exact-source determinant, and the serialized inputs to the stdlib,
+library, and compiled-context cache keys. The stdlib and library input artifacts
+are the exact ordered SHA-256 preimages used by production key derivation, not a
+parallel approximation; the test hashes each artifact back to its recorded final
+key. The compiled input artifact includes package name and version as well as
+source hash and compiler identity. There is no separate persisted
+lowering-cache key; lowered products are covered inside those complete payloads.
+The named test builds complete payloads through several filesystem insertion
+orders and serializes them in 24 fresh processes; the bytes and digests must match
+exactly. The stdlib cache key carries both canonical parsed declarations and the
+prepared graph's exact manifest/inventory/source-byte determinant, so a comment-only
+edit clean-misses even though the AST bytes do not change. Phase B advances the
+stdlib cache format to V10 and the prepared-graph cache to V3. At reviewed head
+`5b2dfd14`, eight fixed-source
 `CompiledContext::encode` probes produced eight distinct SHA-256 digests; that probe
 is the regression. The relevant cache format version is bumped whenever canonical
 bytes change under the existing cache exactness policy. This track owns
@@ -258,7 +298,7 @@ parity, reshape-regression, and fresh-process CLI suites; the raw-store compile-
 leg also runs in the gate's
 `lint-and-unit` stage and the `--local` subset, whose membership
 `scripts/test_gate.py` locks. Phase B's tripwire script and named cache-byte tests
-remain proposed. The fresh-process stability tests cover the [#1338] reproducer, its
+run in its named oracle. The fresh-process stability tests cover the [#1338] reproducer, its
 mirrored operand order, the aliased pair, and the three-way case of Phase A, and the
 existing byte-determinism regressions (`codegen_determinism.rs`,
 `rank_poly_tier3::form3_bias_broadcast_c_is_byte_deterministic`) stay present and
@@ -291,19 +331,21 @@ guarantees one specified order, not equal results under arbitrary orders.
 **Oracle:** `.venv/bin/python scripts/hash_order_phase_a_oracle.py` exits 0 with
 the final line `HASH ORDER PHASE A ORACLE: PASS`. It passed on 2026-08-31.
 
-### Phase B - class closure
+### Phase B - class closure - IMPLEMENTED
 
 **Deliver:** `clippy.toml`; `chelis-unord` with its API pin, compile-fail spelling
 fixtures, and Serde tests; migration of production and test code off the std
 types, with the dependency edges and the dependency-guard constant; the tripwire
-script, its `unittest` twin, and gate wiring; and the C4 exact-byte tests with the
-cache format bumps they require.
+script, its build-script digest registry, generated-Rust inclusion ban, `unittest`
+twin, and gate wiring; and the C4 exact-byte tests with the cache format bumps and
+exact-source determinant they require.
 
-**Frozen at exit:** the wrapper's public API and the tripwire's token list.
+**Frozen at exit:** the wrapper's public API, the tripwire's token list, and the
+exact workspace build-script registry.
 
 **Oracle:** `.venv/bin/python scripts/hash_order_determinism_oracle.py` exits 0
 with the final line `HASH ORDER DETERMINISM ORACLE: PASS`, and the C4 tests are
-green.
+green. It passed on 2026-09-01.
 
 ## Part III: interlocks and non-goals
 

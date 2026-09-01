@@ -311,7 +311,7 @@ fn smt_name_is_cvc5_safe(name: &str) -> bool {
 #[cfg(feature = "smt")]
 pub(crate) fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
     use cvc5_rs::{Kind, Solver, TermManager};
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     // SAFETY MODEL (review 6 -- TOTAL LOWERING): `lower_to_cvc5` is the SOLE
     // authority on cvc5-safety, and it is TOTAL -- every `mk_term` call site
@@ -367,8 +367,8 @@ pub(crate) fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> Ti
     // 1. Declare variables. `sorts` mirrors `vars` so the lowering knows each
     //    variable's cvc5 sort without re-querying cvc5 (and so a var absent
     //    from the declared set is a clean Err, never a panic or an abort).
-    let mut vars: HashMap<String, cvc5_rs::Term> = HashMap::new();
-    let mut sorts: HashMap<String, SmtSort> = HashMap::new();
+    let mut vars: BTreeMap<String, cvc5_rs::Term> = BTreeMap::new();
+    let mut sorts: chelis_unord::UnordMap<String, SmtSort> = chelis_unord::UnordMap::new();
     for (name, sort) in &property.variables {
         if !smt_name_is_cvc5_safe(name) {
             return TierBResult::Error(
@@ -481,8 +481,8 @@ fn quantifier_bound_vars(
 pub fn lower_to_cvc5(
     tm: &cvc5_rs::TermManager,
     expr: &SmtExpr,
-    vars: &std::collections::HashMap<String, cvc5_rs::Term>,
-    sorts: &std::collections::HashMap<String, SmtSort>,
+    vars: &std::collections::BTreeMap<String, cvc5_rs::Term>,
+    sorts: &chelis_unord::UnordMap<String, SmtSort>,
 ) -> Result<(cvc5_rs::Term, SmtSort), String> {
     use cvc5_rs::Kind;
 

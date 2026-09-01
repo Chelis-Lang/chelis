@@ -11,6 +11,7 @@ name = "chelis"
 path = "src/main.rs"
 
 [dependencies]
+chelis-unord.workspace = true
 clap = { version = "4", features = ["derive"] }
 chelis-conformance.workspace = true
 chelis-deep.workspace = true

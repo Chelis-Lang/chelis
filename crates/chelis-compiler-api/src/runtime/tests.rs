@@ -68,12 +68,12 @@ fn manifest_root_lookup_follows_recursive_list_adt_path() {
     use chelis_types::manifest::RootPathStep::Adt;
 
     let entry = manifest_entry_with_path("items.1.0", "items", vec![Adt(1), Adt(0)]);
-    let bindings = HashMap::from([(
+    let bindings = UnordMap::from([(
         "items".to_string(),
         RuntimeValue::List(vec![RuntimeValue::int_lit(1), RuntimeValue::int_lit(2)]),
     )]);
 
-    let value = lookup_runtime_value_for_manifest_root(&entry, &bindings, &HashMap::new())
+    let value = lookup_runtime_value_for_manifest_root(&entry, &bindings, &UnordMap::new())
         .expect("Cons tail/head path must select the second list item");
     assert_eq!(render_value(&value), "2");
 }
@@ -83,10 +83,10 @@ fn manifest_root_lookup_rejects_a_path_step_for_the_wrong_runtime_shape() {
     use chelis_types::manifest::RootPathStep::Tuple;
 
     let entry = manifest_entry_with_path("value.0", "value", vec![Tuple(0)]);
-    let bindings = HashMap::from([("value".to_string(), RuntimeValue::Bool(true))]);
+    let bindings = UnordMap::from([("value".to_string(), RuntimeValue::Bool(true))]);
 
     assert!(
-        lookup_runtime_value_for_manifest_root(&entry, &bindings, &HashMap::new()).is_none(),
+        lookup_runtime_value_for_manifest_root(&entry, &bindings, &UnordMap::new()).is_none(),
         "an unavailable owed component must not fall back to the base value"
     );
 }
@@ -106,7 +106,7 @@ uniform_like(
 }
 "#,
     );
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("seeded host program should evaluate");
     let value = outcome.host_bindings.get("x").expect("x binding");
     match value.as_f64() {
@@ -196,7 +196,7 @@ y = index(drop([cast(10, int64), cast(20, int64)], cast(1, int64)), cast(0, int6
 "#,
     );
 
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("ownership drop and list drop should both evaluate");
     assert!(matches!(
         outcome.host_bindings.get("x").and_then(RuntimeValue::as_f64),
@@ -226,7 +226,7 @@ f64_value = recast_float(cast(1.5, f64), [cast(0.0, f64)])
 "#,
     );
 
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("generic cast targets should actualize at each call");
     for (name, expected) in [
         ("i16_value", Prim::Int16),
@@ -272,7 +272,7 @@ def outer[p_int](witness: List[p_int]) -> int64 =
 value = outer([cast(7, int16)])
 "#,
     );
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("callee binders must specialize independently of caller binders");
     let RuntimeValue::Scalar(payload) = outcome.host_bindings.get("value").expect("value") else {
         panic!("value should be a scalar")
@@ -291,7 +291,7 @@ value = make_i16()
 "#,
     );
 
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("the checked call result must supply the empty container specialization");
     let RuntimeValue::Scalar(payload) = outcome.host_bindings.get("value").expect("value") else {
         panic!("value should be a scalar")
@@ -309,7 +309,7 @@ value = option_witness(Some(cast(0, int16)), cast(257, int64))
 "#,
     );
 
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("the checked Option argument must retain its concrete specialization");
     let RuntimeValue::Scalar(payload) = outcome.host_bindings.get("value").expect("value") else {
         panic!("value should be a scalar")
@@ -327,7 +327,7 @@ value = index(values, cast(0, int64))
 "#,
     );
 
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("the checked map callback type must specialize the generic closure");
     let RuntimeValue::Scalar(payload) = outcome.host_bindings.get("value").expect("value") else {
         panic!("value should be a scalar")
@@ -344,7 +344,7 @@ value = fold(keep_left, cast(127, int8), [cast(1, int8)])
 "#,
     );
 
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("the checked fold callback type must specialize the generic closure");
     let RuntimeValue::Scalar(payload) = outcome.host_bindings.get("value").expect("value") else {
         panic!("value should be a scalar")
@@ -371,7 +371,7 @@ generated = tensor_scan(cast(9, int8), keep_state, cast(2, int64))
 "#,
     );
 
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("every HOF callback edge must preserve its checked specialization");
     for name in ["filtered", "scanned", "flattened"] {
         let RuntimeValue::List(items) = outcome.host_bindings.get(name).expect(name) else {
@@ -398,7 +398,7 @@ generated = tensor_scan(cast(9, int8), keep_state, cast(2, int64))
 #[test]
 fn test_assert_true_returns_unit() {
     let checked = checked_surf(r#"x = test_assert(true, "ok")"#);
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("test_assert(true, ...) should evaluate to Ok");
     let value = outcome.host_bindings.get("x").expect("x binding");
     assert!(matches!(value, RuntimeValue::Unit), "got {value:?}");
@@ -407,7 +407,7 @@ fn test_assert_true_returns_unit() {
 #[test]
 fn test_assert_false_returns_err_with_label() {
     let checked = checked_surf(r#"x = test_assert(false, "my-label")"#);
-    let err = evaluate_host_program(&checked, &HashMap::new())
+    let err = evaluate_host_program(&checked, &UnordMap::new())
         .expect_err("test_assert(false, ...) should surface as host Err");
     assert!(
         err.contains("assert failed") && err.contains("my-label"),
@@ -418,7 +418,7 @@ fn test_assert_false_returns_err_with_label() {
 #[test]
 fn generic_test_assert_eq_float_mismatch_includes_actual_and_expected() {
     let checked = checked_surf(r#"x = test_assert_eq(1.0, 2.0, "label")"#);
-    let err = evaluate_host_program(&checked, &HashMap::new())
+    let err = evaluate_host_program(&checked, &UnordMap::new())
         .expect_err("mismatched f32 assert should surface as host Err");
     assert!(err.contains("1") && err.contains("2"), "got: {err}");
     assert!(err.contains("label"), "expected label in error, got: {err}");
@@ -427,7 +427,7 @@ fn generic_test_assert_eq_float_mismatch_includes_actual_and_expected() {
 #[test]
 fn generic_test_assert_eq_float_match_returns_unit() {
     let checked = checked_surf(r#"x = test_assert_eq(1.5, 1.5, "same")"#);
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("matched f32 assert should evaluate");
     let value = outcome.host_bindings.get("x").expect("x binding");
     assert!(matches!(value, RuntimeValue::Unit), "got {value:?}");
@@ -436,7 +436,7 @@ fn generic_test_assert_eq_float_match_returns_unit() {
 #[test]
 fn generic_test_assert_eq_int_match_and_mismatch() {
     let ok = checked_surf(r#"x = test_assert_eq(cast(3, int64), cast(3, int64), "i")"#);
-    let outcome = evaluate_host_program(&ok, &HashMap::new()).expect("int match should eval");
+    let outcome = evaluate_host_program(&ok, &UnordMap::new()).expect("int match should eval");
     assert!(matches!(
         outcome.host_bindings.get("x"),
         Some(RuntimeValue::Unit)
@@ -444,7 +444,7 @@ fn generic_test_assert_eq_int_match_and_mismatch() {
 
     let bad = checked_surf(r#"x = test_assert_eq(cast(3, int64), cast(5, int64), "i")"#);
     let err =
-        evaluate_host_program(&bad, &HashMap::new()).expect_err("int mismatch should surface Err");
+        evaluate_host_program(&bad, &UnordMap::new()).expect_err("int mismatch should surface Err");
     assert!(
         err.contains("3") && err.contains("5") && err.contains("i"),
         "got: {err}"
@@ -454,11 +454,11 @@ fn generic_test_assert_eq_int_match_and_mismatch() {
 #[test]
 fn generic_test_assert_eq_bool_match_and_mismatch() {
     let ok = checked_surf(r#"x = test_assert_eq(true, true, "b")"#);
-    evaluate_host_program(&ok, &HashMap::new()).expect("bool match should eval");
+    evaluate_host_program(&ok, &UnordMap::new()).expect("bool match should eval");
 
     let bad = checked_surf(r#"x = test_assert_eq(true, false, "b")"#);
-    let err =
-        evaluate_host_program(&bad, &HashMap::new()).expect_err("bool mismatch should surface Err");
+    let err = evaluate_host_program(&bad, &UnordMap::new())
+        .expect_err("bool mismatch should surface Err");
     assert!(
         err.contains("true") && err.contains("false") && err.contains("b"),
         "got: {err}"
@@ -468,10 +468,10 @@ fn generic_test_assert_eq_bool_match_and_mismatch() {
 #[test]
 fn generic_test_assert_eq_string_match_and_mismatch() {
     let ok = checked_surf(r#"x = test_assert_eq("hi", "hi", "s")"#);
-    evaluate_host_program(&ok, &HashMap::new()).expect("string match should eval");
+    evaluate_host_program(&ok, &UnordMap::new()).expect("string match should eval");
 
     let bad = checked_surf(r#"x = test_assert_eq("foo", "bar", "s")"#);
-    let err = evaluate_host_program(&bad, &HashMap::new())
+    let err = evaluate_host_program(&bad, &UnordMap::new())
         .expect_err("string mismatch should surface Err");
     assert!(
         err.contains("foo") && err.contains("bar") && err.contains("s"),
@@ -490,7 +490,7 @@ expected: tensor[4, f32] = to_tensor([1.0, 2.0, 99.0, 4.0])
 x = test_assert_close_tensor(actual, expected, 0.001, "close")
 "#,
     );
-    let err = evaluate_host_program(&checked, &HashMap::new())
+    let err = evaluate_host_program(&checked, &UnordMap::new())
         .expect_err("close-tensor mismatch should surface Err");
     assert!(
         err.contains("at index 2") && err.contains("close"),
@@ -508,7 +508,7 @@ expected: tensor[3, f32] = to_tensor([1.001, 2.001, 3.001])
 x = test_assert_close_tensor(actual, expected, 0.01, "close")
 "#,
     );
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("close-tensor within tol should evaluate to Unit");
     assert!(matches!(
         outcome.host_bindings.get("x"),
@@ -526,7 +526,7 @@ expected: tensor[3, f32] = to_tensor([1.0, 2.0, 3.0])
 x = test_assert_close_tensor(actual, expected, 0.0, "bit-exact")
 "#,
     );
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("zero-tol bit-exact equality should pass");
     assert!(matches!(
         outcome.host_bindings.get("x"),
@@ -543,7 +543,7 @@ expected: tensor[2, f32] = to_tensor([1.0, 2.00001])
 x = test_assert_close_tensor(actual, expected, 0.0, "strict")
 "#,
     );
-    let err = evaluate_host_program(&checked, &HashMap::new())
+    let err = evaluate_host_program(&checked, &UnordMap::new())
         .expect_err("zero-tol with any delta must fail");
     assert!(
         err.contains("at index 1") && err.contains("strict"),
@@ -564,7 +564,7 @@ x = test_assert_close_tensor(actual, expected, 0.01, "nan-actual")
 "#,
     );
     let err =
-        evaluate_host_program(&checked, &HashMap::new()).expect_err("NaN in actual must fail");
+        evaluate_host_program(&checked, &UnordMap::new()).expect_err("NaN in actual must fail");
     assert!(
         err.contains("at index 1") && err.contains("NaN"),
         "expected NaN-aware diagnostic, got: {err}"
@@ -582,7 +582,7 @@ x = test_assert_close_tensor(actual, expected, 0.01, "nan-expected")
 "#,
     );
     let err =
-        evaluate_host_program(&checked, &HashMap::new()).expect_err("NaN in expected must fail");
+        evaluate_host_program(&checked, &UnordMap::new()).expect_err("NaN in expected must fail");
     assert!(
         err.contains("at index 1") && err.contains("NaN"),
         "got: {err}"
@@ -598,7 +598,7 @@ expected: tensor[2, f32] = to_tensor([1.0, 2.0])
 x = test_assert_close_tensor(actual, expected, -0.001, "neg-tol")
 "#,
     );
-    let err = evaluate_host_program(&checked, &HashMap::new())
+    let err = evaluate_host_program(&checked, &UnordMap::new())
         .expect_err("negative tol must be rejected");
     assert!(
         err.contains("invalid tolerance") && err.contains("neg-tol"),
@@ -617,7 +617,7 @@ x = test_assert_close_tensor(actual, expected, nan_tol, "nan-tol")
 "#,
     );
     let err =
-        evaluate_host_program(&checked, &HashMap::new()).expect_err("NaN tol must be rejected");
+        evaluate_host_program(&checked, &UnordMap::new()).expect_err("NaN tol must be rejected");
     assert!(
         err.contains("invalid tolerance") && err.contains("nan-tol"),
         "got: {err}"
@@ -646,17 +646,17 @@ fn eval_deep_with_bindings(
     // `(def {} <name> <body>)`: the body is the fourth element.
     let body = def.elements[3].clone();
 
-    let empty_tensors: HashMap<String, RuntimeTensorValue> = HashMap::new();
+    let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
     let mut ctx = EvalContext {
-        bindings: HashMap::new(),
-        binding_types: HashMap::new(),
-        precision_bindings: HashMap::new(),
-        named_axis_route_cache: HashMap::new(),
-        named_axis_route_visiting: HashSet::new(),
-        top_level_defs: HashMap::new(),
-        declared_signatures: HashMap::new(),
-        type_env: HashMap::new(),
-        adt_fields: HashMap::new(),
+        bindings: UnordMap::new(),
+        binding_types: UnordMap::new(),
+        precision_bindings: UnordMap::new(),
+        named_axis_route_cache: UnordMap::new(),
+        named_axis_route_visiting: UnordSet::new(),
+        top_level_defs: UnordMap::new(),
+        declared_signatures: UnordMap::new(),
+        type_env: UnordMap::new(),
+        adt_fields: UnordMap::new(),
         adt_registry: chelis_types::adt::AdtRegistry::default(),
         tensor_bindings: &empty_tensors,
         transcript: Vec::new(),
@@ -930,7 +930,7 @@ b = pad_sequences_to([[cast(3.0, f32), cast(5.0, f32)], [cast(7.0, f32), cast(11
 y = matmul(a, b)
 "#,
     );
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("matmul should evaluate under host runtime");
     assert_eq!(first_tensor_shape(&outcome, "y"), vec![2, 2]);
     assert_eq!(first_tensor_data(&outcome, "y"), vec![3.0, 5.0, 7.0, 11.0]);
@@ -949,7 +949,7 @@ b = to_tensor([cast(-2.0, f32)])
 y = div(a, b)
 "#,
     );
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("div with negative divisor should evaluate");
     // IEEE: 5 / -2 = -2.5 (an `exp(neg(log(-2)))` decomposition
     // would NaN here).
@@ -966,7 +966,7 @@ y = div(a, b)
 "#,
     );
     let outcome =
-        evaluate_host_program(&checked, &HashMap::new()).expect("div by zero should evaluate");
+        evaluate_host_program(&checked, &UnordMap::new()).expect("div by zero should evaluate");
     let v = first_tensor_data(&outcome, "y");
     assert_eq!(v.len(), 1);
     assert!(
@@ -985,7 +985,7 @@ b = to_tensor([cast(0.0, f32)])
 y = div(a, b)
 "#,
     );
-    let outcome = evaluate_host_program(&checked, &HashMap::new()).expect("-1/0 should evaluate");
+    let outcome = evaluate_host_program(&checked, &UnordMap::new()).expect("-1/0 should evaluate");
     let v = first_tensor_data(&outcome, "y");
     assert_eq!(v.len(), 1);
     assert!(
@@ -1005,7 +1005,7 @@ y = div(a, b)
 "#,
     );
     let outcome =
-        evaluate_host_program(&checked, &HashMap::new()).expect("0/0 should evaluate (NaN)");
+        evaluate_host_program(&checked, &UnordMap::new()).expect("0/0 should evaluate (NaN)");
     let v = first_tensor_data(&outcome, "y");
     assert_eq!(v.len(), 1);
     assert!(v[0].is_nan(), "expected NaN, got {}", v[0]);
@@ -1076,7 +1076,7 @@ y = recip(a)
 "#,
     );
     let outcome =
-        evaluate_host_program(&checked, &HashMap::new()).expect("recip(-2.0) should evaluate");
+        evaluate_host_program(&checked, &UnordMap::new()).expect("recip(-2.0) should evaluate");
     // IEEE: 1 / -2 = -0.5 (an `exp(neg(log(-2)))` decomposition
     // would NaN here).
     assert_eq!(first_tensor_data(&outcome, "y"), vec![-0.5]);
@@ -1091,7 +1091,7 @@ b = pad_sequences_to([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(1.
 y = matmul(a, b)
 "#,
     );
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("rectangular matmul should evaluate");
     assert_eq!(first_tensor_shape(&outcome, "y"), vec![2, 2]);
     // Row 0: [1*1+2*0+3*1, 1*0+2*1+3*1] = [4, 5]
@@ -1107,7 +1107,7 @@ a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.
 y = permute(a, 1, 0)
 "#,
     );
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("permute should evaluate under host runtime");
     // Row-major: original [[1,2],[3,4]] -> transpose [[1,3],[2,4]]
     assert_eq!(first_tensor_shape(&outcome, "y"), vec![2, 2]);
@@ -1122,7 +1122,7 @@ a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.
 y = permute(a, 1, 0)
 "#,
     );
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("rectangular permute should evaluate");
     assert_eq!(first_tensor_shape(&outcome, "y"), vec![3, 2]);
     // [[1,2,3],[4,5,6]] -> [[1,4],[2,5],[3,6]]
@@ -1140,7 +1140,7 @@ a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.
 y = sum(a, cast(1, int32))
 "#,
     );
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("sum should evaluate under host runtime");
     assert_eq!(first_tensor_shape(&outcome, "y"), vec![2]);
     assert_eq!(first_tensor_data(&outcome, "y"), vec![6.0, 15.0]);
@@ -1155,7 +1155,7 @@ y = sum(a, cast(0, int32))
 "#,
     );
     let outcome =
-        evaluate_host_program(&checked, &HashMap::new()).expect("sum on axis 0 should evaluate");
+        evaluate_host_program(&checked, &UnordMap::new()).expect("sum on axis 0 should evaluate");
     assert_eq!(first_tensor_shape(&outcome, "y"), vec![3]);
     assert_eq!(first_tensor_data(&outcome, "y"), vec![5.0, 7.0, 9.0]);
 }
@@ -1191,7 +1191,7 @@ cast(0.49625658988952637, f32)
 y = sum(seq, cast(0, int32))
 "#,
     );
-    let outcome_right = evaluate_host_program(&checked_right, &HashMap::new())
+    let outcome_right = evaluate_host_program(&checked_right, &UnordMap::new())
         .expect("right-pad reflected sum should evaluate");
     let right = first_tensor_data(&outcome_right, "y");
     assert_eq!(right.len(), 1);
@@ -1250,7 +1250,7 @@ cast(0.6340786814689636, f32)
 y = sum(seq, cast(0, int32))
 "#,
     );
-    let outcome_left = evaluate_host_program(&checked_left, &HashMap::new())
+    let outcome_left = evaluate_host_program(&checked_left, &UnordMap::new())
         .expect("left-pad reflected sum should evaluate");
     let left = first_tensor_data(&outcome_left, "y");
     assert_eq!(left.len(), 1);
@@ -1870,7 +1870,7 @@ fn host_runtime_sum_f32_n1_n2_n3_bit_exact() {
              y = sum(seq, cast(0, int32))\n"
         );
         let checked = checked_surf(&src);
-        let outcome = evaluate_host_program(&checked, &HashMap::new())
+        let outcome = evaluate_host_program(&checked, &UnordMap::new())
             .unwrap_or_else(|_| panic!("n={n} sum should evaluate"));
         let result = first_tensor_data(&outcome, "y");
         assert_eq!(result.len(), 1);
@@ -1902,7 +1902,7 @@ y = sum(seq, cast(0, int32))
 "#,
     );
     let outcome =
-        evaluate_host_program(&checked, &HashMap::new()).expect("nan-bearing sum should evaluate");
+        evaluate_host_program(&checked, &UnordMap::new()).expect("nan-bearing sum should evaluate");
     let result = first_tensor_data(&outcome, "y");
     assert_eq!(result.len(), 1);
     assert!(
@@ -1930,7 +1930,7 @@ y = sum(seq, cast(0, int32))
 "#,
     );
     let outcome =
-        evaluate_host_program(&checked, &HashMap::new()).expect("inf-pair sum should evaluate");
+        evaluate_host_program(&checked, &UnordMap::new()).expect("inf-pair sum should evaluate");
     let result = first_tensor_data(&outcome, "y");
     assert_eq!(result.len(), 1);
     assert!(
@@ -1950,7 +1950,7 @@ b = pad_sequences_to([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(1.
 y = matmul(a, b)
 "#,
     );
-    let err = evaluate_host_program(&checked, &HashMap::new())
+    let err = evaluate_host_program(&checked, &UnordMap::new())
         .expect_err("matmul shared-axis mismatch must fail");
     assert!(
         err.contains("matmul") && err.contains("mismatch"),
@@ -1975,7 +1975,7 @@ b = to_tensor([cast(10.0, f32), cast(100.0, f32)])
 y = expand(b, cast(0, int32), cast(3, int64))
 "#,
     );
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("expand should evaluate under host runtime");
     assert_eq!(first_tensor_shape(&outcome, "y"), vec![3, 2]);
     // Three replicas of [10, 100].
@@ -1994,7 +1994,7 @@ b = to_tensor([cast(1.0, f32), cast(2.0, f32)])
 y = expand(b, cast(1, int32), cast(2, int64))
 "#,
     );
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("expand at trailing axis should evaluate");
     assert_eq!(first_tensor_shape(&outcome, "y"), vec![2, 2]);
     // [1, 2] expanded along new last axis with count 2 -> [[1,1],[2,2]].
@@ -2016,7 +2016,7 @@ b = to_tensor([cast(7.0, f32)])
 y = expand(b, cast(0, int32), cast(4, int64))
 "#,
     );
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("expand([1], 0, 4) should evaluate under host runtime");
     assert_eq!(
         first_tensor_shape(&outcome, "y"),
@@ -2042,7 +2042,7 @@ zero_count = sub(cast(0, int64), cast(0, int64))
 y = expand(b, cast(0, int32), zero_count)
 "#,
     );
-    let err = evaluate_host_program(&checked, &HashMap::new())
+    let err = evaluate_host_program(&checked, &UnordMap::new())
         .expect_err("expand with non-positive count must fail");
     assert!(
         err.contains("expand") && err.contains("count"),
@@ -2061,7 +2061,7 @@ fn host_runtime_to_tensor_accepts_2d_float_literal() {
 y = to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]])
 "#,
     );
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("to_tensor of [[1,2],[3,4]] must evaluate to a rank-2 tensor");
     assert_eq!(first_tensor_shape(&outcome, "y"), vec![2, 2]);
     assert_eq!(first_tensor_data(&outcome, "y"), vec![1.0, 2.0, 3.0, 4.0]);
@@ -2079,7 +2079,7 @@ y = to_tensor([
 ])
 "#,
     );
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("to_tensor of 2x2x2 nested list must evaluate to a rank-3 tensor");
     assert_eq!(first_tensor_shape(&outcome, "y"), vec![2, 2, 2]);
     assert_eq!(
@@ -2098,7 +2098,7 @@ fn host_runtime_to_tensor_rejects_ragged_2d_literal() {
 y = to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32)]])
 "#,
     );
-    let err = evaluate_host_program(&checked, &HashMap::new())
+    let err = evaluate_host_program(&checked, &UnordMap::new())
         .expect_err("ragged nested list must fail to_tensor");
     assert!(
         err.contains("uniform inner shape"),
@@ -2115,7 +2115,7 @@ x = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])
 y = softmax(x, cast(0, int32))
 "#,
     );
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("softmax should evaluate under host runtime");
     assert_eq!(first_tensor_shape(&outcome, "y"), vec![3]);
     let data = first_tensor_data(&outcome, "y");
@@ -2141,7 +2141,7 @@ y = softmax(x, cast(0, int32))
 "#,
     );
     let outcome =
-        evaluate_host_program(&checked, &HashMap::new()).expect("softmax 2-class should evaluate");
+        evaluate_host_program(&checked, &UnordMap::new()).expect("softmax 2-class should evaluate");
     assert_eq!(first_tensor_shape(&outcome, "y"), vec![2]);
     let data = first_tensor_data(&outcome, "y");
     let e = 1.0_f64.exp();
@@ -2165,7 +2165,7 @@ x = to_tensor([cast(1000.0, f32), cast(1000.0, f32)])
 y = softmax(x, cast(0, int32))
 "#,
     );
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("softmax with large inputs should remain numerically stable");
     let data = first_tensor_data(&outcome, "y");
     assert_eq!(data.len(), 2);
@@ -2680,7 +2680,7 @@ def probe() -> f32 = sub(
 root = probe()
 "#,
     );
-    let outcome = evaluate_host_program(&checked, &HashMap::new())
+    let outcome = evaluate_host_program(&checked, &UnordMap::new())
         .expect("integer-spelled f32 scalar must evaluate");
     let root = outcome.host_bindings.get("root").expect("root binding");
     let RuntimeValue::Scalar(payload) = root else {
@@ -2895,7 +2895,7 @@ x = round_to(2.675f32, 2)
 y = round_to(2.675f64, 2)
 "#,
     );
-    let outcome = evaluate_host_program(&checked, &HashMap::new()).expect("should evaluate");
+    let outcome = evaluate_host_program(&checked, &UnordMap::new()).expect("should evaluate");
     match outcome.host_bindings.get("x") {
         Some(RuntimeValue::Scalar(payload)) => {
             assert_eq!(payload.dtype(), Prim::F32, "f32 in, f32 out");
@@ -3087,8 +3087,8 @@ fn fo_diag_bools_strings_and_nonnumeric_controls() {
                 chelis_deep::ast::Atom::Bool(false),
                 chelis_deep::Span::new(0, 0)
             ),
-            env: HashMap::new(),
-            precision_env: HashMap::new(),
+            env: UnordMap::new(),
+            precision_env: UnordMap::new(),
         }),
         "<closure>"
     );

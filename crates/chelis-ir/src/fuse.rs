@@ -8,7 +8,7 @@
 //! **Invariant:** fusion never duplicates computation. A node with multiple
 //! consumers is never absorbed into a fused chain.
 
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
 
 use crate::dag::{Dag, DagNode, FusedInput, FusedStep, FusedStepOp, NodeId, RiscOp};
 
@@ -17,7 +17,7 @@ pub struct FuseResult {
     /// Fused DAG.
     pub dag: Dag,
     /// Mapping from original node IDs to node IDs in the fused DAG.
-    pub old_to_new: HashMap<NodeId, NodeId>,
+    pub old_to_new: UnordMap<NodeId, NodeId>,
 }
 
 /// Apply greedy kernel fusion to a DAG.
@@ -31,7 +31,7 @@ pub fn fuse_with_remap(dag: &Dag) -> FuseResult {
     if dag.is_empty() {
         return FuseResult {
             dag: Dag::new(),
-            old_to_new: HashMap::new(),
+            old_to_new: UnordMap::new(),
         };
     }
 
@@ -200,11 +200,11 @@ fn find_chains(dag: &Dag, consumer_count: &[usize]) -> Vec<Chain> {
 }
 
 /// Rebuild the DAG, replacing chain nodes with FusedElem nodes.
-fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, HashMap<NodeId, NodeId>) {
+fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, UnordMap<NodeId, NodeId>) {
     // Map old node ID → chain index (if part of a chain).
-    let mut node_to_chain: HashMap<usize, usize> = HashMap::new();
+    let mut node_to_chain: UnordMap<usize, usize> = UnordMap::new();
     // For each chain, which node is the "representative" (last node, produces output).
-    let mut chain_output: HashMap<usize, NodeId> = HashMap::new();
+    let mut chain_output: UnordMap<usize, NodeId> = UnordMap::new();
 
     for (ci, chain) in chains.iter().enumerate() {
         for &nid in &chain.nodes {
@@ -214,7 +214,7 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, HashMap<NodeId, Nod
     }
 
     let mut new_dag = Dag::new();
-    let mut id_map: HashMap<usize, NodeId> = HashMap::new();
+    let mut id_map: UnordMap<usize, NodeId> = UnordMap::new();
 
     for node in dag.nodes() {
         let old_id = node.id.0;
@@ -340,6 +340,7 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, HashMap<NodeId, Nod
     }
 
     let old_to_new = id_map
+        .into_sorted()
         .into_iter()
         .map(|(old_id, new_id)| (NodeId(old_id), new_id))
         .collect();
@@ -354,16 +355,16 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, HashMap<NodeId, Nod
 fn build_fused_elem(
     dag: &Dag,
     chain: &Chain,
-    _id_map: &HashMap<usize, NodeId>,
+    _id_map: &UnordMap<usize, NodeId>,
 ) -> (RiscOp, Vec<NodeId>) {
-    let chain_set: std::collections::HashSet<usize> = chain.nodes.iter().map(|n| n.0).collect();
+    let chain_set: chelis_unord::UnordSet<usize> = chain.nodes.iter().map(|n| n.0).collect();
 
     // Collect external inputs: inputs to chain nodes that are NOT other chain nodes.
     let mut external_inputs: Vec<NodeId> = Vec::new();
-    let mut ext_index: HashMap<usize, usize> = HashMap::new(); // old_id → index in external_inputs
+    let mut ext_index: UnordMap<usize, usize> = UnordMap::new(); // old_id → index in external_inputs
 
     // Also track: for each chain node, its step index.
-    let mut step_index: HashMap<usize, usize> = HashMap::new();
+    let mut step_index: UnordMap<usize, usize> = UnordMap::new();
 
     let mut steps: Vec<FusedStep> = Vec::new();
 
@@ -398,7 +399,7 @@ fn build_fused_elem(
 }
 
 fn reusable_external_input(dag: &Dag, chain: &Chain, external_inputs: &[NodeId]) -> Option<NodeId> {
-    let external: HashSet<NodeId> = external_inputs.iter().copied().collect();
+    let external: UnordSet<NodeId> = external_inputs.iter().copied().collect();
     let mut reusable = None;
 
     for &nid in &chain.nodes {
@@ -424,9 +425,9 @@ fn reusable_external_input(dag: &Dag, chain: &Chain, external_inputs: &[NodeId])
 /// eliminating the intermediate buffer. Returns a set of node IDs that the
 /// emitter should skip (no allocation, no standalone emission) and the
 /// reduction should handle by inlining the fused steps.
-pub fn reduction_inlined_fused_elems(dag: &Dag) -> HashSet<NodeId> {
+pub fn reduction_inlined_fused_elems(dag: &Dag) -> UnordSet<NodeId> {
     let consumer_count = build_consumer_counts(dag);
-    let mut inlined = HashSet::new();
+    let mut inlined = UnordSet::new();
 
     for node in dag.nodes() {
         let is_reduction = matches!(node.op, RiscOp::Sum { .. } | RiscOp::MaxReduce { .. });

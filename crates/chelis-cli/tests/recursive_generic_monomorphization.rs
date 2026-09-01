@@ -153,7 +153,7 @@ out = print(concrete())
 /// precedes the wrappers it calls in source order, so lowering `caller`
 /// probes `wrap_int`/`wrap_bool` speculatively — each probe lowers a body
 /// containing a recursive generic call. Without probe isolation, the
-/// probes' HashSet order leaks into specialization emission order and the
+/// probes' UnordSet order leaks into specialization emission order and the
 /// emitted C differs across builds. Prints `4`.
 const PROBE_TRIGGER: &str = "\
 type Box[a] =
@@ -785,7 +785,7 @@ fn issue_941_minimized_reproducer_compiles() {
 
 #[test]
 fn emitted_c_is_byte_identical_across_repeated_builds() {
-    // Ten separate `chelis` processes: each gets its own HashSet seed, so a
+    // Ten separate `chelis` processes: each gets its own UnordSet seed, so a
     // probe-order leak into emission order shows up as byte divergence.
     let first = {
         let (_dir, out_dir) = build_ok(PROBE_TRIGGER, "probe_trigger");

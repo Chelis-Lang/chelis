@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,7 +24,7 @@ use crate::analysis::{
 #[derive(Debug, Default)]
 struct WorkspaceState {
     workspace_root: Option<PathBuf>,
-    documents: HashMap<Url, DocumentState>,
+    documents: UnordMap<Url, DocumentState>,
 }
 
 pub struct Backend {

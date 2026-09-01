@@ -813,6 +813,19 @@ class ListOutputTests(unittest.TestCase):
             [gate.render(entry) for entry in gate.LOCAL_STATIC_COMMANDS],
         )
 
+    def test_hash_order_token_tripwire_is_continuous_and_local(self):
+        command = (
+            "<managed-python> scripts/hash_order_determinism_oracle.py --scan-only"
+        )
+        self.assertIn(
+            command,
+            [gate.render(entry) for entry in gate.STAGES["lint-and-unit"]],
+        )
+        self.assertIn(
+            command,
+            [gate.render(entry) for entry in gate.LOCAL_STATIC_COMMANDS],
+        )
+
     def test_pipeline_core_boundary_guards_are_in_the_lint_and_unit_stage(self):
         # The dependency guard, documentation guard, and pipeline-artifact
         # compile-fail fixture must run in the per-PR gate (hosted CI runs

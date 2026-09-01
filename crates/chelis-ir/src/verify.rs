@@ -13,7 +13,7 @@ use chelis_types::types::Prim;
 pub fn verify(dag: &Dag) -> Vec<String> {
     let mut errors = Vec::new();
     let mut consumers = vec![0usize; dag.len()];
-    let mut load_types = std::collections::HashMap::<String, crate::dag::TensorType>::new();
+    let mut load_types = chelis_unord::UnordMap::<String, crate::dag::TensorType>::new();
     for node in dag.nodes() {
         for &input_id in &node.inputs {
             if input_id.0 < consumers.len() {

@@ -14,7 +14,7 @@ use chelis_ir::dag::{Dag, DimInfo, ReduceWindowKind, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_ir::verify;
 use chelis_types::types::Prim;
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 fn tensor_type(dims: &[usize]) -> TensorType {
     TensorType {
@@ -51,7 +51,7 @@ fn build_reduce_window(
 }
 
 fn eval_with_input(dag: &Dag, name: &str, shape: Vec<usize>, data: Vec<f64>) -> TensorValue {
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(name.to_string(), TensorValue::from_vec(shape, data));
     let values = eval_tensor(dag, &inputs).expect("eval succeeds");
     // The output is the second node (id = 1).
@@ -331,7 +331,7 @@ fn reduce_window_grad_lowers_to_adjoint_and_evaluates() {
         "grad of reduce_window_sum must lower to a ReduceWindowGrad adjoint"
     );
 
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(
         "x".to_string(),
         TensorValue::from_vec(vec![4], vec![10.0, 20.0, 30.0, 40.0]),

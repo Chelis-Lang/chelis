@@ -22,7 +22,7 @@ use chelis_ir::host::{
 };
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{RejectionAuthority, Stage, Unsupported, UnsupportedKind};
-use std::collections::HashSet;
+use chelis_unord::UnordSet;
 
 /// A host value whose complete logical type has an implemented C ABI.
 ///
@@ -209,7 +209,7 @@ pub(crate) fn project_program(
         .functions
         .iter()
         .map(|function| function.name.clone())
-        .collect::<HashSet<_>>();
+        .collect::<UnordSet<_>>();
     Ok(HostAbiProgram {
         globals: program
             .globals
@@ -230,7 +230,7 @@ pub(crate) fn project_program(
 
 fn project_binding(
     binding: ConcreteHostBinding,
-    allowed_callbacks: &HashSet<String>,
+    allowed_callbacks: &UnordSet<String>,
 ) -> Result<HostAbiBinding, Unsupported> {
     Ok(HostAbiBinding {
         name: binding.name,
@@ -243,7 +243,7 @@ fn project_binding(
 
 fn project_function(
     function: ConcreteHostFunction,
-    declared_callbacks: &HashSet<String>,
+    declared_callbacks: &UnordSet<String>,
 ) -> Result<HostAbiFunction, Unsupported> {
     let mut allowed_callbacks = declared_callbacks.clone();
     for param in &function.params {
@@ -287,7 +287,7 @@ fn project_function_param(param: ConcreteHostParam) -> Result<HostAbiParam, Unsu
 
 fn project_callback(
     callback: ConcreteHostCallback,
-    allowed_callbacks: &HashSet<String>,
+    allowed_callbacks: &UnordSet<String>,
 ) -> Result<HostAbiCallback, Unsupported> {
     let kind = match callback.kind {
         ConcreteHostCallbackKind::Named { function, params } => HostAbiCallbackKind::Named {
@@ -317,7 +317,7 @@ fn project_callback(
 
 fn project_expr(
     expr: ConcreteHostExpr,
-    allowed_callbacks: &HashSet<String>,
+    allowed_callbacks: &UnordSet<String>,
 ) -> Result<HostAbiExpr, Unsupported> {
     let kind = match expr.kind {
         ConcreteHostExprKind::Int(value) => HostAbiExprKind::Int(value),
@@ -544,7 +544,7 @@ fn project_expr(
 fn project_callback_argument(
     expr: ConcreteHostExpr,
     expected: &ConcreteHostType,
-    allowed_callbacks: &HashSet<String>,
+    allowed_callbacks: &UnordSet<String>,
 ) -> Result<HostAbiExpr, Unsupported> {
     let ConcreteHostExprKind::Var(name, actual) = expr.kind else {
         return Err(unsupported_function_value(

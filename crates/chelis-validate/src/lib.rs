@@ -207,7 +207,7 @@ fn first_reopened_module(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
     fn walk(
         expr: &chelis_deep::ast::Expr,
         prefix: Option<&str>,
-        seen: &mut std::collections::HashSet<String>,
+        seen: &mut chelis_unord::UnordSet<String>,
     ) -> Option<String> {
         let (_, children) = deep_node_parts(expr)?;
         let name = module_name(expr)?;
@@ -225,7 +225,7 @@ fn first_reopened_module(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
         }
         None
     }
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = chelis_unord::UnordSet::new();
     for expr in exprs {
         if let Some(dup) = walk(expr, None, &mut seen) {
             return Some(dup);
@@ -241,7 +241,7 @@ fn first_reopened_module(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
 fn first_duplicate_defsig(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
     fn walk(
         expr: &chelis_deep::ast::Expr,
-        seen: &mut std::collections::HashSet<String>,
+        seen: &mut chelis_unord::UnordSet<String>,
     ) -> Option<String> {
         let (tag, children) = deep_node_parts(expr)?;
         match tag {
@@ -258,7 +258,7 @@ fn first_duplicate_defsig(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
         }
     }
 
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = chelis_unord::UnordSet::new();
     exprs.iter().find_map(|expr| walk(expr, &mut seen))
 }
 

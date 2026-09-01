@@ -3,7 +3,7 @@ use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_ir::vmap::vectorize_axis0;
 use chelis_types::check_ir_program;
 use chelis_types::types::Prim;
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 fn vec_f32(n: usize) -> TensorType {
     TensorType {
@@ -19,7 +19,7 @@ fn mat_f32(m: usize, n: usize) -> TensorType {
     }
 }
 
-fn eval_root(dag: &Dag, inputs: &HashMap<String, TensorValue>) -> TensorValue {
+fn eval_root(dag: &Dag, inputs: &UnordMap<String, TensorValue>) -> TensorValue {
     let root = dag.roots()[0];
     let values = eval_tensor_roots_with_strict(dag, &[root], |name| inputs.get(name).cloned())
         .expect("evaluation should succeed");
@@ -36,7 +36,7 @@ fn vmap_elementwise_vectorizes_axis_zero() {
     let vmapped = vectorize_axis0(&dag, DimInfo::Lit(2)).expect("vmap should succeed");
     let value = eval_root(
         &vmapped,
-        &HashMap::from([(
+        &UnordMap::from([(
             "x".to_string(),
             TensorValue::from_vec(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, -5.0, 6.0]),
         )]),
@@ -71,7 +71,7 @@ fn vmap_reduction_shifts_the_reduced_axis() {
     let vmapped = vectorize_axis0(&dag, DimInfo::Lit(2)).expect("vmap should succeed");
     let value = eval_root(
         &vmapped,
-        &HashMap::from([(
+        &UnordMap::from([(
             "x".to_string(),
             TensorValue::from_vec(
                 vec![2, 2, 3],

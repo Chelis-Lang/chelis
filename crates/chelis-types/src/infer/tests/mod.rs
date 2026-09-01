@@ -1563,7 +1563,7 @@ fn distinct_deftypes_with_overlapping_variant_names_are_accepted() {
 fn deftype_colliding_with_prelude_option_is_rejected() {
     // `Option[a]` is registered by `register_prelude_adts` before
     // `collect_declarations` runs. User code re-declaring it would
-    // overwrite the prelude entry under `HashMap::insert`.
+    // overwrite the prelude entry under `UnordMap::insert`.
     check_err(
         "(deftype {} Option (a) (variant {} Some (t-var {} a)) (variant {} None))",
         CheckErrorKind::DuplicateDefinition,

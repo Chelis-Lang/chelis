@@ -325,7 +325,7 @@ pub(super) fn pattern_bindings(
                         .iter()
                         .map(|(name, _)| name.clone())
                         .collect();
-                    let known_field_set: std::collections::HashSet<&str> = declared_field_names
+                    let known_field_set: chelis_unord::UnordSet<&str> = declared_field_names
                         .iter()
                         .filter_map(|n| n.as_deref())
                         .collect();

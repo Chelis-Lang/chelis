@@ -2785,7 +2785,7 @@ fn run_cmplt_parity(
     b_vals: &[f64],
 ) {
     use chelis_ir::eval::{TensorValue, eval_tensor};
-    use std::collections::HashMap;
+    use chelis_unord::UnordMap;
 
     let n = a_vals.len();
     assert_eq!(n, b_vals.len(), "operand length mismatch in {tag}");
@@ -2806,7 +2806,7 @@ fn run_cmplt_parity(
     let root = dag.add_node(RiscOp::CmpLt, vec![a, b], vec_prim(n, Prim::Bool), None);
 
     // Evaluator oracle: numeric `a < b` per element (eval.rs CmpLt).
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(
         "a".to_string(),
         TensorValue::from_vec(vec![n], a_vals.to_vec()),

@@ -309,8 +309,9 @@ fn monolithic_vs_incontext_build_byte_identical() {
 
 #[test]
 fn stale_stdlib_byte_mutation_misses_not_stale_hit() {
-    // The chelis-std typecheck cache key is content-addressed on
-    // `chelis_std_version || archive_sha256 || shell_sha256`. This test
+    // The chelis-std typecheck cache key is content-addressed on the bundled
+    // identities, canonical linked declarations, and the prepared graph's
+    // exact manifest/inventory/source-byte determinant. This test
     // pins the end-to-end invariant: a chelis-std whose source bytes
     // differ produces a different on-disk cache artifact (different
     // file name AND different contents), so it can never collide with —
@@ -320,9 +321,9 @@ fn stale_stdlib_byte_mutation_misses_not_stale_hit() {
     // cannot be perturbed in-process. Instead this test stages a
     // separately-published, byte-mutated chelis-std in its own reef
     // home and proves its cache artifact is disjoint from the pristine
-    // bundled run's. The exact key-derivation wiring
-    // (`archive_sha256` / `shell_sha256` feed the key) is additionally
-    // unit-tested in `chelis-compiler-api`.
+    // bundled run's. The exact key-derivation wiring, including independent
+    // source-digest and declaration inputs, is additionally unit-tested in
+    // `chelis-compiler-api`.
     let work = tempdir().expect("work dir");
 
     // Pristine run: bundled stdlib, isolated cache home A. Stage the

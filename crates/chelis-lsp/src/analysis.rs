@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -82,11 +83,11 @@ struct TopLevelSymbol {
 
 #[derive(Debug, Clone, Default)]
 struct TopLevelIndex {
-    defs: HashMap<String, TopLevelSymbol>,
-    exports: HashSet<String>,
+    defs: UnordMap<String, TopLevelSymbol>,
+    exports: UnordSet<String>,
     has_explicit_exports: bool,
     module_name: Option<String>,
-    imports: HashMap<String, String>,
+    imports: UnordMap<String, String>,
 }
 
 pub fn analyze_document(uri: &Url, text: &str) -> DocumentAnalysis {
@@ -217,7 +218,7 @@ fn analyze_surf_document(text: &str) -> DocumentAnalysis {
     let mut references = Vec::new();
     let mut completions = builtin_completions(full_document_range(text));
 
-    for symbol in top_level.defs.values() {
+    for (_, symbol) in top_level.defs.to_sorted() {
         definitions.push(Definition {
             name: symbol.name.clone(),
             range: symbol.range,
@@ -231,7 +232,7 @@ fn analyze_surf_document(text: &str) -> DocumentAnalysis {
             visible_in: full_document_range(text),
         });
     }
-    for (name, module) in &top_level.imports {
+    for (name, module) in top_level.imports.to_sorted() {
         completions.push(VisibleName {
             name: name.clone(),
             detail: format!("imported from {module}"),

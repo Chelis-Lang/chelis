@@ -1,5 +1,5 @@
 use chelis_deep::DeepTag;
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 use std::fs;
 
 use chelis_deep::ast::{Atom, Expr, List};
@@ -85,7 +85,7 @@ fn float_element_is_nan(value: ElementRef) -> bool {
 fn bind_checked_precision(
     name: &str,
     prim: Prim,
-    bindings: &mut HashMap<String, Prim>,
+    bindings: &mut UnordMap<String, Prim>,
 ) -> Result<(), String> {
     match bindings.get(name) {
         Some(existing) if *existing != prim => Err(format!(
@@ -101,7 +101,7 @@ fn bind_checked_precision(
     }
 }
 
-fn checked_precision_leaf(actual: &Expr, caller_bindings: &HashMap<String, Prim>) -> Option<Prim> {
+fn checked_precision_leaf(actual: &Expr, caller_bindings: &UnordMap<String, Prim>) -> Option<Prim> {
     let (actual_tag, actual_children) = tagged_expr_children(actual)?;
     match actual_tag {
         DeepTag::TPrim | DeepTag::TVar => actual_children
@@ -122,8 +122,8 @@ fn checked_precision_leaf(actual: &Expr, caller_bindings: &HashMap<String, Prim>
 fn collect_checked_precision_bindings(
     declared: &Expr,
     actual: &Expr,
-    caller_bindings: &HashMap<String, Prim>,
-    bindings: &mut HashMap<String, Prim>,
+    caller_bindings: &UnordMap<String, Prim>,
+    bindings: &mut UnordMap<String, Prim>,
 ) -> Result<(), String> {
     let Some((declared_tag, declared_children)) = tagged_expr_children(declared) else {
         return Ok(());
@@ -260,7 +260,8 @@ impl<'a> EvalContext<'a> {
             .cloned()
             .map(|expr| (name.to_string(), expr))
             .or_else(|| {
-                let mut matches = self.top_level_defs.iter().filter_map(|(key, value)| {
+                let sorted = self.top_level_defs.to_sorted();
+                let mut matches = sorted.into_iter().filter_map(|(key, value)| {
                     terminal_name_matches(key, name).then_some((key, value))
                 });
                 let (key, value) = matches.next()?;
@@ -273,12 +274,13 @@ impl<'a> EvalContext<'a> {
 
     fn lookup_declared_signature(&self, name: &str) -> Option<&Expr> {
         self.declared_signatures.get(name).or_else(|| {
-            let mut matches = self
-                .declared_signatures
-                .iter()
-                .filter_map(|(key, signature)| {
-                    terminal_name_matches(key, name).then_some(signature)
-                });
+            let mut matches =
+                self.declared_signatures
+                    .to_sorted()
+                    .into_iter()
+                    .filter_map(|(key, signature)| {
+                        terminal_name_matches(key, name).then_some(signature)
+                    });
             let signature = matches.next()?;
             matches.next().is_none().then_some(signature)
         })
@@ -511,7 +513,7 @@ impl<'a> EvalContext<'a> {
             .first()
             .and_then(symbol_name)
             .ok_or_else(|| "record missing constructor name".to_string())?;
-        let mut fields_by_name = HashMap::new();
+        let mut fields_by_name = UnordMap::new();
         let mut source_order = Vec::new();
         for field in kids.iter().skip(1) {
             let Some(field_list) = as_list(field) else {
@@ -544,7 +546,7 @@ impl<'a> EvalContext<'a> {
             })?;
             ordered.push(value);
         }
-        if let Some(extra) = fields_by_name.keys().next() {
+        if let Some((extra, _)) = fields_by_name.to_sorted().into_iter().next() {
             return Err(format!(
                 "record `{ctor}` has unknown field `{extra}` at runtime"
             ));
@@ -712,7 +714,8 @@ impl<'a> EvalContext<'a> {
             body,
             env: self
                 .bindings
-                .iter()
+                .to_sorted()
+                .into_iter()
                 .filter(|(name, _)| !self.top_level_defs.contains_key(*name))
                 .map(|(name, value)| (name.clone(), value.clone()))
                 .collect(),
@@ -977,7 +980,7 @@ impl<'a> EvalContext<'a> {
                 &mut self.bindings,
                 &self.adt_fields,
             )? {
-                for name in self.bindings.keys() {
+                for (name, _) in self.bindings.to_sorted() {
                     if !saved.contains_key(name) {
                         self.binding_types.insert(name.clone(), None);
                     }
@@ -1138,7 +1141,7 @@ impl<'a> EvalContext<'a> {
                 self.precision_bindings = precision_env;
                 let value = (|| {
                     let caller_precisions = saved_precisions.clone();
-                    let mut call_precisions = HashMap::new();
+                    let mut call_precisions = UnordMap::new();
                     for (declared, actual) in param_types.iter().zip(arg_type_exprs) {
                         if let (Some(declared), Some(actual)) = (declared, actual) {
                             collect_checked_precision_bindings(
@@ -1161,7 +1164,7 @@ impl<'a> EvalContext<'a> {
                     // The call-site instantiation is fresh (spec/04 §5.8):
                     // callee-owned binders shadow a same-spelled lexical
                     // binding instead of conflicting with it.
-                    self.precision_bindings.extend(call_precisions);
+                    self.precision_bindings.merge(call_precisions);
                     for (index, (param, arg)) in params.into_iter().zip(args).enumerate() {
                         let declared = param_types
                             .get(index)

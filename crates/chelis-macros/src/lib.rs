@@ -1,5 +1,5 @@
 use chelis_deep::DeepTag;
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaExpr, MetaMap, UnknownFormData};
@@ -74,10 +74,10 @@ pub fn expand_program(
     let prelude = if options.load_std_prelude {
         standard_prelude_macros()?
     } else {
-        HashMap::new()
+        UnordMap::new()
     };
     let mut expander = Expander::new(options.max_iterations, prelude);
-    let exprs = expander.expand_sequence(exprs, &HashMap::new())?;
+    let exprs = expander.expand_sequence(exprs, &UnordMap::new())?;
     Ok(ExpandedProgram {
         exprs,
         expansions: expander.expansions,
@@ -88,11 +88,11 @@ struct Expander {
     remaining_expansions: usize,
     hygiene_counter: usize,
     expansions: usize,
-    prelude_macros: HashMap<String, MacroDef>,
+    prelude_macros: UnordMap<String, MacroDef>,
 }
 
 impl Expander {
-    fn new(limit: usize, prelude_macros: HashMap<String, MacroDef>) -> Self {
+    fn new(limit: usize, prelude_macros: UnordMap<String, MacroDef>) -> Self {
         Self {
             remaining_expansions: limit,
             hygiene_counter: 0,
@@ -104,22 +104,22 @@ impl Expander {
     fn expand_sequence(
         &mut self,
         exprs: &[Expr],
-        inherited_macros: &HashMap<String, MacroDef>,
+        inherited_macros: &UnordMap<String, MacroDef>,
     ) -> Result<Vec<Expr>, ExpansionError> {
         self.reject_standard_prelude_callable_collisions(exprs)?;
 
         let mut macros = inherited_macros.clone();
-        for (name, def) in &self.prelude_macros {
+        for (name, def) in self.prelude_macros.to_sorted() {
             macros.entry(name.clone()).or_insert_with(|| def.clone());
         }
 
-        let mut user_macros = HashMap::new();
+        let mut user_macros = UnordMap::new();
         for expr in exprs {
             if let Some(def) = extract_macro_def(expr)? {
                 user_macros.insert(def.name.clone(), def);
             }
         }
-        macros.extend(user_macros);
+        macros.merge(user_macros);
 
         let mut out = Vec::new();
         for expr in exprs {
@@ -151,7 +151,7 @@ impl Expander {
         let def_names = exprs
             .iter()
             .filter_map(|expr| standard_prelude_decl_name(expr, DeepTag::Def, &self.prelude_macros))
-            .collect::<HashSet<_>>();
+            .collect::<UnordSet<_>>();
 
         for expr in exprs {
             let name = standard_prelude_decl_name(expr, DeepTag::Def, &self.prelude_macros)
@@ -176,7 +176,7 @@ impl Expander {
     fn expand_expr(
         &mut self,
         expr: &Expr,
-        macros: &HashMap<String, MacroDef>,
+        macros: &UnordMap<String, MacroDef>,
         scope: &Scope,
     ) -> Result<Expr, ExpansionError> {
         match expr {
@@ -260,7 +260,7 @@ impl Expander {
     fn expand_module(
         &mut self,
         list: &List,
-        macros: &HashMap<String, MacroDef>,
+        macros: &UnordMap<String, MacroDef>,
         span: Span,
     ) -> Result<Expr, ExpansionError> {
         let kids = children(list);
@@ -280,7 +280,7 @@ impl Expander {
     fn expand_fn(
         &mut self,
         list: &List,
-        macros: &HashMap<String, MacroDef>,
+        macros: &UnordMap<String, MacroDef>,
         scope: &Scope,
         span: Span,
     ) -> Result<Expr, ExpansionError> {
@@ -301,7 +301,7 @@ impl Expander {
     fn expand_let(
         &mut self,
         list: &List,
-        macros: &HashMap<String, MacroDef>,
+        macros: &UnordMap<String, MacroDef>,
         scope: &Scope,
         span: Span,
     ) -> Result<Expr, ExpansionError> {
@@ -339,7 +339,7 @@ impl Expander {
     fn expand_match(
         &mut self,
         list: &List,
-        macros: &HashMap<String, MacroDef>,
+        macros: &UnordMap<String, MacroDef>,
         scope: &Scope,
         span: Span,
     ) -> Result<Expr, ExpansionError> {
@@ -381,7 +381,7 @@ impl Expander {
     fn try_expand_macro_call(
         &mut self,
         list: &List,
-        macros: &HashMap<String, MacroDef>,
+        macros: &UnordMap<String, MacroDef>,
         scope: &Scope,
     ) -> Result<Option<Expr>, ExpansionError> {
         let (name, args) = if internal_tag(list) == Some("macro-invoke") {
@@ -416,11 +416,11 @@ impl Expander {
         let invocation = macro_source(&def.name, &args);
         let (placeholder_params, placeholder_args) =
             macro_arg_placeholders(def, &args, self.expansions);
-        let placeholder_body = substitute_expr(&def.body, &placeholder_params, &HashSet::new());
+        let placeholder_body = substitute_expr(&def.body, &placeholder_params, &UnordSet::new());
         let hygienic = hygienize_expr(
             &placeholder_body,
             &mut self.hygiene_counter,
-            &HashMap::new(),
+            &UnordMap::new(),
         );
         let substituted = replace_placeholder_vars(&hygienic, &placeholder_args);
         Ok(Some(annotate_source_expr(&substituted, &invocation)))
@@ -442,12 +442,12 @@ fn macro_arg_placeholders(
     def: &MacroDef,
     args: &[Expr],
     expansion_id: usize,
-) -> (HashMap<String, Expr>, HashMap<String, Expr>) {
-    let mut used_symbols = HashSet::new();
+) -> (UnordMap<String, Expr>, UnordMap<String, Expr>) {
+    let mut used_symbols = UnordSet::new();
     collect_symbols(&def.body, &mut used_symbols);
 
-    let mut placeholder_params = HashMap::new();
-    let mut placeholder_args = HashMap::new();
+    let mut placeholder_params = UnordMap::new();
+    let mut placeholder_args = UnordMap::new();
     for (idx, (param, arg)) in def.params.iter().zip(args.iter()).enumerate() {
         let placeholder = fresh_placeholder(idx, expansion_id, &mut used_symbols);
         placeholder_params.insert(param.clone(), var(&placeholder));
@@ -459,7 +459,7 @@ fn macro_arg_placeholders(
 fn fresh_placeholder(
     idx: usize,
     expansion_id: usize,
-    used_symbols: &mut HashSet<String>,
+    used_symbols: &mut UnordSet<String>,
 ) -> String {
     let mut attempt = 0;
     loop {
@@ -471,7 +471,7 @@ fn fresh_placeholder(
     }
 }
 
-fn replace_placeholder_vars(expr: &Expr, replacements: &HashMap<String, Expr>) -> Expr {
+fn replace_placeholder_vars(expr: &Expr, replacements: &UnordMap<String, Expr>) -> Expr {
     match expr {
         Expr::Atom(_, _) => expr.clone(),
         // Metadata values are walked like children (PR #1319 review).
@@ -530,7 +530,7 @@ fn replace_placeholder_vars(expr: &Expr, replacements: &HashMap<String, Expr>) -
     }
 }
 
-fn collect_symbols(expr: &Expr, out: &mut HashSet<String>) {
+fn collect_symbols(expr: &Expr, out: &mut UnordSet<String>) {
     match expr {
         Expr::Atom(Atom::Name(name), _) => {
             out.insert(name.clone());
@@ -587,7 +587,7 @@ fn collect_symbols(expr: &Expr, out: &mut HashSet<String>) {
 
 #[derive(Debug, Clone, Default)]
 struct Scope {
-    blockers: HashSet<String>,
+    blockers: UnordSet<String>,
 }
 
 impl Scope {
@@ -664,8 +664,8 @@ fn extract_macro_def(expr: &Expr) -> Result<Option<MacroDef>, ExpansionError> {
 
 fn substitute_expr(
     expr: &Expr,
-    params: &HashMap<String, Expr>,
-    shadowed: &HashSet<String>,
+    params: &UnordMap<String, Expr>,
+    shadowed: &UnordSet<String>,
 ) -> Expr {
     match expr {
         Expr::Atom(_, _) => expr.clone(),
@@ -734,8 +734,8 @@ fn substitute_expr(
 
 fn substitute_fn(
     list: &List,
-    params: &HashMap<String, Expr>,
-    shadowed: &HashSet<String>,
+    params: &UnordMap<String, Expr>,
+    shadowed: &UnordSet<String>,
     span: Span,
 ) -> Expr {
     let mut elements = list.elements.clone();
@@ -753,8 +753,8 @@ fn substitute_fn(
 
 fn substitute_let(
     list: &List,
-    params: &HashMap<String, Expr>,
-    shadowed: &HashSet<String>,
+    params: &UnordMap<String, Expr>,
+    shadowed: &UnordSet<String>,
     span: Span,
 ) -> Expr {
     let mut elements = list.elements.clone();
@@ -792,8 +792,8 @@ fn substitute_let(
 
 fn substitute_match(
     list: &List,
-    params: &HashMap<String, Expr>,
-    shadowed: &HashSet<String>,
+    params: &UnordMap<String, Expr>,
+    shadowed: &UnordSet<String>,
     span: Span,
 ) -> Expr {
     let mut elements = Vec::with_capacity(list.elements.len());
@@ -831,7 +831,7 @@ fn substitute_match(
     Expr::List(List { elements }, span)
 }
 
-fn hygienize_expr(expr: &Expr, counter: &mut usize, env: &HashMap<String, String>) -> Expr {
+fn hygienize_expr(expr: &Expr, counter: &mut usize, env: &UnordMap<String, String>) -> Expr {
     match expr {
         Expr::Atom(_, _) => expr.clone(),
         // Metadata values are walked like children (PR #1319 review).
@@ -900,7 +900,7 @@ fn hygienize_expr(expr: &Expr, counter: &mut usize, env: &HashMap<String, String
 fn hygienize_fn(
     list: &List,
     counter: &mut usize,
-    env: &HashMap<String, String>,
+    env: &UnordMap<String, String>,
     span: Span,
 ) -> Expr {
     let mut elements = list.elements.clone();
@@ -917,7 +917,7 @@ fn hygienize_fn(
 fn hygienize_let(
     list: &List,
     counter: &mut usize,
-    env: &HashMap<String, String>,
+    env: &UnordMap<String, String>,
     span: Span,
 ) -> Expr {
     let mut elements = list.elements.clone();
@@ -952,7 +952,7 @@ fn hygienize_let(
 fn hygienize_match(
     list: &List,
     counter: &mut usize,
-    env: &HashMap<String, String>,
+    env: &UnordMap<String, String>,
     span: Span,
 ) -> Expr {
     let kids = children(list);
@@ -993,8 +993,8 @@ fn hygienize_match(
 fn hygienize_params_expr(
     expr: &Expr,
     counter: &mut usize,
-    env: &HashMap<String, String>,
-) -> (Expr, HashMap<String, String>) {
+    env: &UnordMap<String, String>,
+) -> (Expr, UnordMap<String, String>) {
     let mut next_env = env.clone();
     let Expr::List(list, span) = expr else {
         return (expr.clone(), next_env);
@@ -1036,8 +1036,8 @@ fn hygienize_params_expr(
 fn hygienize_pattern(
     expr: &Expr,
     counter: &mut usize,
-    env: &HashMap<String, String>,
-) -> (Expr, HashMap<String, String>) {
+    env: &UnordMap<String, String>,
+) -> (Expr, UnordMap<String, String>) {
     let Expr::List(list, span) = expr else {
         return (expr.clone(), env.clone());
     };
@@ -1230,8 +1230,8 @@ fn macro_source(name: &str, args: &[Expr]) -> Expr {
     Expr::List(List { elements }, zero_span())
 }
 
-fn standard_prelude_macros() -> Result<HashMap<String, MacroDef>, ExpansionError> {
-    let mut defs = HashMap::new();
+fn standard_prelude_macros() -> Result<UnordMap<String, MacroDef>, ExpansionError> {
+    let mut defs = UnordMap::new();
     for def in [
         prelude_linear_layer(),
         prelude_residual(),
@@ -1359,7 +1359,7 @@ fn symbol_name(expr: &Expr) -> Option<&str> {
 fn standard_prelude_decl_name<'a>(
     expr: &'a Expr,
     expected: DeepTag,
-    prelude: &HashMap<String, MacroDef>,
+    prelude: &UnordMap<String, MacroDef>,
 ) -> Option<&'a str> {
     let kids = match expr {
         Expr::List(list, _) if get_tag(list) == Some(expected) => children(list),

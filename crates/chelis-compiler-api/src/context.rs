@@ -778,6 +778,9 @@ fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
 /// V11 adds quantified type-variable restrictions and their live
 /// substitution ledger, so constrained function values retain their domain
 /// through a compiled-context round trip.
+/// V13 canonicalizes every unordered collection that can reach encoded
+/// compiler-context bytes (chelis#1341 Phase B).
+///
 /// V12 records canonical source positions on deferred positional-expand and
 /// reshape obligations. Their serialized checker state is therefore
 /// structurally different from V11 even when a program has no cache-visible
@@ -1205,11 +1208,13 @@ fn build_checked_library_layered(
     // once; every later process reads it back. A build failure here is a
     // genuine chelis-std regression, surfaced rather than hidden behind the
     // monolithic fallback.
-    let stdlib_ctx =
-        match crate::stdlib_cache::load_or_build_stdlib_context(&reef_state.linked_stdlib_decls) {
-            Ok(ctx) => ctx,
-            Err(err) => return Some(Err(err)),
-        };
+    let stdlib_ctx = match crate::stdlib_cache::load_or_build_stdlib_context(
+        &reef_state.linked_stdlib_decls,
+        reef_state.stdlib_source_digest(),
+    ) {
+        Ok(ctx) => ctx,
+        Err(err) => return Some(Err(err)),
+    };
 
     // Layer 2: desugar + macro-expand only the non-chelis-std library decls
     // (the package's own modules + non-stdlib path-deps). A macro-expansion
@@ -1319,8 +1324,13 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn cache_format_version_tracks_ordered_constraints_and_nominal_kinds() {
+    fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
         assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V13\n");
+        assert_eq!(CACHE_FORMAT_VERSION, 13);
+    }
+
+    #[test]
+    fn cache_format_version_tracks_ordered_deferred_constraints() {
         assert_eq!(CACHE_FORMAT_VERSION, 13);
     }
 

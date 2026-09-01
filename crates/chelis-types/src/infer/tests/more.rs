@@ -2003,7 +2003,7 @@ fn narrow_keeps_wildcard_for_return_only_dim_var() {
 /// self-contained (the original #39 behavior).
 #[test]
 fn narrow_substitutes_literal_for_wildcard_unconditionally() {
-    let empty = HashSet::new();
+    let empty = UnordSet::new();
     let body = Type::Tensor(
         vec![Dim::Wildcard, Dim::Wildcard],
         TensorPrec::Concrete(Prim::F32),

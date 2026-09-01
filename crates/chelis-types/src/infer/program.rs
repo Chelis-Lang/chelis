@@ -96,7 +96,7 @@ impl RecursiveLevelScope {
         var_gen: &VarGen,
         subst: &mut Subst,
     ) -> Self {
-        let mut seen = HashSet::new();
+        let mut seen = UnordSet::new();
         let members = indices
             .iter()
             .filter_map(|index| top_level_decl_name(items[*index].1))
@@ -253,7 +253,7 @@ pub(super) fn infer_program_with_product_in_session(
     // module-wrapped programs.
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
-    let metadata_prebound_names = HashSet::new();
+    let metadata_prebound_names = UnordSet::new();
     product.function_inference_plan = FunctionInferencePlan::build(&items);
     let inference_groups = primary_inference_groups(&product.function_inference_plan, &items);
     // Match the persisted-state driver: cache the TLS token once and poll at
@@ -281,7 +281,7 @@ pub(super) fn infer_program_with_product_in_session(
                 &mut vg,
             )
         } else {
-            HashMap::new()
+            UnordMap::new()
         };
         // spec/04 §3.1.1: record in-group instantiations while this
         // recursive group's bodies are inferred; validated in
@@ -489,7 +489,7 @@ pub(crate) fn build_type_env_from_library_in_session(
 
     // Capture library def names — needed by new-code cycle / unbound
     // suppression to distinguish library refs from new-code refs.
-    let mut library_def_names = std::collections::HashSet::new();
+    let mut library_def_names = chelis_unord::UnordSet::new();
     for expr in top_level_decl_items(library_exprs) {
         if let deep::Expr::List(list, _) = expr
             && get_tag(list) == Some(DeepTag::Def)
@@ -559,7 +559,7 @@ pub(crate) fn build_type_env_from_library_in_session(
 ///
 /// Behavior contract:
 /// - The returned `TypeEnv` is identical (modulo non-determinism in
-///   `HashMap` iteration) to `build_type_env_from_library(library_exprs)`.
+///   `UnordMap` iteration) to `build_type_env_from_library(library_exprs)`.
 /// - The returned `CheckedProgram` has the same `annotated_exprs()` and
 ///   `type_env()` shapes that
 ///   `check_ir_with_context(&TypeEnv::empty(), library_exprs)`
@@ -626,7 +626,7 @@ pub(crate) fn build_compiled_library_context_in_session(
     }
 
     // Capture library def names before consuming `state` into `TypeEnv`.
-    let mut library_def_names = std::collections::HashSet::new();
+    let mut library_def_names = chelis_unord::UnordSet::new();
     for expr in top_level_decl_items(library_exprs) {
         if let deep::Expr::List(list, _) = expr
             && get_tag(list) == Some(DeepTag::Def)
@@ -747,7 +747,7 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
 
     // `library_exprs` declared types (IR), layered on top of the base's.
     let new_ir = build_ir_type_env(library_exprs);
-    let combined_ir: HashMap<String, deep::Expr> = state
+    let combined_ir: BTreeMap<String, deep::Expr> = state
         .ir_types
         .iter()
         .chain(new_ir.iter())
@@ -940,7 +940,7 @@ pub(crate) fn check_ir_with_signature_context_in_session(
 
     // New-code declared types (IR) layered on top of library's.
     let new_ir = build_ir_type_env(new_exprs);
-    let combined_ir: HashMap<String, deep::Expr> = state
+    let combined_ir: BTreeMap<String, deep::Expr> = state
         .ir_types
         .iter()
         .chain(new_ir.iter())
@@ -1203,7 +1203,7 @@ pub(super) fn infer_ir_program_with_state(
     // rejects the mismatch; keeping the defsig binding here restores parity.
     // For every well-typed program the defsig type and the body stamp agree, so
     // this skip is a no-op except on exactly the mismatch that must be rejected.
-    let defsig_names: std::collections::HashSet<&str> = items
+    let defsig_names: chelis_unord::UnordSet<&str> = items
         .iter()
         .filter_map(|(_, expr)| match stamped_parts(expr) {
             Some((DeepTag::Defsig, _, kids)) => kids.first().and_then(symbol_name),
@@ -1211,7 +1211,7 @@ pub(super) fn infer_ir_program_with_state(
         })
         .collect();
 
-    let mut prebound_type_failures = HashMap::new();
+    let mut prebound_type_failures = UnordMap::new();
     for (name, ty_expr) in &collected_ir_types.type_env {
         let metadata_level = state.subst.enter_level(&state.var_gen);
         let resolved = resolve_deep_type(
@@ -1256,7 +1256,7 @@ pub(super) fn infer_ir_program_with_state(
         .type_env
         .keys()
         .cloned()
-        .collect::<HashSet<_>>();
+        .collect::<UnordSet<_>>();
     product.function_inference_plan = FunctionInferencePlan::build(&items);
     let inference_groups = primary_inference_groups(&product.function_inference_plan, &items);
     // chelis#930: cooperative cancellation at top-level-declaration
@@ -1289,7 +1289,7 @@ pub(super) fn infer_ir_program_with_state(
                 &mut state.var_gen,
             )
         } else {
-            HashMap::new()
+            UnordMap::new()
         };
         // spec/04 §3.1.1: record in-group instantiations while this
         // recursive group's bodies are inferred; validated in
@@ -1438,7 +1438,7 @@ pub(super) fn primary_inference_schedule(
                 .as_ref()
                 .map(|_| member.item_index)
         })
-        .collect::<HashSet<_>>();
+        .collect::<UnordSet<_>>();
     if module_fn_indices.is_empty() {
         return (0..items.len()).collect();
     }
@@ -1448,7 +1448,10 @@ pub(super) fn primary_inference_schedule(
         .map(|member| member.item_index)
         .filter(|index| module_fn_indices.contains(index))
         .collect::<Vec<_>>();
-    let insertion = module_fn_indices.iter().copied().min().unwrap_or(0);
+    let insertion = module_fn_indices
+        .to_sorted()
+        .first()
+        .map_or(0, |index| **index);
     let mut schedule = Vec::with_capacity(items.len());
     for index in 0..items.len() {
         if index == insertion {
@@ -1489,14 +1492,14 @@ pub(super) fn primary_inference_groups(
         })
         .filter(|indices| !indices.is_empty())
         .collect::<Vec<_>>();
-    let mut component_by_index = HashMap::new();
+    let mut component_by_index = UnordMap::new();
     for (component_index, indices) in recursive_components.iter().enumerate() {
         for index in indices {
             component_by_index.insert(*index, component_index);
         }
     }
 
-    let mut emitted_components = HashSet::new();
+    let mut emitted_components = UnordSet::new();
     let mut groups = Vec::new();
     for index in schedule {
         let Some(component_index) = component_by_index.get(&index).copied() else {
@@ -1522,12 +1525,12 @@ pub(super) fn primary_inference_groups(
 pub(super) fn prebind_recursive_function_schemes(
     indices: &[usize],
     items: &[(Option<String>, &deep::Expr)],
-    declared_signatures: &HashMap<String, DeclaredSigMetadata>,
-    metadata_prebound_names: &HashSet<String>,
+    declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
+    metadata_prebound_names: &UnordSet<String>,
     env: &mut Env,
     vg: &mut VarGen,
-) -> HashMap<usize, Type> {
-    let mut provisional = HashMap::new();
+) -> UnordMap<usize, Type> {
+    let mut provisional = UnordMap::new();
     for index in indices {
         let expr = items[*index].1;
         let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
@@ -1564,7 +1567,7 @@ pub(super) fn prebind_recursive_function_schemes(
     provisional
 }
 
-pub(super) type IrTypeEnv = HashMap<String, deep::Expr>;
+pub(super) type IrTypeEnv = BTreeMap<String, deep::Expr>;
 
 /// Canonical IR type collection result. The type environment retains the
 /// historical last-declaration-wins behavior for duplicate names; the paired
@@ -1572,7 +1575,7 @@ pub(super) type IrTypeEnv = HashMap<String, deep::Expr>;
 /// final entry.
 pub(super) struct CollectedIrTypes {
     type_env: IrTypeEnv,
-    final_origin_by_name: HashMap<String, usize>,
+    final_origin_by_name: UnordMap<String, usize>,
 }
 
 pub(super) fn build_ir_type_env(exprs: &[deep::Expr]) -> IrTypeEnv {
@@ -1582,8 +1585,8 @@ pub(super) fn build_ir_type_env(exprs: &[deep::Expr]) -> IrTypeEnv {
 pub(super) fn collect_ir_types_with_origins<'a>(
     items: impl IntoIterator<Item = &'a deep::Expr>,
 ) -> CollectedIrTypes {
-    let mut type_env = HashMap::new();
-    let mut final_origin_by_name = HashMap::new();
+    let mut type_env = BTreeMap::new();
+    let mut final_origin_by_name = UnordMap::new();
     for (declaration_index, expr) in items.into_iter().enumerate() {
         let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
             continue;
@@ -1828,12 +1831,12 @@ mod recursive_level_scope_tests {
         let provisional = prebind_recursive_function_schemes(
             &indices,
             &items,
-            &HashMap::new(),
-            &HashSet::new(),
+            &UnordMap::new(),
+            &UnordSet::new(),
             &mut env,
             &mut var_gen,
         );
-        for ty in provisional.values() {
+        for (_, ty) in provisional.to_sorted() {
             for var in crate::env::free_tvars(ty) {
                 assert_eq!(subst.level_of_tvar(var), 1);
             }
@@ -1860,8 +1863,8 @@ mod recursive_level_scope_tests {
         prebind_recursive_function_schemes(
             &indices,
             &items,
-            &HashMap::new(),
-            &HashSet::new(),
+            &UnordMap::new(),
+            &UnordSet::new(),
             &mut env,
             &mut var_gen,
         );

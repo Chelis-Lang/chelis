@@ -4,15 +4,15 @@
 //! Background
 //! ----------
 //! The chelis#159 prototype patch in `infer_let` calls
-//! `deep_type_to_resolved_type(ty_expr, vg, adt_reg, &mut HashMap::new())`
-//! with a fresh `HashMap` per binding. The reviewer asked whether this
+//! `deep_type_to_resolved_type(ty_expr, vg, adt_reg, &mut UnordMap::new())`
+//! with a fresh `UnordMap` per binding. The reviewer asked whether this
 //! means dim names in the ascription correctly share with the enclosing
 //! function signature's dim vars, or get fresh vars.
 //!
 //! What the codebase actually does
 //! -------------------------------
-//! The `&mut HashMap` passed to `deep_type_to_resolved_type` is a
-//! `HashMap<String, TypeVar>` (`infer.rs:5404-5412`). It maps named
+//! The `&mut UnordMap` passed to `deep_type_to_resolved_type` is a
+//! `UnordMap<String, TypeVar>` (`infer.rs:5404-5412`). It maps named
 //! type variables (`'a`, `T`, etc.) to internal `TypeVar` IDs. It is
 //! NOT a dim-variable map.
 //!

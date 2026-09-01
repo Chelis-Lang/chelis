@@ -10,7 +10,7 @@
 //! - stores remain standalone owned outputs
 //! - cleanup frees metadata wrappers before backing slots
 
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_ir::dag::{Dag, DimExpr, DimExprKey, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_types::types::Prim;
@@ -52,7 +52,7 @@ struct OwnerRequirement {
 }
 
 impl MemoryPlan {
-    pub fn build(dag: &Dag, output_ids: &[NodeId], skipped: &HashSet<NodeId>) -> Self {
+    pub fn build(dag: &Dag, output_ids: &[NodeId], skipped: &UnordSet<NodeId>) -> Self {
         let mut node_kinds = classify_nodes(dag, skipped);
         let owner_of = compute_owner_map(dag, &node_kinds);
         let requirements = owner_requirements(dag, &node_kinds, &owner_of, output_ids);
@@ -124,7 +124,7 @@ impl MemoryPlan {
     }
 }
 
-fn classify_nodes(dag: &Dag, skipped: &HashSet<NodeId>) -> Vec<NodeMemoryKind> {
+fn classify_nodes(dag: &Dag, skipped: &UnordSet<NodeId>) -> Vec<NodeMemoryKind> {
     let mut kinds = Vec::with_capacity(dag.len());
     for node in dag.nodes() {
         let kind = if skipped.contains(&node.id) {
@@ -226,7 +226,7 @@ fn owner_requirements(
     output_ids: &[NodeId],
 ) -> Vec<OwnerRequirement> {
     let epilogue_index = dag.len();
-    let mut by_owner = HashMap::<NodeId, OwnerRequirement>::new();
+    let mut by_owner = UnordMap::<NodeId, OwnerRequirement>::new();
 
     for node in dag.nodes() {
         if matches!(node_kinds[node.id.0], NodeMemoryKind::SlotBacked { .. }) {
@@ -292,7 +292,11 @@ fn owner_requirements(
         }
     }
 
-    let mut ordered = by_owner.into_values().collect::<Vec<_>>();
+    let mut ordered = by_owner
+        .into_sorted()
+        .into_iter()
+        .map(|(_, requirement)| requirement)
+        .collect::<Vec<_>>();
     ordered.sort_by_key(|req| req.birth_index);
     ordered
 }
@@ -305,7 +309,7 @@ fn assign_slots(
     let mut availability = Vec::<usize>::new();
     let mut slot_capacity_concretes = Vec::<Option<usize>>::new();
     let mut slot_capacity_keys = Vec::<DimExprKey>::new();
-    let mut owner_to_slot = HashMap::<NodeId, usize>::new();
+    let mut owner_to_slot = UnordMap::<NodeId, usize>::new();
 
     for req in requirements {
         let reused = slots.iter().enumerate().find_map(|(slot_id, slot)| {
@@ -407,7 +411,7 @@ mod tests {
     }
 
     fn build_plan(dag: &Dag, output_ids: &[NodeId]) -> MemoryPlan {
-        MemoryPlan::build(dag, output_ids, &HashSet::new())
+        MemoryPlan::build(dag, output_ids, &UnordSet::new())
     }
 
     #[test]

@@ -23,7 +23,7 @@ use chelis_backend_c::codegen;
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::eval_tensor;
 use chelis_types::types::Prim;
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -228,7 +228,7 @@ fn scalar_ty(prec: Prim) -> TensorType {
 
 /// Evaluate the DAG; return the result tensor data of the last node as f64.
 fn eval_last(dag: &Dag) -> Vec<f64> {
-    let inputs = HashMap::new();
+    let inputs = UnordMap::new();
     let vals = eval_tensor(dag, &inputs).unwrap();
     let last_id = NodeId(dag.len() - 1);
     vals[&last_id].to_f64_lossy_vec().clone()
@@ -429,7 +429,7 @@ fn bf16_div_agrees_with_evaluator() {
         None,
     );
     dag.add_node(RiscOp::Div, vec![a, b], vec_ty(n, Prim::Bf16), None);
-    let inputs: HashMap<String, chelis_ir::eval::TensorValue> = [
+    let inputs: UnordMap<String, chelis_ir::eval::TensorValue> = [
         (
             "a".into(),
             chelis_ir::eval::TensorValue::from_vec(
@@ -480,7 +480,7 @@ fn f16_div_agrees_with_evaluator() {
         None,
     );
     dag.add_node(RiscOp::Div, vec![a, b], vec_ty(n, Prim::F16), None);
-    let inputs: HashMap<String, chelis_ir::eval::TensorValue> = [
+    let inputs: UnordMap<String, chelis_ir::eval::TensorValue> = [
         (
             "a".into(),
             chelis_ir::eval::TensorValue::from_vec(
@@ -526,7 +526,7 @@ fn unary_eval(op: RiscOp, prec: Prim, vals: &[f32]) -> Vec<f64> {
         None,
     );
     dag.add_node(op, vec![load], vec_ty(n, prec), None);
-    let inputs: HashMap<String, chelis_ir::eval::TensorValue> = [(
+    let inputs: UnordMap<String, chelis_ir::eval::TensorValue> = [(
         "x".into(),
         chelis_ir::eval::TensorValue::from_vec(vec![n], vals.iter().map(|&v| v as f64).collect()),
     )]

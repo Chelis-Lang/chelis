@@ -8,8 +8,9 @@
 
 use chelis_deep::ast::{Atom, Expr as DeepExpr, MetaMap};
 use chelis_deep::{DeepTag, LiteralSuffix, Span, cast_mode_of};
+use chelis_unord::UnordMap;
 use chelis_vocab::{EffectKind, EffectKindInput};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 use crate::ast::{
@@ -2710,8 +2711,8 @@ fn try_resugar_destructuring_let(node: &NodeRef<'_>) -> Result<Option<Expr>, Res
     }
     exact(&root_bind, 2)?;
     let root_name = name_child(&root_bind, 0)?.to_string();
-    let mut temp_paths = HashMap::from([(root_name, Vec::<usize>::new())]);
-    let mut pattern_nodes = HashMap::<Vec<usize>, Option<String>>::from([(Vec::new(), None)]);
+    let mut temp_paths = UnordMap::from([(root_name, Vec::<usize>::new())]);
+    let mut pattern_nodes = BTreeMap::<Vec<usize>, Option<String>>::from([(Vec::new(), None)]);
     let mut current = &node.children[1];
 
     while let Ok(let_node) = node_ref(current) {
@@ -2785,7 +2786,7 @@ fn try_resugar_destructuring_let(node: &NodeRef<'_>) -> Result<Option<Expr>, Res
 
 fn build_destructuring_pattern(
     path: &[usize],
-    nodes: &HashMap<Vec<usize>, Option<String>>,
+    nodes: &BTreeMap<Vec<usize>, Option<String>>,
     span: Span,
 ) -> Result<LetPattern, ResugarError> {
     let name = nodes.get(path).ok_or(ResugarError::InvalidChild {

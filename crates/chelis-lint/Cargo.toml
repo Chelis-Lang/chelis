@@ -11,6 +11,7 @@ name = "chelis_lint"
 path = "src/lib.rs"
 
 [dependencies]
+chelis-unord.workspace = true
 chelis-deep.workspace = true
 chelis-surf.workspace = true
 ignore = "0.4"

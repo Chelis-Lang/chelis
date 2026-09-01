@@ -1,6 +1,6 @@
 //! Basic DAG optimization passes.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use crate::dag::{Dag, NodeId, RiscOp};
 
@@ -182,10 +182,10 @@ pub fn dead_code_eliminate(dag: &Dag) -> Dag {
 /// Same as [`dead_code_eliminate`] but also returns the `old_id -> new_id`
 /// remapping. Phase F (`lower_program_with_context`) needs the remap to
 /// rewrite the library's name → NodeId symbol table after DCE renumbering.
-pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId>) {
+pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, UnordMap<NodeId, NodeId>) {
     let n = dag.len();
     if n == 0 {
-        return (Dag::new(), HashMap::new());
+        return (Dag::new(), UnordMap::new());
     }
 
     // Mark live nodes: DAG roots + all Store nodes.
@@ -225,7 +225,7 @@ pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId
 
     // Rebuild with only live nodes, remapping IDs.
     let mut new_dag = Dag::new();
-    let mut id_map: HashMap<usize, NodeId> = HashMap::new();
+    let mut id_map: UnordMap<usize, NodeId> = UnordMap::new();
 
     for (old_id, node) in dag.nodes().iter().enumerate() {
         if live[old_id] {
@@ -282,7 +282,8 @@ pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId
         }
     }
 
-    let node_remap: HashMap<NodeId, NodeId> = id_map
+    let node_remap: UnordMap<NodeId, NodeId> = id_map
+        .into_sorted()
         .into_iter()
         .map(|(old, new)| (NodeId(old), new))
         .collect();
@@ -302,8 +303,8 @@ pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId
 /// dedup'd by the helper.
 pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
     let mut new_dag = Dag::new();
-    let mut id_map: HashMap<usize, NodeId> = HashMap::new();
-    let mut seen: HashMap<(String, Vec<NodeId>, Vec<NodeId>), NodeId> = HashMap::new();
+    let mut id_map: UnordMap<usize, NodeId> = UnordMap::new();
+    let mut seen: UnordMap<(String, Vec<NodeId>, Vec<NodeId>), NodeId> = UnordMap::new();
 
     for node in dag.nodes() {
         let remapped_inputs: Vec<NodeId> = node

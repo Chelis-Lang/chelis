@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::collections::HashSet;
+use chelis_unord::UnordMap;
+use chelis_unord::UnordSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -193,7 +193,7 @@ impl Backend {
 struct TrainingPrograms {
     train_c: CCodegenResult,
     train_hip: HipCodegenResult,
-    train_labels: HashMap<String, usize>,
+    train_labels: UnordMap<String, usize>,
 }
 
 struct ForwardPrograms {
@@ -939,8 +939,8 @@ fn build_transformer_programs() -> Result<ForwardPrograms, String> {
 
 /// Set of nodes reachable from `root` by walking input edges (the
 /// dependency cone of `root`).
-fn dependency_cone(dag: &Dag, root: NodeId) -> HashSet<NodeId> {
-    let mut seen = HashSet::new();
+fn dependency_cone(dag: &Dag, root: NodeId) -> UnordSet<NodeId> {
+    let mut seen = UnordSet::new();
     let mut stack = vec![root];
     while let Some(id) = stack.pop() {
         if !seen.insert(id) {
@@ -987,7 +987,7 @@ fn dag_without_roots(dag: &Dag) -> Dag {
     out
 }
 
-fn output_index_map(labels: &[String]) -> HashMap<String, usize> {
+fn output_index_map(labels: &[String]) -> UnordMap<String, usize> {
     labels
         .iter()
         .cloned()
@@ -997,7 +997,7 @@ fn output_index_map(labels: &[String]) -> HashMap<String, usize> {
 }
 
 fn require_named_root<'a>(
-    roots: &'a HashMap<String, NodeId>,
+    roots: &'a UnordMap<String, NodeId>,
     candidates: &[&str],
 ) -> Result<&'a NodeId, String> {
     for candidate in candidates {
@@ -1509,7 +1509,7 @@ fn build_training_main_c(
     _prefix: &str,
     data_path: &Path,
     train: &CCodegenResult,
-    train_labels: &HashMap<String, usize>,
+    train_labels: &UnordMap<String, usize>,
     uses_accuracy: bool,
 ) -> String {
     let train_input_slots = slot_assignments(
@@ -2026,7 +2026,7 @@ int main(void) {{
 }
 
 fn slot_assignments(array_name: &str, labels: &[String], mapping: &[(&str, &str)]) -> String {
-    let map: HashMap<&str, &str> = mapping.iter().copied().collect();
+    let map: UnordMap<&str, &str> = mapping.iter().copied().collect();
     let mut lines = Vec::new();
     for (idx, label) in labels.iter().enumerate() {
         let value = map

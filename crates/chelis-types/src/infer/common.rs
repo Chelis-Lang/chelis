@@ -471,7 +471,7 @@ pub(super) fn extract_string_literal(expr: &deep::Expr) -> Option<String> {
 pub(super) fn narrow_wildcards_with(
     ty: &Type,
     template: &Type,
-    param_dvars: &HashSet<DimVar>,
+    param_dvars: &UnordSet<DimVar>,
 ) -> Type {
     match (ty, template) {
         (Type::Tensor(dims, prec), Type::Tensor(tmpl_dims, _)) if dims.len() == tmpl_dims.len() => {
@@ -543,8 +543,8 @@ pub(super) fn narrow_wildcards_with(
 /// wildcard may be safely narrowed to a declared `Dim::Var`. A non-`Fn`
 /// type (or one whose params carry no tensor dim vars) yields the empty
 /// set, so narrowing falls back to the literal-only behavior.
-pub(super) fn param_bound_dvars(decl_ty: &Type) -> HashSet<DimVar> {
-    let mut out = HashSet::new();
+pub(super) fn param_bound_dvars(decl_ty: &Type) -> UnordSet<DimVar> {
+    let mut out = UnordSet::new();
     if let Type::Fn(params, _) = decl_ty {
         for param in params {
             for dv in crate::env::free_dvars(param) {
@@ -666,11 +666,11 @@ impl<'a> AliasExpansionSession<'a> {
     }
 
     pub(super) fn resolve(&mut self, ty: &Type) -> Type {
-        let mut seen = HashSet::new();
+        let mut seen = UnordSet::new();
         self.resolve_inner(ty, &mut seen)
     }
 
-    fn resolve_inner(&mut self, ty: &Type, seen: &mut HashSet<String>) -> Type {
+    fn resolve_inner(&mut self, ty: &Type, seen: &mut UnordSet<String>) -> Type {
         match ty {
             Type::Adt(name, args) => {
                 let resolved_args: Vec<Type> = args
@@ -712,15 +712,15 @@ impl<'a> AliasExpansionSession<'a> {
                 // arguments inside a signature, preserving named-parameter
                 // equality without leaking registration-time IDs across
                 // signatures or inference levels.
-                let protected_tvars: HashSet<_> = resolved_args
+                let protected_tvars: UnordSet<_> = resolved_args
                     .iter()
                     .flat_map(crate::env::free_tvars)
                     .collect();
-                let protected_dvars: HashSet<_> = resolved_args
+                let protected_dvars: UnordSet<_> = resolved_args
                     .iter()
                     .flat_map(crate::env::free_dvars)
                     .collect();
-                let protected_rvars: HashSet<_> = resolved_args
+                let protected_rvars: UnordSet<_> = resolved_args
                     .iter()
                     .flat_map(crate::env::free_rvars)
                     .collect();
@@ -784,7 +784,7 @@ impl<'a> AliasExpansionSession<'a> {
                     .iter()
                     .filter_map(NominalArg::as_type)
                     .flat_map(crate::env::free_tvars)
-                    .collect::<HashSet<_>>();
+                    .collect::<UnordSet<_>>();
                 let protected_dvars = resolved_args
                     .iter()
                     .flat_map(|argument| match argument {
@@ -792,7 +792,7 @@ impl<'a> AliasExpansionSession<'a> {
                         NominalArg::Dimension(Dim::Var(var)) => vec![*var],
                         NominalArg::Dimension(_) => Vec::new(),
                     })
-                    .collect::<HashSet<_>>();
+                    .collect::<UnordSet<_>>();
                 let protected_rvars = resolved_args
                     .iter()
                     .flat_map(|argument| match argument {
@@ -800,7 +800,7 @@ impl<'a> AliasExpansionSession<'a> {
                         NominalArg::Dimension(Dim::Rank(var)) => vec![*var],
                         NominalArg::Dimension(_) => Vec::new(),
                     })
-                    .collect::<HashSet<_>>();
+                    .collect::<UnordSet<_>>();
                 let mut renaming = Subst::new();
                 for var in crate::env::free_tvars(&substituted) {
                     if !protected_tvars.contains(&var) {
@@ -960,7 +960,7 @@ pub(super) fn precollect_type_resolution_env(
     adt_reg: &AdtRegistry,
 ) -> TypeResolutionEnv {
     let mut headers = TypeResolutionEnv::from_registry(adt_reg);
-    let mut declarations: HashMap<String, (Vec<String>, Vec<&deep::Expr>)> = HashMap::new();
+    let mut declarations: UnordMap<String, (Vec<String>, Vec<&deep::Expr>)> = UnordMap::new();
     for (_, expr) in items {
         let Some((tag, _, kids)) = stamped_parts(expr) else {
             continue;
@@ -1002,17 +1002,18 @@ pub(super) fn precollect_type_resolution_env(
     // use is dimensional; type, mixed, and unused parameters remain ordinary
     // types, preserving the language's unkinded-binder default.
     let mut evidence = declarations
-        .iter()
+        .to_sorted()
+        .into_iter()
         .map(|(name, (params, _))| (name.clone(), vec![(false, false); params.len()]))
-        .collect::<HashMap<_, _>>();
+        .collect::<UnordMap<_, _>>();
     loop {
         let before = evidence.clone();
-        for (name, (params, bodies)) in &declarations {
+        for (name, (params, bodies)) in declarations.to_sorted() {
             let indices = params
                 .iter()
                 .enumerate()
                 .map(|(index, param)| (param.as_str(), index))
-                .collect::<HashMap<_, _>>();
+                .collect::<UnordMap<_, _>>();
             for body in bodies {
                 collect_nominal_kind_evidence(
                     body,
@@ -1028,7 +1029,7 @@ pub(super) fn precollect_type_resolution_env(
             break;
         }
     }
-    for (name, (params, _)) in declarations {
+    for (name, (params, _)) in declarations.into_sorted() {
         let kinds = evidence
             .remove(&name)
             .unwrap_or_else(|| vec![(false, false); params.len()])
@@ -1049,8 +1050,8 @@ pub(super) fn precollect_type_resolution_env(
 fn collect_nominal_kind_evidence(
     expr: &deep::Expr,
     context: Option<NominalParamKind>,
-    own_params: &HashMap<&str, usize>,
-    evidence: &mut HashMap<String, Vec<(bool, bool)>>,
+    own_params: &UnordMap<&str, usize>,
+    evidence: &mut UnordMap<String, Vec<(bool, bool)>>,
     owner: &str,
     existing_headers: &TypeResolutionEnv,
 ) {
@@ -1060,7 +1061,7 @@ fn collect_nominal_kind_evidence(
     };
     let record = |name: &str,
                   context: Option<NominalParamKind>,
-                  evidence: &mut HashMap<String, Vec<(bool, bool)>>| {
+                  evidence: &mut UnordMap<String, Vec<(bool, bool)>>| {
         let Some(index) = own_params.get(name).copied() else {
             return;
         };
@@ -1180,7 +1181,7 @@ pub(super) fn build_opacity_meta(
     let mut meta = crate::opacity::OpacityModuleMeta::default();
     // Declared signature types (from `defsig` nodes) for producer
     // display; keyed by binding name like `meta.bindings`.
-    let mut declared_sigs: HashMap<String, Type> = HashMap::new();
+    let mut declared_sigs: UnordMap<String, Type> = UnordMap::new();
     // Pass 1: export sets. Lexical `(export ...)` nodes attribute to
     // their module wrapper; package-linked exports arrive as
     // top-level nodes whose names carry the reef internal-name stem
@@ -1294,7 +1295,7 @@ pub(super) fn build_opacity_meta(
 /// Reject two same-name `def` declarations in one program (chelis#258).
 ///
 /// A def's value binding is silent last-write-wins (`env.bind` →
-/// `HashMap::insert`, like the `defsig` arm of `collect_declarations`), and
+/// `UnordMap::insert`, like the `defsig` arm of `collect_declarations`), and
 /// Chelis does not dispatch same-name `def`s by argument arity or tensor
 /// rank. So two `def f`s whose sigs differ only in rank leave just one arm
 /// reachable: callers of the other rank fire a confusing `DimensionMismatch`
@@ -1321,7 +1322,7 @@ pub(super) fn reject(errors: &mut DiagnosticSink<'_>, error: CheckError) -> Opti
 }
 
 pub(super) fn report_duplicate_defs(items: &[&deep::Expr], errors: &mut DiagnosticSink<'_>) {
-    let mut seen: HashSet<&str> = HashSet::new();
+    let mut seen: UnordSet<&str> = UnordSet::new();
     for expr in items {
         // chelis#1107: `stamped_parts` reads both carriers. A `List`-only
         // destructure skipped every stamped declaration, so this check fired
@@ -1356,7 +1357,7 @@ pub(super) fn report_duplicate_defs(items: &[&deep::Expr], errors: &mut Diagnost
 /// (`collect_declarations`, declared-param-type collection, signature metadata)
 /// and make the enforced signature order-dependent.
 pub(super) fn report_duplicate_defsigs(items: &[&deep::Expr], errors: &mut DiagnosticSink<'_>) {
-    let mut seen: HashSet<&str> = HashSet::new();
+    let mut seen: UnordSet<&str> = UnordSet::new();
     for expr in items {
         // chelis#1107: carrier-preserving read, as in `report_duplicate_defs`.
         let Some((tag, _, kids)) = stamped_parts(expr) else {
@@ -1395,7 +1396,7 @@ pub(super) fn report_orphan_defsigs(
     // in-process provenance and the linker's reserved mangled-name format;
     // neither fact alone can exempt an authored orphan. Raw Deep/Surf units
     // and persistent checker contexts still take the same-unit check below.
-    let mut defs: HashSet<(Option<&str>, &str)> = HashSet::new();
+    let mut defs: UnordSet<(Option<&str>, &str)> = UnordSet::new();
     for (module, expr) in items {
         let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
             continue;
@@ -1474,12 +1475,12 @@ pub(super) fn report_builtin_shadowing(items: &[&deep::Expr], errors: &mut Diagn
             .map(str::to_string)
     };
 
-    let def_names: HashSet<String> = items
+    let def_names: UnordSet<String> = items
         .iter()
         .filter_map(|expr| decl_name(expr, DeepTag::Def))
         .collect();
 
-    let mut reported: HashSet<String> = HashSet::new();
+    let mut reported: UnordSet<String> = UnordSet::new();
     for expr in items {
         let Some(name) = decl_name(expr, DeepTag::Def).or_else(|| decl_name(expr, DeepTag::Defsig))
         else {
@@ -1652,7 +1653,7 @@ pub(super) fn collect_declarations(
                     .iter()
                     .cloned()
                     .zip(param_kinds.iter().copied())
-                    .collect::<HashMap<_, _>>();
+                    .collect::<UnordMap<_, _>>();
                 let mut resolver = DeepTypeResolver::new(
                     TypeUseSite::TypeAliasBody,
                     BinderMode::ExplicitKinds(&explicit_params),
@@ -1835,8 +1836,8 @@ pub(super) fn app_var_name(callee: &deep::Expr) -> Option<&str> {
 /// Names of every top-level `def` in the program (after module flattening),
 /// so the Body-Discipline check can reject a call that resolves to a user
 /// function shadowing an Identity builtin name (chelis#258 §4.2).
-pub(super) fn collect_user_def_names(items: &[&deep::Expr]) -> HashSet<String> {
-    let mut out = HashSet::new();
+pub(super) fn collect_user_def_names(items: &[&deep::Expr]) -> UnordSet<String> {
+    let mut out = UnordSet::new();
     for expr in items {
         if let Some((DeepTag::Def, _, kids)) = stamped_parts(expr)
             && let Some(name) = kids.first().and_then(symbol_name)
@@ -1859,7 +1860,7 @@ pub(super) fn collect_user_def_names(items: &[&deep::Expr]) -> HashSet<String> {
 pub(super) fn check_rank_body_discipline(
     def_name: &str,
     expr: &deep::Expr,
-    user_def_names: &HashSet<String>,
+    user_def_names: &UnordSet<String>,
     errors: &mut DiagnosticSink<'_>,
 ) {
     stack_guard!("check_rank_body_discipline", expr);
@@ -1996,8 +1997,8 @@ pub(super) fn infer_top_level(
     prebound_type_failure: Option<&ErrorWitness>,
     provisional_recursive_type: Option<&Type>,
     defer_recursive_binding: bool,
-    user_def_names: &HashSet<String>,
-    declared_signatures: &HashMap<String, DeclaredSigMetadata>,
+    user_def_names: &UnordSet<String>,
+    declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
 ) -> Option<(String, Type)> {
     let Some((tag, _, kids)) = stamped_parts(expr) else {
         // chelis#858 / [04-TOT-1]: a top-level list with no decoded tag

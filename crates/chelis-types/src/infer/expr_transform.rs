@@ -226,7 +226,7 @@ pub(super) fn grad_argument_type(arg: &Type, adt_reg: &AdtRegistry) -> Option<Ty
                             .iter()
                             .copied()
                             .zip(args.iter().cloned())
-                            .collect::<std::collections::HashMap<_, _>>();
+                            .collect::<chelis_unord::UnordMap<_, _>>();
                         def.variants.iter().any(|variant| {
                             variant.fields.iter().any(|(_, field_ty)| {
                                 let instantiated =

@@ -1488,7 +1488,7 @@ fn f6_cli_and_tide_agree_on_deep_user_property_verdicts() {
         .collect();
 
     // Same property set, same per-property status, across surfaces.
-    let cli_by_name: std::collections::HashMap<String, String> = cli_props
+    let cli_by_name: std::collections::BTreeMap<String, String> = cli_props
         .iter()
         .map(|p| {
             (

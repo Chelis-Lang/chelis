@@ -2,7 +2,7 @@ use crate::ast::*;
 use crate::lexer::{self, LexError};
 use crate::token::{Token, TokenKind};
 use chelis_deep::Span;
-use std::collections::HashSet;
+use chelis_unord::UnordSet;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -212,8 +212,8 @@ fn accepted_literal_alias(found: &str, expected: &str, kind: &TokenKind) -> bool
 }
 
 fn validate_property_names(decls: &[Decl]) -> Result<(), ParseError> {
-    let mut value_names = HashSet::new();
-    let mut property_names = HashSet::new();
+    let mut value_names = UnordSet::new();
+    let mut property_names = UnordSet::new();
     for decl in decls {
         match decl {
             Decl::Property { name, span, .. }

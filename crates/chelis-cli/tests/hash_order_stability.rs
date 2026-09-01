@@ -1,7 +1,7 @@
 //! Phase A acceptance surface for hash-order-independent positional `expand` settlement.
 //!
 //! Every command invocation below is a fresh process with a freshly seeded
-//! standard-library `HashMap`. One successful in-process check would not lock
+//! standard-library `UnordMap`. One successful in-process check would not lock
 //! chelis#1338: the original reproducer accepted roughly two runs in three.
 
 use assert_cmd::Command;

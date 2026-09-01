@@ -3,7 +3,7 @@
 //! Given a forward DAG computing `f(inputs) -> output`, produces a backward DAG
 //! computing gradients of the output with respect to specified input nodes.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 use std::fmt;
 
 use crate::dag::{
@@ -19,7 +19,7 @@ pub struct GradResult {
     /// The remapped forward output node inside `dag`.
     pub output_node: NodeId,
     /// Maps each requested forward input `NodeId` to its gradient `NodeId` in the combined DAG.
-    pub grad_nodes: HashMap<NodeId, NodeId>,
+    pub grad_nodes: UnordMap<NodeId, NodeId>,
 }
 
 /// Structured reason for an AD rejection.
@@ -461,11 +461,11 @@ fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<Grad
     // spec/design/chelis_span_survival.md §2.3 AD row: "Forward nodes:
     // clone span_id and merged_spans."
     let mut dag = forward.clone();
-    let mut adjoints: HashMap<NodeId, NodeId> = HashMap::new();
+    let mut adjoints: UnordMap<NodeId, NodeId> = UnordMap::new();
     // Contributions wait here until reverse traversal reaches their input.
     // Keeping the consumer ordinal and input slot makes the normative order
     // explicit instead of inheriting reverse traversal order.
-    let mut pending: HashMap<NodeId, Vec<(usize, usize, NodeId)>> = HashMap::new();
+    let mut pending: UnordMap<NodeId, Vec<(usize, usize, NodeId)>> = UnordMap::new();
     // Seed the gradient at `output` (∂output/∂output = 1). This is a
     // backward node corresponding to the forward `output`, so it
     // carries the grad marker.
@@ -481,7 +481,7 @@ fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<Grad
 
     // Walk forward topological order in reverse.
     let topo = forward.topological_order();
-    let topo_positions: HashMap<NodeId, usize> = topo
+    let topo_positions: UnordMap<NodeId, usize> = topo
         .iter()
         .copied()
         .enumerate()
@@ -544,10 +544,10 @@ fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<Grad
     let grad_nodes = wrt
         .iter()
         .filter_map(|&id| adjoints.get(&id).map(|&g| (id, g)))
-        .collect::<HashMap<_, _>>();
+        .collect::<UnordMap<_, _>>();
 
     dag.add_root(output);
-    for &grad in grad_nodes.values() {
+    for (_, &grad) in grad_nodes.to_sorted() {
         dag.add_root(grad);
     }
 
@@ -623,10 +623,10 @@ fn is_scalar_float(ty: &TensorType) -> bool {
 fn prune_to_requested_outputs(
     dag: &Dag,
     output: NodeId,
-    grad_nodes: &HashMap<NodeId, NodeId>,
-) -> (Dag, NodeId, HashMap<NodeId, NodeId>) {
+    grad_nodes: &UnordMap<NodeId, NodeId>,
+) -> (Dag, NodeId, UnordMap<NodeId, NodeId>) {
     if dag.is_empty() {
-        return (Dag::new(), NodeId(0), HashMap::new());
+        return (Dag::new(), NodeId(0), UnordMap::new());
     }
 
     let mut live = vec![false; dag.len()];
@@ -653,7 +653,7 @@ fn prune_to_requested_outputs(
     }
 
     let mut new_dag = Dag::new();
-    let mut id_map = HashMap::<usize, NodeId>::new();
+    let mut id_map = UnordMap::<usize, NodeId>::new();
     for node in dag.nodes() {
         if live[node.id.0] {
             let new_inputs = node
@@ -699,7 +699,8 @@ fn prune_to_requested_outputs(
     }
 
     let new_grad_nodes = grad_nodes
-        .iter()
+        .to_sorted()
+        .into_iter()
         .filter_map(|(old_wrt, old_grad)| {
             id_map
                 .get(&old_grad.0)
@@ -2194,7 +2195,7 @@ fn restore_target(
 mod tests {
     use super::*;
     use crate::eval::{TensorValue, eval_scalar};
-    use std::collections::HashMap;
+    use chelis_unord::UnordMap;
 
     // chelis#729 Phase 1: these fixtures verify the AUTODIFF machinery
     // against f64-precision finite differences, so the DAG type is f64.
@@ -2261,7 +2262,7 @@ mod tests {
         let grad_result = grad_dag(dag, output, &[wrt]).unwrap();
 
         // Analytical gradient.
-        let mut inputs: HashMap<String, f64> = HashMap::new();
+        let mut inputs: UnordMap<String, f64> = UnordMap::new();
         inputs.insert(input_name.to_string(), x0);
         for &(name, val) in other_inputs {
             inputs.insert(name.to_string(), val);
@@ -2487,7 +2488,7 @@ mod tests {
         let out = dag.add_node(RiscOp::Add, vec![xy, z], scalar_f64(), None);
 
         let grad_result = grad_dag(&dag, out, &[x, y, z]).unwrap();
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), 2.0);
         inputs.insert("y".to_string(), 3.0);
         inputs.insert("z".to_string(), 5.0);
@@ -2515,7 +2516,7 @@ mod tests {
         let out = dag.add_node(RiscOp::Add, vec![sum1, x], scalar_f64(), None);
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), 7.0);
         let vals = eval_scalar(&grad_result.dag, &inputs);
         let dx = vals[&grad_result.grad_nodes[&x]];
@@ -2547,7 +2548,7 @@ mod tests {
         let output = dag.add_node(RiscOp::Add, vec![left, right], ty, None);
 
         let grad_result = grad_dag(&dag, output, &[x]).expect("gradient");
-        let values = eval_scalar(&grad_result.dag, &HashMap::from([("x".to_string(), 0.0)]));
+        let values = eval_scalar(&grad_result.dag, &UnordMap::from([("x".to_string(), 0.0)]));
 
         assert_eq!(values[&grad_result.grad_nodes[&x]], 1.0);
     }
@@ -2584,7 +2585,7 @@ mod tests {
 
         let values = eval_tensor(
             &dag,
-            &HashMap::from([(
+            &UnordMap::from([(
                 "x".to_string(),
                 TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
             )]),
@@ -2660,7 +2661,7 @@ mod tests {
         );
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".to_string(),
             TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
@@ -2690,7 +2691,7 @@ mod tests {
         let second = grad_dag(&first.dag, dx_node, &[x]).unwrap();
         let ddx_node = second.grad_nodes[&x];
 
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), 5.0);
         let vals = eval_scalar(&second.dag, &inputs);
         let ddx = vals[&ddx_node];
@@ -2742,7 +2743,7 @@ mod tests {
         let out = dag.add_node(RiscOp::Exp, vec![casted], scalar_f64(), None);
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), 1.0);
         let vals = eval_scalar(&grad_result.dag, &inputs);
         let dx = vals[&grad_result.grad_nodes[&x]];
@@ -2782,7 +2783,7 @@ mod tests {
         let out = dag.add_node(RiscOp::Add, vec![recast, recast], scalar_f32(), None);
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), 1.0);
         let vals = eval_scalar(&grad_result.dag, &inputs);
         let dx = vals[&grad_result.grad_nodes[&x]];
@@ -2844,7 +2845,7 @@ mod tests {
         );
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".to_string(),
             TensorValue::from_vec(vec![6], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
@@ -2906,7 +2907,7 @@ mod tests {
         );
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".to_string(),
             TensorValue::from_vec(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
@@ -2985,7 +2986,7 @@ mod tests {
         let gradient = grad_dag(&dag, output, &[target, updates]).expect("scatter-add gradient");
         let values = eval_tensor(
             &gradient.dag,
-            &HashMap::from([
+            &UnordMap::from([
                 (
                     "target".to_string(),
                     TensorValue::from_vec(vec![4], vec![11.0, 13.0, 17.0, 19.0]),
@@ -3062,7 +3063,7 @@ mod tests {
         );
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".to_string(),
             TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
@@ -3250,7 +3251,7 @@ mod tests {
         let grad_result = grad_dag(&dag, out, &[add_node]).unwrap();
         // This should work -- it's asking for d(out)/d(add_node).
         // The answer should be exp(x+y), i.e., exp evaluated at the add node.
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), 1.0);
         inputs.insert("y".to_string(), 2.0);
         let vals = eval_scalar(&grad_result.dag, &inputs);
@@ -3353,7 +3354,7 @@ mod tests {
             dag.add_node(RiscOp::MaxElem, vec![a, b], ty.clone(), None)
         });
         let grad_result = grad_dag(&dag, out, &[x, y]).unwrap();
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), 2.0);
         inputs.insert("y".to_string(), 2.0);
         let vals = eval_scalar(&grad_result.dag, &inputs);
@@ -3470,7 +3471,7 @@ mod tests {
         let grad_result = grad_dag(&dag, c, &[x]).unwrap();
         // x might not even be in grad_nodes since no path from c to x
         if let Some(&gx) = grad_result.grad_nodes.get(&x) {
-            let mut inputs = HashMap::new();
+            let mut inputs = UnordMap::new();
             inputs.insert("x".to_string(), 7.0);
             let vals = eval_scalar(&grad_result.dag, &inputs);
             let dx = vals[&gx];
@@ -3498,7 +3499,7 @@ mod tests {
         let out = dag.add_node(RiscOp::Add, vec![s3, x], scalar_f64(), None);
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), 2.7);
         let vals = eval_scalar(&grad_result.dag, &inputs);
         let dx = vals[&grad_result.grad_nodes[&x]];
@@ -3589,7 +3590,7 @@ mod tests {
         // Gradient: 1 where element equals max along axis 0, 0 otherwise
         // Expected gradient: [[0, 1, 0], [1, 0, 1]]
         let input_data = vec![1.0, 5.0, 3.0, 4.0, 2.0, 6.0];
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".to_string(),
             TensorValue::from_vec(vec![2, 3], input_data.clone()),
@@ -3618,7 +3619,7 @@ mod tests {
             let mut data_minus = input_data.clone();
             data_minus[elem_idx] -= h;
 
-            let mut inputs_plus = HashMap::new();
+            let mut inputs_plus = UnordMap::new();
             inputs_plus.insert(
                 "x".to_string(),
                 TensorValue::from_vec(vec![2, 3], data_plus),
@@ -3626,7 +3627,7 @@ mod tests {
             let vals_plus = eval_tensor(&dag, &inputs_plus).unwrap();
             let f_plus = vals_plus[&out].to_f64_lossy_vec()[0];
 
-            let mut inputs_minus = HashMap::new();
+            let mut inputs_minus = UnordMap::new();
             inputs_minus.insert(
                 "x".to_string(),
                 TensorValue::from_vec(vec![2, 3], data_minus),
@@ -3686,7 +3687,7 @@ mod tests {
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
 
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".to_string(),
             TensorValue::from_vec(vec![2, 2], vec![3.0, 3.0, 3.0, 1.0]),
@@ -3764,7 +3765,7 @@ mod tests {
         // Row 1: max is 6 at col 2 -> [0, 0, 1]
         // Expected: [[0, 1, 0], [0, 0, 1]]
         let input_data = vec![1.0, 5.0, 3.0, 4.0, 2.0, 6.0];
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".to_string(),
             TensorValue::from_vec(vec![2, 3], input_data.clone()),
@@ -3793,7 +3794,7 @@ mod tests {
             let mut data_minus = input_data.clone();
             data_minus[elem_idx] -= h;
 
-            let mut inputs_plus = HashMap::new();
+            let mut inputs_plus = UnordMap::new();
             inputs_plus.insert(
                 "x".to_string(),
                 TensorValue::from_vec(vec![2, 3], data_plus),
@@ -3801,7 +3802,7 @@ mod tests {
             let vals_plus = eval_tensor(&dag, &inputs_plus).unwrap();
             let f_plus = vals_plus[&out].to_f64_lossy_vec()[0];
 
-            let mut inputs_minus = HashMap::new();
+            let mut inputs_minus = UnordMap::new();
             inputs_minus.insert(
                 "x".to_string(),
                 TensorValue::from_vec(vec![2, 3], data_minus),
@@ -3825,7 +3826,7 @@ mod tests {
         let (dag, x, out) =
             build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Log, vec![a], ty.clone(), None));
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), -1.0);
         let vals = eval_scalar(&grad_result.dag, &inputs);
         let dx = vals[&grad_result.grad_nodes[&x]];
@@ -3841,7 +3842,7 @@ mod tests {
         let (dag, x, out) =
             build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Sqrt, vec![a], ty.clone(), None));
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), 0.0);
         let vals = eval_scalar(&grad_result.dag, &inputs);
         let dx = vals[&grad_result.grad_nodes[&x]];
@@ -3929,7 +3930,7 @@ mod tests {
         );
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".to_string(),
             TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
@@ -3980,7 +3981,7 @@ mod tests {
         );
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".to_string(),
             TensorValue::from_vec(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0]),
@@ -4002,7 +4003,7 @@ mod tests {
             dag.add_node(RiscOp::MaxElem, vec![a, b], ty.clone(), None)
         });
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), 5.0);
         inputs.insert("y".to_string(), 3.0);
         let vals = eval_scalar(&grad_result.dag, &inputs);
@@ -4041,7 +4042,7 @@ mod tests {
         let second = grad_dag(&first.dag, dx_node, &[x]).unwrap();
         let ddx_node = second.grad_nodes[&x];
 
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), 2.0);
         let vals = eval_scalar(&second.dag, &inputs);
         let ddx = vals[&ddx_node];
@@ -4095,7 +4096,7 @@ mod tests {
         );
         let grad_result =
             grad_dag(&dag, out, &[x]).expect("stride gradients are supported (issue #291)");
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".to_string(),
             TensorValue::from_vec(vec![4], vec![10.0, 20.0, 30.0, 40.0]),
@@ -4180,7 +4181,7 @@ mod tests {
         );
 
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".to_string(),
             TensorValue::from_vec(vec![2, 3], vec![1.0, 5.0, 3.0, 4.0, 2.0, 6.0]),
@@ -4218,7 +4219,7 @@ mod tests {
         dag.add_root(p);
 
         let grad_result = grad_dag(&dag, p, &[x]).unwrap();
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".to_string(),
             TensorValue::from_vec(vec![4], vec![2.0, 3.0, 4.0, 5.0]),
@@ -4263,7 +4264,7 @@ mod tests {
         dag.add_root(p);
 
         let grad_result = grad_dag(&dag, p, &[x]).unwrap();
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".to_string(),
             TensorValue::from_vec(vec![4], vec![2.0, 0.0, 4.0, 5.0]),
@@ -4511,7 +4512,7 @@ mod tests {
         let (dag, x, out) =
             build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Abs, vec![a], ty.clone(), None));
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), 0.0_f64);
         let vals = eval_scalar(&grad_result.dag, &inputs);
         let a = vals[&grad_result.grad_nodes[&x]];
@@ -4528,7 +4529,7 @@ mod tests {
         let (dag, x, out) =
             build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Abs, vec![a], ty.clone(), None));
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), -2.7_f64);
         let vals = eval_scalar(&grad_result.dag, &inputs);
         let a = vals[&grad_result.grad_nodes[&x]];
@@ -4654,7 +4655,7 @@ mod tests {
         let (dag, x, out) =
             build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Cos, vec![a], ty.clone(), None));
         let grad_result = grad_dag(&dag, out, &[x]).unwrap();
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert("x".to_string(), 0.5_f64);
         let vals = eval_scalar(&grad_result.dag, &inputs);
         let a = vals[&grad_result.grad_nodes[&x]];
@@ -4798,7 +4799,7 @@ mod tests {
         );
         // The gradient of sum(stride(x, 2)) at n = 5 is the upsample mask
         // [1, 0, 1, 0, 1].
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".to_string(),
             TensorValue::from_vec(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0]),

@@ -90,6 +90,9 @@ use crate::stdlib_cache::{StdLibContext, cache_disabled, typecheck_cache_dir};
 /// `TypeEnv`; a V2 dependency-library payload is a clean miss.
 /// V4 adds quantified type-variable restrictions and their live substitution
 /// ledger.
+/// V6 canonicalizes every unordered collection that can reach library-cache
+/// payload and key bytes (chelis#1341 Phase B).
+///
 /// V5 records canonical source positions on deferred positional-expand and
 /// reshape obligations inside `TypeEnv`.
 /// V6 adds checker-owned nominal parameter kinds and kinded nominal arguments,
@@ -233,22 +236,53 @@ pub fn library_cache_key(
     library_cache_key_at_version(dependency_decls, stdlib_key, LIBRARY_CACHE_FORMAT_VERSION)
 }
 
+/// Exact ordered byte stream hashed by [`library_cache_key`].
+///
+/// This is exposed for the Phase B cache-root oracle. Callers must treat it
+/// as diagnostic evidence, not as a separately versioned wire format.
+#[doc(hidden)]
+pub fn library_cache_key_input_bytes(
+    dependency_decls: &[chelis_surf::ast::Decl],
+    stdlib_key: [u8; 32],
+) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    visit_library_cache_key_inputs(
+        dependency_decls,
+        stdlib_key,
+        LIBRARY_CACHE_FORMAT_VERSION,
+        |part| bytes.extend_from_slice(part),
+    );
+    bytes
+}
+
 fn library_cache_key_at_version(
     dependency_decls: &[chelis_surf::ast::Decl],
     stdlib_key: [u8; 32],
     format_version: u32,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"chelis_library_typecheck_v");
-    hasher.update(format_version.to_le_bytes());
+    visit_library_cache_key_inputs(dependency_decls, stdlib_key, format_version, |part| {
+        hasher.update(part)
+    });
+    hasher.finalize().into()
+}
+
+fn visit_library_cache_key_inputs(
+    dependency_decls: &[chelis_surf::ast::Decl],
+    stdlib_key: [u8; 32],
+    format_version: u32,
+    mut append: impl FnMut(&[u8]),
+) {
+    append(b"chelis_library_typecheck_v");
+    append(&format_version.to_le_bytes());
     let compiler_version = crate::build_fingerprint();
-    hasher.update(b"compiler_version");
-    hasher.update((compiler_version.len() as u64).to_le_bytes());
-    hasher.update(compiler_version.as_bytes());
+    append(b"compiler_version");
+    append(&(compiler_version.len() as u64).to_le_bytes());
+    append(compiler_version.as_bytes());
     // The Layer-1 stdlib sub-context identity. Fixed width, appended
     // directly.
-    hasher.update(b"stdlib_key");
-    hasher.update(stdlib_key);
+    append(b"stdlib_key");
+    append(&stdlib_key);
     // The dependency decls actually being checked. `bincode` is a
     // deterministic encoding, so this is a stable content hash. A `serialize`
     // failure is unreachable for a well-formed `Decl` slice (bincode of `Decl`
@@ -260,15 +294,14 @@ fn library_cache_key_at_version(
     // chelis#1176 review (F2).
     match bincode::serialize(dependency_decls) {
         Ok(decl_bytes) => {
-            hasher.update(b"decls");
-            hasher.update((decl_bytes.len() as u64).to_le_bytes());
-            hasher.update(&decl_bytes);
+            append(b"decls");
+            append(&(decl_bytes.len() as u64).to_le_bytes());
+            append(&decl_bytes);
         }
         Err(_) => {
-            hasher.update(b"decls-unserializable");
+            append(b"decls-unserializable");
         }
     }
-    hasher.finalize().into()
 }
 
 /// The on-disk path for a dependency sub-context cache entry.
@@ -567,7 +600,7 @@ mod tests {
     use crate::stdlib_cache::build_stdlib_context;
 
     #[test]
-    fn cache_format_version_tracks_ordered_constraints_and_nominal_kinds() {
+    fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
         assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 6);
     }
 
@@ -577,7 +610,7 @@ mod tests {
         let decls = sample_decls("preceding_version");
         let stdlib_key = key(5);
         let current_key = library_cache_key(&decls, stdlib_key);
-        let preceding_key = library_cache_key_at_version(&decls, stdlib_key, 4);
+        let preceding_key = library_cache_key_at_version(&decls, stdlib_key, 5);
         assert_ne!(current_key, preceding_key);
 
         let context = build_library_context(&stdlib_context, &decls)
@@ -784,7 +817,7 @@ mod tests {
     }
 
     /// Order-independent semantic equality of two composed library
-    /// programs. `CheckedProgram` and `TypeEnv` carry `HashMap`/`HashSet`
+    /// programs. `CheckedProgram` and `TypeEnv` carry `UnordMap`/`UnordSet`
     /// state whose bincode order is nondeterministic, so compare the
     /// substantive typed content (annotated exprs + type env as a set)
     /// rather than raw bytes.

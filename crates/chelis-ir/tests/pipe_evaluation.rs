@@ -11,7 +11,7 @@
 //! 3. `x |> grad(f)` ≡ `grad(f)(x)`.
 //! 4. `xs |> vmap(grad(f))` ≡ `vmap(grad(f))(xs)`.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use chelis_deep::Expr;
 use chelis_ir::dag::{DimInfo, NodeId, TensorType};
@@ -54,10 +54,10 @@ fn pipe_unary_builtin_stage_lowers_and_evaluates() {
           (var {} relu))
     "#;
     let pipe_expr = parse_one(pipe_src);
-    let scoped = HashMap::from([("x".to_string(), f32_vec(3))]);
-    let dag = lower_subexpr_program(&pipe_expr, scoped, HashMap::new(), HashMap::new());
+    let scoped = UnordMap::from([("x".to_string(), f32_vec(3))]);
+    let dag = lower_subexpr_program(&pipe_expr, scoped, UnordMap::new(), UnordMap::new());
 
-    let inputs = HashMap::from([(
+    let inputs = UnordMap::from([(
         "x".to_string(),
         TensorValue::from_vec(vec![3], vec![-1.0, 0.0, 2.5]),
     )]);
@@ -94,10 +94,10 @@ fn pipe_plain_callable_with_args_lowers_and_evaluates() {
               (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} a))))
     "#;
     let pipe_expr = parse_one(pipe_src);
-    let scoped = HashMap::from([("x".to_string(), f32_vec(3)), ("a".to_string(), f32_vec(3))]);
-    let dag = lower_subexpr_program(&pipe_expr, scoped, HashMap::new(), HashMap::new());
+    let scoped = UnordMap::from([("x".to_string(), f32_vec(3)), ("a".to_string(), f32_vec(3))]);
+    let dag = lower_subexpr_program(&pipe_expr, scoped, UnordMap::new(), UnordMap::new());
 
-    let inputs = HashMap::from([
+    let inputs = UnordMap::from([
         (
             "x".to_string(),
             TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
@@ -152,20 +152,20 @@ fn pipe_grad_stage_matches_non_pipe_application() {
           (var {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))} input))
     "#;
 
-    let mut program_defs = HashMap::new();
+    let mut program_defs = UnordMap::new();
     program_defs.insert("loss".to_string(), parse_one(fn_src));
     let input_ty = f32_vec(1);
-    let scoped = HashMap::from([("input".to_string(), input_ty)]);
+    let scoped = UnordMap::from([("input".to_string(), input_ty)]);
 
     let pipe_dag = lower_subexpr_program(
         &parse_one(pipe_src),
         scoped.clone(),
-        HashMap::new(),
+        UnordMap::new(),
         program_defs.clone(),
     );
-    let app_dag = lower_subexpr_program(&parse_one(app_src), scoped, HashMap::new(), program_defs);
+    let app_dag = lower_subexpr_program(&parse_one(app_src), scoped, UnordMap::new(), program_defs);
 
-    let inputs = HashMap::from([(
+    let inputs = UnordMap::from([(
         "input".to_string(),
         TensorValue::from_vec(vec![1], vec![3.0]),
     )]);
@@ -239,20 +239,20 @@ fn pipe_vmap_grad_stage_matches_non_pipe_application() {
           (var {type: (t-tensor {} (d-lit {} 3) (d-lit {} 1) (t-prim {} f32))} xs))
     "#;
 
-    let mut program_defs = HashMap::new();
+    let mut program_defs = UnordMap::new();
     program_defs.insert("loss".to_string(), parse_one(fn_src));
     let xs_ty = f32_mat(3, 1);
-    let scoped = HashMap::from([("xs".to_string(), xs_ty)]);
+    let scoped = UnordMap::from([("xs".to_string(), xs_ty)]);
 
     let pipe_dag = lower_subexpr_program(
         &parse_one(pipe_src),
         scoped.clone(),
-        HashMap::new(),
+        UnordMap::new(),
         program_defs.clone(),
     );
-    let app_dag = lower_subexpr_program(&parse_one(app_src), scoped, HashMap::new(), program_defs);
+    let app_dag = lower_subexpr_program(&parse_one(app_src), scoped, UnordMap::new(), program_defs);
 
-    let inputs = HashMap::from([(
+    let inputs = UnordMap::from([(
         "xs".to_string(),
         TensorValue::from_vec(vec![3, 1], vec![1.0, 2.0, 3.0]),
     )]);
@@ -324,12 +324,12 @@ fn pipe_vmap_def_stage_lowers_and_evaluates() {
           (var {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} xs)
           (vmap {} (var {} relu_row) (lit {type: (t-prim {} int32)} 0)))
     "#;
-    let mut program_defs = HashMap::new();
+    let mut program_defs = UnordMap::new();
     program_defs.insert("relu_row".to_string(), parse_one(relu_row_src));
-    let scoped = HashMap::from([("xs".to_string(), f32_mat(2, 3))]);
-    let dag = lower_subexpr_program(&parse_one(pipe_src), scoped, HashMap::new(), program_defs);
+    let scoped = UnordMap::from([("xs".to_string(), f32_mat(2, 3))]);
+    let dag = lower_subexpr_program(&parse_one(pipe_src), scoped, UnordMap::new(), program_defs);
 
-    let inputs = HashMap::from([(
+    let inputs = UnordMap::from([(
         "xs".to_string(),
         TensorValue::from_vec(vec![2, 3], vec![-1.0, 0.0, 2.5, -3.0, 1.0, 0.5]),
     )]);
@@ -401,9 +401,9 @@ fn pipe_fn_typed_parameter_stage_lowers_standalone_def() {
     "#;
     let result = try_lower_subexpr_program(
         &parse_one(fn_src),
-        HashMap::new(),
-        HashMap::new(),
-        HashMap::new(),
+        UnordMap::new(),
+        UnordMap::new(),
+        UnordMap::new(),
     );
     assert!(
         result.is_ok(),
@@ -468,28 +468,28 @@ fn pipe_fn_typed_parameter_stage_matches_non_pipe_call_site() {
           (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} seed))
     "#;
 
-    let mut program_defs = HashMap::new();
+    let mut program_defs = UnordMap::new();
     program_defs.insert("apply_one_pipe".to_string(), parse_one(apply_one_pipe_src));
     program_defs.insert("apply_one_app".to_string(), parse_one(apply_one_app_src));
     program_defs.insert("doubler".to_string(), parse_one(doubler_src));
 
     let seed_ty = f32_vec(3);
-    let scoped = HashMap::from([("seed".to_string(), seed_ty)]);
+    let scoped = UnordMap::from([("seed".to_string(), seed_ty)]);
 
     let pipe_dag = lower_subexpr_program(
         &parse_one(pipe_call_src),
         scoped.clone(),
-        HashMap::new(),
+        UnordMap::new(),
         program_defs.clone(),
     );
     let app_dag = lower_subexpr_program(
         &parse_one(app_call_src),
         scoped,
-        HashMap::new(),
+        UnordMap::new(),
         program_defs,
     );
 
-    let inputs = HashMap::from([(
+    let inputs = UnordMap::from([(
         "seed".to_string(),
         TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
     )]);

@@ -4,7 +4,7 @@
 //! where {} is an inline metadata map.
 
 use chelis_deep::DeepTag;
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::Span;
 use chelis_deep::ast as deep;
@@ -95,7 +95,7 @@ fn normalize_single(expr: &deep::Expr) -> deep::Expr {
 
 #[derive(Default)]
 struct DesugarCtx {
-    top_level_fn_params: HashMap<String, Vec<String>>,
+    top_level_fn_params: UnordMap<String, Vec<String>>,
     /// Per-function tensor element types declared in the function's
     /// signature, indexed by parameter position. `None` for non-tensor
     /// parameters or parameters with no declared type.
@@ -105,7 +105,7 @@ struct DesugarCtx {
     /// position 2: the corresponding argument position of a call whose
     /// callee has a declared signature with a tensor parameter at that
     /// position.
-    top_level_fn_tensor_param_prec: HashMap<String, Vec<Option<String>>>,
+    top_level_fn_tensor_param_prec: UnordMap<String, Vec<Option<String>>>,
     /// Names that carry an explicit standalone `sig`/signature declaration
     /// (`Decl::Sig`). When a `def` of the same name also has inline
     /// annotations, `desugar_fun_def` would otherwise synthesize a second
@@ -116,7 +116,7 @@ struct DesugarCtx {
     /// body-vs-signature contract on the un-annotated positions
     /// (chelis#285). When an explicit sig exists, the synthesized one is
     /// strictly redundant and weaker, so we suppress it here.
-    explicit_sig_names: HashSet<String>,
+    explicit_sig_names: UnordSet<String>,
     /// Explicit effect clauses (`! { ... }`) declared on each `def`, keyed by
     /// name. The effect upper-bound check reads the declared effect set only
     /// from a `defsig`'s `t-fn` `eff` metadata
@@ -128,7 +128,7 @@ struct DesugarCtx {
     /// otherwise suppression would silently drop the def's effect contract
     /// (chelis#285). Stored even for an empty `! {}` (which declares "no
     /// effects" and is distinct from no annotation at all).
-    def_effects: HashMap<String, Vec<EffectExpr>>,
+    def_effects: UnordMap<String, Vec<EffectExpr>>,
     /// Monotonic counter behind every `__chelis_tmpN` this context
     /// synthesizes for destructuring `let` patterns (chelis#1200).
     ///
@@ -149,10 +149,10 @@ struct DesugarCtx {
 
 impl DesugarCtx {
     fn new(decls: &[Decl]) -> Self {
-        let mut top_level_fn_params = HashMap::new();
-        let mut top_level_fn_tensor_param_prec = HashMap::new();
-        let mut explicit_sig_names = HashSet::new();
-        let mut def_effects = HashMap::new();
+        let mut top_level_fn_params = UnordMap::new();
+        let mut top_level_fn_tensor_param_prec = UnordMap::new();
+        let mut explicit_sig_names = UnordSet::new();
+        let mut def_effects = UnordMap::new();
         for decl in decls {
             for_each_decl(decl, &mut |d| {
                 collect_top_level_fn_params(d, &mut top_level_fn_params);
@@ -447,11 +447,11 @@ fn lower_module_path(path: &str) -> String {
 }
 
 fn desugar_param(param: &Param) -> deep::Expr {
-    desugar_param_with_dims(param, &HashSet::new())
+    desugar_param_with_dims(param, &UnordSet::new())
 }
 
-fn desugar_param_with_dims(param: &Param, dim_vars: &HashSet<String>) -> deep::Expr {
-    desugar_param_with_scope(param, dim_vars, &HashSet::new())
+fn desugar_param_with_dims(param: &Param, dim_vars: &UnordSet<String>) -> deep::Expr {
+    desugar_param_with_scope(param, dim_vars, &UnordSet::new())
 }
 
 /// Desugar a parameter with both a declared dim-vars scope and a
@@ -465,8 +465,8 @@ fn desugar_param_with_dims(param: &Param, dim_vars: &HashSet<String>) -> deep::E
 /// from sigs to def parameter annotations.
 fn desugar_param_with_scope(
     param: &Param,
-    dim_vars: &HashSet<String>,
-    tvar_set: &HashSet<String>,
+    dim_vars: &UnordSet<String>,
+    tvar_set: &UnordSet<String>,
 ) -> deep::Expr {
     match &param.ty {
         Some(ty) if typed_param_needs_meta_wrapper(&param.name) => deep::Expr::MetaExpr(
@@ -898,7 +898,7 @@ fn for_each_decl(decl: &Decl, visit: &mut impl FnMut(&Decl)) {
     }
 }
 
-fn collect_top_level_fn_params(decl: &Decl, out: &mut HashMap<String, Vec<String>>) {
+fn collect_top_level_fn_params(decl: &Decl, out: &mut UnordMap<String, Vec<String>>) {
     if let Decl::FunDef { name, params, .. } | Decl::Property { name, params, .. } = decl {
         out.insert(
             name.clone(),
@@ -910,7 +910,7 @@ fn collect_top_level_fn_params(decl: &Decl, out: &mut HashMap<String, Vec<String
 /// Collect names that carry an explicit standalone `sig` declaration, so
 /// `desugar_fun_def` can suppress the redundant wildcard-filled `defsig` it
 /// would otherwise synthesize for a same-name annotated `def` (chelis#285).
-fn collect_explicit_sig_names(decl: &Decl, out: &mut HashSet<String>) {
+fn collect_explicit_sig_names(decl: &Decl, out: &mut UnordSet<String>) {
     if let Decl::Sig { name, .. } = decl {
         out.insert(name.clone());
     }
@@ -921,7 +921,7 @@ fn collect_explicit_sig_names(decl: &Decl, out: &mut HashSet<String>) {
 /// sig declares no effects of its own (chelis#285 — see the `def_effects`
 /// field doc). An empty `! {}` is stored too: it declares "no effects" and
 /// must be distinguished from no annotation at all.
-fn collect_def_effects(decl: &Decl, out: &mut HashMap<String, Vec<EffectExpr>>) {
+fn collect_def_effects(decl: &Decl, out: &mut UnordMap<String, Vec<EffectExpr>>) {
     if let Decl::FunDef {
         name,
         effects: Some(effects),
@@ -941,7 +941,7 @@ fn collect_def_effects(decl: &Decl, out: &mut HashMap<String, Vec<EffectExpr>>) 
 /// `sig f: tensor[3, f64] -> ...` followed by an untyped `def f` participates.
 fn collect_top_level_fn_tensor_param_prec(
     decl: &Decl,
-    out: &mut HashMap<String, Vec<Option<String>>>,
+    out: &mut UnordMap<String, Vec<Option<String>>>,
 ) {
     match decl {
         Decl::FunDef { name, params, .. } => {
@@ -1089,7 +1089,7 @@ impl DesugarCtx {
                 name, params, ty, ..
             } => {
                 let param_list = bare_list(params.iter().map(|p| sym(p)).collect());
-                let explicit_params: HashSet<String> = params.iter().cloned().collect();
+                let explicit_params: UnordSet<String> = params.iter().cloned().collect();
                 vec![node(
                     DeepTag::Typealias,
                     vec![
@@ -1122,7 +1122,7 @@ impl DesugarCtx {
                         // lowercase non-primitive name in the precision slot
                         // becomes a quantified type variable per
                         // spec/04-type-system.md §5.8.
-                        apply_effect_metadata(desugar_sig_type(ty, &HashSet::new()), &effects),
+                        apply_effect_metadata(desugar_sig_type(ty, &UnordSet::new()), &effects),
                     ],
                 )]
             }
@@ -1200,7 +1200,7 @@ impl DesugarCtx {
     ) -> Vec<deep::Expr> {
         // Function-level dim params are polymorphic d-vars, NOT module-level defdim.
         // Build a set so desugar_type_with_scope treats them as d-var.
-        let dim_set: HashSet<String> = dim_params.iter().cloned().collect();
+        let dim_set: UnordSet<String> = dim_params.iter().cloned().collect();
 
         // WS-A6 (spec/02-surf-syntax.md §P4b): when a def declares an
         // explicit quantifier list `def f[..](...)`, names in that list
@@ -1214,7 +1214,7 @@ impl DesugarCtx {
         // synthesized sig is preserved and parameter annotations keep
         // their pre-WS-A6 behavior (an unbound precision name surfaces
         // a diagnostic via `validate_tensor_precisions_in_program`).
-        let param_ann_tvar_set: HashSet<String> = dim_set.clone();
+        let param_ann_tvar_set: UnordSet<String> = dim_set.clone();
 
         let param_names: Vec<deep::Expr> = params
             .iter()
@@ -1257,10 +1257,10 @@ impl DesugarCtx {
             //   to the WS-A5 implicit collection over typed params and
             //   the return type (spec/04-type-system.md §5.8) so a
             //   bare `def f(x: tensor[3, p])` continues to work.
-            let tvar_set: HashSet<String> = if !dim_params.is_empty() {
+            let tvar_set: UnordSet<String> = if !dim_params.is_empty() {
                 dim_params.iter().cloned().collect()
             } else {
-                let mut acc: HashSet<String> = HashSet::new();
+                let mut acc: UnordSet<String> = UnordSet::new();
                 for p in params {
                     if let Some(ty) = &p.ty {
                         collect_sig_type_vars(ty, &mut acc);
@@ -1388,7 +1388,7 @@ impl DesugarCtx {
         invariant: Option<&TypeInvariant>,
     ) -> deep::Expr {
         let param_list = bare_list(params.iter().map(|p| sym(p)).collect());
-        let explicit_params: HashSet<String> = params.iter().cloned().collect();
+        let explicit_params: UnordSet<String> = params.iter().cloned().collect();
         let mut children = vec![sym(name), param_list];
         for v in variants {
             children.push(desugar_variant(v, &explicit_params));
@@ -1417,7 +1417,7 @@ impl DesugarCtx {
     }
 }
 
-fn desugar_variant(variant: &Variant, explicit_params: &HashSet<String>) -> deep::Expr {
+fn desugar_variant(variant: &Variant, explicit_params: &UnordSet<String>) -> deep::Expr {
     match &variant.fields {
         VariantFields::Positional(fields) => {
             let mut children = vec![sym(&variant.name)];
@@ -2371,7 +2371,7 @@ fn binop_name(op: BinOp) -> &'static str {
 /// Desugar a type with no declared dim params or quantified type vars
 /// (module-level context).
 fn desugar_type(ty: &TypeExpr) -> deep::Expr {
-    desugar_type_with_scope(ty, &HashSet::new(), &HashSet::new())
+    desugar_type_with_scope(ty, &UnordSet::new(), &UnordSet::new())
 }
 
 /// Desugar a `deftype` field or `typealias` body against that declaration's
@@ -2381,7 +2381,7 @@ fn desugar_type(ty: &TypeExpr) -> deep::Expr {
 /// alias examples. Listed names remain unkinded declaration binders and are
 /// emitted according to their position (`t-var`, `d-var`, or precision
 /// `t-var`).
-fn desugar_declaration_type(ty: &TypeExpr, explicit_params: &HashSet<String>) -> deep::Expr {
+fn desugar_declaration_type(ty: &TypeExpr, explicit_params: &UnordSet<String>) -> deep::Expr {
     desugar_type_with_scope_mode(ty, explicit_params, explicit_params, false)
 }
 
@@ -2414,7 +2414,7 @@ fn is_candidate_tvar_name(name: &str) -> bool {
 /// are EXCLUDED so the type checker still surfaces a
 /// `spec/04-type-system.md §1.1.1`-citing diagnostic for them via the
 /// `(t-prim {} u8)` path.
-fn collect_sig_type_vars(ty: &TypeExpr, out: &mut HashSet<String>) {
+fn collect_sig_type_vars(ty: &TypeExpr, out: &mut UnordSet<String>) {
     match ty {
         TypeExpr::Named(name, _) => {
             if is_candidate_tvar_name(name) {
@@ -2467,8 +2467,8 @@ fn collect_sig_type_vars(ty: &TypeExpr, out: &mut HashSet<String>) {
 /// implicitly quantified type variables, and to `(t-prim {} <name>)`
 /// when it is a primitive. Outside a sig the same desugar is invoked
 /// with an empty quantifier set, so only primitive names are accepted.
-fn desugar_sig_type(ty: &TypeExpr, dim_vars: &HashSet<String>) -> deep::Expr {
-    let mut tvars = HashSet::new();
+fn desugar_sig_type(ty: &TypeExpr, dim_vars: &UnordSet<String>) -> deep::Expr {
+    let mut tvars = UnordSet::new();
     collect_sig_type_vars(ty, &mut tvars);
     desugar_type_with_scope(ty, dim_vars, &tvars)
 }
@@ -2487,16 +2487,16 @@ fn desugar_sig_type(ty: &TypeExpr, dim_vars: &HashSet<String>) -> deep::Expr {
 ///   `Prim::parse_name` rejection path.
 fn desugar_type_with_scope(
     ty: &TypeExpr,
-    dim_vars: &HashSet<String>,
-    tvar_set: &HashSet<String>,
+    dim_vars: &UnordSet<String>,
+    tvar_set: &UnordSet<String>,
 ) -> deep::Expr {
     desugar_type_with_scope_mode(ty, dim_vars, tvar_set, true)
 }
 
 fn desugar_type_with_scope_mode(
     ty: &TypeExpr,
-    dim_vars: &HashSet<String>,
-    tvar_set: &HashSet<String>,
+    dim_vars: &UnordSet<String>,
+    tvar_set: &UnordSet<String>,
     implicit_single_letter_dims: bool,
 ) -> deep::Expr {
     let desugared = match ty {
@@ -3324,13 +3324,13 @@ mod tests {
             s(),
         );
         let ctx = DesugarCtx {
-            top_level_fn_params: HashMap::from([(
+            top_level_fn_params: UnordMap::from([(
                 "loss".to_string(),
                 vec!["x".to_string(), "w".to_string(), "b".to_string()],
             )]),
-            top_level_fn_tensor_param_prec: HashMap::new(),
-            explicit_sig_names: HashSet::new(),
-            def_effects: HashMap::new(),
+            top_level_fn_tensor_param_prec: UnordMap::new(),
+            explicit_sig_names: UnordSet::new(),
+            def_effects: UnordMap::new(),
             next_destructure_temp: std::cell::Cell::new(0),
         };
         let actual = print_expr(&ctx.desugar_expr(&expr))

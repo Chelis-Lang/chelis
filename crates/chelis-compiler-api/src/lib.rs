@@ -50,7 +50,8 @@ pub use fragment::{
 };
 pub use layered::{LayeredCheck, check_layered, check_layered_for_build, stdlib_structural_stats};
 pub use library_cache::{
-    LibraryContext, build_library_context, library_cache_key, load_or_build_library_context,
+    LibraryContext, build_library_context, library_cache_key, library_cache_key_input_bytes,
+    load_or_build_library_context,
 };
 /// The host-runtime value type returned by the decode chokepoint.
 /// Experimental: surfaced for the decode contract point; its shape is not
@@ -58,7 +59,7 @@ pub use library_cache::{
 pub use runtime::RuntimeValue;
 pub use stdlib_cache::{
     StdLibContext, build_stdlib_context, cache_disabled, load_or_build_stdlib_context,
-    stdlib_cache_key, typecheck_cache_dir,
+    stdlib_cache_key, stdlib_cache_key_input_bytes, typecheck_cache_dir,
 };
 
 /// Pinned compiler version for fixture `reef.toml` files in tests and for

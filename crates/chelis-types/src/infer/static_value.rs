@@ -22,7 +22,10 @@ pub(super) struct StaticTensor {
     int_values: Option<Vec<i64>>,
 }
 
-pub(super) fn bind_fn_params_unknown(fn_list: &deep::List, env: &mut HashMap<String, StaticValue>) {
+pub(super) fn bind_fn_params_unknown(
+    fn_list: &deep::List,
+    env: &mut UnordMap<String, StaticValue>,
+) {
     let Some(params_expr) = children(fn_list).first() else {
         return;
     };
@@ -425,7 +428,7 @@ pub(super) fn static_einsum(
     {
         return StaticValue::Unknown;
     }
-    let mut extents = HashMap::<char, usize>::new();
+    let mut extents = UnordMap::<char, usize>::new();
     for (label, extent) in lhs_labels.iter().zip(&lhs.shape) {
         if let Some(existing) = extents.insert(*label, *extent)
             && existing != *extent

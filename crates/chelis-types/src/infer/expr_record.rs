@@ -287,7 +287,7 @@ pub(super) fn infer_record(
 
     let declared_field_names: Vec<Option<String>> =
         variant.fields.iter().map(|(n, _)| n.clone()).collect();
-    let known_field_set: HashSet<&str> = declared_field_names
+    let known_field_set: UnordSet<&str> = declared_field_names
         .iter()
         .filter_map(|n| n.as_deref())
         .collect();

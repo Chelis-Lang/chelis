@@ -21,7 +21,7 @@ use chelis_backend_metal::codegen_metal;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_types::types::Prim;
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -113,7 +113,7 @@ fn cpu_runtime_library_path() -> PathBuf {
 }
 
 fn copy_runtime_artifacts(dst: &Path) {
-    let include = cpu_runtime_include_dir();
+    let include_dir = cpu_runtime_include_dir();
     for header in &[
         "chelis_runtime.h",
         "chelis_runtime_dtype.h",
@@ -124,7 +124,8 @@ fn copy_runtime_artifacts(dst: &Path) {
         write_temp_file(
             dst,
             header,
-            &fs::read_to_string(include.join(header)).unwrap_or_else(|_| panic!("read {header}")),
+            &fs::read_to_string(include_dir.join(header))
+                .unwrap_or_else(|_| panic!("read {header}")),
         );
     }
     fs::copy(cpu_runtime_library_path(), dst.join("libchelis_runtime.a"))
@@ -298,7 +299,7 @@ fn compile_and_run_single_output(dag: &Dag, func_name: &str, inputs: &[TestInput
 /// Run the IR evaluator on the same DAG with the same inputs and return
 /// the flattened f32 result for the first DAG root.
 fn evaluator_single_output(dag: &Dag, inputs: &[TestInput]) -> Vec<f32> {
-    let env: HashMap<String, TensorValue> = inputs
+    let env: UnordMap<String, TensorValue> = inputs
         .iter()
         .map(|i| (i.name.clone(), i.evaluator_value()))
         .collect();

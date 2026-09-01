@@ -20,10 +20,9 @@
 //!   the running binary; a mismatch is a clean miss (`Ok(None)`), never a
 //!   stale hit. A belt-and-braces inner-vs-envelope check rejects a
 //!   tampered identity as `CacheError::IdentityMismatch`.
-//! - The cache format version and magic are now 13. V11 added quantified
-//!   type-variable restrictions and the live substitution restriction ledger;
-//!   V12 added source positions to deferred obligations; V13 adds checker-owned
-//!   nominal parameter kinds and kinded arguments. Stale shapes are rejected,
+//! - The cache format version and magic are now 13. The current format
+//!   canonicalizes unordered collections and carries checker-owned nominal
+//!   parameter kinds and kinded arguments. A stale V12-shaped file is rejected,
 //!   never decoded.
 //! - `stdlib_cache_key` folds `COMPILER_VERSION` directly, so a binary
 //!   built from different compiler source does not stale-hit an older
@@ -480,10 +479,10 @@ fn truncation_at_every_prefix_length_never_silently_loads() {
 }
 
 // ---------------------------------------------------------------------
-// Format-version-13 bump. TypeEnv now serializes nominal parameter kinds and
-// dimension arguments in addition to source-ordered deferred constraints, so
-// every V12 payload has the preceding bincode shape and
-// must be rejected before decode.
+// Format-version-13 bump. Compiler contexts now serialize unordered
+// collections canonically and carry nominal parameter kinds and dimension
+// arguments, so every V12 payload has the preceding bincode shape and must be
+// rejected before decode.
 // ---------------------------------------------------------------------
 
 #[test]
@@ -561,6 +560,8 @@ fn a_bumped_envelope_version_byte_is_rejected_as_unsupported() {
 // decl-honesty property RT-1 originally flagged.
 // ---------------------------------------------------------------------
 
+const REDTEAM_STDLIB_SOURCE_DIGEST: [u8; 32] = [0x77; 32];
+
 #[test]
 fn stdlib_cache_key_is_deterministic_for_one_decl_slice() {
     // The intended cross-fixture-reuse property: a fixed decl slice must
@@ -571,8 +572,8 @@ fn stdlib_cache_key_is_deterministic_for_one_decl_slice() {
     let decls = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_sample() -> int32 = 1\n")
         .expect("sample decls parse");
     assert_eq!(
-        stdlib_cache_key(&decls),
-        stdlib_cache_key(&decls),
+        stdlib_cache_key(&decls, REDTEAM_STDLIB_SOURCE_DIGEST),
+        stdlib_cache_key(&decls, REDTEAM_STDLIB_SOURCE_DIGEST),
         "stdlib_cache_key must be deterministic for a fixed decl slice"
     );
 }
@@ -595,8 +596,8 @@ fn stdlib_cache_key_depends_on_the_decls_themselves() {
         "test setup: the two decl slices must differ"
     );
     assert_ne!(
-        stdlib_cache_key(&decls_a),
-        stdlib_cache_key(&decls_b),
+        stdlib_cache_key(&decls_a, REDTEAM_STDLIB_SOURCE_DIGEST),
+        stdlib_cache_key(&decls_b, REDTEAM_STDLIB_SOURCE_DIGEST),
         "stdlib_cache_key must fold the actual decl bytes, so an edited chelis-std \
          checkout cannot stale-hit a bundled-std artifact"
     );
@@ -624,17 +625,18 @@ fn stdlib_cache_key_folds_the_compiler_version() {
 
     let decls = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_sample() -> int32 = 1\n")
         .expect("sample decls parse");
-    let real = stdlib_cache_key(&decls);
+    let real = stdlib_cache_key(&decls, REDTEAM_STDLIB_SOURCE_DIGEST);
 
     // Byte-for-byte mirror of `stdlib_cache_key`, parameterized on the
-    // compiler-version string. STDLIB_CACHE_FORMAT_VERSION is 9 (the
-    // serialized ordered-deferred-constraint and nominal-kind bumps); the
+    // compiler-version string. STDLIB_CACHE_FORMAT_VERSION is 10 (the
+    // exact-source determinant bump following the hash-order serialization
+    // and nominal-kind bumps); the
     // mirror is only valid while that holds, which assertion (a) below
     // verifies.
     let recompute = |compiler_version: &str| -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"chelis_std_typecheck_v");
-        hasher.update(9u32.to_le_bytes());
+        hasher.update(10u32.to_le_bytes());
         hasher.update(b"compiler_version");
         hasher.update((compiler_version.len() as u64).to_le_bytes());
         hasher.update(compiler_version.as_bytes());
@@ -647,6 +649,8 @@ fn stdlib_cache_key_folds_the_compiler_version() {
         let shell = chelis_std_bundle::shell_sha256();
         hasher.update((shell.len() as u64).to_le_bytes());
         hasher.update(shell.as_bytes());
+        hasher.update(b"exact-source-digest");
+        hasher.update(REDTEAM_STDLIB_SOURCE_DIGEST);
         match bincode::serialize(&decls) {
             Ok(decl_bytes) => {
                 hasher.update(b"decls");

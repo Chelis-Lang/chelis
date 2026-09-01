@@ -3,7 +3,8 @@
 //! Processes `deftype` Deep nodes to extract constructor type signatures.
 
 use chelis_deep::DeepTag;
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
+use std::collections::BTreeMap;
 
 use chelis_deep::ast as deep;
 use serde::{Deserialize, Serialize};
@@ -81,8 +82,8 @@ pub enum CallShape {
 /// Registry of all ADT definitions and type aliases.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdtRegistry {
-    pub defs: HashMap<String, AdtDef>,
-    pub aliases: HashMap<String, TypeAliasDef>,
+    pub defs: BTreeMap<String, AdtDef>,
+    pub aliases: BTreeMap<String, TypeAliasDef>,
     /// Runtime declaration-header scope for the current check. It is kept
     /// separate from validated definitions because self/forward names must be
     /// visible while their bodies are resolving. Rejected declarations never
@@ -102,8 +103,8 @@ impl AdtRegistry {
     pub fn new() -> Self {
         #[allow(clippy::default_constructed_unit_structs)]
         AdtRegistry {
-            aliases: HashMap::new(),
-            defs: HashMap::new(),
+            aliases: BTreeMap::new(),
+            defs: BTreeMap::new(),
             resolution_env: TypeResolutionEnv::default(),
         }
     }
@@ -198,7 +199,7 @@ impl AdtRegistry {
             .param_kinds(&name)
             .map(<[NominalParamKind]>::to_vec)
             .unwrap_or_else(|| vec![NominalParamKind::Type; type_params.len()]);
-        let explicit_params: HashMap<String, NominalParamKind> = type_params
+        let explicit_params: UnordMap<String, NominalParamKind> = type_params
             .iter()
             .cloned()
             .zip(param_kinds.iter().copied())
@@ -364,7 +365,7 @@ impl AdtRegistry {
     ///
     /// Type names share one flat string-keyed namespace here, so a
     /// `deftype Foo` cannot coexist with either a second `deftype Foo`
-    /// or a `typealias Foo = ...` — `HashMap::insert` is last-write-
+    /// or a `typealias Foo = ...` — map insertion is last-write-
     /// wins and silently corrupts the registry otherwise.
     pub fn existing_kind(&self, name: &str) -> Option<&'static str> {
         if self.defs.contains_key(name) {
@@ -421,7 +422,7 @@ impl AdtRegistry {
     /// Candidates are sorted by ADT name before the shape filter, so
     /// dispatch is deterministic across runs even when multiple variants
     /// of the same shape collide. Without the sort, `self.defs.iter()`
-    /// (HashMap) leaks iteration-order non-determinism into the choice
+    /// (formerly a hash map) leaks iteration-order non-determinism into the choice
     /// of "first match" in both the shape-match and the fallback path.
     pub fn lookup_variant_preferring_shape(
         &self,
@@ -526,15 +527,11 @@ impl AdtRegistry {
     /// infinite recursion on a (mutually) recursive alias chain, matching the
     /// `infer.rs` guard.
     pub fn expand_aliases(&self, ty: &Type) -> Type {
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = chelis_unord::UnordSet::new();
         self.expand_aliases_inner(ty, &mut seen)
     }
 
-    fn expand_aliases_inner(
-        &self,
-        ty: &Type,
-        seen: &mut std::collections::HashSet<String>,
-    ) -> Type {
+    fn expand_aliases_inner(&self, ty: &Type, seen: &mut chelis_unord::UnordSet<String>) -> Type {
         match ty {
             Type::Adt(name, args) => {
                 let resolved_args: Vec<Type> = args
@@ -628,19 +625,19 @@ fn list_children(list: &deep::List) -> &[deep::Expr] {
     }
 }
 
-pub(crate) fn substitute_alias_type(ty: &Type, subst: &HashMap<TypeVar, Type>) -> Type {
-    substitute_nominal_type(ty, subst, &HashMap::new())
+pub(crate) fn substitute_alias_type(ty: &Type, subst: &UnordMap<TypeVar, Type>) -> Type {
+    substitute_nominal_type(ty, subst, &UnordMap::new())
 }
 
 pub(crate) fn nominal_substitutions(
     parameters: &[NominalArg],
     arguments: &[NominalArg],
-) -> Option<(HashMap<TypeVar, Type>, HashMap<DimVar, Dim>)> {
+) -> Option<(UnordMap<TypeVar, Type>, UnordMap<DimVar, Dim>)> {
     if parameters.len() != arguments.len() {
         return None;
     }
-    let mut type_subst = HashMap::new();
-    let mut dim_subst = HashMap::new();
+    let mut type_subst = UnordMap::new();
+    let mut dim_subst = UnordMap::new();
     for (parameter, argument) in parameters.iter().zip(arguments) {
         match (parameter, argument) {
             (NominalArg::Type(Type::Var(parameter)), NominalArg::Type(argument)) => {
@@ -657,8 +654,8 @@ pub(crate) fn nominal_substitutions(
 
 pub(crate) fn substitute_nominal_type(
     ty: &Type,
-    type_subst: &HashMap<TypeVar, Type>,
-    dim_subst: &HashMap<DimVar, Dim>,
+    type_subst: &UnordMap<TypeVar, Type>,
+    dim_subst: &UnordMap<DimVar, Dim>,
 ) -> Type {
     match ty {
         Type::Var(tv) => type_subst.get(tv).cloned().unwrap_or(Type::Var(*tv)),

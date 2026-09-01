@@ -296,7 +296,7 @@ pub(super) fn infer_permute_app(
         );
     }
 
-    let mut seen = HashSet::new();
+    let mut seen = UnordSet::new();
     let mut reordered = Vec::with_capacity(dims.len());
     for axis in axes {
         if axis < 0 || axis as usize >= dims.len() {

@@ -124,7 +124,7 @@ fn cpu_runtime_library_path() -> PathBuf {
 }
 
 fn copy_runtime_artifacts(dst: &Path) {
-    let include = cpu_runtime_include_dir();
+    let include_dir = cpu_runtime_include_dir();
     for header in &[
         "chelis_runtime.h",
         "chelis_runtime_dtype.h",
@@ -135,7 +135,8 @@ fn copy_runtime_artifacts(dst: &Path) {
         write_temp_file(
             dst,
             header,
-            &fs::read_to_string(include.join(header)).unwrap_or_else(|_| panic!("read {header}")),
+            &fs::read_to_string(include_dir.join(header))
+                .unwrap_or_else(|_| panic!("read {header}")),
         );
     }
     fs::copy(cpu_runtime_library_path(), dst.join("libchelis_runtime.a"))
@@ -989,7 +990,7 @@ fn s12_symbolic_peak_memory_reports_formula_without_fake_estimate() {
     assert_eq!(result.peak_device_bytes_formula, "(batch * 4)");
     assert_eq!(
         result
-            .peak_device_bytes_at(&std::collections::HashMap::from([(
+            .peak_device_bytes_at(&chelis_unord::UnordMap::from([(
                 String::from("batch"),
                 64usize,
             )]))

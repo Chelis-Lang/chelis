@@ -12,6 +12,7 @@ hash-order-compile-probe = []
 generalize-sweep-oracle = []
 
 [dependencies]
+chelis-unord.workspace = true
 chelis-deep.workspace = true
 chelis-pred.workspace = true
 chelis-vocab.workspace = true

@@ -1,5 +1,5 @@
 use chelis_deep::DeepTag;
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
@@ -71,7 +71,7 @@ impl<'a> EvalContext<'a> {
         &mut self,
         kind: TransformKind,
         transform_expr: &Expr,
-        captured_env: HashMap<String, RuntimeValue>,
+        captured_env: UnordMap<String, RuntimeValue>,
         args: Vec<RuntimeValue>,
     ) -> Result<RuntimeValue, String> {
         // Allocate placeholder names for the call's actual arguments. We
@@ -80,8 +80,7 @@ impl<'a> EvalContext<'a> {
         // load callback when forward-evaluating the lowered DAG.
         let mut placeholder_names: Vec<String> = Vec::with_capacity(args.len());
         let mut placeholder_types: Vec<TensorType> = Vec::with_capacity(args.len());
-        let mut placeholder_tensors: HashMap<String, IrTensorValue> =
-            HashMap::with_capacity(args.len());
+        let mut placeholder_tensors: UnordMap<String, IrTensorValue> = UnordMap::new();
         // Per-argument Deep expression to splice into the synthesized app:
         // a typed placeholder var for tensor/scalar args, or a recursive
         // List/tuple/ADT construction over leaf placeholders.
@@ -263,7 +262,7 @@ impl<'a> EvalContext<'a> {
             span,
         );
 
-        let scoped_types: HashMap<String, TensorType> = placeholder_names
+        let scoped_types: UnordMap<String, TensorType> = placeholder_names
             .iter()
             .cloned()
             .zip(placeholder_types.iter().cloned())
@@ -274,7 +273,7 @@ impl<'a> EvalContext<'a> {
         // from `captured_env` (so `target = fn (...) -> ...; grad(target)(x)`
         // resolves `target` when the inner DAG lowering reaches it).
         let mut program_defs = self.top_level_defs.clone();
-        for (name, value) in captured_env.iter() {
+        for (name, value) in captured_env.to_sorted() {
             if let RuntimeValue::Closure { params, body, .. } = value {
                 program_defs
                     .entry(name.clone())
@@ -395,8 +394,9 @@ impl<'a> EvalContext<'a> {
         // parity gap pinned by `issue_352_grad_over_capturing_def_eval_gap`.
         // Only `Tensor` captures are served; non-tensor captures (closures,
         // scalars routed elsewhere) are not load inputs here.
-        let mut captured_tensors: HashMap<String, IrTensorValue> = captured_env
-            .iter()
+        let mut captured_tensors: UnordMap<String, IrTensorValue> = captured_env
+            .to_sorted()
+            .into_iter()
             .filter_map(|(name, value)| match value {
                 RuntimeValue::Tensor(tensor) => Some((name.clone(), tensor.value.clone())),
                 _ => None,
@@ -579,7 +579,7 @@ fn grad_wrt_indices_from_transform(transform_expr: &Expr) -> Option<Vec<usize>> 
 }
 
 fn lookup_registered_type<'a, T>(
-    entries: &'a HashMap<String, T>,
+    entries: &'a std::collections::BTreeMap<String, T>,
     name: &str,
 ) -> Option<(&'a str, &'a T)> {
     entries
@@ -616,7 +616,7 @@ fn registered_type_has_float(
                 NominalArg::Type(Type::Var(var)) => Some((*var, flag)),
                 _ => None,
             })
-            .collect::<HashMap<_, _>>();
+            .collect::<UnordMap<_, _>>();
         let result = stored_type_has_float(&alias.body, registry, &substitutions, visiting);
         debug_assert_eq!(visiting.pop().as_ref(), Some(&key));
         return result;
@@ -637,7 +637,7 @@ fn registered_type_has_float(
             NominalArg::Type(Type::Var(var)) => Some((*var, flag)),
             _ => None,
         })
-        .collect::<HashMap<_, _>>();
+        .collect::<UnordMap<_, _>>();
     let result = definition.variants.iter().any(|variant| {
         variant
             .fields
@@ -651,7 +651,7 @@ fn registered_type_has_float(
 fn stored_type_has_float(
     ty: &Type,
     registry: &chelis_types::adt::AdtRegistry,
-    substitutions: &HashMap<TypeVar, bool>,
+    substitutions: &UnordMap<TypeVar, bool>,
     visiting: &mut Vec<(String, Vec<bool>)>,
 ) -> bool {
     match ty {
@@ -741,7 +741,7 @@ fn stage_grad_list_value(
     leaf_index: &mut usize,
     placeholder_names: &mut Vec<String>,
     placeholder_types: &mut Vec<TensorType>,
-    placeholder_tensors: &mut HashMap<String, IrTensorValue>,
+    placeholder_tensors: &mut UnordMap<String, IrTensorValue>,
     span: Span,
 ) -> Result<(Expr, GradListShape, bool), String> {
     match value {
@@ -1048,11 +1048,11 @@ pub(super) fn runtime_value_to_dag_input_lossy(
 /// Lit-dim placeholder marshalling (the pre-#351 behavior).
 fn resolve_transform_fn_for_formals<'a>(
     expr: &'a Expr,
-    defs: &'a HashMap<String, Expr>,
+    defs: &'a UnordMap<String, Expr>,
 ) -> Option<(&'a Expr, Option<usize>)> {
     let mut current = expr;
     let mut vmap_axis: Option<usize> = None;
-    let mut visited: HashSet<&str> = HashSet::new();
+    let mut visited: UnordSet<&str> = UnordSet::new();
     loop {
         let Expr::List(list, _) = current else {
             return None;
@@ -1502,10 +1502,10 @@ fn scan_expr_for_host_only(expr: &Expr, hit: &mut Option<String>, vars: &mut Vec
 /// a silently-lowered host-only op, so it is left as-is.
 pub(super) fn find_reachable_host_only_builtin_call(
     root: &Expr,
-    defs: &HashMap<String, Expr>,
+    defs: &UnordMap<String, Expr>,
 ) -> Option<String> {
     let mut hit: Option<String> = None;
-    let mut visited: HashSet<String> = HashSet::new();
+    let mut visited: UnordSet<String> = UnordSet::new();
     let mut worklist: Vec<&Expr> = vec![root];
     while let Some(expr) = worklist.pop() {
         let mut vars: Vec<String> = Vec::new();

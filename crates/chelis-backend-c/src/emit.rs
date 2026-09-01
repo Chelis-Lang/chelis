@@ -19,7 +19,7 @@ pub struct CEmitter {
     /// Which vectorized math library to target for fused-elem SIMD emission (Level 3b).
     math_lib: crate::MathLib,
     /// FusedElem nodes inlined into a trailing reduction (no standalone emission).
-    reduction_inlined: std::collections::HashSet<usize>,
+    reduction_inlined: chelis_unord::UnordSet<usize>,
     /// Backing-slot plan for materialized C tensors.
     memory_plan: MemoryPlan,
     /// chelis#616: `(node id, output axis) -> (symbol, declares)` for every
@@ -28,7 +28,7 @@ pub struct CEmitter {
     /// `declares` is true, or emits a runtime equality-abort guard against
     /// the already-declared value when false (the symbol is Load-declared in
     /// the prologue, or an earlier op already declared it).
-    runtime_dim_sites: std::collections::HashMap<(usize, usize), (String, bool)>,
+    runtime_dim_sites: chelis_unord::UnordMap<(usize, usize), (String, bool)>,
 }
 
 #[derive(Debug, Clone)]
@@ -119,15 +119,15 @@ impl CEmitter {
         // site. A Load source anywhere makes every op site a guard; otherwise
         // the first op site (node-id order = emission order) declares and any
         // later site for the same symbol guards.
-        let mut runtime_dim_sites = std::collections::HashMap::new();
+        let mut runtime_dim_sites = chelis_unord::UnordMap::new();
         {
             let occurrences = chelis_ir::dag::symbolic_occurrences(dag);
-            let load_declared: std::collections::HashSet<&str> = occurrences
+            let load_declared: chelis_unord::UnordSet<&str> = occurrences
                 .iter()
                 .filter(|o| matches!(o.source, SymbolicDimSource::Load { .. }))
                 .map(|o| o.name.as_str())
                 .collect();
-            let mut declared = std::collections::HashSet::new();
+            let mut declared = chelis_unord::UnordSet::new();
             for occurrence in &occurrences {
                 if let SymbolicDimSource::OpDeclared { node, axis } = &occurrence.source {
                     let declares = !load_declared.contains(occurrence.name.as_str())
@@ -142,7 +142,11 @@ impl CEmitter {
             indent: 0,
             use_blas: options.use_blas,
             math_lib,
-            reduction_inlined: reduction_inlined.iter().map(|id| id.0).collect(),
+            reduction_inlined: reduction_inlined
+                .to_sorted()
+                .into_iter()
+                .map(|id| id.0)
+                .collect(),
             memory_plan,
             runtime_dim_sites,
         };
@@ -809,7 +813,7 @@ impl CEmitter {
 
     fn output_specs(dag: &Dag) -> Vec<OutputSpec> {
         let mut specs = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = chelis_unord::UnordSet::new();
 
         for node in dag.nodes() {
             if let RiscOp::Store { name } = &node.op
@@ -853,7 +857,7 @@ impl CEmitter {
 
     pub(crate) fn input_labels(dag: &Dag) -> Vec<String> {
         let mut labels = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = chelis_unord::UnordSet::new();
         for node in dag.nodes() {
             if let RiscOp::Load { name } = &node.op
                 && seen.insert(name.as_str().to_string())
@@ -864,7 +868,7 @@ impl CEmitter {
         labels
     }
 
-    fn input_slots(labels: &[String]) -> std::collections::HashMap<String, usize> {
+    fn input_slots(labels: &[String]) -> chelis_unord::UnordMap<String, usize> {
         labels
             .iter()
             .cloned()
@@ -989,7 +993,7 @@ impl CEmitter {
     }
 
     fn validate_load_abi(dag: &Dag) {
-        let mut seen = std::collections::HashMap::<String, TensorType>::new();
+        let mut seen = chelis_unord::UnordMap::<String, TensorType>::new();
         for node in dag.nodes() {
             if let RiscOp::Load { name } = &node.op {
                 if let Some(prev_ty) = seen.get(name.as_str()) {
@@ -1156,8 +1160,8 @@ impl CEmitter {
         }
     }
 
-    fn input_types(dag: &Dag) -> std::collections::HashMap<String, TensorType> {
-        let mut seen = std::collections::HashMap::<String, TensorType>::new();
+    fn input_types(dag: &Dag) -> chelis_unord::UnordMap<String, TensorType> {
+        let mut seen = chelis_unord::UnordMap::<String, TensorType>::new();
         for node in dag.nodes() {
             if let RiscOp::Load { name } = &node.op {
                 seen.entry(name.as_str().to_string())
@@ -1170,22 +1174,21 @@ impl CEmitter {
     fn emit_input_shape_preamble(
         &mut self,
         dag: &Dag,
-        input_slots: &std::collections::HashMap<String, usize>,
+        input_slots: &chelis_unord::UnordMap<String, usize>,
         func_name: &str,
     ) {
-        // Iteration order over `input_types` (a HashMap) must be
+        // Iteration order over `input_types` (a UnordMap) must be
         // deterministic so the emitted C is byte-identical across runs
         // for the same input. Sort by label; the lookup is by name and
         // the emitted lines are independent per label.
         // See spec/upstream-bugs/host-emit-hashmap-iteration-nondeterminism.md.
         let input_types = Self::input_types(dag);
-        let mut sorted_labels: Vec<&String> = input_types.keys().collect();
-        sorted_labels.sort();
+        let sorted_labels = input_types.to_sorted();
         // Producer-supplied strings flowing into the fprintf format string
         // baked into a `"..."` C string literal. Sanitize once per emission
         // boundary per spec/upstream-bugs/producer-string-sanitization.md.
         let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
-        for label in sorted_labels {
+        for (label, _) in sorted_labels {
             let ty = &input_types[label];
             let slot = input_slots[label];
             // `label` originates as `LoadStoreName::as_str()` (validated)
@@ -8982,7 +8985,7 @@ mod tests {
         );
         let out = dag.add_node(RiscOp::Cos, vec![x], scalar_f32(), None);
         dag.add_root(out);
-        let results = chelis_ir::eval::eval_scalar(&dag, &std::collections::HashMap::new());
+        let results = chelis_ir::eval::eval_scalar(&dag, &chelis_unord::UnordMap::new());
         let val = results[&out] as f32;
         assert!(
             (val - 0.5_f32).abs() < 1e-4,
@@ -9002,7 +9005,7 @@ mod tests {
         );
         let out = dag.add_node(RiscOp::Abs, vec![x], scalar_f32(), None);
         dag.add_root(out);
-        let results = chelis_ir::eval::eval_scalar(&dag, &std::collections::HashMap::new());
+        let results = chelis_ir::eval::eval_scalar(&dag, &chelis_unord::UnordMap::new());
         let val = results[&out] as f32;
         assert!(
             (val - 2.0_f32).abs() < 1e-4,
