@@ -108,6 +108,7 @@ FROZEN_SELF_TEST_CENSUS = tuple(
     ReceiptContractTests.test_execution_receipt_rejects_missing_extra_and_wrong_outcomes
     ReceiptContractTests.test_expected_failing_test_must_execute_and_fail
     ReceiptContractTests.test_expected_failure_requires_the_exact_detector
+    ReceiptContractTests.test_forged_module_main_cannot_prove_python_test_execution
     ReceiptContractTests.test_invalid_retain_cannot_satisfy_invalid_release_receipt
     ReceiptContractTests.test_ledger_receipt_count_drift_fails_closed
     ReceiptContractTests.test_listed_but_skipped_or_ignored_tests_fail_zero_vacuity
@@ -545,8 +546,10 @@ def fixture_manifest() -> tuple[Fixture, ...]:
             platform=Platform.ANY,
             command=(
                 "{python}",
-                "scripts/test_compiled_value_ownership_oracle.py",
+                "-m",
+                "unittest",
                 "-v",
+                "scripts.test_compiled_value_ownership_oracle",
             ),
             test_receipt=test_receipt(FROZEN_SELF_TEST_CENSUS),
         ),
@@ -1432,13 +1435,7 @@ def validate_manifest(
                     f"{fixture.id}: must-pass row expects a failing test execution"
                 )
             cargo_test = fixture.command[:2] == ("cargo", "test")
-            python_unittest = (
-                len(fixture.command) == 3
-                and fixture.command[0] == "{python}"
-                and Path(fixture.command[1]).name.startswith("test_")
-                and Path(fixture.command[1]).suffix == ".py"
-                and fixture.command[2] == "-v"
-            )
+            python_unittest = _python_unittest_target(fixture.command) is not None
             hip_test = (
                 fixture.action is Action.HIP_HARDWARE
                 and "scripts/hip_test.py" in fixture.command
@@ -2118,19 +2115,26 @@ def _ledger_detection(fixture: Fixture, run: subprocess.CompletedProcess[str], p
     return detection
 
 
+def _python_unittest_target(argv: Sequence[str]) -> str | None:
+    if (
+        len(argv) == 5
+        and argv[0] in {"{python}", sys.executable}
+        and tuple(argv[1:4]) == ("-m", "unittest", "-v")
+        and re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+", argv[4])
+        and argv[4].rsplit(".", 1)[-1].startswith("test_")
+    ):
+        return argv[4]
+    return None
+
+
 def _test_list_command(fixture: Fixture, argv: Sequence[str]) -> tuple[str, ...]:
     if fixture.action is Action.HIP_HARDWARE:
         if len(argv) < 3:
             raise OracleFailure(f"{fixture.id}: malformed HIP hardware command")
         command = ["cargo", "test", *argv[2:]]
-    elif (
-        len(argv) == 3
-        and argv[0] == sys.executable
-        and Path(argv[1]).name.startswith("test_")
-        and Path(argv[1]).suffix == ".py"
-        and argv[2] == "-v"
-    ):
-        return (*argv[:2], "--list-tests")
+    elif (module := _python_unittest_target(argv)) is not None:
+        module_path = Path(*module.split(".")).with_suffix(".py")
+        return (argv[0], str(module_path), "--list-tests")
     else:
         command = list(argv)
     if command[:2] != ["cargo", "test"]:
@@ -2214,10 +2218,12 @@ def _cargo_test_execution_receipt(output: str) -> tuple[TestCaseReceipt, ...]:
     )
 
 
-def _python_test_execution_receipt(output: str) -> tuple[TestCaseReceipt, ...]:
+def _python_test_execution_receipt(
+    output: str, module: str
+) -> tuple[TestCaseReceipt, ...]:
     receipts: dict[str, TestOutcome] = {}
     ran_counts: list[int] = []
-    marker = " (__main__."
+    marker = f" ({module}."
     for raw_line in output.splitlines():
         line = raw_line.strip()
         summary = _PYTHON_TEST_SUMMARY.match(line)
@@ -2227,10 +2233,14 @@ def _python_test_execution_receipt(output: str) -> tuple[TestCaseReceipt, ...]:
         if marker not in line or " ... " not in line:
             continue
         left, status = line.rsplit(" ... ", 1)
-        name_with_suffix = left.split(marker, 1)[1]
+        display_name, name_with_suffix = left.split(marker, 1)
         if not name_with_suffix.endswith(")"):
             raise OracleFailure(f"malformed unittest execution line {line!r}")
         name = name_with_suffix.removesuffix(")")
+        if display_name != name.rsplit(".", 1)[-1]:
+            raise OracleFailure(
+                f"unittest display name {display_name!r} disagrees with {name!r}"
+            )
         if status == "ok":
             outcome = TestOutcome.PASSED
         elif status in {"FAIL", "ERROR"}:
@@ -2261,11 +2271,9 @@ def _test_execution_receipt(
     output = f"{result.stdout}\n{result.stderr}"
     if (
         fixture.action is Action.COMMAND
-        and len(argv) == 3
-        and argv[0] == sys.executable
-        and Path(argv[1]).name.startswith("test_")
+        and (module := _python_unittest_target(argv)) is not None
     ):
-        return _python_test_execution_receipt(output)
+        return _python_test_execution_receipt(output, module)
     return _cargo_test_execution_receipt(output)
 
 

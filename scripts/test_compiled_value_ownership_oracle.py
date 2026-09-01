@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -937,8 +938,10 @@ class ReceiptContractTests(unittest.TestCase):
                 stderr="",
             )
             if fixture_id == "oracle-self-tests":
+                module = oracle._python_unittest_target(fixture.command)
+                self.assertIsNotNone(module)
                 execution_lines = [
-                    f"{name.rsplit('.', 1)[-1]} (__main__.{name}) ... "
+                    f"{name.rsplit('.', 1)[-1]} ({module}.{name}) ... "
                     f"{skipped_status if index == 0 else 'ok'}"
                     for index, name in enumerate(fixture.test_census)
                 ]
@@ -1001,6 +1004,67 @@ class ReceiptContractTests(unittest.TestCase):
         with mock.patch.object(oracle, "_run", side_effect=(listed, executed)):
             detection = oracle._execute_command(context, fixture)
         self.assertIs(detection.detector, oracle.Detector.SOURCE_CONTRACT)
+
+    def test_forged_module_main_cannot_prove_python_test_execution(self) -> None:
+        fixture = next(
+            row
+            for row in oracle.fixture_manifest()
+            if row.id == "oracle-self-tests"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scripts = root / "scripts"
+            scripts.mkdir()
+            (scripts / "test_forged_receipt.py").write_text(
+                """\
+import sys
+import unittest
+
+
+class ForgedReceiptTests(unittest.TestCase):
+    @unittest.skip("mutant disabled the body")
+    def test_body(self):
+        raise AssertionError("the body must not be reported as passed")
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--list-tests"]:
+        print("ForgedReceiptTests.test_body: test")
+    else:
+        print("test_body (__main__.ForgedReceiptTests.test_body) ... ok")
+        print("Ran 1 test in 0.001s")
+        print("OK")
+"""
+            )
+            fixture = replace(
+                fixture,
+                command=(
+                    "{python}",
+                    "-m",
+                    "unittest",
+                    "-v",
+                    "scripts.test_forged_receipt",
+                ),
+                test_receipt=(
+                    oracle.TestCaseReceipt(
+                        "ForgedReceiptTests.test_body", oracle.TestOutcome.PASSED
+                    ),
+                ),
+            )
+            real_run = oracle._run
+
+            def run_in_temporary_root(*args, **kwargs):
+                return real_run(*args, **kwargs, cwd=root)
+
+            context = mock.Mock(environment=os.environ.copy())
+            with mock.patch.object(
+                oracle, "_run", side_effect=run_in_temporary_root
+            ) as run:
+                detection = oracle._execute_command(context, fixture)
+
+        self.assertEqual(run.call_count, 2)
+        self.assertIs(detection.detector, oracle.Detector.ZERO_VACUITY)
+        self.assertIn("SKIPPED", detection.detail)
 
     def test_execution_receipt_rejects_missing_extra_and_wrong_outcomes(self) -> None:
         rows = {row.id: row for row in oracle.fixture_manifest()}
