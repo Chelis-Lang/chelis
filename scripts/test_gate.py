@@ -395,30 +395,26 @@ def _nix_workflow_events(workflow: str) -> dict[str, dict[str, str]]:
     return events
 
 
-_NIX_REVIEWED_JOBS_SHA256 = (
-    "18a1b945864eac9240519f7ecd847d11333e072bbd04e623c7f65771177ca338"
+_NIX_REVIEWED_WORKFLOW_SHA256 = (
+    "6f4f661e55a108b30d3bb2e6f463fbcde39c4f69e7b94f50f16c6b4ef721850b"
 )
 
 
-def _assert_nix_jobs_match_reviewed_recipe(workflow: str) -> None:
-    """Lock the complete native jobs while the temporary event policy is active.
+def _assert_nix_workflow_matches_reviewed_recipe(workflow: str) -> None:
+    """Lock the workflow while the temporary event policy is active.
 
     YAML has enough scalar and expression spellings that a partial parser or a
-    banlist can accept a semantically gated job. The workflow's jobs are not
-    changing in this scheduling-only PR, so bind every byte from the one
-    top-level ``jobs:`` key onward instead. A future intentional recipe change
-    must replace this reviewed digest explicitly rather than inheriting a
-    permissive spelling gap.
+    banlist can accept a semantically gated job. Bind every workflow byte so
+    top-level defaults, concurrency, permissions, triggers, jobs, and steps are
+    one closed reviewed artifact. A future intentional policy or recipe change
+    must replace this digest explicitly rather than inheriting a permissive
+    spelling or selection-boundary gap.
     """
-    marker = "jobs:\n"
-    if workflow.count(marker) != 1:
-        raise AssertionError("the Nix workflow must define one plain jobs map")
-    jobs = workflow[workflow.index(marker) :]
-    actual = hashlib.sha256(jobs.encode("utf-8")).hexdigest()
-    if actual != _NIX_REVIEWED_JOBS_SHA256:
+    actual = hashlib.sha256(workflow.encode("utf-8")).hexdigest()
+    if actual != _NIX_REVIEWED_WORKFLOW_SHA256:
         raise AssertionError(
-            "the intentional-event-only Nix workflow jobs must match the "
-            f"reviewed native recipe: found SHA-256 {actual}"
+            "the intentional-event-only Nix workflow must match the reviewed "
+            f"native recipe and event policy: found SHA-256 {actual}"
         )
 
 
@@ -434,7 +430,7 @@ def _assert_nix_intentional_events_only(workflow: str) -> None:
             f"releases: found {events!r}"
         )
 
-    _assert_nix_jobs_match_reviewed_recipe(workflow)
+    _assert_nix_workflow_matches_reviewed_recipe(workflow)
 
 
 def _assert_runner_resource_bounds(workflow: str) -> None:
@@ -3026,6 +3022,25 @@ class NixPackagesWorkflowTests(unittest.TestCase):
                 text.replace(
                     "        sandbox = true\n",
                     "        sandbox = false # sandbox = true\n",
+                    1,
+                ),
+                "reviewed native recipe",
+            ),
+            "workflow working directory override": (
+                text.replace(
+                    "jobs:\n",
+                    "defaults:\n"
+                    "  run:\n"
+                    "    working-directory: definitely-missing-native-recipe\n\n"
+                    "jobs:\n",
+                    1,
+                ),
+                "reviewed native recipe",
+            ),
+            "workflow concurrency override": (
+                text.replace(
+                    "  group: nix-packages-${{ github.ref }}\n",
+                    "  group: all-nix-runs-share-one-group\n",
                     1,
                 ),
                 "reviewed native recipe",
