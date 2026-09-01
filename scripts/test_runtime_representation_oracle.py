@@ -342,6 +342,9 @@ class MutationContractTests(unittest.TestCase):
                 "mutate_c_atomic_element_pointer",
                 "mutate_cxx_rvalue_reference",
                 "mutate_external_preprocessor_configuration",
+                "mutate_continued_nested_preprocessor_configuration",
+                "mutate_preprocessor_configuration_cap",
+                "mutate_header_availability_configuration",
                 "mutate_c_complete_declarator_shapes",
                 "mutate_c_pointer_return",
                 "mutate_objc_pointer_return",
@@ -364,11 +367,27 @@ class MutationContractTests(unittest.TestCase):
                 "engine": "chelis-c-surface",
                 "libclang_major": 18,
                 "configuration_model": (
-                    "clear compiler builtins and enumerate every boolean "
-                    "assignment of source-referenced external macros"
+                    "libclang-annotated directive tokens; closed Boolean conditions; "
+                    "usage-sensitive undefined/0/1 macros and offset-preserving "
+                    "independent literal-header states; at most 256 configurations"
                 ),
             },
         )
+
+    def test_configuration_cap_mutation_fails_for_the_cap_reason(self) -> None:
+        path = (
+            oracle.REPO_ROOT
+            / "crates/chelis-runtime/include/chelis_simd.h"
+        )
+        with oracle.temporary_mutation(
+            path,
+            oracle.mutate_preprocessor_configuration_cap,
+        ):
+            with self.assertRaisesRegex(
+                oracle.OracleFailure,
+                "256-configuration cap",
+            ):
+                oracle.inventory_rows(oracle.REPO_ROOT)
 
     def test_every_classifier_mutation_is_rejected_for_its_intended_reason(self) -> None:
         baseline = oracle.load_baseline()

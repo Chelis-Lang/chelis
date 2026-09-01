@@ -33,7 +33,7 @@ DTYPE_MUTATION_SOURCE = Path("crates/chelis-vocab/src/lib.rs")
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "34b3330e9f6fe998b868751f9bb58588f39f970bb595ae4898dc46fa4b92d24c"
+FREEZE_SHA256 = "4620053a9f28c7cb32e6622bb5b35bebb4260fc2da17a13a2d8da1e702cad689"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -609,8 +609,9 @@ def coverage_manifest(
                 "engine": "chelis-c-surface",
                 "libclang_major": 18,
                 "configuration_model": (
-                    "clear compiler builtins and enumerate every boolean assignment "
-                    "of source-referenced external macros"
+                    "libclang-annotated directive tokens; closed Boolean conditions; "
+                    "usage-sensitive undefined/0/1 macros and offset-preserving "
+                    "independent literal-header states; at most 256 configurations"
                 ),
             },
             "expected_success": "every hit is exact active debt from the frozen foundation",
@@ -997,6 +998,43 @@ def mutate_external_preprocessor_configuration(source: str) -> str:
     )
 
 
+def mutate_continued_nested_preprocessor_configuration(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_continued_nested_configuration",
+        "#if defined(CHELIS_PHASE0_OUTER) && \\\n"
+        "    defined(CHELIS_PHASE0_CONTINUED)\n"
+        "#if defined(CHELIS_PHASE0_NESTED)\n"
+        "extern float "
+        "*runtime_representation_phase0_continued_nested_configuration(void);\n"
+        "#endif\n"
+        "#endif",
+    )
+
+
+def mutate_preprocessor_configuration_cap(source: str) -> str:
+    conditions = " && \\\n    ".join(
+        f"defined(CHELIS_PHASE0_DIMENSION_{index})" for index in range(9)
+    )
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_configuration_cap",
+        f"#if {conditions}\n"
+        "extern float *runtime_representation_phase0_configuration_cap(void);\n"
+        "#endif",
+    )
+
+
+def mutate_header_availability_configuration(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_header_configuration",
+        "#if __has_include(<chelis/runtime_representation_phase0.h>)\n"
+        "extern float *runtime_representation_phase0_header_configuration(void);\n"
+        "#endif",
+    )
+
+
 def mutate_c_complete_declarator_shapes(source: str) -> str:
     return _append_probe(
         source,
@@ -1272,6 +1310,22 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
             "raw-element-pointer",
             Path("crates/chelis-runtime/include/chelis_simd.h"),
             mutate_external_preprocessor_configuration,
+        ),
+        MutationProbe(
+            "raw-element-pointer",
+            Path("crates/chelis-runtime/include/chelis_simd.h"),
+            mutate_continued_nested_preprocessor_configuration,
+        ),
+        MutationProbe(
+            "raw-element-pointer",
+            Path("crates/chelis-runtime/include/chelis_simd.h"),
+            mutate_preprocessor_configuration_cap,
+            SOURCE_REJECTED_FAILURE,
+        ),
+        MutationProbe(
+            "raw-element-pointer",
+            Path("crates/chelis-runtime/include/chelis_simd.h"),
+            mutate_header_availability_configuration,
         ),
         MutationProbe(
             "raw-element-pointer",

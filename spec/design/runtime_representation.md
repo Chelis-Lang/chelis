@@ -508,13 +508,35 @@ Relocating an unchanged carrier between functions, changing one extent of a
 multidimensional array, or changing `float *` to `_Atomic(float) *` therefore
 changes identity. Width-equal spellings such as `int` and `unsigned int`
 cannot collapse to one identity. The parser evaluates production
-preprocessor configurations explicitly: compiler-provided macros are cleared,
-every external macro named by a source conditional is forced both disabled and
-enabled, and the union of those boolean assignments is scanned. Macros defined
-by the source itself are not configuration dimensions. More than eight external
-dimensions fails closed instead of growing an unbounded scan, and syntax
-rejected in any enumerated configuration fails instead of disappearing from the
-inventory.
+preprocessor configurations through a compiler-owned token boundary. It
+tokenizes the complete main file and uses libclang's preprocessing annotations
+to recover exact directive extents, including continued, nested, inactive, and
+digraph directives; directive-looking bytes inside comments or literals never
+enter configuration discovery. `#include`, `#include_next`, `#import`, and
+`#error` are blanked over those exact extents while retaining line breaks and
+byte offsets before the carrier AST is parsed.
+
+Conditional discovery accepts only constants `0` and `1`, `defined`, bare
+macros, Boolean negation/conjunction/disjunction (including their alternative
+tokens), parentheses, and literal `__has_include` queries. Arithmetic,
+comparison, bitwise, ternary, comma, token-paste, function-like, and computed
+header conditions fail closed rather than implying an unbounded or guessed
+value domain. Compiler-provided macros are cleared. A macro used only for
+definedness or only as a Boolean value is scanned as undefined and defined-one;
+a macro used in both ways is scanned as undefined, defined-zero, and
+defined-one. Source definitions of a condition-referenced macro may only be
+empty, `0`, or `1`, with an empty replacement rejected when the macro is used
+as a value; this keeps use-before-definition visible without treating computed
+aliases as configuration authority. The dialect-fixed `__cplusplus`,
+`__OBJC__`, and `defined(__has_include)` states remain compiler-owned.
+Each distinct literal header spelling is an independent absent/present
+dimension. Its libclang-reported token span is replaced by the selected Boolean
+constant while preserving byte offsets and physical line splices before the
+carrier AST is parsed; header availability therefore cannot inherit workstation
+include state or accidentally correlate `<path>` with `"path"`. The checked
+Cartesian product is capped at 256 configurations. Exceeding that cap, or syntax
+rejected in any enumerated configuration, fails instead of disappearing from
+the inventory.
 
 Carrier admission is category-total rather than an `EntityKind` allow-list.
 Every main-file cursor that libclang categorizes as a declaration or expression

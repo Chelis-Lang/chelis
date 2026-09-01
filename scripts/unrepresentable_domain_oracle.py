@@ -78,7 +78,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -446,6 +446,7 @@ def run_bounded_child(
     *,
     timeout: float,
     cwd: Path = REPO_ROOT,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one oracle child, reaping its process group on timeout.
 
@@ -460,6 +461,7 @@ def run_bounded_child(
         process = subprocess.Popen(
             tuple(command),
             cwd=cwd,
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

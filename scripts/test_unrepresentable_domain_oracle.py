@@ -137,6 +137,25 @@ class TestWriteFixture(unittest.TestCase):
 
 
 class TestBoundedChild(unittest.TestCase):
+    @patch("subprocess.Popen")
+    def test_explicit_environment_is_forwarded_to_the_child(
+        self, popen: MagicMock
+    ) -> None:
+        process = popen.return_value
+        process.communicate.return_value = ("out", "err")
+        process.returncode = 0
+        child_env = {"CHELIS_ORACLE_SENTINEL": "kept"}
+
+        completed = oracle.run_bounded_child(
+            "environment handoff",
+            ("chelis", "check"),
+            timeout=1,
+            env=child_env,
+        )
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertIs(popen.call_args.kwargs["env"], child_env)
+
     def test_hung_child_is_reaped_and_diagnostic_names_its_obligation(self) -> None:
         command = (
             sys.executable,
@@ -840,29 +859,29 @@ class TestSyntheticFixtureStyleGate(unittest.TestCase):
         oracle._BINARY_RESOLUTION_ATTEMPTED = False
         oracle._RESOLVED_CHELIS_BINARY = None
 
-    @patch("subprocess.run")
+    @patch("unrepresentable_domain_oracle.run_bounded_child")
     def test_check_disables_advisory_lint_without_dropping_the_environment(
-        self, mock_run: MagicMock
+        self, run_bounded_child: MagicMock
     ) -> None:
-        mock_run.return_value = subprocess.CompletedProcess(
+        run_bounded_child.return_value = subprocess.CompletedProcess(
             args=["chelis", "check"], returncode=2, stdout="{}", stderr=""
         )
         with patch.dict(os.environ, {"CHELIS_ORACLE_SENTINEL": "kept"}, clear=False):
             oracle.run_chelis_check(Path("/tmp/fixture.dp"))
-        child_env = mock_run.call_args.kwargs["env"]
+        child_env = run_bounded_child.call_args.kwargs["env"]
         self.assertEqual(child_env[oracle.STYLE_GATE_DISABLE_ENV], "1")
         self.assertEqual(child_env["CHELIS_ORACLE_SENTINEL"], "kept")
 
-    @patch("subprocess.run")
+    @patch("unrepresentable_domain_oracle.run_bounded_child")
     def test_validate_disables_advisory_lint_without_dropping_the_environment(
-        self, mock_run: MagicMock
+        self, run_bounded_child: MagicMock
     ) -> None:
-        mock_run.return_value = subprocess.CompletedProcess(
+        run_bounded_child.return_value = subprocess.CompletedProcess(
             args=["chelis", "validate"], returncode=2, stdout="{}", stderr=""
         )
         with patch.dict(os.environ, {"CHELIS_ORACLE_SENTINEL": "kept"}, clear=False):
             oracle.run_chelis_validate(Path("/tmp/fixture.dp"))
-        child_env = mock_run.call_args.kwargs["env"]
+        child_env = run_bounded_child.call_args.kwargs["env"]
         self.assertEqual(child_env[oracle.STYLE_GATE_DISABLE_ENV], "1")
         self.assertEqual(child_env["CHELIS_ORACLE_SENTINEL"], "kept")
 

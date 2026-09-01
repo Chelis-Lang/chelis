@@ -10,7 +10,10 @@ use std::fmt;
 use std::path::Path;
 use std::sync::Mutex;
 
-use clang::{Clang, Entity, EntityKind, Index, Type, TypeKind, Unsaved, diagnostic::Severity};
+use clang::{
+    Clang, Entity, EntityKind, Index, Type, TypeKind, Unsaved, diagnostic::Severity,
+    source::SourceRange,
+};
 use quote::ToTokens;
 use serde::{Deserialize, Serialize};
 use syn::parse::Parser;
@@ -1642,123 +1645,91 @@ typedef void *NSString;
 #endif
 "#;
 
-const MAX_EXTERNAL_CONFIGURATION_MACROS: usize = 8;
+const MAX_PREPROCESSOR_CONFIGURATIONS: usize = 256;
 
-fn preprocessor_macro_name(source: &str) -> Option<String> {
-    tokens(source)
-        .into_iter()
-        .find(|token| is_identifier(token))
+#[derive(Clone, Debug)]
+struct PreprocessorToken {
+    spelling: String,
+    start: usize,
+    end: usize,
 }
 
-fn source_defined_macros(source: &str) -> BTreeSet<String> {
-    source
-        .lines()
-        .filter_map(|line| {
-            line.trim_start()
-                .strip_prefix('#')?
-                .trim_start()
-                .strip_prefix("define")
-                .filter(|rest| rest.starts_with(char::is_whitespace))
-                .and_then(preprocessor_macro_name)
-        })
-        .collect()
+#[derive(Clone, Debug)]
+struct PreprocessorDirective {
+    start: usize,
+    end: usize,
+    tokens: Vec<PreprocessorToken>,
 }
 
-fn conditional_expression_macros(source: &str) -> BTreeSet<String> {
-    let expression_tokens = tokens(source);
-    let mut macros = BTreeSet::new();
-    let mut index = 0usize;
-    while index < expression_tokens.len() {
-        if expression_tokens[index] == "__has_include" {
-            index += 1;
-            if expression_tokens.get(index).map(String::as_str) == Some("(")
-                && let Ok(close) = matching_close(&expression_tokens, index, "(", ")")
-            {
-                index = close + 1;
-            }
-            continue;
-        }
-        if expression_tokens[index] == "defined" {
-            index += 1;
-            if expression_tokens.get(index).map(String::as_str) == Some("(") {
-                index += 1;
-            }
-            if let Some(name) = expression_tokens.get(index)
-                && is_identifier(name)
-            {
-                macros.insert(name.clone());
-            }
-            index += 1;
-            continue;
-        }
-        if is_identifier(&expression_tokens[index]) {
-            macros.insert(expression_tokens[index].clone());
-        }
-        index += 1;
-    }
-    macros
+#[derive(Clone, Copy, Debug, Default)]
+struct MacroUsage {
+    definedness: bool,
+    value: bool,
 }
 
-fn external_configuration_macros(source: &str) -> Result<Vec<String>, ScanError> {
-    let locally_defined = source_defined_macros(source);
-    let mut macros = BTreeSet::new();
-    for line in source.lines() {
-        let Some(directive) = line.trim_start().strip_prefix('#').map(str::trim_start) else {
-            continue;
-        };
-        if let Some(rest) = directive
-            .strip_prefix("ifdef")
-            .or_else(|| directive.strip_prefix("ifndef"))
-            .filter(|rest| rest.starts_with(char::is_whitespace))
-        {
-            if let Some(name) = preprocessor_macro_name(rest) {
-                macros.insert(name);
-            }
-            continue;
-        }
-        if let Some(rest) = directive
-            .strip_prefix("elif")
-            .or_else(|| directive.strip_prefix("if"))
-            .filter(|rest| rest.starts_with(char::is_whitespace))
-        {
-            macros.extend(conditional_expression_macros(rest));
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct HeaderQuery {
+    spelling: String,
+}
+
+#[derive(Clone, Debug)]
+struct HeaderQueryUse {
+    query: HeaderQuery,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MacroState {
+    Undefined,
+    Zero,
+    One,
+}
+
+impl MacroState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Undefined => "undefined",
+            Self::Zero => "0",
+            Self::One => "1",
         }
     }
-    macros.retain(|name| {
-        !locally_defined.contains(name)
-            && !matches!(name.as_str(), "__cplusplus" | "__OBJC__" | "__has_include")
-    });
-    if macros.len() > MAX_EXTERNAL_CONFIGURATION_MACROS {
-        return Err(ScanError::new(
-            ScanErrorKind::MalformedCandidate,
-            format!(
-                "C-family source has {} external conditional macros; explicit configuration enumeration is capped at {MAX_EXTERNAL_CONFIGURATION_MACROS}: {}",
-                macros.len(),
-                macros.into_iter().collect::<Vec<_>>().join(", ")
-            ),
-        ));
+}
+
+#[derive(Clone, Debug, Default)]
+struct CompilerConfiguration {
+    macros: BTreeMap<String, MacroState>,
+    present_headers: BTreeSet<HeaderQuery>,
+}
+
+impl CompilerConfiguration {
+    fn label(&self, headers: &BTreeSet<HeaderQuery>) -> String {
+        let mut entries = self
+            .macros
+            .iter()
+            .map(|(name, state)| format!("{name}={}", state.label()))
+            .collect::<Vec<_>>();
+        entries.extend(headers.iter().map(|header| {
+            let state = if self.present_headers.contains(header) {
+                "present"
+            } else {
+                "absent"
+            };
+            format!("{}={state}", header.spelling)
+        }));
+        entries.join(", ")
     }
-    Ok(macros.into_iter().collect())
 }
 
-fn compiler_configurations(macros: &[String]) -> Vec<BTreeSet<String>> {
-    (0..(1usize << macros.len()))
-        .map(|mask| {
-            macros
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| mask & (1usize << index) != 0)
-                .map(|(_, name)| name.clone())
-                .collect()
-        })
-        .collect()
+#[derive(Clone, Debug)]
+struct PreprocessorBoundary {
+    directives: Vec<PreprocessorDirective>,
+    macro_usage: BTreeMap<String, MacroUsage>,
+    headers: BTreeSet<HeaderQuery>,
+    header_uses: Vec<HeaderQueryUse>,
 }
 
-fn compiler_arguments(
-    path: &Path,
-    configuration_macros: &[String],
-    enabled_macros: &BTreeSet<String>,
-) -> Vec<String> {
+fn compiler_base_arguments(path: &Path) -> Vec<String> {
     let extension = path
         .extension()
         .and_then(|value| value.to_str())
@@ -1788,35 +1759,519 @@ fn compiler_arguments(
             "-D__cplusplus=201703L",
         ]
     };
-    let mut arguments = base.into_iter().map(str::to_string).collect::<Vec<_>>();
+    base.into_iter().map(str::to_string).collect()
+}
+
+fn compiler_arguments(path: &Path, configuration: &CompilerConfiguration) -> Vec<String> {
+    let mut arguments = compiler_base_arguments(path);
     arguments.push("-undef".to_string());
-    for name in configuration_macros {
+    arguments.push("-nostdinc".to_string());
+    for (name, state) in &configuration.macros {
         arguments.push(format!("-U{name}"));
-        if enabled_macros.contains(name) {
-            arguments.push(format!("-D{name}=1"));
+        match state {
+            MacroState::Undefined => {}
+            MacroState::Zero => arguments.push(format!("-D{name}=0")),
+            MacroState::One => arguments.push(format!("-D{name}=1")),
         }
     }
     arguments
 }
 
-fn source_without_includes(source: &str, cxx: bool) -> String {
-    source
-        .lines()
-        .map(|line| {
-            let trimmed = line.trim_start();
-            if cxx && matches!(trimmed, "#ifdef __cplusplus" | "#if defined(__cplusplus)") {
-                "#if 1"
-            } else if trimmed.starts_with("#include")
-                || trimmed.starts_with("#import")
-                || trimmed.starts_with("#error")
-            {
-                ""
+fn preprocessing_directives(
+    index: &Index<'_>,
+    source: &str,
+    path: &Path,
+) -> Result<Vec<PreprocessorDirective>, ScanError> {
+    let virtual_path = Path::new("/__chelis_c_surface__/discovery").join(
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("source.cpp"),
+    );
+    let unsaved = [Unsaved::new(&virtual_path, source)];
+    let mut arguments = compiler_base_arguments(path);
+    arguments.extend(["-undef".to_string(), "-nostdinc".to_string()]);
+    let mut parser = index.parser(&virtual_path);
+    parser
+        .arguments(&arguments)
+        .unsaved(&unsaved)
+        .detailed_preprocessing_record(true);
+    let translation_unit = parser.parse().map_err(|error| {
+        ScanError::new(
+            ScanErrorKind::MalformedCandidate,
+            format!("libclang could not tokenize C-family preprocessing directives: {error:?}"),
+        )
+    })?;
+    let file = translation_unit.get_file(&virtual_path).ok_or_else(|| {
+        ScanError::new(
+            ScanErrorKind::MalformedCandidate,
+            "libclang did not retain the C-family source used for preprocessing discovery",
+        )
+    })?;
+    let source_len = u32::try_from(source.len()).map_err(|_| {
+        ScanError::new(
+            ScanErrorKind::MalformedCandidate,
+            "C-family source exceeds libclang's 32-bit source-offset boundary",
+        )
+    })?;
+    let range = SourceRange::new(
+        file.get_offset_location(0),
+        file.get_offset_location(source_len),
+    );
+    let clang_tokens = range.tokenize();
+    let annotations = translation_unit.annotate(&clang_tokens);
+    let mut directive_ranges = BTreeSet::new();
+    for (token, entity) in clang_tokens.iter().zip(&annotations) {
+        let Some(entity) = entity.filter(|entity| {
+            entity.is_in_main_file()
+                && matches!(
+                    entity.get_kind(),
+                    EntityKind::PreprocessingDirective | EntityKind::InclusionDirective
+                )
+        }) else {
+            continue;
+        };
+        if !matches!(token.get_spelling().as_str(), "#" | "%:") {
+            continue;
+        }
+        let Some(range) = entity.get_range() else {
+            continue;
+        };
+        let start = range.get_start().get_spelling_location().offset as usize;
+        let end = range.get_end().get_spelling_location().offset as usize;
+        directive_ranges.insert((start, end));
+    }
+
+    Ok(directive_ranges
+        .into_iter()
+        .map(|(start, end)| {
+            let tokens = clang_tokens
+                .iter()
+                .filter_map(|token| {
+                    let range = token.get_range();
+                    let token_start = range.get_start().get_spelling_location().offset as usize;
+                    let token_end = range.get_end().get_spelling_location().offset as usize;
+                    (token_start >= start && token_end <= end).then(|| PreprocessorToken {
+                        spelling: token.get_spelling(),
+                        start: token_start,
+                        end: token_end,
+                    })
+                })
+                .collect();
+            PreprocessorDirective { start, end, tokens }
+        })
+        .collect())
+}
+
+fn directive_keyword(directive: &PreprocessorDirective) -> Option<&str> {
+    let introducer = directive.tokens.first()?.spelling.as_str();
+    if !matches!(introducer, "#" | "%:") {
+        return None;
+    }
+    directive.tokens.get(1).map(|token| token.spelling.as_str())
+}
+
+fn fixed_configuration_macro(name: &str) -> bool {
+    matches!(name, "__cplusplus" | "__OBJC__" | "__has_include")
+}
+
+struct ConditionParser<'a> {
+    tokens: &'a [PreprocessorToken],
+    index: usize,
+    usage: BTreeMap<String, MacroUsage>,
+    headers: Vec<HeaderQueryUse>,
+}
+
+impl<'a> ConditionParser<'a> {
+    fn new(tokens: &'a [PreprocessorToken]) -> Self {
+        Self {
+            tokens,
+            index: 0,
+            usage: BTreeMap::new(),
+            headers: Vec::new(),
+        }
+    }
+
+    fn spelling(&self) -> Option<&str> {
+        self.tokens
+            .get(self.index)
+            .map(|token| token.spelling.as_str())
+    }
+
+    fn consume(&mut self, spelling: &str) -> bool {
+        if self.spelling() == Some(spelling) {
+            self.index += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expected(&self, expected: &str) -> ScanError {
+        ScanError::new(
+            ScanErrorKind::MalformedCandidate,
+            format!(
+                "unsupported preprocessor condition: expected {expected}, found {}",
+                self.spelling().unwrap_or("end of directive")
+            ),
+        )
+    }
+
+    fn mark_definedness(&mut self, name: &str) {
+        if !fixed_configuration_macro(name) {
+            self.usage.entry(name.to_string()).or_default().definedness = true;
+        }
+    }
+
+    fn mark_value(&mut self, name: &str) {
+        if !fixed_configuration_macro(name) {
+            self.usage.entry(name.to_string()).or_default().value = true;
+        }
+    }
+
+    fn parse(mut self) -> Result<(BTreeMap<String, MacroUsage>, Vec<HeaderQueryUse>), ScanError> {
+        self.parse_or()?;
+        if self.index != self.tokens.len() {
+            return Err(self.expected("end of Boolean expression"));
+        }
+        Ok((self.usage, self.headers))
+    }
+
+    fn parse_or(&mut self) -> Result<(), ScanError> {
+        self.parse_and()?;
+        while matches!(self.spelling(), Some("||" | "or")) {
+            self.index += 1;
+            self.parse_and()?;
+        }
+        Ok(())
+    }
+
+    fn parse_and(&mut self) -> Result<(), ScanError> {
+        self.parse_unary()?;
+        while matches!(self.spelling(), Some("&&" | "and")) {
+            self.index += 1;
+            self.parse_unary()?;
+        }
+        Ok(())
+    }
+
+    fn parse_unary(&mut self) -> Result<(), ScanError> {
+        if matches!(self.spelling(), Some("!" | "not")) {
+            self.index += 1;
+            self.parse_unary()
+        } else {
+            self.parse_primary()
+        }
+    }
+
+    fn parse_primary(&mut self) -> Result<(), ScanError> {
+        if self.consume("(") {
+            self.parse_or()?;
+            if !self.consume(")") {
+                return Err(self.expected("`)`"));
+            }
+            return Ok(());
+        }
+        if self.consume("0") || self.consume("1") {
+            return Ok(());
+        }
+        if self.consume("defined") {
+            let parenthesized = self.consume("(");
+            let name = self
+                .spelling()
+                .filter(|name| is_identifier(name))
+                .ok_or_else(|| self.expected("a macro name after `defined`"))?
+                .to_string();
+            self.index += 1;
+            if parenthesized && !self.consume(")") {
+                return Err(self.expected("`)` after the macro name"));
+            }
+            self.mark_definedness(&name);
+            return Ok(());
+        }
+        if self.spelling() == Some("__has_include") {
+            return self.parse_has_include();
+        }
+        let name = self
+            .spelling()
+            .filter(|name| is_identifier(name))
+            .ok_or_else(|| self.expected("a Boolean macro, `defined`, or `__has_include`"))?
+            .to_string();
+        self.index += 1;
+        self.mark_value(&name);
+        Ok(())
+    }
+
+    fn parse_has_include(&mut self) -> Result<(), ScanError> {
+        let start = self
+            .tokens
+            .get(self.index)
+            .expect("caller established the __has_include token")
+            .start;
+        self.index += 1;
+        if !self.consume("(") {
+            return Err(self.expected("`(` after `__has_include`"));
+        }
+        let (spelling, path) = if self.consume("<") {
+            let mut path = String::new();
+            while let Some(spelling) = self.spelling() {
+                if spelling == ">" {
+                    break;
+                }
+                path.push_str(spelling);
+                self.index += 1;
+            }
+            if path.is_empty() || !self.consume(">") {
+                return Err(self.expected("a literal `<header>`"));
+            }
+            (format!("<{path}>"), path)
+        } else {
+            let literal = self
+                .spelling()
+                .filter(|spelling| spelling.starts_with('"') && spelling.ends_with('"'))
+                .ok_or_else(|| self.expected("a literal quoted header"))?
+                .to_string();
+            self.index += 1;
+            let path = literal[1..literal.len() - 1].to_string();
+            (literal, path)
+        };
+        if !self.consume(")") {
+            return Err(self.expected("`)` after the literal header"));
+        }
+        let end = self.tokens[self.index - 1].end;
+        if path.is_empty() {
+            return Err(ScanError::new(
+                ScanErrorKind::MalformedCandidate,
+                format!("empty literal header name in `__has_include`: {spelling}"),
+            ));
+        }
+        self.headers.push(HeaderQueryUse {
+            query: HeaderQuery { spelling },
+            start,
+            end,
+        });
+        Ok(())
+    }
+}
+
+fn merge_macro_usage(
+    target: &mut BTreeMap<String, MacroUsage>,
+    discovered: BTreeMap<String, MacroUsage>,
+) {
+    for (name, usage) in discovered {
+        let entry = target.entry(name).or_default();
+        entry.definedness |= usage.definedness;
+        entry.value |= usage.value;
+    }
+}
+
+fn preprocessor_boundary(
+    index: &Index<'_>,
+    source: &str,
+    path: &Path,
+) -> Result<PreprocessorBoundary, ScanError> {
+    let directives = preprocessing_directives(index, source, path)?;
+    let mut macro_usage = BTreeMap::new();
+    let mut headers = BTreeSet::new();
+    let mut header_uses = Vec::new();
+
+    for directive in &directives {
+        let Some(keyword) = directive_keyword(directive) else {
+            continue;
+        };
+        match keyword {
+            "ifdef" | "ifndef" | "elifdef" | "elifndef" => {
+                let arguments = &directive.tokens[2..];
+                if arguments.len() != 1 || !is_identifier(&arguments[0].spelling) {
+                    return Err(ScanError::new(
+                        ScanErrorKind::MalformedCandidate,
+                        format!("unsupported `#{keyword}` configuration directive"),
+                    ));
+                }
+                if !fixed_configuration_macro(&arguments[0].spelling) {
+                    macro_usage
+                        .entry(arguments[0].spelling.clone())
+                        .or_insert(MacroUsage::default())
+                        .definedness = true;
+                }
+            }
+            "if" | "elif" => {
+                let (usage, queries) = ConditionParser::new(&directive.tokens[2..]).parse()?;
+                merge_macro_usage(&mut macro_usage, usage);
+                headers.extend(queries.iter().map(|query| query.query.clone()));
+                header_uses.extend(queries);
+            }
+            _ => {}
+        }
+    }
+
+    for directive in &directives {
+        if directive_keyword(directive) != Some("define") {
+            continue;
+        }
+        let Some(name) = directive.tokens.get(2) else {
+            return Err(ScanError::new(
+                ScanErrorKind::MalformedCandidate,
+                "malformed `#define` preprocessing directive",
+            ));
+        };
+        let Some(usage) = macro_usage.get(&name.spelling) else {
+            continue;
+        };
+        let replacement = &directive.tokens[3..];
+        let is_boolean = replacement.is_empty()
+            || matches!(replacement, [PreprocessorToken { spelling, .. }] if spelling == "0" || spelling == "1");
+        let empty_value_expression = replacement.is_empty() && usage.value;
+        if !is_boolean || empty_value_expression {
+            return Err(ScanError::new(
+                ScanErrorKind::MalformedCandidate,
+                format!(
+                    "configuration macro `{}` has a source definition outside the closed empty/0/1 Boolean domain",
+                    name.spelling
+                ),
+            ));
+        }
+    }
+
+    Ok(PreprocessorBoundary {
+        directives,
+        macro_usage,
+        headers,
+        header_uses,
+    })
+}
+
+fn compiler_configurations(
+    macro_usage: &BTreeMap<String, MacroUsage>,
+    headers: &BTreeSet<HeaderQuery>,
+) -> Result<Vec<CompilerConfiguration>, ScanError> {
+    let mut dimension_sizes = macro_usage
+        .values()
+        .map(|usage| {
+            if usage.definedness && usage.value {
+                3
             } else {
-                line
+                2
             }
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect::<Vec<_>>();
+    dimension_sizes.extend(std::iter::repeat_n(2, headers.len()));
+    let count = dimension_sizes.into_iter().try_fold(1usize, |count, size| {
+        count
+            .checked_mul(size)
+            .filter(|next| *next <= MAX_PREPROCESSOR_CONFIGURATIONS)
+            .ok_or(())
+    });
+    if count.is_err() {
+        let mut dimensions = macro_usage.keys().cloned().collect::<Vec<_>>();
+        dimensions.extend(headers.iter().map(|header| header.spelling.clone()));
+        return Err(ScanError::new(
+            ScanErrorKind::MalformedCandidate,
+            format!(
+                "C-family preprocessing configuration exceeds the {MAX_PREPROCESSOR_CONFIGURATIONS}-configuration cap: {}",
+                dimensions.join(", ")
+            ),
+        ));
+    }
+
+    let mut configurations = vec![CompilerConfiguration::default()];
+    for (name, usage) in macro_usage {
+        let states: &[MacroState] = if usage.definedness && usage.value {
+            &[MacroState::Undefined, MacroState::Zero, MacroState::One]
+        } else {
+            &[MacroState::Undefined, MacroState::One]
+        };
+        configurations = configurations
+            .into_iter()
+            .flat_map(|configuration| {
+                states.iter().map(move |state| {
+                    let mut next = configuration.clone();
+                    next.macros.insert(name.clone(), *state);
+                    next
+                })
+            })
+            .collect();
+    }
+    for header in headers {
+        configurations = configurations
+            .into_iter()
+            .flat_map(|configuration| {
+                [false, true].into_iter().map(move |present| {
+                    let mut next = configuration.clone();
+                    if present {
+                        next.present_headers.insert(header.clone());
+                    }
+                    next
+                })
+            })
+            .collect();
+    }
+    Ok(configurations)
+}
+
+fn neutralize_nonsemantic_directives(
+    source: &str,
+    directives: &[PreprocessorDirective],
+) -> Result<String, ScanError> {
+    let mut bytes = source.as_bytes().to_vec();
+    for directive in directives {
+        if !matches!(
+            directive_keyword(directive),
+            Some("include" | "include_next" | "import" | "error")
+        ) {
+            continue;
+        }
+        if directive.start > directive.end || directive.end > bytes.len() {
+            return Err(ScanError::new(
+                ScanErrorKind::MalformedCandidate,
+                "libclang returned a preprocessing directive outside the main source extent",
+            ));
+        }
+        for byte in &mut bytes[directive.start..directive.end] {
+            if !matches!(*byte, b'\n' | b'\r') {
+                *byte = b' ';
+            }
+        }
+    }
+    String::from_utf8(bytes).map_err(|_| {
+        ScanError::new(
+            ScanErrorKind::MalformedCandidate,
+            "preprocessing directive neutralization did not preserve UTF-8",
+        )
+    })
+}
+
+fn materialize_header_queries(
+    source: &str,
+    query_uses: &[HeaderQueryUse],
+    configuration: &CompilerConfiguration,
+) -> Result<String, ScanError> {
+    let mut bytes = source.as_bytes().to_vec();
+    for query_use in query_uses {
+        if query_use.start >= query_use.end || query_use.end > bytes.len() {
+            return Err(ScanError::new(
+                ScanErrorKind::MalformedCandidate,
+                "libclang returned an __has_include query outside the main source extent",
+            ));
+        }
+        for index in query_use.start..query_use.end {
+            let preserves_line_splice =
+                bytes[index] == b'\\' && matches!(bytes.get(index + 1), Some(b'\n' | b'\r'));
+            if !matches!(bytes[index], b'\n' | b'\r') && !preserves_line_splice {
+                bytes[index] = b' ';
+            }
+        }
+        bytes[query_use.start] = if configuration.present_headers.contains(&query_use.query) {
+            b'1'
+        } else {
+            b'0'
+        };
+    }
+    String::from_utf8(bytes).map_err(|_| {
+        ScanError::new(
+            ScanErrorKind::MalformedCandidate,
+            "header-query materialization did not preserve UTF-8",
+        )
+    })
 }
 
 fn materialize_format_holes(source: &str) -> Result<String, ScanError> {
@@ -2371,19 +2826,20 @@ fn compiler_scan(
         )
     })?;
     let index = Index::new(&clang, true, false);
-    let virtual_path = Path::new("/tmp").join(
+    let virtual_path = Path::new("/__chelis_c_surface__/main").join(
         path.file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("chelis_surface.cpp"),
     );
-    let prelude_path = Path::new("/tmp/chelis_c_surface_prelude.hpp");
+    let prelude_path = Path::new("/__chelis_c_surface__/chelis_c_surface_prelude.hpp");
     let materialized = if materialize_holes {
         materialize_format_holes(source)?
     } else {
         source.to_string()
     };
+    let boundary = preprocessor_boundary(&index, &materialized, path)?;
     let cxx = path.extension().and_then(|value| value.to_str()) != Some("c");
-    let mut materialized = source_without_includes(&materialized, cxx);
+    let mut materialized = neutralize_nonsemantic_directives(&materialized, &boundary.directives)?;
     let trimmed = materialized.trim_end();
     if !trimmed.is_empty()
         && !trimmed.ends_with([';', '}', '{'])
@@ -2391,26 +2847,28 @@ fn compiler_scan(
     {
         materialized.push(';');
     }
-    let configuration_macros = external_configuration_macros(&materialized)?;
-    let configurations = compiler_configurations(&configuration_macros);
+    let configurations = compiler_configurations(&boundary.macro_usage, &boundary.headers)?;
     let language_prefix = if cxx {
         "#ifndef __cplusplus\n#define __cplusplus 201703L\n#endif\n"
     } else {
         ""
     };
-    let main_source = format!(
-        "{language_prefix}#include \"{}\"\n{}\n",
-        prelude_path.display(),
-        materialized,
-    );
     let prelude = format!("{CLANG_PRELUDE}\n{}", extra_prelude.unwrap_or_default());
-    let unsaved = [
-        Unsaved::new(&virtual_path, &main_source),
-        Unsaved::new(prelude_path, prelude),
-    ];
     let mut rows = Vec::new();
-    for enabled_macros in configurations {
-        let arguments = compiler_arguments(path, &configuration_macros, &enabled_macros);
+    for configuration in configurations {
+        let arguments = compiler_arguments(path, &configuration);
+        let configuration_label = configuration.label(&boundary.headers);
+        let configured_source =
+            materialize_header_queries(&materialized, &boundary.header_uses, &configuration)?;
+        let main_source = format!(
+            "{language_prefix}#include \"{}\"\n{}\n",
+            prelude_path.display(),
+            configured_source,
+        );
+        let unsaved = vec![
+            Unsaved::new(&virtual_path, &main_source),
+            Unsaved::new(prelude_path, &prelude),
+        ];
         let mut parser = index.parser(&virtual_path);
         parser
             .arguments(&arguments)
@@ -2421,11 +2879,7 @@ fn compiler_scan(
                 ScanErrorKind::MalformedCandidate,
                 format!(
                     "libclang could not parse C-family source under configuration [{}]: {error:?}",
-                    enabled_macros
-                        .iter()
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    configuration_label
                 ),
             )
         })?;
@@ -2443,13 +2897,7 @@ fn compiler_scan(
                 .unwrap_or_default();
             let located_message = format!(
                 "line {} column {} under configuration [{}]: {message}; source: {source_line:?}",
-                location.line,
-                location.column,
-                enabled_macros
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                location.line, location.column, configuration_label
             );
             if authored_context.is_none()
                 && (message.contains("unknown type name")

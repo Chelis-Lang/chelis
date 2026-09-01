@@ -367,6 +367,318 @@ static int *selected_backend(void);
 }
 
 #[test]
+fn continued_conditionals_are_tokenized_as_one_directive() {
+    for newline in ["\n", "\r\n"] {
+        let source = format!(
+            "#if defined(FEATURE_A) && \\{newline}    defined(FEATURE_B){newline}\
+extern float *continued_selected(void);{newline}\
+#else{newline}\
+extern double *continued_selected(void);{newline}\
+#endif{newline}"
+        );
+        let rows = scan_c_source(&source, "fixture")
+            .expect("a continued conditional is one preprocessing directive");
+        let returns: Vec<_> = rows
+            .iter()
+            .filter(|row| {
+                row.owner.contains("continued_selected")
+                    && row.signature.contains("shape=return-pointer")
+            })
+            .collect();
+        assert_eq!(returns.len(), 2, "newline {newline:?}: {rows:#?}");
+    }
+}
+
+#[test]
+fn continued_conditionals_cannot_bypass_the_configuration_cap() {
+    let source = r#"
+#if defined(FEATURE_0) && \
+    defined(FEATURE_1) && \
+    defined(FEATURE_2) && \
+    defined(FEATURE_3) && \
+    defined(FEATURE_4) && \
+    defined(FEATURE_5) && \
+    defined(FEATURE_6) && \
+    defined(FEATURE_7) && \
+    defined(FEATURE_8)
+extern float *too_many_configurations(void);
+#endif
+"#;
+    let error = scan_c_source(source, "fixture")
+        .expect_err("nine independent Boolean dimensions exceed the 256-configuration cap");
+    assert_eq!(error.kind, ScanErrorKind::MalformedCandidate);
+    assert!(error.to_string().contains("256"), "{error}");
+}
+
+#[test]
+fn inactive_nested_conditionals_are_still_part_of_configuration_discovery() {
+    let rows = scan_c_source(
+        r#"
+#if defined(OUTER_FEATURE)
+#if defined(INNER_FEATURE)
+extern float *nested_configuration(void);
+#else
+extern double *nested_configuration(void);
+#endif
+#else
+extern int *nested_configuration(void);
+#endif
+"#,
+        "fixture",
+    )
+    .expect("directives in an inactive outer branch remain discoverable");
+    let returns: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            row.owner.contains("nested_configuration")
+                && row.signature.contains("shape=return-pointer")
+        })
+        .collect();
+    assert_eq!(returns.len(), 3, "{rows:#?}");
+}
+
+#[test]
+fn directive_text_inside_comments_and_raw_strings_is_not_configuration() {
+    let rows = scan_c_source(
+        r##"
+/*
+#if COMMENT_0 || COMMENT_1 || COMMENT_2 || COMMENT_3 || COMMENT_4
+#endif
+*/
+static const char *text = R"delimiter(
+#if STRING_0 || STRING_1 || STRING_2 || STRING_3 || STRING_4
+#endif
+)delimiter";
+extern float *real_declaration(void);
+"##,
+        "fixture",
+    )
+    .expect("comment and string contents are not preprocessing directives");
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.owner.contains("real_declaration"))
+            .count(),
+        1,
+        "{rows:#?}"
+    );
+}
+
+#[test]
+fn a_condition_used_before_its_source_definition_remains_external() {
+    let rows = scan_c_source(
+        r#"
+#if LATE_FEATURE
+extern float *late_definition(void);
+#else
+extern double *late_definition(void);
+#endif
+#define LATE_FEATURE 1
+"#,
+        "fixture",
+    )
+    .expect("a later source definition cannot erase an earlier configuration input");
+    let returns: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            row.owner.contains("late_definition") && row.signature.contains("shape=return-pointer")
+        })
+        .collect();
+    assert_eq!(returns.len(), 2, "{rows:#?}");
+}
+
+#[test]
+fn source_boolean_definitions_stay_inside_the_closed_configuration_domain() {
+    let rows = scan_c_source(
+        r#"
+#define PRESENT
+#ifdef PRESENT
+extern float *empty_definition(void);
+#endif
+#define DISABLED 0
+#if DISABLED
+extern float *zero_definition(void);
+#else
+extern double *zero_definition(void);
+#endif
+#define ENABLED 1
+#if ENABLED
+extern int *one_definition(void);
+#endif
+"#,
+        "fixture",
+    )
+    .expect("empty, zero, and one source definitions are the complete local Boolean domain");
+    assert!(
+        ["empty_definition", "zero_definition", "one_definition"]
+            .iter()
+            .all(|name| rows.iter().any(|row| row.owner.contains(name))),
+        "{rows:#?}"
+    );
+}
+
+#[test]
+fn defined_zero_and_one_are_distinct_configuration_states() {
+    let rows = scan_c_source(
+        r#"
+#if !defined(FEATURE_LEVEL)
+extern int *three_state_configuration(void);
+#elif FEATURE_LEVEL
+extern float *three_state_configuration(void);
+#else
+extern double *three_state_configuration(void);
+#endif
+"#,
+        "fixture",
+    )
+    .expect("definedness and Boolean value are enumerated independently");
+    let returns: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            row.owner.contains("three_state_configuration")
+                && row.signature.contains("shape=return-pointer")
+        })
+        .collect();
+    assert_eq!(returns.len(), 3, "{rows:#?}");
+}
+
+#[test]
+fn literal_header_availability_queries_are_independent_dimensions() {
+    let rows = scan_c_source(
+        r#"
+#if __has_include(<virtual/first.h>)
+extern float *header_configuration(void);
+#elif __has_include("virtual/second.h")
+extern double *header_configuration(void);
+#else
+extern int *header_configuration(void);
+#endif
+"#,
+        "fixture",
+    )
+    .expect("literal header queries have deterministic independent states");
+    let returns: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            row.owner.contains("header_configuration")
+                && row.signature.contains("shape=return-pointer")
+        })
+        .collect();
+    assert_eq!(returns.len(), 3, "{rows:#?}");
+}
+
+#[test]
+fn alternate_spellings_of_one_header_path_remain_independent_dimensions() {
+    let rows = scan_c_source(
+        r#"
+#if __has_include(<virtual/shared.h>) && __has_include("virtual/shared.h")
+extern float *shared_header_configuration(void);
+#elif __has_include(<virtual/shared.h>)
+extern double *shared_header_configuration(void);
+#elif __has_include("virtual/shared.h")
+extern long *shared_header_configuration(void);
+#else
+extern int *shared_header_configuration(void);
+#endif
+"#,
+        "fixture",
+    )
+    .expect("literal header spellings are independent even when their paths match");
+    let returns: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            row.owner.contains("shared_header_configuration")
+                && row.signature.contains("shape=return-pointer")
+        })
+        .collect();
+    assert_eq!(returns.len(), 4, "{rows:#?}");
+}
+
+#[test]
+fn literal_header_names_do_not_inherit_filesystem_path_policy() {
+    let rows = scan_c_source(
+        r#"
+#if __has_include("../relative.h")
+extern float *relative_header_name(void);
+#else
+extern double *relative_header_name(void);
+#endif
+"#,
+        "fixture",
+    )
+    .expect("literal header states are token facts, not host filesystem paths");
+    let returns: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            row.owner.contains("relative_header_name")
+                && row.signature.contains("shape=return-pointer")
+        })
+        .collect();
+    assert_eq!(returns.len(), 2, "{rows:#?}");
+}
+
+#[test]
+fn continued_includes_and_errors_are_neutralized_by_directive_extent() {
+    let rows = scan_c_source(
+        r#"
+#include \
+    "not-present.h"
+#if FEATURE
+#error \
+    selected branch is deliberately unavailable
+extern float *neutralized_directive(void);
+#else
+extern double *neutralized_directive(void);
+#endif
+"#,
+        "fixture",
+    )
+    .expect("complete include and error directive extents are neutralized");
+    let returns: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            row.owner.contains("neutralized_directive")
+                && row.signature.contains("shape=return-pointer")
+        })
+        .collect();
+    assert_eq!(returns.len(), 2, "{rows:#?}");
+}
+
+#[test]
+fn non_boolean_and_computed_preprocessor_conditions_fail_closed() {
+    for source in [
+        "#if FEATURE_LEVEL == 2\nextern float *bad(void);\n#endif\n",
+        "#define JOIN(a, b) a ## b\n#if JOIN(FEATURE, _ENABLED)\nextern float *bad(void);\n#endif\n",
+    ] {
+        let error = scan_c_source(source, "fixture")
+            .expect_err("a configuration outside the closed Boolean grammar must fail");
+        assert_eq!(error.kind, ScanErrorKind::MalformedCandidate, "{error}");
+    }
+}
+
+#[test]
+fn preprocessing_digraphs_use_the_same_token_boundary() {
+    let rows = scan_c_source(
+        r#"
+%:if defined(DIGRAPH_FEATURE)
+extern float *digraph_configuration(void);
+%:else
+extern double *digraph_configuration(void);
+%:endif
+"#,
+        "fixture",
+    )
+    .expect("the compiler's preprocessing tokenization recognizes digraph directives");
+    let returns: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            row.owner.contains("digraph_configuration")
+                && row.signature.contains("shape=return-pointer")
+        })
+        .collect();
+    assert_eq!(returns.len(), 2, "{rows:#?}");
+}
+
+#[test]
 fn cxx_method_result_identities_include_the_full_enclosing_declaration_chain() {
     let rows = scan_c_source(
         r#"
