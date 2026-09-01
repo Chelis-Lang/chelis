@@ -82,7 +82,7 @@ fn float_element_is_nan(value: ElementRef) -> bool {
     }
 }
 
-fn bind_runtime_precision(
+fn bind_checked_precision(
     name: &str,
     prim: Prim,
     bindings: &mut HashMap<String, Prim>,
@@ -101,67 +101,87 @@ fn bind_runtime_precision(
     }
 }
 
-fn bind_runtime_precision_expr(
-    precision: &Expr,
-    prim: Prim,
-    bindings: &mut HashMap<String, Prim>,
-) -> Result<(), String> {
-    let Expr::List(list, _) = precision else {
-        return Ok(());
-    };
-    if tag(list) != Some(DeepTag::TVar) {
-        return Ok(());
+fn checked_precision_leaf(actual: &Expr, caller_bindings: &HashMap<String, Prim>) -> Option<Prim> {
+    let (actual_tag, actual_children) = tagged_expr_children(actual)?;
+    match actual_tag {
+        DeepTag::TPrim | DeepTag::TVar => actual_children
+            .first()
+            .and_then(symbol_name)
+            .and_then(|name| prim_from_name(name).or_else(|| caller_bindings.get(name).copied())),
+        DeepTag::TRef => actual_children
+            .first()
+            .and_then(|inner| checked_precision_leaf(inner, caller_bindings)),
+        _ => None,
     }
-    let Some(name) = children(list).first().and_then(symbol_name) else {
-        return Ok(());
-    };
-    bind_runtime_precision(name, prim, bindings)
 }
 
-/// Match a checker-owned declared parameter type against its tagged runtime
-/// argument and collect only concrete numeric precision actualizations.
-/// Empty containers contribute no guess; another scalar/tensor argument must
-/// establish the variable before a generic cast can use it.
-fn collect_runtime_precision_bindings(
+/// Match a declared callee type against the checker's concrete call-site type
+/// and collect numeric precision actualizations. This consumes only static
+/// type evidence: runtime values cannot recover an empty container's element
+/// type and textual binder names are not identities across nested calls.
+fn collect_checked_precision_bindings(
     declared: &Expr,
-    value: &RuntimeValue,
+    actual: &Expr,
+    caller_bindings: &HashMap<String, Prim>,
     bindings: &mut HashMap<String, Prim>,
 ) -> Result<(), String> {
-    let Expr::List(list, _) = declared else {
+    let Some((declared_tag, declared_children)) = tagged_expr_children(declared) else {
         return Ok(());
     };
-    let declared_children = children(list);
-    match (tag(list), value) {
-        (Some(DeepTag::TVar), RuntimeValue::Scalar(payload)) => {
-            let Some(name) = declared_children.first().and_then(symbol_name) else {
+    if declared_tag == DeepTag::TRef {
+        let Some(declared_inner) = declared_children.first() else {
+            return Ok(());
+        };
+        let actual_inner = tagged_expr_children(actual)
+            .filter(|(tag, _)| *tag == DeepTag::TRef)
+            .and_then(|(_, children)| children.first())
+            .unwrap_or(actual);
+        return collect_checked_precision_bindings(
+            declared_inner,
+            actual_inner,
+            caller_bindings,
+            bindings,
+        );
+    }
+    if declared_tag == DeepTag::TVar {
+        if let (Some(name), Some(prim)) = (
+            declared_children.first().and_then(symbol_name),
+            checked_precision_leaf(actual, caller_bindings),
+        ) {
+            return bind_checked_precision(name, prim, bindings);
+        }
+        return Ok(());
+    }
+
+    let Some((actual_tag, actual_children)) = tagged_expr_children(actual) else {
+        return Ok(());
+    };
+    if declared_tag != actual_tag {
+        return Ok(());
+    }
+
+    match declared_tag {
+        DeepTag::TTensor => {
+            let (Some(declared_precision), Some(actual_precision)) =
+                (declared_children.last(), actual_children.last())
+            else {
                 return Ok(());
             };
-            bind_runtime_precision(name, payload.dtype(), bindings)
+            collect_checked_precision_bindings(
+                declared_precision,
+                actual_precision,
+                caller_bindings,
+                bindings,
+            )
         }
-        (Some(DeepTag::TRef), value) => declared_children.first().map_or(Ok(()), |inner| {
-            collect_runtime_precision_bindings(inner, value, bindings)
-        }),
-        (Some(DeepTag::TTensor), RuntimeValue::Tensor(tensor)) => {
-            declared_children.last().map_or(Ok(()), |precision| {
-                bind_runtime_precision_expr(precision, tensor.precision, bindings)
-            })
-        }
-        (Some(DeepTag::TAdt), RuntimeValue::List(items))
-            if declared_children.first().and_then(symbol_name) == Some("List") =>
-        {
-            let Some(element_type) = declared_children.get(1) else {
-                return Ok(());
-            };
-            for item in items {
-                collect_runtime_precision_bindings(element_type, item, bindings)?;
-            }
-            Ok(())
-        }
-        (Some(DeepTag::TTuple), RuntimeValue::Tuple(items))
-            if declared_children.len() == items.len() =>
-        {
-            for (item_type, item) in declared_children.iter().zip(items) {
-                collect_runtime_precision_bindings(item_type, item, bindings)?;
+        DeepTag::TAdt | DeepTag::TTuple | DeepTag::TFn => {
+            for (declared_child, actual_child) in declared_children.iter().zip(actual_children) {
+                collect_checked_precision_bindings(
+                    declared_child,
+                    actual_child,
+                    caller_bindings,
+                    bindings,
+                )?;
             }
             Ok(())
         }
@@ -218,6 +238,19 @@ impl<'a> EvalContext<'a> {
                     .is_none()
                     .then_some((key.clone(), value.clone()))
             })
+    }
+
+    fn lookup_declared_signature(&self, name: &str) -> Option<&Expr> {
+        self.declared_signatures.get(name).or_else(|| {
+            let mut matches = self
+                .declared_signatures
+                .iter()
+                .filter_map(|(key, signature)| {
+                    terminal_name_matches(key, name).then_some(signature)
+                });
+            let signature = matches.next()?;
+            matches.next().is_none().then_some(signature)
+        })
     }
 
     pub(super) fn eval_expr(&mut self, expr: &Expr) -> Result<RuntimeValue, String> {
@@ -631,9 +664,20 @@ impl<'a> EvalContext<'a> {
             .get(1)
             .ok_or_else(|| "fn missing body".to_string())?
             .clone();
+        let return_type = self
+            .resolving_top_levels
+            .last()
+            .and_then(|name| self.lookup_declared_signature(name))
+            .and_then(|signature| {
+                tagged_expr_children(signature)
+                    .filter(|(tag, _)| *tag == DeepTag::TFn)
+                    .and_then(|(_, children)| children.last())
+            })
+            .cloned();
         Ok(RuntimeValue::Closure {
             params,
             param_types,
+            return_type,
             body,
             env: self
                 .bindings
@@ -764,6 +808,9 @@ impl<'a> EvalContext<'a> {
             .iter()
             .map(|arg| self.static_type_expr_of(arg))
             .collect::<Vec<_>>();
+        let result_type_expr = get_meta(list)
+            .and_then(|meta| meta.entries.iter().find(|(key, _)| key == "type"))
+            .map(|(_, ty)| ty.clone());
         // chelis#721: when the callee names a `(fn …)`-bodied top-level def and
         // is NOT a local binding, resolve it directly to its Closure. A nullary
         // (or otherwise DAG-lowerable) def folds to a constant that lands in
@@ -782,7 +829,12 @@ impl<'a> EvalContext<'a> {
         } else {
             self.eval_expr(func)?
         };
-        self.apply_resolved_callable_with_arg_types(callable, args, &arg_type_exprs)
+        self.apply_resolved_callable_with_arg_types(
+            callable,
+            args,
+            &arg_type_exprs,
+            result_type_expr.as_ref(),
+        )
     }
 
     fn eval_if(&mut self, list: &List) -> Result<RuntimeValue, String> {
@@ -927,7 +979,7 @@ impl<'a> EvalContext<'a> {
         let mut value = self.eval_expr(head)?;
         for stage in kids.iter().skip(1) {
             let next_ty = self.pipe_stage_output_type(stage, value_ty.as_ref());
-            value = self.apply_callable(stage, vec![value], &[value_ty])?;
+            value = self.apply_callable(stage, vec![value], &[value_ty], next_ty.as_ref())?;
             value_ty = next_ty;
         }
         Ok(value)
@@ -993,14 +1045,19 @@ impl<'a> EvalContext<'a> {
         stage: &Expr,
         args: Vec<RuntimeValue>,
         arg_type_exprs: &[Option<Expr>],
+        result_type_expr: Option<&Expr>,
     ) -> Result<RuntimeValue, String> {
         if let Some(name) = builtin_name(stage) {
             return self.eval_builtin(name, &args);
         }
         match self.eval_expr(stage)? {
-            value @ (RuntimeValue::Closure { .. } | RuntimeValue::Transform { .. }) => {
-                self.apply_resolved_callable_with_arg_types(value, args, arg_type_exprs)
-            }
+            value @ (RuntimeValue::Closure { .. } | RuntimeValue::Transform { .. }) => self
+                .apply_resolved_callable_with_arg_types(
+                    value,
+                    args,
+                    arg_type_exprs,
+                    result_type_expr,
+                ),
             other => Err(format!("pipe stage is not callable: {other:?}")),
         }
     }
@@ -1010,7 +1067,7 @@ impl<'a> EvalContext<'a> {
         callable: RuntimeValue,
         args: Vec<RuntimeValue>,
     ) -> Result<RuntimeValue, String> {
-        self.apply_resolved_callable_with_arg_types(callable, args, &[])
+        self.apply_resolved_callable_with_arg_types(callable, args, &[], None)
     }
 
     /// Like [`Self::apply_resolved_callable`], but additionally records a
@@ -1023,11 +1080,13 @@ impl<'a> EvalContext<'a> {
         callable: RuntimeValue,
         args: Vec<RuntimeValue>,
         arg_type_exprs: &[Option<Expr>],
+        result_type_expr: Option<&Expr>,
     ) -> Result<RuntimeValue, String> {
         match callable {
             RuntimeValue::Closure {
                 params,
                 param_types,
+                return_type,
                 body,
                 env,
                 precision_env,
@@ -1045,19 +1104,37 @@ impl<'a> EvalContext<'a> {
                 self.bindings = env;
                 self.precision_bindings = precision_env;
                 let value = (|| {
+                    let caller_precisions = saved_precisions.clone();
+                    let mut call_precisions = HashMap::new();
+                    for (declared, actual) in param_types.iter().zip(arg_type_exprs) {
+                        if let (Some(declared), Some(actual)) = (declared, actual) {
+                            collect_checked_precision_bindings(
+                                declared,
+                                actual,
+                                &caller_precisions,
+                                &mut call_precisions,
+                            )?;
+                        }
+                    }
+                    if let (Some(declared), Some(actual)) = (return_type.as_ref(), result_type_expr)
+                    {
+                        collect_checked_precision_bindings(
+                            declared,
+                            actual,
+                            &caller_precisions,
+                            &mut call_precisions,
+                        )?;
+                    }
+                    // The call-site instantiation is fresh (spec/04 §5.8):
+                    // callee-owned binders shadow a same-spelled lexical
+                    // binding instead of conflicting with it.
+                    self.precision_bindings.extend(call_precisions);
                     for (index, (param, arg)) in params.into_iter().zip(args).enumerate() {
                         let declared = param_types
                             .get(index)
                             .cloned()
                             .flatten()
                             .or_else(|| arg_type_exprs.get(index).cloned().flatten());
-                        if let Some(declared) = declared.as_ref() {
-                            collect_runtime_precision_bindings(
-                                declared,
-                                &arg,
-                                &mut self.precision_bindings,
-                            )?;
-                        }
                         // chelis#729 Phase 1: a tensor argument ingress-finalizes
                         // at the param's DECLARED element dtype (the host-lane
                         // mirror of the DAG evaluator's Load ingress). Without

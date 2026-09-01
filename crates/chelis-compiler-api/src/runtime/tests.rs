@@ -106,7 +106,6 @@ uniform_like(
 }
 "#,
     );
-
     let outcome = evaluate_host_program(&checked, &HashMap::new())
         .expect("seeded host program should evaluate");
     let value = outcome.host_bindings.get("x").expect("x binding");
@@ -261,6 +260,61 @@ value = choose_and_cast(cast(1, int16), cast(2, int64))
         }),
         "the checker should report the conflicting concrete precisions"
     );
+}
+
+#[test]
+fn generic_cast_target_uses_fresh_specialization_for_nested_calls() {
+    let checked = checked_surf(
+        r#"
+def inner[p_int](value: p_int, witness: List[p_int]) -> p_int = cast(value, p_int)
+def outer[p_int](witness: List[p_int]) -> int64 =
+  inner(cast(4294967297, int64), [cast(0, int64)])
+value = outer([cast(7, int16)])
+"#,
+    );
+    let outcome = evaluate_host_program(&checked, &HashMap::new())
+        .expect("callee binders must specialize independently of caller binders");
+    let RuntimeValue::Scalar(payload) = outcome.host_bindings.get("value").expect("value") else {
+        panic!("value should be a scalar")
+    };
+    assert_eq!(payload.dtype(), Prim::Int64);
+}
+
+#[test]
+fn generic_cast_target_uses_contextual_specialization_for_empty_container() {
+    let checked = checked_surf(
+        r#"
+def empty_witness[p_int](items: List[p_int], value: int64) -> p_int =
+  cast(value, p_int)
+def make_i16() -> int16 = empty_witness([], cast(257, int64))
+value = make_i16()
+"#,
+    );
+
+    let outcome = evaluate_host_program(&checked, &HashMap::new())
+        .expect("the checked call result must supply the empty container specialization");
+    let RuntimeValue::Scalar(payload) = outcome.host_bindings.get("value").expect("value") else {
+        panic!("value should be a scalar")
+    };
+    assert_eq!(payload.dtype(), Prim::Int16);
+}
+
+#[test]
+fn generic_cast_target_uses_checked_adt_specialization() {
+    let checked = checked_surf(
+        r#"
+def option_witness[p_int](item: Option[p_int], value: int64) -> p_int =
+  cast(value, p_int)
+value = option_witness(Some(cast(0, int16)), cast(257, int64))
+"#,
+    );
+
+    let outcome = evaluate_host_program(&checked, &HashMap::new())
+        .expect("the checked Option argument must retain its concrete specialization");
+    let RuntimeValue::Scalar(payload) = outcome.host_bindings.get("value").expect("value") else {
+        panic!("value should be a scalar")
+    };
+    assert_eq!(payload.dtype(), Prim::Int16);
 }
 
 // ----- Phase 3t.1: test_assert_* builtins -----
@@ -524,6 +578,7 @@ fn eval_deep_with_bindings(
         named_axis_route_cache: HashMap::new(),
         named_axis_route_visiting: HashSet::new(),
         top_level_defs: HashMap::new(),
+        declared_signatures: HashMap::new(),
         type_env: HashMap::new(),
         adt_fields: HashMap::new(),
         adt_registry: chelis_types::adt::AdtRegistry::default(),
@@ -2951,6 +3006,7 @@ fn fo_diag_bools_strings_and_nonnumeric_controls() {
         describe_value(&RuntimeValue::Closure {
             params: vec!["x".to_string()],
             param_types: vec![None],
+            return_type: None,
             body: chelis_deep::ast::Expr::Atom(
                 chelis_deep::ast::Atom::Bool(false),
                 chelis_deep::Span::new(0, 0)

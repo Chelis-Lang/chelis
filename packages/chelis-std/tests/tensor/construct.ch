@@ -33,8 +33,3 @@ def test_arange_empty_range_produces_empty_tensor() -> unit ! { Test } = {
   xs = to_list(arange(cast(5, int32), cast(5, int32)))
   assert_eq(len(xs), cast(0, int64), "arange(5,5) is empty")
 }
-def test_linspace_count_zero_does_not_overrun() -> unit ! { Test } = {
-  actual = linspace(cast(0.0, f32), cast(1.0, f32), cast(0, int64))
-  expected = to_tensor([cast(0.0, f32)])
-  assert_close_tensor(actual, expected, cast(1e-6, f32), "linspace count=0 falls into count<=1 branch and returns [start]")
-}

@@ -808,6 +808,7 @@ pub(crate) fn revalidate_adt_value(
         named_axis_route_cache: HashMap::new(),
         named_axis_route_visiting: HashSet::new(),
         top_level_defs: module_constants.clone(),
+        declared_signatures: HashMap::new(),
         adt_registry: chelis_types::adt::AdtRegistry::default(),
         type_env: HashMap::new(),
         adt_fields: adt_fields.clone(),
