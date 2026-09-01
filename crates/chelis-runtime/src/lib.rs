@@ -16,6 +16,7 @@ use std::ptr;
 mod decimal_parse;
 pub mod dtype_header;
 mod ieee_narrow;
+mod ownership_ledger;
 
 #[cfg(test)]
 mod runtime_dtype_contract_tests;
@@ -1226,6 +1227,82 @@ pub struct chelis_mapped_file {
     mmap: Mmap,
 }
 
+// Portable logical payload sizes for chelis#1286's test-only ledger. These
+// are the canonical C carrier widths, not allocator metadata or native Rust
+// header sizes, so byte counts stay deterministic across supported 64-bit
+// platforms.
+const LEDGER_VALUE_SLOT_BYTES: u64 = 24;
+const LEDGER_DICT_ENTRY_BYTES: u64 = LEDGER_VALUE_SLOT_BYTES * 2;
+
+fn ledger_allocation(
+    pointer: *const libc::c_void,
+    kind: ownership_ledger::Kind,
+    bytes: u64,
+    site: &str,
+) {
+    if !ownership_ledger::allocate(pointer, kind, bytes, site) {
+        runtime_fail!("compiled ownership ledger rejected allocation at {site}");
+    }
+}
+
+fn new_list(items: Vec<chelis_value>, site: &str) -> *mut chelis_list {
+    let bytes = (items.capacity() as u64).saturating_mul(LEDGER_VALUE_SLOT_BYTES);
+    let pointer = Box::into_raw(Box::new(chelis_list { refcount: 1, items }));
+    ledger_allocation(pointer.cast(), ownership_ledger::Kind::List, bytes, site);
+    pointer
+}
+
+fn new_tuple(items: Vec<chelis_value>, site: &str) -> *mut chelis_tuple {
+    let bytes = (items.capacity() as u64).saturating_mul(LEDGER_VALUE_SLOT_BYTES);
+    let pointer = Box::into_raw(Box::new(chelis_tuple { refcount: 1, items }));
+    ledger_allocation(pointer.cast(), ownership_ledger::Kind::Tuple, bytes, site);
+    pointer
+}
+
+fn new_dict(entries: Vec<chelis_dict_entry>, site: &str) -> *mut chelis_dict {
+    let bytes = (entries.capacity() as u64).saturating_mul(LEDGER_DICT_ENTRY_BYTES);
+    let pointer = Box::into_raw(Box::new(chelis_dict {
+        refcount: 1,
+        entries,
+    }));
+    ledger_allocation(pointer.cast(), ownership_ledger::Kind::Dict, bytes, site);
+    pointer
+}
+
+fn new_adt(ctor: chelis_string, fields: Vec<chelis_value>, site: &str) -> *mut chelis_adt {
+    let bytes = (fields.capacity() as u64).saturating_mul(LEDGER_VALUE_SLOT_BYTES);
+    let pointer = Box::into_raw(Box::new(chelis_adt {
+        refcount: 1,
+        ctor,
+        fields,
+    }));
+    ledger_allocation(pointer.cast(), ownership_ledger::Kind::Adt, bytes, site);
+    pointer
+}
+
+fn new_mapped_file(mmap: Mmap, site: &str) -> *mut chelis_mapped_file {
+    let bytes = mmap.len() as u64;
+    let pointer = Box::into_raw(Box::new(chelis_mapped_file { refcount: 1, mmap }));
+    ledger_allocation(
+        pointer.cast(),
+        ownership_ledger::Kind::MappedFile,
+        bytes,
+        site,
+    );
+    pointer
+}
+
+fn resize_list_ledger(list: *mut chelis_list, site: &str) {
+    if list.is_null() {
+        return;
+    }
+    let bytes =
+        unsafe { ((*list).items.capacity() as u64).saturating_mul(LEDGER_VALUE_SLOT_BYTES) };
+    if !ownership_ledger::resize(list.cast(), bytes, site) {
+        runtime_fail!("compiled ownership ledger rejected list resize at {site}");
+    }
+}
+
 struct RuntimeString {
     refcount: usize,
     value: String,
@@ -1246,15 +1323,24 @@ struct RuntimeString {
 
 unsafe fn retain_string_handle(handle: *mut RuntimeString) {
     if !handle.is_null() {
+        if !ownership_ledger::retain(handle.cast(), "retain_string_handle") {
+            runtime_fail!("compiled ownership ledger rejected string retain");
+        }
         (*handle).refcount += 1;
     }
 }
 
 unsafe fn release_string_handle(handle: *mut RuntimeString) {
     if !handle.is_null() {
+        if !ownership_ledger::release(handle.cast(), "release_string_handle") {
+            runtime_fail!("compiled ownership ledger detected invalid string release");
+        }
         let inner = &mut *handle;
         inner.refcount -= 1;
         if inner.refcount == 0 {
+            if !ownership_ledger::finalize(handle.cast(), "release_string_handle") {
+                runtime_fail!("compiled ownership ledger rejected string finalization");
+            }
             drop(Box::from_raw(handle));
         }
     }
@@ -1262,35 +1348,53 @@ unsafe fn release_string_handle(handle: *mut RuntimeString) {
 
 unsafe fn retain_list_ptr(list: *mut chelis_list) {
     if !list.is_null() {
+        if !ownership_ledger::retain(list.cast(), "retain_list_ptr") {
+            runtime_fail!("compiled ownership ledger rejected list retain");
+        }
         (*list).refcount += 1;
     }
 }
 
 unsafe fn retain_tuple_ptr(tuple: *mut chelis_tuple) {
     if !tuple.is_null() {
+        if !ownership_ledger::retain(tuple.cast(), "retain_tuple_ptr") {
+            runtime_fail!("compiled ownership ledger rejected tuple retain");
+        }
         (*tuple).refcount += 1;
     }
 }
 
 unsafe fn retain_dict_ptr(dict: *mut chelis_dict) {
     if !dict.is_null() {
+        if !ownership_ledger::retain(dict.cast(), "retain_dict_ptr") {
+            runtime_fail!("compiled ownership ledger rejected dict retain");
+        }
         (*dict).refcount += 1;
     }
 }
 
 unsafe fn retain_adt_ptr(adt: *mut chelis_adt) {
     if !adt.is_null() {
+        if !ownership_ledger::retain(adt.cast(), "retain_adt_ptr") {
+            runtime_fail!("compiled ownership ledger rejected adt retain");
+        }
         (*adt).refcount += 1;
     }
 }
 
 unsafe fn release_list_ptr(list: *mut chelis_list) {
     if !list.is_null() {
+        if !ownership_ledger::release(list.cast(), "release_list_ptr") {
+            runtime_fail!("compiled ownership ledger detected invalid list release");
+        }
         let inner = &mut *list;
         inner.refcount -= 1;
         if inner.refcount == 0 {
             for value in &inner.items {
                 chelis_value_release(*value);
+            }
+            if !ownership_ledger::finalize(list.cast(), "release_list_ptr") {
+                runtime_fail!("compiled ownership ledger rejected list finalization");
             }
             drop(Box::from_raw(list));
         }
@@ -1299,11 +1403,17 @@ unsafe fn release_list_ptr(list: *mut chelis_list) {
 
 unsafe fn release_tuple_ptr(tuple: *mut chelis_tuple) {
     if !tuple.is_null() {
+        if !ownership_ledger::release(tuple.cast(), "release_tuple_ptr") {
+            runtime_fail!("compiled ownership ledger detected invalid tuple release");
+        }
         let inner = &mut *tuple;
         inner.refcount -= 1;
         if inner.refcount == 0 {
             for value in &inner.items {
                 chelis_value_release(*value);
+            }
+            if !ownership_ledger::finalize(tuple.cast(), "release_tuple_ptr") {
+                runtime_fail!("compiled ownership ledger rejected tuple finalization");
             }
             drop(Box::from_raw(tuple));
         }
@@ -1312,12 +1422,18 @@ unsafe fn release_tuple_ptr(tuple: *mut chelis_tuple) {
 
 unsafe fn release_dict_ptr(dict: *mut chelis_dict) {
     if !dict.is_null() {
+        if !ownership_ledger::release(dict.cast(), "release_dict_ptr") {
+            runtime_fail!("compiled ownership ledger detected invalid dict release");
+        }
         let inner = &mut *dict;
         inner.refcount -= 1;
         if inner.refcount == 0 {
             for entry in &inner.entries {
                 chelis_value_release(entry.key);
                 chelis_value_release(entry.value);
+            }
+            if !ownership_ledger::finalize(dict.cast(), "release_dict_ptr") {
+                runtime_fail!("compiled ownership ledger rejected dict finalization");
             }
             drop(Box::from_raw(dict));
         }
@@ -1326,12 +1442,18 @@ unsafe fn release_dict_ptr(dict: *mut chelis_dict) {
 
 unsafe fn release_adt_ptr(adt: *mut chelis_adt) {
     if !adt.is_null() {
+        if !ownership_ledger::release(adt.cast(), "release_adt_ptr") {
+            runtime_fail!("compiled ownership ledger detected invalid adt release");
+        }
         let inner = &mut *adt;
         inner.refcount -= 1;
         if inner.refcount == 0 {
             chelis_string_release(inner.ctor);
             for field in &inner.fields {
                 chelis_value_release(*field);
+            }
+            if !ownership_ledger::finalize(adt.cast(), "release_adt_ptr") {
+                runtime_fail!("compiled ownership ledger rejected adt finalization");
             }
             drop(Box::from_raw(adt));
         }
@@ -1349,6 +1471,7 @@ fn cstr_to_string(ptr_: *const c_char) -> String {
 }
 
 fn new_runtime_string(value: String) -> chelis_string {
+    let bytes = value.len().saturating_add(1) as u64;
     let cstring = CString::new(value.clone()).unwrap_or_else(|_| CString::new("").unwrap());
     // One extra linear pass over bytes the constructor already copies once
     // (`value.clone()`) and scans once (`CString::new`), in exchange for O(1)
@@ -1360,9 +1483,14 @@ fn new_runtime_string(value: String) -> chelis_string {
         cstring,
         char_count,
     });
-    chelis_string {
-        handle: Box::into_raw(inner),
-    }
+    let handle = Box::into_raw(inner);
+    ledger_allocation(
+        handle.cast(),
+        ownership_ledger::Kind::String,
+        bytes,
+        "new_runtime_string",
+    );
+    chelis_string { handle }
 }
 
 unsafe fn string_value(value: chelis_string) -> &'static RuntimeString {
@@ -1533,7 +1661,7 @@ pub unsafe extern "C" fn chelis_alloc(
         libc::memset(allocation, 0, byte_capacity as usize);
         allocation.cast::<u8>()
     };
-    Box::into_raw(Box::new(chelis_tensor {
+    let tensor = Box::into_raw(Box::new(chelis_tensor {
         data,
         shape,
         strides,
@@ -1543,7 +1671,22 @@ pub unsafe extern "C" fn chelis_alloc(
         dtype: dtype.id() as chelis_dtype as chelis_dtype,
         owns_data: 1,
         reserved: [0; 2],
-    }))
+    }));
+    ledger_allocation(
+        tensor.cast(),
+        ownership_ledger::Kind::Tensor,
+        0,
+        "chelis_alloc descriptor",
+    );
+    if !data.is_null() {
+        ledger_allocation(
+            data.cast(),
+            ownership_ledger::Kind::TensorStorage,
+            byte_capacity as u64,
+            "chelis_alloc storage",
+        );
+    }
+    tensor
 }
 
 /// Element size in bytes for the given dtype tag.
@@ -1588,6 +1731,13 @@ pub unsafe extern "C" fn chelis_alloc_view(
         reserved: [0; 2],
     });
     let tensor = Box::into_raw(tensor);
+    ledger_allocation(
+        tensor.cast(),
+        ownership_ledger::Kind::Tensor,
+        0,
+        "chelis_alloc_view descriptor",
+    );
+    ownership_ledger::borrow(tensor.cast(), "chelis_alloc_view entry borrow");
     unsafe { validate_tensor(tensor, "chelis_alloc_view") };
     tensor
 }
@@ -1595,11 +1745,23 @@ pub unsafe extern "C" fn chelis_alloc_view(
 #[no_mangle]
 pub unsafe extern "C" fn chelis_free(t: *mut chelis_tensor) {
     if !t.is_null() {
+        if !ownership_ledger::release(t.cast(), "chelis_free descriptor") {
+            runtime_fail!("compiled ownership ledger detected invalid tensor release");
+        }
         unsafe { validate_tensor(t, "chelis_free") };
         if (*t).owns_data != 0 && !(*t).data.is_null() {
+            if !ownership_ledger::release((*t).data.cast(), "chelis_free storage") {
+                runtime_fail!("compiled ownership ledger detected invalid tensor-storage release");
+            }
+            if !ownership_ledger::finalize((*t).data.cast(), "chelis_free storage") {
+                runtime_fail!("compiled ownership ledger rejected tensor-storage finalization");
+            }
             libc::free((*t).data.cast());
         }
         release_tensor_metadata((*t).shape, (*t).strides, (*t).rank);
+        if !ownership_ledger::finalize(t.cast(), "chelis_free descriptor") {
+            runtime_fail!("compiled ownership ledger rejected tensor finalization");
+        }
         drop(Box::from_raw(t));
     }
 }
@@ -2095,11 +2257,7 @@ pub unsafe extern "C" fn chelis_adt_construct(
         std::slice::from_raw_parts(fields, len as usize)
     };
     chelis_string_retain(ctor);
-    Box::into_raw(Box::new(chelis_adt {
-        refcount: 1,
-        ctor,
-        fields: clone_items(slice),
-    }))
+    new_adt(ctor, clone_items(slice), "chelis_adt_construct")
 }
 
 #[no_mangle]
@@ -2314,10 +2472,7 @@ pub unsafe extern "C" fn chelis_value_as_adt(value: chelis_value) -> *mut chelis
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_list_empty() -> *mut chelis_list {
-    Box::into_raw(Box::new(chelis_list {
-        refcount: 1,
-        items: Vec::new(),
-    }))
+    new_list(Vec::new(), "chelis_list_empty")
 }
 
 #[no_mangle]
@@ -2330,10 +2485,7 @@ pub unsafe extern "C" fn chelis_list_from_values(
     } else {
         std::slice::from_raw_parts(items, len as usize)
     };
-    Box::into_raw(Box::new(chelis_list {
-        refcount: 1,
-        items: clone_items(slice),
-    }))
+    new_list(clone_items(slice), "chelis_list_from_values")
 }
 
 #[no_mangle]
@@ -2367,7 +2519,7 @@ pub unsafe extern "C" fn chelis_list_append(
     };
     chelis_value_retain(value);
     items.push(value);
-    Box::into_raw(Box::new(chelis_list { refcount: 1, items }))
+    new_list(items, "chelis_list_append")
 }
 
 #[no_mangle]
@@ -2377,10 +2529,7 @@ pub unsafe extern "C" fn chelis_list_with_capacity(capacity: i64) -> *mut chelis
     }
     let capacity = usize::try_from(capacity)
         .unwrap_or_else(|_| runtime_fail!("chelis_list_with_capacity exceeds platform size"));
-    Box::into_raw(Box::new(chelis_list {
-        refcount: 1,
-        items: Vec::with_capacity(capacity),
-    }))
+    new_list(Vec::with_capacity(capacity), "chelis_list_with_capacity")
 }
 
 #[no_mangle]
@@ -2396,6 +2545,7 @@ pub unsafe extern "C" fn chelis_list_push(list: *mut chelis_list, value: chelis_
     }
     chelis_value_retain(value);
     (*list).items.push(value);
+    resize_list_ledger(list, "chelis_list_push");
 }
 
 #[no_mangle]
@@ -2417,6 +2567,7 @@ pub unsafe extern "C" fn chelis_list_extend(list: *mut chelis_list, src: *const 
         chelis_value_retain(value);
         (*list).items.push(value);
     }
+    resize_list_ledger(list, "chelis_list_extend");
 }
 
 #[no_mangle]
@@ -2435,7 +2586,7 @@ pub unsafe extern "C" fn chelis_list_concat(
             items.push(*item);
         }
     }
-    Box::into_raw(Box::new(chelis_list { refcount: 1, items }))
+    new_list(items, "chelis_list_concat")
 }
 
 #[no_mangle]
@@ -2451,7 +2602,7 @@ pub unsafe extern "C" fn chelis_list_take(
     } else {
         clone_items(&(*list).items[..(*list).items.len().min(count as usize)])
     };
-    Box::into_raw(Box::new(chelis_list { refcount: 1, items }))
+    new_list(items, "chelis_list_take")
 }
 
 #[no_mangle]
@@ -2465,10 +2616,10 @@ pub unsafe extern "C" fn chelis_list_drop(
     if list.is_null() || count as usize >= (*list).items.len() {
         return chelis_list_empty();
     }
-    Box::into_raw(Box::new(chelis_list {
-        refcount: 1,
-        items: clone_items(&(*list).items[count as usize..]),
-    }))
+    new_list(
+        clone_items(&(*list).items[count as usize..]),
+        "chelis_list_drop",
+    )
 }
 
 #[no_mangle]
@@ -2486,17 +2637,10 @@ pub unsafe extern "C" fn chelis_list_chunk(
         &(*list).items[..]
     };
     for chunk in items.chunks(size as usize) {
-        let inner = Box::into_raw(Box::new(chelis_list {
-            refcount: 1,
-            items: clone_items(chunk),
-        }));
+        let inner = new_list(clone_items(chunk), "chelis_list_chunk inner");
         outer.push(chelis_value_from_list(inner));
     }
-    let out = Box::new(chelis_list {
-        refcount: 1,
-        items: outer,
-    });
-    Box::into_raw(out)
+    new_list(outer, "chelis_list_chunk outer")
 }
 
 #[no_mangle]
@@ -2516,10 +2660,7 @@ pub unsafe extern "C" fn chelis_list_flatten(list: *const chelis_list) -> *mut c
             }
         }
     }
-    Box::into_raw(Box::new(chelis_list {
-        refcount: 1,
-        items: out,
-    }))
+    new_list(out, "chelis_list_flatten")
 }
 
 #[no_mangle]
@@ -2528,7 +2669,7 @@ pub unsafe extern "C" fn chelis_range_i64(start: i64, end: i64) -> *mut chelis_l
     for value in start..end {
         items.push(chelis_value_from_int64(value));
     }
-    Box::into_raw(Box::new(chelis_list { refcount: 1, items }))
+    new_list(items, "chelis_range_i64")
 }
 
 #[no_mangle]
@@ -2541,10 +2682,7 @@ pub unsafe extern "C" fn chelis_tuple_from_values(
     } else {
         std::slice::from_raw_parts(items, len as usize)
     };
-    Box::into_raw(Box::new(chelis_tuple {
-        refcount: 1,
-        items: clone_items(slice),
-    }))
+    new_tuple(clone_items(slice), "chelis_tuple_from_values")
 }
 
 #[no_mangle]
@@ -2578,10 +2716,7 @@ pub unsafe extern "C" fn chelis_list_zip(
         let tuple = chelis_tuple_from_values(pair.as_ptr(), 2);
         out.push(chelis_value_from_tuple(tuple));
     }
-    Box::into_raw(Box::new(chelis_list {
-        refcount: 1,
-        items: out,
-    }))
+    new_list(out, "chelis_list_zip")
 }
 
 #[no_mangle]
@@ -2594,10 +2729,7 @@ pub unsafe extern "C" fn chelis_list_enumerate(list: *const chelis_list) -> *mut
             out.push(chelis_value_from_tuple(tuple));
         }
     }
-    Box::into_raw(Box::new(chelis_list {
-        refcount: 1,
-        items: out,
-    }))
+    new_list(out, "chelis_list_enumerate")
 }
 
 #[no_mangle]
@@ -2629,10 +2761,7 @@ pub unsafe extern "C" fn chelis_dict_from_pairs(pairs: *const chelis_list) -> *m
             }
         }
     }
-    Box::into_raw(Box::new(chelis_dict {
-        refcount: 1,
-        entries,
-    }))
+    new_dict(entries, "chelis_dict_from_pairs")
 }
 
 #[no_mangle]
@@ -2716,10 +2845,7 @@ pub unsafe extern "C" fn chelis_dict_remove(
             }
         }
     }
-    Box::into_raw(Box::new(chelis_dict {
-        refcount: 1,
-        entries,
-    }))
+    new_dict(entries, "chelis_dict_remove")
 }
 
 #[no_mangle]
@@ -2753,10 +2879,7 @@ pub unsafe extern "C" fn chelis_dict_insert(
         chelis_value_retain(value);
         entries.push(chelis_dict_entry { key, value });
     }
-    Box::into_raw(Box::new(chelis_dict {
-        refcount: 1,
-        entries,
-    }))
+    new_dict(entries, "chelis_dict_insert")
 }
 
 #[no_mangle]
@@ -2788,10 +2911,7 @@ pub unsafe extern "C" fn chelis_dict_merge(
             }
         }
     }
-    Box::into_raw(Box::new(chelis_dict {
-        refcount: 1,
-        entries,
-    }))
+    new_dict(entries, "chelis_dict_merge")
 }
 
 #[no_mangle]
@@ -2803,7 +2923,7 @@ pub unsafe extern "C" fn chelis_dict_keys(dict: *const chelis_dict) -> *mut chel
             items.push(entry.key);
         }
     }
-    Box::into_raw(Box::new(chelis_list { refcount: 1, items }))
+    new_list(items, "chelis_dict_keys")
 }
 
 #[no_mangle]
@@ -2815,7 +2935,7 @@ pub unsafe extern "C" fn chelis_dict_values(dict: *const chelis_dict) -> *mut ch
             items.push(entry.value);
         }
     }
-    Box::into_raw(Box::new(chelis_list { refcount: 1, items }))
+    new_list(items, "chelis_dict_values")
 }
 
 #[no_mangle]
@@ -2828,7 +2948,7 @@ pub unsafe extern "C" fn chelis_dict_entries(dict: *const chelis_dict) -> *mut c
             items.push(chelis_value_from_tuple(tuple));
         }
     }
-    Box::into_raw(Box::new(chelis_list { refcount: 1, items }))
+    new_list(items, "chelis_dict_entries")
 }
 
 unsafe fn nested_list_shape(list: *const chelis_list) -> Vec<i64> {
@@ -2964,7 +3084,7 @@ pub unsafe extern "C" fn chelis_tensor_elements(tensor: *const chelis_tensor) ->
         };
         items.push(value);
     }
-    Box::into_raw(Box::new(chelis_list { refcount: 1, items }))
+    new_list(items, "chelis_tensor_elements")
 }
 
 #[no_mangle]
@@ -3194,7 +3314,7 @@ pub unsafe extern "C" fn chelis_tensor_split(
             .unwrap_or_else(|| runtime_fail!("Overflow: split axis offset exceeds int64"));
         items.push(chelis_value_from_tensor(part));
     }
-    Box::into_raw(Box::new(chelis_list { refcount: 1, items }))
+    new_list(items, "chelis_tensor_split")
 }
 
 #[no_mangle]
@@ -4407,7 +4527,7 @@ fn bytes_to_value_list(bytes: &[u8]) -> *mut chelis_list {
         .iter()
         .map(|byte| unsafe { chelis_value_from_int64(i64::from(*byte)) })
         .collect::<Vec<_>>();
-    Box::into_raw(Box::new(chelis_list { refcount: 1, items }))
+    new_list(items, "bytes_to_value_list")
 }
 
 #[no_mangle]
@@ -4434,7 +4554,7 @@ pub unsafe extern "C" fn chelis_read_lines(path: chelis_string) -> *mut chelis_l
         .lines()
         .map(|line| chelis_value_from_string(new_runtime_string(line.to_string())))
         .collect::<Vec<_>>();
-    Box::into_raw(Box::new(chelis_list { refcount: 1, items }))
+    new_list(items, "chelis_read_lines")
 }
 
 #[no_mangle]
@@ -4464,7 +4584,7 @@ pub unsafe extern "C" fn chelis_list_dir(path: chelis_string) -> *mut chelis_lis
             entry.file_name().to_string_lossy().into_owned(),
         )));
     }
-    Box::into_raw(Box::new(chelis_list { refcount: 1, items }))
+    new_list(items, "chelis_list_dir")
 }
 
 #[no_mangle]
@@ -4474,7 +4594,7 @@ pub unsafe extern "C" fn chelis_mmap_file(path: chelis_string) -> *mut chelis_ma
         .unwrap_or_else(|err| runtime_fail!("mmap_file failed for `{path_text}`: {err}"));
     let mmap = Mmap::map(&file)
         .unwrap_or_else(|err| runtime_fail!("mmap_file failed for `{path_text}`: {err}"));
-    Box::into_raw(Box::new(chelis_mapped_file { refcount: 1, mmap }))
+    new_mapped_file(mmap, "chelis_mmap_file")
 }
 
 #[no_mangle]

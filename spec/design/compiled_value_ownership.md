@@ -1,7 +1,9 @@
 # Compiled Value Ownership
 
-**Status:** Design freeze and source/FFI ownership-contract freeze for [#1286]. No delivery
-phase in this document is implemented by the design change that introduces it.
+**Status:** Design freeze and source/FFI ownership-contract freeze for [#1286].
+Phase 0's executable detectors are implemented and enforced by the dedicated
+`compiled-value-ownership-phase0-oracle` CI job. Phases 1 through 4 remain
+unimplemented.
 
 **Owning specs:** `spec/04-type-system.md` [04-LIN-1..8],
 `spec/05-risc-primitives.md` [05-OP-31..33], and `spec/11-ffi.md` §2.1.
@@ -613,6 +615,30 @@ ledger event schema, mutation identities, and zero-vacuity rule.
 **Authoritative oracle:**
 `.venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 0`;
 exit zero and final line `COMPILED VALUE OWNERSHIP PHASE 0: PASS`.
+
+**Phase 0 delivery receipt (2026-08-31):** the oracle freezes the complete
+initial fixture identity, checked-in source, child-issue, command, detector,
+mutation-activation, exact-output, and ledger-receipt universes. Deleting an
+issue and its rows together, or adding an undeclared source file, fails the
+independent frozen census. The recursive function-container fixtures use named
+function values so C and HIP reach the C-host ABI projection; Metal's current
+successful emission is an exact typed expected failure owned by [#879], not a
+passing rejection receipt. The Phase 3 C/HIP reuse rows name exact behavioral
+tests, preflight the test list against zero-test success, and freeze a real
+ignored HIP device-entry test that compares the caller's bytes after execution.
+The ledger is compiled only by the private `ownership-ledger` runtime feature;
+normal runtime behavior and the public ABI are unchanged. Its JSONL event stream
+uses deterministic logical owner identities and portable payload-byte counts,
+then validates exact per-event keys, kinds, bytes, identities, sites, transition
+state, invalid-operation class, and final reconciliation. A malformed event,
+wrong result or stdout, empty allocation stream, or mismatched summary fails
+closed before an ownership receipt can pass. The typed expected failures remain
+red for their exact current reasons. In particular, the ledger finds the small
+aggregate-string leaks that the historical platform leak thresholds treated as
+controls. Phase 0 is hardware-independent: it compiles and lists the HIP
+execution test through the normal workspace surface and freezes its exact
+zero-test preflight; the phase oracle executes that preflight and the device
+test only when `--require-hip` becomes mandatory in Phase 3.
 
 ## Phase 1 — unified heap and atomic ABI cutover
 

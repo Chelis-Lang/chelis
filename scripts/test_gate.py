@@ -553,6 +553,10 @@ NON_GATE_JOBS = {
     # the workspace and dtype legs and is aggregated under the stable
     # branch-protection context.
     "faithful-observation-phase2-oracle",
+    # Rule-id: GATE-SCOPE-COMPILED-VALUE-OWNERSHIP-ORACLE -- chelis#1286's
+    # authoritative Phase 0 detector and typed expected-failure matrix is a
+    # dedicated CI job aggregated under the stable integration context.
+    "compiled-value-ownership-phase0-oracle",
     # Rule-id: GATE-SCOPE-GENERALIZE-SWEEP-ORACLE -- chelis#1207's exact
     # sweep-versus-level parity corpus intentionally bypasses nextest's
     # default filter. Four CI-owned shards execute its disjoint partitions;
@@ -1868,7 +1872,8 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("name: Integration Tests (Linux)", aggregate_block)
         self.assertIn(
             "needs: [changes, workspace-tests, dtype-phase3-oracle, "
-            "faithful-observation-phase2-oracle, generalize-sweep-oracle]",
+            "faithful-observation-phase2-oracle, "
+            "compiled-value-ownership-phase0-oracle, generalize-sweep-oracle]",
             aggregate_block,
         )
         self.assertIn("always()", aggregate_block)
@@ -1897,6 +1902,38 @@ class CiParityTests(unittest.TestCase):
         self.assertNotIn(command, dtype_block)
         self.assertIn(
             "faithful-observation-phase2-oracle=${{ needs.faithful-observation-phase2-oracle.result }}",
+            aggregate_block,
+        )
+
+    def test_compiled_value_ownership_phase0_oracle_is_a_dedicated_blocking_job(self):
+        workspace_block = _ci_job_block("workspace-tests")
+        dtype_block = _ci_job_block("dtype-phase3-oracle")
+        faithful_block = _ci_job_block("faithful-observation-phase2-oracle")
+        oracle_block = _ci_job_block("compiled-value-ownership-phase0-oracle")
+        aggregate_block = _ci_job_block("integration")
+        command = (
+            ".venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 0"
+        )
+
+        self.assertIn(
+            "name: Compiled Value Ownership Phase 0 Oracle",
+            oracle_block,
+        )
+        self.assertIn("needs: [changes]", oracle_block)
+        self.assertIn("contents: read", oracle_block)
+        self.assertIn("dtolnay/rust-toolchain@stable", oracle_block)
+        self.assertIn("python3 scripts/ci_setup_uv_python.py", oracle_block)
+        cache_inputs = _rust_cache_inputs(oracle_block)
+        self.assertEqual(cache_inputs.get("shared-key"), "linux-workspace")
+        self.assertEqual(cache_inputs.get("save-if"), "false")
+        self.assertNotIn("CARGO_TARGET_DIR:", oracle_block)
+        _assert_executable_run_once(oracle_block, command)
+        self.assertNotIn(command, workspace_block)
+        self.assertNotIn(command, dtype_block)
+        self.assertNotIn(command, faithful_block)
+        self.assertIn(
+            "compiled-value-ownership-phase0-oracle=${{ "
+            "needs.compiled-value-ownership-phase0-oracle.result }}",
             aggregate_block,
         )
 
@@ -2219,6 +2256,7 @@ class CiParityTests(unittest.TestCase):
         read_only_jobs = (
             "dtype-phase3-oracle",
             "faithful-observation-phase2-oracle",
+            "compiled-value-ownership-phase0-oracle",
             "generalize-sweep-oracle-shard",
         )
         self.assertEqual(workspace_inputs.get("shared-key"), "linux-workspace")
@@ -3362,6 +3400,7 @@ class DocsOnlySkipTests(unittest.TestCase):
         "workspace-tests-shard",
         "dtype-phase3-oracle",
         "faithful-observation-phase2-oracle",
+        "compiled-value-ownership-phase0-oracle",
         "generalize-sweep-oracle-shard",
         "macos-workspace-shard",
         "backend-sanitizers",
@@ -3456,7 +3495,8 @@ class DocsOnlySkipTests(unittest.TestCase):
         self.assertEqual(
             integration.get("needs"),
             "[changes, workspace-tests, dtype-phase3-oracle, "
-            "faithful-observation-phase2-oracle, generalize-sweep-oracle]",
+            "faithful-observation-phase2-oracle, "
+            "compiled-value-ownership-phase0-oracle, generalize-sweep-oracle]",
         )
         cond = integration.get("if", "")
         self.assertIn("always()", cond)
@@ -3467,6 +3507,10 @@ class DocsOnlySkipTests(unittest.TestCase):
         self.assertIn("needs.workspace-tests.result", block)
         self.assertIn("needs.dtype-phase3-oracle.result", block)
         self.assertIn("needs.faithful-observation-phase2-oracle.result", block)
+        self.assertIn(
+            "needs.compiled-value-ownership-phase0-oracle.result",
+            block,
+        )
         self.assertIn("needs.generalize-sweep-oracle.result", block)
         self.assertIn("scripts/ci_require_success.py", block)
 
