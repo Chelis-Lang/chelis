@@ -628,21 +628,6 @@
     }
   },
   {
-    "type": "dimension_parameters",
-    "named": true,
-    "fields": {},
-    "children": {
-      "multiple": true,
-      "required": true,
-      "types": [
-        {
-          "type": "identifier",
-          "named": true
-        }
-      ]
-    }
-  },
-  {
     "type": "do_expression",
     "named": true,
     "fields": {},
@@ -656,6 +641,11 @@
         }
       ]
     }
+  },
+  {
+    "type": "dtype_family",
+    "named": true,
+    "fields": {}
   },
   {
     "type": "effect_clause",
@@ -868,7 +858,7 @@
         "required": false,
         "types": [
           {
-            "type": "dimension_parameters",
+            "type": "type_binders",
             "named": true
           }
         ]
@@ -2576,6 +2566,16 @@
           }
         ]
       },
+      "quantifiers": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "type_binders",
+            "named": true
+          }
+        ]
+      },
       "type": {
         "multiple": false,
         "required": true,
@@ -2745,6 +2745,47 @@
       "types": [
         {
           "type": "type_parameters",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "type_binder",
+    "named": true,
+    "fields": {
+      "bound": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "dtype_family",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "type_binders",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "type_binder",
           "named": true
         }
       ]
@@ -3201,7 +3242,19 @@
     "named": false
   },
   {
+    "type": "Float",
+    "named": false
+  },
+  {
     "type": "IO",
+    "named": false
+  },
+  {
+    "type": "Int",
+    "named": false
+  },
+  {
+    "type": "Numeric",
     "named": false
   },
   {

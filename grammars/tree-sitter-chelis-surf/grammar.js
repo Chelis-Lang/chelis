@@ -146,6 +146,7 @@ module.exports = grammar({
       seq(
         "sig",
         field("name", $.identifier),
+        optional(field("quantifiers", $.type_binders)),
         ":",
         field("type", $.type_expression),
         optional($.effect_clause),
@@ -186,7 +187,7 @@ module.exports = grammar({
       seq(
         "def",
         field("name", $.identifier),
-        optional(field("quantifiers", $.dimension_parameters)),
+        optional(field("quantifiers", $.type_binders)),
         "(",
         commaSep($.parameter),
         ")",
@@ -195,7 +196,15 @@ module.exports = grammar({
         "=",
         field("body", $.expression),
       ),
-    dimension_parameters: ($) => seq("[", commaSep1($.identifier), "]"),
+    // spec/02-surf-syntax.md §P4b/§P4c: an unkinded binder list, each entry
+    // optionally bounded by one of the three closed dtype families.
+    type_binders: ($) => seq("[", commaSep1($.type_binder), "]"),
+    type_binder: ($) =>
+      seq(
+        field("name", $.identifier),
+        optional(seq(":", field("bound", $.dtype_family))),
+      ),
+    dtype_family: ($) => choice("Float", "Int", "Numeric"),
     parameter: ($) =>
       seq(
         field("name", $.value_identifier),
