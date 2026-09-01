@@ -3424,6 +3424,52 @@ def _parse_job_attrs(text: str | None = None) -> dict[str, dict[str, str]]:
     return attrs
 
 
+TELEMETRY_JOB = "test-telemetry"
+
+
+def _telemetry_junit_producers(attrs: dict[str, dict[str, str]]) -> tuple[str, ...]:
+    """Return the telemetry job's JUnit producers, in `needs:` order.
+
+    `changes` is a gate input, not a producer. Every other entry runs
+    nextest and uploads at least one report the telemetry job later
+    downloads by exact name.
+    """
+    raw = attrs.get(TELEMETRY_JOB, {}).get("needs", "")
+    match = re.match(r"^\[(?P<body>.*)\]$", raw.strip())
+    if match is None:
+        raise AssertionError(f"unreadable telemetry needs list: {raw!r}")
+    entries = (entry.strip() for entry in match.group("body").split(","))
+    producers = tuple(entry for entry in entries if entry and entry != "changes")
+    if not producers:
+        raise AssertionError("the telemetry job must name its JUnit producers")
+    return producers
+
+
+def _assert_telemetry_skips_without_every_junit(
+    attrs: dict[str, dict[str, str]],
+) -> None:
+    """Lock the producer-success gate on the cross-lane telemetry job.
+
+    Each download names one artifact and carries no fallback, so a
+    producer that never started -- a hosted runner the job was never
+    assigned -- and a producer that died at its own upload step both
+    leave this job failing on `Artifact not found`. That second red
+    describes the infrastructure, not the defect, while the required
+    aggregate already reports the producer honestly. Requiring every
+    producer to have succeeded is safe only because this aggregate is
+    not a required status context and asserts no contract of its own;
+    required aggregates stay `always()` and fail closed.
+    """
+    cond = attrs.get(TELEMETRY_JOB, {}).get("if", "")
+    for producer in _telemetry_junit_producers(attrs):
+        clause = f"needs.{producer}.result == 'success'"
+        if clause not in cond:
+            raise AssertionError(
+                f"the telemetry job must skip unless {producer!r} succeeded: "
+                f"missing {clause!r} in {cond!r}"
+            )
+
+
 class DocsOnlySkipTests(unittest.TestCase):
     """chelis#419: heavy jobs skip on docs-only PRs via a JOB-LEVEL `if`
     keyed on the `changes` job output, never `paths-ignore` (a path-
@@ -3585,6 +3631,52 @@ class DocsOnlySkipTests(unittest.TestCase):
                 cond = attrs[job].get("if", "")
                 self.assertIn("!cancelled()", cond)
                 self.assertNotIn("always()", cond)
+
+    def test_telemetry_skips_unless_every_junit_producer_succeeded(self):
+        _assert_telemetry_skips_without_every_junit(_parse_job_attrs())
+
+    def test_telemetry_producer_list_matches_the_report_aggregate(self):
+        attrs = _parse_job_attrs()
+        self.assertIn(TELEMETRY_JOB, self.HEAVY_REPORT_JOBS)
+        self.assertEqual(
+            _telemetry_junit_producers(attrs),
+            (
+                "workspace-tests-shard",
+                "dtype-phase3-oracle",
+                "generalize-sweep-oracle-shard",
+                "macos-workspace-shard",
+            ),
+        )
+
+    def test_dropping_one_producer_clause_fails_the_telemetry_gate(self):
+        attrs = _parse_job_attrs()
+        for producer in _telemetry_junit_producers(attrs):
+            with self.subTest(producer=producer):
+                mutated = {job: dict(values) for job, values in attrs.items()}
+                mutated[TELEMETRY_JOB]["if"] = mutated[TELEMETRY_JOB]["if"].replace(
+                    f" && needs.{producer}.result == 'success'", "", 1
+                )
+                with self.assertRaisesRegex(AssertionError, producer):
+                    _assert_telemetry_skips_without_every_junit(mutated)
+
+    def test_a_weaker_non_cancelled_producer_clause_fails_the_gate(self):
+        attrs = _parse_job_attrs()
+        mutated = {job: dict(values) for job, values in attrs.items()}
+        mutated[TELEMETRY_JOB]["if"] = mutated[TELEMETRY_JOB]["if"].replace(
+            "needs.macos-workspace-shard.result == 'success'",
+            "needs.macos-workspace-shard.result != 'cancelled'",
+            1,
+        )
+        with self.assertRaisesRegex(AssertionError, "macos-workspace-shard"):
+            _assert_telemetry_skips_without_every_junit(mutated)
+
+    def test_unreadable_telemetry_needs_list_fails_loudly(self):
+        with self.assertRaisesRegex(AssertionError, "unreadable telemetry"):
+            _telemetry_junit_producers({TELEMETRY_JOB: {"needs": "changes"}})
+
+    def test_a_producerless_telemetry_needs_list_fails_loudly(self):
+        with self.assertRaisesRegex(AssertionError, "must name its JUnit"):
+            _telemetry_junit_producers({TELEMETRY_JOB: {"needs": "[changes]"}})
 
     def test_always_run_jobs_are_not_gated(self):
         attrs = _parse_job_attrs()
