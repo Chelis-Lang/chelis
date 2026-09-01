@@ -1535,11 +1535,11 @@ def known_red_run_violations(
 # ---------------------------------------------------------------------------
 
 
-def oracle_environment() -> dict[str, str]:
+def oracle_environment(repo_root: Path = REPO_ROOT) -> dict[str, str]:
     env = os.environ.copy()
     env.setdefault(
         "CARGO_TARGET_DIR",
-        str(Path(tempfile.gettempdir()) / "chelis-faithful-observation-phase2-target"),
+        str(repo_root / "target" / "oracles" / "faithful-observation-phase2"),
     )
     return env
 

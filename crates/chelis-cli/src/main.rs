@@ -2700,6 +2700,10 @@ fn cmd_check_one_deep(
     )
 }
 
+fn advisory_lint_scope(file: &Path) -> &Path {
+    file
+}
+
 fn emit_advisory_lint_warnings_for_file(file: &Path) {
     if style_gate::disabled_by_env() {
         return;
@@ -2708,8 +2712,9 @@ fn emit_advisory_lint_warnings_for_file(file: &Path) {
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
+    let lint_scope = advisory_lint_scope(file);
     let rules = chelis_lint::registry::non_blocking_rules();
-    let raw = match chelis_lint::lint(parent, &rules) {
+    let raw = match chelis_lint::lint(lint_scope, &rules) {
         Ok(violations) => violations,
         Err(_) => return,
     };
@@ -2745,12 +2750,26 @@ fn emit_advisory_lint_warnings_for_file(file: &Path) {
         // `chelis lint --check` already suppresses, because the advisory
         // emit path applied only the path-glob exception filter. Both
         // code paths now run `should_suppress_unfixable_violation`, so
-        // the two cannot drift again. `parent` is the lint walk root,
-        // passed as `target` exactly as `cmd_lint` does.
-        if should_suppress_unfixable_violation(parent, &rules, &violation) {
+        // the two cannot drift again. The explicit file is both the
+        // lint scope and the fixability-probe target; walking its parent
+        // can make a temp fixture recursively lint all of `/tmp`.
+        if should_suppress_unfixable_violation(lint_scope, &rules, &violation) {
             continue;
         }
         eprintln!("warning: {violation}");
+    }
+}
+
+#[cfg(test)]
+mod advisory_lint_scope_tests {
+    use super::advisory_lint_scope;
+    use std::path::Path;
+
+    #[test]
+    fn advisory_lint_scope_is_the_explicit_input_file() {
+        let file = Path::new("/tmp/oracle_fixture.dp");
+        assert_eq!(advisory_lint_scope(file), file);
+        assert_ne!(advisory_lint_scope(file), file.parent().unwrap());
     }
 }
 

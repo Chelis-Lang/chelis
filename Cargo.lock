@@ -837,6 +837,7 @@ dependencies = [
  "proptest",
  "ryu",
  "serde",
+ "tempfile",
  "thiserror 2.0.18",
 ]
 

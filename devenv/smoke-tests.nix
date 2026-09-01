@@ -3,7 +3,6 @@
 {
   tasks."chelis:toolchain-test" = {
     description = "Check the common development tools";
-    after = [ "devenv:enterShell" ];
     before = [ "devenv:enterTest" ];
     exec = ''
       set -eu
@@ -15,7 +14,7 @@
         fi
       }
 
-      for command_name in rustc cargo uv cmake git pkg-config; do
+      for command_name in rustc cargo uv cmake git mdbook pkg-config pyright kache; do
         require_command "$command_name"
       done
 
@@ -26,33 +25,31 @@
       uv --version
       cmake --version
       git --version
+      mdbook --version
       pkg-config --version
+      pyright --version
+      kache --version
     '';
   };
 
   tasks."chelis:python-test" = {
     description = "Check the Devenv Python interpreter";
-    after = [ "devenv:enterShell" ];
+    after = [ "devenv:python:virtualenv" ];
     before = [ "devenv:enterTest" ];
     exec = ''
       set -eu
-      if [ ! -x "$VIRTUAL_ENV/bin/python" ]; then
+      if [ ! -x "$PYO3_PYTHON" ]; then
         printf '%s\n' 'missing Devenv Python virtual environment' >&2
         exit 1
       fi
-      if [ "$PYO3_PYTHON" != "$VIRTUAL_ENV/bin/python" ]; then
-        printf 'PyO3 interpreter differs from the active environment: %s\n' \
-          "$PYO3_PYTHON" >&2
-        exit 1
-      fi
-      "$VIRTUAL_ENV/bin/python" -c \
+      "$PYO3_PYTHON" -c \
         'import os, pathlib, sys; assert sys.version_info[:2] == (3, 11); assert pathlib.Path(os.environ["PYO3_PYTHON"]).samefile(sys.executable)'
     '';
   };
 
   tasks."chelis:c-compiler-test" = {
     description = "Check the managed C compiler";
-    after = [ "devenv:enterShell" ];
+    after = [ "devenv:files" ];
     before = [ "devenv:enterTest" ];
     exec = ''
       set -eu
@@ -87,7 +84,7 @@
 
   tasks."chelis:cpp-compiler-test" = {
     description = "Check the managed C++ compiler";
-    after = [ "devenv:enterShell" ];
+    after = [ "devenv:files" ];
     before = [ "devenv:enterTest" ];
     exec = ''
       set -eu
@@ -115,6 +112,47 @@
       }
       trap cleanup_object EXIT
       g++ -std=c++17 -Wall -Wextra -Werror -c "$probe" -o "$object_path"
+    '';
+  };
+
+  tasks."chelis:kache-test" = {
+    description = "Check the repository-owned Kache wrapper and no-cache control";
+    after = [ "devenv:python:virtualenv" ];
+    before = [ "devenv:enterTest" ];
+    exec = ''
+      set -eu
+      "$PYO3_PYTHON" scripts/kache_toolchain_smoke.py
+    '';
+  };
+
+  tasks."chelis:pyright-test" = {
+    description = "Check the repository-owned Pyright analysis scope";
+    after = [ "devenv:python:virtualenv" ];
+    before = [ "devenv:enterTest" ];
+    exec = ''
+      set -eu
+      pyright --version
+      "$PYO3_PYTHON" scripts/check_pyright_scope.py
+    '';
+  };
+
+  tasks."chelis:docs-test" = {
+    description = "Build the documentation with the pinned mdBook";
+    before = [ "devenv:enterTest" ];
+    exec = ''
+      set -eu
+      mdbook --version
+      mdbook build docs/book
+    '';
+  };
+
+  tasks."chelis:darwin-tree-sitter-test" = {
+    description = "Check the Darwin native compiler and tree-sitter parser agreement";
+    after = [ "devenv:python:virtualenv" ];
+    before = [ "devenv:enterTest" ];
+    exec = ''
+      set -eu
+      "$PYO3_PYTHON" scripts/darwin_tree_sitter_smoke.py
     '';
   };
 }

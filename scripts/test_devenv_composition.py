@@ -12,8 +12,10 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+DEVENV_SPEC = REPO_ROOT / "openspec/specs/cross-platform-devenv/spec.md"
 EXPECTED_IMPORTS = (
     "./devenv/toolchains.nix",
+    "./devenv/entry-shell.nix",
     "./devenv/commands.nix",
     "./devenv/generated-files.nix",
     "./devenv/git-hooks.nix",
@@ -199,6 +201,11 @@ def parse_contributor_docs(text: str) -> None:
 
 
 class DevenvCompositionTests(unittest.TestCase):
+    def test_controlling_spec_names_all_six_composed_modules(self) -> None:
+        text = DEVENV_SPEC.read_text(encoding="utf-8")
+        self.assertNotIn("all five local modules", text)
+        self.assertIn("Devenv combines all six local modules", text)
+
     def test_repository_composes_the_local_modules_from_the_root_file(self) -> None:
         root_text = (REPO_ROOT / "devenv.nix").read_text(encoding="utf-8")
         yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")

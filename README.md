@@ -95,10 +95,10 @@ After Nix is available, run these steps.
 1. Install the Devenv release that this repository pins:
 
    ```sh
-   nix --extra-experimental-features 'nix-command flakes' profile install github:cachix/devenv/v2.2
+   nix --extra-experimental-features 'nix-command flakes' profile install github:cachix/devenv/v2.2.2
    ```
 
-2. Make sure that Devenv reports version `2.2.0`:
+2. Make sure that Devenv reports version `2.2.2`:
 
    ```sh
    devenv --version
@@ -159,12 +159,33 @@ devenv shell -- chelis-gate --list
 devenv shell -- chelis-reap-orphans
 ```
 
+For repeated commands, enter one persistent `devenv shell` and run every
+command inside it. The required entry checks run before the session starts,
+then the exact activated toolchain is reused without paying shell evaluation
+and activation for every command. After one successful realization and while
+the Devenv files are unchanged, a single noninteractive command may use
+`devenv shell --no-reload -- <command>`.
+
+Measure the ordinary, no-reload, task, activation, and persistent-session costs
+with:
+
+```sh
+.devenv/state/venv/bin/python scripts/devenv_startup_benchmark.py --samples 5
+```
+
 #### Shell behavior
 
-The repository pins the Devenv modules to release `v2.2`. The version of the
-local Devenv CLI must match this module version.
+The repository pins the Devenv modules and update target to release `v2.2.2`.
+Use Devenv 2.2.2 locally when possible. The closed, reviewed CLI range is
+2.2.0 through 2.2.2 so the immutable shared CI action remains supported while
+the repository-owned atomic load-export task removes the concurrency race in
+those versions. CLIs outside that range are rejected before Nix evaluation.
 
-`devenv.nix` imports five local configuration modules. `devenv.yaml` defines
+The upstream `v2.2.2` tag builds a 2.2.2 CLI but its module metadata still
+advertises 2.2.1. Chelis overrides that stale metadata to 2.2.2 so every
+accepted CLI reports the right update target.
+
+`devenv.nix` imports six local configuration modules. `devenv.yaml` defines
 the inputs and CLI options.
 
 `devenv.yaml` pins the shared `nixpkgs` and `rust-overlay` inputs to exact
@@ -174,17 +195,48 @@ revisions. Therefore, `devenv update` cannot change them.
 
 On macOS, the `gcc` and `g++` shims invoke the Nixpkgs clang wrapper from
 `pkgs.stdenv.cc`. They do not invoke host Apple clang.
+Target-specific tree-sitter build scripts use the pinned, SDK-aware Nixpkgs
+compiler wrapper while `CRATE_CC_NO_DEFAULTS=1` prevents cc-rs from injecting
+the redundant `arm64-apple-macosx` native-target alias. This keeps the wrapper's
+SDK and C++ headers without the false cross-target warning.
 
 On Linux, the shell supplies GCC, OpenBLAS, and Valgrind from Nixpkgs.
 
 Devenv creates and activates Python 3.11 at `.devenv/state/venv`. It sets
-`PYO3_PYTHON` to that interpreter.
+`PYO3_PYTHON` to that interpreter. The shell also supplies mdBook 0.5.2 and
+Pyright; `pyrightconfig.json` owns the editor and CLI analysis roots and keeps
+generated environment/build trees out of the source graph.
+
+The shell builds and pins Kache 0.16.0, sets it as the exact `RUSTC_WRAPPER`,
+and reads the repository-owned `.kache.toml`. That policy caches test and CLI
+executables, ignores file-backed machine `KACHE_*` overrides, and retains a
+no-Kache correctness control. Ordinary Cargo commands outside Devenv may still
+honor the contributor's Cargo configuration.
+
+Chelis's relocatable macOS executable/dSYM representation uses Kache cache-key
+schema 28. Existing schema-27 entries deliberately take one cold miss instead
+of restoring pre-sanitization paths. The executable-cache regression first
+proves that upgrade miss with the managed schema-27 fixture, then proves that
+schema-28 clean checkouts restore exact path-clean executable/dSYM pairs.
 
 Devenv does not modify the repository-root `.venv`. The manual setup path below
 owns that environment outside Devenv.
 
-`devenv test` initializes the managed files and Python. It then runs separate
-smoke tasks for the toolchain, Python, C, and C++.
+`devenv test` initializes the managed files and Python. Explicit task-graph
+edges keep Python-backed checks behind the virtual environment and compiler
+checks behind the generated probes. It then runs separate smoke tasks for the
+toolchain, Python, C, C++, Kache, Pyright, docs, and the Darwin tree-sitter
+compiler/parser contract.
+
+Shell entry publishes `.devenv/load-exports` by atomic rename. The committed
+concurrency regression is:
+
+```sh
+.devenv/state/venv/bin/python scripts/devenv_entry_regression.py --workers 8
+```
+
+Every entry must either complete its entry graph and run the payload, or fail
+without running the payload.
 
 The shell also supplies these platform commands:
 

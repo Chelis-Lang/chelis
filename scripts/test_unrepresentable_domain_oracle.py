@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -134,6 +135,27 @@ class TestWriteFixture(unittest.TestCase):
         finally:
             path.unlink(missing_ok=True)
 
+
+class TestBoundedChild(unittest.TestCase):
+    def test_hung_child_is_reaped_and_diagnostic_names_its_obligation(self) -> None:
+        command = (
+            sys.executable,
+            "-c",
+            "import time; print('child-started', flush=True); time.sleep(60)",
+        )
+        with self.assertRaises(oracle.OracleFailure) as raised:
+            oracle.run_bounded_child("planted hung check", command, timeout=0.05)
+
+        message = str(raised.exception)
+        self.assertIn("obligation=planted hung check", message)
+        self.assertIn("state=timed_out", message)
+        self.assertIn("termination=", message)
+        self.assertIn("child-started", message)
+        pid_match = re.search(r"pid=(\d+)", message)
+        self.assertIsNotNone(pid_match, message)
+        assert pid_match is not None
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int(pid_match.group(1)), 0)
 
 class TestKeywordRejection(unittest.TestCase):
     """Test obligation 1 logic with mocked subprocess."""
