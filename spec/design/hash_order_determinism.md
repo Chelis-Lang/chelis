@@ -172,11 +172,21 @@ configuration-blind source census.
 
 `scripts/hash_order_determinism_oracle.py` scans every tracked `.rs` file and every
 untracked, non-ignored local `.rs` file in the repository (`git ls-files`). It
-recursively loads every direct `#[path = "relative/file.rs"] mod` target even when
-that target is ignored. The internal `hash-order-rust-literals` helper parses each
-source through `proc_macro2::TokenStream`, recursively visits every token group,
-and uses `syn::Lit::Str` as the sole decoder for ordinary and raw UTF-8 string
-literals. This is the same token model exposed to procedural macros: it
+then closes the actual Rust module ingress, including ignored existing sources.
+The internal `hash-order-rust-literals` helper parses each source through both
+`proc_macro2::TokenStream` and `syn::parse_file`. It returns direct path-module
+targets, every inline-module path, and every potential external `mod name;` in
+the recursive token tree, including declarations in a macro transcriber. A
+dynamic `mod $name;` cannot be inventoried and therefore fails closed. For a
+non-`mod.rs` owner, the filesystem side conservatively retains both legal roles:
+target root with children beside the file and external module with children below
+the file stem. It resolves ordinary modules through both `name.rs` and
+`name/mod.rs`, and it appends every parsed inline-module path before resolving a
+nested module or path target.
+
+The same compiled helper recursively visits every token group and uses
+`syn::Lit::Str` as the sole decoder for ordinary and raw UTF-8 string literals.
+This is the token model exposed to procedural macros: it
 distinguishes lifetimes from character literals and desugars all four
 outer/inner line/block doc-comment forms into `#[doc = "..."]` strings while
 discarding non-doc comments. The Python oracle owns filesystem closure but has no
@@ -184,8 +194,9 @@ hand-written Rust character, string, comment, or token-tree lexer in the
 literal-provenance path; its separate token-spelling sanitizer remains only for
 the exact allow-list census over the already closed source set.
 
-Every decoded value ending in `.rs` is resolved against every scanned source
-directory, recursing into each existing in-repository target. A declarative macro
+Every decoded value ending in `.rs` is resolved against every target-root,
+external-module, and inline-module directory in that compiled census, recursing
+into each existing in-repository target. A declarative macro
 may split the `#`, attribute group, `path` name, and literal across metavariables,
 but a path literal must originate in a string token exposed by that compiled token
 model. Compile-backed controls confirm that `concat!`, `env!`, `stringify!`, and
@@ -195,7 +206,8 @@ spellings.
 Missing ordinary fixture-name strings do not become inputs. An existing target
 outside the repository, an opaque direct path-bearing attribute, a missing direct
 target, and a direct target that escapes the repository fail closed. Compile-backed
-controls cover direct attributes, fully interpolated attributes, grouped
+controls cover direct attributes, ordinary external modules, inline-module path
+resolution, fully interpolated attributes, grouped
 `#$attribute`, split `$pound[path = ...]`, raw strings, escaped string literals,
 all four doc-comment desugarings, and a path literal between two lifetime tokens;
 ordinary four-slash line comments, triple-star block comments, byte strings, and C
@@ -213,8 +225,11 @@ still hit at that cardinality, so a changed spelling, duplicate token, stale ent
 and unlisted hit fail alike. The script's `unittest` twin plants a raw map in a library
 target, behind a non-default feature (`checkpoint-compile-probe`), in a `build.rs`,
 in a test target, and as a new `#[allow]` without an entry, and asserts each is
-rejected. Because a build script can compose a forbidden spelling inside a string
-and write Rust to `OUT_DIR`, the scanner also freezes every workspace `build.rs`
+rejected. The ordinary-module and inline-module controls place their target below
+an ignored directory, compile it with `rustc --cfg`, and prove the source census
+still finds the raw map. Because a build script can compose a forbidden spelling
+inside a string and write Rust to `OUT_DIR`, the scanner also freezes every
+workspace `build.rs`
 by exact path and SHA-256 and reserves the standalone Rust identifier `include`
 across tracked source. That rejects the built-in `include!` macro, qualified
 spellings, and `use ...::include as ...` aliases; a method selector named
@@ -225,7 +240,8 @@ malicious composed-string generator and prove that both direct and imported-alia
 macro spellings are rejected. The ignored-`#[path]` fixtures prove the scanner
 loads and rejects source files that `rustc --cfg` can compile but
 `git ls-files --others --exclude-standard` alone cannot see, including when a local
-transcriber composes the attribute across token boundaries.
+transcriber composes the attribute across token boundaries or emits it within an
+inline module.
 Migrated code behind a feature compiles in the workflows that already
 build those features (`smt-full-prove.yml`; the `generalize-sweep-oracle` job in
 `ci.yml`); this plan cites that evidence and adds no per-PR feature-matrix Clippy

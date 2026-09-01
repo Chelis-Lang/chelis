@@ -215,6 +215,108 @@ class HashOrderTokenTripwireTests(unittest.TestCase):
                     sources, allowed=(), approved_build_scripts=()
                 )
 
+    def test_ignored_ordinary_external_module_is_compiled_and_scanned(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            (root / "tests/round8_generated").mkdir(parents=True)
+            (root / ".gitignore").write_text(
+                "tests/round8_generated/\n", encoding="utf-8"
+            )
+            (root / "tests/owner.rs").write_text(
+                "#[cfg(round8_ordinary_module)]\n"
+                "mod round8_generated;\n",
+                encoding="utf-8",
+            )
+            (root / "tests/round8_generated/mod.rs").write_text(
+                "pub type Escape = std::collections::HashMap<u8, u8>;\n",
+                encoding="utf-8",
+            )
+            subprocess.run(("git", "init", "-q"), cwd=root, check=True)
+            subprocess.run(
+                ("git", "add", ".gitignore", "tests/owner.rs"),
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(
+                (
+                    "rustc",
+                    "--crate-type",
+                    "lib",
+                    "--cfg",
+                    "round8_ordinary_module",
+                    "tests/owner.rs",
+                    "-o",
+                    str(root / "probe.rlib"),
+                ),
+                cwd=root,
+                check=True,
+                capture_output=True,
+            )
+
+            sources = ORACLE.tracked_rust_sources(repo_root=root)
+            self.assertIn("tests/round8_generated/mod.rs", sources)
+            with self.assertRaisesRegex(
+                ORACLE.HashOrderDeterminismFailure, "unlisted token 'HashMap'"
+            ):
+                ORACLE.validate_sources(
+                    sources, allowed=(), approved_build_scripts=()
+                )
+
+    def test_macro_path_inside_inline_module_uses_the_module_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            (root / "tests/outer/generated").mkdir(parents=True)
+            (root / ".gitignore").write_text(
+                "tests/outer/generated/\n", encoding="utf-8"
+            )
+            (root / "tests/owner.rs").write_text(
+                "macro_rules! load_path_module {\n"
+                "    ($attribute:ident, $target:literal) => {\n"
+                "        #[$attribute = $target]\n"
+                "        mod escaped;\n"
+                "    };\n"
+                "}\n"
+                "#[cfg(round8_inline_module)]\n"
+                "mod outer {\n"
+                '    load_path_module!(path, "generated/escape.rs");\n'
+                "}\n",
+                encoding="utf-8",
+            )
+            (root / "tests/outer/generated/escape.rs").write_text(
+                "pub type Escape = std::collections::HashMap<u8, u8>;\n",
+                encoding="utf-8",
+            )
+            subprocess.run(("git", "init", "-q"), cwd=root, check=True)
+            subprocess.run(
+                ("git", "add", ".gitignore", "tests/owner.rs"),
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(
+                (
+                    "rustc",
+                    "--crate-type",
+                    "lib",
+                    "--cfg",
+                    "round8_inline_module",
+                    "tests/owner.rs",
+                    "-o",
+                    str(root / "probe.rlib"),
+                ),
+                cwd=root,
+                check=True,
+                capture_output=True,
+            )
+
+            sources = ORACLE.tracked_rust_sources(repo_root=root)
+            self.assertIn("tests/outer/generated/escape.rs", sources)
+            with self.assertRaisesRegex(
+                ORACLE.HashOrderDeterminismFailure, "unlisted token 'HashMap'"
+            ):
+                ORACLE.validate_sources(
+                    sources, allowed=(), approved_build_scripts=()
+                )
+
     def test_scans_interpolated_macro_path_attribute_target(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)

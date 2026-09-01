@@ -32,6 +32,9 @@ PATH_BEARING_ATTRIBUTE_PATTERN = re.compile(
 DIRECT_PATH_ATTRIBUTE_PATTERN = re.compile(
     r'#\s*\[\s*path\s*=\s*"(?P<target>[A-Za-z0-9_./-]+)"\s*\]', re.DOTALL
 )
+INTERPOLATED_PATH_ATTRIBUTE_PATTERN = re.compile(
+    r"#\s*\[\s*path\s*=\s*\$[A-Za-z_][A-Za-z0-9_]*\s*\]", re.DOTALL
+)
 PATH_MODULE_ITEM_PATTERN = re.compile(
     r"\s*(?:#\s*\[[^\]]*\]\s*)*mod\s+[A-Za-z_][A-Za-z0-9_]*\s*;"
 )
@@ -68,6 +71,20 @@ class ApprovedBuildScript:
     path: str
     sha256: str
     reason: str
+
+
+@dataclass(frozen=True, order=True)
+class RustPathModule:
+    inline_modules: tuple[str, ...]
+    target: str
+
+
+@dataclass(frozen=True, order=True)
+class RustSourceFacts:
+    literals: tuple[str, ...]
+    external_modules: tuple[str, ...]
+    inline_module_paths: tuple[tuple[str, ...], ...]
+    path_modules: tuple[RustPathModule, ...]
 
 
 # Each entry is an exact, reviewed item boundary. An entry without a matching
@@ -313,10 +330,10 @@ def _strip_comments_and_strings(text: str) -> str:
     return "".join(output)
 
 
-def _rust_utf8_string_literals_by_path(
+def _rust_source_facts_by_path(
     sources: Mapping[str, str],
-) -> dict[str, tuple[str, ...]]:
-    """Decode Rust UTF-8 literals through proc-macro tokenization."""
+) -> dict[str, RustSourceFacts]:
+    """Decode Rust literals and module ingress through compiled Rust parsers."""
 
     if not sources:
         return {}
@@ -338,43 +355,109 @@ def _rust_utf8_string_literals_by_path(
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
         raise HashOrderDeterminismFailure(
-            "compiled Rust literal census failed"
+            "compiled Rust source census failed"
             + (f": {detail}" if detail else "")
         )
     try:
         decoded = json.loads(completed.stdout)
     except json.JSONDecodeError as error:
         raise HashOrderDeterminismFailure(
-            f"compiled Rust literal census returned invalid JSON: {error}"
+            f"compiled Rust source census returned invalid JSON: {error}"
         ) from error
     if not isinstance(decoded, list):
         raise HashOrderDeterminismFailure(
-            "compiled Rust literal census did not return a source list"
+            "compiled Rust source census did not return a source list"
         )
 
     expected = set(sources)
-    observed: dict[str, tuple[str, ...]] = {}
+    observed: dict[str, RustSourceFacts] = {}
     for row in decoded:
-        if not isinstance(row, dict) or set(row) != {"path", "literals"}:
+        if not isinstance(row, dict) or set(row) != {
+            "path",
+            "literals",
+            "external_modules",
+            "inline_module_paths",
+            "path_modules",
+        }:
             raise HashOrderDeterminismFailure(
-                "compiled Rust literal census returned an invalid source row"
+                "compiled Rust source census returned an invalid source row"
             )
         path = row["path"]
         literals = row["literals"]
+        external_modules = row["external_modules"]
+        inline_module_paths = row["inline_module_paths"]
+        path_modules = row["path_modules"]
         if (
             not isinstance(path, str)
             or path not in expected
             or path in observed
             or not isinstance(literals, list)
             or any(not isinstance(literal, str) for literal in literals)
+            or not isinstance(external_modules, list)
+            or any(
+                not isinstance(module, str)
+                or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", module) is None
+                for module in external_modules
+            )
+            or external_modules != sorted(set(external_modules))
+            or not isinstance(inline_module_paths, list)
+            or any(
+                not isinstance(module_path, list)
+                or not module_path
+                or any(
+                    not isinstance(module, str)
+                    or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", module) is None
+                    for module in module_path
+                )
+                for module_path in inline_module_paths
+            )
+            or not isinstance(path_modules, list)
         ):
             raise HashOrderDeterminismFailure(
-                "compiled Rust literal census returned invalid path/literal data"
+                "compiled Rust source census returned invalid source facts"
             )
-        observed[path] = tuple(literals)
+        decoded_inline_paths = tuple(tuple(parts) for parts in inline_module_paths)
+        if decoded_inline_paths != tuple(sorted(set(decoded_inline_paths))):
+            raise HashOrderDeterminismFailure(
+                "compiled Rust source census returned noncanonical inline modules"
+            )
+        decoded_path_modules: list[RustPathModule] = []
+        for path_module in path_modules:
+            if (
+                not isinstance(path_module, dict)
+                or set(path_module) != {"inline_modules", "target"}
+                or not isinstance(path_module["inline_modules"], list)
+                or any(
+                    not isinstance(module, str)
+                    or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", module) is None
+                    for module in path_module["inline_modules"]
+                )
+                or not isinstance(path_module["target"], str)
+                or not path_module["target"].endswith(".rs")
+                or "\0" in path_module["target"]
+            ):
+                raise HashOrderDeterminismFailure(
+                    "compiled Rust source census returned invalid path-module data"
+                )
+            decoded_path_modules.append(
+                RustPathModule(
+                    tuple(path_module["inline_modules"]), path_module["target"]
+                )
+            )
+        canonical_path_modules = tuple(sorted(set(decoded_path_modules)))
+        if tuple(decoded_path_modules) != canonical_path_modules:
+            raise HashOrderDeterminismFailure(
+                "compiled Rust source census returned noncanonical path modules"
+            )
+        observed[path] = RustSourceFacts(
+            literals=tuple(literals),
+            external_modules=tuple(external_modules),
+            inline_module_paths=decoded_inline_paths,
+            path_modules=canonical_path_modules,
+        )
     if set(observed) != expected:
         raise HashOrderDeterminismFailure(
-            "compiled Rust literal census omitted or invented a source"
+            "compiled Rust source census omitted or invented a source"
         )
     return observed
 
@@ -416,46 +499,43 @@ def token_hits(path: str, text: str) -> tuple[TokenHit, ...]:
     return tuple(hits)
 
 
-def _path_module_targets(path: str, text: str) -> tuple[str, ...]:
-    """Return every direct `#[path] mod` target, rejecting opaque forms."""
+def _validate_path_attribute_forms(path: str, text: str) -> None:
+    """Reject path-bearing attributes the compiled module census cannot model."""
 
     sanitized = _strip_comments_and_strings(text)
     direct_by_start = {
         match.start(): match for match in DIRECT_PATH_ATTRIBUTE_PATTERN.finditer(text)
     }
-    targets: list[str] = []
+    interpolated_by_start = {
+        match.start(): match
+        for match in INTERPOLATED_PATH_ATTRIBUTE_PATTERN.finditer(sanitized)
+    }
     for attribute in PATH_BEARING_ATTRIBUTE_PATTERN.finditer(sanitized):
         direct = direct_by_start.get(attribute.start())
-        if direct is None or direct.end() != attribute.end():
+        interpolated = interpolated_by_start.get(attribute.start())
+        direct_matches = direct is not None and direct.end() == attribute.end()
+        interpolated_matches = (
+            interpolated is not None and interpolated.end() == attribute.end()
+        )
+        if not direct_matches and not interpolated_matches:
             raise HashOrderDeterminismFailure(
                 f"unsupported path-bearing attribute at {path}:"
                 f"{sanitized.count(chr(10), 0, attribute.start()) + 1}; "
-                "use one direct #[path = \"relative/file.rs\"] module attribute"
+                "use a direct string path or one macro literal interpolation"
             )
-        if PATH_MODULE_ITEM_PATTERN.match(sanitized, attribute.end()) is None:
+        if direct_matches and PATH_MODULE_ITEM_PATTERN.match(
+            sanitized, attribute.end()
+        ) is None:
             raise HashOrderDeterminismFailure(
                 f"unsupported #[path] target at {path}:"
                 f"{sanitized.count(chr(10), 0, attribute.start()) + 1}; "
                 "the attribute must apply directly to an external mod item"
             )
-        target = direct.group("target")
-        if target.startswith("/"):
+        if direct_matches and direct.group("target").startswith("/"):
             raise HashOrderDeterminismFailure(
-                f"absolute #[path] target {target!r} at {path} is forbidden"
+                f"absolute #[path] target {direct.group('target')!r} at {path} "
+                "is forbidden"
             )
-        resolved = posixpath.normpath(
-            str(PurePosixPath(path).parent.joinpath(target))
-        )
-        if resolved == ".." or resolved.startswith("../"):
-            raise HashOrderDeterminismFailure(
-                f"#[path] target {target!r} at {path} escapes the repository"
-            )
-        if not resolved.endswith(".rs"):
-            raise HashOrderDeterminismFailure(
-                f"#[path] target {target!r} at {path} is not a Rust source"
-            )
-        targets.append(resolved)
-    return tuple(targets)
 
 
 def validate_sources(
@@ -463,18 +543,8 @@ def validate_sources(
     allowed: Sequence[AllowedHit] = ALLOWED_HITS,
     approved_build_scripts: Sequence[ApprovedBuildScript] = APPROVED_BUILD_SCRIPTS,
 ) -> None:
-    missing_path_targets = sorted(
-        (path, target)
-        for path, source in sources.items()
-        for target in _path_module_targets(path, source)
-        if target not in sources
-    )
-    if missing_path_targets:
-        details = "; ".join(
-            f"unscanned #[path] target {target} referenced by {path}"
-            for path, target in missing_path_targets
-        )
-        raise HashOrderDeterminismFailure(details)
+    for path, source in sources.items():
+        _validate_path_attribute_forms(path, source)
 
     approved_build_by_path = {
         entry.path: entry for entry in approved_build_scripts
@@ -559,6 +629,53 @@ def validate_sources(
         raise HashOrderDeterminismFailure("; ".join(details))
 
 
+def _root_module_directories(path: str) -> tuple[PurePosixPath, ...]:
+    source = PurePosixPath(path)
+    directories = {source.parent}
+    if source.name != "mod.rs":
+        # A non-mod.rs file may be a crate/target root (children beside it) or
+        # an external module (children below its stem). Cargo target discovery
+        # is feature-dependent, so retain both real Rust resolution contexts.
+        directories.add(source.parent / source.stem)
+    return tuple(sorted(directories))
+
+
+def _module_directories(
+    path: str, facts: RustSourceFacts
+) -> tuple[PurePosixPath, ...]:
+    directories = set(_root_module_directories(path))
+    for root in _root_module_directories(path):
+        for inline_modules in facts.inline_module_paths:
+            directories.add(root.joinpath(*inline_modules))
+    return tuple(sorted(directories))
+
+
+def _read_repo_rust_source(
+    *,
+    repo_root: Path,
+    candidate: Path,
+    origin: str,
+) -> tuple[str, str] | None:
+    try:
+        resolved = candidate.resolve(strict=True)
+    except FileNotFoundError:
+        return None
+    try:
+        relative = resolved.relative_to(repo_root)
+    except ValueError as error:
+        raise HashOrderDeterminismFailure(
+            f"Rust source reached from {origin} resolves outside the repository"
+        ) from error
+    if not resolved.is_file():
+        return None
+    if resolved.suffix != ".rs":
+        raise HashOrderDeterminismFailure(
+            f"Rust source reached from {origin} is not an .rs file: "
+            f"{relative.as_posix()}"
+        )
+    return relative.as_posix(), resolved.read_text(encoding="utf-8")
+
+
 def tracked_rust_sources(repo_root: Path = REPO_ROOT) -> dict[str, str]:
     repo_root = repo_root.resolve()
     completed = subprocess.run(
@@ -580,75 +697,91 @@ def tracked_rust_sources(repo_root: Path = REPO_ROOT) -> dict[str, str]:
     for path in completed.stdout.splitlines():
         sources[path] = (repo_root / path).read_text(encoding="utf-8")
 
-    literals_by_owner: dict[str, tuple[str, ...]] = {}
+    facts_by_owner: dict[str, RustSourceFacts] = {}
     pending = list(sorted(sources))
     while pending:
-        while pending:
-            batch = tuple(sorted(set(pending)))
-            pending.clear()
-            decoded = _rust_utf8_string_literals_by_path(
+        batch = tuple(sorted(set(pending)))
+        pending.clear()
+        facts_by_owner.update(
+            _rust_source_facts_by_path(
                 {owner: sources[owner] for owner in batch}
             )
-            for owner in batch:
-                source = sources[owner]
-                literals_by_owner[owner] = tuple(
-                    literal
-                    for literal in decoded[owner]
-                    if literal.endswith(".rs") and "\0" not in literal
-                )
-                for target in _path_module_targets(owner, source):
-                    if target in sources:
-                        continue
-                    candidate = repo_root / target
-                    try:
-                        resolved = candidate.resolve(strict=True)
-                        resolved.relative_to(repo_root)
-                    except (FileNotFoundError, ValueError) as error:
-                        raise HashOrderDeterminismFailure(
-                            f"#[path] target {target!r} referenced by {owner} is "
-                            "missing or escapes the repository"
-                        ) from error
-                    if not resolved.is_file():
-                        raise HashOrderDeterminismFailure(
-                            f"#[path] target {target!r} referenced by {owner} is "
-                            "not a file"
+        )
+
+        discovered: dict[str, str] = {}
+        for owner, facts in sorted(facts_by_owner.items()):
+            owner_directories = _module_directories(owner, facts)
+            for module in facts.external_modules:
+                for directory in owner_directories:
+                    for relative in (
+                        directory / f"{module}.rs",
+                        directory / module / "mod.rs",
+                    ):
+                        result = _read_repo_rust_source(
+                            repo_root=repo_root,
+                            candidate=repo_root / relative,
+                            origin=f"external module {module!r} in {owner}",
                         )
-                    sources[target] = resolved.read_text(encoding="utf-8")
-                    pending.append(target)
+                        if result is not None and result[0] not in sources:
+                            discovered[result[0]] = result[1]
+
+            for path_module in facts.path_modules:
+                matched = False
+                for root in _root_module_directories(owner):
+                    directory = root.joinpath(*path_module.inline_modules)
+                    candidate = (
+                        Path(path_module.target)
+                        if posixpath.isabs(path_module.target)
+                        else repo_root / directory / path_module.target
+                    )
+                    result = _read_repo_rust_source(
+                        repo_root=repo_root,
+                        candidate=candidate,
+                        origin=f"#[path] target {path_module.target!r} in {owner}",
+                    )
+                    if result is None:
+                        continue
+                    matched = True
+                    if result[0] not in sources:
+                        discovered[result[0]] = result[1]
+                if not matched:
+                    raise HashOrderDeterminismFailure(
+                        f"#[path] target {path_module.target!r} referenced by "
+                        f"{owner} is missing"
+                    )
 
         # A declarative macro may move a string literal from its definition or
         # invocation into an attribute at another source location. Resolve each
-        # Rust-source literal against every scanned source directory. Existing
-        # in-repository targets form a conservative source-reachability closure;
-        # missing ordinary fixture-name strings do not create source inputs.
+        # Rust-source literal against every root, external-module, and inline-
+        # module directory returned by the compiled module census. Existing
+        # targets form a conservative closure; missing fixture-name strings do
+        # not create source inputs.
         source_directories = {
-            PurePosixPath(path).parent for path in sources
+            directory
+            for owner, facts in facts_by_owner.items()
+            for directory in _module_directories(owner, facts)
         }
-        discovered: dict[str, str] = {}
-        for owner, literals in sorted(literals_by_owner.items()):
-            for literal in literals:
+        for owner, facts in sorted(facts_by_owner.items()):
+            for literal in facts.literals:
+                if not literal.endswith(".rs") or "\0" in literal:
+                    continue
                 if posixpath.isabs(literal):
                     candidate_bases = (PurePosixPath("."),)
                 else:
                     candidate_bases = tuple(sorted(source_directories))
                 for base in candidate_bases:
-                    candidate = Path(literal) if posixpath.isabs(literal) else repo_root / base / literal
-                    try:
-                        resolved = candidate.resolve(strict=True)
-                    except FileNotFoundError:
-                        continue
-                    try:
-                        relative = resolved.relative_to(repo_root)
-                    except ValueError as error:
-                        raise HashOrderDeterminismFailure(
-                            f"Rust-source literal {literal!r} at {owner} resolves outside "
-                            "the repository and cannot be scanned"
-                        ) from error
-                    if not resolved.is_file():
-                        continue
-                    target = relative.as_posix()
-                    if target not in sources:
-                        discovered[target] = resolved.read_text(encoding="utf-8")
+                    candidate = (
+                        Path(literal)
+                        if posixpath.isabs(literal)
+                        else repo_root / base / literal
+                    )
+                    result = _read_repo_rust_source(
+                        repo_root=repo_root,
+                        candidate=candidate,
+                        origin=f"literal {literal!r} in {owner}",
+                    )
+                    if result is not None and result[0] not in sources:
+                        discovered[result[0]] = result[1]
         if discovered:
             sources.update(discovered)
             pending.extend(sorted(discovered))
