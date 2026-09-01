@@ -18,6 +18,17 @@ fn source(expand_size: &str, consume: bool) -> String {
     )
 }
 
+fn runtime_bound_source(start: &str, end: &str) -> String {
+    format!(
+        "module Repro.ShrinkExpandRuntimeBound\n\
+         x = to_tensor([cast(11.0, f32), cast(22.0, f32)])\n\
+         e = expand(x, cast(0, int32), cast(2, int64))\n\
+         k = shape(x, cast(0, int32))\n\
+         s = shrink(e, [[cast(0, int64), cast(1, int64)], [{start}, {end}]])\n\
+         out = relu(s)\n"
+    )
+}
+
 fn eval_stdout(source: &str, stem: &str) -> String {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join(format!("{stem}.ch"));
@@ -130,6 +141,22 @@ fn consumed_shrink_over_cast_shape_expand_keeps_rank_two() {
         "cast(shape(x, cast(0, int32)), int64)",
         "shrink_expand_cast_shape",
     );
+}
+
+#[test]
+fn consumed_shrink_with_runtime_end_declares_its_fresh_extent() {
+    let source = runtime_bound_source("cast(0, int64)", "k");
+    let eval = eval_stdout(&source, "shrink_expand_runtime_end");
+    let (_, compiled) = build_and_run(&source, "shrink_expand_runtime_end");
+    assert_eq!(compiled, eval, "runtime-end shrink must retain C parity");
+}
+
+#[test]
+fn consumed_shrink_with_runtime_start_declares_its_fresh_extent() {
+    let source = runtime_bound_source("cast(k - k, int64)", "cast(2, int64)");
+    let eval = eval_stdout(&source, "shrink_expand_runtime_start");
+    let (_, compiled) = build_and_run(&source, "shrink_expand_runtime_start");
+    assert_eq!(compiled, eval, "runtime-start shrink must retain C parity");
 }
 
 #[test]

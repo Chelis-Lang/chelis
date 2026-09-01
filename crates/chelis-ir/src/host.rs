@@ -10358,7 +10358,8 @@ fn actualize_tensor_helper_types(
                     let dims = bounds
                         .iter()
                         .zip(input.dims.iter())
-                        .map(|((start, end), input_dim)| match (start, end) {
+                        .enumerate()
+                        .map(|(axis, ((start, end), input_dim))| match (start, end) {
                             (crate::dag::RtDim::Lit(start), crate::dag::RtDim::Lit(end))
                                 if start <= end =>
                             {
@@ -10370,7 +10371,16 @@ fn actualize_tensor_helper_types(
                             (crate::dag::RtDim::Node(_), crate::dag::RtDim::Node(_))
                             | (crate::dag::RtDim::Node(_), crate::dag::RtDim::Lit(_))
                             | (crate::dag::RtDim::Lit(_), crate::dag::RtDim::Node(_)) => {
-                                Some(crate::dag::DimInfo::Named("*".to_string(), None))
+                                // A runtime shrink bound produces a fresh extent at this
+                                // node. Give it one stable producer-qualified symbol so
+                                // consumers reuse the extent that Shrink declares. A
+                                // wildcard would be renamed independently on the shrink
+                                // and its consumers by the C backend, leaving the consumer
+                                // symbol without a declaring Load or op (chelis#1137).
+                                Some(crate::dag::DimInfo::Named(
+                                    format!("_rt_shrink_dim_{}_{}", node.id.0, axis),
+                                    None,
+                                ))
                             }
                             _ => None,
                         })
