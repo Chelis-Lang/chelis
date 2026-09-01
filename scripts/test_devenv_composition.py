@@ -102,10 +102,31 @@ def parse_python_module(text: str) -> DevenvPython:
 
 
 def parse_commands_module(text: str) -> DevenvCommands:
+    # Presence alone would still pass if the exec were re-pointed at the
+    # adapter's own interpreter, which is exactly the reported defect.
+    if "os.execv(sys.executable" in text:
+        raise ValueError(
+            "the Devenv Python command adapter must not re-execute its own "
+            "interpreter: that bypasses the activated Devenv venv (chelis#1421)"
+        )
+    # An interpolated state path would bake the installing worktree into
+    # the store script, the defect class chelis#1409 exists for.
+    if "config.env.DEVENV_STATE" in text:
+        raise ValueError(
+            "the Devenv Python command adapter must resolve DEVENV_STATE at "
+            "run time, not interpolate a worktree path into the store script"
+        )
     adapter_fragments = (
         "runPython =",
         'script = "${config.devenv.root}/''${relativePath}"',
-        "os.execv(sys.executable, [sys.executable, script, *sys.argv[1:]])",
+        # The adapter must run the script under the interpreter Devenv
+        # activated, resolved from DEVENV_STATE at run time. Its own
+        # interpreter is the bare store CPython, which scripts/gate.py
+        # reads as unmanaged and re-executes through uv (chelis#1421).
+        'state = os.environ.get("DEVENV_STATE")',
+        'activated = os.path.join(state, "venv", "bin", "python")',
+        "os.access(activated, os.X_OK)",
+        "os.execv(interpreter, [interpreter, script, *sys.argv[1:]])",
     )
     missing_adapter = [
         fragment for fragment in adapter_fragments if fragment not in text
@@ -244,6 +265,32 @@ class DevenvCompositionTests(unittest.TestCase):
         text = (REPO_ROOT / "devenv/commands.nix").read_text(encoding="utf-8")
         mutated = text.replace('"chelis-gate"', '"other-gate"', 1)
         with self.assertRaisesRegex(ValueError, "command set is incomplete"):
+            parse_commands_module(mutated)
+
+    def test_adapter_reexecuting_its_own_interpreter_fails(self) -> None:
+        text = (REPO_ROOT / "devenv/commands.nix").read_text(encoding="utf-8")
+        mutated = text.replace(
+            "os.execv(interpreter, [interpreter, script, *sys.argv[1:]])",
+            "os.execv(sys.executable, [sys.executable, script, *sys.argv[1:]])",
+        )
+        with self.assertRaisesRegex(ValueError, "must not re-execute its own"):
+            parse_commands_module(mutated)
+
+    def test_adapter_dropping_the_activated_venv_lookup_fails(self) -> None:
+        text = (REPO_ROOT / "devenv/commands.nix").read_text(encoding="utf-8")
+        mutated = text.replace(
+            'state = os.environ.get("DEVENV_STATE")', "state = None"
+        )
+        with self.assertRaisesRegex(ValueError, "adapter is incomplete"):
+            parse_commands_module(mutated)
+
+    def test_adapter_interpolating_the_state_path_fails(self) -> None:
+        text = (REPO_ROOT / "devenv/commands.nix").read_text(encoding="utf-8")
+        mutated = text.replace(
+            'state = os.environ.get("DEVENV_STATE")',
+            'state = "${config.env.DEVENV_STATE}"',
+        )
+        with self.assertRaisesRegex(ValueError, "resolve DEVENV_STATE at "):
             parse_commands_module(mutated)
 
     def test_missing_generated_file_fails_at_the_parse_boundary(self) -> None:

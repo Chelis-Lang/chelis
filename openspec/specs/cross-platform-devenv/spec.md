@@ -234,13 +234,17 @@ The shell MUST provide these commands through Devenv scripts:
 - `chelis-z3-test` on Linux
 - `chelis-hip-test` on Linux
 
-Each command MUST use the configured Devenv Python package. Each command MUST forward all arguments to its existing tested Python file.
+Each command MUST use the configured Devenv Python package. Each command MUST forward all arguments to its existing tested Python file. Each command MUST run that file under the active Devenv virtual environment interpreter when one exists, resolved at run time rather than from an interpolated path.
 
 The command definitions MUST NOT duplicate the Python implementation inside Nix.
 
 #### Scenario: A contributor runs a command
 - **WHEN** a contributor runs a supported command in the shell
 - **THEN** Devenv invokes its repository Python file with all supplied arguments
+
+#### Scenario: A command runs under the active interpreter
+- **WHEN** a contributor runs a supported command in the shell
+- **THEN** the repository Python file runs under the active Devenv virtual environment interpreter
 
 #### Scenario: A platform-specific command is unavailable
 - **WHEN** a contributor enters the shell on an unsupported platform
