@@ -64,6 +64,61 @@ FROZEN_FIXTURE_IDS = frozenset(
     contextual-callback-metal
     """.split()
 )
+FROZEN_SELF_TEST_CENSUS = tuple(
+    """
+    LedgerContractTests.test_empty_event_stream_fails_zero_vacuity
+    LedgerContractTests.test_invalid_event_requires_exact_identity_and_site_schema
+    LedgerContractTests.test_invalid_event_truth_table_accepts_only_invalid_operations
+    LedgerContractTests.test_live_owner_allocation_remains_valid_without_finalization
+    LedgerContractTests.test_missing_summary_fails_closed
+    LedgerContractTests.test_transition_kind_and_bytes_must_match_allocation
+    LedgerContractTests.test_transition_missing_schema_fields_fails_closed
+    LedgerContractTests.test_valid_ledger_preserves_deterministic_counts_and_bytes
+    LedgerContractTests.test_zero_owner_allocation_requires_finalization
+    ManifestContractTests.test_c_and_hip_reuse_rows_name_exact_behavioral_tests
+    ManifestContractTests.test_child_counterpart_identities_are_frozen
+    ManifestContractTests.test_closed_children_are_green_controls
+    ManifestContractTests.test_closure_phases_require_explicit_hip_hardware
+    ManifestContractTests.test_every_child_has_positive_and_negative_parity
+    ManifestContractTests.test_every_fixture_source_exists
+    ManifestContractTests.test_every_ledger_executable_freezes_exact_stdout
+    ManifestContractTests.test_every_test_command_has_a_frozen_nonempty_census
+    ManifestContractTests.test_expected_failures_name_a_future_green_phase
+    ManifestContractTests.test_external_prerequisite_is_not_an_ownership_child
+    ManifestContractTests.test_forward_capture_freezes_the_complete_expected_output
+    ManifestContractTests.test_frozen_fixture_child_and_mutation_universes_are_literal
+    ManifestContractTests.test_host_nonzero_expected_failures_freeze_exact_receipts
+    ManifestContractTests.test_launch_selector_is_the_exact_frozen_subset
+    ManifestContractTests.test_ledger_expected_failures_freeze_exact_receipts
+    ManifestContractTests.test_manifest_is_complete_unique_and_well_typed
+    ManifestContractTests.test_mutation_identity_set_is_frozen
+    ManifestContractTests.test_open_children_use_typed_expected_failures
+    ManifestContractTests.test_option_and_recursive_function_projection_universe_is_frozen
+    ManifestContractTests.test_option_scalars_freeze_every_emitted_root
+    ManifestContractTests.test_phase_zero_is_hardware_independent_but_hardware_row_exists
+    ManifestContractTests.test_recursive_function_fixtures_reach_named_value_projection
+    ManifestContractTests.test_recursive_function_metal_rows_are_typed_expected_failures
+    ManifestContractTests.test_removing_a_child_and_all_its_rows_fails_closed
+    ManifestContractTests.test_self_test_census_matches_the_loaded_suite
+    ManifestContractTests.test_undeclared_fixture_file_fails_closed
+    ReceiptContractTests.test_balanced_ledger_cannot_hide_wrong_stdout
+    ReceiptContractTests.test_empty_python_and_cargo_test_suites_fail_zero_vacuity
+    ReceiptContractTests.test_expected_failure_requires_the_exact_detector
+    ReceiptContractTests.test_invalid_retain_cannot_satisfy_invalid_release_receipt
+    ReceiptContractTests.test_ledger_receipt_count_drift_fails_closed
+    ReceiptContractTests.test_must_pass_rejects_a_detected_failure
+    ReceiptContractTests.test_nonzero_receipt_rejects_exit_and_diagnostic_drift
+    ReceiptContractTests.test_unexpected_success_fails_closed
+    """.split()
+)
+FROZEN_RUNTIME_LEDGER_TEST_CENSUS = tuple(
+    """
+    balanced_string_records_owner_transitions_and_summary
+    duplicate_release_records_invalid_operation_before_exit
+    ledger_process_probe
+    tensor_storage_uses_portable_payload_bytes
+    """.split()
+)
 FROZEN_COUNTERPARTS = {
     543: {
         "positive": frozenset(
@@ -247,7 +302,7 @@ class Fixture:
     peak_bound: int | None = None
     ledger_receipt: LedgerReceipt | None = None
     command: tuple[str, ...] = ()
-    listed_test: str | None = None
+    test_census: tuple[str, ...] = ()
     containing_type: str | None = None
 
 
@@ -421,7 +476,7 @@ def _fixture(
     diagnostic_fragments: Sequence[str] = (),
     peak_bound: int | None = None,
     command: Sequence[str] = (),
-    listed_test: str | None = None,
+    test_census: Sequence[str] = (),
     containing_type: str | None = None,
 ) -> Fixture:
     return Fixture(
@@ -442,7 +497,7 @@ def _fixture(
         diagnostic_fragments=tuple(diagnostic_fragments),
         peak_bound=peak_bound,
         command=tuple(command),
-        listed_test=listed_test,
+        test_census=tuple(test_census),
         containing_type=containing_type,
     )
 
@@ -461,6 +516,7 @@ def fixture_manifest() -> tuple[Fixture, ...]:
             backend=Backend.RUNTIME,
             platform=Platform.ANY,
             command=("{python}", "scripts/test_compiled_value_ownership_oracle.py"),
+            test_census=FROZEN_SELF_TEST_CENSUS,
         ),
         _fixture(
             "runtime-ledger-process-tests",
@@ -481,6 +537,7 @@ def fixture_manifest() -> tuple[Fixture, ...]:
                 "--test",
                 "ownership_ledger",
             ),
+            test_census=FROZEN_RUNTIME_LEDGER_TEST_CENSUS,
         ),
     ]
 
@@ -642,7 +699,9 @@ def fixture_manifest() -> tuple[Fixture, ...]:
                     "--",
                     "--exact",
                 ),
-                listed_test="emit::tests::fused_in_place_does_not_alias_a_caller_owned_input",
+                test_census=(
+                    "emit::tests::fused_in_place_does_not_alias_a_caller_owned_input",
+                ),
             ),
             _fixture(
                 "c-caller-owned-view-reuse",
@@ -663,7 +722,9 @@ def fixture_manifest() -> tuple[Fixture, ...]:
                     "--",
                     "--exact",
                 ),
-                listed_test="emit::tests::fused_in_place_does_not_alias_a_view_of_a_caller_owned_input",
+                test_census=(
+                    "emit::tests::fused_in_place_does_not_alias_a_view_of_a_caller_owned_input",
+                ),
             ),
             _fixture(
                 "hip-caller-owned-reuse",
@@ -686,7 +747,9 @@ def fixture_manifest() -> tuple[Fixture, ...]:
                     "--ignored",
                     "--exact",
                 ),
-                listed_test="emit::tests::fused_in_place_does_not_alias_a_caller_owned_input",
+                test_census=(
+                    "emit::tests::fused_in_place_does_not_alias_a_caller_owned_input",
+                ),
             ),
             _fixture(
                 "hip-caller-owned-view-reuse",
@@ -709,7 +772,9 @@ def fixture_manifest() -> tuple[Fixture, ...]:
                     "--ignored",
                     "--exact",
                 ),
-                listed_test="emit::tests::fused_in_place_does_not_alias_a_view_of_a_caller_owned_input",
+                test_census=(
+                    "emit::tests::fused_in_place_does_not_alias_a_view_of_a_caller_owned_input",
+                ),
             ),
             _fixture(
                 "hip-no-reuse-control",
@@ -730,7 +795,9 @@ def fixture_manifest() -> tuple[Fixture, ...]:
                     "--",
                     "--exact",
                 ),
-                listed_test="emit::tests::fused_without_reusable_input_keeps_non_in_place_kernel_shape",
+                test_census=(
+                    "emit::tests::fused_without_reusable_input_keeps_non_in_place_kernel_shape",
+                ),
             ),
             _fixture(
                 "hip-caller-bytes-unchanged-hardware",
@@ -754,7 +821,9 @@ def fixture_manifest() -> tuple[Fixture, ...]:
                     "--ignored",
                     "--test-threads=1",
                 ),
-                listed_test="compiled_value_ownership_caller_bytes_unchanged",
+                test_census=(
+                    "compiled_value_ownership_caller_bytes_unchanged",
+                ),
             ),
         ]
     )
@@ -1289,13 +1358,40 @@ def validate_manifest(
                 )
         if fixture.source is not None and not (repository_root / fixture.source).is_file():
             raise OracleFailure(f"{fixture.id}: missing fixture source {fixture.source}")
-        if fixture.action is Action.COMMAND and not fixture.command:
-            raise OracleFailure(f"{fixture.id}: command action has no argv")
-        if fixture.listed_test is not None and not (
-            fixture.command[:2] == ("cargo", "test")
-            or "scripts/hip_test.py" in fixture.command
-        ):
-            raise OracleFailure(f"{fixture.id}: listed test row is not a test command")
+        if fixture.action in {Action.COMMAND, Action.HIP_HARDWARE}:
+            if not fixture.command:
+                raise OracleFailure(f"{fixture.id}: test command action has no argv")
+            if not fixture.test_census:
+                raise OracleFailure(
+                    f"{fixture.id}: test command has no frozen nonempty test census"
+                )
+            if (
+                any(not name for name in fixture.test_census)
+                or len(fixture.test_census) != len(set(fixture.test_census))
+                or fixture.test_census != tuple(sorted(fixture.test_census))
+            ):
+                raise OracleFailure(
+                    f"{fixture.id}: frozen test census must be sorted, unique, and nonempty"
+                )
+            cargo_test = fixture.command[:2] == ("cargo", "test")
+            python_unittest = (
+                len(fixture.command) == 2
+                and fixture.command[0] == "{python}"
+                and Path(fixture.command[1]).name.startswith("test_")
+                and Path(fixture.command[1]).suffix == ".py"
+            )
+            hip_test = (
+                fixture.action is Action.HIP_HARDWARE
+                and "scripts/hip_test.py" in fixture.command
+            )
+            if not (cargo_test or python_unittest or hip_test):
+                raise OracleFailure(
+                    f"{fixture.id}: command action is not a supported test runner"
+                )
+        elif fixture.command or fixture.test_census:
+            raise OracleFailure(
+                f"{fixture.id}: non-test action carries a test command or census"
+            )
         if fixture.action is Action.LEDGER_BUILD_RUN and fixture.expected_output is None:
             raise OracleFailure(f"{fixture.id}: ledger executable has no exact stdout receipt")
         if fixture.action is Action.BUILD_REJECT:
@@ -1952,13 +2048,22 @@ def _ledger_detection(fixture: Fixture, run: subprocess.CompletedProcess[str], p
     return detection
 
 
-def _listed_test_command(fixture: Fixture, argv: Sequence[str]) -> tuple[str, ...]:
+def _test_list_command(fixture: Fixture, argv: Sequence[str]) -> tuple[str, ...]:
     if fixture.action is Action.HIP_HARDWARE:
         if len(argv) < 3:
             raise OracleFailure(f"{fixture.id}: malformed HIP hardware command")
         command = ["cargo", "test", *argv[2:]]
+    elif (
+        len(argv) == 2
+        and argv[0] == sys.executable
+        and Path(argv[1]).name.startswith("test_")
+        and Path(argv[1]).suffix == ".py"
+    ):
+        return (*argv, "--list-tests")
     else:
         command = list(argv)
+    if command[:2] != ["cargo", "test"]:
+        raise OracleFailure(f"{fixture.id}: unsupported test-list command")
     if "--" in command:
         command.append("--list")
     else:
@@ -1968,38 +2073,37 @@ def _listed_test_command(fixture: Fixture, argv: Sequence[str]) -> tuple[str, ..
 
 def _execute_command(context: PhaseContext, fixture: Fixture) -> Detection:
     argv = tuple(sys.executable if item == "{python}" else item for item in fixture.command)
-    if fixture.listed_test is not None:
-        listed = _run(
-            _listed_test_command(fixture, argv),
-            environment=context.environment,
-            timeout=1200,
+    listed = _run(
+        _test_list_command(fixture, argv),
+        environment=context.environment,
+        timeout=1200,
+    )
+    if listed.returncode != 0:
+        return Detection.failure(
+            Detector.NONZERO_EXIT,
+            f"test-list preflight failed: {listed.stderr.strip()}",
         )
-        if listed.returncode != 0:
-            return Detection.failure(
-                Detector.NONZERO_EXIT,
-                f"test-list preflight failed: {listed.stderr.strip()}",
-            )
-        names = [
-            line.removesuffix(": test")
-            for line in listed.stdout.splitlines()
-            if line.endswith(": test")
-        ]
-        if names != [fixture.listed_test]:
-            return Detection.failure(
-                Detector.ZERO_VACUITY,
-                f"expected exactly test {fixture.listed_test!r}, listed={names}",
-            )
+    names = tuple(
+        line.removesuffix(": test")
+        for line in listed.stdout.splitlines()
+        if line.endswith(": test")
+    )
+    if names != fixture.test_census:
+        return Detection.failure(
+            Detector.ZERO_VACUITY,
+            f"expected exact test census {fixture.test_census!r}, listed={names}",
+        )
     result = _run(argv, environment=context.environment, timeout=1200)
     if result.returncode != 0:
         diagnostic = f"{result.stdout}\n{result.stderr}"
-        if (
-            fixture.listed_test is not None
-            and fixture.listed_test in diagnostic
-            and "test result: FAILED" in diagnostic
-        ):
+        failed_test = next(
+            (name for name in fixture.test_census if name in diagnostic),
+            None,
+        )
+        if failed_test is not None and "test result: FAILED" in diagnostic:
             return Detection.failure(
                 fixture.detector,
-                f"listed behavioral test failed for the current known issue: {fixture.listed_test}",
+                f"listed behavioral test failed for the current known issue: {failed_test}",
             )
         return Detection.failure(
             detect_nonzero(fixture, result.returncode, diagnostic),

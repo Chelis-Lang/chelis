@@ -161,6 +161,36 @@ class ManifestContractTests(unittest.TestCase):
         self.assertEqual(len({fixture.id for fixture in fixtures}), len(fixtures))
         self.assertEqual(len({mutation.id for mutation in mutations}), len(mutations))
 
+    def test_every_test_command_has_a_frozen_nonempty_census(self) -> None:
+        fixtures = oracle.fixture_manifest()
+        test_rows = tuple(
+            row
+            for row in fixtures
+            if row.action in {oracle.Action.COMMAND, oracle.Action.HIP_HARDWARE}
+        )
+        self.assertTrue(test_rows)
+        for row in test_rows:
+            with self.subTest(fixture=row.id):
+                self.assertTrue(row.test_census)
+                malformed = tuple(
+                    replace(candidate, test_census=())
+                    if candidate.id == row.id
+                    else candidate
+                    for candidate in fixtures
+                )
+                with self.assertRaisesRegex(
+                    oracle.OracleFailure, "frozen nonempty test census"
+                ):
+                    oracle.validate_manifest(malformed, oracle.mutation_manifest())
+
+    def test_self_test_census_matches_the_loaded_suite(self) -> None:
+        fixture = next(
+            row
+            for row in oracle.fixture_manifest()
+            if row.id == "oracle-self-tests"
+        )
+        self.assertEqual(fixture.test_census, _self_test_names())
+
     def test_frozen_fixture_child_and_mutation_universes_are_literal(self) -> None:
         fixtures = oracle.fixture_manifest()
         mutations = oracle.mutation_manifest()
@@ -419,14 +449,14 @@ class ManifestContractTests(unittest.TestCase):
         ):
             with self.subTest(fixture=fixture_id):
                 self.assertIn(fixture_id, rows)
-                self.assertIsNotNone(rows[fixture_id].listed_test)
+                self.assertEqual(len(rows[fixture_id].test_census), 1)
 
         control = rows["hip-no-reuse-control"]
         test_name = (
             "emit::tests::"
             "fused_without_reusable_input_keeps_non_in_place_kernel_shape"
         )
-        self.assertEqual(control.listed_test, test_name)
+        self.assertEqual(control.test_census, (test_name,))
         self.assertEqual(
             control.command,
             (
@@ -836,6 +866,26 @@ class LedgerContractTests(unittest.TestCase):
 
 
 class ReceiptContractTests(unittest.TestCase):
+    def test_empty_python_and_cargo_test_suites_fail_zero_vacuity(self) -> None:
+        rows = {
+            row.id: row
+            for row in oracle.fixture_manifest()
+            if row.id in {"oracle-self-tests", "runtime-ledger-process-tests"}
+        }
+        context = mock.Mock(environment={})
+        empty_list = oracle.subprocess.CompletedProcess(
+            args=("test-runner",),
+            returncode=0,
+            stdout="",
+            stderr="Ran 0 tests\n\nOK\n",
+        )
+        for fixture_id in ("oracle-self-tests", "runtime-ledger-process-tests"):
+            with self.subTest(fixture=fixture_id):
+                with mock.patch.object(oracle, "_run", return_value=empty_list) as run:
+                    detection = oracle._execute_command(context, rows[fixture_id])
+                self.assertEqual(run.call_count, 1)
+                self.assertIs(detection.detector, oracle.Detector.ZERO_VACUITY)
+
     def test_ledger_receipt_count_drift_fails_closed(self) -> None:
         fixture = next(
             row
@@ -967,5 +1017,27 @@ class ReceiptContractTests(unittest.TestCase):
         self.assertIs(detection.detector, oracle.Detector.OUTPUT_MISMATCH)
 
 
+def _flatten_tests(suite: unittest.TestSuite) -> tuple[unittest.TestCase, ...]:
+    tests: list[unittest.TestCase] = []
+    for candidate in suite:
+        if isinstance(candidate, unittest.TestSuite):
+            tests.extend(_flatten_tests(candidate))
+        elif isinstance(candidate, unittest.TestCase):
+            tests.append(candidate)
+    return tuple(tests)
+
+
+def _self_test_names() -> tuple[str, ...]:
+    suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
+    prefix = f"{__name__}."
+    return tuple(
+        sorted(test.id().removeprefix(prefix) for test in _flatten_tests(suite))
+    )
+
+
 if __name__ == "__main__":
-    unittest.main()
+    if sys.argv[1:] == ["--list-tests"]:
+        for name in _self_test_names():
+            print(f"{name}: test")
+    else:
+        unittest.main()
