@@ -66,12 +66,77 @@ def keep(N: f64) -> f64 = N
 out = keep(7.0f64)
 ";
 
+const BARE_UPPERCASE_WITHOUT_CONSTRUCTOR: &str = "\
+def keep(S: f64) -> f64 = S
+out = keep(7.0f64)
+";
+
+const BARE_UPPERCASE_COLLIDES_WITH_NULLARY_CONSTRUCTOR: &str = "\
+type Flag = | S
+def keep(S: f64) -> f64 = S
+out = keep(7.0f64)
+";
+
 const LOCAL_CONSTRUCTOR_COLLIDES_WITH_PRELUDE: &str = "\
 type Wrapper =
   | Empty
   | Some(f64)
 def wrap(x: f64) -> Wrapper = Some(x)
 out = wrap(1.0f64)
+";
+
+const LOCAL_POSITIONAL_PATTERN_COLLIDES_WITH_PRELUDE: &str = "\
+type Wrapper =
+  | Empty
+  | Some(f64)
+def unwrap(value: Wrapper) -> f64 = match value with {
+  | Empty => 0.0f64
+  | Some(inner) => inner
+}
+out = unwrap(Some(1.0f64))
+";
+
+const LOCAL_RECORD_PATTERN_COLLIDES_WITH_PRELUDE: &str = "\
+type Wrapper =
+  | Empty
+  | Some { value: f64 }
+def unwrap(wrapper: Wrapper) -> f64 = match wrapper with {
+  | Empty => 0.0f64
+  | Some { value } => value
+}
+out = unwrap(Some { value: 1.0f64 })
+";
+
+const LOCAL_NULLARY_PATTERN_COLLIDES_WITH_PRELUDE: &str = "\
+type Wrapper =
+  | None
+  | Value(f64)
+def is_none(wrapper: Wrapper) -> f64 = match wrapper with {
+  | None => 1.0f64
+  | Value(_) => 0.0f64
+}
+out = is_none(None)
+";
+
+const CONSTRUCTOR_PATTERN_SURVIVES_LEXICAL_SHADOW: &str = "\
+type Box = | N(f64)
+def unwrap(N: f64, value: Box) -> f64 = match value with {
+  | N(inner) => inner
+}
+out = unwrap(99.0f64, N(1.0f64))
+";
+
+const CONSTRUCTOR_PATTERNS_FOLLOW_SCRUTINEE_OWNER: &str = "\
+type RecordBox = | Shared { value: f64 }
+type PositionalBox = | Shared(f64)
+def unwrap_record(value: RecordBox) -> f64 = match value with {
+  | Shared { value } => value
+}
+def unwrap_positional(value: PositionalBox) -> f64 = match value with {
+  | Shared(inner) => inner
+}
+record_out = unwrap_record(Shared { value: 1.0f64 })
+positional_out = unwrap_positional(Shared(2.0f64))
 ";
 
 const UNKNOWN_APPLIED_UPPERCASE: &str = "\
@@ -195,11 +260,74 @@ fn bare_uppercase_name_remains_an_ordinary_value_binding() {
 }
 
 #[test]
+fn bare_uppercase_value_does_not_require_a_same_named_constructor() {
+    assert_eval_and_c(
+        BARE_UPPERCASE_WITHOUT_CONSTRUCTOR,
+        "bare_uppercase_without_constructor",
+        "out = 7.0\n",
+    );
+}
+
+#[test]
+fn bare_uppercase_value_wins_over_same_named_nullary_constructor() {
+    assert_eval_and_c(
+        BARE_UPPERCASE_COLLIDES_WITH_NULLARY_CONSTRUCTOR,
+        "bare_uppercase_collides_with_nullary_constructor",
+        "out = 7.0\n",
+    );
+}
+
+#[test]
 fn local_constructor_identity_wins_over_same_named_prelude_constructor() {
     assert_eval_and_c(
         LOCAL_CONSTRUCTOR_COLLIDES_WITH_PRELUDE,
         "local_constructor_collides_with_prelude",
         "out = Some(1.0)\n",
+    );
+}
+
+#[test]
+fn local_positional_pattern_identity_wins_over_same_named_prelude_constructor() {
+    assert_eval_and_c(
+        LOCAL_POSITIONAL_PATTERN_COLLIDES_WITH_PRELUDE,
+        "local_positional_pattern_collides_with_prelude",
+        "out = 1.0\n",
+    );
+}
+
+#[test]
+fn local_record_pattern_identity_wins_over_same_named_prelude_constructor() {
+    assert_eval_and_c(
+        LOCAL_RECORD_PATTERN_COLLIDES_WITH_PRELUDE,
+        "local_record_pattern_collides_with_prelude",
+        "out = 1.0\n",
+    );
+}
+
+#[test]
+fn local_nullary_pattern_identity_wins_over_same_named_prelude_constructor() {
+    assert_eval_and_c(
+        LOCAL_NULLARY_PATTERN_COLLIDES_WITH_PRELUDE,
+        "local_nullary_pattern_collides_with_prelude",
+        "out = 1.0\n",
+    );
+}
+
+#[test]
+fn constructor_pattern_identity_survives_same_named_lexical_binding() {
+    assert_eval_and_c(
+        CONSTRUCTOR_PATTERN_SURVIVES_LEXICAL_SHADOW,
+        "constructor_pattern_survives_lexical_shadow",
+        "out = 1.0\n",
+    );
+}
+
+#[test]
+fn constructor_patterns_follow_the_nominal_scrutinee_owner() {
+    assert_eval_and_c(
+        CONSTRUCTOR_PATTERNS_FOLLOW_SCRUTINEE_OWNER,
+        "constructor_patterns_follow_scrutinee_owner",
+        "record_out = 1.0\npositional_out = 2.0\n",
     );
 }
 

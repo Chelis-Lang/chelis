@@ -3,7 +3,6 @@
 //! These helpers preserve list callback diagnostics and concat shape rules.
 
 use super::*;
-use crate::adt::VariantInfo;
 
 pub(super) fn collection_helper_type_error(
     expr: &deep::Expr,
@@ -135,23 +134,6 @@ pub(super) fn note_list_literal_binding(env: &mut Env, name: &str, rhs: &deep::E
     }
 }
 
-/// Resolve the exact constructor variant selected by declaration/import
-/// scope. The ADT registry may contain several same-named variants; its
-/// iteration or sort order is not a name-resolution authority.
-fn active_constructor_variant<'env, 'adt>(
-    name: &str,
-    env: &'env Env,
-    adt_reg: &'adt AdtRegistry,
-) -> Option<(&'env str, &'adt VariantInfo)> {
-    let (owner, _) = env.lookup_constructor(name)?;
-    let variant = adt_reg
-        .lookup(owner)?
-        .variants
-        .iter()
-        .find(|variant| variant.name == name)?;
-    Some((owner, variant))
-}
-
 /// Resolve an ADT constructor application and enforce its call shape.
 pub(super) fn prepare_constructor_application(
     func_name: &Option<String>,
@@ -167,7 +149,7 @@ pub(super) fn prepare_constructor_application(
 
     let ctor_lookup_name = func_name
         .as_ref()
-        .and_then(|fname| active_constructor_variant(fname, env, adt_reg).map(|_| fname.clone()));
+        .and_then(|fname| active_constructor(fname, env, adt_reg).map(|_| fname.clone()));
 
     // The call site uses positional `(app)` syntax here (named-field
     // record construction lowers through a different builder, not
@@ -186,7 +168,7 @@ pub(super) fn prepare_constructor_application(
     // so the application does not double-report). Inference continues
     // so the call still yields its true type.
     if let Some(ref fname) = ctor_lookup_name
-        && let Some((adt_name, _)) = active_constructor_variant(fname, env, adt_reg)
+        && let Some((adt_name, _, _)) = active_constructor(fname, env, adt_reg)
     {
         let adt_name = adt_name.to_string();
         crate::opacity::check_opaque_use(
@@ -209,7 +191,7 @@ pub(super) fn prepare_constructor_application(
         .is_some_and(|fname| constructor_out_of_scope(fname, env));
     if !ctor_call_out_of_scope
         && let Some(ref fname) = ctor_lookup_name
-        && let Some((_adt_name, variant)) = active_constructor_variant(fname, env, adt_reg)
+        && let Some((_adt_name, _, variant)) = active_constructor(fname, env, adt_reg)
         && !variant.fields.is_empty()
         && variant
             .fields

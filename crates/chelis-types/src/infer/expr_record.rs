@@ -242,7 +242,8 @@ pub(super) fn infer_record(
     // keeps the #317 record-constructor guard while leaving opacity rejection
     // (D-CHECK) for opaque heads.
     let head_is_opaque = adt_reg.lookup(adt_name).is_some_and(|d| d.opaque);
-    if !head_is_opaque && constructor_out_of_scope(head, env) {
+    let head_is_alias = adt_reg.resolve_alias(head).is_some();
+    if !head_is_opaque && !head_is_alias && constructor_out_of_scope(head, env) {
         for kv_expr in kids.iter().skip(1) {
             if let deep::Expr::List(kv_list, _) = kv_expr
                 && get_tag(kv_list) == Some(DeepTag::Kv)

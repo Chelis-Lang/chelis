@@ -192,16 +192,16 @@ pub(super) fn pattern_bindings(
                     // only import that names `| Alpha =>` without importing
                     // `Alpha`) must be rejected at `check` here, the same way
                     // the construction site is in `infer_var`. Without this the
-                    // fuzzy terminal fallback below binds the arm to a foreign
-                    // module's tag and the mismatch surfaces only as a runtime
-                    // non-exhaustive match. `constructor_pattern_out_of_scope`
-                    // rejects both the unique-fuzzy case and the non-unique /
-                    // unresolvable case; the latter would otherwise push a bare
-                    // name with no scheme into `covered_variants` and be silently
-                    // accepted under a `_` wildcard arm. Skip coverage/binding so
-                    // the bogus arm cannot also mask the real `non-exhaustive`
-                    // diagnostic.
-                    if constructor_pattern_out_of_scope(ctor_name, env, adt_reg) {
+                    // fuzzy terminal fallbacks could otherwise bind the arm to
+                    // a foreign module's tag. Resolve through the structural
+                    // constructor map and its exact registry owner instead.
+                    let resolved_scrutinee = subst.apply(scrutinee_ty);
+                    let Some((adt_name, adt_def, variant_info)) = pattern_constructor_for_scrutinee(
+                        ctor_name,
+                        &resolved_scrutinee,
+                        env,
+                        adt_reg,
+                    ) else {
                         errors.push(CheckError::new(
                             CheckErrorKind::UnknownConstructor {
                                 identifier: ctor_name.to_string(),
@@ -214,75 +214,41 @@ pub(super) fn pattern_bindings(
                             )],
                         ));
                         return;
-                    }
-                    // Record the *resolved* variant name for exhaustiveness,
-                    // not the bare pattern name. After reef's module-scoped
-                    // constructor mangling (chelis#157), the registry keys
-                    // variants by their package/module-qualified name, while
-                    // a pattern may still be written with the bare terminal
-                    // name (e.g. an unqualified `JsonNull` arm). Pushing the
-                    // bare name would leave the mangled variant uncovered and
-                    // fire a spurious `non-exhaustive match`. Resolve through
-                    // the registry's terminal-unique lookup so coverage is
-                    // compared on the same (mangled) key `variant_names`
-                    // returns.
-                    let covered_name = adt_reg
-                        .lookup_variant(ctor_name)
-                        .or_else(|| adt_reg.lookup_variant_terminal_unique(ctor_name))
-                        .map(|(_, variant)| variant.name.clone())
-                        .unwrap_or_else(|| ctor_name.to_string());
-                    covered_variants.push(covered_name);
+                    };
+                    let adt_name = adt_name.to_string();
+                    covered_variants.push(variant_info.name.clone());
 
                     // RFC D-CHECK: constructor pattern match on an
                     // out-of-module opaque type is rejected; binding
                     // inference continues so no error cascades.
-                    if let Some((adt_name, _)) = adt_reg
-                        .lookup_variant(ctor_name)
-                        .or_else(|| adt_reg.lookup_variant_terminal_unique(ctor_name))
-                    {
-                        let adt_name = adt_name.to_string();
-                        crate::opacity::check_opaque_use(
-                            crate::opacity::OpaqueAction::PatCtor,
-                            &adt_name,
-                            adt_reg,
-                            errors,
-                        );
-                    }
+                    crate::opacity::check_opaque_use(
+                        crate::opacity::OpaqueAction::PatCtor,
+                        &adt_name,
+                        adt_reg,
+                        errors,
+                    );
 
-                    // Look up constructor in env and decompose
-                    if let Some(scheme) = env
-                        .lookup(ctor_name)
-                        .or_else(|| env.lookup_terminal_unique(ctor_name))
-                    {
-                        let scheme = scheme.clone();
-                        let ctor_ty = env.instantiate(&scheme, vg, subst);
-                        // Unify the result of the constructor with scrutinee type
-                        match &ctor_ty {
-                            Type::Fn(arg_types, ret) => {
-                                let _ = unify(ret, scrutinee_ty, subst);
-                                // Bind sub-patterns to argument types
-                                for (i, sub_pat) in kids[1..].iter().enumerate() {
-                                    if i < arg_types.len() {
-                                        let resolved = subst.apply(&arg_types[i]);
-                                        pattern_bindings(
-                                            sub_pat,
-                                            &resolved,
-                                            env,
-                                            vg,
-                                            subst,
-                                            adt_reg,
-                                            errors,
-                                            product,
-                                            covered_variants,
-                                            has_wildcard,
-                                        );
-                                    }
-                                }
-                            }
-                            _ => {
-                                // Nullary constructor
-                                let _ = unify(&ctor_ty, scrutinee_ty, subst);
-                            }
+                    // Instantiate the exact nominal variant rather than an
+                    // ordinary lexical binding. A parameter with the same
+                    // spelling is a value binding, not constructor authority
+                    // for a pattern head (chelis#1076).
+                    let (arg_types, ret) = instantiate_variant_of(adt_def, variant_info, vg);
+                    let _ = unify(&ret, scrutinee_ty, subst);
+                    for (i, sub_pat) in kids[1..].iter().enumerate() {
+                        if i < arg_types.len() {
+                            let resolved = subst.apply(&arg_types[i]);
+                            pattern_bindings(
+                                sub_pat,
+                                &resolved,
+                                env,
+                                vg,
+                                subst,
+                                adt_reg,
+                                errors,
+                                product,
+                                covered_variants,
+                                has_wildcard,
+                            );
                         }
                     }
                 }
@@ -317,10 +283,16 @@ pub(super) fn pattern_bindings(
                     // `pat-ctor` arm — a record-shaped match against a
                     // constructor that was never imported must be an `unknown
                     // constructor` error, not a fuzzy bind to a foreign tag.
-                    // `constructor_pattern_out_of_scope` also rejects the
-                    // non-unique / unresolvable case a `_` wildcard arm would
-                    // otherwise silently accept.
-                    if constructor_pattern_out_of_scope(ctor_name, env, adt_reg) {
+                    // Structural resolution also rejects the non-unique /
+                    // unresolvable case a `_` wildcard arm could otherwise
+                    // silently accept.
+                    let resolved_scrutinee = subst.apply(scrutinee_ty);
+                    let Some((adt_name, adt_def, variant_info)) = pattern_constructor_for_scrutinee(
+                        ctor_name,
+                        &resolved_scrutinee,
+                        env,
+                        adt_reg,
+                    ) else {
                         errors.push(CheckError::new(
                             CheckErrorKind::UnknownConstructor {
                                 identifier: ctor_name.to_string(),
@@ -333,36 +305,24 @@ pub(super) fn pattern_bindings(
                             )],
                         ));
                         return;
-                    }
-                    // Look up variant in ADT registry for the canonical
-                    // field order and known field-name set used for
-                    // validation diagnostics.
-                    let variant_info = adt_reg
-                        .lookup_variant(ctor_name)
-                        .or_else(|| adt_reg.lookup_variant_terminal_unique(ctor_name));
+                    };
+                    let adt_name = adt_name.to_string();
                     // RFC D-CHECK: record pattern match on an
                     // out-of-module opaque type is rejected; binding
                     // inference continues so no error cascades.
-                    if let Some((adt_name, _)) = variant_info {
-                        let adt_name = adt_name.to_string();
-                        crate::opacity::check_opaque_use(
-                            crate::opacity::OpaqueAction::PatRecord,
-                            &adt_name,
-                            adt_reg,
-                            errors,
-                        );
-                    }
+                    crate::opacity::check_opaque_use(
+                        crate::opacity::OpaqueAction::PatRecord,
+                        &adt_name,
+                        adt_reg,
+                        errors,
+                    );
 
-                    // Record the resolved (mangled) variant name for
-                    // exhaustiveness, mirroring `pat-ctor`. See that arm for
-                    // why the bare pattern name is not used (chelis#157).
-                    let covered_name = variant_info
-                        .map(|(_, vi)| vi.name.clone())
-                        .unwrap_or_else(|| ctor_name.to_string());
-                    covered_variants.push(covered_name);
+                    covered_variants.push(variant_info.name.clone());
                     let declared_field_names: Vec<Option<String>> = variant_info
-                        .map(|(_, vi)| vi.fields.iter().map(|(n, _)| n.clone()).collect())
-                        .unwrap_or_default();
+                        .fields
+                        .iter()
+                        .map(|(name, _)| name.clone())
+                        .collect();
                     let known_field_set: std::collections::HashSet<&str> = declared_field_names
                         .iter()
                         .filter_map(|n| n.as_deref())
@@ -379,35 +339,9 @@ pub(super) fn pattern_bindings(
                     // ADT's abstract `a`, leaving record-pattern bindings
                     // stuck as fresh type variables and breaking
                     // downstream linearity/borrow checks. (closes #181)
-                    let instantiated_arg_types: Vec<Type> = if let Some(scheme) = env
-                        .lookup(ctor_name)
-                        .or_else(|| env.lookup_terminal_unique(ctor_name))
-                    {
-                        let scheme = scheme.clone();
-                        let ctor_ty = env.instantiate(&scheme, vg, subst);
-                        match ctor_ty {
-                            Type::Fn(arg_types, ret) => {
-                                let _ = unify(&ret, scrutinee_ty, subst);
-                                arg_types
-                            }
-                            // Nullary constructor: the scheme body is the
-                            // ADT type itself, no Fn-wrapping. Still unify
-                            // with the scrutinee so the ADT's type
-                            // parameters are pinned to its concrete
-                            // instantiation, mirroring `pat-ctor`'s
-                            // positional path. There are no fields to
-                            // bind for `Foo {}`, so the empty
-                            // `instantiated_arg_types` is the right
-                            // return value either way; the unify is the
-                            // side-effect that matters.
-                            other => {
-                                let _ = unify(&other, scrutinee_ty, subst);
-                                Vec::new()
-                            }
-                        }
-                    } else {
-                        Vec::new()
-                    };
+                    let (instantiated_arg_types, instantiated_ret) =
+                        instantiate_variant_of(adt_def, variant_info, vg);
+                    let _ = unify(&instantiated_ret, scrutinee_ty, subst);
 
                     for kv_expr in kids.iter().skip(1) {
                         if let Some((DeepTag::Kv, _, kv_kids)) = stamped_parts(kv_expr)
@@ -428,37 +362,12 @@ pub(super) fn pattern_bindings(
                                         match pos.and_then(|i| instantiated_arg_types.get(i)) {
                                             Some(ty) => subst.apply(ty),
                                             None => {
-                                                // Fallback: un-instantiated declared field
-                                                // type when the constructor scheme isn't
-                                                // in `env`. This branch SHOULD be
-                                                // unreachable in practice: every `deftype`
-                                                // registered in `adt_reg` via
-                                                // `collect_declarations` also binds its
-                                                // constructor scheme in `env` in the same
-                                                // call. If that invariant drifts (e.g., a
-                                                // future code path populates `adt_reg`
-                                                // without binding into `env`), the
-                                                // fallback would silently produce
-                                                // `Var(T_a)` from the un-instantiated
-                                                // VariantInfo — exactly the bug #181 fixed.
-                                                // The debug_assert below flags the drift
-                                                // in tests; the runtime fallback to
-                                                // `vi.fields[i]` preserves pre-fix
-                                                // behavior in release builds.
-                                                debug_assert!(
-                                                    false,
-                                                    "env/adt_reg sync invariant violated: \
-                                                         field `{n}` of constructor `{ctor_name}` \
-                                                         is known to `adt_reg` (variant_info found) \
-                                                         but the constructor scheme is missing from \
-                                                         `env`. See infer.rs pat-record fallback note."
-                                                );
                                                 variant_info
-                                                    .and_then(|(_, vi)| {
-                                                        vi.fields.iter().find_map(|(name, ty)| {
-                                                            (name.as_deref() == Some(n))
-                                                                .then(|| ty.clone())
-                                                        })
+                                                    .fields
+                                                    .iter()
+                                                    .find_map(|(name, ty)| {
+                                                        (name.as_deref() == Some(n))
+                                                            .then(|| ty.clone())
                                                     })
                                                     // Per the loop guard `known_field_set
                                                     // .contains(n)` and the fact that

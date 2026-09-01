@@ -306,8 +306,8 @@ pub(super) fn is_constructor_name(name: &str) -> bool {
         .is_some_and(|c| c.is_ascii_uppercase())
 }
 
-/// A constructor reference is *in scope* only when its exact name is present
-/// in `env`'s constructor authority — either a bare builtin constructor
+/// A constructor-position reference is *in scope* only when its exact name is
+/// present in `env`'s constructor authority — either a bare builtin constructor
 /// (`Some`/`None`/`Cons`/`Nil`, registered bare by
 /// `register_prelude_adts`) or a reef-mangled in-scope constructor
 /// (chelis#157/#316 rewrite the reference to its mangled name when the
@@ -325,42 +325,66 @@ pub(super) fn constructor_out_of_scope(name: &str, env: &Env) -> bool {
     is_constructor_name(name) && env.lookup_constructor(name).is_none()
 }
 
-/// Pattern-position counterpart of [`constructor_out_of_scope`]. A constructor
-/// **pattern** head (`| Alpha =>`, `| Alpha { .. } =>`) is in scope only when it
-/// resolves through an *exact* binding — either the type env's constructor
-/// authority (`env.lookup_constructor`, for builtins and reef-mangled
-/// in-scope constructors) or the ADT registry (`adt_reg.lookup_variant`, the
-/// exact mangled variant key). The terminal-unique fallbacks
-/// (`env.lookup_terminal_unique` / `lookup_variant_terminal_unique`) are
-/// diagnostic-only fuzzy matches, never an in-scope binding.
-///
-/// Returns `true` when `name` is a PascalCase constructor that resolves through
-/// *neither* exact path. This rejects two out-of-scope cases the bare
-/// [`constructor_out_of_scope`] env check misses for patterns (chelis#317):
-///
-///   1. unique fuzzy — exactly one foreign same-terminal variant exists, so a
-///      bare `| Alpha =>` would fuzzy-bind to it; and
-///   2. non-unique / unresolvable — two foreign modules export a same-terminal
-///      `Dup`, so `lookup_*_terminal_unique` returns `None` and the arm would
-///      otherwise push the bare name into `covered_variants` with no scheme and
-///      no diagnostic. Normally that surfaces as `NonExhaustiveMatch`, but a `_`
-///      wildcard arm (`has_wildcard`) suppresses exhaustiveness and the bogus
-///      out-of-scope arm is silently accepted. Rejecting here closes that hole.
-///
-/// Soundness depends on the reef rewriter guaranteeing every genuinely in-scope
-/// constructor reaches type-check exact-bound under its mangled name (see the
-/// module-level note on the terminal-unique fallback). A future half-mangled
-/// producer (mangled deftype, bare reference) would be wrongly rejected here —
-/// which is the intended failure mode: a half-mangled program is a structural
-/// defect, not a valid in-scope reference.
-pub(super) fn constructor_pattern_out_of_scope(
+/// Bare value references have one extra disambiguation step: an exact ordinary
+/// binding wins before an uppercase spelling can be diagnosed as an unknown
+/// constructor (spec/01 §3.2). Constructor application and pattern positions
+/// must not use this helper because a same-named lexical value does not replace
+/// structural constructor authority there.
+pub(super) fn bare_constructor_out_of_scope(name: &str, env: &Env) -> bool {
+    is_constructor_name(name) && env.lookup(name).is_none()
+}
+
+/// Resolve the exact constructor owner, scheme, and variant selected by
+/// declaration/import scope. The global ADT registry may contain multiple
+/// same-named variants; its population and iteration order are not name
+/// resolution authority.
+pub(super) fn active_constructor<'env, 'adt>(
     name: &str,
+    env: &'env Env,
+    adt_reg: &'adt AdtRegistry,
+) -> Option<(&'env str, &'env Scheme, &'adt crate::adt::VariantInfo)> {
+    let (owner, scheme) = env.lookup_constructor(name)?;
+    let variant = adt_reg
+        .lookup(owner)?
+        .variants
+        .iter()
+        .find(|variant| variant.name == name)?;
+    Some((owner, scheme, variant))
+}
+
+/// Resolve a pattern constructor against the nominal scrutinee owner already
+/// established by inference. That owner is stronger than a flat same-named
+/// registry lookup and preserves existing shape-collision semantics when two
+/// in-scope ADTs deliberately share a constructor spelling (chelis#148). The
+/// structural constructor map remains the scope gate and the fallback when
+/// the scrutinee is not nominal yet.
+pub(super) fn pattern_constructor_for_scrutinee<'adt>(
+    name: &str,
+    scrutinee_ty: &Type,
     env: &Env,
-    adt_reg: &AdtRegistry,
-) -> bool {
-    is_constructor_name(name)
-        && env.lookup_constructor(name).is_none()
-        && adt_reg.lookup_variant(name).is_none()
+    adt_reg: &'adt AdtRegistry,
+) -> Option<(
+    &'adt str,
+    &'adt crate::adt::AdtDef,
+    &'adt crate::adt::VariantInfo,
+)> {
+    if constructor_out_of_scope(name, env) {
+        return None;
+    }
+
+    if let Type::Adt(owner, _) | Type::KindedAdt(owner, _) = scrutinee_ty
+        && let Some(definition) = adt_reg.lookup(owner)
+        && let Some(variant) = definition
+            .variants
+            .iter()
+            .find(|variant| variant.name == name)
+    {
+        return Some((definition.name.as_str(), definition, variant));
+    }
+
+    let (owner, _, variant) = active_constructor(name, env, adt_reg)?;
+    let definition = adt_reg.lookup(owner)?;
+    Some((definition.name.as_str(), definition, variant))
 }
 
 pub(super) fn check_error_kind_from_type_error_kind(kind: &TypeErrorKind) -> CheckErrorKind {

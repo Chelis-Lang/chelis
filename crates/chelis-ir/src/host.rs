@@ -4596,33 +4596,38 @@ fn lower_host_expr_kind(
                     },
                 )));
             }
-            match resolve_adt_constructor_definition(program, &name) {
-                AdtConstructorResolution::Unique(definition) if definition.is_nullary() => {
-                    let instantiated =
-                        definition.instantiate_nullary_term(&ty).map_err(|error| {
-                            host_expr_lowering_error(
-                                expr,
-                                format!(
-                                    "constructor `{name}` is not concretely instantiated: {error}"
-                                ),
-                            )
-                        })?;
-                    return Ok(HostExpr::new(HostExprKind::AdtConstruct {
-                        ctor: name,
-                        fields: Vec::new(),
-                        ty: instantiated.ty,
-                    }));
+            // An ordinary lexical binding wins in bare value position. Only
+            // a name absent from host scope may lower as a nullary ADT
+            // constructor (spec/01 §3.2; chelis#1076).
+            if !scope.contains_key(&name) {
+                match resolve_adt_constructor_definition_for_type(program, &name, &ty) {
+                    AdtConstructorResolution::Unique(definition) if definition.is_nullary() => {
+                        let instantiated =
+                            definition.instantiate_nullary_term(&ty).map_err(|error| {
+                                host_expr_lowering_error(
+                                    expr,
+                                    format!(
+                                        "constructor `{name}` is not concretely instantiated: {error}"
+                                    ),
+                                )
+                            })?;
+                        return Ok(HostExpr::new(HostExprKind::AdtConstruct {
+                            ctor: name,
+                            fields: Vec::new(),
+                            ty: instantiated.ty,
+                        }));
+                    }
+                    // Whether this reference is a construction at all depends
+                    // on which declaration answers it, so an ambiguous name
+                    // cannot fall through to the variable path: that would
+                    // emit a bare C identifier nothing declares and trade a
+                    // rejection for a silently different lowering (chelis#730's
+                    // shape). Fail closed instead.
+                    AdtConstructorResolution::Ambiguous(candidates) => {
+                        return Err(ambiguous_constructor_error(expr, &name, &candidates));
+                    }
+                    AdtConstructorResolution::Unique(_) | AdtConstructorResolution::Missing => {}
                 }
-                // Whether this reference is a construction at all depends
-                // on which declaration answers it, so an ambiguous name
-                // cannot fall through to the variable path: that would
-                // emit a bare C identifier nothing declares and trade a
-                // rejection for a silently different lowering (chelis#730's
-                // shape). Fail closed instead.
-                AdtConstructorResolution::Ambiguous(candidates) => {
-                    return Err(ambiguous_constructor_error(expr, &name, &candidates));
-                }
-                AdtConstructorResolution::Unique(_) | AdtConstructorResolution::Missing => {}
             }
             HostExpr::new(HostExprKind::Var(name, ty))
         }
@@ -5996,6 +6001,7 @@ fn lower_match_host_expr(
     let mut none_expr = None;
     let mut generic_arms = Vec::new();
     let mut generic_default = None;
+    let option_match = matches!(&scrutinee_ty, HostTypeTerm::Option(_));
 
     for arm in kids.iter().skip(1) {
         let Some(arm_list) = as_list(arm) else {
@@ -6024,7 +6030,7 @@ fn lower_match_host_expr(
         if let Some(DeepTag::PatCtor | DeepTag::PatRecord) = tag(pattern) {
             let ctor = children(pattern).first().and_then(symbol_name);
             match ctor {
-                Some("Some") => {
+                Some("Some") if option_match => {
                     if let Some(bound) = children(pattern).get(1).and_then(as_list)
                         && tag(bound) == Some(DeepTag::PatVar)
                         && let Some(name) = children(bound).first().and_then(symbol_name)
@@ -6044,7 +6050,7 @@ fn lower_match_host_expr(
                         expected_ty,
                     )?);
                 }
-                Some("None") => {
+                Some("None") if option_match => {
                     let body = arm_kids.get(2).ok_or_else(|| {
                         host_expr_lowering_error(&match_expr, "a `None` match arm has no body")
                     })?;
@@ -6057,7 +6063,11 @@ fn lower_match_host_expr(
                     )?);
                 }
                 Some(ctor_name) => {
-                    let ctor_fields = match resolve_adt_constructor_definition(program, ctor_name) {
+                    let ctor_fields = match resolve_adt_constructor_definition_for_type(
+                        program,
+                        ctor_name,
+                        &scrutinee_ty,
+                    ) {
                         AdtConstructorResolution::Unique(definition) => {
                             instantiate_adt_constructor(program, &definition, &scrutinee_ty)
                                 .map_err(|error| {
@@ -6325,37 +6335,39 @@ fn lower_record_host_expr(
             host_expr_lowering_error(&record_expr, "a `record` node has no constructor symbol")
         })?
         .to_string();
-    // The checker stamps a generic constructor expression with its concrete
-    // ADT instantiation. Feed that instantiation into the declaration lookup
-    // before lowering any fields so `ReviewBox[a]` fields become (for
-    // example) exact `int8` or `bf16` terms. Looking up the bare constructor
-    // first preserves the declaration's named variable and lets it leak all
-    // the way to host resolution even though the use site is monomorphic.
-    let ctor_definition = match resolve_adt_constructor_definition(program, &ctor) {
-        AdtConstructorResolution::Unique(definition) => definition,
-        // The field-name check below reports the AUTHORED constructor, so
-        // validating against a different declaration produced a
-        // self-contradicting "has no field" rejection of a valid program
-        // (chelis#1271). Name both candidates instead of choosing.
-        AdtConstructorResolution::Ambiguous(candidates) => {
-            return Err(ambiguous_constructor_error(
-                &record_expr,
-                &ctor,
-                &candidates,
-            ));
-        }
-        AdtConstructorResolution::Missing => {
-            return Err(host_expr_lowering_error(
-                &record_expr,
-                format!("record constructor `{ctor}` has no matching ADT declaration"),
-            ));
-        }
-    };
     let checked_ty = expr_host_type(
         &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
         program,
         scope,
     );
+    let resolution_ty = expected_ty
+        .filter(|_| checked_ty.is_unresolved())
+        .unwrap_or(&checked_ty);
+    // The checker stamps a constructor expression with its nominal owner and
+    // concrete instantiation. Resolve through that receipt before lowering
+    // fields so same-named declarations cannot be selected by registry order
+    // (chelis#1076/#1271).
+    let ctor_definition =
+        match resolve_adt_constructor_definition_for_type(program, &ctor, resolution_ty) {
+            AdtConstructorResolution::Unique(definition) => definition,
+            // The field-name check below reports the AUTHORED constructor, so
+            // validating against a different declaration produced a
+            // self-contradicting "has no field" rejection of a valid program
+            // (chelis#1271). Name both candidates instead of choosing.
+            AdtConstructorResolution::Ambiguous(candidates) => {
+                return Err(ambiguous_constructor_error(
+                    &record_expr,
+                    &ctor,
+                    &candidates,
+                ));
+            }
+            AdtConstructorResolution::Missing => {
+                return Err(host_expr_lowering_error(
+                    &record_expr,
+                    format!("record constructor `{ctor}` has no matching ADT declaration"),
+                ));
+            }
+        };
     let explicit_ty = expected_ty
         .filter(|expected| {
             checked_ty.is_unresolved()
@@ -7007,7 +7019,7 @@ fn list_grad_pack_plan(
                     _ => return None,
                 };
             let AdtConstructorResolution::Unique(definition) =
-                resolve_adt_constructor_definition(program, &ctor)
+                resolve_adt_constructor_definition_for_type(program, &ctor, ty)
             else {
                 return None;
             };
@@ -13781,7 +13793,9 @@ fn lookup_access_field(
             // `None` here means the name is unknown rather than
             // contested. The caller renders that as "absent or ambiguous
             // on the resolved ADT type" (chelis#1271).
-            let Some(definition) = lookup_adt_constructor_definition(program, ctor) else {
+            let AdtConstructorResolution::Unique(definition) =
+                resolve_adt_constructor_definition_for_type(program, ctor, ty)
+            else {
                 return Ok(None);
             };
             let instantiated = instantiate_adt_constructor(program, &definition, ty)?;
