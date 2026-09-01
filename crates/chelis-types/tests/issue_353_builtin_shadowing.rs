@@ -272,21 +272,25 @@ fn inline_annotated_def_reports_exactly_one_error() {
 fn builtin_named_param_called_in_body_is_accepted() {
     let called = surf_to_deep(
         "module ParamCall\n\
-         def apply(round_to: (f64, int64) -> f64, x: f64) -> f64 = round_to(x, cast(0, int64))\n",
+         def apply(round_to: (f64 -> int64 -> f64), x: f64) -> f64 = round_to(x, cast(0, int64))\n",
     );
+    let called_result = check_ir_program(&called);
     assert!(
-        check_ir_program(&called).is_ok(),
-        "calling a builtin-named parameter must follow lexical scope"
+        called_result.is_ok(),
+        "calling a builtin-named parameter must follow lexical scope; got {:?}",
+        called_result.err().map(|report| report.errors)
     );
 
     // Lambda parameters get the same treatment.
     let lambda = surf_to_deep(
         "module LambdaCall\n\
-         g = fn (map: (f64) -> f64) -> map(1.5)\n",
+         g = fn (map: (f64 -> f64)) -> map(1.5f64)\n",
     );
+    let lambda_result = check_ir_program(&lambda);
     assert!(
-        check_ir_program(&lambda).is_ok(),
-        "calling a builtin-named lambda parameter must follow lexical scope"
+        lambda_result.is_ok(),
+        "calling a builtin-named lambda parameter must follow lexical scope; got {:?}",
+        lambda_result.err().map(|report| report.errors)
     );
 
     // A DIFFERENT (non-shadowed) callee alongside a builtin-named value
@@ -299,5 +303,28 @@ fn builtin_named_param_called_in_body_is_accepted() {
     assert!(
         check_ir_program(&value_only).is_ok(),
         "value-position builtin-named params must stay accepted"
+    );
+}
+
+#[test]
+fn builtin_named_non_callable_local_still_rejects_as_a_type_error() {
+    let deep = surf_to_deep(
+        "module NonCallable\n\
+         def f(x: f64) -> f64 = {\n\
+           round_to = x\n\
+           round_to(x, cast(0, int64))\n\
+         }\n",
+    );
+    let err = check_ir_program(&deep).expect_err("a scalar local is not callable");
+    assert!(
+        err.errors.iter().any(|error| {
+            matches!(error.kind, CheckErrorKind::TypeMismatch)
+                && error.message.contains("f64 vs (f64, int64)")
+        }) && err
+            .errors
+            .iter()
+            .all(|error| !matches!(error.kind, CheckErrorKind::BuiltinShadowing)),
+        "lexical precedence must diagnose the selected scalar local rather than fall back to the builtin: {:?}",
+        err.errors
     );
 }

@@ -94,6 +94,16 @@ fn ordinary_defs_cannot_collide_with_standard_prelude_macros() {
             "collision diagnostic for `{name}` must name the declaration, macro class, and owning spec; got: {message}"
         );
     }
+
+    let decls = parse_str("sig residual: f32 -> f32\n").expect("surf parse should succeed");
+    let deep = desugar_program(&decls);
+    let err = expand_program(&deep, &ExpansionOptions::default())
+        .expect_err("a standard-prelude macro name must reject an ordinary sig");
+    assert!(
+        err.to_string().contains("`sig residual`")
+            && err.to_string().contains("standard prelude macro"),
+        "sig collision diagnostic must name the authored declaration; got: {err}"
+    );
 }
 
 #[test]
@@ -106,7 +116,23 @@ def f(x: f32, y: f32) -> f32 = residual(x, y)
     );
 
     assert!(text.contains(" sub)"), "user macro body must win: {text}");
-    assert!(!text.contains("source: (residual") || text.contains(" sub)"));
+}
+
+#[test]
+fn ordinary_prelude_names_are_available_when_prelude_loading_is_disabled() {
+    for name in ["linear_layer", "residual", "cross_entropy"] {
+        let decls = parse_str(&format!("def {name}(x: f32) -> f32 = x\n"))
+            .expect("surf parse should succeed");
+        let deep = desugar_program(&decls);
+        expand_program(
+            &deep,
+            &ExpansionOptions {
+                max_iterations: 100,
+                load_std_prelude: false,
+            },
+        )
+        .expect("without a loaded prelude there is no compiler-provided collision");
+    }
 }
 
 #[test]

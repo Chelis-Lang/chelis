@@ -250,17 +250,15 @@ pub enum CheckErrorKind {
     /// one module and constructs/inspects opaque types as in-module).
     ReservedLinkerName,
     /// A top-level `def` or `sig` (Deep `defsig`) reuses a name from the
-    /// closed builtin vocabulary (`BUILTIN_NAMES`). Call sites are
-    /// dispatched builtin-first by name in both the host evaluator
-    /// (`runtime/host_ops.rs::builtin_name`) and IR lowering
-    /// (`lower.rs`), so a user definition with a builtin name can never
-    /// be reached by name: pre-fix, the chelis#353 reproducer
-    /// (`def sum`) checked clean, hit the builtin's arity error under
-    /// eval, and segfaulted on the C backend. Rejected at declaration
-    /// time instead (spec/04-type-system.md §8.6). Reef package modules
-    /// are unaffected: their decls are internal-name-rewritten
-    /// (`pkg__...`) before the checker runs, and their call sites are
-    /// rewritten with them.
+    /// closed builtin vocabulary (`BUILTIN_NAMES`). Top-level builtin names
+    /// identify the intrinsic call surface and cannot be rebound with a user
+    /// signature, so they are rejected at declaration time
+    /// (spec/04-type-system.md §8.6). Ordinary lexical bindings are
+    /// different: function parameters, block locals, and pattern bindings
+    /// take precedence over compiler-provided dispatch in every lane
+    /// (chelis#1076). Reef package modules are also unaffected: their decls
+    /// are internal-name-rewritten (`pkg__...`) before the checker runs, and
+    /// their call sites are rewritten with them.
     BuiltinShadowing,
     /// chelis#731 / spec/04-type-system.md §10 [04-TOT-1]: a Deep tag
     /// reached `infer_expr`'s dispatch with no checker disposition. The

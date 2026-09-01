@@ -22,7 +22,7 @@ pub(super) fn infer_app(
     }
 
     // Check if func is a comparison op (for special return type handling)
-    let func_name = stamped_parts(&kids[0]).and_then(|(tag, _, callee_kids)| {
+    let source_func_name = stamped_parts(&kids[0]).and_then(|(tag, _, callee_kids)| {
         (tag == DeepTag::Var)
             .then(|| {
                 callee_kids
@@ -32,6 +32,12 @@ pub(super) fn infer_app(
             })
             .flatten()
     });
+    // Compiler-provided application rules are selected only after ordinary
+    // lexical lookup. A parameter, block binding, or pattern binding with the
+    // same spelling owns the call; its inferred function type, rather than a
+    // builtin's name-keyed checker route, decides whether the application is
+    // valid (spec/04-type-system.md §8.6; chelis#1076).
+    let func_name = source_func_name.filter(|name| !env.is_lexically_bound(name));
 
     if matches!(func_name.as_deref(), Some("permute")) {
         return infer_permute_app(list, env, vg, subst, adt_reg, errors, product);

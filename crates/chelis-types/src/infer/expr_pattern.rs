@@ -176,7 +176,7 @@ pub(super) fn pattern_bindings(
                 if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
                     let resolved = subst.apply(scrutinee_ty);
                     product.record_bypass(pat, resolved.clone(), "pattern binding traversal");
-                    env.bind(name.to_string(), Scheme::mono(resolved));
+                    env.bind_lexical(name.to_string(), Scheme::mono(resolved));
                 }
             }
             DeepTag::PatWild => {
@@ -292,7 +292,7 @@ pub(super) fn pattern_bindings(
                 if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
                     let resolved = subst.apply(scrutinee_ty);
                     product.record_bypass(pat, resolved.clone(), "pattern binding traversal");
-                    env.bind(name.to_string(), Scheme::mono(resolved));
+                    env.bind_lexical(name.to_string(), Scheme::mono(resolved));
                 }
                 if kids.len() >= 2 {
                     pattern_bindings(
@@ -755,7 +755,7 @@ pub(super) fn infer_pipe_stage_lambda(
     };
 
     let mut fn_env = env.clone();
-    fn_env.bind(param_name.to_string(), Scheme::mono(param_ty.clone()));
+    fn_env.bind_lexical(param_name.to_string(), Scheme::mono(param_ty.clone()));
     // chelis#397/#469: a fresh parameter has no size provenance; clear any
     // entry inherited from an outer name it shadows (BLOCKER C).
     fn_env.clear_size_provenance(param_name);

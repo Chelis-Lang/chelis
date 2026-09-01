@@ -35,17 +35,21 @@ Tracking Conventions owns the one-tracker-per-class rule now.
 
 [#731]'s Phases 0-3 and PP1-PP4 are delivered. PR [#1406] delivered [#1247]'s
 separately owned kinded nominal-application residue and its [#1258]/[#1024]
-resugaring interlock. Work discovered afterwards is recorded as independently
-landable PP items or separate residue; it does not extend the historical wave
-DAG with a fifth phase. PP4 was delivered by PR [#1402]: exact module scope at
-the package checker and batched-test boundaries. The remaining rows stay
-separately owned residue; neither delivery absorbs a successor mechanism.
+resugaring interlock. PR [#1447] is the delivery vehicle for the independently
+owned compiler-provided-name precedence residue [#1076]/[#672]; this roadmap
+does not claim that residue delivered before the PR's acceptance oracle and
+merge. Work discovered afterwards is recorded as independently landable PP
+items or separate residue; it does not extend the historical wave DAG with a
+fifth phase. PP4 was delivered by PR [#1402]: exact module scope at the package
+checker and batched-test boundaries. The remaining rows stay separately owned
+residue; no delivery absorbs a successor mechanism.
 
 | disposition | issues | coordination record |
 |---|---|---|
 | PP4 (delivered by PR [#1402]) | [#1264], plus the raw-flat-scope residue explicitly left by closed [#1261]/PR [#1273] | One scope-identity rule: a unique foreign terminal name is never an import, and independently rewritten test modules are combined only after they carry exact internal names. PP4 does not close [#1261] again. |
 | Kinded nominal-application residue (delivered by PR [#1406], not PP4) | [#1247], with [#1258]/[#1024] | Checker-owned fixed-point parameter kinds; structural `d-lit` nominal arguments; exact kind and dimension enforcement across check, test, round-trip, eval, and build. The PR's standing acceptance oracle is `issue_1247_integer_type_application`; this delivery does not extend the PP sequence or absorb another residue mechanism. |
-| Later #731 residue, not PP4 | [#874]/[#887] Tier 1; [#1125]/[#1134]; [#1076]/[#672] | Keep these as separate mechanisms: tag-keyed vacuity, stamped-ingress/pass-set parity, and compiler-provided-name precedence respectively. The bounded [#1125] nominal-rank file-ingress instance has its own `issue_1125_nominal_rank_ingress` oracle; the issue remains open for its carrier-reader audit and structural lint. Neither PP4 nor the kinded nominal-application repair absorbs those remaining contracts or tests. |
+| Compiler-provided-name precedence (PR [#1447] delivery vehicle, not PP4) | [#1076]/[#672] | Ordinary lexical callable bindings precede builtin dispatch in check, eval, and lowering; loaded standard-prelude macro names reject colliding ordinary top-level `def`/`sig` declarations before expansion, while an explicit user macro may override the prelude. Oracle: `cargo nextest run -p chelis-cli --test issue_1076_672_name_precedence --no-fail-fast`. |
+| Later #731 residue, not PP4 | [#874]/[#887] Tier 1; [#1125]/[#1134] | Keep these as separate mechanisms: tag-keyed vacuity and stamped-ingress/pass-set parity respectively. The bounded [#1125] nominal-rank file-ingress instance has its own `issue_1125_nominal_rank_ingress` oracle; the issue remains open for its carrier-reader audit and structural lint. Neither PP4 nor another residue repair absorbs those remaining contracts or tests. |
 | Owned or dispositioned elsewhere | [#850], [#609], [#1355] | [#850]'s checker half is delivered and its native-emission half remains [#730]/[#763] work. [#609] is already Slice A of [#1277]/`runtime_extents.md`, so duplicating it under PP4 would create two owners. [#1355] is the same diagonal-result extent family but is not yet in that design's issue map; an ownership amendment belongs there, not in PP4. |
 | Closed bookkeeping | [#1129] | Closed 2026-08-27 after its landing inventory was reconciled; it is not open checker-totality residue and creates no design deliverable. |
 
@@ -1068,6 +1072,7 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#1273]: https://github.com/Chelis-Lang/chelis/pull/1273
 [#1402]: https://github.com/Chelis-Lang/chelis/pull/1402
 [#1406]: https://github.com/Chelis-Lang/chelis/pull/1406
+[#1447]: https://github.com/Chelis-Lang/chelis/pull/1447
 [#1277]: https://github.com/Chelis-Lang/chelis/issues/1277
 [#1355]: https://github.com/Chelis-Lang/chelis/issues/1355
 [#1362]: https://github.com/Chelis-Lang/chelis/issues/1362

@@ -7804,6 +7804,15 @@ fn lower_app_host_expr(
         .and_then(host_fn_signature)
         .or_else(|| lookup_declared_fn_type(program, &name))
         .or_else(|| kids.first().and_then(expr_fn_type));
+    // Ordinary lexical lookup precedes every compiler-provided callable
+    // route. In particular, a function-typed parameter named `round_to`,
+    // `map`, or `Cons` is a call through that parameter, not a builtin or
+    // constructor selected by spelling (spec/04-type-system.md §8.6;
+    // chelis#1076).
+    let callee_is_local_callable = scope
+        .get(&name)
+        .is_some_and(|ty| matches!(ty, HostTypeTerm::Fn(_, _)));
+    let active_compiler_name = (!callee_is_local_callable).then_some(name.as_str());
     let checked_ty = expr_host_type(app_expr, program, scope);
     let explicit_ty = expected_ty
         .filter(|_| checked_ty.is_unresolved())
@@ -7830,7 +7839,10 @@ fn lower_app_host_expr(
             ty: explicit_ty,
         }));
     }
-    let ctor_definition = match resolve_adt_constructor_definition(program, &name) {
+    let ctor_definition = match active_compiler_name
+        .map(|_| resolve_adt_constructor_definition(program, &name))
+        .unwrap_or(AdtConstructorResolution::Missing)
+    {
         AdtConstructorResolution::Unique(definition) => Some(definition),
         // The resolved declaration supplies both the constructed ADT name
         // and each argument's expected field type, which lowering then
@@ -7897,7 +7909,7 @@ fn lower_app_host_expr(
         }
         return lowered;
     }
-    if name == "Cons" && kids.len() == 3 {
+    if active_compiler_name == Some("Cons") && kids.len() == 3 {
         let expr = Expr::List(list.clone(), chelis_deep::Span::new(0, 0));
         if let Some(items) = lower_list_literal_items(&expr, program, scope, tensor_helpers)? {
             let ty = expr_host_type(&expr, program, scope);
@@ -7914,7 +7926,7 @@ fn lower_app_host_expr(
             return Ok(HostExpr::new(HostExprKind::List(items, ty)));
         }
     }
-    if name == "Some" && kids.len() == 2 {
+    if active_compiler_name == Some("Some") && kids.len() == 2 {
         let arg = lower_host_expr(&kids[1], program, scope, tensor_helpers)?;
         return Ok(HostExpr::new(HostExprKind::Builtin {
             name,
@@ -7926,7 +7938,7 @@ fn lower_app_host_expr(
             },
         }));
     }
-    if name == "map" && kids.len() == 3 {
+    if active_compiler_name == Some("map") && kids.len() == 3 {
         let callback =
             lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {
                 host_expr_lowering_error(app_expr, "`map` requires a lowerable callback")
@@ -7944,7 +7956,7 @@ fn lower_app_host_expr(
             ty,
         }));
     }
-    if name == "filter" && kids.len() == 3 {
+    if active_compiler_name == Some("filter") && kids.len() == 3 {
         let callback =
             lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {
                 host_expr_lowering_error(app_expr, "`filter` requires a lowerable callback")
@@ -7962,7 +7974,7 @@ fn lower_app_host_expr(
             ty,
         }));
     }
-    if name == "fold" && kids.len() == 4 {
+    if active_compiler_name == Some("fold") && kids.len() == 4 {
         let callback =
             lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {
                 host_expr_lowering_error(app_expr, "`fold` requires a lowerable callback")
@@ -7997,7 +8009,7 @@ fn lower_app_host_expr(
             ty,
         }));
     }
-    if name == "scan" && kids.len() == 4 {
+    if active_compiler_name == Some("scan") && kids.len() == 4 {
         let callback =
             lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {
                 host_expr_lowering_error(app_expr, "`scan` requires a lowerable callback")
@@ -8017,7 +8029,7 @@ fn lower_app_host_expr(
             ty,
         }));
     }
-    if name == "partition" && kids.len() == 3 {
+    if active_compiler_name == Some("partition") && kids.len() == 3 {
         let callback =
             lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {
                 host_expr_lowering_error(app_expr, "`partition` requires a lowerable callback")
@@ -8036,7 +8048,7 @@ fn lower_app_host_expr(
             ty,
         }));
     }
-    if name == "flat_map" && kids.len() == 3 {
+    if active_compiler_name == Some("flat_map") && kids.len() == 3 {
         let callback =
             lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {
                 host_expr_lowering_error(app_expr, "`flat_map` requires a lowerable callback")
@@ -8089,9 +8101,6 @@ fn lower_app_host_expr(
     // the fn pointer into `chelis_scalar_tensor_from_f64` and emit C that
     // gcc rejects. Skip both tensor-helper branches and fall through to
     // the generic `HostExpr::new(HostExprKind::Call)` path so the wrapper emits `return f(x);`.
-    let callee_is_local_callable = scope
-        .get(&name)
-        .is_some_and(|ty| matches!(ty, HostTypeTerm::Fn(_, _)));
     // A callee carrying a callable (fn-pointer) parameter cannot be
     // summarized through the tensor-helper DAG: the DAG has no
     // representation for a fn-pointer input. Such a callee is lowered by
@@ -8282,7 +8291,7 @@ fn lower_app_host_expr(
             ty: instantiated.ty,
         }));
     }
-    if !BUILTIN_NAMES.contains(&name.as_str())
+    if (callee_is_local_callable || !BUILTIN_NAMES.contains(&name.as_str()))
         && name != "Some"
         && name != "None"
         && fn_sig.is_some()
