@@ -1263,12 +1263,12 @@ pub fn fused_elementwise(
     let mut params = Vec::new();
     for i in 0..n_external {
         let pfx = format!("ext{i}");
-        let parameter = if in_place_aliased_ext.is_some() && in_place_aliased_ext != Some(i) {
-            format!("const {ty} *__restrict__ {pfx}")
+        let qual = if in_place_aliased_ext.is_some() && in_place_aliased_ext != Some(i) {
+            format!("const {ty} *__restrict__ ")
         } else {
-            format!("const {ty} *{pfx}")
+            format!("const {ty} *")
         };
-        params.push(parameter);
+        params.push(format!("{qual}{pfx}"));
         params.push(stride_params(&pfx));
         params.push(format!("int {pfx}_ndim"));
         params.push(format!("int {pfx}_size"));
