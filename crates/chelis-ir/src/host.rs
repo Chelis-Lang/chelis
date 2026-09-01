@@ -7810,10 +7810,10 @@ fn lower_app_host_expr(
     // (spec/04-type-system.md §8.6; chelis#1076). Keep the override exact to
     // `BUILTIN_NAMES`: applied uppercase heads retain constructor precedence
     // under spec/01-nomenclature.md §3.2.
-    let callee_shadows_builtin = BUILTIN_NAMES.contains(&name.as_str())
-        && scope
-            .get(&name)
-            .is_some_and(|ty| matches!(ty, HostTypeTerm::Fn(_, _)));
+    let callee_is_local_callable = scope
+        .get(&name)
+        .is_some_and(|ty| matches!(ty, HostTypeTerm::Fn(_, _)));
+    let callee_shadows_builtin = BUILTIN_NAMES.contains(&name.as_str()) && callee_is_local_callable;
     let active_compiler_name = (!callee_shadows_builtin).then_some(name.as_str());
     let checked_ty = expr_host_type(app_expr, program, scope);
     let explicit_ty = expected_ty
@@ -8117,7 +8117,7 @@ fn lower_app_host_expr(
         .is_some_and(|(params, _)| params.iter().any(|ty| matches!(ty, HostTypeTerm::Fn(..))));
     let helper_summary_rejects = top_level_fn_helper_summary_rejects(program, &name)?;
     if let Some(tensor_ty) = helper_tensor_ty.clone()
-        && !callee_shadows_builtin
+        && !callee_is_local_callable
         && !has_callable_params
         && !top_level_fn_needs_host_lane_tensor_lowering(program, &name)
         && !helper_summary_rejects
@@ -8141,7 +8141,7 @@ fn lower_app_host_expr(
         }));
     }
     if let Some(tensor_ty) = helper_tensor_ty
-        && !callee_shadows_builtin
+        && !callee_is_local_callable
         && !has_callable_params
         && !top_level_fn_needs_host_lane_tensor_lowering(program, &name)
         && !helper_summary_rejects
