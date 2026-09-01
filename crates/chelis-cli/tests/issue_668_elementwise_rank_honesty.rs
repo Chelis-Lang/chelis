@@ -171,6 +171,39 @@ fn inline_binary_identity_preserves_rank() {
 }
 
 #[test]
+fn central_identity_registry_drives_inline_floor_div_rank_in_both_orders() {
+    for rhs in ["add(floor_div(s, s), e)", "add(e, floor_div(s, s))"] {
+        let (status, report) = check(&rank_divergent_source(rhs));
+        assert!(
+            !status.success(),
+            "the central identity registry must preserve floor_div rank in `{rhs}`: {report}"
+        );
+        assert!(
+            report["errors"].as_array().is_some_and(|errors| errors
+                .iter()
+                .any(|error| error["kind"] == "DimensionMismatch")),
+            "expected a dimension mismatch for `{rhs}`: {report}"
+        );
+    }
+}
+
+#[test]
+fn central_identity_registry_drives_let_bound_floor_div_rank() {
+    let source = rank_divergent_source("fd = floor_div(s, s)\n  add(fd, e)");
+    let (status, report) = check(&source);
+    assert!(
+        !status.success(),
+        "let-bound floor_div must retain the registry-owned rank fact: {report}"
+    );
+    assert!(
+        report["errors"].as_array().is_some_and(|errors| errors
+            .iter()
+            .any(|error| error["kind"] == "DimensionMismatch")),
+        "expected a dimension mismatch after let-bound floor_div: {report}"
+    );
+}
+
+#[test]
 fn inline_comparison_cannot_hide_rank_mismatch_in_discarded_binding() {
     let source = rank_divergent_source("ignored = eq(e, neg(s))\n  s");
     let (status, report) = check(&source);

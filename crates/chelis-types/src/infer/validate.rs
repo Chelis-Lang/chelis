@@ -2555,44 +2555,16 @@ pub(super) fn derive_ir_builtin_output_type(
         "conv2d" => derive_conv2d_output_type(list, type_env),
         "stride" => derive_movement_rank_output_type(list, type_env, 0),
         "expand" => derive_movement_rank_output_type(list, type_env, 1),
-        // Shape-preserving unary point-wise: output type == input type.
-        // Each entry below is cross-verified against the lowerer's
-        // accepted name set in `crates/chelis-ir/src/lower.rs` (the
-        // canonical IR vocabulary) and spec/05-risc-primitives.md
-        // §2.2 / §3.3 (RT-205 round-3 F-B audit).
-        //
-        // Reductions (sum, mean, max_reduce, argmax_reduce,
-        // prod_reduce, min_reduce, argmin_reduce) and movement ops
-        // (reshape, permute, gather, pad, shrink) are
-        // EXCLUDED: they change rank or shape and need per-op
-        // derivation.
-        //
         // softmax takes a (tensor, axis) tuple but its output shape
-        // equals the input tensor's shape, so it fits the unary
-        // passthrough path (positional [3] is the tensor).
-        "relu" | "tanh" | "sigmoid" | "gelu" | "silu" | "exp" | "log" | "neg" | "recip"
-        | "sqrt" | "abs" | "sin" | "cos" | "tan" | "atan" | "floor" | "ceil" | "round" | "not"
-        | "softmax" => derive_unary_shape_passthrough(list, type_env, static_env),
-        // Shape-preserving binary point-wise: output type == first
-        // operand's type. Broadcasting cases are caught by HM
-        // elsewhere; here we fall through to None if the first
-        // operand's type is not derivable and try the second.
-        //
-        // RT-205 round-3 F-B: `maximum` and `minimum` were the wrong
-        // names. `max_elem` and `min_elem` are direct Tier-1 identities
-        // governed by [05-OP-40]. The lowerer
-        // accepts `max_elem`/`min_elem` (lower.rs:1329-1330);
-        // `maximum`/`minimum` do not appear anywhere in the IR
-        // vocabulary, so the old allowlist never matched.
-        //
-        // `lt` is an alias for `cmplt` accepted at lowerer.rs:3913
-        // (kept). `gte`, `lte`, `neq` are Tier 2 comparison ops
-        // (spec/05 §3.2) accepted by the lowerer (lower.rs:1349-1352)
-        // and added here so passthrough recognizes them. `and`, `or`
-        // are bool binaries (lower.rs:1353-1354).
-        "add" | "sub" | "mul" | "div" | "max_elem" | "min_elem" | "cmplt" | "lt" | "gt" | "gte"
-        | "lte" | "eq" | "neq" | "and" | "or" => {
-            derive_binary_shape_passthrough(list, type_env, static_env)
+        // equals the input tensor's shape, but it is intentionally not in the
+        // rank-polymorphism Identity class because its axis is positional.
+        "softmax" => derive_unary_shape_passthrough(list, type_env, static_env),
+        // The central shape registry owns every shape-identity builtin. This
+        // resolver must consume that registry directly: a second manual
+        // allowlist omitted floor_div/mod/clamp/where/bitwise identities and
+        // let inline or let-bound rank evidence disappear (chelis#668).
+        _ if crate::shape_class(func_name) == crate::ShapeClass::Identity => {
+            derive_identity_shape_passthrough(list, type_env, static_env)
         }
         _ => None,
     }
@@ -2612,23 +2584,24 @@ pub(super) fn derive_unary_shape_passthrough(
     resolve_let_value_tensor_rank_type(arg, type_env, static_env)
 }
 
-/// Derive the output tensor type of a shape-preserving binary
-/// point-wise call: it equals the type of whichever operand is
-/// concretely resolvable (typically the first). Broadcasting and
-/// dtype-promotion cases are caught by HM elsewhere; this helper
-/// only needs to surface a shape that the next validator arm can
-/// inspect (RT-205 round-2 F2).
-pub(super) fn derive_binary_shape_passthrough(
+/// Derive the output tensor rank of any centrally classified identity op from
+/// its first tensor argument whose rank is structurally resolvable. Identity
+/// operations may be unary, binary, or carry scalar parameters (`clamp`,
+/// `uniform_like`), so arity-specific allowlists are both unnecessary and a
+/// source of registry drift. Broadcasting and dtype promotion remain owned by
+/// ordinary inference; this helper surfaces only the rank needed by the next
+/// validator arm.
+pub(super) fn derive_identity_shape_passthrough(
     list: &deep::List,
     type_env: &IrTypeEnv,
     static_env: &UnordMap<String, StaticValue>,
 ) -> Option<deep::Expr> {
-    let lhs = list.elements.get(3)?;
-    if let Some(ty) = resolve_let_value_tensor_rank_type(lhs, type_env, static_env) {
-        return Some(ty);
-    }
-    let rhs = list.elements.get(4)?;
-    resolve_let_value_tensor_rank_type(rhs, type_env, static_env)
+    list.elements
+        .iter()
+        .skip(3)
+        .find_map(|argument| {
+            resolve_let_value_tensor_rank_type(argument, type_env, static_env)
+        })
 }
 
 /// Resolve a tensor type for an identity op's output, retaining a rank-only
