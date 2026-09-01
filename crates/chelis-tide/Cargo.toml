@@ -27,3 +27,6 @@ chelis-deep.workspace = true
 http-body-util = "0.1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+
+[lints]
+workspace = true

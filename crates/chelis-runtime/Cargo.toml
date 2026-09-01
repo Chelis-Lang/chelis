@@ -31,3 +31,6 @@ num-bigint = "0.4"
 # keeps zero checker dependencies; this edge exists only for
 # `tests/format_shortest_matches_reference.rs`.
 chelis-types = { workspace = true }
+
+[lints]
+workspace = true

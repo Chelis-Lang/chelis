@@ -159,3 +159,6 @@ required-features = ["arb"]
 name = "certify_special_fn_envelope"
 path = "src/bin/certify_special_fn_envelope.rs"
 required-features = ["arb"]
+
+[lints]
+workspace = true

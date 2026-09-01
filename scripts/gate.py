@@ -195,6 +195,24 @@ BUILD_WORKSPACE: list[str] = ["cargo", "build", "--workspace", "--all-targets"]
 CLIPPY_WORKSPACE: list[str] = [
     "cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings",
 ]
+# The second half of the Clippy configuration matrix
+# (`spec/design/hash_order_determinism.md` C2.3): every declared feature
+# that needs no external solver toolchain. Clippy lints only the
+# configuration it compiles, so a feature nobody compiles is a hole in the
+# `disallowed_types` ban. `scripts/check_configuration_closure.py` owns the
+# registry and fails if this command drifts from it.
+CLIPPY_SOLVER_FREE_FEATURES: list[str] = [
+    "cargo", "clippy", "--workspace", "--all-targets", "--features",
+    "chelis-backend-c/sleef,"
+    "chelis-e2e/hip-local-gpu,"
+    "chelis-prove/clarabel,"
+    "chelis-python/extension-module,"
+    "chelis-runtime/ownership-ledger,"
+    "chelis-types/checkpoint-compile-probe,"
+    "chelis-types/generalize-sweep-oracle,"
+    "chelis-types/hash-order-compile-probe",
+    "--", "-D", "warnings",
+]
 FMT_CHECK: list[str] = ["cargo", "fmt", "--all", "--", "--check"]
 CHELIS_LINT_CHECK: list[str] = [
     "cargo",
@@ -272,10 +290,12 @@ HASH_ORDER_COMPILE_FAIL: list[str] = [
 # and reject raw hash carriers or unreviewed lint allowances. The full
 # executable oracle remains the phase acceptance command; this scan-only form
 # is the cheap continuous completeness lock.
-HASH_ORDER_TOKEN_TRIPWIRE: list[str] = [
+# Reconciles the repository's Rust sources against rustc's own dep-info from
+# the Clippy stages above, so the compiler reports what it compiled instead
+# of a script recomputing it. Must run after both Clippy commands.
+CONFIGURATION_CLOSURE: list[str] = [
     MANAGED_PYTHON,
-    "scripts/hash_order_determinism_oracle.py",
-    "--scan-only",
+    "scripts/check_configuration_closure.py",
 ]
 # The pipeline-core boundary guards. Before this, they ran only in the manual
 # `compiler_pipeline_oracle.py`, so a forbidden dependency, a false no_std
@@ -351,6 +371,7 @@ CHELIS_BINARY_PRODUCERS: tuple[tuple[str, ...], ...] = (
 STAGES: dict[str, list[list[str]]] = {
     "lint-and-unit": [
         CLIPPY_WORKSPACE,
+        CLIPPY_SOLVER_FREE_FEATURES,
         FMT_CHECK,
         CHELIS_LINT_CHECK,
         CHELIS_STD_BUNDLE_CHECK,
@@ -359,7 +380,7 @@ STAGES: dict[str, list[list[str]]] = {
         DOCTEST_PIPELINE_CORE,
         CHECKPOINT_COMPILE_FAIL,
         HASH_ORDER_COMPILE_FAIL,
-        HASH_ORDER_TOKEN_TRIPWIRE,
+        CONFIGURATION_CLOSURE,
         PIPELINE_CORE_DEPENDENCY_GUARD,
         PIPELINE_CORE_DOCUMENTATION_GUARD,
         PIPELINE_CORE_COMPILE_FAIL,
@@ -385,6 +406,7 @@ HASH_PARTITION_RE = re.compile(
 # `local_command_list`.
 LOCAL_STATIC_COMMANDS: list[list[str]] = [
     CLIPPY_WORKSPACE,
+    CLIPPY_SOLVER_FREE_FEATURES,
     FMT_CHECK,
     CHELIS_LINT_CHECK,
     CHELIS_STD_BUNDLE_CHECK,
@@ -393,7 +415,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     DOCTEST_PIPELINE_CORE,
     CHECKPOINT_COMPILE_FAIL,
     HASH_ORDER_COMPILE_FAIL,
-    HASH_ORDER_TOKEN_TRIPWIRE,
+    CONFIGURATION_CLOSURE,
     PIPELINE_CORE_DEPENDENCY_GUARD,
     PIPELINE_CORE_DOCUMENTATION_GUARD,
     UNREPRESENTABLE_DOMAIN_ORACLE,
