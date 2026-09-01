@@ -1598,11 +1598,33 @@ def load_ledger(path: Path, *, minimum_allocations: int = 0) -> Ledger:
             )
             _required_site(record, context)
             identity = record.get("id")
+            known_identity: int | None = None
             if identity is not None:
-                if type(identity) is not int or identity <= 0 or identity not in owners:
+                known_identity = _required_int(record, "id", context)
+                if known_identity == 0 or known_identity not in owners:
                     raise OracleFailure(
                         f"{context}: invalid-event identity must be null or a known positive integer"
                     )
+            if event == "invalid_allocate":
+                matches_state = (
+                    known_identity is not None and known_identity not in finalized
+                )
+            elif known_identity is None:
+                matches_state = True
+            elif event == "invalid_finalize":
+                matches_state = (
+                    known_identity in finalized
+                    or owners[known_identity] != 0
+                )
+            else:
+                matches_state = (
+                    known_identity in finalized
+                    or owners[known_identity] == 0
+                )
+            if not matches_state:
+                raise OracleFailure(
+                    f"{context}: {event} does not match reconstructed state"
+                )
             invalid_operations += 1
             invalid_events[str(event)] += 1
         else:
@@ -1648,6 +1670,26 @@ def load_ledger(path: Path, *, minimum_allocations: int = 0) -> Ledger:
         summary.peak_live_bytes,
         summary.invalid_operations,
     )
+    missing_finalization = sorted(
+        identity
+        for identity, owner_count in owners.items()
+        if owner_count == 0 and identity not in finalized
+    )
+    finalized_while_live = sorted(
+        identity
+        for identity, owner_count in owners.items()
+        if owner_count > 0 and identity in finalized
+    )
+    if missing_finalization:
+        raise OracleFailure(
+            "ownership ledger zero-owner allocations are missing finalization: "
+            f"{missing_finalization}"
+        )
+    if finalized_while_live:
+        raise OracleFailure(
+            "ownership ledger live-owner allocations were finalized: "
+            f"{finalized_while_live}"
+        )
     if computed != reported:
         raise OracleFailure(f"ownership ledger summary mismatch: computed={computed}, reported={reported}")
     if allocation_count < minimum_allocations:

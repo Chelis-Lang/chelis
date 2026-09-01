@@ -450,6 +450,96 @@ class LedgerContractTests(unittest.TestCase):
         path.write_text("".join(json.dumps(record) + "\n" for record in records))
         return path
 
+    def invalid_event_ledger(
+        self, event: str, state: str
+    ) -> list[dict[str, object]]:
+        records: list[dict[str, object]] = [
+            {"event": "header", "schema": oracle.LEDGER_SCHEMA}
+        ]
+        if state != "unknown":
+            records.append(
+                {
+                    "event": "allocate",
+                    "id": 1,
+                    "kind": "String",
+                    "bytes": 6,
+                    "owners_before": 0,
+                    "owners_after": 1,
+                    "site": "test",
+                }
+            )
+            if state in {"zero", "finalized"}:
+                records.append(
+                    {
+                        "event": "release",
+                        "id": 1,
+                        "kind": "String",
+                        "bytes": 6,
+                        "owners_before": 1,
+                        "owners_after": 0,
+                        "site": "test",
+                    }
+                )
+            if state == "finalized":
+                records.append(
+                    {
+                        "event": "finalize",
+                        "id": 1,
+                        "kind": "String",
+                        "bytes": 6,
+                        "owners_before": 0,
+                        "owners_after": 0,
+                        "site": "test",
+                    }
+                )
+
+        records.append(
+            {
+                "event": event,
+                "id": None if state == "unknown" else 1,
+                "site": "test",
+            }
+        )
+
+        if state == "live":
+            records.append(
+                {
+                    "event": "release",
+                    "id": 1,
+                    "kind": "String",
+                    "bytes": 6,
+                    "owners_before": 1,
+                    "owners_after": 0,
+                    "site": "test",
+                }
+            )
+        if state in {"live", "zero"}:
+            records.append(
+                {
+                    "event": "finalize",
+                    "id": 1,
+                    "kind": "String",
+                    "bytes": 6,
+                    "owners_before": 0,
+                    "owners_after": 0,
+                    "site": "test",
+                }
+            )
+
+        allocations = 0 if state == "unknown" else 1
+        records.append(
+            {
+                "event": "summary",
+                "allocations": allocations,
+                "finalized": allocations,
+                "live_owners": 0,
+                "live_bytes": 0,
+                "peak_live_bytes": 0 if state == "unknown" else 6,
+                "invalid_operations": 1,
+            }
+        )
+        return records
+
     def test_valid_ledger_preserves_deterministic_counts_and_bytes(self) -> None:
         path = self.write_ledger(
             [
@@ -596,6 +686,113 @@ class LedgerContractTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(oracle.OracleFailure, "kind/bytes"):
             oracle.load_ledger(path)
+
+    def test_zero_owner_allocation_requires_finalization(self) -> None:
+        path = self.write_ledger(
+            [
+                {"event": "header", "schema": oracle.LEDGER_SCHEMA},
+                {
+                    "event": "allocate",
+                    "id": 1,
+                    "kind": "String",
+                    "bytes": 6,
+                    "owners_before": 0,
+                    "owners_after": 1,
+                    "site": "test",
+                },
+                {
+                    "event": "release",
+                    "id": 1,
+                    "kind": "String",
+                    "bytes": 6,
+                    "owners_before": 1,
+                    "owners_after": 0,
+                    "site": "test",
+                },
+                {
+                    "event": "summary",
+                    "allocations": 1,
+                    "finalized": 0,
+                    "live_owners": 0,
+                    "live_bytes": 0,
+                    "peak_live_bytes": 6,
+                    "invalid_operations": 0,
+                },
+            ]
+        )
+        with self.assertRaisesRegex(oracle.OracleFailure, "missing finalization"):
+            oracle.load_ledger(path)
+
+    def test_live_owner_allocation_remains_valid_without_finalization(self) -> None:
+        path = self.write_ledger(
+            [
+                {"event": "header", "schema": oracle.LEDGER_SCHEMA},
+                {
+                    "event": "allocate",
+                    "id": 1,
+                    "kind": "String",
+                    "bytes": 6,
+                    "owners_before": 0,
+                    "owners_after": 1,
+                    "site": "test",
+                },
+                {
+                    "event": "summary",
+                    "allocations": 1,
+                    "finalized": 0,
+                    "live_owners": 1,
+                    "live_bytes": 6,
+                    "peak_live_bytes": 6,
+                    "invalid_operations": 0,
+                },
+            ]
+        )
+        self.assertEqual(oracle.load_ledger(path).summary.live_owners, 1)
+
+    def test_invalid_event_truth_table_accepts_only_invalid_operations(self) -> None:
+        accepted = [
+            ("invalid_allocate", "live"),
+            ("invalid_allocate", "zero"),
+            ("invalid_retain", "unknown"),
+            ("invalid_retain", "zero"),
+            ("invalid_retain", "finalized"),
+            ("invalid_release", "unknown"),
+            ("invalid_release", "zero"),
+            ("invalid_release", "finalized"),
+            ("invalid_resize", "unknown"),
+            ("invalid_resize", "zero"),
+            ("invalid_resize", "finalized"),
+            ("invalid_borrow", "unknown"),
+            ("invalid_borrow", "zero"),
+            ("invalid_borrow", "finalized"),
+            ("invalid_finalize", "unknown"),
+            ("invalid_finalize", "live"),
+            ("invalid_finalize", "finalized"),
+        ]
+        for event, state in accepted:
+            with self.subTest(event=event, state=state):
+                ledger = oracle.load_ledger(
+                    self.write_ledger(self.invalid_event_ledger(event, state))
+                )
+                self.assertEqual(ledger.invalid_events[event], 1)
+
+        rejected = [
+            ("invalid_allocate", "unknown"),
+            ("invalid_allocate", "finalized"),
+            ("invalid_retain", "live"),
+            ("invalid_release", "live"),
+            ("invalid_resize", "live"),
+            ("invalid_borrow", "live"),
+            ("invalid_finalize", "zero"),
+        ]
+        for event, state in rejected:
+            with self.subTest(event=event, state=state):
+                with self.assertRaisesRegex(
+                    oracle.OracleFailure, "does not match reconstructed state"
+                ):
+                    oracle.load_ledger(
+                        self.write_ledger(self.invalid_event_ledger(event, state))
+                    )
 
     def test_invalid_event_requires_exact_identity_and_site_schema(self) -> None:
         path = self.write_ledger(
