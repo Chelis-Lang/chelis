@@ -3839,7 +3839,7 @@ class ContractValidationTests(unittest.TestCase):
         self.replace(
             Path("spec/03-deep-syntax.md"),
             "| `dtype_bounds` | metadata map | Dtype-family bounds on a "
-            "`defsig` or `def` binder; see §2.2 |",
+            "`defsig`'s binders; see §2.2 |",
             "| `dtype_bounds` | string | Producer-specific bound provenance |",
         )
         self.assert_contract_fails("Deep dtype-family bound metadata key")

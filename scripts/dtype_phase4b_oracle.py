@@ -55,7 +55,7 @@ FROZEN_FILE_DIGESTS = {
         "d9be2537f612a3813d91f51966b210b461ddc9abcadc468f7bfb60c9f769084c"
     ),
     "spec/03-deep-syntax.md": (
-        "994f4bc55d0889503098c2b132e0f1e94e490d43e64bf5cfbccbadb77a4c4b9e"
+        "27de7e4cbaa10b6fefd4600f8dea6b481aea456f07e9d0e6b5e459cf68590cf5"
     ),
     "spec/04-type-system.md": (
         "fbae91dc1efa5382c432710f8f6f3c30e6e6b4a3e0cb3327232e22b1d38f3491"
@@ -809,7 +809,7 @@ def validate_normative_contract(
             ("**Reduce:** `sum`, `count`, `max_reduce`", "Deep count builtin"),
             (
                 "| `dtype_bounds` | metadata map | Dtype-family bounds on a "
-                "`defsig` or `def` binder; see §2.2 |",
+                "`defsig`'s binders; see §2.2 |",
                 "Deep dtype-family bound metadata key",
             ),
         ),

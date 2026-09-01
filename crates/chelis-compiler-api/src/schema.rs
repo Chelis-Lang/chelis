@@ -1365,7 +1365,7 @@ pub enum WireSurfDecl {
     },
     FunDef {
         name: String,
-        dim_params: Vec<String>,
+        type_binders: Vec<WireTypeBinder>,
         params: Vec<WireParam>,
         ret_ty: Option<WireSurfTypeExpr>,
         body: WireSurfExpr,
@@ -1389,6 +1389,15 @@ pub enum WireSurfDecl {
         names: Vec<String>,
         span: Span,
     },
+}
+
+/// One entry of a declaration's `[..]` binder list. `bound` carries the
+/// `spec/04-type-system.md` §5.9 dtype family when the binder declares one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireTypeBinder {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

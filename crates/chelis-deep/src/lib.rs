@@ -6,6 +6,7 @@
 
 pub mod ast;
 pub mod authoring;
+pub mod dtype_bounds;
 pub mod effect_kind;
 pub mod lexer;
 pub mod node;
@@ -21,6 +22,9 @@ pub mod tag;
 pub mod validate;
 
 pub use ast::{Atom, CastMode, Expr, List, MetaExpr, MetaMap, UnknownFormData, cast_mode_of};
+pub use dtype_bounds::{
+    DTYPE_BOUNDS_KEY, DtypeBoundsError, DtypeFamily, decode_dtype_bounds, encode_dtype_bounds,
+};
 pub use effect_kind::decode_effect_kind;
 pub use lexer::LiteralSuffix;
 pub use parser::{

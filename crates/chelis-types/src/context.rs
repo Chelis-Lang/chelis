@@ -309,7 +309,8 @@ mod tests {
         let live = inner.var_gen.fresh_tvar();
         inner
             .subst
-            .install_tvar_restriction(live, TypeVarRestriction::ActiveFloat);
+            .narrow_tvar_restriction(live, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
 
         let context = TypeEnv::from_inner(inner);
         let encoded = bincode::serialize(&context).expect("restricted TypeEnv serializes");

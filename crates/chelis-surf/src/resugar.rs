@@ -7,7 +7,7 @@
 //! code.
 
 use chelis_deep::ast::{Atom, Expr as DeepExpr, MetaMap};
-use chelis_deep::{DeepTag, LiteralSuffix, Span, cast_mode_of};
+use chelis_deep::{DeepTag, LiteralSuffix, Span, cast_mode_of, decode_dtype_bounds};
 use chelis_unord::UnordMap;
 use chelis_vocab::{EffectKind, EffectKindInput};
 use std::collections::BTreeMap;
@@ -15,7 +15,8 @@ use thiserror::Error;
 
 use crate::ast::{
     BinOp, Decl, EffectExpr, Expr, ImportKind, LetBinding, LetPattern, Literal, MatchArm, Param,
-    Pattern, PropertyOption, TypeExpr, TypeInvariant, UnaryOp, Variant, VariantFields,
+    Pattern, PropertyOption, TypeBinder, TypeExpr, TypeInvariant, UnaryOp, Variant,
+    VariantFields,
 };
 
 /// Failure to structurally resugar a Deep expression.
@@ -828,8 +829,13 @@ fn resugar_declaration_sequence(exprs: &[DeepExpr]) -> Result<Vec<Decl>, Resugar
                     index += 2;
                     continue;
                 }
+                // Only bounded binders are reconstructed: an unbounded name
+                // in a sig is implicitly quantified (§P4b), so listing it
+                // would add a binder list the author never wrote.
+                let type_binders = resugar_dtype_bound_binders(node.meta, &[])?;
                 declarations.push(Decl::Sig {
                     name,
+                    type_binders,
                     ty: resugar_type(&node.children[1])?,
                     effects: resugar_effect_metadata(&node.children[1])?,
                     span: node.span,
@@ -971,7 +977,7 @@ fn resugar_definition(
         let raw_params = node_ref(&function.children[0])?;
         let mut ret_ty = None;
         let mut effects = None;
-        let mut dim_params = Vec::new();
+        let mut quantifiers = Vec::new();
         if let Some(declared_type) = declared_type {
             let type_node = node_ref(declared_type)?;
             if type_node.tag != DeepTag::TFn || type_node.children.is_empty() {
@@ -1009,11 +1015,16 @@ fn resugar_definition(
             let result = resugar_type(type_node.children.last().expect("nonempty checked"))?;
             ret_ty = (!is_infer_type(&result)).then_some(result);
             effects = resugar_effect_metadata(declared_type)?;
-            collect_quantified_variables(declared_type, &mut dim_params)?;
+            collect_quantified_variables(declared_type, &mut quantifiers)?;
         }
+        // A def's bound rides on its `defsig`; the `def` node carries one only
+        // when a standalone `sig` already owns the binders, which the checker
+        // rejects (`spec/03-deep-syntax.md` §2.2).
+        let bound_source = signature.map_or(definition.meta, |signature| signature.meta);
+        let type_binders = resugar_dtype_bound_binders(bound_source, &quantifiers)?;
         return Ok(Decl::FunDef {
             name,
-            dim_params,
+            type_binders,
             params,
             ret_ty,
             effects,
@@ -1653,15 +1664,15 @@ fn validate_surface_declarations(declarations: &[Decl]) -> Result<(), ResugarErr
             }
             Decl::FunDef {
                 name,
-                dim_params,
+                type_binders,
                 params,
                 ret_ty,
                 body,
                 ..
             } => {
                 require_name(name, "function", is_lower_identifier)?;
-                for param in dim_params {
-                    require_name(param, "function-quantifier", is_value_identifier)?;
+                for binder in type_binders {
+                    require_name(&binder.name, "function-quantifier", is_value_identifier)?;
                 }
                 validate_surface_params(params)?;
                 if let Some(ty) = ret_ty {
@@ -3647,6 +3658,40 @@ fn type_name(expr: &DeepExpr) -> Option<&str> {
 
 fn is_infer_type(ty: &TypeExpr) -> bool {
     matches!(ty, TypeExpr::Infer(_))
+}
+
+/// Rebuild a declaration's binder list from its `dtype_bounds` metadata.
+///
+/// `quantifiers` are the names collected from the declared type, in
+/// first-occurrence order; every one of them appears in the result, carrying
+/// its bound when the metadata declares one. A bounded name the type never
+/// mentions is still emitted so the round trip does not silently drop an
+/// authored bound the checker is about to reject.
+fn resugar_dtype_bound_binders(
+    meta: &MetaMap,
+    quantifiers: &[String],
+) -> Result<Vec<TypeBinder>, ResugarError> {
+    let bounds = decode_dtype_bounds(meta).map_err(|_| ResugarError::InvalidChild {
+        tag: "defsig",
+        index: 1,
+        expected: "a well-formed `dtype_bounds` metadata map",
+    })?;
+    let mut binders: Vec<TypeBinder> = quantifiers
+        .iter()
+        .map(|name| TypeBinder {
+            name: name.clone(),
+            bound: bounds
+                .iter()
+                .find(|(binder, _)| binder == name)
+                .map(|(_, family)| *family),
+        })
+        .collect();
+    for (binder, family) in bounds {
+        if !binders.iter().any(|existing| existing.name == binder) {
+            binders.push(TypeBinder::bounded(binder, family));
+        }
+    }
+    Ok(binders)
 }
 
 fn collect_quantified_variables(

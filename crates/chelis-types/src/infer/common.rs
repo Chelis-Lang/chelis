@@ -860,12 +860,101 @@ pub(super) fn resolve_deep_type(
     binder_mode: BinderMode<'_>,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<Type, ErrorWitness> {
-    let ty = {
+    let (ty, _) = resolve_deep_type_with_bounds(
+        expr,
+        vg,
+        adt_reg,
+        use_site,
+        binder_mode,
+        UnordMap::new(),
+        errors,
+    )?;
+    Ok(ty)
+}
+
+/// Resolve a declaration's type expression under declared dtype-family bounds
+/// (`spec/04-type-system.md` §5.9).
+///
+/// The bounds arrive from the declaration node's `dtype_bounds` metadata and
+/// leave as `(variable, family)` pairs the caller installs on the
+/// substitution, so generalization re-quantifies them onto the scheme.
+pub(super) fn resolve_deep_type_with_bounds(
+    expr: &deep::Expr,
+    vg: &mut VarGen,
+    adt_reg: &AdtRegistry,
+    use_site: TypeUseSite,
+    binder_mode: BinderMode<'_>,
+    dtype_bounds: UnordMap<String, TypeVarRestriction>,
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<(Type, Vec<(TypeVar, TypeVarRestriction)>), ErrorWitness> {
+    let (ty, bounds) = {
         let mut resolver =
-            DeepTypeResolver::new(use_site, binder_mode, adt_reg.resolution_env(), vg, errors);
-        resolver.resolve(expr)?.into_type()
+            DeepTypeResolver::new(use_site, binder_mode, adt_reg.resolution_env(), vg, errors)
+                .with_dtype_bounds(dtype_bounds);
+        let ty = resolver.resolve(expr)?.into_type();
+        let bounds = resolver.finish_dtype_bounds()?;
+        (ty, bounds)
     };
-    Ok(resolve_type_aliases(&ty, adt_reg, vg))
+    Ok((resolve_type_aliases(&ty, adt_reg, vg), bounds))
+}
+
+/// Decode a declaration node's `dtype_bounds` metadata into checker
+/// restrictions, reporting a malformed bound rather than dropping it.
+pub(super) fn declaration_dtype_bounds(
+    meta: &deep::MetaMap,
+    declaration: &str,
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<UnordMap<String, TypeVarRestriction>, ErrorWitness> {
+    match chelis_deep::decode_dtype_bounds(meta) {
+        Ok(bounds) => Ok(bounds
+            .into_iter()
+            .map(|(binder, family)| (binder, restriction_for_family(family)))
+            .collect()),
+        Err(error) => Err(report_witness(
+            errors,
+            CheckError::new(
+                CheckErrorKind::MalformedForm,
+                format!("malformed dtype-family bound on `{declaration}`: {error}"),
+                vec![
+                    "declare each bound as `name: Float`, `name: Int`, or `name: Numeric`"
+                        .to_string(),
+                ],
+            ),
+        )),
+    }
+}
+
+/// Attach a declaration's resolved bounds to the substitution so
+/// generalization re-quantifies them onto the scheme.
+pub(super) fn install_declared_bounds(
+    bounds: &[(TypeVar, TypeVarRestriction)],
+    subst: &mut Subst,
+    declaration: &str,
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<(), ErrorWitness> {
+    for (variable, restriction) in bounds {
+        if let Err(error) = subst.narrow_tvar_restriction(*variable, *restriction) {
+            return Err(report_witness(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!("`{declaration}` declares conflicting dtype bounds: {}", error.message),
+                    vec![],
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The checker restriction for a surface dtype family. Total over the closed
+/// `spec/04-type-system.md` §5.9 family set.
+pub(super) fn restriction_for_family(family: chelis_deep::DtypeFamily) -> TypeVarRestriction {
+    match family {
+        chelis_deep::DtypeFamily::Float => TypeVarRestriction::ActiveFloat,
+        chelis_deep::DtypeFamily::Int => TypeVarRestriction::ActiveInt,
+        chelis_deep::DtypeFamily::Numeric => TypeVarRestriction::ActiveNumeric,
+    }
 }
 
 // ── Declaration collection (first pass) ──────────────────────────
@@ -1595,21 +1684,29 @@ pub(super) fn collect_declarations(
             }
         }
         DeepTag::Defsig => {
-            // (defsig {} name type_expr)
+            // (defsig {dtype_bounds?} name type_expr)
             if kids.len() >= 2
                 && let Some(name) = symbol_name(&kids[0])
             {
+                let Ok(dtype_bounds) = declaration_dtype_bounds(meta, name, errors) else {
+                    return;
+                };
                 let signature_level = subst.enter_level(vg);
-                let resolved = resolve_deep_type(
+                let resolved = resolve_deep_type_with_bounds(
                     &kids[1],
                     vg,
                     adt_reg,
                     TypeUseSite::Defsig,
                     BinderMode::ImplicitGeneric,
+                    dtype_bounds,
                     errors,
                 );
+                let installed = match &resolved {
+                    Ok((_, bounds)) => install_declared_bounds(bounds, subst, name, errors),
+                    Err(_) => Ok(()),
+                };
                 subst.leave_level(signature_level, vg);
-                if let Ok(ty) = resolved {
+                if let (Ok((ty, _)), Ok(())) = (resolved, installed) {
                     let scheme = env.generalize(&ty, subst);
                     env.bind(name.to_string(), scheme);
                 }
@@ -1686,6 +1783,28 @@ pub(super) fn collect_declarations(
                         aliased_ty.into_type(),
                     );
                 }
+            }
+        }
+        DeepTag::Def => {
+            // `spec/03-deep-syntax.md` §2.2: a declaration's signature owns
+            // its binders, so a dtype-family bound on a `def` is an error
+            // rather than a second, silently-preferred source of truth. Surf
+            // routes a `def [..]` bound here only when a standalone `sig`
+            // already declares the name; without one the desugarer emits the
+            // bound on the synthesized `defsig` instead.
+            if let Some(name) = kids.first().and_then(symbol_name)
+                && meta
+                    .entries
+                    .iter()
+                    .any(|(key, _)| key == chelis_deep::DTYPE_BOUNDS_KEY)
+            {
+                errors.push(CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    format!(
+                        "`{name}` declares a dtype-family bound on its `def`, but its `sig` owns the declaration's binders"
+                    ),
+                    vec![format!("move the bound to `sig {name}[..]`")],
+                ));
             }
         }
         _ => {}

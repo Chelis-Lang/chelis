@@ -1,7 +1,7 @@
 use crate::ast::*;
 use crate::lexer::{self, LexError};
 use crate::token::{Token, TokenKind};
-use chelis_deep::Span;
+use chelis_deep::{DtypeFamily, Span};
 use chelis_unord::UnordSet;
 use thiserror::Error;
 
@@ -828,6 +828,59 @@ impl Parser {
         Ok(names)
     }
 
+    /// Parse a declaration's `[..]` binder list (`spec/02-surf-syntax.md`
+    /// §P4b/§P4c). Shared by `def` and `sig`; a `type` declaration's
+    /// parameter list keeps [`Self::parse_name_bracket_list`], which has no
+    /// bound production.
+    fn parse_type_binder_list(&mut self) -> Result<Vec<TypeBinder>, ParseError> {
+        let start = self.expect(&TokenKind::LBracket)?.span;
+        let mut binders: Vec<TypeBinder> = Vec::new();
+        if *self.peek() != TokenKind::RBracket {
+            loop {
+                binders.push(self.parse_type_binder()?);
+                if *self.peek() != TokenKind::Comma {
+                    break;
+                }
+                self.advance();
+                if self.comma_terminates_list(&TokenKind::RBracket, binders.len(), false)? {
+                    break;
+                }
+            }
+        }
+        self.expect(&TokenKind::RBracket)?;
+        if binders.is_empty() && self.mode == ParseMode::Canonical {
+            return Err(ParseError::Expected {
+                expected: "omit empty `[]`".into(),
+                found: "empty parameter list".into(),
+                offset: start.offset,
+            });
+        }
+        Ok(binders)
+    }
+
+    /// One binder: `name`, or `name: Family` for a dtype-family bound.
+    ///
+    /// The bound position admits only the three closed family names, so an
+    /// ADT name written there is a parse error rather than a silently
+    /// accepted bound.
+    fn parse_type_binder(&mut self) -> Result<TypeBinder, ParseError> {
+        let (name, _) = self.expect_ident_or_type_ident()?;
+        if *self.peek() != TokenKind::Colon {
+            return Ok(TypeBinder::unbounded(name));
+        }
+        self.advance();
+        let offset = self.current_offset();
+        let (family, _) = self.expect_ident_or_type_ident()?;
+        match DtypeFamily::from_surf_name(&family) {
+            Some(family) => Ok(TypeBinder::bounded(name, family)),
+            None => Err(ParseError::Expected {
+                expected: "a dtype family `Float`, `Int`, or `Numeric`".into(),
+                found: family,
+                offset,
+            }),
+        }
+    }
+
     // ---------------------------------------------------------------------------
     // Top-level
     // ---------------------------------------------------------------------------
@@ -1221,9 +1274,9 @@ impl Parser {
         let start = self.advance().span; // consume Def
         let (name, _) = self.expect_ident()?;
 
-        // Optional dimension parameters: def f[a, b](...)
-        let dim_params = if *self.peek() == TokenKind::LBracket {
-            self.parse_name_bracket_list()?
+        // Optional binder list: def f[a, b](...) / def f[p: Float](...)
+        let type_binders = if *self.peek() == TokenKind::LBracket {
+            self.parse_type_binder_list()?
         } else {
             Vec::new()
         };
@@ -1276,7 +1329,7 @@ impl Parser {
 
         Ok(Decl::FunDef {
             name,
-            dim_params,
+            type_binders,
             params,
             ret_ty,
             effects,
@@ -1293,6 +1346,13 @@ impl Parser {
             return Err(err);
         }
         let (name, _) = self.expect_ident()?;
+        // Optional binder list: sig f[p: Float]: ... (§P4c). It sits in the
+        // same position it occupies on a `def`, immediately after the name.
+        let type_binders = if *self.peek() == TokenKind::LBracket {
+            self.parse_type_binder_list()?
+        } else {
+            Vec::new()
+        };
         self.expect(&TokenKind::Colon)?;
         let ty = self.parse_type()?;
         let effects = self.parse_optional_effects()?;
@@ -1304,6 +1364,7 @@ impl Parser {
         let span = start.merge(end);
         Ok(Decl::Sig {
             name,
+            type_binders,
             ty,
             effects,
             span,

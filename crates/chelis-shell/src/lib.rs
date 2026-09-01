@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 pub const SHELL_MAGIC: &[u8; 8] = b"CHELCHB\0";
-pub const SHELL_FORMAT_VERSION: u32 = 2;
+pub const SHELL_FORMAT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellPackage {
@@ -51,10 +51,18 @@ pub struct TypeVariableRestriction {
     pub domain: TypeVariableDomain,
 }
 
+/// The `spec/04-type-system.md` §5.9 dtype families, as a published package
+/// records a quantified variable's bound. The set is closed: a new family is
+/// a numbered-spec change, and adding one is a shell format version bump.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TypeVariableDomain {
+    /// §5.9 `Float`.
     ActiveFloat,
+    /// §5.9 `Int`.
+    ActiveInt,
+    /// §5.9 `Numeric`.
+    ActiveNumeric,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

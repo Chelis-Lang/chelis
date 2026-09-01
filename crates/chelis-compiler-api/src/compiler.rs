@@ -5149,7 +5149,7 @@ fn wire_decl(decl: &Decl) -> WireSurfDecl {
         },
         Decl::FunDef {
             name,
-            dim_params,
+            type_binders,
             params,
             ret_ty,
             body,
@@ -5157,7 +5157,13 @@ fn wire_decl(decl: &Decl) -> WireSurfDecl {
             ..
         } => WireSurfDecl::FunDef {
             name: name.clone(),
-            dim_params: dim_params.clone(),
+            type_binders: type_binders
+                .iter()
+                .map(|binder| crate::schema::WireTypeBinder {
+                    name: binder.name.clone(),
+                    bound: binder.bound.map(|family| family.surf_name().to_string()),
+                })
+                .collect(),
             params: params.iter().map(wire_param).collect(),
             ret_ty: ret_ty.as_ref().map(wire_type_expr),
             body: wire_expr(body),

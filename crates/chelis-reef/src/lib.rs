@@ -8142,6 +8142,8 @@ fn canonical_shell_scheme(
         })?;
         let domain = match restriction {
             TypeVarRestriction::ActiveFloat => TypeVariableDomain::ActiveFloat,
+            TypeVarRestriction::ActiveInt => TypeVariableDomain::ActiveInt,
+            TypeVarRestriction::ActiveNumeric => TypeVariableDomain::ActiveNumeric,
         };
         restrictions.push((
             canonical.0,
@@ -8796,7 +8798,7 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
     match decl {
         Decl::FunDef {
             name,
-            dim_params,
+            type_binders,
             params,
             ret_ty,
             effects,
@@ -8819,7 +8821,7 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
             let body = rewrite_expr(body, resolver, &mut locals);
             Decl::FunDef {
                 name: internal_name(package, module, name),
-                dim_params: dim_params.clone(),
+                type_binders: type_binders.clone(),
                 params: params
                     .iter()
                     .map(|param| rewrite_param(param, resolver))
@@ -8873,11 +8875,13 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
         }
         Decl::Sig {
             name,
+            type_binders,
             ty,
             effects,
             span,
         } => Decl::Sig {
             name: internal_name(package, module, name),
+            type_binders: type_binders.clone(),
             ty: rewrite_type(ty, resolver),
             effects: effects.clone(),
             span: *span,
@@ -8942,7 +8946,7 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
     match decl {
         Decl::FunDef {
             name,
-            dim_params,
+            type_binders,
             params,
             ret_ty,
             effects,
@@ -8956,7 +8960,7 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
             let body = rewrite_expr(body, resolver, &mut locals);
             Decl::FunDef {
                 name: name.clone(),
-                dim_params: dim_params.clone(),
+                type_binders: type_binders.clone(),
                 params: params
                     .iter()
                     .map(|param| rewrite_param(param, resolver))
@@ -9010,11 +9014,13 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
         }
         Decl::Sig {
             name,
+            type_binders,
             ty,
             effects,
             span,
         } => Decl::Sig {
             name: name.clone(),
+            type_binders: type_binders.clone(),
             ty: rewrite_type(ty, resolver),
             effects: effects.clone(),
             span: *span,
@@ -9707,7 +9713,7 @@ mod tests {
         let span = Span::new(0, 0);
         let fun = Decl::FunDef {
             name: "pkg__a__B__c".to_string(),
-            dim_params: vec![],
+            type_binders: vec![],
             params: vec![],
             ret_ty: None,
             effects: None,

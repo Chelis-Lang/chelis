@@ -324,12 +324,15 @@ fn trusted_quantile_symbols(decls: &[Decl]) -> Vec<String> {
         .filter_map(|decl| match decl {
             Decl::FunDef {
                 name,
-                dim_params,
+                type_binders,
                 params,
                 ret_ty,
                 ..
             } if name == LINKED_NAUTILUS_QUANTILE
-                && dim_params.as_slice() == ["n"]
+                && type_binders
+                    .iter()
+                    .map(|binder| (binder.name.as_str(), binder.bound))
+                    .eq([("n", None)])
                 && params.len() == 2
                 && matches!(
                     params[0].ty.as_ref(),
@@ -1971,7 +1974,7 @@ mod tests {
     fn fun_def(name: &str, params: &[&str], body: Expr) -> Decl {
         Decl::FunDef {
             name: name.to_string(),
-            dim_params: Vec::new(),
+            type_binders: Vec::new(),
             params: params.iter().map(|p| param(p)).collect(),
             ret_ty: None,
             effects: None,
