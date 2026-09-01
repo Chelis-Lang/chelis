@@ -359,6 +359,20 @@ transformation builder, which remints output keys and records contributors.
 The migration removes `Clone`/`Deserialize` from identity-bearing node carriers
 even if raw AST values retain them inside untrusted or pre-seal modules.
 
+The Surf tree is syntax-faithful: the parser does not expand sugar into hidden
+lambdas, parameters, variables, or other helpers. Bare `realize`, bare `copy`,
+and one-argument pipe `cast` are represented by explicit closed
+`SurfSugarKind` variants carrying their exact token sites; the same rule covers
+any later sugar. Parsed ordinary nodes require a private grammar-production
+witness for their spelling (`fn` for a lambda, a binding token for a variable,
+and so on), so a sugar action cannot manufacture an ordinary parsed node by
+copying the sugar token's site. `TransformContext<SurfDesugar>` is the only
+owner of sugar expansion. It converts the explicit sugar occurrence into Deep
+helpers with `NodeOrigin::Synthesized` and the sugar site as contributor, while
+an explicitly written lambda/parameter/variable remains `Parsed`. Adding a
+Surf sugar variant makes the generated traversal and exhaustive desugar match
+fail to compile until both attribution polarities are supplied.
+
 - `SourceUnitId` identifies one immutable input snapshot, not a logical module
   across edits. Its normative derivation binds a versioned domain, the exact
   source bytes, and a typed logical-input identity supplied by the registered
@@ -557,7 +571,8 @@ typed edges:
   promotion, and digest comparison before returning a value.
 
 Closed enums/exhaustive dispatch own the implementation sets for roles,
-passes, builders, and caches. Adding a variant without its schema,
+external ingress kinds, passes, builders, and caches. Adding a variant without
+its schema,
 configuration encoder, identity builder, and both test polarities is a compile
 failure. A hand-edited manifest cannot bless a row, and S7.0 does not copy
 those private rows into the normative spec. Only a stable token that appears
@@ -574,46 +589,80 @@ distinct from its display label. Multi-buffer requests keep every field
 distinct, batch identities bind the element and field, and no public adapter
 can recover a raw parser or construct a sourced tree from `Vec<Expr>`.
 
-Closure against future bypass exports is mechanically derived, not asserted by
-a fixed fixture. A Python S7 API-surface guard derives every workspace Rust
-library target from `cargo metadata --workspace`, generates rustdoc JSON for
-all of them, resolves aliases and generic/result wrappers, and classifies
-signatures by type shape rather than item name. Raw input is classified
-independently of raw output: any public callable whose result contains a raw or
-sourced Surf/Deep program or a qualified Surf/Deep parse failure must take
-`SourceInput<R>`, never `&str`, `String`, `Cow<str>`, `&[u8]`, `Vec<u8>`,
-`Box<[u8]>`, or an alias of those closed raw carrier families. Thus both
-`fn parse(&str) -> Vec<surf::Decl>` and
-`fn parse(&str) -> SourcedSurfProgram` fail.
+External reachability is explicit rather than inferred from Rust visibility.
+One private sealed `ExternalSourceIngress` registry owns every source-processing
+entry: exported Rust functions, CLI commands, PyO3 functions/methods, HTTP
+routes, MCP tools, LSP buffers, Reef composition, C/other FFI, and batch/edit
+request fields. Each row binds an `ExternalIngressKind`, typed request/input
+role, logical-instance derivation, and generated framework wrapper. The wrapper
+receives a `RegisteredIngress<E>` capability and is the only code outside
+`chelis-source` that can obtain `IngressContext<R>`. Raw handler functions,
+manual `wrap_pyfunction!`, manual router/tool registration, and handwritten
+CLI dispatch cannot mint that capability. Existing private PyO3 functions and
+private Axum/MCP handlers migrate through the registry in Slice 1; Rust
+`pub`/private visibility does not affect whether they are external roots.
 
-The same guard rejects any semantic consumer that accepts raw AST instead of a
-sourced carrier, any public constructor/decoder for identity-bearing parts,
-and any cache decoder that returns facts without a sourced carrier. These
-closed rules classify the complete cargo-derived public universe in the same
-run; there is no crate list, expected-row baseline, or editable allowlist. A
-new public parser, adapter, AST consumer, or identity constructor therefore
-fails the guard even when no role/pass/cache enum was edited.
+The registry is configuration-invariant. A row, generated wrapper, framework
+registration, or path from an external root to `ParserLease`/
+`IngressContext::issue` may not be controlled by Cargo features, target cfg,
+`cfg!`, or conditional macro expansion. Platform availability is a typed value
+in the always-present row and fails explicitly at runtime; it never removes the
+entry from the census. A new external framework kind adds a closed
+`ExternalIngressKind` variant, generator arm, registration enumerator, and
+positive/negative mutation in the same change or cannot receive an ingress
+capability.
 
-A second, body-aware leg derives the reverse Rust call graph from the same
-cargo-metadata universe. Its typed roots are the private `ParserLease` consumer
-and sealed `IngressContext::issue` methods, not function-name patterns. Every
-public ancestor that can reach either root must accept `SourceInput<R>` or a
-registered request/file/buffer carrier whose type contains the required
-logical-instance identity; a direct raw text/byte parameter is forbidden even
-when the callable returns only a score, diagnostic, or other non-AST result.
-This is the mechanically derived check for `run_source`, `prepare_source`, and
-prove/MCP-style adapters that the result-shape leg cannot identify. Adding a
-new caller changes the reverse graph in the same build and cannot be hidden by
-leaving a manifest row unchanged.
+Closure is proved by a Python S7 external-surface guard with three derived
+legs:
+
+1. Run `cargo metadata --no-deps --format-version 1` at the workspace root and
+   enumerate every package and every library, binary, `cdylib`, `staticlib`,
+   and other shipping Rust target, including each target's declared
+   `required-features`; there is no crate/target list in the guard.
+2. Generate private-item rustdoc JSON for each applicable target with the
+   repository's already working stable-toolchain mechanism:
+   `RUSTC_BOOTSTRAP=1 cargo rustdoc -p <package> <target-selector>
+   --output-format json -Z unstable-options -- --document-private-items`.
+   Resolve aliases and generic/result wrappers. Any Rust-callable parse result
+   (raw/sourced Surf/Deep or qualified parse failure) requires
+   `SourceInput<R>`, independently of the result's rawness; semantic consumers
+   require sourced AST; identity constructors and fact-returning cache decoders
+   remain sealed.
+3. Use compiler-expanded HIR/MIR plus source-level registration syntax from
+   those same Cargo targets to enumerate all `ExternalSourceIngress` rows,
+   generated Rust/CLI/PyO3/Axum/MCP/FFI wrappers, private callback edges, and
+   reverse paths to `ParserLease` or `IngressContext::issue`. Every reachable
+   root must be generated from exactly one registry row; every row must resolve
+   to exactly one framework registration for its kind. Direct registrations,
+   indirect function-pointer/trait-object callbacks without a typed wrapper,
+   duplicate or missing rows, and any `cfg` on a row/registration/path fail
+   closed. The source-level leg examines items before cfg stripping, so an
+   inactive feature/target branch containing a source/AST/parse signature,
+   ingress capability, or framework-registration macro is rejected rather
+   than omitted from the active rustdoc graph.
+
+The committed guard command is
+`.venv/bin/python scripts/source_ingress_surface.py`; its only successful final
+line is `SOURCE INGRESS SURFACE: PASS`. The script owns the target-selector
+expansion and uses a task-local Cargo target directory, so reviewers do not
+have to substitute placeholders or invoke unstable rustdoc directly.
+
+Thus `fn parse(&str) -> Vec<surf::Decl>`,
+`fn parse(&str) -> SourcedSurfProgram`, a private `#[pyfunction]` over `&str`,
+a private Axum handler registered with `post(handler)`, and a CLI branch that
+passes raw text to the parser all fail for distinct executable reasons. There
+is no expected-row baseline or editable allowlist: the typed registry is the
+construction authority, while the Cargo/rustdoc/HIR registration census proves
+that external code neither bypasses nor leaves it dead.
 
 Compile-fail controls reject public construction/recombination of identity
 parts and an unregistered pass/builder/cache; the derived API-surface guard,
-rather than a hand-maintained compile-fail example, proves that no raw public
-parser or AST-consuming semantic edge exists. Runtime mutation controls reject
-duplicate keys, a key moved to another structural occurrence, forged or
-swapped origins/contributors even after every stored digest is recomputed, an
-unresolved evidence root, and a cache whose source, semantic, recipe,
-assignment, or format digest changed.
+rather than a hand-maintained compile-fail example, proves that no raw Rust or
+framework-registered parser/adapter or AST-consuming semantic edge exists.
+Runtime mutation controls reject duplicate keys, a key moved to another
+structural occurrence, forged or swapped origins/contributors even after every
+stored digest is recomputed, an unresolved evidence root, and a cache whose
+source, semantic, recipe, assignment, or format digest changed.
 
 No fallback reparses `surf:<start>..<end>`, uses `Expr::span().offset` as an
 identity, or treats `Span::new(0, 0)` as both a real location and a missing
@@ -783,21 +832,26 @@ as commits but cannot merge independently.
    raw-ingress compile-fail tests. Add the dependency-leaf `chelis-source`
    crate for opaque `SourceUnitId`, `LocalNodeId`, `NodeKey`, `SourceSite`,
    `NodeOrigin`, `NodeRef`, `DiagnosticSourceRef`, and sealed
-   role/pass/builder/cache descriptors. Define `SourcedSurfProgram` in
-   `chelis-surf` and `SourcedDeepProgram` in `chelis-deep`; neither AST crate
-   depends on the other in the wrong direction. Define the generated
+   role/external-ingress/pass/builder/cache descriptors. Define
+   `SourcedSurfProgram` in `chelis-surf` and `SourcedDeepProgram` in
+   `chelis-deep`; neither AST crate depends on the other in the wrong
+   direction. Define the generated
    `IdentityStructure` traversal/path grammar, independently reconstructible
-   issuance recipes, and rustdoc-derived public API-surface guard before
-   migration begins. In the same atomic landing change, make every Surf and
-   Deep parser plus every public adapter require `SourceInput<R>`, return the
-   appropriate sourced success or qualified parser error, and thread the
-   issued sites through every Surf declaration, expression, pattern, type, and
-   desugaring helper. Formatting and LSP indexing consume
+   issuance recipes, sealed external-ingress registry, and Cargo/rustdoc/HIR
+   surface guard before migration begins. In the same atomic landing change,
+   preserve parser sugar as explicit `SurfSugarKind` variants; move bare
+   `realize`, bare `copy`, and one-argument pipe `cast` expansion into
+   `TransformContext<SurfDesugar>`. Make every Surf and Deep parser plus every
+   Rust/CLI/PyO3/HTTP/MCP/LSP/Reef/FFI adapter require `SourceInput<R>` or a
+   registry-generated typed request wrapper, return the appropriate sourced
+   success or qualified parser error, and thread the issued sites through every
+   Surf declaration, expression, pattern, type, and desugaring helper.
+   Formatting and LSP indexing consume
    `SourcedSurfProgram`; `TransformContext<SurfDesugar>` is the sole edge to
    `SourcedDeepProgram`; checking and lowering accept only the Deep carrier.
-   No intermediate public parser may accept raw text or return an
-   identity-free parsed tree, and a private `ParserLease` prevents internal
-   adapter bypass.
+   No Rust-public or framework-registered parser may accept raw text or return
+   an identity-free parsed tree; private `ParserLease` plus
+   `RegisteredIngress<E>` prevent internal and private-callback bypass.
    Source-less construction requires `SourceLessContext<B>`; subtree
    clone/splice requires `TransformContext<P>` and remints keys. Lock exact
    nested ranges, the attribution table, source-evidence reconstruction,
@@ -858,16 +912,20 @@ Each slice includes positive/negative parity. Required counterexamples are:
   Surf ledger-bijection oracle proves every path has a site and no pre-desugar
   `NodeKey`, while the Deep oracle proves every identity-bearing path has
   exactly one key/origin row;
+- bare `realize`, bare `copy`, and one-argument pipe `cast` remain explicit
+  `SurfSugarKind` occurrences through parsing/formatting/LSP; their generated
+  Deep lambdas/parameters/variables are `Synthesized` with the sugar site as
+  contributor, while source-written explicit-lambda twins remain `Parsed`;
 - a Surf or Deep parse error before AST construction carries a qualified
   source range and no node key;
 - every sealed `SourceInput<R>` role has a successful parse and parse-before-
   node failure; multi-buffer and batch fields remain distinct; private-module
-  tests cannot obtain `ParserLease`; and a rustdoc-JSON mutation that adds a
-  raw-input public parser returning raw Surf/Deep, `SourcedSurfProgram`,
-  `SourcedDeepProgram`, or a qualified parse failure is rejected for both text
-  and byte carriers; mutations adding raw public `run_source`, `prepare_source`,
-  prove/MCP edges, raw AST semantic consumers, or identity constructors are
-  likewise discovered without editing a crate list or expected manifest;
+  tests cannot obtain `ParserLease` or `RegisteredIngress<E>`; and mutations
+  adding a raw-input Rust-public parser, private `#[pyfunction]`, private Axum
+  handler, MCP callback, CLI branch, or FFI wrapper are rejected for both text
+  and byte carriers. Feature/target-gating a registry row, wrapper,
+  registration, or parser path also rejects; all targets and external roots
+  are discovered without editing a crate list or expected manifest;
 - parser-only, parsed-node, synthesized-node, and unavailable-node diagnostics
   preserve the typed identity distinctions through the compiler API and
   resolve every referenced unit; #886 separately locks their exact JSON
@@ -896,10 +954,11 @@ Each slice includes positive/negative parity. Required counterexamples are:
   disagreeing facts reject, while intentionally materializing the same input
   twice requires a composition transform that remints output keys;
 - every sealed pass/builder changes identity when an output-affecting
-  invocation option changes; adding a pass, builder, input role, or cache
-  without its required trait members or exhaustive dispatch is a compile
-  failure, and deleting a public serialized-token registry row makes the
-  generated-source guard fail;
+  invocation option changes; adding a pass, builder, input role, external
+  ingress kind, or cache without its required trait members, generator,
+  registration enumerator, or exhaustive dispatch is a compile failure, and
+  deleting a public serialized-token registry row makes the generated-source
+  guard fail;
 - deleting a source qualifier, restoring `HashMap<usize, usize>`, or replacing
   synthesized origin with `Span::new(0, 0)` makes the suite red.
 
@@ -913,7 +972,7 @@ The named suite exercises Surf parse → Deep desugar → check/linearity →
 lowering → diagnostic and generated-source output for every counterexample
 above and invokes the construction-privacy, ledger-bijection, sealed-edge, and
 cache-freshness mutation oracles, including the generated path traversal and
-rustdoc-derived public API-surface guards. #886's §04/§09 wire suite is an
+Cargo/rustdoc/HIR external-surface guards. #886's §04/§09 wire suite is an
 explicit integration prerequisite for source-bearing machine output but does
 not replace #1172's identity oracle. Supporting crate tests do not replace
 this end-to-end oracle.
@@ -921,14 +980,15 @@ this end-to-end oracle.
 🔴 **Red-team gate after S7.** A fresh local subagent executes the oracle,
   plants the qualified-key, changed-snapshot, fabricated-parser-node,
   duplicate/recombined-key, swapped-assignment, redigested-origin,
-  same-unit-diamond, raw-API-export, and Surf-carrier-bypass regressions named
-  above, and tries to bypass every sealed input/pass/builder/cache edge with an
-  unqualified source path or unbound output-affecting option.
+  same-unit-diamond, parser-sugar-twin, private-framework-callback,
+  cfg-hidden-ingress, raw-API-export, and Surf-carrier-bypass regressions named
+  above, and tries to bypass every sealed ingress/input/pass/builder/cache edge
+  with an unqualified source path or unbound output-affecting option.
 S7 is not complete while any entry point can construct a parsed program
-without a source unit, any public value can recombine identity components, any
-cache can expose facts before independent evidence reconstruction, any Surf
-consumer must discard its sourced carrier, or any semantic map remains
-offset-keyed.
+without a source unit, any externally registered root bypasses the typed
+registry, any public value can recombine identity components, any cache can
+expose facts before independent evidence reconstruction, any Surf consumer
+must discard its sourced carrier, or any semantic map remains offset-keyed.
 
 ## 4. Canary verification
 
