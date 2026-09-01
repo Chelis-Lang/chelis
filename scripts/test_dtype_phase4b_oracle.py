@@ -3864,6 +3864,37 @@ class ContractValidationTests(unittest.TestCase):
             "unbounded binder stays a general type variable"
         )
 
+    def test_deep_grammar_must_derive_a_map_valued_metadata_key(self) -> None:
+        # The chapter's own PEG has to derive the Deep the language emits.
+        # `chelis validate --deep` is the second implementation of exactly
+        # this production, and it rejected every migrated stdlib module while
+        # `MetaValue` had no nested-`Meta` alternative.
+        self.replace(
+            Path("spec/03-deep-syntax.md"),
+            "MetaValue   \u2190 Meta / Node / Literal / Identifier / TypeName",
+            "MetaValue   \u2190 Node / Literal / Identifier / TypeName",
+        )
+        self.assert_contract_fails(
+            "Deep grammar derives a map-valued metadata key"
+        )
+
+    def test_stdlib_bound_obligation_cannot_cite_the_operation_class_table(
+        self,
+    ) -> None:
+        # §5.4's rows are operation classes, not signatures. Citing it would
+        # make `arange`'s `Int` bound optional and `assert_close`'s `Float`
+        # bound wrong, contradicting [05-OP-35].
+        self.replace(
+            Path("spec/04-type-system.md"),
+            "A public stdlib signature whose `[05-OP-35]` registry domain is "
+            "exactly one of\nthese families declares that family as a bound.",
+            "A public stdlib signature whose §5.4 row admits exactly one "
+            "family declares\nthat family as a bound.",
+        )
+        self.assert_contract_fails(
+            "stdlib bound obligation cites the registry domain"
+        )
+
     def test_numeric_family_is_the_union_of_float_and_int(self) -> None:
         self.replace(
             Path("spec/04-type-system.md"),

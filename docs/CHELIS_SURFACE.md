@@ -482,9 +482,14 @@ build also rejects runtime-symbolic windowed axes and bf16/f16 (cast to f32 firs
   reductions (`sum`/`mean`) — see [`spec/design/rank_polymorphism.md`](../spec/design/rank_polymorphism.md); owning issue chelis#258. Body discipline limits which builtins are admissible (`shape_class` in `builtins.rs`).
 - **Dtype-family bounds** ([04-DTYPE-2], §5.9): a binder in a `def` or `sig`
   `[...]` clause may declare `Float`, `Int`, or `Numeric`, restricting the dtypes
-  it instantiates at. The bound lives on the scheme, so it survives aliases,
-  wrappers, higher-order values, and imports; two bounded variables that unify
-  keep the intersection of their families. An unbounded binder is still a general
+  it instantiates at. Every stdlib signature whose [05-OP-35] domain is one
+  family now declares it, so `Std.Tensor.Construct`, `Std.Scalar`, `Std.Sort`,
+  `Std.Test`, `Std.Contracts`, and the `Std.Init.*` modules all narrow: each
+  rejects the families its domain excludes, and a `Numeric` bound additionally
+  rejects `bool`, which the previously unbounded binders accepted.
+  The bound lives on the scheme, so it survives aliases, wrappers,
+  higher-order values, and imports; two bounded variables that unify keep the
+  intersection of their families. An unbounded binder is still a general
   type variable, not a dtype variable.
 
 ---

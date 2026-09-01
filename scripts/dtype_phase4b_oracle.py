@@ -55,10 +55,10 @@ FROZEN_FILE_DIGESTS = {
         "5552e1e7d63da4ca59fc5f69e7555877474e50d92f616c05e989b172c5e63cbb"
     ),
     "spec/03-deep-syntax.md": (
-        "27de7e4cbaa10b6fefd4600f8dea6b481aea456f07e9d0e6b5e459cf68590cf5"
+        "e072d61a7492e26ede48691f38ea15d8d138a4a8f5ae4566a5a26894241d210a"
     ),
     "spec/04-type-system.md": (
-        "9d549e4bd51ba388b3a299bd9290668eab5210e1f550a212f5d3558b9135b131"
+        "b8e504c9980b4ac1556fc918449ca2c636d28bfb3fd2b82bdcce083fb7b23a23"
     ),
     "spec/05-risc-primitives.md": (
         "e427fa744b313a3a8a7cad99e1ca92ed7df8e57db459bf53a499edb098dca86a"
@@ -79,7 +79,7 @@ FROZEN_FILE_DIGESTS = {
         "4a6013c2dc5a074d19ae12696c109a35218facfdb423d29ff07cef79fe6689b9"
     ),
     "spec/design/dtype_semantics.md": (
-        "c31b56bff446ce4a562431e37e70a0128c2ff8d9c8699dbc6ad35b7833b96adb"
+        "fda55c86b7333e54febc2e599479d3f3ba3db3cb722ecce7cf385c9bf3af1e5e"
     ),
     "spec/design/implicit_linearity.md": (
         "f03302f4b328841d79824f6326f1edf2e954a9b98c0118992d4a3a1f2dfb67cf"
@@ -496,7 +496,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/remediation_roadmap.md",
         "| **v0.19.0 - grounded dtype storage break",
         "| **v0.20.0 - behavior-preserving permanent guards**",
-        "ea3f2741a9f9473d0d5e059b9d0c8bcb6454fe299734afe64ce2cfa5b9eb06eb",
+        "ec37b8cab3f013cdc17f9c792291922b0bfbdebf5b2fa48a44bb8ba2aad2f516",
     ),
     "status dtype row": (
         "docs/investigations/remediation_status_2026_08_04.md",
@@ -812,6 +812,10 @@ def validate_normative_contract(
                 "`defsig`'s binders; see §2.2 |",
                 "Deep dtype-family bound metadata key",
             ),
+            (
+                "MetaValue   \u2190 Meta / Node / Literal / Identifier / TypeName",
+                "Deep grammar derives a map-valued metadata key",
+            ),
         ),
         violations,
     )
@@ -847,6 +851,11 @@ def validate_normative_contract(
             (
                 "| `Numeric` | the union of `Float` and `Int` |",
                 "dtype-family membership table",
+            ),
+            (
+                "A public stdlib signature whose `[05-OP-35]` registry domain "
+                "is exactly one of\nthese families declares that family as a bound.",
+                "stdlib bound obligation cites the registry domain",
             ),
         ),
         violations,

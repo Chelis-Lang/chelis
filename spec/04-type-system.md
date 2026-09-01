@@ -2048,10 +2048,11 @@ that declaration, and a bound written in the same declaration's `def` binder
 list is a declaration error. A `def` with no standalone signature carries its
 bounds in its own binder list.
 
-A public stdlib signature whose §5.4 row admits exactly one family declares
-that family as a bound. `spec/05-risc-primitives.md` writes the same domains as
-the signature-table metavariables `p_float`, `p_int`, and `p_numeric`; each of
-those metavariables denotes the family of the same name.
+A public stdlib signature whose `[05-OP-35]` registry domain is exactly one of
+these families declares that family as a bound. That registry writes its domains
+as the signature-table metavariables `p_float`, `p_int`, and `p_numeric`, and
+each denotes the family of the same name; a signature whose domain is some other
+set, such as every active tensor element dtype, declares no bound.
 
 The surface spelling of a binder list is `spec/02-surf-syntax.md` §P4b and of
 a bound is its §P4c; the Deep encoding is `spec/03-deep-syntax.md` §1.1.
