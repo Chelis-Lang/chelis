@@ -1,137 +1,163 @@
 #!/usr/bin/env python3
-"""Authoritative executable oracle for chelis#893 runtime representation phases.
+"""The chelis#893 runtime-representation Phase 0 acceptance oracle.
 
-Phase 0 freezes a source-derived inventory, proves that its transition debt can
-only shrink, runs controlled detector mutations, and executes the parser
-contract, release reproducers, and landed positive receipts. Later phases
-extend this same runner.
+Phase 0 changes no representation, allocation, descriptor, field privacy, or
+kernel behavior. It proves three things and nothing more:
+
+1. every representation seam named by `spec/design/runtime_representation.md`
+   section C6 is enumerated and frozen, so later phases can prove they only
+   deleted debt;
+2. the live defects those phases repair have executable reproducers that must
+   invert rather than be deleted; and
+3. a new unlisted seam is detected.
+
+# The universe is a file list, not a language
+
+The inventory's completeness claim is over `INVENTORY_SOURCES`: an explicit,
+reviewed list of the repository files that can carry a representation seam.
+Fifty-one are Rust and four are plain C headers. A completeness claim stated
+over a *language* instead cannot be discharged, because a reviewer can always
+name one more construct; stated over a file list it is decidable, and
+`_assert_source_list_current` proves the list still equals the tracked contents
+of its roots, so a new file fails until someone registers it.
+
+Rust is read with `syn`, a total parser for the language. The four C headers
+are read with the numeric capacity census's own token vocabulary
+(`tests/support/c_lexical.rs`), which keeps one C classifier in the repository
+rather than two.
+
+# Identity is the owning declaration
+
+A row is `kind|path|owner`. Reformatting a literal inside a function does not
+move the freeze; adding a function, field, or dtype variant that carries a seam
+does. That is the granularity Phases 3 and 4 delete at, and it is what keeps a
+755-row emitter file from needing a freeze adjudication on every edit.
 """
 
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
-from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager
-from dataclasses import dataclass
-from functools import cache
 import hashlib
 import inspect
 import json
-import os
-from pathlib import Path, PurePosixPath
-import re
 import subprocess
-
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory.json"
-DESIGN_PATH = REPO_ROOT / "spec/design/runtime_representation.md"
-DIRECT_ACCESS_MUTATION_SOURCE = Path("crates/chelis-runtime/src/decimal_parse.rs")
-DTYPE_MUTATION_SOURCE = Path("crates/chelis-vocab/src/lib.rs")
 
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "4620053a9f28c7cb32e6622bb5b35bebb4260fc2da17a13a2d8da1e702cad689"
+FREEZE_SHA256 = "168ca0af7e92710a2fc40b9ab4ad96acc3dccfc00b6e6ef1cc333dea42c13413"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
 )
 
-SOURCE_SUFFIXES = {
-    ".c",
-    ".cc",
-    ".cpp",
-    ".cu",
-    ".cuh",
-    ".cxx",
-    ".h",
-    ".h++",
-    ".hh",
-    ".hip",
-    ".hpp",
-    ".hxx",
-    ".m",
-    ".metal",
-    ".mm",
-    ".rs",
-}
-SOURCE_PREFIXES = (
-    "crates/chelis-runtime/src/",
-    "crates/chelis-runtime/include/",
-    "crates/chelis-vocab/src/",
-    "crates/chelis-ir/src/",
-    "crates/chelis-python/src/",
-)
-BACKEND_SOURCE_RE = re.compile(
-    r"^crates/chelis-backend-[^/]+/(?:src|runtime|include)/"
+# The roots whose tracked contents the frozen source list must equal. Keeping
+# the roots beside the list is what makes the list checkable rather than
+# aspirational.
+INVENTORY_ROOTS = (
+    "crates/chelis-runtime/src/*.rs",
+    "crates/chelis-runtime/include/*.h",
+    "crates/chelis-vocab/src/*.rs",
+    "crates/chelis-ir/src/*.rs",
+    "crates/chelis-python/src/*.rs",
+    "crates/chelis-backend-*/src/*.rs",
+    "crates/chelis-backend-*/runtime/*.h",
 )
 
-DECLARATION_PATTERNS = (
-    re.compile(r"\b(?:struct|enum|union)\s+([A-Za-z_][A-Za-z0-9_]*)"),
-    re.compile(
-        r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:unsafe\s+)?"
-        r"(?:extern\s+\"C\"\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)"
-    ),
-    re.compile(r"^\s*macro_rules!\s+([A-Za-z_][A-Za-z0-9_]*)"),
-)
+INVENTORY_SOURCES: tuple[str, ...] = (
+    "crates/chelis-backend-c/src/blas.rs",
+    "crates/chelis-backend-c/src/emit.rs",
+    "crates/chelis-backend-c/src/emitted_expr.rs",
+    "crates/chelis-backend-c/src/host_abi.rs",
+    "crates/chelis-backend-c/src/host_abi_tests.rs",
+    "crates/chelis-backend-c/src/host_emit.rs",
+    "crates/chelis-backend-c/src/lib.rs",
+    "crates/chelis-backend-c/src/memory.rs",
+    "crates/chelis-backend-c/src/toolchain.rs",
+    "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
+    "crates/chelis-backend-hip/src/blas.rs",
+    "crates/chelis-backend-hip/src/emit.rs",
+    "crates/chelis-backend-hip/src/fusion.rs",
+    "crates/chelis-backend-hip/src/kernels.rs",
+    "crates/chelis-backend-hip/src/launch.rs",
+    "crates/chelis-backend-hip/src/lib.rs",
+    "crates/chelis-backend-hip/src/memory.rs",
+    "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
+    "crates/chelis-backend-metal/src/blas.rs",
+    "crates/chelis-backend-metal/src/dtype.rs",
+    "crates/chelis-backend-metal/src/emit.rs",
+    "crates/chelis-backend-metal/src/kernels.rs",
+    "crates/chelis-backend-metal/src/lib.rs",
+    "crates/chelis-ir/src/analysis.rs",
+    "crates/chelis-ir/src/dag.rs",
+    "crates/chelis-ir/src/eval.rs",
+    "crates/chelis-ir/src/fuse.rs",
+    "crates/chelis-ir/src/grad.rs",
+    "crates/chelis-ir/src/host.rs",
+    "crates/chelis-ir/src/host_type_state.rs",
+    "crates/chelis-ir/src/lib.rs",
+    "crates/chelis-ir/src/load_store_name.rs",
+    "crates/chelis-ir/src/lower.rs",
+    "crates/chelis-ir/src/optimize.rs",
+    "crates/chelis-ir/src/pipeline.rs",
+    "crates/chelis-ir/src/span_merge.rs",
+    "crates/chelis-ir/src/span_sanitize.rs",
+    "crates/chelis-ir/src/specialize.rs",
+    "crates/chelis-ir/src/tier2.rs",
+    "crates/chelis-ir/src/verify.rs",
+    "crates/chelis-ir/src/vmap.rs",
+    "crates/chelis-python/src/lib.rs",
+    "crates/chelis-runtime/include/chelis_blas.h",
+    "crates/chelis-runtime/include/chelis_math.h",
+    "crates/chelis-runtime/include/chelis_runtime.h",
+    "crates/chelis-runtime/include/chelis_runtime_dtype.h",
+    "crates/chelis-runtime/include/chelis_simd.h",
+    "crates/chelis-runtime/src/decimal_parse.rs",
+    "crates/chelis-runtime/src/dtype_header.rs",
+    "crates/chelis-runtime/src/format_shortest.rs",
+    "crates/chelis-runtime/src/ieee_narrow.rs",
+    "crates/chelis-runtime/src/lib.rs",
+    "crates/chelis-runtime/src/ownership_ledger.rs",
+    "crates/chelis-runtime/src/runtime_dtype_contract_tests.rs",
+    "crates/chelis-vocab/src/lib.rs",)
 
-RUST_ELEMENT_TYPE_RE = (
-    r"(?:f(?:16|32|64)|i(?:8|16|32|64)|u(?:8|16|32|64)|"
-    r"half::(?:f16|bf16)|Bool8)"
-)
-DIRECT_DATA_RE = re.compile(r"(?:\.data\b|->data\b)")
-RAW_POINTER_RE = re.compile(
-    rf"(?:as\s+\*(?:mut|const)\s+{RUST_ELEMENT_TYPE_RE}\b"
-    rf"|\*(?:mut|const)\s+{RUST_ELEMENT_TYPE_RE}\b)"
-)
-FIXED_RANK_RE = re.compile(
-    r"(?:\b[A-Z][A-Z0-9_]*MAX_DIM\b|\bMAX_DIM\b|\[(?:i32|i64|int|int32_t|int64_t)\s*;\s*(?:[2-9][0-9]*|[A-Z][A-Z0-9_]*)\])"
-)
-NARROW_METADATA_RE = re.compile(
-    r"(?:\b(?:rank|ndim|size|storage_size)\s*:\s*i32\b"
-    r"|\bint(?:32_t)?\s+[^;\"']*(?:rank|ndim|size|storage_size)\b"
-    r"|(?:rank|ndim|size|storage_size)[^;\"']*\bi32::try_from)"
-)
-WIDTH_ARITHMETIC_RE = re.compile(
-    rf"(?:byte_width|dtype_size|elem(?:ent)?_size|byte_capacity|checked_mul|saturating_mul"
-    rf"|size_of\s*::\s*<\s*{RUST_ELEMENT_TYPE_RE}\s*>)"
-)
-BACKEND_SPELLING_RE = re.compile(
-    r'\"[^\"\n]*(?:float|double|half|__half|hip_bfloat16|bool|u?int(?:8|16|32|64)_t)[^\"\n]*\"'
-)
-LOAD_STORE_RE = re.compile(
-    r"(?i)(?:load|store|read|write).*(?:format!|\.line\(|pointer|ptr|\[[^]]+\]|->data|\.data)"
-)
-DESCRIPTOR_FIELDS = {
-    "data",
-    "dtype",
-    "shape",
-    "strides",
-    "size",
-    "byte_capacity",
-    "rank",
-    "ndim",
-    "storage_size",
+# Which phase deletes each seam class, from the design's Part III phase map.
+# Phase 1 closes the capacity and dtype-contract vocabulary, Phase 2 the device
+# and binding mirrors, Phase 3 the host field seal, Phase 4 the typed lanes.
+DELETION_PHASE_BY_KIND: dict[str, int] = {
+    "dtype-contract": 1,
+    "normalized-key-arithmetic": 1,
+    "width-arithmetic": 1,
+    "fixed-rank-metadata": 2,
+    "narrow-metadata": 2,
+    "backend-element-spelling": 4,
+    "load-store-template": 4,
 }
-RUST_STRUCT_RE = re.compile(
-    r"\bstruct\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\{(?P<body>.*?)\}",
-    re.DOTALL,
-)
-C_STRUCT_RE = re.compile(
-    r"\btypedef\s+struct(?:\s+[A-Za-z_][A-Za-z0-9_]*)?\s*"
-    r"\{(?P<body>.*?)\}\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*;",
-    re.DOTALL,
-)
 
 
 class OracleFailure(RuntimeError):
     """A failed runtime-representation oracle obligation."""
 
-    def __init__(self, message: str, *, code: str = "oracle.failure") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "oracle.failure",
+        details: Sequence[str] = (),
+    ) -> None:
         super().__init__(message)
         self.code = code
+        #: The exact identities behind the message. A mutation check inspects
+        #: these rather than string-matching a truncated message, so a witness
+        #: cannot pass by accident when several rows appear at once.
+        self.details = tuple(details)
 
 
 @dataclass(frozen=True, order=True)
@@ -139,23 +165,20 @@ class InventoryRow:
     kind: str
     path: str
     owner: str
-    signature: str
-    occurrence: int
     deletion_phase: int
+    #: A legible excerpt for a reviewer. Deliberately outside `identity` and
+    #: outside the frozen digest, so rewording a line cannot move the freeze.
+    sample: str = ""
 
     @property
     def identity(self) -> str:
-        digest = hashlib.sha256(self.signature.encode("utf-8")).hexdigest()[:20]
-        return (
-            f"kind={self.kind}|path={self.path}|owner={self.owner}|"
-            f"signature={digest}|occurrence={self.occurrence}"
-        )
+        return f"kind={self.kind}|path={self.path}|owner={self.owner}"
 
     def to_baseline_dict(self) -> dict[str, object]:
-        return {
-            "identity": self.identity,
-            "deletion_phase": self.deletion_phase,
-        }
+        return {"identity": self.identity, "deletion_phase": self.deletion_phase}
+
+    def to_active_dict(self) -> dict[str, object]:
+        return {"identity": self.identity, "sample": self.sample}
 
 
 @dataclass(frozen=True)
@@ -176,11 +199,15 @@ UNCLASSIFIED_FAILURE = FailureExpectation(
 )
 SOURCE_REJECTED_FAILURE = FailureExpectation(
     "source.rejected",
-    "fail-closed C-surface parser rejected",
+    "fail-closed inventory scanner rejected",
+)
+SOURCE_LIST_FAILURE = FailureExpectation(
+    "inventory.unregistered_source",
+    "the frozen inventory source list is stale",
 )
 
 
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True)
 class MutationProbe:
     witness_id: str
     expected_kind: str
@@ -188,361 +215,193 @@ class MutationProbe:
     mutate: Callable[[str], str]
     expected_failure: FailureExpectation = UNCLASSIFIED_FAILURE
 
-    def __init__(
-        self,
-        expected_kind: str,
-        path: Path,
-        mutate: Callable[[str], str],
-        expected_failure: FailureExpectation | str = UNCLASSIFIED_FAILURE,
-        *,
-        witness_id: str | None = None,
-    ) -> None:
-        if isinstance(expected_failure, str):
-            expected_failure = FailureExpectation(
-                "source.rejected"
-                if expected_failure == SOURCE_REJECTED_FAILURE.reason_prefix
-                else "oracle.failure",
-                expected_failure,
-            )
-        object.__setattr__(
-            self,
-            "witness_id",
-            witness_id or f"phase0.{mutate.__name__}",
-        )
-        object.__setattr__(self, "expected_kind", expected_kind)
-        object.__setattr__(self, "path", path)
-        object.__setattr__(self, "mutate", mutate)
-        object.__setattr__(self, "expected_failure", expected_failure)
 
-    @property
-    def expected_error(self) -> str:
-        return self.expected_failure.reason_prefix
-
-
-def _mutation_probe(
+def _probe(
     expected_kind: str,
-    path: Path,
+    path: str,
     mutate: Callable[[str], str],
     expected_failure: FailureExpectation = UNCLASSIFIED_FAILURE,
 ) -> MutationProbe:
     return MutationProbe(
         witness_id=f"phase0.{mutate.__name__}",
         expected_kind=expected_kind,
-        path=path,
+        path=Path(path),
         mutate=mutate,
         expected_failure=expected_failure,
     )
 
 
-def _tracked_source_paths(root: Path) -> tuple[Path, ...]:
+def _inventory_candidates(root: Path) -> tuple[str, ...]:
+    """Every file on disk under an inventory root, minus ignored ones.
+
+    This reads the filesystem rather than the git index on purpose: cargo
+    compiles what is on disk, so an unstaged new file in a crate's `src/` is
+    production source and can carry a seam. Enumerating the index instead would
+    let a file be invisible to the inventory right up until someone staged it.
+    """
+
+    found = {
+        path.relative_to(root).as_posix()
+        for pattern in INVENTORY_ROOTS
+        for path in root.glob(pattern)
+        if path.is_file()
+    }
+    if not found:
+        return ()
     completed = subprocess.run(
-        ("git", "ls-files", "-z"),
+        ("git", "check-ignore", "--stdin"),
         cwd=root,
-        check=True,
+        input="\n".join(sorted(found)),
+        check=False,
         capture_output=True,
+        text=True,
     )
-    paths = []
-    for raw_path in completed.stdout.split(b"\0"):
-        if not raw_path:
-            continue
-        relative = raw_path.decode("utf-8")
-        if not relative.startswith(SOURCE_PREFIXES) and not _is_backend_source(relative):
-            continue
-        if PurePosixPath(relative).suffix not in SOURCE_SUFFIXES:
-            continue
-        paths.append(Path(relative))
-    return tuple(sorted(paths))
+    # Exit 0 means some paths matched, 1 means none did; anything else is a
+    # real failure rather than an empty ignore set.
+    if completed.returncode not in (0, 1):
+        raise OracleFailure("could not resolve ignored inventory candidates")
+    ignored = {line for line in completed.stdout.split("\n") if line}
+    return tuple(sorted(found - ignored))
 
 
-def _is_backend_source(path: str) -> bool:
-    return BACKEND_SOURCE_RE.match(path) is not None
+def _assert_source_list_current(root: Path) -> None:
+    """The frozen list must still equal its roots' tracked contents.
+
+    Without this the list would silently rot: a new file under an inventory
+    root would carry seams nobody scans. The failure names the exact sanctioned
+    action rather than inviting a workaround.
+    """
+
+    tracked = set(_inventory_candidates(root))
+    registered = set(INVENTORY_SOURCES)
+    unregistered = sorted(tracked - registered)
+    departed = sorted(registered - tracked)
+    if unregistered:
+        raise OracleFailure(
+            "the frozen inventory source list is stale; these tracked files under an "
+            "inventory root are not registered in INVENTORY_SOURCES: "
+            + ", ".join(unregistered[:5]),
+            code=SOURCE_LIST_FAILURE.code,
+        )
+    if departed:
+        raise OracleFailure(
+            "the frozen inventory source list is stale; these registered files no "
+            "longer exist: " + ", ".join(departed[:5]),
+            code=SOURCE_LIST_FAILURE.code,
+        )
 
 
-def _is_c_surface_source(path: str) -> bool:
-    return (
-        path.startswith("crates/chelis-runtime/")
-        or path.startswith("crates/chelis-python/src/")
-        or _is_backend_source(path)
-    )
+_SCAN_GENERATION = 0
+_SCAN_CACHE: dict[int, tuple[InventoryRow, ...]] = {}
 
 
-@cache
-def _c_surface_binary() -> Path:
-    configured = os.environ.get("CHELIS_C_SURFACE_BINARY")
-    if configured:
-        binary = Path(configured)
-        if not binary.is_absolute():
-            binary = REPO_ROOT / binary
-        if not binary.is_file():
-            raise OracleFailure(
-                f"CHELIS_C_SURFACE_BINARY does not name a file: {binary}"
-            )
-        return binary
+def _invalidate_inventory_cache() -> None:
+    """Mutations rewrite tracked source, so the cached scan must be dropped."""
 
-    target = Path(os.environ.get("CARGO_TARGET_DIR", "target"))
-    if not target.is_absolute():
-        target = REPO_ROOT / target
-    binary = target / "debug" / (
-        "chelis-c-surface.exe" if os.name == "nt" else "chelis-c-surface"
-    )
+    global _SCAN_GENERATION
+    _SCAN_GENERATION += 1
+
+
+def _cargo_target_directory() -> Path:
     completed = subprocess.run(
-        (
-            "cargo",
-            "build",
-            "-p",
-            "chelis-c-surface",
-            "--bin",
-            "chelis-c-surface",
-        ),
+        ("cargo", "metadata", "--format-version", "1", "--no-deps"),
         cwd=REPO_ROOT,
         check=False,
         capture_output=True,
         text=True,
     )
-    if completed.returncode != 0 or not binary.is_file():
-        raise OracleFailure(
-            "could not build the C-surface parser:\n"
-            + completed.stdout
-            + completed.stderr
-        )
+    if completed.returncode != 0:
+        raise OracleFailure(f"cargo metadata failed: {completed.stderr.strip()}")
+    return Path(json.loads(completed.stdout)["target_directory"])
+
+
+def _build_scanner() -> Path:
+    completed = subprocess.run(
+        ("cargo", "build", "--quiet", "-p", "chelis-repr-inventory"),
+        cwd=REPO_ROOT,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise OracleFailure("could not build the structural inventory scanner")
+    binary = _cargo_target_directory() / "debug" / "chelis-repr-inventory"
+    if not binary.exists():
+        raise OracleFailure(f"structural inventory scanner missing at {binary}")
     return binary
 
 
-def c_surface_inventory_rows(
-    root: Path, paths: Sequence[Path]
-) -> tuple[tuple[str, str, str, str], ...]:
-    rows, _ = _c_surface_inventory(root, paths)
-    return rows
+def scan_sources(root: Path) -> tuple[dict[str, str], ...]:
+    """Run the structural scanner over the frozen source list."""
 
-
-def _c_surface_inventory(
-    root: Path,
-    paths: Sequence[Path],
-) -> tuple[tuple[tuple[str, str, str, str], ...], dict[str, str]]:
-    manifest = [path.as_posix() for path in paths if _is_c_surface_source(path.as_posix())]
+    binary = _build_scanner()
     completed = subprocess.run(
-        (str(_c_surface_binary()), "--repo", str(root)),
-        cwd=root,
-        input=json.dumps(manifest),
+        (str(binary), "--repo", str(root)),
+        input=json.dumps(list(INVENTORY_SOURCES)),
         check=False,
         capture_output=True,
         text=True,
     )
     if completed.returncode != 0:
         raise OracleFailure(
-            "fail-closed C-surface parser rejected the source tree: "
+            "fail-closed inventory scanner rejected the source tree: "
             + completed.stderr.strip(),
-            code="source.rejected",
+            code=SOURCE_REJECTED_FAILURE.code,
         )
     try:
-        decoded = json.loads(completed.stdout)
+        payload = json.loads(completed.stdout)
     except json.JSONDecodeError as error:
-        raise OracleFailure(f"C-surface parser emitted invalid JSON: {error}") from error
-    if not isinstance(decoded, dict) or set(decoded) != {
-        "rows",
-        "production_rust_sources",
-    }:
-        raise OracleFailure("C-surface parser output must be a typed scan object")
-    decoded_rows = decoded["rows"]
-    production_sources = decoded["production_rust_sources"]
-    if not isinstance(decoded_rows, list):
-        raise OracleFailure("C-surface parser rows must be a JSON list")
-    if not isinstance(production_sources, dict) or not all(
-        isinstance(path, str) and isinstance(source, str)
-        for path, source in production_sources.items()
-    ):
-        raise OracleFailure("C-surface production Rust sources must be strings")
-    rows = []
-    for row in decoded_rows:
-        if not isinstance(row, dict) or set(row) != {
-            "path",
-            "kind",
-            "owner",
-            "signature",
-        }:
-            raise OracleFailure("C-surface parser emitted an invalid row")
-        values = tuple(row[key] for key in ("kind", "path", "owner", "signature"))
-        if not all(isinstance(value, str) for value in values):
-            raise OracleFailure("C-surface parser row fields must be strings")
-        rows.append(values)
-    return tuple(rows), production_sources
-
-
-def _owner_after_line(line: str, owner: str) -> str:
-    for pattern in DECLARATION_PATTERNS:
-        match = pattern.search(line)
-        if match is not None:
-            return match.group(1)
-    return owner
-
-
-def _normalized_signature(line: str) -> str:
-    return " ".join(line.strip().split())
-
-
-def descriptor_owner_names(source: str) -> set[str]:
-    owners: set[str] = set()
-    for match in RUST_STRUCT_RE.finditer(source):
-        fields = set(
-            re.findall(
-                r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?"
-                r"([A-Za-z_][A-Za-z0-9_]*)\s*:",
-                match.group("body"),
-            )
-        )
-        if {"data", "dtype"} <= fields and len(fields & DESCRIPTOR_FIELDS) >= 4:
-            owners.add(match.group("name"))
-    for match in C_STRUCT_RE.finditer(source):
-        fields = set(
-            re.findall(
-                r"(?:^|;)\s*[^;{}]*?\b([A-Za-z_][A-Za-z0-9_]*)\s*"
-                r"(?:\[[^]]*\])?\s*(?=;|$)",
-                match.group("body"),
-            )
-        )
-        if {"data", "dtype"} <= fields and len(fields & DESCRIPTOR_FIELDS) >= 4:
-            owners.add(match.group("name"))
-    return owners
-
-
-def descriptor_field_signatures(source: str) -> tuple[tuple[str, str], ...]:
-    """Return descriptor field declarations with their structural owner."""
-
-    fields: list[tuple[str, str]] = []
-    owners = descriptor_owner_names(source)
-    for match in RUST_STRUCT_RE.finditer(source):
-        owner = match.group("name")
-        if owner not in owners:
-            continue
-        for line in match.group("body").splitlines():
-            if re.match(
-                r"^\s*(?:pub(?:\([^)]*\))?\s+)?"
-                r"[A-Za-z_][A-Za-z0-9_]*\s*:",
-                line,
-            ):
-                fields.append((owner, _normalized_signature(line)))
-    for match in C_STRUCT_RE.finditer(source):
-        owner = match.group("name")
-        if owner not in owners:
-            continue
-        for declaration in match.group("body").split(";"):
-            signature = _normalized_signature(declaration)
-            if signature and re.search(r"\b[A-Za-z_][A-Za-z0-9_]*\s*(?:\[[^]]*\])?$", signature):
-                fields.append((owner, signature + ";"))
-    return tuple(fields)
-
-
-def _deletion_phase(kind: str, path: str, owner: str) -> int:
-    if kind in {"dtype-contract", "normalized-key-arithmetic", "width-arithmetic"}:
-        return 1
-    if kind in {"fixed-rank-metadata", "narrow-metadata"}:
-        return 2
-    if path.startswith("crates/chelis-python/src/"):
-        return 2
-    if kind == "descriptor-field" and owner in {"ChelisGpuTensor", "chelis_gpu_tensor"}:
-        return 2
-    if _is_backend_source(path) or kind in {
-        "backend-element-spelling",
-        "load-store-template",
-    }:
-        return 4
-    return 3
-
-
-def _line_kinds(path: str, owner: str, line: str) -> tuple[str, ...]:
-    stripped = line.strip()
-    if not stripped or stripped.startswith(("//", "///", "//!", "*", "/*")):
-        return ()
-
-    kinds: list[str] = []
-    is_backend = _is_backend_source(path)
-    is_python = path.startswith("crates/chelis-python/src/")
-    is_runtime = path.startswith("crates/chelis-runtime/")
-
-    if DIRECT_DATA_RE.search(stripped) and (is_runtime or is_python or is_backend):
-        kinds.append("direct-data-access")
-    if RAW_POINTER_RE.search(stripped) and (is_runtime or is_python or is_backend):
-        kinds.append("raw-element-pointer")
-    if FIXED_RANK_RE.search(stripped) and (is_python or "backend-hip" in path):
-        kinds.append("fixed-rank-metadata")
-    if NARROW_METADATA_RE.search(stripped) and (is_python or "backend-hip" in path):
-        kinds.append("narrow-metadata")
-    if WIDTH_ARITHMETIC_RE.search(stripped) and (
-        is_runtime
-        or is_python
-        or is_backend
-        or path in {"crates/chelis-ir/src/analysis.rs", "crates/chelis-ir/src/dag.rs"}
-        or path == "crates/chelis-vocab/src/lib.rs"
-    ):
-        kinds.append("width-arithmetic")
-    if path == "crates/chelis-ir/src/dag.rs" and (
-        owner.startswith(("normalize_", "flatten_", "push_product", "assemble_"))
-        or owner == "normalized_key"
-    ) and re.search(r"(?:DimExprKey|concrete|atoms?|gcd|product|quotient)", stripped):
-        kinds.append("normalized-key-arithmetic")
-    if is_backend and BACKEND_SPELLING_RE.search(stripped):
-        kinds.append("backend-element-spelling")
-    if is_backend and LOAD_STORE_RE.search(stripped):
-        kinds.append("load-store-template")
-
-    if path == "crates/chelis-vocab/src/lib.rs" and owner in {"Repr", "RuntimeDType"}:
-        if re.search(r"(?:Self::|Repr::|^[A-Z][A-Za-z0-9_]*(?:\s*=\s*[0-9]+)?\s*,?$)", stripped):
-            kinds.append("dtype-contract")
-    if path == "crates/chelis-runtime/src/lib.rs" and (
-        "TensorElement for" in stripped or "const DTYPE: RuntimeDType" in stripped
-    ):
-        kinds.append("dtype-contract")
-
-    return tuple(dict.fromkeys(kinds))
+        raise OracleFailure(f"inventory scanner emitted invalid JSON: {error}") from error
+    if not isinstance(payload, dict) or set(payload) != {"rows"}:
+        raise OracleFailure("inventory scanner must emit a typed scan object")
+    rows = payload["rows"]
+    if not isinstance(rows, list):
+        raise OracleFailure("inventory scanner must emit a row list")
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {"path", "kind", "owner", "sample"}:
+            raise OracleFailure(f"inventory scanner emitted an invalid row: {row!r}")
+    return tuple(rows)
 
 
 def inventory_rows(root: Path) -> tuple[InventoryRow, ...]:
-    candidates: list[tuple[str, str, str, str, int]] = []
-    tracked_paths = _tracked_source_paths(root)
-    c_surface_rows, production_rust_sources = _c_surface_inventory(root, tracked_paths)
-    for kind, path, owner, signature in c_surface_rows:
-        candidates.append(
-            (kind, path, owner, signature, _deletion_phase(kind, path, owner))
+    """Derive the deduplicated, owner-keyed seam inventory.
+
+    The scan is cached per generation: a Phase 0 run derives the inventory once
+    plus once per mutation, not once per mutation per file.
+    """
+
+    cached = _SCAN_CACHE.get(_SCAN_GENERATION)
+    if cached is not None:
+        return cached
+    _assert_source_list_current(root)
+    seen: dict[str, InventoryRow] = {}
+    for row in scan_sources(root):
+        kind = row["kind"]
+        derived = InventoryRow(
+            kind=kind,
+            path=row["path"],
+            owner=row["owner"],
+            deletion_phase=_deletion_phase(kind, row["path"]),
+            sample=row["sample"],
         )
-    for relative in tracked_paths:
-        path = relative.as_posix()
-        owner = "module"
-        source = production_rust_sources.get(path)
-        if source is None:
-            source = (root / relative).read_text(encoding="utf-8")
-        for descriptor_owner, signature in descriptor_field_signatures(source):
-            candidates.append(
-                (
-                    "descriptor-field",
-                    path,
-                    descriptor_owner,
-                    signature,
-                    _deletion_phase("descriptor-field", path, descriptor_owner),
-                )
-            )
-        for line in source.splitlines():
-            stripped = line.strip()
-            owner = _owner_after_line(line, owner)
-            signature = _normalized_signature(line)
-            for kind in _line_kinds(path, owner, line):
-                candidates.append(
-                    (kind, path, owner, signature, _deletion_phase(kind, path, owner))
-                )
-
-    occurrences: defaultdict[tuple[str, str, str, str], int] = defaultdict(int)
-    rows = []
-    for kind, path, owner, signature, phase in candidates:
-        key = (kind, path, owner, signature)
-        occurrences[key] += 1
-        rows.append(
-            InventoryRow(kind, path, owner, signature, occurrences[key], phase)
-        )
-    return tuple(sorted(rows, key=lambda row: row.identity))
+        seen.setdefault(derived.identity, derived)
+    rows = tuple(sorted(seen.values()))
+    _SCAN_CACHE.clear()
+    _SCAN_CACHE[_SCAN_GENERATION] = rows
+    return rows
 
 
-def _freeze_digest(
-    rows: Sequence[dict[str, object]], manifest: dict[str, object]
-) -> str:
+def _deletion_phase(kind: str, path: str) -> int:
+    """The phase that deletes this seam, from the design's Part III map."""
+
+    if kind in DELETION_PHASE_BY_KIND:
+        return DELETION_PHASE_BY_KIND[kind]
+    if path.startswith("crates/chelis-python/") or path.startswith("crates/chelis-backend-"):
+        # The device and binding mirrors are Phase 2's to delete; the backend
+        # lane consumers are Phase 4's.
+        return 4 if path.startswith("crates/chelis-backend-") else 2
+    return 3
+
+
+def _freeze_digest(rows: Sequence[dict[str, object]], manifest: dict[str, object]) -> str:
     payload = json.dumps(
         {"coverage_manifest": manifest, "foundation_rows": rows},
         sort_keys=True,
@@ -552,6 +411,13 @@ def _freeze_digest(
 
 
 def _mutation_implementation_sha256(mutate: Callable[[str], str]) -> str:
+    """Hash a mutation's implementation, transitively through its helpers.
+
+    Binding the implementation rather than a prose label is what stops a
+    witness being weakened while its manifest entry still claims the old
+    semantics.
+    """
+
     pending = [mutate]
     sources: dict[str, str] = {}
     while pending:
@@ -567,20 +433,13 @@ def _mutation_implementation_sha256(mutate: Callable[[str], str]) -> str:
         sources[identity] = inspect.getsource(current)
         for name in current.__code__.co_names:
             dependency = current.__globals__.get(name)
-            if (
-                inspect.isfunction(dependency)
-                and dependency.__module__ == current.__module__
-            ):
+            if inspect.isfunction(dependency) and dependency.__module__ == current.__module__:
                 pending.append(dependency)
-    payload = "\n".join(
-        f"{identity}\0{sources[identity]}" for identity in sorted(sources)
-    )
+    payload = "\n".join(f"{identity}\0{sources[identity]}" for identity in sorted(sources))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def mutation_manifest(
-    probes: Sequence[MutationProbe],
-) -> list[dict[str, object]]:
+def mutation_manifest(probes: Sequence[MutationProbe]) -> list[dict[str, object]]:
     return [
         {
             "witness_id": probe.witness_id,
@@ -597,23 +456,24 @@ def mutation_manifest(
     ]
 
 
-def coverage_manifest(
-    probes: Sequence[MutationProbe] | None = None,
-) -> dict[str, object]:
+def coverage_manifest(probes: Sequence[MutationProbe] | None = None) -> dict[str, object]:
     probes = phase0_mutation_probes() if probes is None else probes
     return {
         "source_inventory": {
-            "artifact": "tracked runtime, ABI, IR-capacity, binding, and backend sources",
-            "enumerator": "git ls-files plus closed source classifiers",
-            "parser": {
-                "engine": "chelis-c-surface",
-                "libclang_major": 18,
-                "configuration_model": (
-                    "libclang-annotated directive tokens; closed Boolean conditions; "
-                    "usage-sensitive undefined/0/1 macros and offset-preserving "
-                    "independent literal-header states; at most 256 configurations"
+            "artifact": "the frozen INVENTORY_SOURCES file list",
+            "enumerator": (
+                "chelis-repr-inventory: syn for Rust, the capacity census token "
+                "vocabulary for plain C headers"
+            ),
+            "universe": {
+                "registered_sources": len(INVENTORY_SOURCES),
+                "roots": list(INVENTORY_ROOTS),
+                "closure_rule": (
+                    "the registered list must equal its roots' tracked contents; a new "
+                    "file fails until it is registered"
                 ),
             },
+            "identity": "kind|path|owner, where owner is the seam's enclosing declaration",
             "expected_success": "every hit is exact active debt from the frozen foundation",
             "command": PHASE0_COMMAND,
             "mutations": mutation_manifest(probes),
@@ -633,10 +493,10 @@ def build_foundation_baseline(rows: Sequence[InventoryRow]) -> dict[str, object]
     foundation = [row.to_baseline_dict() for row in rows]
     manifest = coverage_manifest()
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "freeze_sha256": _freeze_digest(foundation, manifest),
         "foundation_rows": foundation,
-        "active_debt": [row.identity for row in rows],
+        "active_debt": [row.to_active_dict() for row in rows],
         "coverage_manifest": manifest,
     }
 
@@ -651,10 +511,16 @@ def load_baseline() -> dict[str, object]:
     return loaded
 
 
-def validate_baseline(
-    baseline: dict[str, object], rows: Sequence[InventoryRow]
-) -> None:
-    if baseline.get("schema_version") != 3:
+def validate_baseline(baseline: dict[str, object], rows: Sequence[InventoryRow]) -> None:
+    """Check the derived inventory against the shrink-only frozen ledger.
+
+    The digest binds the immutable foundation and the executable coverage
+    manifest together. The active-debt list is deliberately outside it so it can
+    shrink; what stops it growing is that every active identity must already be
+    in the reviewed foundation.
+    """
+
+    if baseline.get("schema_version") != 4:
         raise OracleFailure("unsupported Phase 0 inventory schema")
     manifest = baseline.get("coverage_manifest")
     if not isinstance(manifest, dict):
@@ -665,23 +531,26 @@ def validate_baseline(
     active = baseline.get("active_debt")
     if not isinstance(foundation, list) or not all(isinstance(row, dict) for row in foundation):
         raise OracleFailure("foundation_rows must be a list of objects")
-    if not isinstance(active, list) or not all(isinstance(value, str) for value in active):
-        raise OracleFailure("active_debt must be a list of identities")
+    if not isinstance(active, list) or not all(isinstance(row, dict) for row in active):
+        raise OracleFailure("active_debt must be a list of objects")
 
     computed_digest = _freeze_digest(foundation, manifest)
     if baseline.get("freeze_sha256") != computed_digest or computed_digest != FREEZE_SHA256:
         raise OracleFailure("Phase 0 freeze digest does not match the reviewed contract")
 
     foundation_ids = [row.get("identity") for row in foundation]
+    active_ids = [row.get("identity") for row in active]
     if not all(isinstance(value, str) for value in foundation_ids):
         raise OracleFailure("every foundation row must have an identity")
+    if not all(isinstance(value, str) for value in active_ids):
+        raise OracleFailure("every active-debt row must have an identity")
     if len(foundation_ids) != len(set(foundation_ids)):
         raise OracleFailure("duplicate identity in Phase 0 foundation")
-    if len(active) != len(set(active)):
+    if len(active_ids) != len(set(active_ids)):
         raise OracleFailure("duplicate identity in active transition debt")
 
     foundation_set = set(foundation_ids)
-    active_set = set(active)
+    active_set = set(active_ids)
     outside = active_set - foundation_set
     if outside:
         raise OracleFailure(
@@ -697,7 +566,8 @@ def validate_baseline(
     if unclassified:
         raise OracleFailure(
             "unclassified inventory hit: " + ", ".join(sorted(unclassified)[:5]),
-            code="inventory.unclassified",
+            code=UNCLASSIFIED_FAILURE.code,
+            details=sorted(unclassified),
         )
     stale = active_set - observed_set
     if stale:
@@ -716,28 +586,14 @@ def validate_phase0_inventory() -> None:
     validate_baseline(load_baseline(), inventory_rows(REPO_ROOT))
 
 
-def mutate_direct_data_access(source: str) -> str:
-    marker = "runtime_representation_phase0_direct_access"
-    if marker in source:
-        raise OracleFailure("direct-access mutation is already present")
-    mutation = f"""
-
-#[allow(dead_code)]
-unsafe fn {marker}(tensor: *mut crate::chelis_tensor) -> *mut u8 {{
-    unsafe {{ (*tensor).data }}
-}}
-"""
-    test_module = "\n#[cfg(test)]"
-    if test_module in source:
-        return source.replace(test_module, mutation + test_module, 1)
-    return source + mutation
-
-
-def mutate_incomplete_dtype(source: str) -> str:
-    anchor = "    I16 = 8,\n}"
-    if source.count(anchor) != 1:
-        raise OracleFailure("incomplete-dtype mutation anchor drifted")
-    return source.replace(anchor, "    I16 = 8,\n    Phase0Probe = 127,\n}", 1)
+# ---------------------------------------------------------------------------
+# Controlled mutations
+#
+# Each plants a REAL seam of its class, not a token pattern that happens to
+# match a regular expression. A witness that plants something the structural
+# scanner would have to be broken to miss is the only kind that proves the
+# classifier works.
+# ---------------------------------------------------------------------------
 
 
 def _append_probe(source: str, marker: str, snippet: str) -> str:
@@ -750,11 +606,124 @@ def _append_probe(source: str, marker: str, snippet: str) -> str:
     return source + mutation
 
 
+_PROBE_DESCRIPTOR = """#[repr(C)]
+#[allow(dead_code)]
+struct RuntimeRepresentationPhase0Descriptor {{
+    data: *mut f32,
+    dtype: i32,
+    shape: {shape},
+    strides: *const i64,
+    ndim: {ndim},
+    size: i64,
+}}"""
+
+
+def mutate_direct_data_access(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_direct_access",
+        """#[allow(dead_code)]
+unsafe fn runtime_representation_phase0_direct_access(
+    tensor: *mut crate::chelis_tensor,
+) -> *mut u8 {
+    unsafe { (*tensor).data }
+}""",
+    )
+
+
+def mutate_direct_data_access_after_test_module(source: str) -> str:
+    """A production item AFTER a test module is still production source."""
+
+    marker = "runtime_representation_phase0_after_test_access"
+    if marker in source or "#[cfg(test)]" not in source:
+        raise OracleFailure("post-test direct-access mutation anchor drifted")
+    return (
+        source
+        + f"""
+
+#[allow(dead_code)]
+unsafe fn {marker}(tensor: *mut crate::chelis_tensor) -> *mut u8 {{
+    unsafe {{ (*tensor).data }}
+}}
+"""
+    )
+
+
+def mutate_incomplete_dtype(source: str) -> str:
+    anchor = "    I16 = 8,\n}"
+    if source.count(anchor) != 1:
+        raise OracleFailure("incomplete-dtype mutation anchor drifted")
+    return source.replace(anchor, "    I16 = 8,\n    Phase0Probe = 127,\n}", 1)
+
+
+def mutate_raw_element_pointer(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_raw_pointer",
+        """#[allow(dead_code)]
+fn runtime_representation_phase0_raw_pointer(bytes: *mut u8) -> *mut f32 {
+    bytes as *mut f32
+}""",
+    )
+
+
+def mutate_width_arithmetic(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_byte_width",
+        """#[allow(dead_code)]
+fn runtime_representation_phase0_byte_width() -> usize {
+    size_of::<f32>()
+}""",
+    )
+
+
+def mutate_normalized_key_arithmetic(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_saturating_fold",
+        """#[allow(dead_code)]
+fn runtime_representation_phase0_saturating_fold(concrete: usize, value: usize) -> usize {
+    concrete.saturating_mul(value)
+}""",
+    )
+
+
 def mutate_backend_element_spelling(source: str) -> str:
     return _append_probe(
         source,
         "runtime_representation_phase0_backend_spelling",
-        'const runtime_representation_phase0_backend_spelling: &str = "float";',
+        """#[allow(dead_code)]
+fn runtime_representation_phase0_backend_spelling() -> &'static str {
+    "float"
+}""",
+    )
+
+
+def mutate_load_store_template(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_load_store",
+        """#[allow(dead_code)]
+fn runtime_representation_phase0_load_store(index: usize) -> String {
+    format!("((float *)tensor->data)[{index}]")
+}""",
+    )
+
+
+def mutate_narrow_metadata(source: str) -> str:
+    return _append_probe(
+        source,
+        "RuntimeRepresentationPhase0Descriptor",
+        _PROBE_DESCRIPTOR.format(shape="*const i64", ndim="i32"),
+    )
+
+
+def mutate_fixed_rank_metadata(source: str) -> str:
+    return _append_probe(
+        source,
+        "RuntimeRepresentationPhase0Descriptor",
+        _PROBE_DESCRIPTOR.format(shape="[i64; CHELIS_MAX_DIM]", ndim="i64"),
     )
 
 
@@ -763,624 +732,106 @@ def mutate_descriptor_field(source: str) -> str:
         source,
         "runtime_representation_phase0_descriptor",
         """typedef struct {
-    void *data;
-    int64_t *shape;
-    int64_t *strides;
-    int64_t size;
-    int32_t rank;
-    uint8_t dtype;
+    float *data;
+    int dtype;
+    int shape[8];
+    int strides[8];
+    int ndim;
+    int size;
 } runtime_representation_phase0_descriptor;""",
     )
 
 
-def mutate_fixed_rank_metadata(source: str) -> str:
+def mutate_unknown_c_arithmetic_spelling(source: str) -> str:
+    """An arithmetic spelling nobody classified must stop the build.
+
+    The rule is inverted for the reason `spec/design/dtype_semantics.md`
+    section C6 gives: an allowlist of arithmetic spellings can never be
+    complete, so a 16-bit float that no list mentions has to fail loudly rather
+    than enter as an unflagged row.
+    """
+
     return _append_probe(
         source,
-        "RUNTIME_REPRESENTATION_PHASE0_FIXED_RANK",
-        "const RUNTIME_REPRESENTATION_PHASE0_FIXED_RANK: [i32; 8] = [0; 8];",
+        "runtime_representation_phase0_unknown_arithmetic",
+        "extern _Float16 *runtime_representation_phase0_unknown_arithmetic(void);",
     )
 
 
-def mutate_load_store_template(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_load_store",
-        "fn runtime_representation_phase0_load_store() {\n"
-        '    let runtime_representation_phase0_load_store = format!("phase0 pointer");\n'
-        "}",
-    )
+def mutate_unregistered_inventory_source(_source: str) -> str:
+    """A new file under an inventory root must fail until it is registered."""
 
-
-def mutate_narrow_metadata(source: str) -> str:
-    return _append_probe(
-        source,
-        "RuntimeRepresentationPhase0Narrow",
-        "struct RuntimeRepresentationPhase0Narrow { ndim: i32 }",
-    )
-
-
-def mutate_normalized_key_arithmetic(source: str) -> str:
-    return _append_probe(
-        source,
-        "normalize_runtime_representation_phase0",
-        """fn normalize_runtime_representation_phase0() {
-    let atoms: Vec<DimExprKey> = Vec::new();
-}""",
-    )
-
-
-def mutate_raw_element_pointer(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_raw_pointer",
-        "fn runtime_representation_phase0_raw_pointer(_: *mut f32) {}",
-    )
-
-
-def mutate_width_arithmetic(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_byte_width",
-        "fn runtime_representation_phase0_byte_width() { let byte_width = 1usize; }",
-    )
-
-
-def mutate_free_standing_c_element_pointer(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_c_element_pointer",
-        "extern void runtime_representation_phase0_c_element_pointer(float *payload);",
-    )
-
-
-def mutate_c_sizeof_width_authority(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_c_sizeof",
-        "static size_t runtime_representation_phase0_c_sizeof(void) { return sizeof(float); }",
-    )
-
-
-def mutate_cxx_sizeof_pack_width_authority(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_cxx_sizeof_pack",
-        "template<typename... Ts> "
-        "static size_t runtime_representation_phase0_cxx_sizeof_pack(void) "
-        "{ return sizeof...(Ts); }",
-    )
-
-
-def mutate_c_const_after_element_pointer(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_c_const_after_pointer",
-        "extern void runtime_representation_phase0_c_const_after_pointer("
-        "float const *payload);",
-    )
-
-
-def mutate_c_array_parameter(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_c_array_parameter",
-        "extern void runtime_representation_phase0_c_array_parameter(float payload[]);",
-    )
-
-
-def mutate_c_const_after_pointer_cast(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_c_const_after_cast",
-        "static float runtime_representation_phase0_c_const_after_cast(void *payload) "
-        "{ return *((float const *)payload); }",
-    )
-
-
-def mutate_c_qualified_sizeof_width_authority(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_c_qualified_sizeof",
-        "static size_t runtime_representation_phase0_c_qualified_sizeof(void) "
-        "{ return sizeof(const float); }",
-    )
-
-
-def mutate_c_typedef_alias_pointer(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_c_typedef_pointer",
-        "typedef float runtime_representation_phase0_element;\n"
-        "extern void runtime_representation_phase0_c_typedef_pointer("
-        "runtime_representation_phase0_element *payload);",
-    )
-
-
-def mutate_c_macro_alias_pointer(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_c_macro_pointer",
-        "#define RUNTIME_REPRESENTATION_PHASE0_ELEMENT float\n"
-        "extern void runtime_representation_phase0_c_macro_pointer("
-        "RUNTIME_REPRESENTATION_PHASE0_ELEMENT *payload);",
-    )
-
-
-def mutate_c_unknown_arithmetic_pointer(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_c_unknown_pointer",
-        "extern void runtime_representation_phase0_c_unknown_pointer("
-        "_Float16 *payload);",
-    )
-
-
-def mutate_c_redefined_alias_pointer(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_c_redefined_alias",
-        "#define RUNTIME_REPRESENTATION_PHASE0_REDEFINED float\n"
-        "extern void runtime_representation_phase0_c_redefined_alias("
-        "RUNTIME_REPRESENTATION_PHASE0_REDEFINED *payload);\n"
-        "#undef RUNTIME_REPRESENTATION_PHASE0_REDEFINED\n"
-        "#define RUNTIME_REPRESENTATION_PHASE0_REDEFINED void",
-    )
-
-
-def mutate_cxx_reference_and_template(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_cxx_reference",
-        "extern void runtime_representation_phase0_cxx_reference(float &payload);\n"
-        "extern void runtime_representation_phase0_cxx_template("
-        "vector<float, 4> *payload);",
-    )
-
-
-def mutate_c_declaration_relocation(source: str) -> str:
-    anchor = "static inline float chelis_sum_f32("
-    if source.count(anchor) != 1:
-        raise OracleFailure("C declaration relocation anchor drifted")
-    return source.replace(
-        anchor,
-        "static inline float runtime_representation_phase0_relocated_sum_f32(",
-        1,
-    )
-
-
-def mutate_cxx_enclosing_namespace(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_enclosing_namespace",
-        "namespace runtime_representation_phase0_enclosing_namespace {\n"
-        "static inline float chelis_sum_f32("
-        "const float * CHELIS_RESTRICT data, int n);\n"
-        "}",
-    )
-
-
-def mutate_c_carrier_expression(source: str) -> str:
-    anchor = (
-        "static inline float chelis_sum_f32("
-        "const float * CHELIS_RESTRICT data, int n) {\n"
-    )
-    if source.count(anchor) != 1:
-        raise OracleFailure("C carrier expression anchor drifted")
-    return source.replace(anchor, anchor + "    (void)data;\n", 1)
-
-
-def mutate_c_atomic_element_pointer(source: str) -> str:
-    anchor = "    float *C,"
-    if source.count(anchor) < 1:
-        raise OracleFailure("C atomic pointer anchor drifted")
-    return source.replace(anchor, "    _Atomic(float) *C,", 1)
-
-
-def mutate_cxx_rvalue_reference(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_cxx_rvalue",
-        "#ifdef __cplusplus\n"
-        "extern void runtime_representation_phase0_cxx_rvalue(float &&payload);\n"
-        "#endif",
-    )
-
-
-def mutate_external_preprocessor_configuration(source: str) -> str:
-    anchor = "#ifdef __AVX2__\n#include <immintrin.h>\n"
-    if source.count(anchor) != 1:
-        raise OracleFailure("external preprocessor configuration anchor drifted")
-    return source.replace(
-        anchor,
-        anchor
-        + "extern float *runtime_representation_phase0_avx_configuration(void);\n",
-        1,
-    )
-
-
-def mutate_continued_nested_preprocessor_configuration(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_continued_nested_configuration",
-        "#if defined(CHELIS_PHASE0_OUTER) && \\\n"
-        "    defined(CHELIS_PHASE0_CONTINUED)\n"
-        "#if defined(CHELIS_PHASE0_NESTED)\n"
-        "extern float "
-        "*runtime_representation_phase0_continued_nested_configuration(void);\n"
-        "#endif\n"
-        "#endif",
-    )
-
-
-def mutate_preprocessor_configuration_cap(source: str) -> str:
-    conditions = " && \\\n    ".join(
-        f"defined(CHELIS_PHASE0_DIMENSION_{index})" for index in range(9)
-    )
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_configuration_cap",
-        f"#if {conditions}\n"
-        "extern float *runtime_representation_phase0_configuration_cap(void);\n"
-        "#endif",
-    )
-
-
-def mutate_header_availability_configuration(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_header_configuration",
-        "#if __has_include(<chelis/runtime_representation_phase0.h>)\n"
-        "extern float *runtime_representation_phase0_header_configuration(void);\n"
-        "#endif",
-    )
-
-
-def mutate_c_complete_declarator_shapes(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_complete_declarators",
-        "typedef float *runtime_representation_phase0_pointer_alias;\n"
-        "extern void runtime_representation_phase0_complete_declarators(\n"
-        "    runtime_representation_phase0_pointer_alias alias_payload,\n"
-        "    float first[4][8], float (*callback)(int),\n"
-        "    float __attribute__((address_space(1))) *addressed);\n"
-        "static float *runtime_representation_phase0_first, "
-        "*runtime_representation_phase0_second;",
-    )
-
-
-def mutate_c_pointer_return(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_pointer_return",
-        "extern float *runtime_representation_phase0_pointer_return(void);",
-    )
-
-
-def mutate_objc_pointer_return(source: str) -> str:
-    return _append_probe(
-        source,
-        "RuntimeRepresentationPhase0Provider",
-        "@interface RuntimeRepresentationPhase0Provider\n"
-        "- (float *)runtimeRepresentationPhase0Values;\n"
-        "@end",
-    )
-
-
-def mutate_objc_numeric_ivar(source: str) -> str:
-    return _append_probe(
-        source,
-        "RuntimeRepresentationPhase0IvarProvider",
-        "@interface RuntimeRepresentationPhase0IvarProvider {\n"
-        "@public\n"
-        "    float *runtimeRepresentationPhase0Ivar;\n"
-        "}\n"
-        "@end",
-    )
-
-
-def mutate_rust_dynamic_c_pointer(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_rust_dynamic_pointer",
-        "fn runtime_representation_phase0_rust_dynamic_pointer(ty: &str) -> String {\n"
-        "    format!(r#\"extern void dynamic({ty} const *payload);\"#)\n"
-        "}",
-    )
-
-
-def mutate_rust_positional_and_macro_rules_pointer(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_rust_positional_pointer",
-        "fn runtime_representation_phase0_rust_positional_pointer(\n"
-        "    ty: &str, name: &str,\n"
-        ") -> String {\n"
-        "    format!(\"{} *{}\", ty, name)\n"
-        "}\n"
-        "macro_rules! runtime_representation_phase0_macro_pointer {\n"
-        "    () => { \"double *payload\" };\n"
-        "}",
-    )
-
-
-def mutate_rust_split_c_pointer(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_rust_split_pointer",
-        "fn runtime_representation_phase0_rust_split_pointer(ty: &str) -> String {\n"
-        "    format!(\"{ty}\") + \" *payload\"\n"
-        "}",
-    )
-
-
-def mutate_rust_unconstrained_c_source(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_unconstrained_source",
-        "fn runtime_representation_phase0_unconstrained_source(\n"
-        "    declaration: &str,\n"
-        ") -> String {\n"
-        "    format!(\"{declaration}\")\n"
-        "}",
-    )
-
-
-def mutate_rust_stringify_pointer(source: str) -> str:
-    return _append_probe(
-        source,
-        "runtime_representation_phase0_stringify_pointer",
-        "fn runtime_representation_phase0_stringify_pointer() -> &'static str {\n"
-        "    stringify!(float *payload)\n"
-        "}",
-    )
-
-
-def mutate_direct_data_access_after_test_module(source: str) -> str:
-    marker = "runtime_representation_phase0_after_test_access"
-    if marker in source or "#[cfg(test)]" not in source:
-        raise OracleFailure("post-test direct-access mutation anchor drifted")
-    return source + f"""
+    return """//! Temporary Phase 0 detector probe.
 
 #[allow(dead_code)]
-unsafe fn {marker}(tensor: *mut crate::chelis_tensor) -> *mut u8 {{
-    unsafe {{ (*tensor).data }}
-}}
+pub unsafe fn runtime_representation_phase0_unregistered(
+    tensor: *mut u8,
+) -> *mut f32 {
+    tensor as *mut f32
+}
 """
 
 
 def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
+    runtime_probe = "crates/chelis-runtime/src/decimal_parse.rs"
     return (
-        MutationProbe(
-            "backend-element-spelling",
-            Path("crates/chelis-backend-metal/src/emit.rs"),
-            mutate_backend_element_spelling,
-        ),
-        MutationProbe(
-            "descriptor-field",
-            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
-            mutate_descriptor_field,
-            witness_id="phase0.mutate_descriptor_field.hip",
-        ),
-        MutationProbe(
-            "direct-data-access",
-            DIRECT_ACCESS_MUTATION_SOURCE,
-            mutate_direct_data_access,
-        ),
-        MutationProbe("dtype-contract", DTYPE_MUTATION_SOURCE, mutate_incomplete_dtype),
-        MutationProbe(
-            "fixed-rank-metadata",
-            Path("crates/chelis-python/src/lib.rs"),
-            mutate_fixed_rank_metadata,
-        ),
-        MutationProbe(
-            "load-store-template",
-            Path("crates/chelis-backend-c/src/host_emit.rs"),
-            mutate_load_store_template,
-        ),
-        MutationProbe(
-            "narrow-metadata",
-            Path("crates/chelis-backend-hip/src/emit.rs"),
-            mutate_narrow_metadata,
-        ),
-        MutationProbe(
-            "normalized-key-arithmetic",
-            Path("crates/chelis-ir/src/dag.rs"),
-            mutate_normalized_key_arithmetic,
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-runtime/src/ieee_narrow.rs"),
-            mutate_raw_element_pointer,
-        ),
-        MutationProbe(
-            "width-arithmetic",
-            Path("crates/chelis-runtime/src/format_shortest.rs"),
-            mutate_width_arithmetic,
-        ),
-        MutationProbe(
-            "descriptor-field",
-            Path("crates/chelis-backend-metal/runtime/chelis_metal_runtime.h"),
-            mutate_descriptor_field,
-            witness_id="phase0.mutate_descriptor_field.metal",
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
-            mutate_free_standing_c_element_pointer,
-        ),
-        MutationProbe(
-            "width-arithmetic",
-            Path("crates/chelis-backend-metal/runtime/chelis_metal_runtime.h"),
-            mutate_c_sizeof_width_authority,
-        ),
-        MutationProbe(
-            "width-arithmetic",
-            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
-            mutate_cxx_sizeof_pack_width_authority,
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
-            mutate_c_const_after_element_pointer,
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
-            mutate_c_array_parameter,
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
-            mutate_c_const_after_pointer_cast,
-        ),
-        MutationProbe(
-            "width-arithmetic",
-            Path("crates/chelis-backend-metal/runtime/chelis_metal_runtime.h"),
-            mutate_c_qualified_sizeof_width_authority,
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
-            mutate_c_typedef_alias_pointer,
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
-            mutate_c_macro_alias_pointer,
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
-            mutate_c_unknown_arithmetic_pointer,
-            "fail-closed C-surface parser rejected",
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
-            mutate_c_redefined_alias_pointer,
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
-            mutate_cxx_reference_and_template,
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-backend-hip/src/kernels.rs"),
-            mutate_rust_dynamic_c_pointer,
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-backend-hip/src/kernels.rs"),
-            mutate_rust_positional_and_macro_rules_pointer,
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-backend-hip/src/kernels.rs"),
-            mutate_rust_split_c_pointer,
-            "fail-closed C-surface parser rejected",
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-runtime/include/chelis_simd.h"),
-            mutate_c_declaration_relocation,
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-runtime/include/chelis_simd.h"),
-            mutate_cxx_enclosing_namespace,
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-runtime/include/chelis_simd.h"),
-            mutate_c_carrier_expression,
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
-            mutate_c_atomic_element_pointer,
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
-            mutate_cxx_rvalue_reference,
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-runtime/include/chelis_simd.h"),
-            mutate_external_preprocessor_configuration,
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-runtime/include/chelis_simd.h"),
-            mutate_continued_nested_preprocessor_configuration,
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-runtime/include/chelis_simd.h"),
-            mutate_preprocessor_configuration_cap,
+        _probe("backend-element-spelling", "crates/chelis-backend-metal/src/emit.rs", mutate_backend_element_spelling),
+        _probe("descriptor-field", "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h", mutate_descriptor_field),
+        _probe("direct-data-access", runtime_probe, mutate_direct_data_access),
+        _probe("direct-data-access", runtime_probe, mutate_direct_data_access_after_test_module),
+        _probe("dtype-contract", "crates/chelis-vocab/src/lib.rs", mutate_incomplete_dtype),
+        _probe("fixed-rank-metadata", "crates/chelis-python/src/lib.rs", mutate_fixed_rank_metadata),
+        _probe("load-store-template", "crates/chelis-backend-c/src/host_emit.rs", mutate_load_store_template),
+        _probe("narrow-metadata", "crates/chelis-python/src/lib.rs", mutate_narrow_metadata),
+        _probe("normalized-key-arithmetic", "crates/chelis-ir/src/dag.rs", mutate_normalized_key_arithmetic),
+        _probe("raw-element-pointer", "crates/chelis-runtime/src/ieee_narrow.rs", mutate_raw_element_pointer),
+        _probe("width-arithmetic", "crates/chelis-runtime/src/format_shortest.rs", mutate_width_arithmetic),
+        _probe(
+            "unknown-arithmetic-spelling",
+            "crates/chelis-runtime/include/chelis_simd.h",
+            mutate_unknown_c_arithmetic_spelling,
             SOURCE_REJECTED_FAILURE,
         ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-runtime/include/chelis_simd.h"),
-            mutate_header_availability_configuration,
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
-            mutate_c_complete_declarator_shapes,
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-runtime/include/chelis_simd.h"),
-            mutate_c_pointer_return,
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-backend-metal/runtime/chelis_metal_runtime.h"),
-            mutate_objc_pointer_return,
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-backend-metal/runtime/chelis_metal_runtime.h"),
-            mutate_objc_numeric_ivar,
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-backend-hip/src/kernels.rs"),
-            mutate_rust_unconstrained_c_source,
-        ),
-        MutationProbe(
-            "raw-element-pointer",
-            Path("crates/chelis-backend-hip/src/kernels.rs"),
-            mutate_rust_stringify_pointer,
-        ),
-        MutationProbe(
-            "direct-data-access",
-            DIRECT_ACCESS_MUTATION_SOURCE,
-            mutate_direct_data_access_after_test_module,
+        _probe(
+            "unregistered-inventory-source",
+            "crates/chelis-runtime/src/runtime_representation_phase0_probe.rs",
+            mutate_unregistered_inventory_source,
+            SOURCE_LIST_FAILURE,
         ),
     )
 
 
 @contextmanager
 def temporary_mutation(path: Path, mutate: Callable[[str], str]) -> Iterator[None]:
-    original = path.read_bytes()
-    path.write_text(mutate(original.decode("utf-8")), encoding="utf-8")
+    """Apply a mutation to tracked source and restore it byte for byte.
+
+    The dirty-source check lives HERE rather than in the runner so no caller,
+    unit tests included, can plant a mutation over uncommitted work.
+    """
+
+    _assert_source_clean(path)
+    existed = path.exists()
+    original = path.read_bytes() if existed else None
+    _invalidate_inventory_cache()
+    path.write_text(mutate(original.decode("utf-8") if original else ""), encoding="utf-8")
     try:
         yield
     finally:
-        path.write_bytes(original)
-        if path.read_bytes() != original:
-            raise OracleFailure(f"failed to restore controlled mutation: {path}")
+        _invalidate_inventory_cache()
+        if original is None:
+            path.unlink(missing_ok=True)
+            if path.exists():
+                raise OracleFailure(f"failed to remove controlled mutation: {path}")
+        else:
+            path.write_bytes(original)
+            if path.read_bytes() != original:
+                raise OracleFailure(f"failed to restore controlled mutation: {path}")
 
 
-def _assert_mutation_sources_clean() -> None:
-    paths = tuple(dict.fromkeys(str(probe.path) for probe in phase0_mutation_probes()))
+def _assert_source_clean(path: Path) -> None:
+    relative = path.resolve().relative_to(REPO_ROOT.resolve()).as_posix()
     completed = subprocess.run(
-        ("git", "status", "--porcelain", "--", *paths),
+        ("git", "status", "--porcelain", "--", relative),
         cwd=REPO_ROOT,
         check=False,
         capture_output=True,
@@ -1389,61 +840,51 @@ def _assert_mutation_sources_clean() -> None:
     if completed.returncode != 0:
         raise OracleFailure("could not inspect mutation source status")
     if completed.stdout.strip():
-        raise OracleFailure("refusing to mutate a dirty detector source")
+        raise OracleFailure(f"refusing to mutate a dirty detector source: {relative}")
 
 
-def _expect_unclassified_mutation(
-    path: Path,
-    mutate: Callable[[str], str],
-    expected_kind: str,
-    expected_failure: FailureExpectation,
-) -> None:
+def _expect_mutation_rejected(probe: MutationProbe) -> None:
     baseline = load_baseline()
-    with temporary_mutation(path, mutate):
+    with temporary_mutation(REPO_ROOT / probe.path, probe.mutate):
         try:
             validate_baseline(baseline, inventory_rows(REPO_ROOT))
         except OracleFailure as error:
-            message = str(error)
-            if error.code != expected_failure.code or not message.startswith(
-                expected_failure.reason_prefix
-            ) or (
-                expected_failure == UNCLASSIFIED_FAILURE
-                and f"kind={expected_kind}|" not in message
+            if error.code != probe.expected_failure.code or not str(error).startswith(
+                probe.expected_failure.reason_prefix
             ):
                 raise OracleFailure(
-                    f"{expected_kind} mutation failed for the wrong reason: {message}"
+                    f"{probe.witness_id} failed for the wrong reason: {error}"
+                ) from error
+            if probe.expected_failure is UNCLASSIFIED_FAILURE and not any(
+                identity.startswith(f"kind={probe.expected_kind}|")
+                for identity in error.details
+            ):
+                raise OracleFailure(
+                    f"{probe.witness_id} failed without naming a {probe.expected_kind} "
+                    f"row: {sorted(error.details)[:5]}"
                 ) from error
         else:
-            raise OracleFailure(f"{expected_kind} mutation was silently accepted")
+            raise OracleFailure(f"{probe.witness_id} mutation was silently accepted")
 
 
 def run_phase0_mutations() -> None:
-    _assert_mutation_sources_clean()
     for probe in phase0_mutation_probes():
-        _expect_unclassified_mutation(
-            REPO_ROOT / probe.path,
-            probe.mutate,
-            probe.expected_kind,
-            probe.expected_failure,
-        )
+        _expect_mutation_rejected(probe)
 
 
 def phase0_legs() -> tuple[OracleLeg, ...]:
     return (
         OracleLeg(
-            "fail-closed C-surface parser contract",
-            (
-                "cargo",
-                "nextest",
-                "run",
-                "-p",
-                "chelis-c-surface",
-                "--test",
-                "c_surface",
-            ),
+            "structural inventory scanner contract",
+            ("cargo", "nextest", "run", "-p", "chelis-repr-inventory", "--test", "inventory"),
         ),
+        # [#888] has three witnesses at two levels: the key-level collision in
+        # the IR, and the planner-level consequence in each backend that
+        # consumes the key. The two planners carry the same defect in verbatim
+        # copies, so one witness would understate the class. All three must
+        # INVERT when Phase 1's exact CapacityKey lands, never be deleted.
         OracleLeg(
-            "capacity collision release reproducer",
+            "capacity collision key-level release reproducer",
             (
                 "cargo",
                 "nextest",
@@ -1451,6 +892,21 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "--release",
                 "-p",
                 "chelis-ir",
+                "--test",
+                "issue_888_capacity_collision",
+            ),
+        ),
+        OracleLeg(
+            "capacity collision planner-level release reproducers",
+            (
+                "cargo",
+                "nextest",
+                "run",
+                "--release",
+                "-p",
+                "chelis-backend-c",
+                "-p",
+                "chelis-backend-hip",
                 "--test",
                 "issue_888_capacity_collision",
             ),
@@ -1493,10 +949,28 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "runtime_dtype_invalid_ffi",
             ),
         ),
+        OracleLeg(
+            "shared capacity census classifier",
+            (
+                "cargo",
+                "nextest",
+                "run",
+                "-p",
+                "chelis-cli",
+                "--test",
+                "capacity_census_tripwire",
+            ),
+        ),
     )
 
 
 def hardware_probe_manifest() -> tuple[dict[str, str], ...]:
+    """Hardware lanes are registered with their exact command, never counted.
+
+    A lane the default suite skipped has not run. Recording the command here is
+    a registration, not a receipt.
+    """
+
     return (
         {
             "lane": "hip",
@@ -1517,29 +991,6 @@ def hardware_probe_manifest() -> tuple[dict[str, str], ...]:
     )
 
 
-def validate_design_sequencing() -> None:
-    source = " ".join(DESIGN_PATH.read_text(encoding="utf-8").split())
-    required = (
-        "Phase 3 creates the shared schema and installs the generated host and public-C artifacts.",
-        "Phase 2 requires Phase 3 and consumes that landed schema",
-        "Phase 2 does not gate this phase.",
-    )
-    for text in required:
-        if text not in source:
-            raise OracleFailure(f"Phase 2/3 descriptor sequencing drifted: missing {text!r}")
-    contradictions = (
-        r"Phase 2 (?:installs|owns|creates|generates) [^.]{0,100}host descriptor",
-        r"Phase 2 [^.]{0,120}delivers C3 completely",
-        r"Phase 2 creates the shared schema",
-        r"Phase 3 requires Phase 2",
-    )
-    for pattern in contradictions:
-        if re.search(pattern, source, flags=re.IGNORECASE):
-            raise OracleFailure(
-                f"contradictory Phase 2/3 ownership matched {pattern!r}"
-            )
-
-
 def _run_leg(leg: OracleLeg) -> None:
     print(f"+ {leg.name}: {' '.join(leg.argv)}", flush=True)
     completed = subprocess.run(leg.argv, cwd=REPO_ROOT, check=False)
@@ -1548,7 +999,6 @@ def _run_leg(leg: OracleLeg) -> None:
 
 
 def run_phase0(*, run_mutations: bool = True) -> None:
-    validate_design_sequencing()
     validate_phase0_inventory()
     if run_mutations:
         run_phase0_mutations()
@@ -1557,9 +1007,33 @@ def run_phase0(*, run_mutations: bool = True) -> None:
     print("RUNTIME REPRESENTATION PHASE 0: PASS")
 
 
+def regenerate() -> None:
+    """Rewrite the baseline from the current tree.
+
+    Regeneration cannot bless growth: it rewrites the artifact, and the reviewed
+    `FREEZE_SHA256` in this file still has to be moved by hand, which is the
+    design's B1 freeze move rather than a regeneration step.
+    """
+
+    baseline = build_foundation_baseline(inventory_rows(REPO_ROOT))
+    BASELINE_PATH.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
+    print(f"wrote {len(baseline['foundation_rows'])} rows to {BASELINE_PATH}")
+    print(f"freeze_sha256 = {baseline['freeze_sha256']}")
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--phase", type=int, required=True)
+    parser.add_argument(
+        "--regenerate",
+        action="store_true",
+        help="rewrite the frozen baseline from the current tree",
+    )
+    parser.add_argument(
+        "--skip-mutations",
+        action="store_true",
+        help="skip the controlled mutations (development loop only)",
+    )
     return parser.parse_args()
 
 
@@ -1567,7 +1041,10 @@ def main() -> int:
     args = _parse_args()
     if args.phase != 0:
         raise OracleFailure("only runtime-representation Phase 0 is implemented")
-    run_phase0()
+    if args.regenerate:
+        regenerate()
+        return 0
+    run_phase0(run_mutations=not args.skip_mutations)
     return 0
 
 
