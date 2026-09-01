@@ -285,7 +285,7 @@ pub(super) struct InferenceProduct {
     pub(super) owner_types: HashMap<usize, FinalOwnerType>,
     pub(super) type_headers: TypeResolutionEnv,
     pub(super) adt_registry: AdtRegistry,
-    pub(super) declaration_inference_plan: DeclarationInferencePlan,
+    pub(super) function_inference_plan: FunctionInferencePlan,
     /// Canonical whole-program preorder, computed before dependency/SCC
     /// scheduling. Deferred constraints must never derive their order from
     /// allocation or hash-table traversal.
@@ -1496,7 +1496,7 @@ pub(super) fn finalize_checked_program(
 ) -> CheckedProgram {
     let signature_inference = infer_signature_metadata_with_context_and_headers(
         &annotated_exprs,
-        &product.declaration_inference_plan,
+        &product.function_inference_plan,
         &type_env,
         signature_context,
         &product.type_headers,

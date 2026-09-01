@@ -225,7 +225,7 @@ pub(super) fn detect_forged_linker_names(exprs: &[deep::Expr], errors: &mut Diag
 
 pub(super) fn infer_signature_metadata_with_context_and_headers(
     exprs: &[deep::Expr],
-    declaration_plan: &DeclarationInferencePlan,
+    function_plan: &FunctionInferencePlan,
     type_env: &HashMap<String, deep::Expr>,
     signature_context: &SignatureInferenceMetadata,
     type_headers: &TypeResolutionEnv,
@@ -233,7 +233,7 @@ pub(super) fn infer_signature_metadata_with_context_and_headers(
 ) -> SignatureInferenceMetadata {
     let defsig_names = collect_defsig_names(exprs);
     let authored_signature_types = collect_authored_signature_types(exprs, type_headers, errors);
-    let recursive_members = declaration_plan.recursive_function_member_names();
+    let recursive_members = function_plan.recursive_member_names();
     let mut functions = BTreeMap::new();
     let mut defs_by_name = HashMap::<String, VecDeque<&deep::Expr>>::new();
     for expr in top_level_decl_items(exprs) {
@@ -255,8 +255,8 @@ pub(super) fn infer_signature_metadata_with_context_and_headers(
             .or_default()
             .push_back(expr);
     }
-    let ordered_defs = declaration_plan
-        .ordered_function_members()
+    let ordered_defs = function_plan
+        .ordered_members()
         .filter_map(|member| defs_by_name.get_mut(&member.name)?.pop_front())
         .collect::<Vec<_>>();
     let passes = ordered_defs.len().max(1);
@@ -371,25 +371,24 @@ pub(super) fn infer_signature_metadata_with_context_and_headers(
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct DeclarationInferenceMember {
+pub(super) struct FunctionInferenceMember {
     pub(super) item_index: usize,
     pub(super) name: String,
-    pub(super) is_function: bool,
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct DeclarationInferenceComponent {
-    pub(super) members: Vec<DeclarationInferenceMember>,
+pub(super) struct FunctionInferenceComponent {
+    pub(super) members: Vec<FunctionInferenceMember>,
     pub(super) recursive: bool,
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct DeclarationInferencePlan {
-    pub(super) components: Vec<DeclarationInferenceComponent>,
+pub(super) struct FunctionInferencePlan {
+    pub(super) components: Vec<FunctionInferenceComponent>,
     pub(super) complete: bool,
 }
 
-impl Default for DeclarationInferencePlan {
+impl Default for FunctionInferencePlan {
     fn default() -> Self {
         Self {
             components: Vec::new(),
@@ -398,26 +397,24 @@ impl Default for DeclarationInferencePlan {
     }
 }
 
-struct DefinitionInferenceItem<'a> {
+struct FunctionDefItem<'a> {
     vertex: usize,
     item_index: usize,
     name: String,
-    module: Option<String>,
-    is_function: bool,
     expr: &'a deep::Expr,
 }
 
-impl DeclarationInferencePlan {
-    /// Build the one canonical declaration dependency plan for an inference run.
+impl FunctionInferencePlan {
+    /// Build the one canonical function dependency plan for an inference run.
     /// SCCs are constructed in O(vertices + edges), returned callee-first,
     /// and retain source order within each component.
     pub(super) fn build(items: &[(Option<String>, &deep::Expr)]) -> Self {
         profile_plan_build();
         let cancel = crate::cancel::current_cancel_token();
         let cancelled = || cancel.as_ref().is_some_and(CancelToken::is_cancelled);
-        let mut vertex_by_identity = HashMap::<(Option<String>, String), usize>::new();
+        let mut vertex_by_name = HashMap::<String, usize>::new();
         let mut def_items = Vec::new();
-        for (item_index, (module, expr)) in items.iter().enumerate() {
+        for (item_index, (_, expr)) in items.iter().enumerate() {
             if cancelled() {
                 return Self::incomplete();
             }
@@ -427,34 +424,27 @@ impl DeclarationInferencePlan {
             let Some(name) = kids.first().and_then(symbol_name) else {
                 continue;
             };
-            let is_function = kids
+            if kids
                 .get(1)
                 .and_then(|body| tagged_children(body, DeepTag::Fn))
-                .is_some();
-            let identity = (module.clone(), name.to_string());
-            let next_vertex = vertex_by_identity.len();
-            let vertex = *vertex_by_identity.entry(identity).or_insert(next_vertex);
-            def_items.push(DefinitionInferenceItem {
+                .is_none()
+            {
+                continue;
+            }
+            let next_vertex = vertex_by_name.len();
+            let vertex = *vertex_by_name
+                .entry(name.to_string())
+                .or_insert(next_vertex);
+            def_items.push(FunctionDefItem {
                 vertex,
                 item_index,
                 name: name.to_string(),
-                module: module.clone(),
-                is_function,
                 expr,
             });
         }
 
-        let names_by_module = vertex_by_identity.keys().fold(
-            HashMap::<Option<String>, HashSet<String>>::new(),
-            |mut names, (module, name)| {
-                names
-                    .entry(module.clone())
-                    .or_default()
-                    .insert(name.clone());
-                names
-            },
-        );
-        let mut graph = vec![Vec::<usize>::new(); vertex_by_identity.len()];
+        let def_names = vertex_by_name.keys().cloned().collect::<HashSet<_>>();
+        let mut graph = vec![Vec::<usize>::new(); vertex_by_name.len()];
         for item in &def_items {
             if cancelled() {
                 return Self::incomplete();
@@ -462,22 +452,26 @@ impl DeclarationInferencePlan {
             let Some((DeepTag::Def, _, kids)) = stamped_parts(item.expr) else {
                 continue;
             };
-            let Some(body) = kids.get(1) else {
+            let Some(fn_kids) = kids
+                .get(1)
+                .and_then(|body| tagged_children(body, DeepTag::Fn))
+            else {
                 continue;
             };
-            let Some(def_names) = names_by_module.get(&item.module) else {
+            let (Some(params), Some(body)) = (fn_kids.first(), fn_kids.get(1)) else {
                 continue;
             };
-            let mut bound = Vec::new();
+            let mut bound = vec![
+                param_source_infos(params)
+                    .into_iter()
+                    .map(|(name, _)| name)
+                    .collect(),
+            ];
             let mut calls = HashSet::new();
-            collect_top_level_calls(body, def_names, &mut bound, &mut calls);
+            collect_top_level_calls(body, &def_names, &mut bound, &mut calls);
             let mut callees = calls
                 .into_iter()
-                .filter_map(|name| {
-                    vertex_by_identity
-                        .get(&(item.module.clone(), name))
-                        .copied()
-                })
+                .filter_map(|name| vertex_by_name.get(&name).copied())
                 .collect::<Vec<_>>();
             callees.sort_unstable();
             callees.dedup();
@@ -498,7 +492,7 @@ impl DeclarationInferencePlan {
         }
         let mut components = vertex_components
             .iter()
-            .map(|_| DeclarationInferenceComponent {
+            .map(|_| FunctionInferenceComponent {
                 members: Vec::new(),
                 recursive: false,
             })
@@ -506,10 +500,9 @@ impl DeclarationInferencePlan {
         for item in def_items {
             components[component_by_vertex[item.vertex]]
                 .members
-                .push(DeclarationInferenceMember {
+                .push(FunctionInferenceMember {
                     item_index: item.item_index,
                     name: item.name,
-                    is_function: item.is_function,
                 });
         }
         for (component, vertices) in components.iter_mut().zip(&vertex_components) {
@@ -531,24 +524,16 @@ impl DeclarationInferencePlan {
         }
     }
 
-    pub(super) fn ordered_members(&self) -> impl Iterator<Item = &DeclarationInferenceMember> {
+    pub(super) fn ordered_members(&self) -> impl Iterator<Item = &FunctionInferenceMember> {
         self.components
             .iter()
             .flat_map(|component| component.members.iter())
     }
 
-    pub(super) fn ordered_function_members(
-        &self,
-    ) -> impl Iterator<Item = &DeclarationInferenceMember> {
-        self.ordered_members().filter(|member| member.is_function)
-    }
-
-    pub(super) fn recursive_function_member_names(&self) -> HashSet<String> {
+    pub(super) fn recursive_member_names(&self) -> HashSet<String> {
         self.components
             .iter()
-            .filter(|component| {
-                component.recursive && component.members.iter().all(|member| member.is_function)
-            })
+            .filter(|component| component.recursive)
             .flat_map(|component| component.members.iter())
             .map(|member| member.name.clone())
             .collect()

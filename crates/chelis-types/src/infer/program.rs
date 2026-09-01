@@ -253,9 +253,10 @@ pub(super) fn infer_program_with_product_in_session(
     // module-wrapped programs.
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
+    prebind_literal_external_inputs(&items, &mut env, &mut vg, &mut subst, &adt_reg, errors);
     let metadata_prebound_names = HashSet::new();
-    product.declaration_inference_plan = DeclarationInferencePlan::build(&items);
-    let inference_groups = primary_inference_groups(&product.declaration_inference_plan, &items);
+    product.function_inference_plan = FunctionInferencePlan::build(&items);
+    let inference_groups = primary_inference_groups(&product.function_inference_plan, &items);
     // Match the persisted-state driver: cache the TLS token once and poll at
     // declaration granularity. In particular, an incomplete recursive SCC
     // must consume its structured scope through `abort` before this schedule
@@ -1218,9 +1219,21 @@ pub(super) fn infer_ir_program_with_state(
             _ => None,
         })
         .collect();
+    let metadata_prebound_names = collected_ir_types
+        .type_env
+        .keys()
+        .filter(|name| {
+            let declaration_index = collected_ir_types.final_origin_by_name[*name];
+            definition_owns_metadata_prebind(items[declaration_index].1, name)
+        })
+        .cloned()
+        .collect::<HashSet<_>>();
 
     let mut prebound_type_failures = HashMap::new();
     for (name, ty_expr) in &collected_ir_types.type_env {
+        if !metadata_prebound_names.contains(name) {
+            continue;
+        }
         let metadata_level = state.subst.enter_level(&state.var_gen);
         let resolved = resolve_deep_type(
             ty_expr,
@@ -1260,13 +1273,8 @@ pub(super) fn infer_ir_program_with_state(
         .unwrap_or(false);
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
-    let metadata_prebound_names = collected_ir_types
-        .type_env
-        .keys()
-        .cloned()
-        .collect::<HashSet<_>>();
-    product.declaration_inference_plan = DeclarationInferencePlan::build(&items);
-    let inference_groups = primary_inference_groups(&product.declaration_inference_plan, &items);
+    product.function_inference_plan = FunctionInferencePlan::build(&items);
+    let inference_groups = primary_inference_groups(&product.function_inference_plan, &items);
     // chelis#930: cooperative cancellation at top-level-declaration
     // granularity. Body inference is one of the two front-end passes whose
     // cost scales with declaration count, so an abandoned compile has to be
@@ -1425,37 +1433,44 @@ pub(super) fn infer_ir_program_with_state(
     product
 }
 
-/// Primary body-inference schedule. Every top-level definition uses the same
-/// exact-namespace dependency/SCC planner, so a dependency's generalized
-/// scheme is available to its consumers independent of declaration order.
-/// The returned values are original flattened ordinals: scheduling never
-/// changes diagnostic ownership, collected-type origins, or output order.
+/// Primary body-inference schedule. Function declarations inside a lexical
+/// module use the same dependency/SCC planner as signature inference, so a
+/// forward helper's body-derived scheme is available to its caller. Bare defs
+/// and every non-function declaration retain textual order. The returned
+/// values are original flattened ordinals: scheduling never changes diagnostic
+/// ownership, collected-type origins, or output order.
 pub(super) fn primary_inference_schedule(
-    declaration_plan: &DeclarationInferencePlan,
+    function_plan: &FunctionInferencePlan,
     items: &[(Option<String>, &deep::Expr)],
 ) -> Vec<usize> {
-    if !declaration_plan.complete {
+    if !function_plan.complete {
         return Vec::new();
     }
-    let definition_indices = declaration_plan
+    let module_fn_indices = function_plan
         .ordered_members()
-        .map(|member| member.item_index)
+        .filter_map(|member| {
+            items[member.item_index]
+                .0
+                .as_ref()
+                .map(|_| member.item_index)
+        })
         .collect::<HashSet<_>>();
-    if definition_indices.is_empty() {
+    if module_fn_indices.is_empty() {
         return (0..items.len()).collect();
     }
 
-    let ordered_definitions = declaration_plan
+    let ordered_module_fns = function_plan
         .ordered_members()
         .map(|member| member.item_index)
+        .filter(|index| module_fn_indices.contains(index))
         .collect::<Vec<_>>();
-    let insertion = definition_indices.iter().copied().min().unwrap_or(0);
+    let insertion = module_fn_indices.iter().copied().min().unwrap_or(0);
     let mut schedule = Vec::with_capacity(items.len());
     for index in 0..items.len() {
         if index == insertion {
-            schedule.extend(ordered_definitions.iter().copied());
+            schedule.extend(ordered_module_fns.iter().copied());
         }
-        if !definition_indices.contains(&index) {
+        if !module_fn_indices.contains(&index) {
             schedule.push(index);
         }
     }
@@ -1468,22 +1483,19 @@ pub(super) struct PrimaryInferenceGroup {
     recursive: bool,
 }
 
-/// Group the flat primary schedule into recursive function SCC inference
-/// units. Acyclic definitions retain dependency order. Only a genuine SCC
-/// containing functions exclusively is grouped and provisionally prebound;
-/// eager value cycles remain ordinary declarations and are rejected by the
-/// cycle validator.
+/// Group the flat primary schedule into recursive SCC inference units.
+/// Acyclic bare functions stay in textual order; acyclic module functions
+/// retain dependency order. Only a genuine recursive component is grouped
+/// and prebound, so a bare acyclic forward helper remains unavailable.
 pub(super) fn primary_inference_groups(
-    declaration_plan: &DeclarationInferencePlan,
+    function_plan: &FunctionInferencePlan,
     items: &[(Option<String>, &deep::Expr)],
 ) -> Vec<PrimaryInferenceGroup> {
-    let schedule = primary_inference_schedule(declaration_plan, items);
-    let recursive_components = declaration_plan
+    let schedule = primary_inference_schedule(function_plan, items);
+    let recursive_components = function_plan
         .components
         .iter()
-        .filter(|component| {
-            component.recursive && component.members.iter().all(|member| member.is_function)
-        })
+        .filter(|component| component.recursive)
         .map(|component| {
             component
                 .members
@@ -1577,6 +1589,66 @@ pub(super) type IrTypeEnv = HashMap<String, deep::Expr>;
 pub(super) struct CollectedIrTypes {
     type_env: IrTypeEnv,
     final_origin_by_name: HashMap<String, usize>,
+}
+
+fn definition_owns_metadata_prebind(expr: &deep::Expr, name: &str) -> bool {
+    let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
+        return false;
+    };
+    let Some(body) = kids.get(1) else {
+        return false;
+    };
+    tagged_children(body, DeepTag::Fn).is_some() || body_is_literal_self_ref(body, name)
+}
+
+/// The stamped typed ingress does not install arbitrary body-type metadata,
+/// but [04-INF-4]'s literal self-reference is an external-input declaration,
+/// not an eager read. Install only that exact shape before body inference so
+/// it has the same meaning at both public checker ingresses. Ordinary values
+/// remain source-ordered and are never admitted by this path.
+fn prebind_literal_external_inputs(
+    items: &[(Option<String>, &deep::Expr)],
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    let collected = collect_ir_types_with_origins(items.iter().map(|(_, expr)| *expr));
+    let defsig_names = items
+        .iter()
+        .filter_map(|(_, expr)| match stamped_parts(expr) {
+            Some((DeepTag::Defsig, _, kids)) => kids.first().and_then(symbol_name),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    for (name, ty_expr) in &collected.type_env {
+        let declaration_index = collected.final_origin_by_name[name];
+        let expr = items[declaration_index].1;
+        let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
+            continue;
+        };
+        let Some(body) = kids.get(1) else {
+            continue;
+        };
+        if defsig_names.contains(name.as_str()) || !body_is_literal_self_ref(body, name) {
+            continue;
+        }
+        let metadata_level = subst.enter_level(vg);
+        let resolved = resolve_deep_type(
+            ty_expr,
+            vg,
+            adt_reg,
+            TypeUseSite::CompilerMetadata,
+            BinderMode::TrustedCompilerMetadata,
+            errors,
+        );
+        subst.leave_level(metadata_level, vg);
+        if let Ok(ty) = resolved {
+            let scheme = env.generalize(&ty, subst);
+            env.bind(name.clone(), scheme);
+        }
+    }
 }
 
 pub(super) fn build_ir_type_env(exprs: &[deep::Expr]) -> IrTypeEnv {
