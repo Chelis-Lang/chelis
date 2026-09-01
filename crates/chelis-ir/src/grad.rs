@@ -643,7 +643,7 @@ fn prune_to_requested_outputs(
             for &input in &dag.nodes()[i].inputs {
                 live[input.0] = true;
             }
-            // chelis#384/#397/#616: a shape-only dep (a Form-3 `expand`
+            // chelis#384/#397/#616: a shape-only dep (an `expand` shape
             // source or a runtime-dim declarer) keeps its source alive; the
             // consumer needs the extent even though it never reads the value.
             for &dep in &dag.nodes()[i].shape_deps {
@@ -677,7 +677,7 @@ fn prune_to_requested_outputs(
             {
                 new_node.merged_spans = node.merged_spans.clone();
             }
-            // chelis#384/#397: preserve (remapped) Form-3 `expand` shape-deps.
+            // chelis#384/#397: preserve (remapped) shape-derived `expand` deps.
             if !node.shape_deps.is_empty() {
                 let mapped: Vec<NodeId> = node
                     .shape_deps

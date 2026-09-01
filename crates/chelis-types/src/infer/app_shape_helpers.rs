@@ -202,7 +202,7 @@ pub(super) enum SizeClass {
     Unknown,
 }
 
-/// The §4.7.2 Form-3 sourceless-size diagnostic (chelis#469), emitted by
+/// The §4.7.2 sourceless-size diagnostic (chelis#469), emitted by
 /// `check_expand_signature` when an `expand` size resolves to `Sourceless`.
 /// Factored out so the diagnostic text has a single source of truth.
 /// `size_expr` is the size sub-expression (used only to name a symbolic
@@ -245,7 +245,7 @@ pub(super) fn classify_expand_size(expr: &deep::Expr, env: &Env) -> SizeClass {
         return SizeClass::Static;
     }
     // An inline `shape(t, axis)` read (possibly `cast`-wrapped) of an
-    // in-scope tensor is the canonical Form-3 shape source (`bias_broadcast`).
+    // in-scope tensor is the canonical shape source (`bias_broadcast`).
     if let Some(operand) = shape_read_operand(expr) {
         return if shape_operand_is_in_scope_tensor(operand, env) {
             SizeClass::ShapeSourced

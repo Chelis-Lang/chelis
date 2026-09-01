@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "309fe01757b5db0794b5cc713191ee8e1f6cb26e02141c05957878cd93358dec",
+  "corpus_sha256": "5fc99a09ded919bd6c914be08a6f2a0d5a3ada3a1eaa6d6a9cad798202e8d6c0",
   "rows": [
     {
       "id": "expand.binder.eval_c",
@@ -133,6 +133,12 @@
       "baseline": "silent_unguarded",
       "phase_a": "executes_exactly",
       "receipt": "ir.vmap_keeps_shape_bound_shared_and_shifts_its_axis"
+    },
+    {
+      "id": "vmap.shared_shape_bound.concrete_c_emit",
+      "baseline": "silent_unguarded",
+      "phase_a": "executes_exactly",
+      "receipt": "cli.vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice"
     },
     {
       "id": "vmap.shared_shape_bound_ordinary_use",

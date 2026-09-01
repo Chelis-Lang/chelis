@@ -29,6 +29,20 @@ fn errors(report: &Value) -> Vec<&str> {
         .collect()
 }
 
+fn rust_sources_below(path: &Path, files: &mut Vec<std::path::PathBuf>) {
+    for entry in
+        fs::read_dir(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+    {
+        let entry = entry.expect("source entry");
+        let path = entry.path();
+        if path.is_dir() {
+            rust_sources_below(&path, files);
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            files.push(path);
+        }
+    }
+}
+
 fn compile_and_run_c(build_dir: &Path, stem: &str) -> std::process::Output {
     let binary = build_dir.join(format!("{stem}-bin"));
     let compile = StdCommand::new("cc")
@@ -218,4 +232,81 @@ fn stale_extent_guidance_is_removed_but_axis_guidance_stays_int32() {
     );
     let axis_errors = errors(&axis).join("\n");
     assert!(axis_errors.contains("int32"), "{axis_errors}");
+
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let mut sources = Vec::new();
+    for relative in ["crates/chelis-ir/src", "crates/chelis-types/src"] {
+        rust_sources_below(&repo.join(relative), &mut sources);
+    }
+    let obsolete = concat!("Form-", "3");
+    let residues = sources
+        .iter()
+        .filter(|path| {
+            fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+                .contains(obsolete)
+        })
+        .map(|path| {
+            path.strip_prefix(repo)
+                .unwrap_or(path)
+                .display()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        residues.is_empty(),
+        "obsolete runtime-extent taxonomy remains in active compiler sources: {residues:?}"
+    );
+}
+
+/// chelis#1378 red-team regression: vectorizing a shrink prepends the mapped
+/// batch axis. A concrete batch must receive a concrete end bound; leaving the
+/// internal `ToEnd` sentinel beside `tensor[2, ...]` makes the C backend panic
+/// before it can emit the object-only program currently masked by chelis#1397.
+///
+/// The negative parity row is the IR-level
+/// `vmap_rejects_element_derived_extent`: a genuinely batch-varying bound must
+/// still reject instead of being forced into this shared-axis construction.
+#[test]
+fn vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice() {
+    let source = "def g(x: tensor[n, f32]) -> tensor[m, f32] = shrink(x, [[1i64, shape(x, 0)]])\n\
+        def main() = vmap(g)(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n";
+    let report = check(source);
+    assert_eq!(report["score"].as_f64(), Some(1.0), "{report}");
+    assert!(errors(&report).is_empty(), "{report}");
+
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("vmap_shape_bound.ch");
+    fs::write(&path, source).expect("fixture");
+    let out_dir = dir.path().join("out");
+    let build = Command::cargo_bin("chelis")
+        .expect("chelis")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            "--allow-style-violations",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "-o",
+            out_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("build");
+    assert!(
+        build.status.success(),
+        "concrete mapped batch must emit C without an unresolved ToEnd ICE:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let emitted_path = out_dir.join("vmap_shape_bound.c");
+    let emitted = fs::read_to_string(&emitted_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", emitted_path.display()));
+    assert!(
+        emitted.contains("t0->shape[1]"),
+        "the shared shape extent must still read the unbatched function's axis 0, shifted behind the mapped batch axis:\n{emitted}"
+    );
 }

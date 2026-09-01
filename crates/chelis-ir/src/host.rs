@@ -3048,7 +3048,7 @@ fn lower_host_function(
     // the enclosing `def`'s type child, but they must not re-lower the same
     // checked function under fresh inference variables: that loses symbolic
     // dimension provenance and can turn a valid tensor helper into a false
-    // Form-3 materialization rejection.
+    // sourceless runtime-extent materialization rejection.
     let (param_tys, ret_ty) = declared_fn_type_expr
         .as_ref()
         .and_then(|ty| parse_expanded_fn_type_expr(program, ty))

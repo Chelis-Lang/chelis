@@ -20,7 +20,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                 consumers[input_id.0] += 1;
             }
         }
-        // chelis#384/#397/#616: a shape-only dependency (a Form-3 `expand`
+        // chelis#384/#397/#616: a shape-only dependency (an `expand` shape
         // source or a runtime-dim declarer kept alive for its extent) is a
         // real consumption — the dependent reads the node's shape, not its
         // value — so its target is not dangling.

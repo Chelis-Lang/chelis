@@ -1528,7 +1528,7 @@ pub struct DagNode {
     #[serde(default)]
     pub merged_spans: Vec<String>,
     /// chelis#384/#397: nodes this node depends on ONLY for their shape, not
-    /// their data. A Form-3 `expand(b, axis, shape(x, k))` reads the
+    /// their data. An `expand(b, axis, shape(x, k))` reads the
     /// broadcast extent from `x`'s runtime shape but does not consume `x`'s
     /// data, so `x` is not in `inputs`. Without recording the dependency,
     /// `x`'s `Load` is dead-code-eliminated and the symbolic dim it declares
@@ -1588,7 +1588,7 @@ impl Dag {
     }
 
     /// chelis#384/#397: record that `id` depends on `dep` only for its shape
-    /// (a Form-3 `expand(..., shape(x, ...))` extent source). DCE keeps `dep`
+    /// (an `expand(..., shape(x, ...))` extent source). DCE keeps `dep`
     /// live through this edge; eval/backends ignore it. See
     /// [`DagNode::shape_deps`].
     pub fn add_shape_dep(&mut self, id: NodeId, dep: NodeId) {
@@ -1603,7 +1603,7 @@ impl Dag {
     /// node `new_id` in this DAG, remapping each through `remap`. Every
     /// DAG-rebuild pass (DCE, copy/drop insertion, BLAS specialization,
     /// fusion, vmap, grad, splice) must call this alongside its
-    /// `merged_spans` preservation so a Form-3 `expand` extent source is not
+    /// `merged_spans` preservation so a shape-derived `expand` extent is not
     /// silently dropped on the rebuild — losing it reintroduces the
     /// wrong-shape regression. Deps that don't survive the rebuild's remap
     /// are dropped (the consuming node was itself eliminated, so the dep is

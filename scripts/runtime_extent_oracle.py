@@ -206,6 +206,12 @@ def generated_phase_a_corpus() -> tuple[CorpusRow, ...]:
             "ir.vmap_keeps_shape_bound_shared_and_shifts_its_axis",
         ),
         _row(
+            "vmap.shared_shape_bound.concrete_c_emit",
+            "silent_unguarded",
+            EXECUTES,
+            "cli.vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice",
+        ),
+        _row(
             "vmap.shared_shape_bound_ordinary_use",
             "silent_unguarded",
             EXECUTES,
@@ -323,6 +329,7 @@ def automatic_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
                 "negative_extent_remains_a_static_type_error",
                 "shape_sourced_expand_rejects_wrong_rank_ascription",
                 "stale_extent_guidance_is_removed_but_axis_guidance_stays_int32",
+                "vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice",
                 "zero_extent_is_check_clean_and_evaluates_to_empty_tensor",
             ),
         ),

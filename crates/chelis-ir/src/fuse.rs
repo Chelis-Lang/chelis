@@ -317,7 +317,7 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, UnordMap<NodeId, No
             {
                 new_node.merged_spans = node.merged_spans.clone();
             }
-            // chelis#384/#397: preserve (remapped) Form-3 `expand` shape-deps.
+            // chelis#384/#397: preserve (remapped) shape-derived `expand` deps.
             if !node.shape_deps.is_empty() {
                 let mapped: Vec<NodeId> = node
                     .shape_deps

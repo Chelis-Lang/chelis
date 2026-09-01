@@ -9,6 +9,12 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
         DimInfo::Named(_, Some(size)) => Some(*size),
         DimInfo::Named(_, None) => None,
     };
+    // `ToEnd` is the structural full-axis sentinel only while the mapped
+    // batch remains symbolic. Once vmap knows the batch cardinality, spell
+    // the bound as that exact literal: downstream backends deliberately
+    // reject a sentinel paired with a concrete result dimension because it
+    // can otherwise conceal a malformed movement rewrite.
+    let batch_shrink_end = concrete_batch.map(RtDim::Lit).unwrap_or(RtDim::ToEnd);
 
     // A node-valued movement extent is one scalar for the whole mapped
     // invocation, not one scalar per element. Prove that its dependency
@@ -66,7 +72,7 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
                 fill: *fill,
             },
             RiscOp::Shrink { bounds } => RiscOp::Shrink {
-                bounds: std::iter::once((RtDim::Lit(0), RtDim::ToEnd))
+                bounds: std::iter::once((RtDim::Lit(0), batch_shrink_end.clone()))
                     .chain(
                         bounds
                             .iter()
@@ -146,8 +152,8 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
             if !node.merged_spans.is_empty() {
                 new_node.merged_spans = node.merged_spans.clone();
             }
-            // chelis#384/#397: vmap is a 1:1 id-preserving clone, so a
-            // Form-3 `expand` shape-dep maps to the same id verbatim.
+            // chelis#384/#397: vmap is a 1:1 id-preserving clone, so an
+            // `expand` shape dependency maps to the same id verbatim.
             new_node.shape_deps = node
                 .shape_deps
                 .iter()

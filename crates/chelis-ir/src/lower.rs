@@ -908,8 +908,8 @@ fn insert_copy_nodes_for_consuming_fanout(dag: &Dag) -> (Dag, UnordMap<NodeId, N
                 .reusable_input
                 .and_then(|old| id_map.get(&old).copied());
             new_node.merged_spans = node.merged_spans.clone();
-            // chelis#384/#397: preserve (remapped) shape-only deps so a
-            // Form-3 `expand` extent source survives this rebuild. Deps are
+            // chelis#384/#397: preserve (remapped) shape-only deps so an
+            // `expand` shape-derived extent source survives this rebuild. Deps are
             // earlier in topo order, so already remapped in `id_map`.
             new_node.shape_deps = node
                 .shape_deps
@@ -997,8 +997,8 @@ fn strip_drop_nodes(dag: &Dag) -> (Dag, UnordMap<NodeId, NodeId>) {
                 .reusable_input
                 .and_then(|old| id_map.get(&old).copied());
             new_node.merged_spans = node.merged_spans.clone();
-            // chelis#384/#397: preserve (remapped) shape-only deps so a
-            // Form-3 `expand` extent source survives this rebuild. Deps are
+            // chelis#384/#397: preserve (remapped) shape-only deps so an
+            // `expand` shape-derived extent source survives this rebuild. Deps are
             // earlier in topo order, so already remapped in `id_map`.
             new_node.shape_deps = node
                 .shape_deps
@@ -1352,7 +1352,7 @@ fn lower_subexpr_program_inner_impl(
     // whose iteration order is randomized per process; using it directly made
     // the pre-created `Load` node order — and therefore the tensor-helper
     // kernel's input-slot order (`input_labels` follows `dag.nodes()`) —
-    // non-deterministic across builds. For a Form-3 `expand` whose extent is
+    // non-deterministic across builds. For an `expand` whose extent is
     // read from a shape-source operand referenced ONLY via `shape(x, …)` (the
     // §4.7.2 `bias_broadcast` example), both that operand and the data operand
     // survive DCE, so their relative slot order flipped build-to-build and the
@@ -8087,7 +8087,7 @@ impl LowerCtx {
                     {
                         self.dag.set_reusable_input(new_id, *mapped_input);
                     }
-                    // chelis#384/#397: preserve (remapped) Form-3 `expand`
+                    // chelis#384/#397: preserve (remapped) shape-derived `expand`
                     // shape-deps across the splice. Deps are earlier nodes,
                     // already in `remap`.
                     self.dag
@@ -11520,7 +11520,7 @@ impl LowerCtx {
     /// carries the named dimension `name` in its shape — i.e. the symbol has a
     /// real tensor source the backend can read the extent from. Used to
     /// distinguish a valid §4.7.2 Form-2 symbolic `expand` size (an in-scope
-    /// tensor dim) from a sourceless Form-3 scalar-parameter size that the
+    /// tensor dim) from a sourceless scalar-parameter size that the
     /// backend cannot materialize.
     fn tensor_source_for_symbol(&self, name: &str) -> Option<(NodeId, usize, DimInfo)> {
         self.dag.nodes().iter().find_map(|node| {

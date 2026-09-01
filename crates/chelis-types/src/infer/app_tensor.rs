@@ -1017,7 +1017,7 @@ pub(super) fn check_expand_signature(
             // by an in-scope tensor — stamps the named dim into the output so
             // declared results refer to it by name. Every other materializable
             // spelling (`shape(...)` reads, static arithmetic, `cast`-wrapped,
-            // and `let`-bound sizes — Form-3) defers the output dim slot to
+            // and `let`-bound sizes) defers the output dim slot to
             // the declared return-type / call-context via unification.
             match arg_exprs.get(2).and_then(symbolic_dim_ref_name) {
                 Some(name) if env.lookup(name).is_none() || env.tensor_carries_dim(name) => {

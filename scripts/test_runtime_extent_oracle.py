@@ -33,6 +33,7 @@ class RuntimeExtentOracleTests(unittest.TestCase):
             "grad_vmap.backward_expand.eval_c",
             "ir.movement_input_cardinality",
             "vmap.shared_shape_bound",
+            "vmap.shared_shape_bound.concrete_c_emit",
             "wire.input_axis.round_trip",
             "wire.movement_input_cardinality",
             "wire.capacity_census",
