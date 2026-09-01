@@ -66,7 +66,7 @@ fn integer_dimension_argument_parses_in_type_application() {
         panic!("expected an applied type annotation");
     };
     assert_eq!(name, "Frame");
-    assert!(matches!(&args[0], TypeExpr::Named(n, _) if n == "2"));
+    assert!(matches!(&args[0], TypeExpr::DimensionLiteral(value, _) if value.to_string() == "2"));
 }
 
 #[test]
@@ -84,7 +84,10 @@ fn integer_argument_parses_in_nested_type_application() {
         panic!("expected a nested applied type");
     };
     assert_eq!(inner, "Column");
-    assert!(matches!(&inner_args[0], TypeExpr::Named(n, _) if n == "2"));
+    assert!(matches!(
+        &inner_args[0],
+        TypeExpr::DimensionLiteral(value, _) if value.to_string() == "2"
+    ));
 }
 
 #[test]

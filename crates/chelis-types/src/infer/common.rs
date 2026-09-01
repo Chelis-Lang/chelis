@@ -467,6 +467,27 @@ pub(super) fn narrow_wildcards_with(
                 .collect();
             Type::Adt(n.clone(), new_args)
         }
+        (Type::KindedAdt(n, args), Type::KindedAdt(_, t_args)) if args.len() == t_args.len() => {
+            let new_args = args
+                .iter()
+                .zip(t_args)
+                .map(|(argument, template)| match (argument, template) {
+                    (NominalArg::Type(ty), NominalArg::Type(template)) => {
+                        NominalArg::Type(narrow_wildcards_with(ty, template, param_dvars))
+                    }
+                    (
+                        NominalArg::Dimension(Dim::Wildcard),
+                        NominalArg::Dimension(template @ Dim::Lit(_)),
+                    ) => NominalArg::Dimension(template.clone()),
+                    (
+                        NominalArg::Dimension(Dim::Wildcard),
+                        NominalArg::Dimension(template @ Dim::Var(var)),
+                    ) if param_dvars.contains(var) => NominalArg::Dimension(template.clone()),
+                    _ => argument.clone(),
+                })
+                .collect();
+            Type::KindedAdt(n.clone(), new_args)
+        }
         _ => ty.clone(),
     }
 }
@@ -588,7 +609,7 @@ pub(super) fn macro_source(expr: &deep::Expr) -> Option<String> {
 pub(super) struct AliasExpansionSession<'a> {
     adt_reg: &'a AdtRegistry,
     vg: &'a mut VarGen,
-    cache: Vec<(String, Vec<Type>, Type)>,
+    cache: Vec<(String, Vec<NominalArg>, Type)>,
 }
 
 impl<'a> AliasExpansionSession<'a> {
@@ -612,13 +633,18 @@ impl<'a> AliasExpansionSession<'a> {
                     .iter()
                     .map(|arg| self.resolve_inner(arg, seen))
                     .collect();
+                let nominal_args = resolved_args
+                    .iter()
+                    .cloned()
+                    .map(NominalArg::Type)
+                    .collect::<Vec<_>>();
 
                 if seen.contains(name) {
                     return Type::Adt(name.clone(), resolved_args);
                 }
                 if let Some((_, _, cached)) =
                     self.cache.iter().find(|(cached_name, cached_args, _)| {
-                        cached_name == name && cached_args == &resolved_args
+                        cached_name == name && cached_args == &nominal_args
                     })
                 {
                     return cached.clone();
@@ -627,17 +653,13 @@ impl<'a> AliasExpansionSession<'a> {
                 let Some(alias) = self.adt_reg.resolve_alias(name) else {
                     return Type::Adt(name.clone(), resolved_args);
                 };
-                if alias.param_vars.len() != resolved_args.len() {
+                let Some((type_subst, dim_subst)) =
+                    crate::adt::nominal_substitutions(&alias.param_args, &nominal_args)
+                else {
                     return Type::Adt(name.clone(), resolved_args);
-                }
-
-                let parameter_subst: HashMap<TypeVar, Type> = alias
-                    .param_vars
-                    .iter()
-                    .copied()
-                    .zip(resolved_args.iter().cloned())
-                    .collect();
-                let substituted = crate::adt::substitute_alias_type(&alias.body, &parameter_subst);
+                };
+                let substituted =
+                    crate::adt::substitute_nominal_type(&alias.body, &type_subst, &dim_subst);
 
                 // Alias-body variables that did not come from a supplied type
                 // argument are quantified by the alias declaration. Freshen
@@ -658,6 +680,83 @@ impl<'a> AliasExpansionSession<'a> {
                     .iter()
                     .flat_map(crate::env::free_rvars)
                     .collect();
+                let mut renaming = Subst::new();
+                for var in crate::env::free_tvars(&substituted) {
+                    if !protected_tvars.contains(&var) {
+                        renaming
+                            .insert_type(var, self.vg.fresh_type())
+                            .expect("fresh alias-body type renaming is valid");
+                    }
+                }
+                for var in crate::env::free_dvars(&substituted) {
+                    if !protected_dvars.contains(&var) {
+                        renaming.insert_dim(var, self.vg.fresh_dim());
+                    }
+                }
+                for var in crate::env::free_rvars(&substituted) {
+                    if !protected_rvars.contains(&var) {
+                        renaming.insert_rank(var, vec![Dim::Rank(self.vg.fresh_rvar())]);
+                    }
+                }
+
+                let expanded = renaming.apply(&substituted);
+                seen.insert(name.clone());
+                let resolved = self.resolve_inner(&expanded, seen);
+                seen.remove(name);
+                self.cache
+                    .push((name.clone(), nominal_args, resolved.clone()));
+                resolved
+            }
+            Type::KindedAdt(name, args) => {
+                let resolved_args = args
+                    .iter()
+                    .map(|argument| match argument {
+                        NominalArg::Type(ty) => NominalArg::Type(self.resolve_inner(ty, seen)),
+                        NominalArg::Dimension(dim) => NominalArg::Dimension(dim.clone()),
+                    })
+                    .collect::<Vec<_>>();
+                if seen.contains(name) {
+                    return Type::KindedAdt(name.clone(), resolved_args);
+                }
+                if let Some((_, _, cached)) =
+                    self.cache.iter().find(|(cached_name, cached_args, _)| {
+                        cached_name == name && cached_args == &resolved_args
+                    })
+                {
+                    return cached.clone();
+                }
+                let Some(alias) = self.adt_reg.resolve_alias(name) else {
+                    return Type::KindedAdt(name.clone(), resolved_args);
+                };
+                let Some((type_subst, dim_subst)) =
+                    crate::adt::nominal_substitutions(&alias.param_args, &resolved_args)
+                else {
+                    return Type::KindedAdt(name.clone(), resolved_args);
+                };
+                let substituted =
+                    crate::adt::substitute_nominal_type(&alias.body, &type_subst, &dim_subst);
+
+                let protected_tvars = resolved_args
+                    .iter()
+                    .filter_map(NominalArg::as_type)
+                    .flat_map(crate::env::free_tvars)
+                    .collect::<HashSet<_>>();
+                let protected_dvars = resolved_args
+                    .iter()
+                    .flat_map(|argument| match argument {
+                        NominalArg::Type(ty) => crate::env::free_dvars(ty),
+                        NominalArg::Dimension(Dim::Var(var)) => vec![*var],
+                        NominalArg::Dimension(_) => Vec::new(),
+                    })
+                    .collect::<HashSet<_>>();
+                let protected_rvars = resolved_args
+                    .iter()
+                    .flat_map(|argument| match argument {
+                        NominalArg::Type(ty) => crate::env::free_rvars(ty),
+                        NominalArg::Dimension(Dim::Rank(var)) => vec![*var],
+                        NominalArg::Dimension(_) => Vec::new(),
+                    })
+                    .collect::<HashSet<_>>();
                 let mut renaming = Subst::new();
                 for var in crate::env::free_tvars(&substituted) {
                     if !protected_tvars.contains(&var) {
@@ -818,6 +917,7 @@ pub(super) fn precollect_type_resolution_env(
     adt_reg: &AdtRegistry,
 ) -> TypeResolutionEnv {
     let mut headers = TypeResolutionEnv::from_registry(adt_reg);
+    let mut declarations: HashMap<String, (Vec<String>, Vec<&deep::Expr>)> = HashMap::new();
     for (_, expr) in items {
         let Some((tag, _, kids)) = stamped_parts(expr) else {
             continue;
@@ -825,24 +925,201 @@ pub(super) fn precollect_type_resolution_env(
         if !matches!(tag, DeepTag::Deftype | DeepTag::Typealias) {
             continue;
         }
-        let (Some(name), Some(params)) = (kids.first().and_then(symbol_name), kids.get(1)) else {
+        let (Some(name), Some(params_expr)) = (kids.first().and_then(symbol_name), kids.get(1))
+        else {
             continue;
         };
-        if stamped_parts(params).is_some_and(|(tag, _, _)| tag == DeepTag::Variant) {
+        if stamped_parts(params_expr).is_some_and(|(tag, _, _)| tag == DeepTag::Variant) {
             // Legacy Deep permits omitting the explicit empty parameter list.
-            headers.insert(name, 0);
+            declarations.insert(name.to_string(), (Vec::new(), kids[1..].iter().collect()));
         } else {
-            let params = match params {
+            let params = match params_expr {
                 deep::Expr::List(list, _) => list.elements.as_slice(),
                 deep::Expr::BareList(elements, _) => elements.as_slice(),
                 _ => continue,
             };
             if params.iter().all(|param| symbol_name(param).is_some()) {
-                headers.insert(name, params.len());
+                let names = params
+                    .iter()
+                    .filter_map(symbol_name)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                let bodies = if tag == DeepTag::Typealias {
+                    kids.get(2).into_iter().collect()
+                } else {
+                    kids[2..].iter().collect()
+                };
+                declarations.insert(name.to_string(), (names, bodies));
             }
         }
     }
+
+    // Kind inference is a deterministic fixed point over declaration
+    // headers. A parameter becomes dimension-kinded only when every observed
+    // use is dimensional; type, mixed, and unused parameters remain ordinary
+    // types, preserving the language's unkinded-binder default.
+    let mut evidence = declarations
+        .iter()
+        .map(|(name, (params, _))| (name.clone(), vec![(false, false); params.len()]))
+        .collect::<HashMap<_, _>>();
+    loop {
+        let before = evidence.clone();
+        for (name, (params, bodies)) in &declarations {
+            let indices = params
+                .iter()
+                .enumerate()
+                .map(|(index, param)| (param.as_str(), index))
+                .collect::<HashMap<_, _>>();
+            for body in bodies {
+                collect_nominal_kind_evidence(
+                    body,
+                    Some(NominalParamKind::Type),
+                    &indices,
+                    &mut evidence,
+                    name,
+                    &headers,
+                );
+            }
+        }
+        if evidence == before {
+            break;
+        }
+    }
+    for (name, (params, _)) in declarations {
+        let kinds = evidence
+            .remove(&name)
+            .unwrap_or_else(|| vec![(false, false); params.len()])
+            .into_iter()
+            .map(|(type_use, dimension_use)| {
+                if dimension_use && !type_use {
+                    NominalParamKind::Dimension
+                } else {
+                    NominalParamKind::Type
+                }
+            })
+            .collect();
+        headers.insert(name, kinds);
+    }
     headers
+}
+
+fn collect_nominal_kind_evidence(
+    expr: &deep::Expr,
+    context: Option<NominalParamKind>,
+    own_params: &HashMap<&str, usize>,
+    evidence: &mut HashMap<String, Vec<(bool, bool)>>,
+    owner: &str,
+    existing_headers: &TypeResolutionEnv,
+) {
+    stack_guard!("collect_nominal_kind_evidence", expr);
+    let Some((tag, _, kids)) = stamped_parts(expr) else {
+        return;
+    };
+    let record = |name: &str,
+                  context: Option<NominalParamKind>,
+                  evidence: &mut HashMap<String, Vec<(bool, bool)>>| {
+        let Some(index) = own_params.get(name).copied() else {
+            return;
+        };
+        let Some(entries) = evidence.get_mut(owner) else {
+            return;
+        };
+        match context {
+            Some(NominalParamKind::Type) => entries[index].0 = true,
+            Some(NominalParamKind::Dimension) => entries[index].1 = true,
+            None => {}
+        }
+    };
+    match tag {
+        DeepTag::TVar => {
+            if let Some(name) = kids.first().and_then(symbol_name) {
+                record(name, context, evidence);
+            }
+        }
+        DeepTag::DVar | DeepTag::DRank => {
+            if let Some(name) = kids.first().and_then(symbol_name) {
+                record(name, Some(NominalParamKind::Dimension), evidence);
+            }
+        }
+        DeepTag::TTensor => {
+            if let Some((precision, dimensions)) = kids.split_last() {
+                for dimension in dimensions {
+                    collect_nominal_kind_evidence(
+                        dimension,
+                        Some(NominalParamKind::Dimension),
+                        own_params,
+                        evidence,
+                        owner,
+                        existing_headers,
+                    );
+                }
+                collect_nominal_kind_evidence(
+                    precision,
+                    Some(NominalParamKind::Type),
+                    own_params,
+                    evidence,
+                    owner,
+                    existing_headers,
+                );
+            }
+        }
+        DeepTag::TAdt => {
+            let Some(target) = kids.first().and_then(symbol_name) else {
+                return;
+            };
+            for (index, argument) in kids.iter().skip(1).enumerate() {
+                let propagated = evidence
+                    .get(target)
+                    .and_then(|entries| entries.get(index))
+                    .and_then(|(type_use, dimension_use)| {
+                        if *type_use {
+                            Some(NominalParamKind::Type)
+                        } else if *dimension_use {
+                            Some(NominalParamKind::Dimension)
+                        } else {
+                            None
+                        }
+                    })
+                    .or_else(|| {
+                        existing_headers
+                            .param_kinds(target)
+                            .and_then(|kinds| kinds.get(index).copied())
+                    });
+                collect_nominal_kind_evidence(
+                    argument,
+                    propagated,
+                    own_params,
+                    evidence,
+                    owner,
+                    existing_headers,
+                );
+            }
+        }
+        DeepTag::TFn | DeepTag::TRef | DeepTag::TTuple => {
+            for child in kids {
+                collect_nominal_kind_evidence(
+                    child,
+                    Some(NominalParamKind::Type),
+                    own_params,
+                    evidence,
+                    owner,
+                    existing_headers,
+                );
+            }
+        }
+        _ => {
+            for child in kids {
+                collect_nominal_kind_evidence(
+                    child,
+                    context,
+                    own_params,
+                    evidence,
+                    owner,
+                    existing_headers,
+                );
+            }
+        }
+    }
 }
 
 /// Build the program-shape opacity metadata (RFC D-CHECK) from the
@@ -1460,27 +1737,44 @@ pub(super) fn collect_declarations(
                     _ => Vec::new(),
                 };
 
-                let explicit_params: HashSet<String> = params.iter().cloned().collect();
+                let param_kinds = headers
+                    .param_kinds(name)
+                    .map(<[NominalParamKind]>::to_vec)
+                    .unwrap_or_else(|| vec![NominalParamKind::Type; params.len()]);
+                let explicit_params = params
+                    .iter()
+                    .cloned()
+                    .zip(param_kinds.iter().copied())
+                    .collect::<HashMap<_, _>>();
                 let mut resolver = DeepTypeResolver::new(
                     TypeUseSite::TypeAliasBody,
-                    BinderMode::Explicit(&explicit_params),
+                    BinderMode::ExplicitKinds(&explicit_params),
                     headers,
                     vg,
                     errors,
                 );
                 if let Ok(aliased_ty) = resolver.resolve(&kids[2]) {
-                    let param_vars = params
+                    let param_args = params
                         .iter()
-                        .map(|param| {
-                            resolver.type_var(param).expect(
-                                "explicit alias params are pre-bound as nominal type arguments",
-                            )
+                        .zip(&param_kinds)
+                        .map(|(param, kind)| match kind {
+                            NominalParamKind::Type => NominalArg::Type(Type::Var(
+                                resolver
+                                    .type_var(param)
+                                    .expect("type-kinded alias parameter is pre-bound"),
+                            )),
+                            NominalParamKind::Dimension => NominalArg::Dimension(Dim::Var(
+                                resolver
+                                    .dim_var(param)
+                                    .expect("dimension-kinded alias parameter is pre-bound"),
+                            )),
                         })
                         .collect();
                     adt_reg.register_alias(
                         name.to_string(),
                         params,
-                        param_vars,
+                        param_kinds,
+                        param_args,
                         aliased_ty.into_type(),
                     );
                 }
@@ -1499,6 +1793,11 @@ pub(super) fn type_contains_rank(ty: &Type) -> bool {
         Type::Fn(args, ret) => args.iter().any(type_contains_rank) || type_contains_rank(ret),
         Type::Ref(inner) => type_contains_rank(inner),
         Type::Adt(_, args) => args.iter().any(type_contains_rank),
+        Type::KindedAdt(_, args) => args.iter().any(|argument| match argument {
+            NominalArg::Type(ty) => type_contains_rank(ty),
+            NominalArg::Dimension(Dim::Rank(_)) => true,
+            NominalArg::Dimension(_) => false,
+        }),
         Type::Tuple(ts) => ts.iter().any(type_contains_rank),
         Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error(_) => false,
     }
@@ -2083,6 +2382,15 @@ pub(super) fn infer_top_level(
                 unify_result.is_ok() && body_return_collapsed && body_has_unbound_diagnostic;
             let unrecovered_initial_failure = initial_failed && !recovered_by_relaxed_retry;
             if unrecovered_initial_failure || masked_by_error {
+                // Declared-signature mismatches remain the established
+                // TypeMismatch contract except when nominal-dimension
+                // enforcement proves a concrete extent disagreement.  The
+                // latter is the one structurally distinct case introduced by
+                // [04-ADT-4].
+                let mismatch_kind = match unify_result.as_ref().err().map(|error| &error.kind) {
+                    Some(TypeErrorKind::DimensionMismatch) => CheckErrorKind::DimensionMismatch,
+                    _ => CheckErrorKind::TypeMismatch,
+                };
                 // RT-2 fixup B1: when the mismatch is a tensor
                 // precision mismatch (notably a `reduce_sum` body
                 // whose result precision differs from the declared
@@ -2108,7 +2416,7 @@ pub(super) fn infer_top_level(
                     _ => String::new(),
                 };
                 errors.push(CheckError::new(
-                    CheckErrorKind::TypeMismatch,
+                    mismatch_kind,
                     format!(
                         "def '{}' body doesn't match declared signature: \
                          body has type `{}`, declared type is `{}`{}",

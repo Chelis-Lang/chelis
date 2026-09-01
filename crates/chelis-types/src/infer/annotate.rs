@@ -532,6 +532,10 @@ fn type_is_safe_annotation_stamp(ty: &Type) -> bool {
                     .all(|dim| matches!(dim, Dim::Name(_) | Dim::Lit(_)))
         }
         Type::Adt(_, args) | Type::Tuple(args) => args.iter().all(type_is_safe_annotation_stamp),
+        Type::KindedAdt(_, args) => args.iter().all(|argument| match argument {
+            NominalArg::Type(ty) => type_is_safe_annotation_stamp(ty),
+            NominalArg::Dimension(dim) => matches!(dim, Dim::Name(_) | Dim::Lit(_)),
+        }),
         Type::Var(_) | Type::Error(_) => false,
     }
 }

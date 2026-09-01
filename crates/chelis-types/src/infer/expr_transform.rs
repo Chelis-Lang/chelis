@@ -244,6 +244,36 @@ pub(super) fn grad_argument_type(arg: &Type, adt_reg: &AdtRegistry) -> Option<Ty
                 debug_assert_eq!(visiting.pop().as_ref(), Some(arg));
                 result
             }
+            Type::KindedAdt(name, args) => {
+                if visiting.contains(arg) {
+                    return (arg.clone(), false);
+                }
+                visiting.push(arg.clone());
+                let result = if let Some(expanded) = adt_reg.instantiate_nominal_alias(name, args) {
+                    cotangent(&expanded, adt_reg, visiting)
+                } else {
+                    let has_float = adt_reg.defs.get(name).is_some_and(|def| {
+                        let Some((type_subst, dim_subst)) =
+                            crate::adt::nominal_substitutions(&def.param_args, args)
+                        else {
+                            return false;
+                        };
+                        def.variants.iter().any(|variant| {
+                            variant.fields.iter().any(|(_, field_ty)| {
+                                let instantiated = crate::adt::substitute_nominal_type(
+                                    field_ty,
+                                    &type_subst,
+                                    &dim_subst,
+                                );
+                                cotangent(&instantiated, adt_reg, visiting).1
+                            })
+                        })
+                    });
+                    (Type::KindedAdt(name.clone(), args.clone()), has_float)
+                };
+                debug_assert_eq!(visiting.pop().as_ref(), Some(arg));
+                result
+            }
             Type::Ref(inner) => {
                 let (inner, has_float) = cotangent(inner, adt_reg, visiting);
                 (inner, has_float)

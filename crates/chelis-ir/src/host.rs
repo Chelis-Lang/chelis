@@ -10,7 +10,7 @@ use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_deep::decode_effect_kind;
 use chelis_types::adt::{AdtDef, AdtRegistry};
 use chelis_types::infer::type_to_deep_expr;
-use chelis_types::types::{Prim, TensorPrec, Type};
+use chelis_types::types::{Dim, NominalArg, NominalParamKind, Prim, TensorPrec, Type};
 use chelis_types::{BUILTIN_NAMES, CheckedProgram};
 use chelis_vocab::EffectKind;
 
@@ -1744,14 +1744,16 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
     }
 
     let declared_param_tys = lookup_declared_type_expr(program, name)
-        .and_then(|ty| parse_fn_type_expr(&ty))
+        .and_then(|ty| parse_expanded_fn_type_expr(program, &ty))
         .map(|(params, _)| params)
         .unwrap_or_default();
     let mut scope = HashMap::new();
     for (index, param) in children(params_list).iter().enumerate() {
         let pname = param_name(param)?;
-        let pty = param_host_type(param)
-            .or_else(|| declared_param_tys.get(index).cloned())
+        let pty = declared_param_tys
+            .get(index)
+            .cloned()
+            .or_else(|| param_host_type(param).map(|ty| expand_host_type_aliases(program, ty)))
             .filter(|ty| !ty.is_unresolved())?;
         let tensor_ty = tensor_type_from_host_input(&pty)?;
         scope.insert(pname, tensor_ty);
@@ -3011,9 +3013,12 @@ fn lower_host_function(
     ty_expr: Option<&Expr>,
     program: &CheckedProgram,
 ) -> Result<Option<HostFunction>, crate::lower::LowerDiagnostic> {
-    let declared_fn_type_expr = ty_expr
-        .cloned()
-        .or_else(|| lookup_declared_type_expr(program, name));
+    // Preserve authored dimension identities while expanding only the
+    // checker-validated nominal aliases below. Replacing this expression with
+    // the canonical checked signature turns `batch` into an anonymous `dN`
+    // and can collapse distinct runtime guards onto one checker variable.
+    let declared_fn_type_expr =
+        lookup_declared_type_expr(program, name).or_else(|| ty_expr.cloned());
     let fn_type_parts = declared_fn_type_expr
         .as_ref()
         .and_then(parse_fn_type_expr_parts);
@@ -3025,8 +3030,10 @@ fn lower_host_function(
     // Form-3 materialization rejection.
     let (param_tys, ret_ty) = declared_fn_type_expr
         .as_ref()
-        .and_then(parse_fn_type_expr)
-        .or_else(|| expr_fn_type(body))
+        .and_then(|ty| parse_expanded_fn_type_expr(program, ty))
+        .or_else(|| {
+            expr_fn_type(body).map(|signature| expand_host_fn_type_aliases(program, signature))
+        })
         .or_else(|| lookup_declared_fn_type(program, name))
         .unwrap_or((Vec::new(), fresh_host_inference()));
 
@@ -3046,12 +3053,13 @@ fn lower_host_function(
                 let Some(pname) = param_name(param) else {
                     continue;
                 };
-                let pty = param_host_type(param)
+                let pty = param_tys
+                    .get(index)
+                    .cloned()
                     .filter(|ty| !ty.is_unresolved())
                     .or_else(|| {
-                        param_tys
-                            .get(index)
-                            .cloned()
+                        param_host_type(param)
+                            .map(|ty| expand_host_type_aliases(program, ty))
                             .filter(|ty| !ty.is_unresolved())
                     })
                     .unwrap_or_else(fresh_host_inference);
@@ -4578,11 +4586,7 @@ fn lower_host_expr_kind(
                 .and_then(symbol_name)
                 .ok_or_else(|| host_expr_lowering_error(expr, "a `var` node has no symbol"))?
                 .to_string();
-            let ty = expr_type(expr)
-                .filter(|ty| !ty.is_unresolved())
-                .or_else(|| scope.get(&name).cloned())
-                .or_else(|| lookup_declared_host_type(program, &name))
-                .unwrap_or_else(fresh_host_inference);
+            let ty = expr_host_type(expr, program, scope);
             if name == "Nil" {
                 return Ok(HostExpr::new(HostExprKind::List(
                     Vec::new(),
@@ -9706,6 +9710,25 @@ fn checker_type_has_stored_variable(
                     .any(|ty| checker_type_has_stored_variable(ty, registry, visiting))
             }
         }
+        Type::KindedAdt(name, args) => {
+            if let Some(definition) = registry.lookup(name) {
+                args.iter()
+                    .enumerate()
+                    .any(|(index, argument)| match argument {
+                        NominalArg::Type(ty) => {
+                            checker_adt_parameter_is_stored(definition, index, registry, visiting)
+                                && checker_type_has_stored_variable(ty, registry, visiting)
+                        }
+                        NominalArg::Dimension(_) => false,
+                    })
+            } else {
+                args.iter().any(|argument| {
+                    argument
+                        .as_type()
+                        .is_some_and(|ty| checker_type_has_stored_variable(ty, registry, visiting))
+                })
+            }
+        }
         Type::Error(_) => true,
     }
 }
@@ -9724,6 +9747,11 @@ fn checker_type_has_variable(ty: &Type) -> bool {
         }
         Type::Ref(inner) => checker_type_has_variable(inner),
         Type::Adt(_, args) | Type::Tuple(args) => args.iter().any(checker_type_has_variable),
+        Type::KindedAdt(_, args) => args.iter().any(|argument| match argument {
+            NominalArg::Type(ty) => checker_type_has_variable(ty),
+            NominalArg::Dimension(Dim::Var(_) | Dim::Rank(_)) => true,
+            NominalArg::Dimension(_) => false,
+        }),
         Type::Prim(_) | Type::Unit => false,
         Type::Error(_) => true,
     }
@@ -9754,6 +9782,22 @@ fn checker_type_has_erased_adt_variable(
                     && checker_type_has_variable(arg))
                     || checker_type_has_erased_adt_variable(arg, registry, visiting)
             })
+        }
+        Type::KindedAdt(name, args) => {
+            let Some(definition) = registry.lookup(name) else {
+                return false;
+            };
+            args.iter()
+                .enumerate()
+                .any(|(index, argument)| match argument {
+                    NominalArg::Type(ty) => {
+                        (!checker_adt_parameter_is_stored(definition, index, registry, visiting)
+                            && checker_type_has_variable(ty))
+                            || checker_type_has_erased_adt_variable(ty, registry, visiting)
+                    }
+                    NominalArg::Dimension(Dim::Var(_) | Dim::Rank(_)) => true,
+                    NominalArg::Dimension(_) => false,
+                })
         }
         Type::Var(_) | Type::Tensor(_, _) | Type::Prim(_) | Type::Unit | Type::Error(_) => false,
     }
@@ -10927,10 +10971,125 @@ fn expr_host_type(
 ) -> HostTypeTerm {
     let raw = expr_host_type_raw(expr, program, scope);
     let subst = active_type_subst();
-    if subst.is_empty() {
-        return raw;
+    let specialized = if subst.is_empty() {
+        raw
+    } else {
+        apply_host_type_subst(&raw, &subst)
+    };
+    expand_host_type_aliases(program, specialized)
+}
+
+/// Expand checker-validated aliases before a host type drives layout,
+/// constructor, field, or match decisions.
+///
+/// The checker keeps an authored alias name in expression metadata even
+/// though aliases are semantically transparent. Host lowering previously
+/// happened to work only when the type was a direct ADT. In particular,
+/// `type Pair[n] = Column[n]` left an access through `Pair[2]` looking for a
+/// nonexistent `Pair` constructor layout. Resolve the alias at the single
+/// host-type boundary so every downstream consumer sees the expanded field or
+/// tensor type. Dimension-kinded alias arguments remain dimensions during
+/// substitution; they are erased only when an enclosing nominal value's host
+/// layout deliberately has no slot for them.
+fn expand_host_type_aliases(program: &CheckedProgram, ty: HostTypeTerm) -> HostTypeTerm {
+    fn expand(
+        program: &CheckedProgram,
+        ty: HostTypeTerm,
+        visiting: &mut HashSet<String>,
+    ) -> HostTypeTerm {
+        match ty {
+            HostTypeTerm::Adt(name, args) => {
+                let args = args
+                    .into_iter()
+                    .map(|argument| expand(program, argument, visiting))
+                    .collect::<Vec<_>>();
+                let Some(alias) = program.adt_registry().resolve_alias(&name) else {
+                    return HostTypeTerm::Adt(name, args);
+                };
+                if alias.params.len() != args.len() || !visiting.insert(name.clone()) {
+                    return HostTypeTerm::Adt(name, args);
+                }
+                let checker_parameter_names = alias
+                    .param_args
+                    .iter()
+                    .zip(&alias.params)
+                    .filter_map(|(argument, parameter)| match argument {
+                        NominalArg::Type(Type::Var(variable)) => {
+                            Some((format!("t{}", variable.0), parameter.clone()))
+                        }
+                        NominalArg::Dimension(Dim::Var(variable)) => {
+                            Some((format!("d{}", variable.0), parameter.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect::<HashMap<_, _>>();
+                let body = rename_host_type_variables(
+                    decode_host_type_or_raise(
+                        &type_to_deep_expr(&program.adt_registry().expand_aliases(&alias.body)),
+                        &HashMap::new(),
+                    ),
+                    &checker_parameter_names,
+                );
+                let parameter_kinds = if alias.param_kinds.len() == alias.params.len() {
+                    Cow::Borrowed(alias.param_kinds.as_slice())
+                } else {
+                    Cow::Owned(vec![NominalParamKind::Type; alias.params.len()])
+                };
+                let mut type_substitutions = HashMap::new();
+                let mut dimension_substitutions = HashMap::new();
+                for ((parameter, kind), argument) in
+                    alias.params.iter().zip(parameter_kinds.iter()).zip(args)
+                {
+                    match (kind, argument) {
+                        (NominalParamKind::Type, argument) => {
+                            type_substitutions.insert(parameter.clone(), argument);
+                        }
+                        (NominalParamKind::Dimension, HostTypeTerm::TypeVariable(argument)) => {
+                            dimension_substitutions
+                                .insert(parameter.clone(), DimInfo::Named(argument, None));
+                        }
+                        (NominalParamKind::Dimension, _) => {}
+                    }
+                }
+                let expanded = expand(
+                    program,
+                    substitute_host_dimension_terms(
+                        substitute_host_type_term(body, &type_substitutions),
+                        &dimension_substitutions,
+                    ),
+                    visiting,
+                );
+                visiting.remove(&name);
+                expanded
+            }
+            HostTypeTerm::Fn(params, ret) => HostTypeTerm::Fn(
+                params
+                    .into_iter()
+                    .map(|param| expand(program, param, visiting))
+                    .collect(),
+                Box::new(expand(program, *ret, visiting)),
+            ),
+            HostTypeTerm::List(inner) => {
+                HostTypeTerm::List(Box::new(expand(program, *inner, visiting)))
+            }
+            HostTypeTerm::Dict(key, value) => HostTypeTerm::Dict(
+                Box::new(expand(program, *key, visiting)),
+                Box::new(expand(program, *value, visiting)),
+            ),
+            HostTypeTerm::Tuple(items) => HostTypeTerm::Tuple(
+                items
+                    .into_iter()
+                    .map(|item| expand(program, item, visiting))
+                    .collect(),
+            ),
+            HostTypeTerm::Option(inner) => {
+                HostTypeTerm::Option(Box::new(expand(program, *inner, visiting)))
+            }
+            other => other,
+        }
     }
-    apply_host_type_subst(&raw, &subst)
+
+    expand(program, ty, &mut HashSet::new())
 }
 
 /// Replace every bound `TypeVariable` in a host type (chelis#1201).
@@ -11384,16 +11543,42 @@ fn lookup_type_expr<'a>(type_env: &'a HashMap<String, Expr>, name: &str) -> Opti
     })
 }
 
+fn lookup_authored_defsig_type_expr(program: &CheckedProgram, name: &str) -> Option<Expr> {
+    let mut exact = None;
+    let mut terminal_matches = Vec::new();
+    for expr in top_level_items(program.exprs()) {
+        let Some((DeepTag::Defsig, _, kids)) = stamped_parts(expr) else {
+            continue;
+        };
+        let (Some(candidate), Some(signature)) = (kids.first().and_then(symbol_name), kids.get(1))
+        else {
+            continue;
+        };
+        if candidate == name {
+            exact = Some(signature.clone());
+            break;
+        }
+        if terminal_name_matches(candidate, name) {
+            terminal_matches.push(signature.clone());
+        }
+    }
+    exact.or_else(|| {
+        (terminal_matches.len() == 1)
+            .then(|| terminal_matches.into_iter().next())
+            .flatten()
+    })
+}
+
 fn lookup_declared_type_expr(program: &CheckedProgram, name: &str) -> Option<Expr> {
-    checked_authored_function_signature(program, name)
-        .map(type_to_deep_expr)
+    lookup_authored_defsig_type_expr(program, name)
+        .or_else(|| checked_authored_function_signature(program, name).map(type_to_deep_expr))
         .or_else(|| lookup_type_expr(program.type_env(), name).cloned())
 }
 
 fn lookup_declared_host_type(program: &CheckedProgram, name: &str) -> Option<HostTypeTerm> {
     lookup_declared_type_expr(program, name)
         .as_ref()
-        .map(|ty| decode_host_type_or_raise(ty, &HashMap::new()))
+        .and_then(|ty| decode_expanded_host_type_expr(program, ty))
 }
 
 fn lookup_declared_fn_type(
@@ -11402,7 +11587,7 @@ fn lookup_declared_fn_type(
 ) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
     lookup_declared_type_expr(program, name)
         .as_ref()
-        .and_then(parse_fn_type_expr)
+        .and_then(|ty| parse_expanded_fn_type_expr(program, ty))
 }
 
 fn lookup_program_def<'a>(defs: &'a HashMap<String, Expr>, name: &str) -> Option<&'a Expr> {
@@ -11517,6 +11702,132 @@ fn parse_fn_type_expr(expr: &Expr) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> 
     ))
 }
 
+fn expand_host_fn_type_aliases(
+    program: &CheckedProgram,
+    signature: (Vec<HostTypeTerm>, HostTypeTerm),
+) -> (Vec<HostTypeTerm>, HostTypeTerm) {
+    let (params, ret) = signature;
+    (
+        params
+            .into_iter()
+            .map(|param| expand_host_type_aliases(program, param))
+            .collect(),
+        expand_host_type_aliases(program, ret),
+    )
+}
+
+fn authored_nominal_dimension(expr: &Expr) -> Option<DimInfo> {
+    match expr {
+        Expr::MetaExpr(meta, _) => return authored_nominal_dimension(&meta.expr),
+        Expr::Atom(Atom::Name(name), _) => return Some(DimInfo::Named(name.clone(), None)),
+        Expr::Atom(Atom::Int(value), _) => {
+            return usize::try_from(*value).ok().map(DimInfo::Lit);
+        }
+        _ => {}
+    }
+    let (tag, _, children) = stamped_parts(expr)?;
+    match tag {
+        // Before nominal-parameter kinds are resolved, Surf spells every
+        // symbolic application argument as `t-var`. The declaration's kind
+        // is the authority that lets this boundary interpret it as a
+        // dimension without changing the public Deep vocabulary.
+        DeepTag::TVar | DeepTag::DName | DeepTag::DVar => children
+            .first()
+            .and_then(symbol_name)
+            .map(|name| DimInfo::Named(name.to_string(), None)),
+        DeepTag::DLit => match children.first() {
+            Some(Expr::Atom(Atom::Int(value), _)) => usize::try_from(*value).ok().map(DimInfo::Lit),
+            _ => None,
+        },
+        DeepTag::DRank => None,
+        _ => None,
+    }
+}
+
+fn decode_expanded_host_type_expr(program: &CheckedProgram, expr: &Expr) -> Option<HostTypeTerm> {
+    if let Expr::MetaExpr(meta, _) = expr {
+        return decode_expanded_host_type_expr(program, &meta.expr);
+    }
+    if let Some((DeepTag::TAdt, _, children)) = stamped_parts(expr)
+        && let Some((name, arguments)) = children
+            .split_first()
+            .and_then(|(name, arguments)| symbol_name(name).map(|name| (name, arguments)))
+        && let Some(alias) = program.adt_registry().resolve_alias(name)
+        && alias.params.len() == arguments.len()
+    {
+        let parameter_kinds = if alias.param_kinds.len() == alias.params.len() {
+            Cow::Borrowed(alias.param_kinds.as_slice())
+        } else {
+            Cow::Owned(vec![NominalParamKind::Type; alias.params.len()])
+        };
+        let mut type_substitutions = HashMap::new();
+        let mut dimension_substitutions = HashMap::new();
+        for ((parameter, kind), argument) in alias
+            .params
+            .iter()
+            .zip(parameter_kinds.iter())
+            .zip(arguments)
+        {
+            match kind {
+                NominalParamKind::Type => {
+                    type_substitutions.insert(
+                        parameter.clone(),
+                        decode_expanded_host_type_expr(program, argument)?,
+                    );
+                }
+                NominalParamKind::Dimension => {
+                    dimension_substitutions
+                        .insert(parameter.clone(), authored_nominal_dimension(argument)?);
+                }
+            }
+        }
+        let checker_parameter_names = alias
+            .param_args
+            .iter()
+            .zip(&alias.params)
+            .filter_map(|(argument, parameter)| match argument {
+                NominalArg::Type(Type::Var(variable)) => {
+                    Some((format!("t{}", variable.0), parameter.clone()))
+                }
+                NominalArg::Dimension(Dim::Var(variable)) => {
+                    Some((format!("d{}", variable.0), parameter.clone()))
+                }
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>();
+        let body = rename_host_type_variables(
+            decode_host_type(&type_to_deep_expr(
+                &program.adt_registry().expand_aliases(&alias.body),
+            ))
+            .ok()?,
+            &checker_parameter_names,
+        );
+        return Some(expand_host_type_aliases(
+            program,
+            substitute_host_dimension_terms(
+                substitute_host_type_term(body, &type_substitutions),
+                &dimension_substitutions,
+            ),
+        ));
+    }
+    decode_host_type(expr)
+        .ok()
+        .map(|term| expand_host_type_aliases(program, term))
+}
+
+fn parse_expanded_fn_type_expr(
+    program: &CheckedProgram,
+    expr: &Expr,
+) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
+    let (args, ret) = parse_fn_type_expr_parts(expr)?;
+    Some((
+        args.iter()
+            .map(|argument| decode_expanded_host_type_expr(program, argument))
+            .collect::<Option<Vec<_>>>()?,
+        decode_expanded_host_type_expr(program, &ret)?,
+    ))
+}
+
 fn parse_fn_type_expr_parts(expr: &Expr) -> Option<(Vec<Expr>, Expr)> {
     let (DeepTag::TFn, _, kids) = stamped_parts(expr)? else {
         return None;
@@ -11597,6 +11908,71 @@ fn substitute_host_type_term(
             }
         }
         concrete_or_state => concrete_or_state,
+    }
+}
+
+fn substitute_host_dimension_terms(
+    term: HostTypeTerm,
+    subst: &HashMap<String, DimInfo>,
+) -> HostTypeTerm {
+    let substitute_dim = |dim: DimInfo| match dim {
+        DimInfo::Named(name, _) if subst.contains_key(&name) => subst[&name].clone(),
+        other => other,
+    };
+    match term {
+        HostTypeTerm::Fn(params, ret) => HostTypeTerm::Fn(
+            params
+                .into_iter()
+                .map(|param| substitute_host_dimension_terms(param, subst))
+                .collect(),
+            Box::new(substitute_host_dimension_terms(*ret, subst)),
+        ),
+        HostTypeTerm::Adt(name, args) => HostTypeTerm::Adt(
+            name,
+            args.into_iter()
+                .map(|argument| substitute_host_dimension_terms(argument, subst))
+                .collect(),
+        ),
+        HostTypeTerm::List(inner) => {
+            HostTypeTerm::List(Box::new(substitute_host_dimension_terms(*inner, subst)))
+        }
+        HostTypeTerm::Dict(key, value) => HostTypeTerm::Dict(
+            Box::new(substitute_host_dimension_terms(*key, subst)),
+            Box::new(substitute_host_dimension_terms(*value, subst)),
+        ),
+        HostTypeTerm::Tuple(items) => HostTypeTerm::Tuple(
+            items
+                .into_iter()
+                .map(|item| substitute_host_dimension_terms(item, subst))
+                .collect(),
+        ),
+        HostTypeTerm::Option(inner) => {
+            HostTypeTerm::Option(Box::new(substitute_host_dimension_terms(*inner, subst)))
+        }
+        HostTypeTerm::Tensor(TensorType { dims, precision }) => HostTypeTerm::Tensor(TensorType {
+            dims: dims.into_iter().map(substitute_dim).collect(),
+            precision,
+        }),
+        HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm { precision, shape }) => {
+            let shape = match shape {
+                HostShapeTerm::Concrete(dims) => {
+                    HostShapeTerm::Concrete(dims.into_iter().map(substitute_dim).collect())
+                }
+                HostShapeTerm::Polymorphic(slots) => HostShapeTerm::Polymorphic(
+                    slots
+                        .into_iter()
+                        .map(|slot| match slot {
+                            crate::host_type_state::HostShapeSlot::Dim(dim) => {
+                                crate::host_type_state::HostShapeSlot::Dim(substitute_dim(dim))
+                            }
+                            rank => rank,
+                        })
+                        .collect(),
+                ),
+            };
+            HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm { precision, shape })
+        }
+        other => other,
     }
 }
 
@@ -12841,14 +13217,22 @@ fn adt_constructor_definitions(program: &CheckedProgram) -> Vec<GenericAdtConstr
             continue;
         }
         let checker_parameter_names = definition
-            .param_vars
+            .param_args
             .iter()
             .zip(&definition.type_params)
-            .map(|(variable, name)| (format!("t{}", variable.0), name.clone()))
+            .filter_map(|(argument, name)| match argument {
+                NominalArg::Type(Type::Var(variable)) => {
+                    Some((format!("t{}", variable.0), name.clone()))
+                }
+                NominalArg::Dimension(Dim::Var(variable)) => {
+                    Some((format!("d{}", variable.0), name.clone()))
+                }
+                _ => None,
+            })
             .collect::<HashMap<_, _>>();
         let parameters = definition.type_params.clone();
         let stored_parameters = definition
-            .param_vars
+            .type_params
             .iter()
             .enumerate()
             .map(|(index, _)| {
@@ -12888,6 +13272,12 @@ fn adt_constructor_definitions(program: &CheckedProgram) -> Vec<GenericAdtConstr
 }
 
 fn rename_host_type_variables(term: HostTypeTerm, names: &HashMap<String, String>) -> HostTypeTerm {
+    let rename_dim = |dim: DimInfo| match dim {
+        DimInfo::Named(name, extent) => {
+            DimInfo::Named(names.get(&name).cloned().unwrap_or(name), extent)
+        }
+        literal => literal,
+    };
     match term {
         HostTypeTerm::TypeVariable(name) => {
             HostTypeTerm::TypeVariable(names.get(&name).cloned().unwrap_or(name))
@@ -12924,12 +13314,36 @@ fn rename_host_type_variables(term: HostTypeTerm, names: &HashMap<String, String
         HostTypeTerm::Option(inner) => {
             HostTypeTerm::Option(Box::new(rename_host_type_variables(*inner, names)))
         }
+        HostTypeTerm::Tensor(TensorType { dims, precision }) => HostTypeTerm::Tensor(TensorType {
+            dims: dims.into_iter().map(rename_dim).collect(),
+            precision,
+        }),
         HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm { precision, shape }) => {
             let precision = match precision {
                 HostPrecisionTerm::Variable(name) => {
                     HostPrecisionTerm::Variable(names.get(&name).cloned().unwrap_or(name))
                 }
                 concrete => concrete,
+            };
+            let shape = match shape {
+                HostShapeTerm::Concrete(dims) => {
+                    HostShapeTerm::Concrete(dims.into_iter().map(rename_dim).collect())
+                }
+                HostShapeTerm::Polymorphic(slots) => HostShapeTerm::Polymorphic(
+                    slots
+                        .into_iter()
+                        .map(|slot| match slot {
+                            crate::host_type_state::HostShapeSlot::Dim(dim) => {
+                                crate::host_type_state::HostShapeSlot::Dim(rename_dim(dim))
+                            }
+                            crate::host_type_state::HostShapeSlot::RankVariable(name) => {
+                                crate::host_type_state::HostShapeSlot::RankVariable(
+                                    names.get(&name).cloned().unwrap_or(name),
+                                )
+                            }
+                        })
+                        .collect(),
+                ),
             };
             HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm { precision, shape })
         }
@@ -12943,8 +13357,11 @@ fn checker_adt_parameter_is_stored(
     registry: &AdtRegistry,
     visiting: &mut HashSet<(String, usize)>,
 ) -> bool {
-    let Some(parameter) = definition.param_vars.get(parameter_index).copied() else {
+    let Some(argument) = definition.param_args.get(parameter_index) else {
         return true;
+    };
+    let NominalArg::Type(Type::Var(parameter)) = argument else {
+        return false;
     };
     let key = (definition.name.clone(), parameter_index);
     if !visiting.insert(key.clone()) {
@@ -12954,7 +13371,7 @@ fn checker_adt_parameter_is_stored(
         variant
             .fields
             .iter()
-            .any(|(_, field)| checker_type_stores_variable(field, parameter, registry, visiting))
+            .any(|(_, field)| checker_type_stores_variable(field, *parameter, registry, visiting))
     });
     visiting.remove(&key);
     stored
@@ -12990,6 +13407,25 @@ fn checker_type_stores_variable(
                 // Built-in/container ADTs have value-represented arguments.
                 args.iter()
                     .any(|ty| checker_type_stores_variable(ty, target, registry, visiting))
+            }
+        }
+        Type::KindedAdt(name, args) => {
+            if let Some(nested) = registry.lookup(name) {
+                args.iter()
+                    .enumerate()
+                    .any(|(index, argument)| match argument {
+                        NominalArg::Type(ty) => {
+                            checker_adt_parameter_is_stored(nested, index, registry, visiting)
+                                && checker_type_stores_variable(ty, target, registry, visiting)
+                        }
+                        NominalArg::Dimension(_) => false,
+                    })
+            } else {
+                args.iter().any(|argument| {
+                    argument.as_type().is_some_and(|ty| {
+                        checker_type_stores_variable(ty, target, registry, visiting)
+                    })
+                })
             }
         }
         // A checked program cannot carry Error, but fail closed if a legacy

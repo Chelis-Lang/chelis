@@ -14,7 +14,9 @@ use chelis_deep::ast as deep;
 use crate::adt::AdtRegistry;
 use crate::errors::{CheckError, CheckErrorKind, ErrorWitness, report_witness};
 use crate::session::DiagnosticSink;
-use crate::types::{Dim, DimVar, Prim, RankVar, TensorPrec, Type, TypeVar, VarGen};
+use crate::types::{
+    Dim, DimVar, NominalArg, NominalParamKind, Prim, RankVar, TensorPrec, Type, TypeVar, VarGen,
+};
 
 /// A type that crossed the Deep syntax boundary without a silent fallback.
 /// The tuple field is private so callers cannot assert resolution without
@@ -120,6 +122,9 @@ pub(crate) enum BinderMode<'a> {
     /// A `deftype` or `typealias` parameter list explicitly names every legal
     /// type, dimension, and rank binder.
     Explicit(&'a HashSet<String>),
+    /// A nominal declaration whose parameter kinds were fixed before any
+    /// declaration body was resolved.
+    ExplicitKinds(&'a HashMap<String, NominalParamKind>),
     /// A `defsig` implicitly quantifies each named type/dimension/rank variable.
     ImplicitGeneric,
     /// Metadata emitted by a checked compiler pass may carry generated names.
@@ -136,7 +141,7 @@ pub(crate) enum BinderMode<'a> {
 /// later check.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TypeResolutionEnv {
-    arities: HashMap<String, usize>,
+    headers: HashMap<String, Vec<NominalParamKind>>,
 }
 
 impl TypeResolutionEnv {
@@ -145,33 +150,41 @@ impl TypeResolutionEnv {
         // Checker-native nominal surfaces that are typed structurally by
         // builtin rules instead of carrying registry variants.
         for (name, arity) in [("Dict", 2), ("Result", 2), ("String", 0)] {
-            headers.arities.insert(name.to_string(), arity);
+            headers
+                .headers
+                .insert(name.to_string(), vec![NominalParamKind::Type; arity]);
         }
         for (name, definition) in &registry.defs {
-            headers
-                .arities
-                .insert(name.clone(), definition.type_params.len());
+            let kinds = if definition.param_kinds.len() == definition.type_params.len() {
+                definition.param_kinds.clone()
+            } else {
+                vec![NominalParamKind::Type; definition.type_params.len()]
+            };
+            headers.headers.insert(name.clone(), kinds);
         }
         for (name, definition) in &registry.aliases {
-            headers
-                .arities
-                .insert(name.clone(), definition.params.len());
+            let kinds = if definition.param_kinds.len() == definition.params.len() {
+                definition.param_kinds.clone()
+            } else {
+                vec![NominalParamKind::Type; definition.params.len()]
+            };
+            headers.headers.insert(name.clone(), kinds);
         }
         headers
     }
 
-    pub(crate) fn insert(&mut self, name: impl Into<String>, arity: usize) {
-        self.arities.entry(name.into()).or_insert(arity);
+    pub(crate) fn insert(&mut self, name: impl Into<String>, kinds: Vec<NominalParamKind>) {
+        self.headers.entry(name.into()).or_insert(kinds);
     }
 
     pub(crate) fn extend_from(&mut self, other: &Self) {
-        for (name, arity) in &other.arities {
-            self.arities.insert(name.clone(), *arity);
+        for (name, kinds) in &other.headers {
+            self.headers.insert(name.clone(), kinds.clone());
         }
     }
 
-    fn arity(&self, name: &str) -> Option<usize> {
-        self.arities.get(name).copied()
+    pub(crate) fn param_kinds(&self, name: &str) -> Option<&[NominalParamKind]> {
+        self.headers.get(name).map(Vec::as_slice)
     }
 }
 
@@ -219,6 +232,22 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 resolver
                     .type_vars
                     .insert(name.clone(), resolver.vg.fresh_tvar());
+            }
+        }
+        if let BinderMode::ExplicitKinds(kinds) = binder_mode {
+            for (name, kind) in kinds {
+                match kind {
+                    NominalParamKind::Type => {
+                        resolver
+                            .type_vars
+                            .insert(name.clone(), resolver.vg.fresh_tvar());
+                    }
+                    NominalParamKind::Dimension => {
+                        resolver
+                            .dim_vars
+                            .insert(name.clone(), resolver.vg.fresh_dvar());
+                    }
+                }
             }
         }
         resolver
@@ -282,6 +311,10 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
 
     pub(crate) fn type_var(&self, name: &str) -> Option<TypeVar> {
         self.type_vars.get(name).copied()
+    }
+
+    pub(crate) fn dim_var(&self, name: &str) -> Option<DimVar> {
+        self.dim_vars.get(name).copied()
     }
 
     pub(crate) fn type_vars(&self) -> Vec<TypeVar> {
@@ -386,24 +419,77 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                         self.use_site.label()
                     )));
                 };
-                let Some(expected) = self.headers.arity(name) else {
+                let Some(param_kinds) = self.headers.param_kinds(name) else {
                     return Err(self.type_error(format!(
                         "unknown nominal type `{name}` in {}",
                         self.use_site.label()
                     )));
                 };
                 let actual = children.len() - 1;
-                if actual != expected {
+                if actual != param_kinds.len() {
                     return Err(self.type_error(format!(
-                        "nominal type `{name}` in {} expects {expected} type argument(s), got {actual}",
-                        self.use_site.label()
+                        "nominal type `{name}` in {} expects {} argument(s), got {actual}",
+                        self.use_site.label(),
+                        param_kinds.len()
                     )));
                 }
                 let mut args = Vec::with_capacity(actual);
-                for child in &children[1..] {
-                    args.push(self.resolve_type(child)?);
+                for (index, (child, kind)) in children[1..].iter().zip(param_kinds).enumerate() {
+                    let (child_tag, _, child_children) = self.type_form_expr(child)?;
+                    match kind {
+                        NominalParamKind::Type => {
+                            if matches!(
+                                child_tag,
+                                Some(
+                                    DeepTag::DName | DeepTag::DVar | DeepTag::DLit | DeepTag::DRank
+                                )
+                            ) {
+                                return Err(self.type_error(format!(
+                                    "nominal type `{name}` argument {} expects a type, got a dimension",
+                                    index + 1
+                                )));
+                            }
+                            args.push(NominalArg::Type(self.resolve_type(child)?));
+                        }
+                        NominalParamKind::Dimension => {
+                            let dim = match child_tag {
+                                Some(DeepTag::DName | DeepTag::DVar | DeepTag::DLit) => {
+                                    self.resolve_dim(child)?
+                                }
+                                // Surf cannot know the target header while desugaring
+                                // `Frame[n]`, so symbolic nominal arguments arrive as
+                                // `t-var`; the checker-owned header gives them their
+                                // dimension meaning here.
+                                Some(DeepTag::TVar) => {
+                                    let child_name = self.one_symbol("t-var", child_children)?;
+                                    Dim::Var(self.resolve_dim_var(child_name)?)
+                                }
+                                _ => {
+                                    return Err(self.type_error(format!(
+                                        "nominal type `{name}` argument {} expects a dimension, got a type",
+                                        index + 1
+                                    )));
+                                }
+                            };
+                            args.push(NominalArg::Dimension(dim));
+                        }
+                    }
                 }
-                Ok(Type::Adt(name.to_string(), args))
+                if param_kinds.contains(&NominalParamKind::Dimension) {
+                    Ok(Type::KindedAdt(name.to_string(), args))
+                } else {
+                    Ok(Type::Adt(
+                        name.to_string(),
+                        args.into_iter()
+                            .map(|argument| match argument {
+                                NominalArg::Type(ty) => ty,
+                                NominalArg::Dimension(_) => {
+                                    unreachable!("type-only header produced a dimension argument")
+                                }
+                            })
+                            .collect(),
+                    ))
+                }
             }
             Some(DeepTag::TTuple) => {
                 let mut elements = Vec::with_capacity(children.len());
@@ -467,6 +553,16 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 .then(|| self.vg.fresh_tvar())
                 .ok_or_else(|| self.unbound("type", name));
         }
+        if matches!(
+            self.binder_mode,
+            BinderMode::ExplicitKinds(kinds)
+                if kinds.get(name) == Some(&NominalParamKind::Dimension)
+        ) {
+            return Err(self.type_error(format!(
+                "nominal parameter `{name}` has Dimension kind and cannot be used in a type slot in {}",
+                self.use_site.label()
+            )));
+        }
         if !self.allows_name(name) {
             return Err(self.unbound("type", name));
         }
@@ -482,6 +578,16 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 .allows_hole()
                 .then(|| self.vg.fresh_dvar())
                 .ok_or_else(|| self.unbound("dimension", name));
+        }
+        if matches!(
+            self.binder_mode,
+            BinderMode::ExplicitKinds(kinds)
+                if kinds.get(name) == Some(&NominalParamKind::Type)
+        ) {
+            return Err(self.type_error(format!(
+                "nominal parameter `{name}` has Type kind and cannot be used in a dimension slot in {}",
+                self.use_site.label()
+            )));
         }
         if !self.allows_name(name) {
             return Err(self.unbound("dimension", name));
@@ -499,6 +605,15 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 .then(|| self.vg.fresh_rvar())
                 .ok_or_else(|| self.unbound("rank", name));
         }
+        if matches!(
+            self.binder_mode,
+            BinderMode::ExplicitKinds(kinds) if kinds.contains_key(name)
+        ) {
+            return Err(self.type_error(format!(
+                "nominal parameter `{name}` cannot be used as a rank spread in {}; nominal parameters have only Type or Dimension kind",
+                self.use_site.label()
+            )));
+        }
         if !self.allows_name(name) {
             return Err(self.unbound("rank", name));
         }
@@ -512,12 +627,16 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         match self.binder_mode {
             BinderMode::ClosedInput => false,
             BinderMode::Explicit(names) => names.contains(name),
+            BinderMode::ExplicitKinds(kinds) => kinds.contains_key(name),
             BinderMode::ImplicitGeneric | BinderMode::TrustedCompilerMetadata => true,
         }
     }
 
     fn allows_hole(&self) -> bool {
-        !matches!(self.binder_mode, BinderMode::Explicit(_))
+        !matches!(
+            self.binder_mode,
+            BinderMode::Explicit(_) | BinderMode::ExplicitKinds(_)
+        )
     }
 
     /// Decode-once (chelis#731 Phase 3): the decoded tag drives dispatch;

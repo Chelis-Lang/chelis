@@ -12,7 +12,7 @@ meta_value = { bare_list | typed_helper | node | unit_list | literal | bare_name
 bare_list = { "(" ~ spacing ~ (bare_list_item ~ spacing)* ~ ")" ~ spacing }
 bare_list_item = { typed_helper | node | unit_list | literal | bare_name }
 
-child = { typed_helper | node | unit_list | literal | bare_name }
+child = { bare_list | typed_helper | node | unit_list | literal | bare_name }
 bare_name = { identifier | type_name }
 tag = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | "-")* }
 identifier = @{ ident_segment ~ ("." ~ ident_segment)* }

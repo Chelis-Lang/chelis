@@ -247,6 +247,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                             Type::Ref(_) => resolved,
                             Type::Tensor(_, _)
                             | Type::Adt(_, _)
+                            | Type::KindedAdt(_, _)
                             | Type::Tuple(_)
                             | Type::Error(_) => Type::Ref(Box::new(resolved)),
                             // Issue #256: when the borrow inner is still an
@@ -516,6 +517,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                             Type::Ref(_) => resolved,
                             Type::Tensor(_, _)
                             | Type::Adt(_, _)
+                            | Type::KindedAdt(_, _)
                             | Type::Tuple(_)
                             | Type::Error(_) => Type::Ref(Box::new(resolved)),
                             Type::Var(tv) => {
@@ -1263,7 +1265,7 @@ pub(super) fn infer_lit(
                 // gate is not scoped to `.dp` ingestion.
                 // `resolve_deep_type` expands transparent
                 // aliases, so `0.5 : P2` cannot launder the gate.
-                if let Type::Adt(adt_name, _) = &resolved {
+                if let Type::Adt(adt_name, _) | Type::KindedAdt(adt_name, _) = &resolved {
                     crate::opacity::check_opaque_use(
                         crate::opacity::OpaqueAction::LitForge,
                         adt_name,

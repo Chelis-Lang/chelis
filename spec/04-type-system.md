@@ -335,6 +335,9 @@ Last child is the precision type (must be a numeric `t-prim`). All preceding chi
 ;; List (tensor[batch, f32])
 (t-adt {} List (t-tensor {} (d-name {} batch) (t-prim {} f32)))
 
+;; Column with a concrete extent argument
+(t-adt {} Column (d-lit {} 3))
+
 ;; No type arguments
 (t-adt {} Activation)
 ```
@@ -408,6 +411,34 @@ reannotation, and linearity annotation.
 > type, dimension, or rank variables, including through an alias chain. Thus
 > one concrete tensor extent, rank, precision, or stored ADT argument cannot
 > constrain a later use in the same consuming module.
+
+### 2.3.2 Nominal parameter kinds and applications
+
+> **[04-ADT-3]** Every parameter of a `deftype` or `typealias` SHALL have one
+> checker-owned kind, `Type` or `Dimension`, fixed for the whole check unit
+> before any declaration body is resolved. A parameter has `Dimension` kind
+> exactly when it has at least one use in a dimension slot and no use in a
+> type slot. A tensor axis is a dimension slot; other type-expression
+> positions are type slots. A nominal argument position inherits the target
+> header's corresponding kind. This inheritance is the least fixed point over
+> all source headers, including forward, recursive, mutually recursive, and
+> alias-mediated references. An unused parameter defaults to `Type`. A
+> parameter used in both kinds is a type error; an implementation SHALL NOT
+> choose one occurrence, create independent variables, or reinterpret either
+> occurrence as an inference wildcard.
+
+> **[04-ADT-4]** A nominal application SHALL have the target header's exact
+> arity and SHALL match every parameter kind positionally. A `Type` parameter
+> accepts only a type argument. A `Dimension` parameter accepts one dimension
+> (`d-name`, `d-var`, or `d-lit`) and does not accept a type or rank spread.
+> Consequently, a Surf integer argument such as `Column[3]` denotes the exact
+> literal dimension `(d-lit {} 3)`, while `Option[3]` is a type error. The
+> dimension argument participates in ordinary dimension substitution and
+> unification through constructors, aliases, signatures, records, matches,
+> evaluation, and lowering. Unequal literal extents are a
+> `DimensionMismatch`; an implementation SHALL NOT erase, freshen, or
+> wildcard the argument before checking. Type aliases substitute type and
+> dimension parameters transparently and preserve the same rule.
 
 ### 2.4 Exhaustive Pattern Matching
 

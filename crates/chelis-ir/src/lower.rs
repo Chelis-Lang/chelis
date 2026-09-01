@@ -12089,6 +12089,25 @@ impl LowerCtx {
         let saved_callables = self.local_callables.clone();
         let saved_fn_typed_params = self.fn_typed_params.clone();
 
+        // The checker stamps an alias-expanded function type on the `fn`
+        // node, but its variables are anonymous checker identities. Retain a
+        // directly lowerable authored tensor spelling so runtime dimensions
+        // keep names such as `batch`; use the checked type only where the
+        // authored spelling still contains a nominal alias.
+        let checked_param_types = elems
+            .get(1)
+            .and_then(|expr| match expr {
+                Expr::Map(meta, _) => meta
+                    .entries
+                    .iter()
+                    .find(|(key, _)| key == "type")
+                    .map(|(_, value)| value),
+                _ => None,
+            })
+            .and_then(stamped_parts)
+            .and_then(|(tag, _, kids)| (tag == DeepTag::TFn).then_some(kids))
+            .and_then(|kids| kids.split_last().map(|(_, params)| params));
+
         // Register params as Load nodes. For `t-fn`-typed params,
         // additionally track the name in `fn_typed_params` so
         // `resolve_callable_expr_inner` can surface
@@ -12098,8 +12117,15 @@ impl LowerCtx {
         // dispatch on the callable shape, not on the binding's
         // `LoweredValue`.
         if let Some((DeepTag::Params, _, params)) = stamped_parts(&elems[2]) {
-            for param in params {
-                if let Some((name, ty_expr)) = param_name_and_type_expr(param) {
+            for (index, param) in params.iter().enumerate() {
+                if let Some((name, authored_ty_expr)) = param_name_and_type_expr(param) {
+                    let checked_ty_expr = checked_param_types.and_then(|types| types.get(index));
+                    let ty_expr = match authored_ty_expr {
+                        Some(authored) if !Self::type_expr_contains_nominal(authored) => {
+                            Some(authored)
+                        }
+                        _ => checked_ty_expr.or(authored_ty_expr),
+                    };
                     if Self::type_expr_is_fn(ty_expr) {
                         self.fn_typed_params.insert(name.clone());
                     }
@@ -12135,6 +12161,19 @@ impl LowerCtx {
         match tag {
             DeepTag::TFn => true,
             DeepTag::TRef => Self::type_expr_is_fn(kids.first()),
+            _ => false,
+        }
+    }
+
+    fn type_expr_contains_nominal(expr: &Expr) -> bool {
+        let Some((tag, _, kids)) = stamped_parts(expr) else {
+            return false;
+        };
+        match tag {
+            DeepTag::TAdt => true,
+            DeepTag::TRef | DeepTag::TFn | DeepTag::TTuple => {
+                kids.iter().any(Self::type_expr_contains_nominal)
+            }
             _ => false,
         }
     }

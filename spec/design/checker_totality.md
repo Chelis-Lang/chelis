@@ -1,6 +1,8 @@
 # Checker Totality: every construct is checked or loudly rejected
 
-**Status:** Phases 0-3 and PP1-PP4 are delivered. Phase 3 first shipped
+**Status:** Phases 0-3 and PP1-PP4 are delivered. The separately owned [#1247]
+kinded nominal-application residue is not another phase; PR [#1406] is its
+delivery vehicle. Phase 3 first shipped
 `DeepTag` as derive-on-demand dispatch and was red-teamed in that form
 (round-1 QUALIFIED PASS with findings folded, round-2 PASS); a maintainer
 directive then superseded that record with the decode-once rework now in the
@@ -1257,6 +1259,74 @@ command above remains the standing completion oracle after delivery;
 supporting unit coverage pins every isolated-entry declaration namespace and
 fail-closed synthetic identity in addition to the two checker edges above.
 
+### Later residue: kinded nominal applications ([#1247], with [#1258])
+
+**Delivery vehicle: PR [#1406].** This is a separately landable #731 residue
+mechanism, not PP4 or a fifth historical phase. [#1247] owns checker honesty;
+[#1258] is the same boundary viewed from #1024's Surf/Deep round-trip
+contract. Completion requires the PR's acceptance oracle and merge; this
+design record alone does not claim delivery.
+
+Before this slice, Surf correctly admitted an integer only inside a nominal
+argument such as `Column[3]`, but desugared it as `(t-var {} 3)`. Nominal
+headers recorded arity without parameter kind, and the checker represented
+every application argument as an ordinary type. The integer therefore became
+a fresh type wildcard at `Option[3]` and carried no extent at `Column[3]`.
+`chelis check` and `chelis test` could report success on an unenforced
+application, while `chelis surf` and `migrate surf` rejected the malformed
+numeric `t-var` produced by Chelis itself.
+
+`spec/04-type-system.md` [04-ADT-3]/[04-ADT-4] now control the language rule.
+Every `deftype` and `typealias` parameter receives one checker-owned `Type` or
+`Dimension` kind before declaration bodies resolve. Direct tensor-axis uses
+and transitive nominal-argument uses contribute to a deterministic least
+fixed point across forward references, aliases, and recursive headers. A
+parameter is dimension-kinded only with dimension evidence and no type
+evidence; mixed use rejects and unused parameters retain the ordinary-type
+default.
+
+The implementation closes the mechanism at every representation boundary:
+
+1. Surf carries an integer nominal argument as a dedicated dimension-literal
+   node and desugars it to `d-lit`; bare integer type positions remain parse
+   errors. Deep's typed child-role table admits type or non-rank dimension
+   syntax only at a `t-adt` argument.
+2. The checker stores nominal type and dimension arguments in distinct enum
+   variants. A dimension cannot enter the ordinary `Type::Adt` argument
+   vector, and kind mismatches fail before unification instead of allocating a
+   wildcard.
+3. Dimension arguments participate in substitution and `unify_dim` through
+   aliases, constructors, records, matches, signatures, opacity checks,
+   evaluation, and native lowering. Unequal concrete extents produce
+   `DimensionMismatch`; a dimension supplied to a type slot or a type supplied
+   to a dimension slot produces `TypeMismatch`.
+4. `chelis check --show-inferred` preserves the dimension structurally under
+   the existing ADT wire node, and Hull consumes the new closed dimension
+   wrapper. Every bincode cache that can persist the checker/registry shape is
+   version-bumped and rejects its predecessor.
+5. `chelis check` and `chelis test` share the same rejection path. A failed
+   check exits nonzero with `score < 1` and a non-empty error list; a test file
+   with the same program reports a compile failure and cannot count as passed.
+
+The standing completion oracle is:
+
+```sh
+cargo nextest run -p chelis-cli --test issue_1247_integer_type_application --no-fail-fast
+```
+
+It pins both polarities for ordinary, dimension-only, mixed, alias-mediated,
+and forward headers; exact error kinds and fitness; structured inferred JSON;
+Deep/Surf/migration round trips; record and match behavior; eval and generated
+C; and test-runner failure. The existing `issue_935_nullary_generic_adt`
+suite is the positive regression oracle for representation-erased nominal
+dimensions. The five `hello-chelis` Coral files named by [#1258] are an
+ecosystem migration receipt, not a substitute for the repository oracle.
+
+This slice does not absorb the remaining tag-keyed vacuity
+([#874]/[#887] Tier 1), stamped-ingress parity ([#1125]/[#1134]), or
+compiler-provided-name precedence ([#1076]/[#672]). Their contracts and tests
+remain independently owned.
+
 ### Adjacent ledger rows delivered with the class change
 
 - **[#850], checker half.** `defsig` is now a same-unit annotation for a
@@ -1314,6 +1384,9 @@ fail-closed synthetic identity in addition to the two checker edges above.
   preserves both and closes only the raw-flat-scope residue that PR explicitly
   left to [#1264]/[#731]. The already-closed issue is context, not a second
   closing claim.
+- **With [#1024]**: [#1258] is the resugaring half of [#1247]. PR [#1406]
+  closes both with one structural dimension-literal representation; it does
+  not absorb unrelated canonical-Surf or total-resugaring instances.
 - **With [#721]**: none (eval ingestion, no checker code); listed so nobody
   searches for it here.
 
@@ -1329,6 +1402,7 @@ fail-closed synthetic identity in addition to the two checker edges above.
 | PP2 | [#1147] and the future supply of registered builtins with no inference disposition |
 | PP3 | [#1209]/[#1211]/[#1212]'s name-keyed binding-identity channel |
 | PP4 | [#1264] and [#1261]'s raw-flat-test-scope residue; exact module scope in every checker/test entry |
+| [#1247] residue | integer nominal arguments are kind-checked and concrete dimensions constrain every checker/test/compiler lane; [#1258] round trips the same representation |
 
 ## Decisions and remaining questions
 
@@ -1341,6 +1415,7 @@ fail-closed synthetic identity in addition to the two checker edges above.
 | 5 | how a lambda-bound or function-valued parameter's type binds, and which checks re-run once it is bound | DECIDED 2026-08-04: shape-constrained lambdas with an unknown outer parameter constructor are monomorphic bind-on-first-use within their enclosing declaration, replay the ordinary semantic rule, and reject unresolved at that declaration's own boundary; a result annotation or later top-level caller does not bind them; symbolic declared tensors remain polymorphic and rigid dimensions remain distinct absent a real equality constraint | [04-INF-1] + PP1 |
 | 6 | whether two closures may each consume one underlying value through two user-visible names (`y = x`, one capture per name), or capture forwards through the alias chain generally | DECIDED 2026-08-21: preserved and made normative. A capture consumes the binding it names; distinct user-visible bindings of one value are distinct for capture; only a destructured component (or an alias of one) forwards to its carrier. Nautilus `lu_solve` and coral depend on the spelling; the reviewer guidance on [#1209] was to specify the choice explicitly and keep any tightening separate | [04-LIN-2] + PP3 |
 | 7 | whether one linked module's uniquely matching terminal name or one batched test file's declaration can confer unimported scope on another file | DECIDED 2026-08-31: no. Value lookup is exact-only after reef rewriting; batch entries are independently module-rewritten before combination; terminal matching is diagnostic-only | spec/02 P2 + [04-FIT-2] + PP4 |
+| 8 | whether an unannotated nominal parameter is a type, a dimension, or contextually reinterpreted per application | DECIDED 2026-08-31: one checker-owned header kind is fixed before body resolution. Dimension-only evidence selects `Dimension`; mixed use rejects; unused defaults to `Type`; transitive nominal uses propagate by least fixed point | [04-ADT-3]/[04-ADT-4] + [#1247] residue |
 
 ## Contract summary
 
@@ -1355,6 +1430,10 @@ continuous-oracle guarantees. PP4 additionally makes module scope exact at
 both package and batched-test boundaries: a foreign terminal-name match is
 never a binding, and the fitness report cannot describe an unresolved value or
 constructor as fully resolved.
+The separately owned [#1247] residue applies the same honesty rule to
+nominal arguments: integer syntax is either an exact checked dimension or a
+kind error, never an inference wildcard, and every downstream checker/test
+signal preserves that decision.
 
 [#696]: https://github.com/Chelis-Lang/chelis/pull/696
 [#703]: https://github.com/Chelis-Lang/chelis/issues/703
@@ -1391,6 +1470,8 @@ constructor as fully resolved.
 [#1264]: https://github.com/Chelis-Lang/chelis/issues/1264
 [#1273]: https://github.com/Chelis-Lang/chelis/pull/1273
 [#1402]: https://github.com/Chelis-Lang/chelis/pull/1402
+[#1258]: https://github.com/Chelis-Lang/chelis/issues/1258
+[#1406]: https://github.com/Chelis-Lang/chelis/pull/1406
 [#1076]: https://github.com/Chelis-Lang/chelis/issues/1076
 [#672]: https://github.com/Chelis-Lang/chelis/issues/672
 [#1247]: https://github.com/Chelis-Lang/chelis/issues/1247

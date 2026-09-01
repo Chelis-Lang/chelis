@@ -117,13 +117,33 @@ fn valid_primitives_self_and_forward_nominals_are_accepted() {
 }
 
 #[test]
-fn explicit_deftype_type_dimension_and_rank_binders_are_accepted() {
-    assert_accepts(
+fn explicit_deftype_rank_binder_is_rejected() {
+    assert_one_type_resolution_error(
         "(deftype {} Boxed (p n r)
            (variant {} Boxed
              (field {} value
                (t-tensor {} (d-var {} n) (d-rank {} r) (t-var {} p)))))",
-        "explicit deftype binders",
+        "cannot be used as a rank spread",
+        "rank-kinded nominal parameter",
+    );
+}
+
+#[test]
+fn explicit_kinded_deftype_field_rejects_inference_hole() {
+    assert_one_type_resolution_error(
+        "(deftype {} Hole (a)
+           (variant {} Hole (field {} value (t-var {} _))))",
+        "undeclared type variable `_`",
+        "explicit kinded deftype field inference hole",
+    );
+}
+
+#[test]
+fn explicit_kinded_typealias_body_rejects_inference_hole() {
+    assert_one_type_resolution_error(
+        "(typealias {} Hole (a) (t-var {} _))",
+        "undeclared type variable `_`",
+        "explicit kinded typealias body inference hole",
     );
 }
 

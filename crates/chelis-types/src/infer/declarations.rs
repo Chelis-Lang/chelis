@@ -1473,6 +1473,9 @@ pub(super) fn type_contains_tensor(ty: &Type) -> bool {
         Type::Tensor(_, _) => true,
         Type::Ref(inner) => type_contains_tensor(inner),
         Type::Adt(_, args) | Type::Tuple(args) => args.iter().any(type_contains_tensor),
+        Type::KindedAdt(_, args) => args
+            .iter()
+            .any(|argument| argument.as_type().is_some_and(type_contains_tensor)),
         Type::Fn(_, _) | Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error(_) => false,
     }
 }
@@ -1498,6 +1501,14 @@ pub(super) fn type_carries_tensor_with_carriers(ty: &Type, carriers: &HashSet<St
                 || args
                     .iter()
                     .any(|a| type_carries_tensor_with_carriers(a, carriers))
+        }
+        Type::KindedAdt(name, args) => {
+            carriers.contains(name)
+                || args.iter().any(|argument| {
+                    argument
+                        .as_type()
+                        .is_some_and(|ty| type_carries_tensor_with_carriers(ty, carriers))
+                })
         }
         Type::Fn(_, _) | Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error(_) => false,
     }
@@ -1595,7 +1606,7 @@ pub(super) fn validate_deferred_borrow_vars(
             // non-carrying record/tuple resolved through the deferred
             // path is rejected here — linearity's loosened classifier
             // can no longer be relied on to catch it.
-            Type::Adt(_, _) | Type::Tuple(_) => {
+            Type::Adt(_, _) | Type::KindedAdt(_, _) | Type::Tuple(_) => {
                 type_carries_tensor_with_carriers(peeled, &carriers)
             }
             // Don't double-report an inner that already failed inference.
@@ -1643,7 +1654,7 @@ pub(super) fn validate_deferred_opaque_uses(
             }
         };
         match peeled {
-            Type::Adt(adt_name, _) => {
+            Type::Adt(adt_name, _) | Type::KindedAdt(adt_name, _) => {
                 crate::opacity::check_opaque_use(action, adt_name, adt_reg, errors);
             }
             // Never pinned: let-generalization makes an unannotated

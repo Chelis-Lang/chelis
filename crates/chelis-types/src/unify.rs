@@ -1271,6 +1271,15 @@ impl Subst {
                 let args = args.iter().map(|a| self.apply(a)).collect();
                 Type::Adt(name.clone(), args)
             }
+            Type::KindedAdt(name, args) => Type::KindedAdt(
+                name.clone(),
+                args.iter()
+                    .map(|argument| match argument {
+                        NominalArg::Type(ty) => NominalArg::Type(self.apply(ty)),
+                        NominalArg::Dimension(dim) => NominalArg::Dimension(self.apply_dim(dim)),
+                    })
+                    .collect(),
+            ),
             Type::Tuple(ts) => {
                 let ts = ts.iter().map(|t| self.apply(t)).collect();
                 Type::Tuple(ts)
@@ -1388,6 +1397,28 @@ impl Subst {
                             quantified_dvars,
                             quantified_rvars,
                         )
+                    })
+                    .collect(),
+            ),
+            Type::KindedAdt(name, args) => Type::KindedAdt(
+                name.clone(),
+                args.iter()
+                    .map(|argument| match argument {
+                        NominalArg::Type(ty) => NominalArg::Type(self.apply_excluding(
+                            ty,
+                            quantified_tvars,
+                            quantified_dvars,
+                            quantified_rvars,
+                        )),
+                        NominalArg::Dimension(Dim::Var(var)) if quantified_dvars.contains(var) => {
+                            argument.clone()
+                        }
+                        NominalArg::Dimension(Dim::Rank(var)) if quantified_rvars.contains(var) => {
+                            argument.clone()
+                        }
+                        NominalArg::Dimension(dim) => {
+                            NominalArg::Dimension(self.apply_dim_excluding(dim, quantified_dvars))
+                        }
                     })
                     .collect(),
             ),
@@ -1628,6 +1659,19 @@ impl Subst {
             {
                 for (inferred, declared) in inferred_args.iter().zip(declared_args) {
                     self.project_tvar_restrictions_inner(inferred, declared)?;
+                }
+                Ok(())
+            }
+            (
+                Type::KindedAdt(inferred_name, inferred_args),
+                Type::KindedAdt(declared_name, declared_args),
+            ) if inferred_name == declared_name && inferred_args.len() == declared_args.len() => {
+                for (inferred, declared) in inferred_args.iter().zip(declared_args) {
+                    if let (NominalArg::Type(inferred), NominalArg::Type(declared)) =
+                        (inferred, declared)
+                    {
+                        self.project_tvar_restrictions_inner(inferred, declared)?;
+                    }
                 }
                 Ok(())
             }
@@ -1894,6 +1938,39 @@ pub fn unify(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
             }
             for (a1, a2) in args1.iter().zip(args2.iter()) {
                 unify(a1, a2, subst)?;
+            }
+            Ok(())
+        }
+        (Type::KindedAdt(n1, args1), Type::KindedAdt(n2, args2)) => {
+            if n1 != n2 {
+                return Err(TypeError {
+                    kind: TypeErrorKind::TypeMismatch,
+                    message: format!("type mismatch: {n1} vs {n2}"),
+                });
+            }
+            if args1.len() != args2.len() {
+                return Err(TypeError {
+                    kind: TypeErrorKind::ArityMismatch,
+                    message: format!(
+                        "ADT type argument count mismatch for {n1}: {} vs {}",
+                        args1.len(),
+                        args2.len()
+                    ),
+                });
+            }
+            for (a1, a2) in args1.iter().zip(args2) {
+                match (a1, a2) {
+                    (NominalArg::Type(t1), NominalArg::Type(t2)) => unify(t1, t2, subst)?,
+                    (NominalArg::Dimension(d1), NominalArg::Dimension(d2)) => {
+                        unify_dim(d1, d2, subst)?
+                    }
+                    _ => {
+                        return Err(TypeError {
+                            kind: TypeErrorKind::TypeMismatch,
+                            message: format!("nominal argument kind mismatch for {n1}"),
+                        });
+                    }
+                }
             }
             Ok(())
         }
@@ -2439,6 +2516,9 @@ fn occurs_in(v: TypeVar, ty: &Type, subst: &Subst) -> bool {
             TensorPrec::Var(v2) => *v2 == v,
         },
         Type::Adt(_, args) => args.iter().any(|a| occurs_in(v, a, subst)),
+        Type::KindedAdt(_, args) => args
+            .iter()
+            .any(|argument| argument.as_type().is_some_and(|ty| occurs_in(v, ty, subst))),
         Type::Tuple(ts) => ts.iter().any(|t| occurs_in(v, t, subst)),
         Type::Prim(_) | Type::Unit | Type::Error(_) => false,
     }

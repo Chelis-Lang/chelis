@@ -7237,7 +7237,9 @@ fn planted_prelude_adt_with_f64_variant_is_detected() {
     let planted = AdtDef {
         name: "Planted".to_string(),
         type_params: Vec::new(),
+        param_kinds: Vec::new(),
         param_vars: Vec::new(),
+        param_args: Vec::new(),
         opaque: false,
         defining_module: None,
         variants: vec![VariantInfo {

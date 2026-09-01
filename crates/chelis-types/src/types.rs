@@ -406,6 +406,54 @@ impl From<Prim> for TensorPrec {
     }
 }
 
+/// One argument of a nominal type application.
+///
+/// Keeping dimensions out of [`Type`] makes an extent impossible to consume
+/// as an ordinary type while preserving the declared argument order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum NominalArg {
+    Type(Type),
+    Dimension(Dim),
+}
+
+/// Checker-owned kind of a nominal declaration parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NominalParamKind {
+    Type,
+    Dimension,
+}
+
+impl NominalArg {
+    pub fn as_type(&self) -> Option<&Type> {
+        match self {
+            Self::Type(ty) => Some(ty),
+            Self::Dimension(_) => None,
+        }
+    }
+
+    pub fn as_dimension(&self) -> Option<&Dim> {
+        match self {
+            Self::Type(_) => None,
+            Self::Dimension(dim) => Some(dim),
+        }
+    }
+}
+
+impl From<Type> for NominalArg {
+    fn from(value: Type) -> Self {
+        Self::Type(value)
+    }
+}
+
+impl fmt::Display for NominalArg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Type(ty) => ty.fmt(f),
+            Self::Dimension(dim) => dim.fmt(f),
+        }
+    }
+}
+
 /// Chelis type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Type {
@@ -420,8 +468,12 @@ pub enum Type {
     /// `TensorPrec::Var(_)` for sig-quantified precision polymorphism
     /// per `spec/04-type-system.md` §5.8 (WS-A5).
     Tensor(Vec<Dim>, TensorPrec),
-    /// Algebraic data type: name + type arguments.
+    /// Algebraic data type whose arguments are all ordinary types.
     Adt(String, Vec<Type>),
+    /// Algebraic data type with at least one dimension-kinded argument.
+    /// Keeping this representation distinct makes a dimension impossible to
+    /// consume through an ordinary `Type::Adt` argument path.
+    KindedAdt(String, Vec<NominalArg>),
     /// Type variable (for inference).
     Var(TypeVar),
     /// Tuple type.
@@ -558,6 +610,11 @@ impl fmt::Display for Type {
             Type::Adt(name, args) if args.is_empty() => write!(f, "{name}"),
             Type::Adt(name, args) => {
                 let arg_strs: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+                write!(f, "{name} {}", arg_strs.join(" "))
+            }
+            Type::KindedAdt(name, args) if args.is_empty() => write!(f, "{name}"),
+            Type::KindedAdt(name, args) => {
+                let arg_strs: Vec<String> = args.iter().map(ToString::to_string).collect();
                 write!(f, "{name} {}", arg_strs.join(" "))
             }
             Type::Var(v) => write!(f, "?{}", v.0),

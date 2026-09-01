@@ -320,6 +320,7 @@ fn validate_deep_node(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError>
         match child.as_rule() {
             deep::Rule::node => validate_deep_node(child.clone())?,
             deep::Rule::typed_helper => validate_typed_helper(child.clone())?,
+            deep::Rule::bare_list => validate_bare_list(child.clone())?,
             deep::Rule::unit_list | deep::Rule::literal | deep::Rule::bare_name => {}
             other => {
                 return Err(ValidationError::Failed(format!(
@@ -332,6 +333,31 @@ fn validate_deep_node(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError>
     }
 
     validate_tag_shape(deep_tag, &children, span.start())
+}
+
+fn validate_bare_list(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError> {
+    for item in pair.into_inner().filter(is_structural_pair) {
+        let child = match item.as_rule() {
+            deep::Rule::bare_list_item => item.into_inner().find(is_structural_pair),
+            _ => Some(item),
+        };
+        let Some(child) = child else {
+            continue;
+        };
+        match child.as_rule() {
+            deep::Rule::node => validate_deep_node(child)?,
+            deep::Rule::typed_helper => validate_typed_helper(child)?,
+            deep::Rule::unit_list | deep::Rule::literal | deep::Rule::bare_name => {}
+            other => {
+                return Err(ValidationError::Failed(format!(
+                    "unexpected Deep bare-list rule {:?} at byte {}",
+                    other,
+                    child.as_span().start()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_typed_helper(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError> {
@@ -598,6 +624,13 @@ mod tests {
         let source = "(defsig {} f (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} f32))) (t-tensor {} (d-rank {} r) (t-prim {} f32))))\n";
         validate_deep(source)
             .expect("validator should accept canonical t-ref / d-rank rank-polymorphic Deep");
+    }
+
+    #[test]
+    fn deep_accepts_canonical_nominal_parameter_lists() {
+        let source = "(deftype {} Column (n a) (variant {} Column (field {} items (t-tensor {} (d-var {} n) (t-var {} a)))))\n";
+        validate_deep(source)
+            .expect("validator must accept the compiler's canonical bare nominal-parameter list");
     }
 
     fn assert_duplicate_defsig_rejected(source: &str) {

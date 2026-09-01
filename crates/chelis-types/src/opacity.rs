@@ -458,6 +458,19 @@ pub(crate) fn demangle_type(ty: &Type) -> Type {
             demangle_ident(name),
             args.iter().map(demangle_type).collect(),
         ),
+        Type::KindedAdt(name, args) => Type::KindedAdt(
+            demangle_ident(name),
+            args.iter()
+                .map(|argument| match argument {
+                    crate::types::NominalArg::Type(ty) => {
+                        crate::types::NominalArg::Type(demangle_type(ty))
+                    }
+                    crate::types::NominalArg::Dimension(dim) => {
+                        crate::types::NominalArg::Dimension(dim.clone())
+                    }
+                })
+                .collect(),
+        ),
         Type::Fn(args, ret) => Type::Fn(
             args.iter().map(demangle_type).collect(),
             Box::new(demangle_type(ret)),
@@ -494,6 +507,29 @@ fn mentions_inner(
                 .iter()
                 .any(|a| mentions_inner(a, target, adt_reg, seen))
             {
+                return true;
+            }
+            if !seen.insert(name.clone()) {
+                return false;
+            }
+            adt_reg.lookup(name).is_some_and(|def| {
+                def.variants.iter().any(|variant| {
+                    variant
+                        .fields
+                        .iter()
+                        .any(|(_, fty)| mentions_inner(fty, target, adt_reg, seen))
+                })
+            })
+        }
+        Type::KindedAdt(name, args) => {
+            if name == target {
+                return true;
+            }
+            if args.iter().any(|argument| {
+                argument
+                    .as_type()
+                    .is_some_and(|ty| mentions_inner(ty, target, adt_reg, seen))
+            }) {
                 return true;
             }
             if !seen.insert(name.clone()) {

@@ -782,6 +782,9 @@ fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
 /// reshape obligations. Their serialized checker state is therefore
 /// structurally different from V11 even when a program has no cache-visible
 /// type changes.
+/// V13 adds checker-owned nominal parameter kinds and kinded nominal
+/// arguments, so dimension literals and variables survive a compiled-context
+/// round trip without being reinterpreted as ordinary type arguments.
 ///
 /// V9 unified two independent V8 formats. The pipeline-core
 /// extraction sealed the lowered-library proof identity into the cached
@@ -795,13 +798,13 @@ fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
 /// bincode is positional and a V8 file of either lineage would decode to a
 /// wrong shape; the magic check rejects it before any decode. A V6, V7, or
 /// either V8 file is stale.
-const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V12\n";
+const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V13\n";
 
 /// On-disk format version for the cache envelope. Bumping this tells
 /// `load_if_fresh` to reject older cache files with
 /// [`CacheError::UnsupportedVersion`] rather than risk a "successful but
 /// wrong" decode.
-const CACHE_FORMAT_VERSION: u32 = 12;
+const CACHE_FORMAT_VERSION: u32 = 13;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -1316,9 +1319,9 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn cache_format_version_tracks_ordered_deferred_constraints() {
-        assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V12\n");
-        assert_eq!(CACHE_FORMAT_VERSION, 12);
+    fn cache_format_version_tracks_ordered_constraints_and_nominal_kinds() {
+        assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V13\n");
+        assert_eq!(CACHE_FORMAT_VERSION, 13);
     }
 
     /// chelis#1156: the cache identity must distinguish two BUILDS, not

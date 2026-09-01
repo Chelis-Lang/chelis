@@ -3,7 +3,7 @@
 //! Processes `deftype` Deep nodes to extract constructor type signatures.
 
 use chelis_deep::DeepTag;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use chelis_deep::ast as deep;
 use serde::{Deserialize, Serialize};
@@ -26,14 +26,22 @@ pub struct VariantInfo {
 pub struct AdtDef {
     pub name: String,
     pub type_params: Vec<String>,
-    /// The fresh `TypeVar`s allocated for `type_params` at
-    /// registration, in the same order. Variant field types reference
-    /// these vars, so storing them lets call sites instantiate a
+    /// Checker-owned kind for each nominal parameter, in source order.
+    #[serde(default)]
+    pub param_kinds: Vec<NominalParamKind>,
+    /// The fresh `TypeVar`s allocated for the type-kinded subset of
+    /// `type_params`, in source order with dimension-kinded parameters
+    /// omitted. Variant field types reference these vars, so storing them
+    /// lets call sites instantiate a
     /// SPECIFIC ADT's constructor without going through the
     /// name-keyed env (where same-named constructors from colliding
     /// ADTs overwrite each other, chelis#148).
     #[serde(default)]
     pub param_vars: Vec<TypeVar>,
+    /// Registration-time type/dimension variables aligned with
+    /// `type_params` and `param_kinds`.
+    #[serde(default)]
+    pub param_args: Vec<NominalArg>,
     pub variants: Vec<VariantInfo>,
     /// True when the `deftype` carried `opaque: true` metadata
     /// (RFC D-CHECK): construction and inspection are checker-gated
@@ -50,7 +58,11 @@ pub struct AdtDef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TypeAliasDef {
     pub params: Vec<String>,
+    #[serde(default)]
+    pub param_kinds: Vec<NominalParamKind>,
     pub param_vars: Vec<TypeVar>,
+    #[serde(default)]
+    pub param_args: Vec<NominalArg>,
     pub body: Type,
 }
 
@@ -182,10 +194,18 @@ impl AdtRegistry {
             variant_start = 1;
         }
 
-        let explicit_params: HashSet<String> = type_params.iter().cloned().collect();
+        let param_kinds = headers
+            .param_kinds(&name)
+            .map(<[NominalParamKind]>::to_vec)
+            .unwrap_or_else(|| vec![NominalParamKind::Type; type_params.len()]);
+        let explicit_params: HashMap<String, NominalParamKind> = type_params
+            .iter()
+            .cloned()
+            .zip(param_kinds.iter().copied())
+            .collect();
         let mut resolver = DeepTypeResolver::new(
             TypeUseSite::DeftypeField,
-            BinderMode::Explicit(&explicit_params),
+            BinderMode::ExplicitKinds(&explicit_params),
             headers,
             vg,
             errors,
@@ -250,18 +270,43 @@ impl AdtRegistry {
         let all_tvars = resolver.type_vars();
         let all_dvars = resolver.dim_vars();
         let all_rvars = resolver.rank_vars();
-        let param_vars: Vec<TypeVar> = type_params
+        let param_args: Vec<NominalArg> = type_params
             .iter()
-            .map(|param| {
-                resolver
-                    .type_var(param)
-                    .expect("explicit parameters are pre-bound as nominal type arguments")
+            .zip(&param_kinds)
+            .map(|(param, kind)| match kind {
+                NominalParamKind::Type => NominalArg::Type(Type::Var(
+                    resolver
+                        .type_var(param)
+                        .expect("type-kinded nominal parameter is pre-bound"),
+                )),
+                NominalParamKind::Dimension => NominalArg::Dimension(Dim::Var(
+                    resolver
+                        .dim_var(param)
+                        .expect("dimension-kinded nominal parameter is pre-bound"),
+                )),
             })
             .collect();
-        let adt_type = Type::Adt(
-            name.clone(),
-            param_vars.iter().copied().map(Type::Var).collect(),
-        );
+        let param_vars = param_args
+            .iter()
+            .filter_map(|argument| match argument {
+                NominalArg::Type(Type::Var(var)) => Some(*var),
+                _ => None,
+            })
+            .collect();
+        let adt_type = if param_kinds.contains(&NominalParamKind::Dimension) {
+            Type::KindedAdt(name.clone(), param_args.clone())
+        } else {
+            Type::Adt(
+                name.clone(),
+                param_args
+                    .iter()
+                    .map(|argument| match argument {
+                        NominalArg::Type(ty) => ty.clone(),
+                        NominalArg::Dimension(_) => unreachable!("type-only nominal header"),
+                    })
+                    .collect(),
+            )
+        };
         let constructor_schemes = variants
             .iter()
             .map(|variant| {
@@ -294,7 +339,9 @@ impl AdtRegistry {
             AdtDef {
                 name,
                 type_params,
+                param_kinds,
                 param_vars,
+                param_args,
                 variants,
                 opaque,
                 defining_module,
@@ -409,14 +456,24 @@ impl AdtRegistry {
         &mut self,
         name: String,
         params: Vec<String>,
-        param_vars: Vec<TypeVar>,
+        param_kinds: Vec<NominalParamKind>,
+        param_args: Vec<NominalArg>,
         body: Type,
     ) {
+        let param_vars = param_args
+            .iter()
+            .filter_map(|argument| match argument {
+                NominalArg::Type(Type::Var(var)) => Some(*var),
+                _ => None,
+            })
+            .collect();
         self.aliases.insert(
             name,
             TypeAliasDef {
                 params,
+                param_kinds,
                 param_vars,
+                param_args,
                 body,
             },
         );
@@ -429,19 +486,25 @@ impl AdtRegistry {
 
     /// Instantiate a type alias with the given type arguments.
     pub fn instantiate_alias(&self, name: &str, args: &[Type]) -> Option<Type> {
-        let alias = self.aliases.get(name)?;
-        if alias.param_vars.len() != args.len() {
-            return None;
-        }
-
-        let subst: HashMap<TypeVar, Type> = alias
-            .param_vars
+        let args = args
             .iter()
-            .copied()
-            .zip(args.iter().cloned())
-            .collect();
+            .cloned()
+            .map(NominalArg::Type)
+            .collect::<Vec<_>>();
+        self.instantiate_nominal_alias(name, &args)
+    }
 
-        Some(substitute_alias_type(&alias.body, &subst))
+    /// Instantiate a type alias whose parameters may be ordinary types or
+    /// dimensions. The declaration-owned parameter arguments and the applied
+    /// arguments must agree positionally in kind.
+    pub fn instantiate_nominal_alias(&self, name: &str, args: &[NominalArg]) -> Option<Type> {
+        let alias = self.aliases.get(name)?;
+        let (type_subst, dim_subst) = nominal_substitutions(&alias.param_args, args)?;
+        Some(substitute_nominal_type(
+            &alias.body,
+            &type_subst,
+            &dim_subst,
+        ))
     }
 
     /// Recursively expand every registered type alias inside `ty`, leaving
@@ -490,6 +553,30 @@ impl AdtRegistry {
                     resolved
                 } else {
                     Type::Adt(name.clone(), resolved_args)
+                }
+            }
+            Type::KindedAdt(name, args) => {
+                let resolved_args = args
+                    .iter()
+                    .map(|argument| match argument {
+                        NominalArg::Type(ty) => {
+                            NominalArg::Type(self.expand_aliases_inner(ty, seen))
+                        }
+                        NominalArg::Dimension(dim) => NominalArg::Dimension(dim.clone()),
+                    })
+                    .collect::<Vec<_>>();
+
+                if seen.contains(name) {
+                    return Type::KindedAdt(name.clone(), resolved_args);
+                }
+
+                if let Some(expanded) = self.instantiate_nominal_alias(name, &resolved_args) {
+                    seen.insert(name.clone());
+                    let resolved = self.expand_aliases_inner(&expanded, seen);
+                    seen.remove(name);
+                    resolved
+                } else {
+                    Type::KindedAdt(name.clone(), resolved_args)
                 }
             }
             Type::Fn(args, ret) => Type::Fn(
@@ -542,36 +629,91 @@ fn list_children(list: &deep::List) -> &[deep::Expr] {
 }
 
 pub(crate) fn substitute_alias_type(ty: &Type, subst: &HashMap<TypeVar, Type>) -> Type {
+    substitute_nominal_type(ty, subst, &HashMap::new())
+}
+
+pub(crate) fn nominal_substitutions(
+    parameters: &[NominalArg],
+    arguments: &[NominalArg],
+) -> Option<(HashMap<TypeVar, Type>, HashMap<DimVar, Dim>)> {
+    if parameters.len() != arguments.len() {
+        return None;
+    }
+    let mut type_subst = HashMap::new();
+    let mut dim_subst = HashMap::new();
+    for (parameter, argument) in parameters.iter().zip(arguments) {
+        match (parameter, argument) {
+            (NominalArg::Type(Type::Var(parameter)), NominalArg::Type(argument)) => {
+                type_subst.insert(*parameter, argument.clone());
+            }
+            (NominalArg::Dimension(Dim::Var(parameter)), NominalArg::Dimension(argument)) => {
+                dim_subst.insert(*parameter, argument.clone());
+            }
+            _ => return None,
+        }
+    }
+    Some((type_subst, dim_subst))
+}
+
+pub(crate) fn substitute_nominal_type(
+    ty: &Type,
+    type_subst: &HashMap<TypeVar, Type>,
+    dim_subst: &HashMap<DimVar, Dim>,
+) -> Type {
     match ty {
-        Type::Var(tv) => subst.get(tv).cloned().unwrap_or(Type::Var(*tv)),
-        Type::Ref(inner) => Type::Ref(Box::new(substitute_alias_type(inner, subst))),
+        Type::Var(tv) => type_subst.get(tv).cloned().unwrap_or(Type::Var(*tv)),
+        Type::Ref(inner) => Type::Ref(Box::new(substitute_nominal_type(
+            inner, type_subst, dim_subst,
+        ))),
         Type::Tensor(dims, precision) => {
             let precision = match precision {
-                TensorPrec::Var(var) => match subst.get(var) {
+                TensorPrec::Var(var) => match type_subst.get(var) {
                     Some(Type::Prim(prim)) => TensorPrec::Concrete(*prim),
                     Some(Type::Var(var)) => TensorPrec::Var(*var),
                     _ => TensorPrec::Var(*var),
                 },
                 TensorPrec::Concrete(prim) => TensorPrec::Concrete(*prim),
             };
-            Type::Tensor(dims.clone(), precision)
+            Type::Tensor(
+                dims.iter()
+                    .map(|dim| match dim {
+                        Dim::Var(var) => dim_subst.get(var).cloned().unwrap_or_else(|| dim.clone()),
+                        _ => dim.clone(),
+                    })
+                    .collect(),
+                precision,
+            )
         }
         Type::Fn(args, ret) => Type::Fn(
             args.iter()
-                .map(|arg| substitute_alias_type(arg, subst))
+                .map(|arg| substitute_nominal_type(arg, type_subst, dim_subst))
                 .collect(),
-            Box::new(substitute_alias_type(ret, subst)),
+            Box::new(substitute_nominal_type(ret, type_subst, dim_subst)),
         ),
         Type::Adt(name, args) => Type::Adt(
             name.clone(),
             args.iter()
-                .map(|arg| substitute_alias_type(arg, subst))
+                .map(|arg| substitute_nominal_type(arg, type_subst, dim_subst))
+                .collect(),
+        ),
+        Type::KindedAdt(name, args) => Type::KindedAdt(
+            name.clone(),
+            args.iter()
+                .map(|argument| match argument {
+                    NominalArg::Type(ty) => {
+                        NominalArg::Type(substitute_nominal_type(ty, type_subst, dim_subst))
+                    }
+                    NominalArg::Dimension(Dim::Var(var)) => {
+                        NominalArg::Dimension(dim_subst.get(var).cloned().unwrap_or(Dim::Var(*var)))
+                    }
+                    NominalArg::Dimension(dim) => NominalArg::Dimension(dim.clone()),
+                })
                 .collect(),
         ),
         Type::Tuple(items) => Type::Tuple(
             items
                 .iter()
-                .map(|item| substitute_alias_type(item, subst))
+                .map(|item| substitute_nominal_type(item, type_subst, dim_subst))
                 .collect(),
         ),
         _ => ty.clone(),

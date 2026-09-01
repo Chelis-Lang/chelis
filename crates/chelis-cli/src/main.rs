@@ -5,13 +5,13 @@ mod style_gate;
 
 use chelis_compiler_api::compiler::BuildTarget;
 use chelis_compiler_api::schema::{
-    EvalRequest, SourceKind, WireInferredDim, WireInferredEffect, WireInferredPrecision,
-    WireInferredType,
+    EvalRequest, SourceKind, WireInferredAdtArg, WireInferredDim, WireInferredDimensionArg,
+    WireInferredEffect, WireInferredPrecision, WireInferredType,
 };
 use chelis_deep::DeepTag;
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr};
 use chelis_surf::ast::{Decl, ImportKind};
-use chelis_types::types::{Dim, Effect, EffectSet, TensorPrec, Type};
+use chelis_types::types::{Dim, Effect, EffectSet, NominalArg, TensorPrec, Type};
 use chelis_vocab::DiagnosticKind;
 use clap::{ArgAction, ArgGroup, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -2829,7 +2829,24 @@ fn wire_inferred_type(ty: &Type) -> WireInferredType {
         },
         Type::Adt(name, args) => WireInferredType::Adt {
             name: name.clone(),
-            args: args.iter().map(wire_inferred_type).collect(),
+            args: args
+                .iter()
+                .map(|ty| WireInferredAdtArg::Type(wire_inferred_type(ty)))
+                .collect(),
+        },
+        Type::KindedAdt(name, args) => WireInferredType::Adt {
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|argument| match argument {
+                    NominalArg::Type(ty) => WireInferredAdtArg::Type(wire_inferred_type(ty)),
+                    NominalArg::Dimension(dim) => {
+                        WireInferredAdtArg::Dimension(WireInferredDimensionArg::Dimension {
+                            dim: wire_inferred_dim(dim),
+                        })
+                    }
+                })
+                .collect(),
         },
         Type::Var(var) => WireInferredType::Var { id: var.0 },
         Type::Tuple(types) => WireInferredType::Tuple {
@@ -2912,6 +2929,16 @@ fn format_cli_type(ty: &Type) -> String {
         Type::Adt(name, args) if args.is_empty() => name.clone(),
         Type::Adt(name, args) => {
             let args = args.iter().map(format_cli_type).collect::<Vec<_>>();
+            format!("{name}[{}]", args.join(", "))
+        }
+        Type::KindedAdt(name, args) => {
+            let args = args
+                .iter()
+                .map(|argument| match argument {
+                    NominalArg::Type(ty) => format_cli_type(ty),
+                    NominalArg::Dimension(dim) => format_cli_dim(dim),
+                })
+                .collect::<Vec<_>>();
             format!("{name}[{}]", args.join(", "))
         }
         Type::Var(var) => format!("?{}", var.0),

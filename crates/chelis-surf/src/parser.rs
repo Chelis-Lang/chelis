@@ -3128,7 +3128,10 @@ impl Parser {
     fn parse_type_arg(&mut self) -> Result<TypeExpr, ParseError> {
         if let TokenKind::Int(n) = self.peek().clone() {
             let tok = self.advance();
-            return Ok(TypeExpr::Named(n.to_string(), tok.span));
+            return Ok(TypeExpr::DimensionLiteral(
+                crate::ast::DimensionLiteral::new(n),
+                tok.span,
+            ));
         }
         self.parse_type()
     }
@@ -3675,6 +3678,7 @@ fn expr_span(e: &Expr) -> Span {
 fn type_span(t: &TypeExpr) -> Span {
     match t {
         TypeExpr::Named(_, s) => *s,
+        TypeExpr::DimensionLiteral(_, s) => *s,
         TypeExpr::RankSpread(_, s) => *s,
         TypeExpr::Tensor(_, _, s) => *s,
         TypeExpr::Arrow(_, _, s) => *s,

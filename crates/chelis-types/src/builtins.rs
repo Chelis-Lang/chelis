@@ -2557,7 +2557,9 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         .or_insert_with(|| AdtDef {
             name: "Option".to_string(),
             type_params: vec!["a".to_string()],
+            param_kinds: vec![NominalParamKind::Type],
             param_vars: vec![option_tvar],
+            param_args: vec![NominalArg::Type(Type::Var(option_tvar))],
             opaque: false,
             defining_module: None,
             variants: vec![
@@ -2605,7 +2607,9 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         .or_insert_with(|| AdtDef {
             name: "List".to_string(),
             type_params: vec!["a".to_string()],
+            param_kinds: vec![NominalParamKind::Type],
             param_vars: vec![list_tvar],
+            param_args: vec![NominalArg::Type(Type::Var(list_tvar))],
             opaque: false,
             defining_module: None,
             variants: vec![
@@ -2626,7 +2630,9 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         .or_insert_with(|| AdtDef {
             name: "MappedFile".to_string(),
             type_params: Vec::new(),
+            param_kinds: Vec::new(),
             param_vars: Vec::new(),
+            param_args: Vec::new(),
             opaque: false,
             defining_module: None,
             variants: Vec::new(),

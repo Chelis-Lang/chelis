@@ -178,7 +178,7 @@ pub(super) fn resolve_record_head<'a>(
     // Alias head: `type P2 = Probability` makes `P2 { ... }` mean
     // `Probability { ... }`.
     let alias = adt_reg.resolve_alias(head)?;
-    if let Type::Adt(target, _) = &alias.body {
+    if let Type::Adt(target, _) | Type::KindedAdt(target, _) = &alias.body {
         let (adt_name, variant) = adt_reg.lookup_variant(target)?;
         return Some((adt_name, variant, variant.name.clone()));
     }
@@ -376,7 +376,14 @@ pub(super) fn instantiate_variant_of(
     vg: &mut VarGen,
 ) -> (Vec<Type>, Type) {
     let mut type_vars = adt_def.param_vars.clone();
-    let mut dim_vars = Vec::new();
+    let mut dim_vars = adt_def
+        .param_args
+        .iter()
+        .filter_map(|argument| match argument {
+            NominalArg::Dimension(Dim::Var(var)) => Some(*var),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     let mut rank_vars = Vec::new();
     for (_, field_type) in &variant.fields {
         for var in crate::env::free_tvars(field_type) {
@@ -414,14 +421,28 @@ pub(super) fn instantiate_variant_of(
         .iter()
         .map(|(_, field_type)| renaming.apply(field_type))
         .collect();
-    let ret = Type::Adt(
-        adt_def.name.clone(),
-        adt_def
-            .param_vars
-            .iter()
-            .map(|var| renaming.apply(&Type::Var(*var)))
-            .collect(),
-    );
+    let renamed_args = adt_def
+        .param_args
+        .iter()
+        .map(|argument| match argument {
+            NominalArg::Type(ty) => NominalArg::Type(renaming.apply(ty)),
+            NominalArg::Dimension(dim) => NominalArg::Dimension(renaming.apply_dim(dim)),
+        })
+        .collect::<Vec<_>>();
+    let ret = if adt_def.param_kinds.contains(&NominalParamKind::Dimension) {
+        Type::KindedAdt(adt_def.name.clone(), renamed_args)
+    } else {
+        Type::Adt(
+            adt_def.name.clone(),
+            renamed_args
+                .into_iter()
+                .map(|argument| match argument {
+                    NominalArg::Type(ty) => ty,
+                    NominalArg::Dimension(_) => unreachable!("type-only nominal definition"),
+                })
+                .collect(),
+        )
+    };
     (args, ret)
 }
 
@@ -481,7 +502,7 @@ pub(super) fn infer_access(
         resolved = *inner;
     }
     match resolved {
-        Type::Adt(ref adt_name, _) => {
+        Type::Adt(ref adt_name, _) | Type::KindedAdt(ref adt_name, _) => {
             // RFC D-CHECK: field access on an out-of-module opaque
             // type is rejected; inference continues so the access
             // still yields its true field type (no cascades).
@@ -642,7 +663,7 @@ pub(super) fn infer_record_update(
         resolved = *inner;
     }
     match resolved {
-        Type::Adt(ref adt_name, _) => {
+        Type::Adt(ref adt_name, _) | Type::KindedAdt(ref adt_name, _) => {
             // RFC D-CHECK: record update of an out-of-module opaque
             // type is rejected; inference continues and returns the
             // target's true type (no cascades).
@@ -819,7 +840,7 @@ pub(super) fn infer_cast(
 
     // RFC D-CHECK cast gates operate on the same resolved target as ordinary
     // cast typing, including transparent alias expansion.
-    if let Type::Adt(target_adt, _) = &target_ty
+    if let Type::Adt(target_adt, _) | Type::KindedAdt(target_adt, _) = &target_ty
         && crate::opacity::check_opaque_use(
             crate::opacity::OpaqueAction::CastInto,
             target_adt,
@@ -833,7 +854,7 @@ pub(super) fn infer_cast(
     while let Type::Ref(inner) = peeled {
         peeled = inner.as_ref();
     }
-    if let Type::Adt(source_adt, _) = peeled
+    if let Type::Adt(source_adt, _) | Type::KindedAdt(source_adt, _) = peeled
         && crate::opacity::check_opaque_use(
             crate::opacity::OpaqueAction::CastOut,
             source_adt,
@@ -922,6 +943,7 @@ pub(super) fn infer_cast(
         other @ (Type::Fn(_, _)
         | Type::Ref(_)
         | Type::Adt(_, _)
+        | Type::KindedAdt(_, _)
         | Type::Var(_)
         | Type::Tuple(_)
         | Type::Unit) => report(

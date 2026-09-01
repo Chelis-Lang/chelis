@@ -893,6 +893,12 @@ evidence; they are not trusted as evidence of their own free-form detail.
 
 PR #1204 adds `parity_recursive_generic` to this frozen inventory. Its independent evidence is the 22-case `recursive_generic_monomorphization` suite. Fresh-context red-team round 3 accepted its implementation and boundary controls. The corpus guard adds only `recursive_generic.ch`.
 
+PR #1406 adds `parity_kinded_nominal_dimensions` and
+`kinded_nominal_dimensions.ch` to the frozen inventory. The dedicated
+`issue_1247_integer_type_application` suite independently exercises the same
+kinded nominal contract through `chelis check`, `chelis test`, Surf migration,
+evaluation, and generated C; the parity row remains the cross-lane receipt.
+
 Three digest-locked behavioral canaries perturb the compiled observation before
 the shared comparator, drive the shared `assert_expected` helper with a
 known-wrong expected value, and present an adjacent f32 result while the
