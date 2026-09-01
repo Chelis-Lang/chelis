@@ -1,6 +1,7 @@
 # Hash-Order Determinism: observable behavior never depends on hash iteration order
 
-**Status:** Phase A is implemented; Phase B is in review. Tracking issue: [#1341].
+**Status:** Phase A is implemented. Phase B is implemented and its named oracle
+passes; the change carrying it is in review. Tracking issue: [#1341].
 Amended 2026-08-28: the mechanism moved from the census enumerator that PR #1366
 merged to a type-level ban, then was cut to what defends a known instance or a spec
 sentence. Amended 2026-09-01: Phase B's completeness leg moved from a
