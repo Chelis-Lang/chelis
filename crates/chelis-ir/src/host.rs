@@ -10227,20 +10227,28 @@ fn actualize_tensor_helper_types(
 
     let mut inferred = UnordMap::<crate::dag::NodeId, TensorType>::new();
     // Generated runtime extents share the `DimInfo::Named` carrier with
-    // source dimensions. Reserve every name already present in the DAG, then
-    // mint by insertion into that finite set. This is collision-proof even
-    // when source deliberately spells the preferred producer-qualified name;
-    // a prefix convention alone is not an identity boundary (chelis#1137
-    // red-team round 2).
-    let mut occupied_dim_names = dag
-        .nodes()
-        .iter()
-        .flat_map(|node| node.output_type.dims.iter())
-        .filter_map(|dim| match dim {
-            crate::dag::DimInfo::Named(name, _) => Some(name.clone()),
-            crate::dag::DimInfo::Lit(_) => None,
-        })
-        .collect::<UnordSet<_>>();
+    // source dimensions. Reserve the canonical complete DAG namespace plus
+    // names that host-scope actualization can introduce later, then mint by
+    // insertion into that finite set. A prefix convention alone is not an
+    // identity boundary (chelis#1137 red-team rounds 2-3).
+    let mut occupied_dim_names = crate::dag::dimension_identity_names(dag);
+    // `to_sorted` here is an order-insensitive drain, not an order claim:
+    // every element lands in a set whose membership is what the minting
+    // loop below reads.
+    occupied_dim_names.extend(
+        scope
+            .to_sorted()
+            .into_iter()
+            .filter_map(|(_, term)| match term {
+                HostTypeTerm::Tensor(tensor) => Some(tensor),
+                _ => None,
+            })
+            .flat_map(|tensor| tensor.dims.iter())
+            .filter_map(|dim| match dim {
+                crate::dag::DimInfo::Named(name, _) => Some(name.clone()),
+                crate::dag::DimInfo::Lit(_) => None,
+            }),
+    );
     let mut uses = UnordMap::<crate::dag::NodeId, Vec<crate::dag::NodeId>>::new();
     for node in dag.nodes() {
         for input in &node.inputs {
@@ -16280,6 +16288,293 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                 .dims,
             vec![batch],
             "the full-axis sentinel preserves the input axis identity"
+        );
+    }
+
+    fn runtime_shrink_bound_nodes(
+        dag: &mut crate::dag::Dag,
+    ) -> (crate::dag::NodeId, crate::dag::NodeId) {
+        use crate::dag::{RiscOp, TensorType};
+
+        let scalar_i64 = TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        };
+        let start = dag.add_node(
+            RiscOp::synth_const(Prim::Int64, 1.0),
+            vec![],
+            scalar_i64.clone(),
+            None,
+        );
+        let end = dag.add_node(
+            RiscOp::synth_const(Prim::Int64, 3.0),
+            vec![],
+            scalar_i64,
+            None,
+        );
+        (start, end)
+    }
+
+    #[test]
+    fn runtime_shrink_name_reserves_scope_actualized_base_and_suffixes() {
+        use crate::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
+
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(8)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let (start, end) = runtime_shrink_bound_nodes(&mut dag);
+        let shrink = dag.add_node(
+            RiscOp::Shrink {
+                bounds: vec![(RtDim::Node(1), RtDim::Node(2))],
+            },
+            vec![input, start, end],
+            TensorType {
+                dims: vec![DimInfo::Named("*".into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(shrink);
+
+        let base = format!("_rt_shrink_dim_{}_0", shrink.0);
+        let suffixed = format!("{base}_1");
+        let mut scope = UnordMap::from([(
+            "x".into(),
+            HostTypeTerm::Tensor(TensorType {
+                dims: vec![DimInfo::Lit(8)],
+                precision: Prim::F32,
+            }),
+        )]);
+        scope.insert(
+            "scope_only_reservations".into(),
+            HostTypeTerm::Tensor(TensorType {
+                dims: vec![
+                    DimInfo::Named(base.clone(), None),
+                    DimInfo::Named(suffixed, None),
+                ],
+                precision: Prim::F32,
+            }),
+        );
+
+        let actualized = actualize_tensor_helper_types(&dag, &scope);
+        assert_eq!(
+            actualized
+                .get(shrink)
+                .expect("runtime shrink")
+                .output_type
+                .dims,
+            vec![DimInfo::Named(format!("{base}_2"), None)],
+            "names introduced by host-scope actualization share the same identity namespace"
+        );
+    }
+
+    #[test]
+    fn runtime_shrink_name_reserves_op_internal_symbols_in_both_node_orders() {
+        use crate::dag::{Dag, DimExpr, DimInfo, RiscOp, RtDim, TensorType};
+
+        for internal_before_shrink in [false, true] {
+            let mut dag = Dag::new();
+            let input = dag.add_node(
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                TensorType {
+                    dims: vec![DimInfo::Lit(8)],
+                    precision: Prim::F32,
+                },
+                None,
+            );
+            let (start, end) = runtime_shrink_bound_nodes(&mut dag);
+            let expected_shrink_id = if internal_before_shrink { 4 } else { 3 };
+            let base = format!("_rt_shrink_dim_{expected_shrink_id}_0");
+            let internal_size = DimExpr::Mul(
+                Box::new(DimExpr::Sym(base.clone())),
+                Box::new(DimExpr::Sym(format!("{base}_1"))),
+            );
+            let add_internal_carrier = |dag: &mut Dag| {
+                dag.add_node(
+                    RiscOp::Expand {
+                        axis: 0,
+                        size: internal_size.clone(),
+                    },
+                    vec![input],
+                    TensorType {
+                        dims: vec![DimInfo::Lit(1), DimInfo::Lit(8)],
+                        precision: Prim::F32,
+                    },
+                    None,
+                )
+            };
+            if internal_before_shrink {
+                let _ = add_internal_carrier(&mut dag);
+            }
+            let shrink = dag.add_node(
+                RiscOp::Shrink {
+                    bounds: vec![(RtDim::Node(1), RtDim::Node(2))],
+                },
+                vec![input, start, end],
+                TensorType {
+                    dims: vec![DimInfo::Named("*".into(), None)],
+                    precision: Prim::F32,
+                },
+                None,
+            );
+            if !internal_before_shrink {
+                let _ = add_internal_carrier(&mut dag);
+            }
+            dag.add_root(shrink);
+            assert_eq!(shrink.0, expected_shrink_id);
+
+            let scope = UnordMap::from([(
+                "x".into(),
+                HostTypeTerm::Tensor(TensorType {
+                    dims: vec![DimInfo::Lit(8)],
+                    precision: Prim::F32,
+                }),
+            )]);
+            let actualized = actualize_tensor_helper_types(&dag, &scope);
+            assert_eq!(
+                actualized
+                    .get(shrink)
+                    .expect("runtime shrink")
+                    .output_type
+                    .dims,
+                vec![DimInfo::Named(format!("{base}_2"), None)],
+                "op-internal symbols must be reserved before allocation regardless of node order"
+            );
+        }
+    }
+
+    #[test]
+    fn multiple_runtime_shrinks_keep_distinct_names_through_fanout_consumers() {
+        use crate::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
+
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(8)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let (start, end) = runtime_shrink_bound_nodes(&mut dag);
+        let wildcard = TensorType {
+            dims: vec![DimInfo::Named("*".into(), None)],
+            precision: Prim::F32,
+        };
+        let shrink_a = dag.add_node(
+            RiscOp::Shrink {
+                bounds: vec![(RtDim::Node(1), RtDim::Node(2))],
+            },
+            vec![input, start, end],
+            wildcard.clone(),
+            None,
+        );
+        let shrink_b = dag.add_node(
+            RiscOp::Shrink {
+                bounds: vec![(RtDim::Node(1), RtDim::Node(2))],
+            },
+            vec![input, start, end],
+            wildcard.clone(),
+            None,
+        );
+        let synthetic = |name: &str| TensorType {
+            dims: vec![DimInfo::Named(name.into(), None)],
+            precision: Prim::F32,
+        };
+        let consumers = [
+            dag.add_node(
+                RiscOp::Add,
+                vec![shrink_a, shrink_a],
+                synthetic("d701"),
+                None,
+            ),
+            dag.add_node(
+                RiscOp::Mul,
+                vec![shrink_a, shrink_a],
+                synthetic("d702"),
+                None,
+            ),
+            dag.add_node(
+                RiscOp::Add,
+                vec![shrink_b, shrink_b],
+                synthetic("d703"),
+                None,
+            ),
+            dag.add_node(
+                RiscOp::Mul,
+                vec![shrink_b, shrink_b],
+                synthetic("d704"),
+                None,
+            ),
+        ];
+        for consumer in consumers {
+            dag.add_root(consumer);
+        }
+        let scope = UnordMap::from([(
+            "x".into(),
+            HostTypeTerm::Tensor(TensorType {
+                dims: vec![DimInfo::Lit(8)],
+                precision: Prim::F32,
+            }),
+        )]);
+
+        let actualized = actualize_tensor_helper_types(&dag, &scope);
+        let dims_a = actualized
+            .get(shrink_a)
+            .expect("first shrink")
+            .output_type
+            .dims
+            .clone();
+        let dims_b = actualized
+            .get(shrink_b)
+            .expect("second shrink")
+            .output_type
+            .dims
+            .clone();
+        assert_ne!(
+            dims_a, dims_b,
+            "each runtime Shrink owns a distinct extent identity"
+        );
+        assert_eq!(
+            actualized
+                .get(consumers[0])
+                .expect("a/add")
+                .output_type
+                .dims,
+            dims_a
+        );
+        assert_eq!(
+            actualized
+                .get(consumers[1])
+                .expect("a/mul")
+                .output_type
+                .dims,
+            dims_a
+        );
+        assert_eq!(
+            actualized
+                .get(consumers[2])
+                .expect("b/add")
+                .output_type
+                .dims,
+            dims_b
+        );
+        assert_eq!(
+            actualized
+                .get(consumers[3])
+                .expect("b/mul")
+                .output_type
+                .dims,
+            dims_b
         );
     }
 

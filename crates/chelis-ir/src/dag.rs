@@ -2153,6 +2153,26 @@ fn op_internal_symbolic_dims(op: &RiscOp) -> Vec<String> {
     out
 }
 
+/// Every symbolic dimension identity already carried by a DAG.
+///
+/// Keep output-axis and op-internal carriers behind one enumerator so a
+/// producer allocating a fresh dimension cannot accidentally reserve only
+/// the visible `TensorType` half of the namespace. The op-internal half is
+/// exactly whatever [`op_internal_symbolic_dims`] recognizes, so an op that
+/// spells a dimension symbol only inside its own payload still participates
+/// even when no node output repeats that name.
+pub(crate) fn dimension_identity_names(dag: &Dag) -> UnordSet<String> {
+    let mut names = UnordSet::new();
+    for node in dag.nodes() {
+        names.extend(node.output_type.dims.iter().filter_map(|dim| match dim {
+            DimInfo::Named(name, _) => Some(name.clone()),
+            DimInfo::Lit(_) => None,
+        }));
+        names.extend(op_internal_symbolic_dims(&node.op));
+    }
+    names
+}
+
 fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, usize)> {
     let node = dag.get(id)?;
     match &node.op {
