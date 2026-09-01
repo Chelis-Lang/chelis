@@ -476,8 +476,9 @@ pub(crate) fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> Ti
 ///    an independent evaluation can see it.
 ///
 /// Leg 2 evaluates in `BigRational`, not `f64`. cvc5 decides in exact rational
-/// arithmetic and does not model IEEE-754 rounding (see the note on
-/// `real_literal_term`), so an `f64` re-evaluation disagrees with the solver
+/// arithmetic and does not model IEEE-754 rounding (see the `SOUNDNESS:` /
+/// `KNOWN LIMITATION` note in `lower_to_cvc5`'s `SmtExpr::RealLit` arm), so an
+/// `f64` re-evaluation disagrees with the solver
 /// wherever a witness is not representable: cvc5 answers `x > 1e17` with
 /// `100000000000000001.0`, which rounds to exactly `1e17` in `f64` and reads as
 /// violating its own bound. Every strict bound past 2^53 would lose its
@@ -531,13 +532,19 @@ fn validate_model_independently(
 ) -> Result<(), String> {
     let mut env: std::collections::BTreeMap<String, ExactValue> = std::collections::BTreeMap::new();
     for (name, sort) in &property.variables {
-        let Some(raw) = bindings.get(name).and_then(Value::as_str) else {
-            // An unreadable model cannot be revalidated, and an unproven
-            // suspicion is not grounds to discard a counterexample.
-            return Ok(());
-        };
-        let Some(value) = parse_smt_model_value(raw, *sort) else {
-            return Ok(());
+        // A variable this function cannot read is simply left out of the
+        // environment. `eval_exact_bool` then abstains on any precondition
+        // that mentions it, while preconditions over the readable variables
+        // are still decided. Returning early here instead would switch the
+        // whole leg off because ONE unrelated variable came back as, say, an
+        // algebraic number, which is routine in the NRA logic this file
+        // selects.
+        let Some(value) = bindings
+            .get(name)
+            .and_then(Value::as_str)
+            .and_then(|raw| parse_smt_model_value(raw, *sort))
+        else {
+            continue;
         };
         env.insert(name.clone(), value);
     }
@@ -571,6 +578,18 @@ enum ExactValue {
 /// that one.
 #[cfg(feature = "smt")]
 const MAX_MODEL_VALUE_DEPTH: usize = 64;
+
+/// Bound on the raw model-value string this parser will read.
+///
+/// Reading a decimal exactly is quadratic in its digit count, and the guard
+/// runs AFTER `check_sat`, so `tlimit-per` does not bound it: cvc5's budget
+/// covers the solve, not the revalidation. A property built by chained
+/// squaring makes each witness roughly twice as wide as the last, so a few
+/// levels reach tens of thousands of digits and the guard costs more than the
+/// solve it is checking. Past this width leg 2 abstains, which is the same
+/// answer it already gives for a value form it cannot parse.
+#[cfg(feature = "smt")]
+const MAX_MODEL_VALUE_CHARS: usize = 4096;
 
 /// Exactly evaluate a boolean-shaped [`SmtExpr`] under a model.
 ///
@@ -758,7 +777,7 @@ fn parse_smt_model_value(raw: &str, sort: SmtSort) -> Option<ExactValue> {
 /// that bound on the way back in.
 #[cfg(feature = "smt")]
 fn parse_smt_rational(raw: &str, depth: usize) -> Option<num_rational::BigRational> {
-    if depth > MAX_MODEL_VALUE_DEPTH {
+    if depth > MAX_MODEL_VALUE_DEPTH || raw.len() > MAX_MODEL_VALUE_CHARS {
         return None;
     }
     let text = raw.trim();
@@ -2790,6 +2809,132 @@ mod tests {
         }
     }
 
+    /// Round-2 F1: one unreadable variable must not switch off the whole leg.
+    ///
+    /// An algebraic-number witness for an unrelated variable is routine in the
+    /// NRA logic this file selects. Before the fix, its presence made the
+    /// independent leg return early, so a precondition over a perfectly
+    /// readable variable went unchecked.
+    #[test]
+    fn an_unreadable_sibling_does_not_disable_the_readable_checks() {
+        let property = SmtProperty {
+            variables: vec![
+                ("d".to_string(), SmtSort::Real),
+                ("z".to_string(), SmtSort::Real),
+            ],
+            preconditions: vec![SmtExpr::Cmp(
+                CmpOp::Gt,
+                Box::new(SmtExpr::Var("d".to_string())),
+                Box::new(SmtExpr::RealLit(0.5)),
+            )],
+            postcondition: SmtExpr::BoolLit(true),
+        };
+        // `d = 0.0` violates `d > 0.5`, and it must still be caught even though
+        // `z` came back as an algebraic number this parser cannot read.
+        let reason = validate_model_independently(
+            &property,
+            &model(&[
+                ("d", "0.0"),
+                ("z", "(_ real_algebraic_number <1*x^2 + (-2), (5/4, 3/2)>)"),
+            ]),
+        )
+        .expect_err("a readable violation must be caught beside an unreadable sibling");
+        assert!(
+            reason.contains("exactly violates precondition 0"),
+            "{reason}"
+        );
+        // A precondition that mentions the unreadable variable still abstains.
+        let over_z = SmtProperty {
+            preconditions: vec![SmtExpr::Cmp(
+                CmpOp::Gt,
+                Box::new(SmtExpr::Var("z".to_string())),
+                Box::new(SmtExpr::RealLit(1e9)),
+            )],
+            ..property
+        };
+        assert!(
+            validate_model_independently(
+                &over_z,
+                &model(&[
+                    ("d", "2.0"),
+                    ("z", "(_ real_algebraic_number <1*x^2 + (-2), (5/4, 3/2)>)"),
+                ]),
+            )
+            .is_ok(),
+            "a precondition over the unreadable variable must abstain"
+        );
+    }
+
+    /// Round-2 F2: reading a decimal exactly is quadratic, and the guard runs
+    /// after `check_sat`, where cvc5's `tlimit-per` no longer applies. Past the
+    /// width bound leg 2 abstains rather than spending unbounded time.
+    #[test]
+    fn an_oversized_model_value_abstains_rather_than_parsing() {
+        let wide = format!("{}.0", "9".repeat(MAX_MODEL_VALUE_CHARS + 1));
+        assert!(wide.len() > MAX_MODEL_VALUE_CHARS);
+        assert_eq!(parse_smt_rational(&wide, 0), None, "past the width bound");
+        let at_bound = "9".repeat(MAX_MODEL_VALUE_CHARS);
+        assert!(
+            parse_smt_rational(&at_bound, 0).is_some(),
+            "a value at the bound is still read exactly"
+        );
+    }
+
+    /// Round-1's ulp-tight shape: adjacent f64s, so every real strictly between
+    /// them rounds to an endpoint that violates one bound. Distinct from the
+    /// magnitude family - this is about interval width, not size.
+    #[test]
+    fn an_ulp_tight_interval_still_disproves() {
+        let hi = f64::from_bits(1.0f64.to_bits() + 1);
+        let prop = SmtProperty {
+            variables: vec![("x".to_string(), SmtSort::Real)],
+            preconditions: vec![
+                SmtExpr::Cmp(
+                    CmpOp::Gt,
+                    Box::new(SmtExpr::Var("x".to_string())),
+                    Box::new(SmtExpr::RealLit(1.0)),
+                ),
+                SmtExpr::Cmp(
+                    CmpOp::Lt,
+                    Box::new(SmtExpr::Var("x".to_string())),
+                    Box::new(SmtExpr::RealLit(hi)),
+                ),
+            ],
+            postcondition: SmtExpr::BoolLit(false),
+        };
+        assert!(
+            matches!(solve_property(&prop, 5000), TierBResult::Disproved(_)),
+            "a witness inside a one-ulp interval must survive the guard"
+        );
+    }
+
+    /// A Bool-sorted variable read straight out of the model, and the
+    /// empty-precondition no-op.
+    #[test]
+    fn bool_sorted_variables_and_empty_preconditions() {
+        let property = SmtProperty {
+            variables: vec![("b".to_string(), SmtSort::Bool)],
+            preconditions: vec![SmtExpr::Var("b".to_string())],
+            postcondition: SmtExpr::BoolLit(true),
+        };
+        assert!(
+            validate_model_independently(&property, &model(&[("b", "false")])).is_err(),
+            "a Bool precondition false under the model is a decided violation"
+        );
+        assert!(
+            validate_model_independently(&property, &model(&[("b", "true")])).is_ok(),
+            "a Bool precondition true under the model is satisfied"
+        );
+        let none = SmtProperty {
+            preconditions: vec![],
+            ..property
+        };
+        assert!(
+            validate_model_independently(&none, &model(&[("b", "false")])).is_ok(),
+            "no preconditions means nothing to violate"
+        );
+    }
+
     /// The measured chelis#1224 false-positive family, end to end through cvc5:
     /// a strict bound past 2^53 must still yield a counterexample.
     #[test]
@@ -2806,7 +2951,7 @@ mod tests {
             };
             assert!(
                 matches!(solve_property(&prop, 5000), TierBResult::Disproved(_)),
-                "x > {bound:e} must still disprove; the guard must not eat it"
+                "x > {bound} must still disprove; the guard must not eat it"
             );
         }
     }
