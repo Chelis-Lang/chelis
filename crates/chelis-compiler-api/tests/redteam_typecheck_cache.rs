@@ -39,8 +39,8 @@
 //! canonicalization equivalence (a wrong-canonicalization regression
 //! would be a NEW collision class), the `IdentityMismatch`
 //! envelope-vs-inner tamper guard, fingerprint sensitivity to every
-//! identity component, the format-version-12 magic rejection of a forged
-//! V10 file, and adversarial corruption shapes against the recompute
+//! identity component, the format-version-13 magic rejection of a forged
+//! V12 file, and adversarial corruption shapes against the recompute
 //! fall-through.
 //!
 //! Kept on the per-PR `ci` profile: every test is cache-key / identity /

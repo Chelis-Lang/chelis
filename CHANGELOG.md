@@ -21,7 +21,7 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   Structured inferred JSON wraps nominal dimensions as
   `{kind:"dimension", dim:{...}}` without changing existing type-argument
   objects. Serialized compiler state changes accordingly: compiled-context
-  cache v11 → v12, stdlib cache v7 → v8, library cache v4 → v5,
+  cache v12 → v13, stdlib cache v8 → v9, library cache v5 → v6,
   and Reef prepared-graph cache v2 → v3; stale entries rebuild
   automatically.
 
