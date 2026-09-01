@@ -185,9 +185,12 @@ aside.
 **The space is declared.** `[workspace.lints.rust] unexpected_cfgs = "deny"`,
 inherited through every member's `[lints]` table, makes a `cfg` name that is
 neither a declared Cargo feature nor a well-known rustc cfg a compile error
-rather than a warning. Workspace source uses only `test`, `unix`, `target_os`,
-and `debug_assertions`, and declares no `cfg`-gated module, so the space is
-exactly declared features times supported hosts: finite and enumerable.
+rather than a warning. Beyond features, workspace source uses only `test`, `unix`, `target_os`, and
+`debug_assertions`, and declares no module gated on one of those, so the space
+is exactly declared features times supported hosts: finite and enumerable.
+(Feature-gated module declarations do exist, in `chelis-prove` and
+`chelis-cli`; the matrix compiles them, and `z3_engine.rs` is one of the three
+nightly-only sources named below.)
 
 **The matrix compiles it.** `scripts/check_configuration_closure.py` holds
 `CLIPPY_MATRIX`, a constant whose rows each carry a command, the file that must
@@ -195,9 +198,9 @@ issue it, the hosts it runs on, and its cadence:
 
 | row | compiles | owner | cadence |
 |---|---|---|---|
-| `default-features` | default features, Linux and macOS | `scripts/gate.py` | per pull request |
+| `default-features` | default features | `scripts/gate.py` | per pull request |
 | `solver-free-features` | `sleef`, `hip-local-gpu`, `clarabel`, `extension-module`, `ownership-ledger`, and the three `chelis-types` probe features | `scripts/gate.py` | per pull request |
-| `no-default-features` | every default feature in its off-state, Linux and macOS | `scripts/gate.py` | per pull request |
+| `no-default-features` | every default feature in its off-state | `scripts/gate.py` | per pull request |
 | `cvc5-features` | `smt` for `chelis-cli`, `chelis-prove`, `chelis-tide` | `ci.yml`'s `SMT Feature Build (Linux)`, which already provisions cvc5 | per pull request |
 | `all-features` | every declared feature at once | `smt-full-prove.yml`, the only runner that provisions every solver | nightly |
 
@@ -243,8 +246,8 @@ registered row. A developer who has once built an unregistered configuration in
 that worktree therefore has dep-info for it, and leg 3 would count those files
 as covered. The authoritative reconciliation is consequently the CI one, where
 `Swatinem/rust-cache` prunes workspace-member artifacts before saving and the
-job runs only the registered rows; the local run is a fast approximation that
-can be too generous, never too strict.
+job builds only registered configurations; the local run is a fast
+approximation that can be too generous, never too strict.
 
 **Executable controls.** `scripts/test_check_configuration_closure.py` proves
 the two properties the rest rests on, with rustc rather than assertion:
@@ -256,7 +259,25 @@ a workspace that only warns, an uncovered feature, an invented feature, an
 unqualified feature spelling, a run its owner does not issue, an uncompiled
 source, an empty dep-info set, and a stale or ungated exception.
 
-**Residual, named.** `z3`, `carcara`, and `arb` need external solver toolchains
+**Residual: the host dimension.** Both registered hosts are unix, so
+`#[cfg(not(unix))]` is compiled by no row at any cadence. Eighteen such sites
+exist, including production code in `chelis-cli`, `chelis-reef`,
+`chelis-compiler-api`, and `chelisup`. Windows is not a supported host: no
+workflow uses a Windows runner and `release.yml` builds only Linux and macOS,
+so those regions ship nowhere and the class cannot reach a user through them.
+They are nonetheless outside the ban's enforcement, and this document does not
+claim otherwise. Bringing them in requires a supported Windows host, not a
+further row.
+
+Separately, the three per-pull-request rows list macOS among their hosts, but
+no continuous job runs Clippy on macOS: the macOS jobs run `gate.py
+integration`, which is nextest. `#[cfg(target_os = "macos")]` regions are
+therefore linted by `python3 scripts/gate.py --local`, which `AGENTS.md` makes
+mandatory before a non-documentation push, and not by default CI. Recording
+that here is what the Manual Gates rule requires.
+
+**Residual: the feature dimension.** `z3`, `carcara`, and `arb` need external
+solver toolchains
 whose per-pull-request cost this repository has already declined, so everything
 they gate is linted nightly rather than per pull request. That is three whole
 sources plus every region those three features gate inside sources the
@@ -404,9 +425,13 @@ parity, reshape-regression, and fresh-process CLI suites; the raw-store compile-
 leg also runs in the gate's
 `lint-and-unit` stage and the `--local` subset, whose membership
 `scripts/test_gate.py` locks. Phase B's configuration-closure check and named
-cache-byte tests run in its named oracle, and the closure check also runs in the
-gate's `lint-and-unit` stage, ordered after the Clippy commands that produce the
-dep-info it reads. The fresh-process stability tests cover the [#1338] reproducer, its
+cache-byte tests run in its named oracle, and two of its legs also run in the
+gate's `lint-and-unit` stage and the `--local` subset: the closure check,
+ordered after the Clippy commands that produce the dep-info it reads, and the
+disallowed-type compile-fail fixture. That fixture is the ban's liveness proof.
+Nothing else continuous reads `clippy.toml`, and no workspace source spells the
+banned types, so deleting the two `disallowed-types` entries would otherwise
+leave every job green. The fresh-process stability tests cover the [#1338] reproducer, its
 mirrored operand order, the aliased pair, and the three-way case of Phase A, and the
 existing byte-determinism regressions (`codegen_determinism.rs`,
 `rank_poly_tier3::form3_bias_broadcast_c_is_byte_deterministic`) stay present and

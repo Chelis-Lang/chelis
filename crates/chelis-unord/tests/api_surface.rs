@@ -16,13 +16,8 @@ fn public_methods(type_name: &str) -> BTreeSet<String> {
             _ => None,
         })
         .filter(|item_impl| item_impl.trait_.is_none())
-        .filter(|item_impl| match item_impl.self_ty.as_ref() {
-            Type::Path(path) => path
-                .path
-                .segments
-                .last()
-                .is_some_and(|segment| segment.ident == type_name),
-            _ => false,
+        .filter(|item_impl| {
+            impl_self_name(&item_impl.self_ty).is_some_and(|name| name == type_name)
         })
         .flat_map(|item_impl| item_impl.items.iter())
         .filter_map(|item| match item {
@@ -45,13 +40,8 @@ fn public_traits(type_name: &str) -> BTreeSet<String> {
             Item::Impl(item_impl) => Some(item_impl),
             _ => None,
         })
-        .filter(|item_impl| match item_impl.self_ty.as_ref() {
-            Type::Path(path) => path
-                .path
-                .segments
-                .last()
-                .is_some_and(|segment| segment.ident == type_name),
-            _ => false,
+        .filter(|item_impl| {
+            impl_self_name(&item_impl.self_ty).is_some_and(|name| name == type_name)
         })
         .filter_map(|item_impl| {
             item_impl
@@ -232,42 +222,110 @@ fn public_trait_api_is_exact() {
     );
 }
 
+/// The five types the pins above cover.
+const PINNED_TYPES: [&str; 5] = [
+    "Entry",
+    "OccupiedEntry",
+    "UnordMap",
+    "UnordSet",
+    "VacantEntry",
+];
+
+/// The self type of an `impl`, with any reference layers stripped.
+///
+/// `impl IntoIterator for &UnordMap<..>` is an order-bearing exit whose self
+/// type is a reference, so a check that only looks at `Type::Path` misses it.
+fn impl_self_name(mut ty: &Type) -> Option<String> {
+    loop {
+        match ty {
+            Type::Reference(reference) => ty = &reference.elem,
+            Type::Paren(paren) => ty = &paren.elem,
+            Type::Path(path) => {
+                return path
+                    .path
+                    .segments
+                    .last()
+                    .map(|segment| segment.ident.to_string());
+            }
+            _ => return None,
+        }
+    }
+}
+
 #[test]
-fn the_crate_exports_no_other_public_item() {
-    // The pinned types above are the whole public surface. A free function or
-    // a fourth type could otherwise add an exit nobody has pinned.
+fn the_public_surface_is_closed_by_construction() {
+    // Two earlier rounds repaired this test by adding the filter case the
+    // previous round escaped through. This one enumerates by exclusion
+    // instead: every public item must be one of the five pinned types, and
+    // every `impl` must be on one of them, so there is no shape left to add.
     let source = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"))
         .expect("read chelis-unord source");
     let syntax = syn::parse_file(&source).expect("parse chelis-unord source");
-    let public: BTreeSet<String> = syntax
+    let pinned: BTreeSet<String> = PINNED_TYPES.map(str::to_owned).into_iter().collect();
+
+    // An impl on a private type cannot be a public exit, so those are allowed;
+    // the closure comes from the public-item check below, which admits only
+    // the pinned five.
+    let private_types: BTreeSet<String> = syntax
         .items
         .iter()
         .filter_map(|item| match item {
-            Item::Struct(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
-                Some(item.ident.to_string())
-            }
-            Item::Enum(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
-                Some(item.ident.to_string())
-            }
-            Item::Fn(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
-                Some(item.sig.ident.to_string())
-            }
+            Item::Struct(item) if !is_public(&item.vis) => Some(item.ident.to_string()),
+            Item::Enum(item) if !is_public(&item.vis) => Some(item.ident.to_string()),
             _ => None,
         })
         .collect();
-    assert_eq!(
-        public,
-        BTreeSet::from(
-            [
-                "Entry",
-                "OccupiedEntry",
-                "UnordMap",
-                "UnordSet",
-                "VacantEntry"
-            ]
-            .map(str::to_owned)
-        )
-    );
+
+    let mut public_types = BTreeSet::new();
+    for item in &syntax.items {
+        let (kind, name, is_public) = match item {
+            Item::Struct(item) => ("struct", item.ident.to_string(), is_public(&item.vis)),
+            Item::Enum(item) => ("enum", item.ident.to_string(), is_public(&item.vis)),
+            Item::Fn(item) => ("fn", item.sig.ident.to_string(), is_public(&item.vis)),
+            Item::Mod(item) => ("mod", item.ident.to_string(), is_public(&item.vis)),
+            Item::Type(item) => ("type", item.ident.to_string(), is_public(&item.vis)),
+            Item::Trait(item) => ("trait", item.ident.to_string(), is_public(&item.vis)),
+            Item::Const(item) => ("const", item.ident.to_string(), is_public(&item.vis)),
+            Item::Static(item) => ("static", item.ident.to_string(), is_public(&item.vis)),
+            Item::Use(item) => ("use", "<re-export>".to_owned(), is_public(&item.vis)),
+            Item::Macro(item) => (
+                "macro",
+                item.ident
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "<anonymous>".to_owned()),
+                item.attrs
+                    .iter()
+                    .any(|attribute| attribute.path().is_ident("macro_export")),
+            ),
+            Item::Impl(item) => {
+                let name = impl_self_name(&item.self_ty)
+                    .unwrap_or_else(|| panic!("an impl self type must resolve to a named type"));
+                assert!(
+                    pinned.contains(&name) || private_types.contains(&name),
+                    "impl on `{name}`, which is neither pinned nor private to this crate: \
+                     an impl reaching a public type through a reference is an exit the \
+                     inherent and trait pins do not see"
+                );
+                continue;
+            }
+            _ => continue,
+        };
+        if !is_public {
+            continue;
+        }
+        assert!(
+            matches!(kind, "struct" | "enum"),
+            "unexpected public {kind} `{name}`: the crate's public surface is the five \
+             pinned types and nothing else"
+        );
+        public_types.insert(name);
+    }
+    assert_eq!(public_types, pinned);
+}
+
+fn is_public(visibility: &syn::Visibility) -> bool {
+    matches!(visibility, syn::Visibility::Public(_))
 }
 
 #[test]

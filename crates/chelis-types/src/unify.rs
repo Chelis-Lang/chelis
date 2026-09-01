@@ -8,7 +8,7 @@
 //! caller resolves a variable via [`Subst::apply`] or [`Subst::apply_dim`],
 //! the resolver iteratively follows the chain to its terminal value AND
 //! writes the resolved value back into the substitution so future lookups
-//! land in O(1). The maps live behind a `RefCell` so this in-place
+//! land in O(1). The maps live behind a `Mutex` so this in-place
 //! compression remains available to callers that hold an immutable
 //! borrow of `Subst` (annotation passes, `Env::generalize`, occurs checks).
 //!

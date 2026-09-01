@@ -295,6 +295,14 @@ HASH_ORDER_COMPILE_FAIL: list[str] = [
     MANAGED_PYTHON,
     "scripts/check_hash_order_compile_fail.py",
 ]
+# The liveness proof for the ban itself. `clippy.toml` is read by nothing else
+# continuous, and no workspace source spells the banned types today, so
+# deleting the two `disallowed-types` entries would leave every job green.
+# This fixture compiles code that must be rejected and fails if it is not.
+HASH_ORDER_PHASE_B_COMPILE_FAIL: list[str] = [
+    MANAGED_PYTHON,
+    "scripts/check_hash_order_phase_b_compile_fail.py",
+]
 # chelis#1341 Phase B completeness lock. Clippy's `disallowed_types` bans the
 # raw hash collections, but lints only the configuration it compiles.
 # Reconciles the repository's Rust sources against rustc's own dep-info from
@@ -388,6 +396,7 @@ STAGES: dict[str, list[list[str]]] = {
         DOCTEST_PIPELINE_CORE,
         CHECKPOINT_COMPILE_FAIL,
         HASH_ORDER_COMPILE_FAIL,
+        HASH_ORDER_PHASE_B_COMPILE_FAIL,
         CONFIGURATION_CLOSURE,
         PIPELINE_CORE_DEPENDENCY_GUARD,
         PIPELINE_CORE_DOCUMENTATION_GUARD,
@@ -424,6 +433,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     DOCTEST_PIPELINE_CORE,
     CHECKPOINT_COMPILE_FAIL,
     HASH_ORDER_COMPILE_FAIL,
+    HASH_ORDER_PHASE_B_COMPILE_FAIL,
     CONFIGURATION_CLOSURE,
     PIPELINE_CORE_DEPENDENCY_GUARD,
     PIPELINE_CORE_DOCUMENTATION_GUARD,

@@ -2,10 +2,11 @@
 //!
 //! Per `spec/upstream-bugs/host-emit-hashmap-iteration-nondeterminism.md`,
 //! `chelis_backend_c::emit::CEmitter::emit_input_shape_preamble` previously
-//! iterated a `UnordMap<String, TensorType>` of input parameters; UnordMap
-//! iteration order is non-deterministic across process runs (and across
-//! compilations within a single run, since each emitter call constructs a
-//! fresh collection, and before this PR that collection was hash-seeded).
+//! iterated a `HashMap<String, TensorType>` of input parameters, whose
+//! iteration order was non-deterministic across process runs, and across
+//! compilations within a single run because each emitter call constructed a
+//! freshly seeded map. That store is a `UnordMap` today and its order is the
+//! key's, but the regression this file locks is the original one.
 //!
 //! The user-visible symptom was that the input-validation block (NULL
 //! checks, ndim checks, fixed-axis-size checks, and symbolic-dim binding
@@ -16,9 +17,10 @@
 //! The two assertions below lock the invariant:
 //!   1. **Cross-process determinism.** Building the same DAG in many fresh
 //!      `CEmitter` instances within one test run produces byte-identical C.
-//!      A hash map seeds per instance, so multiple maps
-//!      within one process exercise the same non-determinism that a fresh
-//!      `chelis build` would.
+//!      A hash map seeded per instance, so multiple maps within one process
+//!      exercised the same non-determinism a fresh `chelis build` would have.
+//!      The assertion still holds against an ordered store; it would now fail
+//!      only if something reintroduced an order that is not the key's.
 //!   2. **Lex-sorted preamble.** The input-validation block lists labels
 //!      in lex order — a stable, observer-visible ordering.
 

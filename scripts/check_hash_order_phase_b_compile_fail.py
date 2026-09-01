@@ -58,11 +58,18 @@ FIXTURES = (
             "--bin",
             "hash-order-escape-fixture",
         ),
+        # One entry per rejected site. `is not an iterator` alone was satisfied
+        # by any of three sites, so the `for _ in &map` line's coverage was
+        # dead. The leading backtick separates the reference form from the
+        # owned one: "`&UnordMap<..>`" does not contain "`UnordMap<..>`".
         (
-            "no method named `iter`",
-            "no method named `keys`",
-            "no method named `values`",
-            "is not an iterator",
+            "no method named `iter` found for struct `UnordMap<K, V>`",
+            "no method named `keys` found for struct `UnordMap<K, V>`",
+            "no method named `values` found for struct `UnordMap<K, V>`",
+            "`UnordMap<String, usize>` is not an iterator",
+            "no method named `iter` found for struct `UnordSet<T>`",
+            "`UnordSet<String>` is not an iterator",
+            "`&UnordMap<String, usize>` is not an iterator",
         ),
     ),
     Fixture(

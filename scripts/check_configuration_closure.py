@@ -57,6 +57,11 @@ class ClippyRun:
     label: str
     command: tuple[str, ...]
     owner: str
+    #: Hosts the owner runs this on. For `scripts/gate.py` that means the
+    #: developer's host under `--local`, which `AGENTS.md` makes mandatory
+    #: before a non-documentation push. No continuous job runs Clippy on
+    #: macOS, so macOS coverage is gate-local; the design document records
+    #: that residual.
     hosts: tuple[str, ...]
     cadence: str
 
