@@ -491,6 +491,16 @@ pub(crate) fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> Ti
 /// counterexample, because the cost of a false rejection is a silently weaker
 /// prover: `TierBResult::Error` degrades the disproof to Tier C fuzzing under
 /// `auto`, and to `Unsupported` under `smt-only`.
+///
+/// The consequence worth naming, since abstention is silent by design: a
+/// `sqrt`-guarded property gets no precondition validation in either direction,
+/// and cvc5's SQRT is underspecified at a negative argument, so a model whose
+/// argument is negative can satisfy a `sqrt` lower bound vacuously and surface
+/// as a counterexample to a property that is true. That is chelis#1475, and it
+/// belongs at the lowering, which introduces the partiality, not here. Widening
+/// this guard to reject on any non-`true` would appear to cover it while
+/// reintroducing the false-rejection class that made the first version of this
+/// check unsound in the rejecting direction.
 #[cfg(feature = "smt")]
 fn validate_model_satisfies_preconditions(
     property: &SmtProperty,
