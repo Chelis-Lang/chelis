@@ -301,37 +301,34 @@ def _assert_native_devenv_recipe(workflow: str) -> None:
             )
 
 
-def _assert_nix_docs_only_gate(workflow: str) -> None:
-    blocks = _workflow_job_blocks(workflow)
-    changes = blocks.get("changes", "")
-    if "scripts/ci_detect_docs_only.py" not in changes:
-        raise AssertionError(
-            "the Nix workflow must compute docs_only with the shared detector"
-        )
-    linux = blocks.get("nix-linux-x86-64", "")
-    if "needs: [changes]" not in linux or DOCS_ONLY_GATE_IF not in linux:
-        raise AssertionError(
-            "the Linux Nix job must skip docs-only pull requests via the "
-            "shared job-level gate"
-        )
-    darwin = blocks.get("nix-darwin-arm64", "")
-    if "needs.changes" in darwin:
-        raise AssertionError(
-            "the darwin Nix job must keep manual dispatch as its only gate"
-        )
-
-
-def _assert_darwin_manual_dispatch(workflow: str) -> None:
+def _assert_nix_intentional_events_only(workflow: str) -> None:
     trigger_section = workflow.split("jobs:", 1)[0]
-    if "workflow_dispatch:" not in trigger_section:
-        raise AssertionError("the Nix workflow must expose a workflow_dispatch trigger")
+    required = ("workflow_dispatch:", "release:", "types: [published]")
+    for marker in required:
+        if marker not in trigger_section:
+            raise AssertionError(
+                "the Nix workflow must run on manual dispatch and published "
+                f"releases: missing {marker!r}"
+            )
+    forbidden = ("pull_request:", "push:", "schedule:")
+    for marker in forbidden:
+        if marker in trigger_section:
+            raise AssertionError(
+                "the Nix workflow must not run automatically on pull requests, "
+                f"pushes, or schedules: found {marker!r}"
+            )
+
     blocks = _workflow_job_blocks(workflow)
-    darwin = blocks.get("nix-darwin-arm64", "")
-    if "if: github.event_name == 'workflow_dispatch'" not in darwin:
-        raise AssertionError("the darwin Nix job must run on manual dispatch only")
-    linux = blocks.get("nix-linux-x86-64", "")
-    if "github.event_name" in linux:
-        raise AssertionError("the Linux Nix job must keep pull request coverage")
+    if "changes" in blocks:
+        raise AssertionError(
+            "the intentional-event-only Nix workflow must not run a docs-only detector"
+        )
+    for job in ("nix-linux-x86-64", "nix-darwin-arm64"):
+        block = blocks.get(job, "")
+        if "needs: [changes]" in block or "github.event_name" in block:
+            raise AssertionError(
+                f"{job!r} must run on both configured intentional events"
+            )
 
 
 def _assert_runner_resource_bounds(workflow: str) -> None:
@@ -2795,44 +2792,38 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "precede the runner verification"):
             _assert_native_devenv_recipe(mutated)
 
-    def test_linux_job_skips_docs_only_pull_requests(self):
+    def test_workflow_runs_on_intentional_events_only(self):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
-        _assert_nix_docs_only_gate(text)
+        _assert_nix_intentional_events_only(text)
 
-    def test_missing_docs_only_gate_fails_the_skip_lock(self):
+    def test_automatic_pr_push_and_schedule_triggers_fail_the_event_lock(self):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
-        mutated = text.replace(f"    {DOCS_ONLY_GATE_IF}\n", "", 1)
-        with self.assertRaisesRegex(AssertionError, "shared job-level gate"):
-            _assert_nix_docs_only_gate(mutated)
+        for trigger in ("pull_request:", "push:", "schedule:"):
+            with self.subTest(trigger=trigger):
+                mutated = text.replace(
+                    "  workflow_dispatch:\n",
+                    f"  workflow_dispatch:\n  {trigger}\n",
+                    1,
+                )
+                with self.assertRaisesRegex(AssertionError, "must not run"):
+                    _assert_nix_intentional_events_only(mutated)
 
-    def test_missing_docs_only_detector_fails_the_skip_lock(self):
+    def test_missing_release_trigger_fails_the_event_lock(self):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
-        mutated = text.replace("scripts/ci_detect_docs_only.py", "omitted.py", 1)
-        with self.assertRaisesRegex(AssertionError, "shared detector"):
-            _assert_nix_docs_only_gate(mutated)
+        mutated = text.replace("  release:\n    types: [published]\n", "", 1)
+        with self.assertRaisesRegex(AssertionError, "published releases"):
+            _assert_nix_intentional_events_only(mutated)
 
-    def test_docs_only_gate_on_the_darwin_job_fails_the_skip_lock(self):
+    def test_event_specific_job_gate_fails_the_event_lock(self):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
         mutated = text.replace(
-            "    if: github.event_name == 'workflow_dispatch'\n",
-            "    needs: [changes]\n"
-            f"    {DOCS_ONLY_GATE_IF}\n",
+            "    runs-on: macos-latest\n",
+            "    if: github.event_name == 'workflow_dispatch'\n"
+            "    runs-on: macos-latest\n",
             1,
         )
-        with self.assertRaisesRegex(AssertionError, "manual dispatch as its only"):
-            _assert_nix_docs_only_gate(mutated)
-
-    def test_darwin_job_runs_on_manual_dispatch_only(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
-        _assert_darwin_manual_dispatch(text)
-
-    def test_darwin_pull_request_trigger_fails_the_manual_lock(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
-        mutated = text.replace(
-            "    if: github.event_name == 'workflow_dispatch'\n", "", 1
-        )
-        with self.assertRaisesRegex(AssertionError, "manual dispatch"):
-            _assert_darwin_manual_dispatch(mutated)
+        with self.assertRaisesRegex(AssertionError, "both configured"):
+            _assert_nix_intentional_events_only(mutated)
 
     def test_each_job_bounds_runner_resources(self):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
