@@ -79,6 +79,37 @@ def f(residual, x: tensor[4, f32]) -> tensor[4, f32] = residual(x)
 }
 
 #[test]
+fn ordinary_defs_cannot_collide_with_standard_prelude_macros() {
+    for name in ["linear_layer", "residual", "cross_entropy"] {
+        let decls = parse_str(&format!("def {name}(x: f32) -> f32 = x\n"))
+            .expect("surf parse should succeed");
+        let deep = desugar_program(&decls);
+        let err = expand_program(&deep, &ExpansionOptions::default())
+            .expect_err("a standard-prelude macro name must reject an ordinary def");
+        let message = err.to_string();
+        assert!(
+            message.contains(&format!("`def {name}`"))
+                && message.contains("standard prelude macro")
+                && message.contains("spec/02-surf-syntax.md §P5b"),
+            "collision diagnostic for `{name}` must name the declaration, macro class, and owning spec; got: {message}"
+        );
+    }
+}
+
+#[test]
+fn user_macro_may_override_standard_prelude_macro() {
+    let text = expand_surf(
+        r#"
+macro residual(x, y) = sub(x, y)
+def f(x: f32, y: f32) -> f32 = residual(x, y)
+"#,
+    );
+
+    assert!(text.contains(" sub)"), "user macro body must win: {text}");
+    assert!(!text.contains("source: (residual") || text.contains(" sub)"));
+}
+
+#[test]
 fn hygiene_renames_macro_introduced_binders_only() {
     let decls = parse_str(
         r#"

@@ -217,13 +217,9 @@ fn near_miss_names_still_check_clean() {
 /// investigation (check clean, eval and C backend both produce
 /// [1.0, 0.0]) — so the §8.6 rule deliberately does not bind to them.
 ///
-/// CALL position is a different story: dispatch is builtin-first, so a
-/// builtin-named binding invoked by name is silently unreachable. The
-/// parameter half of that class is now rejected
-/// (`builtin_named_param_called_in_body_is_rejected`); the block-local
-/// half remains open and is tracked as chelis#1076 — this pin covers
-/// only value-position reuse and must not be read as a safety claim
-/// about calls through a local.
+/// Call position follows the same lexical rule: the innermost callable
+/// binding wins over the builtin in every lane (spec/04-type-system.md
+/// §8.6, chelis#1076).
 #[test]
 fn value_params_and_locals_may_reuse_builtin_names() {
     let param_case = surf_to_deep(
@@ -269,29 +265,18 @@ fn inline_annotated_def_reports_exactly_one_error() {
     assert!(errs[0].0.contains("`def relu`"), "got: {}", errs[0].0);
 }
 
-/// chelis#891 review finding 4: a builtin-named parameter that is CALLED
-/// in its own body is rejected -- eval and lowering dispatch builtin-first
-/// by name, so the call could never reach the parameter (verified live:
-/// `def apply(round_to, x) = round_to(x, 0)` invoked the BUILTIN). Value
-/// position stays allowed (`value_params_and_locals_may_reuse_builtin_names`).
-/// Runs through the real surf → stamp → deep pipeline, so it also proves
-/// the walker fires on the `Expr::Node` carrier (#908) -- a walker matching
-/// only the legacy `Expr::List` would pass its own synthetic tests while
-/// silently never firing here.
+/// chelis#1076: callable parameters named like builtins follow ordinary
+/// lexical scope. The checker must accept both a def parameter and a lambda
+/// parameter in call position; eval/build parity is pinned at the CLI layer.
 #[test]
-fn builtin_named_param_called_in_body_is_rejected() {
+fn builtin_named_param_called_in_body_is_accepted() {
     let called = surf_to_deep(
         "module ParamCall\n\
          def apply(round_to: (f64, int64) -> f64, x: f64) -> f64 = round_to(x, cast(0, int64))\n",
     );
-    let err =
-        check_ir_program(&called).expect_err("calling a builtin-named param must be rejected");
     assert!(
-        err.errors.iter().any(|e| e
-            .message
-            .contains("parameter `round_to` shadows the builtin")),
-        "got: {:?}",
-        err.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        check_ir_program(&called).is_ok(),
+        "calling a builtin-named parameter must follow lexical scope"
     );
 
     // Lambda parameters get the same treatment.
@@ -299,13 +284,9 @@ fn builtin_named_param_called_in_body_is_rejected() {
         "module LambdaCall\n\
          g = fn (map: (f64) -> f64) -> map(1.5)\n",
     );
-    let err = check_ir_program(&lambda).expect_err("lambda param call must be rejected");
     assert!(
-        err.errors
-            .iter()
-            .any(|e| e.message.contains("parameter `map` shadows the builtin")),
-        "got: {:?}",
-        err.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        check_ir_program(&lambda).is_ok(),
+        "calling a builtin-named lambda parameter must follow lexical scope"
     );
 
     // A DIFFERENT (non-shadowed) callee alongside a builtin-named value
