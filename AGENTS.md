@@ -519,9 +519,12 @@ When a public surface has an implicit invariant, make it explicit and test it.
   `.cargo-husky/hooks/commit-msg` have no file extension, so `chelis_lint`'s
   `Surface::classify` - which keys on the extension - never classifies them. All three
   must still be minimal POSIX `sh` and `shellcheck`-clean. The bootstrap and the two
-  hooks are checked with `sh -n`; the generated launcher is checked with `bash -n` by
-  the `chelisupLauncherLint` flake check, so a bash-ism there passes CI while still
-  violating the POSIX-`sh` requirement. All other scripts remain Python.
+  hooks are checked with `sh -n`. The generated launcher's only check is
+  `chelisupLauncherLint`, which uses `bash -n`, so a bash-ism there satisfies it while
+  still violating the POSIX-`sh` requirement. Since chelis#1450 no routine CI runs that
+  check at all, neither fault is caught before merge. It is a manual gate:
+  `nix build .#checks.<system>.chelisupLauncherLint`, expected exit 0, or dispatch the
+  `Nix Packages` workflow. All other scripts remain Python.
 - Existing `scripts/` directory uses Python; follow that convention.
 - **Use a uv-managed Python**, not the system Python, for every script and every
   ad-hoc invocation. [Build Toolchain](#build-toolchain) owns provisioning, the
@@ -1040,8 +1043,9 @@ and [`docs/book/src/reef.md`](docs/book/src/reef.md).
   restores itself at `$CHELIS_HOME/bin/chelisup`. The generic Rust installer
   contains no Nix root path or cleanup logic. The installed Nix wrapper removes
   all three roots after the real `self uninstall` command succeeds. The
-  `chelisupLauncherLint` flake check gates the generated launcher with `bash -n`
-  plus `shellcheck`.
+  `chelisupLauncherLint` flake check runs `bash -n` plus `shellcheck` over the
+  generated launcher, but since chelis#1450 it fires only on `workflow_dispatch` or a
+  published release, so it gates nothing on a pull request or a push to `main`.
 - **Shim resolution order** (first match wins): `+<ver>` arg → `CHELIS_TOOLCHAIN`
   → nearest `chelis-toolchain` file → nearest `reef.toml` `compiler =` pin →
   recorded default. A resolved-but-not-installed version is a loud error naming
