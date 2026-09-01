@@ -239,7 +239,12 @@ fn normal_output_forwarding_is_part_of_whole_command_deadline() {
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_chelis"))
         .current_dir(&pkg)
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["test", "tests/", "--json", "--suite-timeout", "3"])
+        .env("CHELIS_TEST_INTERNAL_TESTING", "1")
+        .env("CHELIS_TEST_EXPIRE_OUTPUT_FORWARDING_DEADLINE", "1")
+        // Keep the suite deadline well clear of fixture execution. The gated
+        // hook expires only the post-suite forwarding budget, so host load
+        // cannot move this oracle into the distinct timeout-reporting branch.
+        .args(["test", "tests/", "--json", "--suite-timeout", "30"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -253,13 +258,13 @@ fn normal_output_forwarding_is_part_of_whole_command_deadline() {
             break status;
         }
         assert!(
-            started.elapsed() < Duration::from_secs(6),
+            started.elapsed() < Duration::from_secs(15),
             "normal output forwarding escaped the whole-command deadline"
         );
         std::thread::sleep(Duration::from_millis(20));
     };
     assert_eq!(status.code(), Some(1));
-    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(started.elapsed() < Duration::from_secs(15));
     let mut stderr = Vec::new();
     child
         .stderr
@@ -268,13 +273,8 @@ fn normal_output_forwarding_is_part_of_whole_command_deadline() {
         .read_to_end(&mut stderr)
         .expect("read stderr");
     let stderr = String::from_utf8_lossy(&stderr);
-    // Under load, the same whole-command deadline can expire either while
-    // forwarding normal output or while the bounded timeout reporter tries to
-    // describe the unread stdout pipe. Both paths are explicit, incomplete,
-    // nonzero failures; neither is a false-success fallback.
     assert!(
-        stderr.contains("output forwarding exceeded")
-            || stderr.contains("suite timeout report could not be written to stdout",),
+        stderr.contains("output forwarding exceeded"),
         "bounded failure must identify incomplete output: {stderr}"
     );
 }
