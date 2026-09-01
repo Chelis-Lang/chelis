@@ -306,11 +306,12 @@ pub(super) fn is_constructor_name(name: &str) -> bool {
         .is_some_and(|c| c.is_ascii_uppercase())
 }
 
-/// A constructor reference is *in scope* only when its exact name is bound
-/// in `env` — either a bare builtin constructor (`Some`/`None`/`Cons`/`Nil`,
-/// registered bare by `register_prelude_adts`) or a reef-mangled in-scope
-/// constructor (chelis#157/#316 rewrite the reference to its mangled name
-/// when the importing module declares it locally or imports it by name).
+/// A constructor-position reference is *in scope* only when its exact name is
+/// present in `env`'s constructor authority — either a bare builtin constructor
+/// (`Some`/`None`/`Cons`/`Nil`, registered bare by
+/// `register_prelude_adts`) or a reef-mangled in-scope constructor
+/// (chelis#157/#316 rewrite the reference to its mangled name when the
+/// importing module declares it locally or imports it by name).
 ///
 /// Returns `true` when `name` looks like a constructor (PascalCase terminal)
 /// but is not bound exactly. Whether the package registry contains zero, one,
@@ -321,44 +322,87 @@ pub(super) fn is_constructor_name(name: &str) -> bool {
 /// unbound value. Every non-exact constructor reference is rejected at
 /// `check` as an unknown constructor.
 pub(super) fn constructor_out_of_scope(name: &str, env: &Env) -> bool {
+    is_constructor_name(name) && env.lookup_constructor(name).is_none()
+}
+
+/// Bare value references have one extra disambiguation step: an exact ordinary
+/// binding wins before an uppercase spelling can be diagnosed as an unknown
+/// constructor (spec/01 §3.2). Constructor application and pattern positions
+/// must not use this helper because a same-named lexical value does not replace
+/// structural constructor authority there.
+pub(super) fn bare_constructor_out_of_scope(name: &str, env: &Env) -> bool {
     is_constructor_name(name) && env.lookup(name).is_none()
 }
 
-/// Pattern-position counterpart of [`constructor_out_of_scope`]. A constructor
-/// **pattern** head (`| Alpha =>`, `| Alpha { .. } =>`) is in scope only when it
-/// resolves through an *exact* binding — either the type env (`env.lookup`, for
-/// builtins and reef-mangled in-scope constructors) or the ADT registry
-/// (`adt_reg.lookup_variant`, the exact mangled variant key). The terminal-unique
-/// fallbacks (`env.lookup_terminal_unique` / `lookup_variant_terminal_unique`)
-/// are diagnostic-only fuzzy matches, never an in-scope binding.
+/// Resolve an exact in-scope constructor candidate for a call shape.
 ///
-/// Returns `true` when `name` is a PascalCase constructor that resolves through
-/// *neither* exact path. This rejects two out-of-scope cases the bare
-/// [`constructor_out_of_scope`] env check misses for patterns (chelis#317):
-///
-///   1. unique fuzzy — exactly one foreign same-terminal variant exists, so a
-///      bare `| Alpha =>` would fuzzy-bind to it; and
-///   2. non-unique / unresolvable — two foreign modules export a same-terminal
-///      `Dup`, so `lookup_*_terminal_unique` returns `None` and the arm would
-///      otherwise push the bare name into `covered_variants` with no scheme and
-///      no diagnostic. Normally that surfaces as `NonExhaustiveMatch`, but a `_`
-///      wildcard arm (`has_wildcard`) suppresses exhaustiveness and the bogus
-///      out-of-scope arm is silently accepted. Rejecting here closes that hole.
-///
-/// Soundness depends on the reef rewriter guaranteeing every genuinely in-scope
-/// constructor reaches type-check exact-bound under its mangled name (see the
-/// module-level note on the terminal-unique fallback). A future half-mangled
-/// producer (mangled deftype, bare reference) would be wrongly rejected here —
-/// which is the intended failure mode: a half-mangled program is a structural
-/// defect, not a valid in-scope reference.
-pub(super) fn constructor_pattern_out_of_scope(
+/// Mixed positional/record collisions select the matching shape regardless of
+/// declaration order (chelis#148). Candidates come only from the environment's
+/// structural constructor scope, so an unrelated registry entry cannot become
+/// visible merely because another constructor with the same spelling is in
+/// scope. When several candidates share a shape, the latest declaration keeps
+/// the established active-owner precedence.
+pub(super) fn constructor_for_shape<'env, 'adt>(
     name: &str,
+    call_shape: CallShape,
+    env: &'env Env,
+    adt_reg: &'adt AdtRegistry,
+) -> Option<(&'env str, &'env Scheme, &'adt crate::adt::VariantInfo)> {
+    let want_named = matches!(call_shape, CallShape::Record);
+    let mut fallback = None;
+    for (owner, scheme) in env.lookup_constructors(name).rev() {
+        let variant = adt_reg
+            .lookup(owner)?
+            .variants
+            .iter()
+            .find(|variant| variant.name == name)?;
+        fallback.get_or_insert((owner, scheme, variant));
+        let shape_matches = !variant.fields.is_empty()
+            && variant
+                .fields
+                .iter()
+                .all(|(field_name, _)| field_name.is_some() == want_named);
+        if shape_matches {
+            return Some((owner, scheme, variant));
+        }
+    }
+    fallback
+}
+
+/// Resolve a pattern constructor against the nominal scrutinee owner already
+/// established by inference. That owner is stronger than a flat same-named
+/// registry lookup and preserves existing shape-collision semantics when two
+/// in-scope ADTs deliberately share a constructor spelling (chelis#148). The
+/// structural constructor map remains the scope gate and the fallback when
+/// the scrutinee is not nominal yet.
+pub(super) fn pattern_constructor_for_scrutinee<'adt>(
+    name: &str,
+    call_shape: CallShape,
+    scrutinee_ty: &Type,
     env: &Env,
-    adt_reg: &AdtRegistry,
-) -> bool {
-    is_constructor_name(name)
-        && env.lookup(name).is_none()
-        && adt_reg.lookup_variant(name).is_none()
+    adt_reg: &'adt AdtRegistry,
+) -> Option<(
+    &'adt str,
+    &'adt crate::adt::AdtDef,
+    &'adt crate::adt::VariantInfo,
+)> {
+    if constructor_out_of_scope(name, env) {
+        return None;
+    }
+
+    if let Type::Adt(owner, _) | Type::KindedAdt(owner, _) = scrutinee_ty
+        && let Some(definition) = adt_reg.lookup(owner)
+        && let Some(variant) = definition
+            .variants
+            .iter()
+            .find(|variant| variant.name == name)
+    {
+        return Some((definition.name.as_str(), definition, variant));
+    }
+
+    let (owner, _, variant) = constructor_for_shape(name, call_shape, env, adt_reg)?;
+    let definition = adt_reg.lookup(owner)?;
+    Some((definition.name.as_str(), definition, variant))
 }
 
 pub(super) fn check_error_kind_from_type_error_kind(kind: &TypeErrorKind) -> CheckErrorKind {
@@ -862,7 +906,6 @@ pub(super) fn collect_all_declarations(
     report_duplicate_defsigs(&bare_items, errors);
     report_orphan_defsigs(items, errors);
     report_builtin_shadowing(&bare_items, errors);
-    report_builtin_param_call_shadowing(&bare_items, errors);
     let resolution_env = precollect_type_resolution_env(items, adt_reg);
     // Install the provisional self/forward header scope explicitly in this
     // per-check registry clone. Declaration bodies resolve against it, while
@@ -1398,16 +1441,13 @@ pub(super) fn report_orphan_defsigs(
 /// Reject a top-level `def` or `defsig` whose name appears in the closed
 /// builtin vocabulary (chelis#353, spec/04-type-system.md §8.6).
 ///
-/// Call sites are dispatched builtin-first by name in both the host
-/// evaluator (`runtime/host_ops.rs::builtin_name`) and IR lowering
-/// (`lower.rs::builtin_name`); both import `BUILTIN_NAMES`, the same
-/// table consulted here, so the rejected set and the dispatched set
-/// cannot drift. A user definition with a builtin name is therefore
-/// unreachable by name: pre-fix, `def sum` checked clean, hit the
-/// builtin's arity error under eval, and segfaulted on the C backend —
-/// three lanes, three different answers. Rejecting the declaration here,
-/// in the collection chokepoint every checker entry point shares, makes
-/// all lanes agree on the same diagnostic.
+/// Top-level builtin names identify the language's intrinsic call surface.
+/// This check imports `BUILTIN_NAMES`, the same closed table evaluator and
+/// lowering dispatch consume, so the reserved declaration set cannot drift
+/// from that surface. Rejecting a same-name top-level declaration prevents a
+/// user signature from redefining the intrinsic operation. Lexical bindings
+/// are different: ordinary scope resolution selects them before builtin
+/// dispatch in every execution lane (chelis#1076).
 ///
 /// Deliberately narrow scope:
 /// - Reef package modules never reach this check with bare names: reef
@@ -1416,8 +1456,7 @@ pub(super) fn report_orphan_defsigs(
 ///   `def sum` is allowed and genuinely dispatches to the user def (the
 ///   stdlib's `Std.Decimal.normalize` / `Std.Test.fail` rely on this).
 /// - Function parameters and block-locals may reuse builtin names: they
-///   bind values, not call-site dispatch, and shadow harmlessly on every
-///   lane.
+///   shadow the builtin under ordinary lexical scoping in every lane.
 ///
 /// An inline-annotated `def` desugars to a `defsig` AND a `def` with the
 /// same name; report once per name, as the `def` (what the user wrote).
@@ -1459,8 +1498,8 @@ pub(super) fn report_builtin_shadowing(items: &[&deep::Expr], errors: &mut Diagn
             format!(
                 "`{decl_kw} {name}` shadows the builtin function `{name}`: user `def`/`sig` \
                  declarations may not reuse builtin names (spec/04-type-system.md \u{00a7}8.6). \
-                 Calls to `{name}` always dispatch to the builtin under eval and lowering, so \
-                 the shadowing declaration can never be reached by name."
+                 Top-level builtin names identify the intrinsic call surface and cannot be \
+                 rebound with a user signature."
             ),
             vec![format!(
                 "rename `{name}` (e.g. `{name}2` or `my_{name}`); inside a reef package \
@@ -1468,147 +1507,6 @@ pub(super) fn report_builtin_shadowing(items: &[&deep::Expr], errors: &mut Diagn
                  internal-name-rewritten before checking"
             )],
         ));
-    }
-}
-
-/// A function parameter MAY reuse a builtin name (the deliberate #353
-/// carve-out -- it binds a value and shadows harmlessly in value position),
-/// but a CALL through that name never reaches the parameter: the host
-/// evaluator (`runtime/eval.rs::eval_app`) and IR lowering both dispatch
-/// builtin-first by name. `def apply(round_to, x) = round_to(x, 0)`
-/// therefore type-checked while silently invoking the BUILTIN (chelis#891
-/// review finding 4). Reject exactly that shape -- a builtin-named
-/// parameter applied by name inside its own scope -- and leave
-/// value-position reuse intact (pinned by
-/// `value_params_and_locals_may_reuse_builtin_names`).
-///
-/// Walks through [`stamped_parts`], so both the stamped `Expr::Node`
-/// carrier (all compiler ingress since #908) and the legacy programmatic
-/// `Expr::List` carrier are covered.
-pub(super) fn report_builtin_param_call_shadowing(
-    items: &[&deep::Expr],
-    errors: &mut DiagnosticSink<'_>,
-) {
-    let mut reported: HashSet<String> = HashSet::new();
-    for expr in items {
-        let mut scope: Vec<String> = Vec::new();
-        walk_builtin_param_calls(expr, &mut scope, &mut reported, errors);
-    }
-}
-
-/// Extract a parameter's bound name from any of the shapes
-/// [`extract_params`] accepts (bare `Name` atom, `MetaExpr`-wrapped name,
-/// legacy `(name {type: ..})` list, or stamped `BareList` pair), without
-/// resolving annotations.
-fn builtin_shadow_param_name(param: &deep::Expr) -> Option<&str> {
-    let mut current = param;
-    loop {
-        match current {
-            deep::Expr::Atom(deep::Atom::Name(name), _) => return Some(name.as_str()),
-            deep::Expr::MetaExpr(meta, _) => current = &meta.expr,
-            deep::Expr::BareList(elements, _) => return elements.first().and_then(symbol_name),
-            deep::Expr::List(list, _) => return list.elements.first().and_then(symbol_name),
-            _ => return None,
-        }
-    }
-}
-
-/// The element slice of a `(params ...)` container, mirroring the carrier
-/// shapes [`extract_params`] accepts.
-fn builtin_shadow_param_elems(container: &deep::Expr) -> &[deep::Expr] {
-    match container {
-        deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => node.children_slice(),
-        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Params) => children(list),
-        deep::Expr::List(list, _) => list.elements.as_slice(),
-        deep::Expr::BareList(elements, _) => elements.as_slice(),
-        _ => &[],
-    }
-}
-
-/// Extract the name of a `(var name)` callee, unwrapping `MetaExpr`
-/// annotation layers, on either physical carrier.
-fn builtin_shadow_callee_name(callee: &deep::Expr) -> Option<&str> {
-    let mut current = callee;
-    loop {
-        if let deep::Expr::MetaExpr(meta, _) = current {
-            current = &meta.expr;
-            continue;
-        }
-        return match stamped_parts(current) {
-            Some((DeepTag::Var, _, kids)) => kids.first().and_then(symbol_name),
-            _ => None,
-        };
-    }
-}
-
-fn walk_builtin_param_calls(
-    expr: &deep::Expr,
-    scope: &mut Vec<String>,
-    reported: &mut HashSet<String>,
-    errors: &mut DiagnosticSink<'_>,
-) {
-    stack_guard!("walk_builtin_param_calls", expr);
-    match expr {
-        deep::Expr::MetaExpr(meta, _) => {
-            walk_builtin_param_calls(&meta.expr, scope, reported, errors);
-        }
-        deep::Expr::BareList(elements, _) => {
-            for element in elements {
-                walk_builtin_param_calls(element, scope, reported, errors);
-            }
-        }
-        deep::Expr::UnknownForm(data) => {
-            for child in &data.children {
-                walk_builtin_param_calls(child, scope, reported, errors);
-            }
-        }
-        _ => {
-            let Some((tag, _, kids)) = stamped_parts(expr) else {
-                return;
-            };
-            if tag == DeepTag::Fn {
-                let mut added = 0usize;
-                if let Some(container) = kids.first() {
-                    for param in builtin_shadow_param_elems(container) {
-                        if let Some(name) = builtin_shadow_param_name(param)
-                            && builtins::BUILTIN_NAMES.contains(&name)
-                        {
-                            scope.push(name.to_string());
-                            added += 1;
-                        }
-                    }
-                }
-                for kid in kids.iter().skip(1) {
-                    walk_builtin_param_calls(kid, scope, reported, errors);
-                }
-                scope.truncate(scope.len() - added);
-                return;
-            }
-            if tag == DeepTag::App
-                && let Some(callee) = kids.first()
-                && let Some(name) = builtin_shadow_callee_name(callee)
-                && scope.iter().any(|param| param == name)
-                && reported.insert(name.to_string())
-            {
-                errors.push(CheckError::new(
-                    CheckErrorKind::BuiltinShadowing,
-                    format!(
-                        "parameter `{name}` shadows the builtin `{name}` and is called in \
-                         this function body: calls dispatch builtin-first under eval and \
-                         lowering (spec/04-type-system.md \u{00a7}8.6), so `{name}(...)` here \
-                         always invokes the builtin; the parameter can never be reached \
-                         by name."
-                    ),
-                    vec![format!(
-                        "rename the parameter (e.g. `{name}_fn`); builtin-named parameters \
-                         remain allowed in value position"
-                    )],
-                ));
-            }
-            for kid in kids {
-                walk_builtin_param_calls(kid, scope, reported, errors);
-            }
-        }
     }
 }
 
@@ -1678,11 +1576,20 @@ pub(super) fn collect_declarations(
             {
                 errors.push(crate::opacity::unmoduled_opaque_error(name));
             }
+            let adt_name = kids.first().and_then(symbol_name).map(str::to_string);
             if let Ok(ctors) =
                 adt_reg.register_deftype(kids, vg, headers, errors, opaque, defining_module)
             {
                 for (name, scheme) in ctors {
-                    env.bind(name, scheme);
+                    if let Some(owner) = &adt_name {
+                        env.bind_constructor(name, owner.clone(), scheme);
+                    } else {
+                        // `register_deftype` reports malformed declarations;
+                        // retain the former defensive binding behavior if a
+                        // future parser shape can return constructors without
+                        // an authored owner name.
+                        env.bind(name, scheme);
+                    }
                 }
             }
         }

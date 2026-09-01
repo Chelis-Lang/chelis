@@ -22,7 +22,7 @@ pub(super) fn infer_app(
     }
 
     // Check if func is a comparison op (for special return type handling)
-    let func_name = stamped_parts(&kids[0]).and_then(|(tag, _, callee_kids)| {
+    let source_func_name = stamped_parts(&kids[0]).and_then(|(tag, _, callee_kids)| {
         (tag == DeepTag::Var)
             .then(|| {
                 callee_kids
@@ -31,6 +31,19 @@ pub(super) fn infer_app(
                     .map(str::to_string)
             })
             .flatten()
+    });
+    // Builtin-specific application rules are selected only after ordinary
+    // lexical lookup. A parameter, block binding, or pattern binding with the
+    // same builtin spelling owns the call; its inferred function type, rather
+    // than the builtin's name-keyed checker route, decides whether the
+    // application is valid (spec/04-type-system.md §8.6; chelis#1076).
+    //
+    // Keep the override exact to the closed builtin vocabulary. In particular,
+    // applied uppercase heads retain constructor classification under
+    // spec/01-nomenclature.md §3.2 even when a single-letter value binder with
+    // the same spelling is in scope.
+    let func_name = source_func_name.clone().filter(|name| {
+        !builtins::BUILTIN_NAMES.contains(&name.as_str()) || !env.is_lexically_bound(name)
     });
 
     if matches!(func_name.as_deref(), Some("permute")) {
@@ -124,17 +137,61 @@ pub(super) fn infer_app(
         );
     }
 
-    let ctor_lookup_name = match prepare_constructor_application(&func_name, env, adt_reg, errors) {
-        Ok(name) => name,
+    match prepare_constructor_application(&func_name, env, adt_reg, errors) {
+        Ok(_) => {}
         Err(rejected) => return rejected,
-    };
+    }
 
-    let func_ty = {
-        let _ctor_guard = ctor_lookup_name
-            .as_ref()
-            .map(|_| crate::opacity::suppress_ctor_reference_check());
+    // Applied uppercase heads are constructor syntax, even when a value
+    // binder with the same spelling is present (spec/01 §3.2). Do not send a
+    // resolved constructor back through the string-keyed value environment:
+    // a parameter named `N` would replace the constructor scheme there.
+    // Conversely, do not rediscover an owner by scanning the ADT registry:
+    // two positional constructors may share a name (`Option::Some` and a
+    // local `Wrapper::Some`), and registry order is not scope. The separate
+    // constructor authority preserves the active declaration/import owner
+    // and scheme across ordinary lexical shadowing.
+    let applied_constructor_head = source_func_name.as_deref().is_some_and(is_constructor_name);
+    let func_ty = if applied_constructor_head {
+        let source_name = source_func_name.as_deref().unwrap();
+        let resolved_constructor = if constructor_out_of_scope(source_name, env) {
+            None
+        } else {
+            constructor_for_shape(source_name, CallShape::Positional, env, adt_reg)
+                .map(|(_, scheme, _)| env.instantiate(scheme, vg, subst))
+        };
+        match resolved_constructor {
+            Some(constructor_type) => constructor_type,
+            None => {
+                let name = source_func_name.as_deref().unwrap();
+                report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::UnknownConstructor {
+                            identifier: name.to_string(),
+                        },
+                        with_macro_provenance(&kids[0], format!("unknown constructor: {name}")),
+                        vec![format!(
+                            "Constructor '{name}' is not in scope. Declare it locally or add it \
+                             to an import (e.g. `import Mod ({name})`)"
+                        )],
+                    ),
+                )
+            }
+        }
+    } else {
         infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product)
     };
+    // The constructor callee no longer passes through `infer_expr`, but it is
+    // still a runtime expression owner and must contribute the same fitness
+    // and annotation receipt as every other callee.
+    if applied_constructor_head {
+        product.total_nodes += 1;
+        if !matches!(func_ty, Type::Error(_)) {
+            product.typed_nodes += 1;
+        }
+        product.record_canonical(&kids[0], func_ty.clone());
+    }
     // A reduction's axis argument may name a *dimension* of the operand
     // (`sum(x, seq)`, Tier-3 named-axis reduction, spec §4.5.3), not a bound
     // *value*. Like `expand`'s symbolic size arg below, such a name is typed as

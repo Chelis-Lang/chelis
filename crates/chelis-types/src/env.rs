@@ -85,10 +85,41 @@ struct TypeResolutionScope {
     binders: Option<HashSet<String>>,
 }
 
+/// Constructor identity selected by declaration/import scope.
+///
+/// Constructor position is structural in Chelis, so an ordinary lexical
+/// value binding with the same spelling must not replace this entry. Keeping
+/// the owner beside the scheme also avoids rediscovering an arbitrary owner
+/// from the ADT registry when two in-scope ADTs use the same constructor name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ConstructorBinding {
+    owner: String,
+    scheme: Scheme,
+}
+
 /// Type environment (Γ): maps names to polymorphic type schemes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Env {
     bindings: HashMap<String, Scheme>,
+    /// Active constructor bindings, separate from ordinary value lookup.
+    ///
+    /// Every exact owner remains available so constructor syntax can select by
+    /// positional versus record shape without consulting out-of-scope registry
+    /// entries. Declaration/import order still chooses the active owner when
+    /// several candidates have the same shape, matching the value environment's
+    /// established constructor binding. A later lexical parameter or block
+    /// binding may replace `bindings[name]` for bare value position without
+    /// changing constructor position.
+    #[serde(default)]
+    constructor_bindings: HashMap<String, Vec<ConstructorBinding>>,
+    /// Names introduced by the current lexical scope (function parameters,
+    /// block bindings, and pattern bindings). Builtin-specific inference may
+    /// only dispatch on a name from the closed builtin vocabulary when that
+    /// spelling has not been replaced by one of these bindings. This is
+    /// check-time provenance, not part of the reusable or serialized type
+    /// environment.
+    #[serde(skip)]
+    lexical_bindings: HashSet<String>,
     /// Current declaration's type/dimension/rank binders. Installed only on
     /// the cloned environment used to infer that declaration, inherited by
     /// nested lexical clones, and omitted from cached checker state.
@@ -123,6 +154,26 @@ impl Env {
     /// Look up a name. Returns None if unbound.
     pub fn lookup(&self, name: &str) -> Option<&Scheme> {
         self.bindings.get(name)
+    }
+
+    /// Look up the active constructor owner and scheme for an exact name.
+    pub(crate) fn lookup_constructor(&self, name: &str) -> Option<(&str, &Scheme)> {
+        self.constructor_bindings
+            .get(name)
+            .and_then(|bindings| bindings.last())
+            .map(|binding| (binding.owner.as_str(), &binding.scheme))
+    }
+
+    /// Iterate every in-scope exact constructor candidate in declaration order.
+    pub(crate) fn lookup_constructors(
+        &self,
+        name: &str,
+    ) -> impl DoubleEndedIterator<Item = (&str, &Scheme)> {
+        self.constructor_bindings
+            .get(name)
+            .into_iter()
+            .flatten()
+            .map(|binding| (binding.owner.as_str(), &binding.scheme))
     }
 
     /// Install the binder set owned by the declaration whose body is about to
@@ -217,6 +268,28 @@ impl Env {
     /// Extend the environment with a new binding.
     pub fn bind(&mut self, name: String, scheme: Scheme) {
         self.bindings.insert(name, scheme);
+    }
+
+    /// Bind a constructor in both structural constructor position and the
+    /// ordinary value environment used by bare/nullary references.
+    pub(crate) fn bind_constructor(&mut self, name: String, owner: String, scheme: Scheme) {
+        self.bindings.insert(name.clone(), scheme.clone());
+        let candidates = self.constructor_bindings.entry(name).or_default();
+        candidates.retain(|candidate| candidate.owner != owner);
+        candidates.push(ConstructorBinding { owner, scheme });
+    }
+
+    /// Extend the environment with a binding introduced by ordinary lexical
+    /// scope. Unlike [`Self::bind`], this also records that builtin callable
+    /// dispatch must not claim the name while this environment lives.
+    pub(crate) fn bind_lexical(&mut self, name: String, scheme: Scheme) {
+        self.lexical_bindings.insert(name.clone());
+        self.bind(name, scheme);
+    }
+
+    /// Whether an ordinary lexical binding owns `name` in this environment.
+    pub(crate) fn is_lexically_bound(&self, name: &str) -> bool {
+        self.lexical_bindings.contains(name)
     }
 
     /// Remove a temporary inference binding before generalizing an SCC.
@@ -684,6 +757,65 @@ fn collect_rvars(ty: &Type, vars: &mut Vec<RankVar>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lexical_value_shadowing_does_not_replace_constructor_authority() {
+        let mut env = Env::new();
+        let constructor = Scheme::mono(Type::Fn(
+            vec![Type::Prim(Prim::F64)],
+            Box::new(Type::Adt("Box".to_string(), Vec::new())),
+        ));
+        env.bind_constructor("N".to_string(), "Box".to_string(), constructor.clone());
+        env.bind_lexical("N".to_string(), Scheme::mono(Type::Prim(Prim::F64)));
+
+        assert_eq!(
+            env.lookup("N").map(|scheme| &scheme.body),
+            Some(&Type::Prim(Prim::F64))
+        );
+        let (owner, active_constructor) = env
+            .lookup_constructor("N")
+            .expect("constructor binding survives lexical shadowing");
+        assert_eq!(owner, "Box");
+        assert_eq!(
+            bincode::serialize(active_constructor).expect("serialize active constructor"),
+            bincode::serialize(&constructor).expect("serialize expected constructor")
+        );
+    }
+
+    #[test]
+    fn active_constructor_identity_is_last_declaration_wins_and_serialized() {
+        let mut env = Env::new();
+        env.bind_constructor(
+            "Some".to_string(),
+            "Option".to_string(),
+            Scheme::mono(Type::Adt("Option".to_string(), Vec::new())),
+        );
+        let wrapper_scheme = Scheme::mono(Type::Adt("Wrapper".to_string(), Vec::new()));
+        env.bind_constructor(
+            "Some".to_string(),
+            "Wrapper".to_string(),
+            wrapper_scheme.clone(),
+        );
+
+        let encoded = bincode::serialize(&env).expect("serialize env");
+        let decoded: Env = bincode::deserialize(&encoded).expect("deserialize env");
+        let (owner, active_constructor) = decoded
+            .lookup_constructor("Some")
+            .expect("serialized constructor authority");
+        assert_eq!(owner, "Wrapper");
+        assert_eq!(
+            bincode::serialize(active_constructor).expect("serialize active constructor"),
+            bincode::serialize(&wrapper_scheme).expect("serialize expected constructor")
+        );
+        assert_eq!(
+            decoded
+                .lookup_constructors("Some")
+                .map(|(owner, _)| owner)
+                .collect::<Vec<_>>(),
+            vec!["Option", "Wrapper"],
+            "shape-aware resolution needs every in-scope owner after serialization"
+        );
+    }
 
     #[test]
     fn free_variables_protect_quantified_ids_from_global_substitutions() {

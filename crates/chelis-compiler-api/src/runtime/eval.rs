@@ -217,6 +217,19 @@ fn render_shape(shape: &[usize]) -> String {
 }
 
 impl<'a> EvalContext<'a> {
+    /// Resolve a builtin only when ordinary lexical lookup did not select a
+    /// runtime binding of the same name (spec/04-type-system.md §8.6,
+    /// chelis#1076). Every evaluator builtin fast path goes through this
+    /// predicate so a new early dispatch cannot silently bypass scope.
+    fn active_builtin_name<'expr>(&self, expr: &'expr Expr) -> Option<&'expr str> {
+        let name = builtin_name(expr)?;
+        self.active_builtin_symbol(name).then_some(name)
+    }
+
+    fn active_builtin_symbol(&self, name: &str) -> bool {
+        !self.bindings.contains_key(name) && !self.tensor_bindings.contains_key(name)
+    }
+
     pub(super) fn resolve_top_level(&mut self, name: &str) -> Result<RuntimeValue, String> {
         if let Some(value) = self.bindings.get(name) {
             return Ok(value.clone());
@@ -720,7 +733,7 @@ impl<'a> EvalContext<'a> {
         // axis. It must be intercepted BEFORE generic argument evaluation
         // (which would fail with `unknown runtime name`) and routed
         // through IR lowering, where name -> index resolution lives.
-        if let Some(reduce_name) = builtin_name(func)
+        if let Some(reduce_name) = self.active_builtin_name(func)
             && REDUCTION_BUILTIN_NAMES.contains(&reduce_name)
             && kids.len() >= 3
             && kids[2..].iter().any(|axis| var_name(axis).is_some())
@@ -734,7 +747,7 @@ impl<'a> EvalContext<'a> {
         // routing lane: IR lowering resolves the insertion point against
         // the operand's named dims. The positional form (integer axis,
         // possibly with a symbolic size) keeps the host path.
-        if let Some(expand_name) = builtin_name(func)
+        if let Some(expand_name) = self.active_builtin_name(func)
             && expand_name == "expand"
             && kids.len() >= 4
             && var_name(&kids[2]).is_some()
@@ -806,7 +819,7 @@ impl<'a> EvalContext<'a> {
             });
         }
 
-        if let Some(name) = builtin_name(func) {
+        if let Some(name) = self.active_builtin_name(func) {
             return self.eval_builtin(name, &args, &arg_type_exprs, result_type_expr.as_ref());
         }
 
@@ -1044,7 +1057,9 @@ impl<'a> EvalContext<'a> {
     /// the input type for shape-preserving (Identity-class) builtins,
     /// or a top-level def's declared return type.
     fn callee_output_type(&self, callee: &str, input_ty: Option<&Expr>) -> Option<Expr> {
-        if chelis_types::shape_class(callee) == chelis_types::ShapeClass::Identity {
+        if self.active_builtin_symbol(callee)
+            && chelis_types::shape_class(callee) == chelis_types::ShapeClass::Identity
+        {
             return input_ty.cloned();
         }
         let (resolved, _) = self.lookup_top_level_def(callee)?;
@@ -1065,7 +1080,7 @@ impl<'a> EvalContext<'a> {
         arg_type_exprs: &[Option<Expr>],
         result_type_expr: Option<&Expr>,
     ) -> Result<RuntimeValue, String> {
-        if let Some(name) = builtin_name(stage) {
+        if let Some(name) = self.active_builtin_name(stage) {
             return self.eval_builtin(name, &args, arg_type_exprs, result_type_expr);
         }
         match self.eval_expr(stage)? {

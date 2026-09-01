@@ -958,7 +958,7 @@ pub(super) fn infer_var(
         // to a foreign module's same-terminal tag via the registry's fuzzy
         // fallback. Check exact scope first; the fuzzy `lookup_terminal_unique`
         // is the mis-resolution path the issue reports.
-        if constructor_out_of_scope(name, env) {
+        if bare_constructor_out_of_scope(name, env) {
             let mut err = CheckError::new(
                 CheckErrorKind::UnknownConstructor {
                     identifier: name.to_string(),

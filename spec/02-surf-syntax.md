@@ -594,6 +594,9 @@ Macro rules:
 
 - resolution order is lexical blockers first, then user-defined top-level macros, then
   the standard macro prelude, then ordinary function call resolution
+- an ordinary top-level `def` or `sig` may not use the name of a loaded standard
+  prelude macro; the declaration is rejected during macro expansion because its calls
+  would otherwise expand as the standard macro before ordinary function resolution
 - a local binding named `linear_layer` or `cross_entropy` blocks macro expansion for
   that identifier
 - hygiene renames only binders introduced by the macro expansion (block-binding names, `fn`

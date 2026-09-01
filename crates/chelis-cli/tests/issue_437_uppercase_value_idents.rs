@@ -102,7 +102,7 @@ fn uppercase_reference_resolves_to_value_not_constructor() {
     // The decisive resolution check (not just a type-check): a bound `S`
     // referenced as `T = S` must resolve to S's VALUE, not to a
     // constructor application. In chelis-types this is the
-    // is_constructor_name(S)=true / constructor_out_of_scope(S)=false path
+    // is_constructor_name(S)=true / bare_constructor_out_of_scope(S)=false path
     // (the name is uppercase but bound in env, so env lookup wins). Eval
     // is the oracle: if `S` resolved as a constructor, T would read back
     // as an ADT `{ctor: "S"}` instead of the scalar 2.0, which is exactly

@@ -1361,6 +1361,27 @@ pub(super) fn validate_ir_expr(
                 }
                 return StaticValue::Unknown;
             }
+            if get_tag(list) == Some(DeepTag::Arm) {
+                let kids = children(list);
+                let mut scoped_static_env = static_env.clone();
+                if let Some(pattern) = kids.first() {
+                    for name in chelis_deep::pattern_binder_names(pattern) {
+                        scoped_static_env.insert(name, StaticValue::Unknown);
+                    }
+                }
+                // The pattern is binding syntax. Only the optional guard and
+                // body execute in the arm's lexical scope.
+                for elem in kids.iter().skip(1) {
+                    validate_ir_expr(
+                        elem,
+                        type_env,
+                        &mut scoped_static_env,
+                        failed_let_names,
+                        errors,
+                    );
+                }
+                return StaticValue::Unknown;
+            }
             if get_tag(list) == Some(DeepTag::Let) {
                 let kids = children(list);
                 let mut scoped_static_env = static_env.clone();
@@ -1397,8 +1418,11 @@ pub(super) fn validate_ir_expr(
                             // whose output type is derivable from its args,
                             // register the derived type so downstream uses
                             // of `name` resolve correctly.
-                            let derived =
-                                derive_ir_builtin_output_type(value_expr, &scoped_type_env);
+                            let derived = derive_ir_builtin_output_type(
+                                value_expr,
+                                &scoped_type_env,
+                                &scoped_static_env,
+                            );
                             match derived {
                                 Some(ty) => {
                                     scoped_type_env.insert(name.to_string(), ty);
@@ -1440,7 +1464,10 @@ pub(super) fn validate_ir_expr(
                                     // "really wrong arg" cases still
                                     // surface their own diagnostic.
                                     if let deep::Expr::List(_, _) = value_expr
-                                        && let_rhs_is_recognized_shape_sensitive(value_expr)
+                                        && let_rhs_is_recognized_shape_sensitive(
+                                            value_expr,
+                                            &scoped_static_env,
+                                        )
                                     {
                                         failed_let_names.insert(name.to_string());
                                     }
@@ -1468,7 +1495,7 @@ pub(super) fn validate_ir_expr(
                 // both; the rejection is removed because lowering handles them
                 // (see `lower_par` and the `jit` lowering arm).
                 if tag == DeepTag::App
-                    && let Some(func_name) = ir_builtin_name(list)
+                    && let Some(func_name) = active_ir_builtin_name(list, static_env)
                     && is_ir_shape_sensitive_builtin(func_name)
                 {
                     validate_ir_builtin_symbolic_requirements(
@@ -1507,7 +1534,10 @@ pub(super) fn validate_ir_expr(
             }
             if get_tag(list) == Some(DeepTag::App) {
                 let kids = children(list);
-                let func_name = kids.first().and_then(app_builtin_name);
+                let func_name = kids
+                    .first()
+                    .and_then(app_builtin_name)
+                    .filter(|name| compiler_name_is_active(name, static_env));
                 let arg_values = kids
                     .iter()
                     .skip(1)
@@ -1695,6 +1725,24 @@ pub(super) fn ir_builtin_name(list: &deep::List) -> Option<&str> {
     ir_builtin_name_of_expr(list.elements.get(2)?)
 }
 
+/// Preserve ordinary lexical precedence when this post-inference validator
+/// selects a compiler-owned route. `static_env` is already the validator's
+/// scoped binding environment: function parameters, sequential let binders,
+/// and pattern binders are inserted before their bodies are visited.
+pub(super) fn active_ir_builtin_name<'a>(
+    list: &'a deep::List,
+    static_env: &HashMap<String, StaticValue>,
+) -> Option<&'a str> {
+    ir_builtin_name(list).filter(|name| compiler_name_is_active(name, static_env))
+}
+
+pub(super) fn compiler_name_is_active(
+    name: &str,
+    static_env: &HashMap<String, StaticValue>,
+) -> bool {
+    !builtins::BUILTIN_NAMES.contains(&name) || !static_env.contains_key(name)
+}
+
 /// The builtin callee name of an `app`'s callee child, on either carrier.
 ///
 /// chelis#1107 amendment: `validate_ir_expr` bridges a stamped `Expr::Node`
@@ -1826,7 +1874,10 @@ pub(super) fn is_ir_binary_shape_passthrough_builtin(name: &str) -> bool {
 /// level: cascade-suppressed intermediate let-binders are still
 /// marked failed so the suppression propagates unboundedly down the
 /// chain.
-pub(super) fn let_rhs_is_recognized_shape_sensitive(expr: &deep::Expr) -> bool {
+pub(super) fn let_rhs_is_recognized_shape_sensitive(
+    expr: &deep::Expr,
+    static_env: &HashMap<String, StaticValue>,
+) -> bool {
     stack_guard!("let_rhs_is_recognized_shape_sensitive", expr, false);
     let inner = peel_borrow(expr);
     // chelis#1107 amendment: carrier-preserving read.
@@ -1836,13 +1887,16 @@ pub(super) fn let_rhs_is_recognized_shape_sensitive(expr: &deep::Expr) -> bool {
     let Some(func_name) = kids.first().and_then(ir_builtin_name_of_expr) else {
         return false;
     };
+    if !compiler_name_is_active(func_name, static_env) {
+        return false;
+    }
     if is_ir_shape_sensitive_builtin(func_name) {
         return true;
     }
     if is_ir_unary_shape_passthrough_builtin(func_name)
         && let Some(arg) = kids.get(1)
     {
-        return let_rhs_is_recognized_shape_sensitive(arg);
+        return let_rhs_is_recognized_shape_sensitive(arg, static_env);
     }
     if is_ir_binary_shape_passthrough_builtin(func_name) {
         // Either operand being a recognised shape-sensitive form is
@@ -1851,12 +1905,12 @@ pub(super) fn let_rhs_is_recognized_shape_sensitive(expr: &deep::Expr) -> bool {
         // so a failed inner shape-sensitive call on either side
         // means the whole RHS is structurally broken.
         if let Some(lhs) = kids.get(1)
-            && let_rhs_is_recognized_shape_sensitive(lhs)
+            && let_rhs_is_recognized_shape_sensitive(lhs, static_env)
         {
             return true;
         }
         if let Some(rhs) = kids.get(2)
-            && let_rhs_is_recognized_shape_sensitive(rhs)
+            && let_rhs_is_recognized_shape_sensitive(rhs, static_env)
         {
             return true;
         }
@@ -2388,6 +2442,7 @@ pub(super) fn conv2d_output_extent(
 pub(super) fn derive_ir_builtin_output_type(
     expr: &deep::Expr,
     type_env: &IrTypeEnv,
+    static_env: &HashMap<String, StaticValue>,
 ) -> Option<deep::Expr> {
     // chelis#1107 amendment: carrier-preserving entry. The `derive_*` helpers
     // below take `&deep::List`, so bridge a stamped Node once here.
@@ -2396,7 +2451,7 @@ pub(super) fn derive_ir_builtin_output_type(
     if get_tag(list) != Some(DeepTag::App) {
         return None;
     }
-    let func_name = ir_builtin_name(list)?;
+    let func_name = active_ir_builtin_name(list, static_env)?;
     match func_name {
         "conv2d" => derive_conv2d_output_type(list, type_env),
         // Shape-preserving unary point-wise: output type == input type.
@@ -2416,7 +2471,7 @@ pub(super) fn derive_ir_builtin_output_type(
         // passthrough path (positional [3] is the tensor).
         "relu" | "tanh" | "sigmoid" | "gelu" | "silu" | "exp" | "log" | "neg" | "recip"
         | "sqrt" | "abs" | "sin" | "cos" | "tan" | "atan" | "floor" | "ceil" | "round" | "not"
-        | "softmax" => derive_unary_shape_passthrough(list, type_env),
+        | "softmax" => derive_unary_shape_passthrough(list, type_env, static_env),
         // Shape-preserving binary point-wise: output type == first
         // operand's type. Broadcasting cases are caught by HM
         // elsewhere; here we fall through to None if the first
@@ -2435,7 +2490,9 @@ pub(super) fn derive_ir_builtin_output_type(
         // and added here so passthrough recognizes them. `and`, `or`
         // are bool binaries (lower.rs:1353-1354).
         "add" | "sub" | "mul" | "div" | "max_elem" | "min_elem" | "cmplt" | "lt" | "gt" | "gte"
-        | "lte" | "eq" | "neq" | "and" | "or" => derive_binary_shape_passthrough(list, type_env),
+        | "lte" | "eq" | "neq" | "and" | "or" => {
+            derive_binary_shape_passthrough(list, type_env, static_env)
+        }
         _ => None,
     }
 }
@@ -2448,9 +2505,10 @@ pub(super) fn derive_ir_builtin_output_type(
 pub(super) fn derive_unary_shape_passthrough(
     list: &deep::List,
     type_env: &IrTypeEnv,
+    static_env: &HashMap<String, StaticValue>,
 ) -> Option<deep::Expr> {
     let arg = list.elements.get(3)?;
-    resolve_let_value_tensor_type(arg, type_env)
+    resolve_let_value_tensor_type(arg, type_env, static_env)
 }
 
 /// Derive the output tensor type of a shape-preserving binary
@@ -2462,13 +2520,14 @@ pub(super) fn derive_unary_shape_passthrough(
 pub(super) fn derive_binary_shape_passthrough(
     list: &deep::List,
     type_env: &IrTypeEnv,
+    static_env: &HashMap<String, StaticValue>,
 ) -> Option<deep::Expr> {
     let lhs = list.elements.get(3)?;
-    if let Some(ty) = resolve_let_value_tensor_type(lhs, type_env) {
+    if let Some(ty) = resolve_let_value_tensor_type(lhs, type_env, static_env) {
         return Some(ty);
     }
     let rhs = list.elements.get(4)?;
-    resolve_let_value_tensor_type(rhs, type_env)
+    resolve_let_value_tensor_type(rhs, type_env, static_env)
 }
 
 /// Resolve the tensor type expression of a let-binding RHS or any
@@ -2479,6 +2538,7 @@ pub(super) fn derive_binary_shape_passthrough(
 pub(super) fn resolve_let_value_tensor_type(
     expr: &deep::Expr,
     type_env: &IrTypeEnv,
+    static_env: &HashMap<String, StaticValue>,
 ) -> Option<deep::Expr> {
     if let Some(ty) = arg_tensor_type_expr(expr, type_env) {
         return Some(ty);
@@ -2486,7 +2546,7 @@ pub(super) fn resolve_let_value_tensor_type(
     // Peek through borrow before recursing in case a wrapper op
     // appears under an `&` borrow (uncommon but cheap).
     let inner = peel_borrow(expr);
-    derive_ir_builtin_output_type(inner, type_env)
+    derive_ir_builtin_output_type(inner, type_env, static_env)
 }
 
 /// Derive a conv2d call's output tensor type (rank-4 `[N, F, outH, outW]`

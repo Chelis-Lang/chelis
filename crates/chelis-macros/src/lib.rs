@@ -50,6 +50,14 @@ pub enum ExpansionError {
 
     #[error("failed to load standard macro prelude: {message}")]
     PreludeLoad { message: String },
+
+    #[error(
+        "`{declaration} {name}` collides with the standard prelude macro `{name}`: ordinary top-level `def`/`sig` declarations may not reuse a loaded standard-prelude macro name (spec/02-surf-syntax.md §P5b); rename the declaration or define a user macro when macro override is intended"
+    )]
+    StandardPreludeNameCollision {
+        name: String,
+        declaration: &'static str,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +106,8 @@ impl Expander {
         exprs: &[Expr],
         inherited_macros: &HashMap<String, MacroDef>,
     ) -> Result<Vec<Expr>, ExpansionError> {
+        self.reject_standard_prelude_callable_collisions(exprs)?;
+
         let mut macros = inherited_macros.clone();
         for (name, def) in &self.prelude_macros {
             macros.entry(name.clone()).or_insert_with(|| def.clone());
@@ -119,6 +129,48 @@ impl Expander {
             out.push(self.expand_expr(expr, &macros, &Scope::default())?);
         }
         Ok(out)
+    }
+
+    /// Reject an ordinary declaration whose calls would be consumed by the
+    /// loaded standard macro prelude before ordinary function resolution
+    /// (spec/02-surf-syntax.md §P5b, chelis#672).
+    ///
+    /// The check reads the exact prelude map used by expansion, so adding or
+    /// removing a standard macro changes collision detection in the same
+    /// operation. An inline-annotated `def` desugars to `defsig` plus `def`;
+    /// collect the def names first so its one diagnostic names the authored
+    /// `def`, even when the synthesized `defsig` appears first.
+    fn reject_standard_prelude_callable_collisions(
+        &self,
+        exprs: &[Expr],
+    ) -> Result<(), ExpansionError> {
+        if self.prelude_macros.is_empty() {
+            return Ok(());
+        }
+
+        let def_names = exprs
+            .iter()
+            .filter_map(|expr| standard_prelude_decl_name(expr, DeepTag::Def, &self.prelude_macros))
+            .collect::<HashSet<_>>();
+
+        for expr in exprs {
+            let name = standard_prelude_decl_name(expr, DeepTag::Def, &self.prelude_macros)
+                .or_else(|| {
+                    standard_prelude_decl_name(expr, DeepTag::Defsig, &self.prelude_macros)
+                });
+            let Some(name) = name else {
+                continue;
+            };
+            return Err(ExpansionError::StandardPreludeNameCollision {
+                name: name.to_string(),
+                declaration: if def_names.contains(name) {
+                    "def"
+                } else {
+                    "sig"
+                },
+            });
+        }
+        Ok(())
     }
 
     fn expand_expr(
@@ -1302,6 +1354,24 @@ fn symbol_name(expr: &Expr) -> Option<&str> {
         Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
         _ => None,
     }
+}
+
+fn standard_prelude_decl_name<'a>(
+    expr: &'a Expr,
+    expected: DeepTag,
+    prelude: &HashMap<String, MacroDef>,
+) -> Option<&'a str> {
+    let kids = match expr {
+        Expr::List(list, _) if get_tag(list) == Some(expected) => children(list),
+        Expr::Node(node, _) if node.tag() == expected => node.children_slice(),
+        Expr::MetaExpr(meta, _) => {
+            return standard_prelude_decl_name(&meta.expr, expected, prelude);
+        }
+        _ => return None,
+    };
+    kids.first()
+        .and_then(symbol_name)
+        .filter(|name| prelude.contains_key(*name))
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {

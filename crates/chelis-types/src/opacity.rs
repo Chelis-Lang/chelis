@@ -87,11 +87,6 @@ pub(crate) struct OpacityContextData {
     /// Name of the top-level decl currently being inferred (message
     /// location context per the D-CHECK error contract).
     pub current_decl: Option<String>,
-    /// While true, `check_ctor_reference` is a no-op: `infer_app`
-    /// sets this around its callee inference so a positional
-    /// constructor application reports ONE violation (constructor
-    /// application), not a second one for the callee `var` node.
-    pub suppress_ctor_reference: bool,
     /// Program-shape metadata (exports, bindings, producer text).
     pub meta: OpacityModuleMeta,
 }
@@ -101,7 +96,6 @@ impl OpacityContextData {
         Self {
             current_module: None,
             current_decl: None,
-            suppress_ctor_reference: false,
             meta,
         }
     }
@@ -183,38 +177,6 @@ pub(crate) fn with_context<R>(f: impl FnOnce(&OpacityContextData) -> R) -> Optio
     OPACITY_CONTEXT.with(|cell| cell.borrow().as_ref().map(f))
 }
 
-/// Suppress `check_ctor_reference` for the duration of the returned
-/// guard (see `OpacityContextData::suppress_ctor_reference`).
-pub(crate) fn suppress_ctor_reference_check() -> CtorSuppressGuard {
-    let previous = OPACITY_CONTEXT.with(|cell| {
-        let mut borrowed = cell.borrow_mut();
-        match borrowed.as_mut() {
-            Some(data) => {
-                let prev = data.suppress_ctor_reference;
-                data.suppress_ctor_reference = true;
-                prev
-            }
-            None => false,
-        }
-    });
-    CtorSuppressGuard { previous }
-}
-
-pub(crate) struct CtorSuppressGuard {
-    previous: bool,
-}
-
-impl Drop for CtorSuppressGuard {
-    fn drop(&mut self) {
-        let previous = self.previous;
-        OPACITY_CONTEXT.with(|cell| {
-            if let Some(data) = cell.borrow_mut().as_mut() {
-                data.suppress_ctor_reference = previous;
-            }
-        });
-    }
-}
-
 // ── Inference hooks (RFC D-CHECK rejection set) ──────────────────
 
 /// Core rejection: `adt_name` was constructed/inspected via `action`
@@ -258,17 +220,14 @@ pub(crate) fn check_opaque_use(
 
 /// Bare-constructor-reference rejection (the constructor binding
 /// itself is hidden): fires when `name` resolves to a constructor of
-/// an out-of-module opaque ADT. Suppressed under `infer_app`'s callee
-/// guard so positional application reports once.
+/// an out-of-module opaque ADT. Positional applications instantiate their
+/// constructor directly from the registry and therefore do not route their
+/// callee through this bare-reference hook.
 pub(crate) fn check_ctor_reference(
     name: &str,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) -> bool {
-    let suppressed = with_context(|ctx| ctx.suppress_ctor_reference).unwrap_or(false);
-    if suppressed {
-        return false;
-    }
     let Some((adt_name, _variant)) = adt_reg
         .lookup_variant(name)
         .or_else(|| adt_reg.lookup_variant_terminal_unique(name))

@@ -2069,11 +2069,11 @@ fn build_c_tensor_grad_lm_style_mixed_scalar_tensor_args_builds() {
     let out_dir = dir.path().join("tensor-grad-lm-canary-out");
     write_file(
         &path,
-        "def residual[n](theta: tensor[n, f32], x: f32, y: f32) -> f32 = {\n\
+        "def lm_residual[n](theta: tensor[n, f32], x: f32, y: f32) -> f32 = {\n\
            y_hat = if lt(x, cast(0.0, f32)) then tensor_to_scalar(sum(copy(theta), 0)) else add(tensor_to_scalar(sum(copy(theta), 0)), x)\n\
            sub(y, y_hat)\n\
          }\n\
-         row = grad(residual, wrt=theta)\n\
+         row = grad(lm_residual, wrt=theta)\n\
          def jac[n, m](theta: tensor[n, f32], xs: tensor[m, f32], ys: tensor[m, f32]) -> List[tensor[n, f32]] = {\n\
            pairs = zip(to_list(xs), to_list(ys))\n\
            map(fn (pair: (f32, f32)) -> row(copy(theta), pair.0, pair.1), pairs)\n\

@@ -4596,33 +4596,38 @@ fn lower_host_expr_kind(
                     },
                 )));
             }
-            match resolve_adt_constructor_definition(program, &name) {
-                AdtConstructorResolution::Unique(definition) if definition.is_nullary() => {
-                    let instantiated =
-                        definition.instantiate_nullary_term(&ty).map_err(|error| {
-                            host_expr_lowering_error(
-                                expr,
-                                format!(
-                                    "constructor `{name}` is not concretely instantiated: {error}"
-                                ),
-                            )
-                        })?;
-                    return Ok(HostExpr::new(HostExprKind::AdtConstruct {
-                        ctor: name,
-                        fields: Vec::new(),
-                        ty: instantiated.ty,
-                    }));
+            // An ordinary lexical binding wins in bare value position. Only
+            // a name absent from host scope may lower as a nullary ADT
+            // constructor (spec/01 §3.2; chelis#1076).
+            if !scope.contains_key(&name) {
+                match resolve_adt_constructor_definition_for_type(program, &name, &ty) {
+                    AdtConstructorResolution::Unique(definition) if definition.is_nullary() => {
+                        let instantiated =
+                            definition.instantiate_nullary_term(&ty).map_err(|error| {
+                                host_expr_lowering_error(
+                                    expr,
+                                    format!(
+                                        "constructor `{name}` is not concretely instantiated: {error}"
+                                    ),
+                                )
+                            })?;
+                        return Ok(HostExpr::new(HostExprKind::AdtConstruct {
+                            ctor: name,
+                            fields: Vec::new(),
+                            ty: instantiated.ty,
+                        }));
+                    }
+                    // Whether this reference is a construction at all depends
+                    // on which declaration answers it, so an ambiguous name
+                    // cannot fall through to the variable path: that would
+                    // emit a bare C identifier nothing declares and trade a
+                    // rejection for a silently different lowering (chelis#730's
+                    // shape). Fail closed instead.
+                    AdtConstructorResolution::Ambiguous(candidates) => {
+                        return Err(ambiguous_constructor_error(expr, &name, &candidates));
+                    }
+                    AdtConstructorResolution::Unique(_) | AdtConstructorResolution::Missing => {}
                 }
-                // Whether this reference is a construction at all depends
-                // on which declaration answers it, so an ambiguous name
-                // cannot fall through to the variable path: that would
-                // emit a bare C identifier nothing declares and trade a
-                // rejection for a silently different lowering (chelis#730's
-                // shape). Fail closed instead.
-                AdtConstructorResolution::Ambiguous(candidates) => {
-                    return Err(ambiguous_constructor_error(expr, &name, &candidates));
-                }
-                AdtConstructorResolution::Unique(_) | AdtConstructorResolution::Missing => {}
             }
             HostExpr::new(HostExprKind::Var(name, ty))
         }
@@ -5996,6 +6001,7 @@ fn lower_match_host_expr(
     let mut none_expr = None;
     let mut generic_arms = Vec::new();
     let mut generic_default = None;
+    let option_match = matches!(&scrutinee_ty, HostTypeTerm::Option(_));
 
     for arm in kids.iter().skip(1) {
         let Some(arm_list) = as_list(arm) else {
@@ -6024,7 +6030,7 @@ fn lower_match_host_expr(
         if let Some(DeepTag::PatCtor | DeepTag::PatRecord) = tag(pattern) {
             let ctor = children(pattern).first().and_then(symbol_name);
             match ctor {
-                Some("Some") => {
+                Some("Some") if option_match => {
                     if let Some(bound) = children(pattern).get(1).and_then(as_list)
                         && tag(bound) == Some(DeepTag::PatVar)
                         && let Some(name) = children(bound).first().and_then(symbol_name)
@@ -6044,7 +6050,7 @@ fn lower_match_host_expr(
                         expected_ty,
                     )?);
                 }
-                Some("None") => {
+                Some("None") if option_match => {
                     let body = arm_kids.get(2).ok_or_else(|| {
                         host_expr_lowering_error(&match_expr, "a `None` match arm has no body")
                     })?;
@@ -6057,7 +6063,11 @@ fn lower_match_host_expr(
                     )?);
                 }
                 Some(ctor_name) => {
-                    let ctor_fields = match resolve_adt_constructor_definition(program, ctor_name) {
+                    let ctor_fields = match resolve_adt_constructor_definition_for_type(
+                        program,
+                        ctor_name,
+                        &scrutinee_ty,
+                    ) {
                         AdtConstructorResolution::Unique(definition) => {
                             instantiate_adt_constructor(program, &definition, &scrutinee_ty)
                                 .map_err(|error| {
@@ -6325,37 +6335,39 @@ fn lower_record_host_expr(
             host_expr_lowering_error(&record_expr, "a `record` node has no constructor symbol")
         })?
         .to_string();
-    // The checker stamps a generic constructor expression with its concrete
-    // ADT instantiation. Feed that instantiation into the declaration lookup
-    // before lowering any fields so `ReviewBox[a]` fields become (for
-    // example) exact `int8` or `bf16` terms. Looking up the bare constructor
-    // first preserves the declaration's named variable and lets it leak all
-    // the way to host resolution even though the use site is monomorphic.
-    let ctor_definition = match resolve_adt_constructor_definition(program, &ctor) {
-        AdtConstructorResolution::Unique(definition) => definition,
-        // The field-name check below reports the AUTHORED constructor, so
-        // validating against a different declaration produced a
-        // self-contradicting "has no field" rejection of a valid program
-        // (chelis#1271). Name both candidates instead of choosing.
-        AdtConstructorResolution::Ambiguous(candidates) => {
-            return Err(ambiguous_constructor_error(
-                &record_expr,
-                &ctor,
-                &candidates,
-            ));
-        }
-        AdtConstructorResolution::Missing => {
-            return Err(host_expr_lowering_error(
-                &record_expr,
-                format!("record constructor `{ctor}` has no matching ADT declaration"),
-            ));
-        }
-    };
     let checked_ty = expr_host_type(
         &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
         program,
         scope,
     );
+    let resolution_ty = expected_ty
+        .filter(|_| checked_ty.is_unresolved())
+        .unwrap_or(&checked_ty);
+    // The checker stamps a constructor expression with its nominal owner and
+    // concrete instantiation. Resolve through that receipt before lowering
+    // fields so same-named declarations cannot be selected by registry order
+    // (chelis#1076/#1271).
+    let ctor_definition =
+        match resolve_adt_constructor_definition_for_type(program, &ctor, resolution_ty) {
+            AdtConstructorResolution::Unique(definition) => definition,
+            // The field-name check below reports the AUTHORED constructor, so
+            // validating against a different declaration produced a
+            // self-contradicting "has no field" rejection of a valid program
+            // (chelis#1271). Name both candidates instead of choosing.
+            AdtConstructorResolution::Ambiguous(candidates) => {
+                return Err(ambiguous_constructor_error(
+                    &record_expr,
+                    &ctor,
+                    &candidates,
+                ));
+            }
+            AdtConstructorResolution::Missing => {
+                return Err(host_expr_lowering_error(
+                    &record_expr,
+                    format!("record constructor `{ctor}` has no matching ADT declaration"),
+                ));
+            }
+        };
     let explicit_ty = expected_ty
         .filter(|expected| {
             checked_ty.is_unresolved()
@@ -7007,7 +7019,7 @@ fn list_grad_pack_plan(
                     _ => return None,
                 };
             let AdtConstructorResolution::Unique(definition) =
-                resolve_adt_constructor_definition(program, &ctor)
+                resolve_adt_constructor_definition_for_type(program, &ctor, ty)
             else {
                 return None;
             };
@@ -7804,6 +7816,17 @@ fn lower_app_host_expr(
         .and_then(host_fn_signature)
         .or_else(|| lookup_declared_fn_type(program, &name))
         .or_else(|| kids.first().and_then(expr_fn_type));
+    // Ordinary lexical lookup precedes builtin callable routes. A
+    // function-typed parameter named `round_to` or `map` is a call through
+    // that parameter, not a builtin selected by spelling
+    // (spec/04-type-system.md §8.6; chelis#1076). Keep the override exact to
+    // `BUILTIN_NAMES`: applied uppercase heads retain constructor precedence
+    // under spec/01-nomenclature.md §3.2.
+    let callee_is_local_callable = scope
+        .get(&name)
+        .is_some_and(|ty| matches!(ty, HostTypeTerm::Fn(_, _)));
+    let callee_shadows_builtin = BUILTIN_NAMES.contains(&name.as_str()) && callee_is_local_callable;
+    let active_compiler_name = (!callee_shadows_builtin).then_some(name.as_str());
     let checked_ty = expr_host_type(app_expr, program, scope);
     let explicit_ty = expected_ty
         .filter(|_| checked_ty.is_unresolved())
@@ -7830,7 +7853,10 @@ fn lower_app_host_expr(
             ty: explicit_ty,
         }));
     }
-    let ctor_definition = match resolve_adt_constructor_definition(program, &name) {
+    let ctor_definition = match active_compiler_name
+        .map(|_| resolve_adt_constructor_definition_for_type(program, &name, &explicit_ty))
+        .unwrap_or(AdtConstructorResolution::Missing)
+    {
         AdtConstructorResolution::Unique(definition) => Some(definition),
         // The resolved declaration supplies both the constructed ADT name
         // and each argument's expected field type, which lowering then
@@ -7897,7 +7923,7 @@ fn lower_app_host_expr(
         }
         return lowered;
     }
-    if name == "Cons" && kids.len() == 3 {
+    if active_compiler_name == Some("Cons") && kids.len() == 3 {
         let expr = Expr::List(list.clone(), chelis_deep::Span::new(0, 0));
         if let Some(items) = lower_list_literal_items(&expr, program, scope, tensor_helpers)? {
             let ty = expr_host_type(&expr, program, scope);
@@ -7914,7 +7940,11 @@ fn lower_app_host_expr(
             return Ok(HostExpr::new(HostExprKind::List(items, ty)));
         }
     }
-    if name == "Some" && kids.len() == 2 {
+    // `Some` has a dedicated Option ABI only when no checked user ADT
+    // constructor owns this application. A local `Wrapper::Some` shares the
+    // spelling but lowers through the generic ADT path below; raw-name
+    // dispatch would contradict the checker's nominal result type.
+    if active_compiler_name == Some("Some") && kids.len() == 2 && ctor_definition.is_none() {
         let arg = lower_host_expr(&kids[1], program, scope, tensor_helpers)?;
         return Ok(HostExpr::new(HostExprKind::Builtin {
             name,
@@ -7926,7 +7956,7 @@ fn lower_app_host_expr(
             },
         }));
     }
-    if name == "map" && kids.len() == 3 {
+    if active_compiler_name == Some("map") && kids.len() == 3 {
         let callback =
             lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {
                 host_expr_lowering_error(app_expr, "`map` requires a lowerable callback")
@@ -7944,7 +7974,7 @@ fn lower_app_host_expr(
             ty,
         }));
     }
-    if name == "filter" && kids.len() == 3 {
+    if active_compiler_name == Some("filter") && kids.len() == 3 {
         let callback =
             lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {
                 host_expr_lowering_error(app_expr, "`filter` requires a lowerable callback")
@@ -7962,7 +7992,7 @@ fn lower_app_host_expr(
             ty,
         }));
     }
-    if name == "fold" && kids.len() == 4 {
+    if active_compiler_name == Some("fold") && kids.len() == 4 {
         let callback =
             lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {
                 host_expr_lowering_error(app_expr, "`fold` requires a lowerable callback")
@@ -7997,7 +8027,7 @@ fn lower_app_host_expr(
             ty,
         }));
     }
-    if name == "scan" && kids.len() == 4 {
+    if active_compiler_name == Some("scan") && kids.len() == 4 {
         let callback =
             lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {
                 host_expr_lowering_error(app_expr, "`scan` requires a lowerable callback")
@@ -8017,7 +8047,7 @@ fn lower_app_host_expr(
             ty,
         }));
     }
-    if name == "partition" && kids.len() == 3 {
+    if active_compiler_name == Some("partition") && kids.len() == 3 {
         let callback =
             lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {
                 host_expr_lowering_error(app_expr, "`partition` requires a lowerable callback")
@@ -8036,7 +8066,7 @@ fn lower_app_host_expr(
             ty,
         }));
     }
-    if name == "flat_map" && kids.len() == 3 {
+    if active_compiler_name == Some("flat_map") && kids.len() == 3 {
         let callback =
             lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {
                 host_expr_lowering_error(app_expr, "`flat_map` requires a lowerable callback")
@@ -8089,9 +8119,6 @@ fn lower_app_host_expr(
     // the fn pointer into `chelis_scalar_tensor_from_f64` and emit C that
     // gcc rejects. Skip both tensor-helper branches and fall through to
     // the generic `HostExpr::new(HostExprKind::Call)` path so the wrapper emits `return f(x);`.
-    let callee_is_local_callable = scope
-        .get(&name)
-        .is_some_and(|ty| matches!(ty, HostTypeTerm::Fn(_, _)));
     // A callee carrying a callable (fn-pointer) parameter cannot be
     // summarized through the tensor-helper DAG: the DAG has no
     // representation for a fn-pointer input. Such a callee is lowered by
@@ -8254,9 +8281,7 @@ fn lower_app_host_expr(
     } else {
         inferred_ret_ty.clone()
     };
-    if let Some(definition) = ctor_definition
-        && !matches!(name.as_str(), "Some" | "None")
-    {
+    if let Some(definition) = ctor_definition {
         let instantiated = instantiate_adt_constructor(program, &definition, &construct_ty)
             .map_err(|error| {
                 host_expr_lowering_error(
@@ -8282,7 +8307,7 @@ fn lower_app_host_expr(
             ty: instantiated.ty,
         }));
     }
-    if !BUILTIN_NAMES.contains(&name.as_str())
+    if (callee_shadows_builtin || !BUILTIN_NAMES.contains(&name.as_str()))
         && name != "Some"
         && name != "None"
         && fn_sig.is_some()
@@ -9099,6 +9124,26 @@ fn substitute_expr(
             }
             expr.clone()
         }
+        Expr::List(list, span) if tag(list) == Some(DeepTag::App) => {
+            // Applied uppercase heads are constructor syntax (spec/01 §3.2),
+            // not value references. Higher-order specialization may replace
+            // a bare uppercase parameter elsewhere, but it must not rewrite
+            // the callee of `N(x)` into the parameter's argument and thereby
+            // turn a checked constructor application into an ordinary C call.
+            let elements = list
+                .elements
+                .iter()
+                .enumerate()
+                .map(|(index, child)| {
+                    if index == 2 && is_constructor_application_head(child) {
+                        child.clone()
+                    } else {
+                        substitute_expr(child, substitutions, shadowed)
+                    }
+                })
+                .collect();
+            Expr::List(List { elements }, *span)
+        }
         Expr::List(list, span) if tag(list) == Some(DeepTag::Fn) => {
             let kids = children(list);
             let mut next_shadowed = shadowed.clone();
@@ -9159,6 +9204,22 @@ fn substitute_expr(
         ),
         _ => expr.clone(),
     }
+}
+
+fn is_constructor_application_head(expr: &Expr) -> bool {
+    let expr = match expr {
+        Expr::MetaExpr(meta, _) => &meta.expr,
+        direct => direct,
+    };
+    let Some(var) = as_list(expr).filter(|list| tag(list) == Some(DeepTag::Var)) else {
+        return false;
+    };
+    children(var)
+        .first()
+        .and_then(symbol_name)
+        .map(terminal_name)
+        .and_then(|name| name.chars().next())
+        .is_some_and(|first| first.is_ascii_uppercase())
 }
 
 /// Whether a let-bound value is a callable expression that can be β-substituted
@@ -13606,7 +13667,45 @@ fn resolve_adt_constructor_definition(
 ) -> AdtConstructorResolution {
     let definitions = adt_constructor_definitions(program);
     let owning = definitions_owning(&definitions, ctor_name, constructor_name_of);
-    match (&owning, owning.candidates()) {
+    resolve_adt_constructor_candidates(&owning)
+}
+
+/// Resolve a positional construction using the nominal result already
+/// established by the checker. Two ADTs may deliberately share an exact
+/// constructor name; the checked result type is the structural owner receipt
+/// that lowering needs, whereas the sorted registry population is not scope.
+fn resolve_adt_constructor_definition_for_type(
+    program: &CheckedProgram,
+    ctor_name: &str,
+    checked_ty: &HostTypeTerm,
+) -> AdtConstructorResolution {
+    let definitions = adt_constructor_definitions(program);
+    let owning = definitions_owning(&definitions, ctor_name, constructor_name_of);
+    if let HostTypeTerm::Adt(adt_name, _) = checked_ty {
+        let exact_owner = owning
+            .candidates()
+            .iter()
+            .copied()
+            .filter(|definition| definition.adt_name == *adt_name)
+            .collect::<Vec<_>>();
+        if let [only] = exact_owner.as_slice() {
+            return AdtConstructorResolution::Unique((*only).clone());
+        }
+        let terminal_owner = owning
+            .candidates()
+            .iter()
+            .copied()
+            .filter(|definition| terminal_name_matches(&definition.adt_name, adt_name))
+            .collect::<Vec<_>>();
+        if let [only] = terminal_owner.as_slice() {
+            return AdtConstructorResolution::Unique((*only).clone());
+        }
+    }
+    resolve_adt_constructor_candidates(&owning)
+}
+
+fn resolve_adt_constructor_candidates(owning: &NameMatch<'_>) -> AdtConstructorResolution {
+    match (owning, owning.candidates()) {
         (_, []) => AdtConstructorResolution::Missing,
         (_, [only]) => AdtConstructorResolution::Unique((*only).clone()),
         // Two declarations carrying the SAME name are not a
@@ -13694,7 +13793,9 @@ fn lookup_access_field(
             // `None` here means the name is unknown rather than
             // contested. The caller renders that as "absent or ambiguous
             // on the resolved ADT type" (chelis#1271).
-            let Some(definition) = lookup_adt_constructor_definition(program, ctor) else {
+            let AdtConstructorResolution::Unique(definition) =
+                resolve_adt_constructor_definition_for_type(program, ctor, ty)
+            else {
                 return Ok(None);
             };
             let instantiated = instantiate_adt_constructor(program, &definition, ty)?;
