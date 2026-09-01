@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "168ca0af7e92710a2fc40b9ab4ad96acc3dccfc00b6e6ef1cc333dea42c13413",
+  "freeze_sha256": "31b574b80a4301d5f6d1f44cb6fb4ecaa231cd697a08e84c94b17b175fd12299",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -364,31 +364,31 @@
     },
     {
       "identity": "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor::data",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor::dtype",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor::ndim",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor::shape",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor::size",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor::storage_size",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor::strides",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=descriptor-field|path=crates/chelis-python/src/lib.rs|owner=ChelisGpuTensor::data",
@@ -556,59 +556,59 @@
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_device_to_host",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_alloc",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_alloc_view",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_clone",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_free",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_bf16_gemm_f32_acc_row_major",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_dgemm_batched_row_major",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_dgemm_row_major",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_dgemm_strided_batched_row_major",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_f16_gemm_f32_acc_row_major",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_sgemm_batched_row_major",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_sgemm_row_major",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_sgemm_strided_batched_row_major",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_host_to_device",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx::emit_literal_tensor",
@@ -1272,83 +1272,83 @@
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_alloc",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_alloc_view",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_is_contiguous",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_matrix_slices_contiguous",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_bf16_gemm_f32_acc_row_major",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_dgemm_batched_row_major",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_dgemm_row_major",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_dgemm_strided_batched_row_major",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_f16_gemm_f32_acc_row_major",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_sgemm_batched_row_major",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_sgemm_row_major",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_sgemm_strided_batched_row_major",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=hipblasDgemm",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=hipblasDgemmStridedBatched",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=hipblasGemmEx",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=hipblasSgemm",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=hipblasSgemmStridedBatched",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=module",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-metal/runtime/chelis_metal_runtime.h|owner=chelis_metal_mps_gemm_f16",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-metal/runtime/chelis_metal_runtime.h|owner=chelis_metal_mps_gemm_f32",
-      "deletion_phase": 4
+      "deletion_phase": 2
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-python/src/lib.rs|owner=ChelisGpuTensor",

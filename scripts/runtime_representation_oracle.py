@@ -52,7 +52,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "168ca0af7e92710a2fc40b9ab4ad96acc3dccfc00b6e6ef1cc333dea42c13413"
+FREEZE_SHA256 = "31b574b80a4301d5f6d1f44cb6fb4ecaa231cd697a08e84c94b17b175fd12299"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -389,15 +389,31 @@ def inventory_rows(root: Path) -> tuple[InventoryRow, ...]:
     return rows
 
 
+def _is_device_or_binding_mirror(path: str) -> bool:
+    """Does this file hold a device or binding descriptor mirror?
+
+    Phase 2 owns the binding and device portion of C4; Phase 3 owns the host
+    runtime and public C. The split is by descriptor, not by crate: a backend
+    crate's `runtime/` header IS the device descriptor, while its `src/` is
+    lane code that Phase 4 retypes.
+    """
+
+    return path.startswith("crates/chelis-python/") or (
+        path.startswith("crates/chelis-backend-") and "/runtime/" in path
+    )
+
+
 def _deletion_phase(kind: str, path: str) -> int:
     """The phase that deletes this seam, from the design's Part III map."""
 
     if kind in DELETION_PHASE_BY_KIND:
         return DELETION_PHASE_BY_KIND[kind]
-    if path.startswith("crates/chelis-python/") or path.startswith("crates/chelis-backend-"):
-        # The device and binding mirrors are Phase 2's to delete; the backend
-        # lane consumers are Phase 4's.
-        return 4 if path.startswith("crates/chelis-backend-") else 2
+    if _is_device_or_binding_mirror(path):
+        return 2
+    if path.startswith("crates/chelis-backend-"):
+        # Backend `src/` is lane code: element spellings, load and store
+        # templates, and the pointers they emit. Phase 4 retypes those.
+        return 4
     return 3
 
 

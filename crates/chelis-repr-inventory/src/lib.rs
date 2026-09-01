@@ -338,7 +338,8 @@ fn is_descriptor(names: &BTreeSet<String>) -> bool {
             >= 4
 }
 
-/// Does this string literal spell a C element type?
+/// The C element type this literal spells, if any. The spelling is returned
+/// rather than a bare boolean so a caller can name what it matched.
 fn c_element_spelling(text: &str) -> Option<&'static str> {
     let bytes = text.as_bytes();
     C_ELEMENT_TYPES.iter().copied().find(|candidate| {
