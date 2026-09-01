@@ -4378,9 +4378,79 @@ fn extract_numeric_leaf(expr: &Expr) -> Option<StagedScalar> {
 /// metadata as absence. The outer `Option` is recognition success; the inner
 /// one distinguishes an unstamped expression from a stamped scalar.
 fn optional_scalar_prim(expr: &Expr) -> Option<Option<Prim>> {
-    match expr_type_metadata(expr) {
+    match unique_metadata_value(expr, "type")? {
         Some(ty) => Some(Some(LowerCtx::try_extract_prim(ty)?)),
         None => Some(None),
+    }
+}
+
+/// Read a metadata key only when it occurs at most once.
+///
+/// `None` rejects an untagged carrier or duplicate key; `Some(None)` is a
+/// canonical absence. Static folding must not reproduce the parser's
+/// first-entry behavior because duplicate contract metadata is malformed,
+/// not an alternate spelling.
+fn unique_metadata_value<'a>(expr: &'a Expr, key: &str) -> Option<Option<&'a Expr>> {
+    let meta = match expr {
+        Expr::Node(_, _) | Expr::List(_, _) => {
+            let (_, meta, _) = stamped_parts(expr)?;
+            meta
+        }
+        Expr::Atom(_, _)
+        | Expr::Map(_, _)
+        | Expr::MetaExpr(_, _)
+        | Expr::BareList(_, _)
+        | Expr::UnknownForm(_) => return Some(None),
+    };
+    let mut values = meta
+        .entries
+        .iter()
+        .filter_map(|(candidate, value)| (candidate == key).then_some(value));
+    let first = values.next();
+    if values.next().is_some() {
+        return None;
+    }
+    Some(first)
+}
+
+/// Decode one canonical numeric `lit` under [04-LIT-1].
+///
+/// This is the fold's only literal ingress. It jointly validates the value
+/// atom, declared primitive, and the optional provenance marker. The sole
+/// cross-family form is an exact integer atom with one
+/// `literal_source: integer` marker at a float dtype; `scalar_from_i64`
+/// performs its one required target-width finalization without an f64 hop.
+fn extract_type_checked_literal(expr: &Expr) -> Option<chelis_types::ScalarValue> {
+    use chelis_types::{scalar_from_f64, scalar_from_i64};
+
+    let (DeepTag::Lit, _, kids) = stamped_parts(expr)? else {
+        return None;
+    };
+    let [Expr::Atom(atom, _)] = kids else {
+        return None;
+    };
+    let declared = optional_scalar_prim(expr)??;
+    let literal_source = unique_metadata_value(expr, "literal_source")?;
+    let integer_source = matches!(
+        literal_source,
+        Some(Expr::Atom(Atom::Name(source), _)) if source == "integer"
+    );
+
+    match (atom, declared, literal_source) {
+        (Atom::Int(value), prim, None) if prim.is_integer() => {
+            scalar_from_i64("lit", prim, *value).ok()
+        }
+        (Atom::Int(value), prim, Some(_)) if prim.is_float() && integer_source => {
+            scalar_from_i64("lit", prim, *value).ok()
+        }
+        (Atom::Float(value), prim, None) if prim.is_float() => {
+            scalar_from_f64("lit", prim, *value).ok()
+        }
+        (Atom::Bool(value), Prim::Bool, None) => {
+            scalar_from_i64("lit", Prim::Bool, i64::from(*value)).ok()
+        }
+        (Atom::Str(_) | Atom::Name(_) | Atom::Tag(_), _, _)
+        | (Atom::Int(_) | Atom::Float(_) | Atom::Bool(_), _, _) => None,
     }
 }
 
@@ -4412,13 +4482,7 @@ fn extract_type_checked_scalar(expr: &Expr) -> Option<chelis_types::ScalarValue>
         Expr::List(_, _) | Expr::Node(_, _) => {
             let (tag, _, kids) = stamped_parts(expr)?;
             match tag {
-                DeepTag::Lit if kids.len() == 1 => {
-                    let declared = optional_scalar_prim(expr)??;
-                    let Expr::Atom(atom, _) = &kids[0] else {
-                        return None;
-                    };
-                    scalar_from_atom(atom, declared)
-                }
+                DeepTag::Lit => extract_type_checked_literal(expr),
                 DeepTag::Cast => {
                     let inner = extract_type_checked_scalar(kids.first()?)?;
                     let target = LowerCtx::try_extract_prim(kids.get(1)?)?;
@@ -4427,9 +4491,15 @@ fn extract_type_checked_scalar(expr: &Expr) -> Option<chelis_types::ScalarValue>
                     }
                     match chelis_deep::cast_mode_of(kids).ok()? {
                         chelis_deep::CastMode::Checked => {
-                            chelis_types::cast_scalar("cast", inner, target).ok()
+                            chelis_types::CheckedCastPlan::new(inner.prim(), target)
+                                .ok()?
+                                .cast_scalar("cast", inner)
+                                .ok()
                         }
                         chelis_deep::CastMode::Trunc => {
+                            if !inner.prim().is_float() || !target.is_integer() {
+                                return None;
+                            }
                             chelis_types::cast_trunc_scalar("cast_trunc", inner, target).ok()
                         }
                     }
@@ -15745,6 +15815,10 @@ mod tests {
                 "(cast {} (lit {type: (t-prim {} f64)} 7.0) (t-prim {} int64))",
                 7,
             ),
+            (
+                "(cast {} (lit {type: (t-prim {} f64), literal_source: integer} 7) (t-prim {} int64))",
+                7,
+            ),
         ];
         let ctx = LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
         for (source, expected) in cases {
@@ -15770,6 +15844,13 @@ mod tests {
             "(app {type: (t-prim {} int64)} (var {} neg) \
                  (lit {type: (t-prim {} string)} 1))",
             "(cast {} (lit {type: (t-prim {} bool)} 1) (t-prim {} int64))",
+            "(cast {} (lit {type: (t-prim {} f64), literal_source: floating} 7.0) \
+                 (t-prim {} int64))",
+            "(cast {} (lit {type: (t-prim {} f64), literal_source: integer, \
+                 literal_source: integer} 7) (t-prim {} int64))",
+            "(cast {} (lit {type: (t-prim {} int32)} 7) (t-prim {} int64) trunc)",
+            "(cast {} (cast {} (lit {type: (t-prim {} int32)} 7) \
+                 (t-prim {} string)) (t-prim {} int64))",
         ];
         let ctx = LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
         for source in cases {
@@ -15781,6 +15862,49 @@ mod tests {
                 ctx.extract_u64_value(&expr),
                 None,
                 "payload/type disagreement must not become a seed: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_794_malformed_literal_and_cast_modes_use_typed_unsupported_channel() {
+        let seeds = [
+            "(cast {} (lit {type: (t-prim {} f64), literal_source: floating} 7.0) \
+                 (t-prim {} int64))",
+            "(cast {} (lit {type: (t-prim {} int32)} 7) (t-prim {} int64) trunc)",
+        ];
+        for seed in seeds {
+            let source = format!(
+                "(handle-effect {{effect: random}} \
+                    {seed} \
+                    (app {{type: (t-tensor {{}} (d-lit {{}} 2) (t-prim {{}} f32))}} \
+                         (var {{}} uniform_like) \
+                         (lit {{type: (t-tensor {{}} (d-lit {{}} 2) (t-prim {{}} f32))}} 0.0) \
+                         (lit {{type: (t-prim {{}} f64)}} 0.0) \
+                         (lit {{type: (t-prim {{}} f64)}} 1.0)))"
+            );
+            let expr = chelis_deep::parser::parse_str(&source)
+                .unwrap_or_else(|error| panic!("parse malformed seed {seed}: {error}"))
+                .pop()
+                .expect("one handled-random expression");
+            let outcome = catch_lowering(move || {
+                let mut ctx =
+                    LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
+                ctx.random_seed = Some(7);
+                let _ = ctx.lower_expr(&expr);
+            });
+            let diagnostic = outcome.expect_err(&format!(
+                "malformed seed must be rejected, not lowered: {seed}"
+            ));
+            assert!(
+                diagnostic.fatal,
+                "rejection must bypass host fallback: {seed}"
+            );
+            let message = diagnostic.to_string();
+            assert!(message.starts_with("unsupported:"), "{seed}: {message}");
+            assert!(
+                message.contains("[05-RNG-1]") && message.contains("int64"),
+                "{seed}: {message}"
             );
         }
     }
