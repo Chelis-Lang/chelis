@@ -45,6 +45,40 @@ def apply_sum(x: f64) -> f64 = {
 out = apply_sum(3.0f64)
 ";
 
+const SHAPE_SENSITIVE_LOCAL: &str = "\
+def call_local(x: f64) -> f64 = {
+  conv2d = fn (a: f64, b: f64, c: f64, d: f64) -> add(add(a, b), add(c, d))
+  conv2d(x, 2.0f64, 3.0f64, 4.0f64)
+}
+out = call_local(1.0f64)
+";
+
+const APPLIED_UPPERCASE_CONSTRUCTOR: &str = "\
+type Box = | N(f64)
+def wrap(N: (f64 -> f64), x: f64) -> Box = N(x)
+def add_hundred(x: f64) -> f64 = add(x, 100.0f64)
+out = wrap(add_hundred, 1.0f64)
+";
+
+const BARE_UPPERCASE_BINDING: &str = "\
+type Box = | N(f64)
+def keep(N: f64) -> f64 = N
+out = keep(7.0f64)
+";
+
+const UNKNOWN_APPLIED_UPPERCASE: &str = "\
+def apply_n(N: (f64 -> f64), x: f64) -> f64 = N(x)
+def add_hundred(x: f64) -> f64 = add(x, 100.0f64)
+out = apply_n(add_hundred, 1.0f64)
+";
+
+const INVALID_BUILTIN_CONV2D: &str = "\
+def bad_conv(
+  x: tensor[1, 1, 3, 3, f32],
+  k: tensor[1, 1, 1, 1, f32]
+) -> tensor[1, 1, 3, 3, f32] = conv2d(x, k, 1.0f64, 0)
+";
+
 const PRELUDE_COLLISION: &str = "\
 def cross_entropy(logits: tensor[2, 3, f32], labels: tensor[2, 3, f32]) -> tensor[f32] =
   scalar_to_tensor(cast(999.0, f32))
@@ -122,6 +156,77 @@ fn builtin_named_local_bypasses_named_axis_interception() {
         NAMED_AXIS_SHAPED_LOCAL,
         "named_axis_shaped_local",
         "out = 5.0\n",
+    );
+}
+
+#[test]
+fn builtin_named_local_bypasses_post_inference_shape_validation() {
+    assert_eval_and_c(
+        SHAPE_SENSITIVE_LOCAL,
+        "shape_sensitive_local",
+        "out = 10.0\n",
+    );
+}
+
+#[test]
+fn applied_uppercase_head_remains_a_constructor_despite_a_value_binder() {
+    assert_eval_and_c(
+        APPLIED_UPPERCASE_CONSTRUCTOR,
+        "applied_uppercase_constructor",
+        "out = N(1.0)\n",
+    );
+}
+
+#[test]
+fn bare_uppercase_name_remains_an_ordinary_value_binding() {
+    assert_eval_and_c(
+        BARE_UPPERCASE_BINDING,
+        "bare_uppercase_binding",
+        "out = 7.0\n",
+    );
+}
+
+#[test]
+fn applied_uppercase_head_without_a_declared_constructor_rejects() {
+    let dir = tempdir().expect("tempdir");
+    let source = dir.path().join("unknown_applied_uppercase.ch");
+    write_file(&source, UNKNOWN_APPLIED_UPPERCASE);
+
+    let output = chelis()
+        .args(["check", source.to_str().unwrap()])
+        .output()
+        .expect("run check");
+    assert_eq!(output.status.code(), Some(2));
+    let report: Value = serde_json::from_slice(&output.stdout).expect("check JSON");
+    assert!(
+        report["errors"].as_array().is_some_and(|errors| {
+            errors.iter().any(|error| {
+                error["kind"] == "UnknownConstructor"
+                    && error["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("unknown constructor: N"))
+            })
+        }),
+        "check report: {report}"
+    );
+}
+
+#[test]
+fn real_shape_sensitive_builtin_keeps_its_validation() {
+    let dir = tempdir().expect("tempdir");
+    let source = dir.path().join("invalid_builtin_conv2d.ch");
+    write_file(&source, INVALID_BUILTIN_CONV2D);
+
+    let output = chelis()
+        .args(["check", source.to_str().unwrap()])
+        .output()
+        .expect("run check");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("IR builtin `conv2d` requires a literal integer stride"),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 

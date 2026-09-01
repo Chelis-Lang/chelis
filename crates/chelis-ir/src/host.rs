@@ -9110,6 +9110,26 @@ fn substitute_expr(
             }
             expr.clone()
         }
+        Expr::List(list, span) if tag(list) == Some(DeepTag::App) => {
+            // Applied uppercase heads are constructor syntax (spec/01 §3.2),
+            // not value references. Higher-order specialization may replace
+            // a bare uppercase parameter elsewhere, but it must not rewrite
+            // the callee of `N(x)` into the parameter's argument and thereby
+            // turn a checked constructor application into an ordinary C call.
+            let elements = list
+                .elements
+                .iter()
+                .enumerate()
+                .map(|(index, child)| {
+                    if index == 2 && is_constructor_application_head(child) {
+                        child.clone()
+                    } else {
+                        substitute_expr(child, substitutions, shadowed)
+                    }
+                })
+                .collect();
+            Expr::List(List { elements }, *span)
+        }
         Expr::List(list, span) if tag(list) == Some(DeepTag::Fn) => {
             let kids = children(list);
             let mut next_shadowed = shadowed.clone();
@@ -9170,6 +9190,22 @@ fn substitute_expr(
         ),
         _ => expr.clone(),
     }
+}
+
+fn is_constructor_application_head(expr: &Expr) -> bool {
+    let expr = match expr {
+        Expr::MetaExpr(meta, _) => &meta.expr,
+        direct => direct,
+    };
+    let Some(var) = as_list(expr).filter(|list| tag(list) == Some(DeepTag::Var)) else {
+        return false;
+    };
+    children(var)
+        .first()
+        .and_then(symbol_name)
+        .map(terminal_name)
+        .and_then(|name| name.chars().next())
+        .is_some_and(|first| first.is_ascii_uppercase())
 }
 
 /// Whether a let-bound value is a callable expression that can be β-substituted
