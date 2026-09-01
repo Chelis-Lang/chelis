@@ -14,6 +14,7 @@ pub(super) fn validate_ir_program(
     detect_top_level_binding_cycles(exprs, errors);
     detect_trivial_non_terminating_fns(exprs, errors);
     let mut static_env = UnordMap::new();
+    let shape_env = shape_type_env(type_env);
     let declared_signatures = collect_declared_sig_metadata(top_level_decl_items(exprs));
     // Names of let-bindings whose RHS validation already emitted a
     // diagnostic (so their derived output type is unknown). Downstream
@@ -32,7 +33,7 @@ pub(super) fn validate_ir_program(
         }
         validate_ir_expr(
             expr,
-            type_env,
+            &shape_env,
             &mut static_env,
             &mut failed_let_names,
             &declared_signatures,
@@ -1324,7 +1325,7 @@ pub(super) fn resolve_arg_precision_through_subst(
 
 pub(super) fn validate_ir_expr(
     expr: &deep::Expr,
-    type_env: &IrTypeEnv,
+    type_env: &ShapeTypeEnv,
     static_env: &mut UnordMap<String, StaticValue>,
     failed_let_names: &mut UnordSet<String>,
     declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
@@ -2047,8 +2048,8 @@ pub(super) fn expr_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<
 
 pub(super) fn extend_ir_env_with_fn_params(
     fn_list: &deep::List,
-    type_env: &IrTypeEnv,
-) -> IrTypeEnv {
+    type_env: &ShapeTypeEnv,
+) -> ShapeTypeEnv {
     let mut scoped = type_env.clone();
     let Some(params_expr) = children(fn_list).first() else {
         return scoped;
@@ -2089,12 +2090,12 @@ pub(super) fn extend_ir_env_with_fn_params(
         let Some((_, ty)) = meta.entries.iter().find(|(k, _)| k == "type") else {
             continue;
         };
-        scoped.insert(name.to_string(), ty.clone());
+        scoped.insert(name.to_string(), ShapeTypeFact::Exact(ty.clone()));
     }
     scoped
 }
 
-pub(super) fn expr_tensor_type_is_concrete(expr: &deep::Expr, type_env: &IrTypeEnv) -> bool {
+pub(super) fn expr_tensor_type_is_concrete(expr: &deep::Expr, type_env: &ShapeTypeEnv) -> bool {
     // Peel `(borrow {} ...)` so the idiomatic Surf borrow form does
     // not silently bypass the dim-concreteness check.
     arg_tensor_type_expr(expr, type_env)
@@ -2115,7 +2116,7 @@ pub(super) fn expr_tensor_type_is_concrete(expr: &deep::Expr, type_env: &IrTypeE
 /// non-concrete axis other than 0.
 pub(super) fn conv2d_input_dims_concrete_modulo_batch(
     expr: Option<&deep::Expr>,
-    type_env: &IrTypeEnv,
+    type_env: &ShapeTypeEnv,
 ) -> bool {
     let Some(expr) = expr else {
         return false;
@@ -2140,7 +2141,7 @@ pub(super) fn conv2d_input_dims_concrete_modulo_batch(
 pub(super) fn validate_ir_builtin_symbolic_requirements(
     list: &deep::List,
     func_name: &str,
-    type_env: &IrTypeEnv,
+    type_env: &ShapeTypeEnv,
     static_env: &UnordMap<String, StaticValue>,
     failed_let_names: &UnordSet<String>,
     errors: &mut DiagnosticSink<'_>,
@@ -2291,7 +2292,7 @@ pub(super) fn parse_span_offset(span_id: &str) -> Option<usize> {
 /// input/kernel and positive-stride / non-negative-padding.
 pub(super) fn validate_conv2d_symbolic_requirements(
     list: &deep::List,
-    type_env: &IrTypeEnv,
+    type_env: &ShapeTypeEnv,
     failed_let_names: &UnordSet<String>,
     errors: &mut DiagnosticSink<'_>,
 ) {
@@ -2543,9 +2544,9 @@ pub(super) fn conv2d_output_extent(
 /// case the validator's own arm will report the diagnostic).
 pub(super) fn derive_ir_builtin_output_type(
     expr: &deep::Expr,
-    type_env: &IrTypeEnv,
+    type_env: &ShapeTypeEnv,
     static_env: &UnordMap<String, StaticValue>,
-) -> Option<deep::Expr> {
+) -> Option<ShapeTypeFact> {
     // chelis#1107 amendment: carrier-preserving entry. The `derive_*` helpers
     // below take `&deep::List`, so bridge a stamped Node once here.
     let mut bridge = None;
@@ -2555,7 +2556,7 @@ pub(super) fn derive_ir_builtin_output_type(
     }
     let func_name = active_ir_builtin_name(list, static_env)?;
     match func_name {
-        "conv2d" => derive_conv2d_output_type(list, type_env),
+        "conv2d" => derive_conv2d_output_type(list, type_env).map(ShapeTypeFact::Exact),
         "stride" => derive_movement_rank_output_type(list, type_env, static_env, 0),
         "expand" => derive_movement_rank_output_type(list, type_env, static_env, 1),
         // softmax takes a (tensor, axis) tuple but its output shape
@@ -2580,9 +2581,9 @@ pub(super) fn derive_ir_builtin_output_type(
 /// borrow wrapper as usual (RT-205 round-2 F2).
 pub(super) fn derive_unary_shape_passthrough(
     list: &deep::List,
-    type_env: &IrTypeEnv,
+    type_env: &ShapeTypeEnv,
     static_env: &UnordMap<String, StaticValue>,
-) -> Option<deep::Expr> {
+) -> Option<ShapeTypeFact> {
     let arg = list.elements.get(3)?;
     resolve_let_value_tensor_rank_type(arg, type_env, static_env)
 }
@@ -2596,9 +2597,9 @@ pub(super) fn derive_unary_shape_passthrough(
 /// validator arm.
 pub(super) fn derive_identity_shape_passthrough(
     list: &deep::List,
-    type_env: &IrTypeEnv,
+    type_env: &ShapeTypeEnv,
     static_env: &UnordMap<String, StaticValue>,
-) -> Option<deep::Expr> {
+) -> Option<ShapeTypeFact> {
     list.elements
         .iter()
         .skip(3)
@@ -2612,16 +2613,14 @@ pub(super) fn derive_identity_shape_passthrough(
 /// producers must carry the still-proved rank to their own consumers.
 fn resolve_let_value_tensor_rank_type(
     expr: &deep::Expr,
-    type_env: &IrTypeEnv,
+    type_env: &ShapeTypeEnv,
     static_env: &UnordMap<String, StaticValue>,
-) -> Option<deep::Expr> {
-    if let Some(ty) = arg_tensor_rank_type_expr(expr, type_env, static_env) {
-        return Some(ty);
-    }
+) -> Option<ShapeTypeFact> {
     // Peek through borrow before recursing in case a wrapper op
     // appears under an `&` borrow (uncommon but cheap).
     let inner = peel_borrow(expr);
     derive_ir_builtin_output_type(inner, type_env, static_env)
+        .or_else(|| expr_shape_type_fact(inner, type_env))
 }
 
 /// Derive a conv2d call's output tensor type (rank-4 `[N, F, outH, outW]`
@@ -2638,7 +2637,7 @@ fn resolve_let_value_tensor_rank_type(
 /// conv2d calls resolve `&y` to the symbolic-batch type.
 pub(super) fn derive_conv2d_output_type(
     list: &deep::List,
-    type_env: &IrTypeEnv,
+    type_env: &ShapeTypeEnv,
 ) -> Option<deep::Expr> {
     let input_ty = list
         .elements
@@ -2830,7 +2829,7 @@ pub(super) fn extract_typed_scalar_literal(
 
 pub(super) fn ir_builtin_axis_dim(
     list: &deep::List,
-    type_env: &IrTypeEnv,
+    type_env: &ShapeTypeEnv,
     tensor_arg_index: usize,
     axis_arg_index: usize,
 ) -> Option<DeepDimKind> {

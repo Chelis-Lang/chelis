@@ -248,3 +248,19 @@ out = apply(lift, to_tensor([1.0, 2.0, 3.0, 4.0]))\n";
     assert_eq!(report["score"], 1, "clean control must score perfectly");
     assert_eq!(report["errors"], serde_json::json!([]));
 }
+
+#[test]
+fn authored_rank_only_prefix_dimension_is_not_internal_validator_state() {
+    let source = "module Repro.AuthoredRankName\n\
+def convolve(\n\
+  x: tensor[__chelis_rank_only_axis_0, 3, 8, 8, f32],\n\
+  k: tensor[8, 3, 3, 3, f32],\n\
+) -> tensor[__chelis_rank_only_axis_0, 8, 6, 6, f32] = conv2d(&x, &k, 1i32, 0)\n";
+    let (status, report) = check(source);
+    assert!(
+        status.success(),
+        "a legal authored dimension name must not alias private rank facts: {report}"
+    );
+    assert_eq!(report["score"], 1, "clean control must score perfectly");
+    assert_eq!(report["errors"], serde_json::json!([]));
+}

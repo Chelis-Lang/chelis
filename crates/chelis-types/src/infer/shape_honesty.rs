@@ -1,10 +1,45 @@
 //! Rank-only type facts used by the post-inference shape validator.
 
-use super::validate::{
-    derive_ir_builtin_output_type, expr_type_expr, node_expr, tensor_precision_expr,
-    validator_error,
-};
+use super::validate::{derive_ir_builtin_output_type, validator_error};
 use super::*;
+
+/// Validator-private shape knowledge.
+///
+/// Rank-only facts are deliberately not encoded as Deep dimension syntax.
+/// Authored programs can spell every legal `d-name`, so any string sentinel
+/// in a `t-tensor` is forgeable and can make an exact-shape consumer mistake
+/// source syntax for internal state. This Rust enum is constructed only by
+/// the validator and cannot cross the source/Deep boundary.
+#[derive(Debug, Clone)]
+pub(super) enum ShapeTypeFact {
+    Exact(deep::Expr),
+    RankOnly { rank: usize },
+}
+
+impl ShapeTypeFact {
+    fn exact_expr(&self) -> Option<&deep::Expr> {
+        match self {
+            Self::Exact(expr) => Some(expr),
+            Self::RankOnly { .. } => None,
+        }
+    }
+
+    fn tensor_rank(&self) -> Option<usize> {
+        match self {
+            Self::Exact(expr) => tensor_dims_from_type_expr(expr).map(|dims| dims.len()),
+            Self::RankOnly { rank } => Some(*rank),
+        }
+    }
+}
+
+pub(super) type ShapeTypeEnv = HashMap<String, ShapeTypeFact>;
+
+pub(super) fn shape_type_env(type_env: &IrTypeEnv) -> ShapeTypeEnv {
+    type_env
+        .iter()
+        .map(|(name, ty)| (name.clone(), ShapeTypeFact::Exact(ty.clone())))
+        .collect()
+}
 
 /// Bind a Surf function's parameter names to the standalone `defsig`
 /// parameter types visible in the same validation unit. Surf deliberately
@@ -14,8 +49,8 @@ use super::*;
 pub(super) fn extend_ir_env_with_declared_fn_params(
     fn_expr: &deep::Expr,
     parameter_types: &[deep::Expr],
-    type_env: &IrTypeEnv,
-) -> IrTypeEnv {
+    type_env: &ShapeTypeEnv,
+) -> ShapeTypeEnv {
     let mut scoped = type_env.clone();
     let Some((DeepTag::Fn, _, fn_children)) = stamped_parts(fn_expr) else {
         return scoped;
@@ -28,7 +63,7 @@ pub(super) fn extend_ir_env_with_declared_fn_params(
     };
     for (param, parameter_type) in params.iter().zip(parameter_types) {
         if let Some(name) = param_name_for_refs(param) {
-            scoped.insert(name, parameter_type.clone());
+            scoped.insert(name, ShapeTypeFact::Exact(parameter_type.clone()));
         }
     }
     scoped
@@ -47,19 +82,15 @@ pub(super) fn extend_ir_env_with_declared_fn_params(
 pub(super) fn validate_identity_builtin_rank_requirements(
     list: &deep::List,
     func_name: &str,
-    type_env: &IrTypeEnv,
+    type_env: &ShapeTypeEnv,
     static_env: &HashMap<String, StaticValue>,
     errors: &mut DiagnosticSink<'_>,
 ) {
     let mut expected_rank: Option<usize> = None;
     for argument in list.elements.iter().skip(3) {
-        let Some(dims) = arg_tensor_rank_type_expr(argument, type_env, static_env)
-            .as_ref()
-            .and_then(tensor_dims_from_type_expr)
-        else {
+        let Some(rank) = arg_tensor_rank(argument, type_env, static_env) else {
             continue;
         };
-        let rank = dims.len();
         if rank == 0 {
             continue;
         }
@@ -91,45 +122,38 @@ pub(super) fn validate_identity_builtin_rank_requirements(
 /// validator has proved.
 pub(super) fn derive_movement_rank_output_type(
     list: &deep::List,
-    type_env: &IrTypeEnv,
+    type_env: &ShapeTypeEnv,
     static_env: &HashMap<String, StaticValue>,
     added_axes: usize,
-) -> Option<deep::Expr> {
-    let input_ty = list
+) -> Option<ShapeTypeFact> {
+    let input_rank = list
         .elements
         .get(3)
-        .and_then(|argument| arg_tensor_rank_type_expr(argument, type_env, static_env))?;
-    let input_rank = tensor_dims_from_type_expr(&input_ty)?.len();
-    let precision = tensor_precision_expr(&input_ty)?;
-    let mut children = (0..input_rank.checked_add(added_axes)?)
-        .map(|axis| {
-            node_expr(
-                DeepTag::DName,
-                vec![symbol_expr(&format!("__chelis_rank_only_axis_{axis}"))],
-            )
-        })
-        .collect::<Vec<_>>();
-    children.push(precision);
-    Some(node_expr(DeepTag::TTensor, children))
+        .and_then(|argument| arg_tensor_rank(argument, type_env, static_env))?;
+    Some(ShapeTypeFact::RankOnly {
+        rank: input_rank.checked_add(added_axes)?,
+    })
 }
 
 /// Resolve the tensor type expression of a callsite argument, peeking through
 /// a `(borrow {} <inner>)` wrapper if present.
-pub(super) fn arg_tensor_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<deep::Expr> {
+pub(super) fn arg_tensor_type_expr(
+    expr: &deep::Expr,
+    type_env: &ShapeTypeEnv,
+) -> Option<deep::Expr> {
     let inner = peel_borrow(expr);
-    let ty = expr_type_expr(inner, type_env)?;
-    (!type_expr_is_rank_only(&ty)).then_some(ty)
+    expr_shape_type_fact(inner, type_env)?.exact_expr().cloned()
 }
 
-/// Resolve a tensor type for rank comparison, including validator-internal
+/// Resolve a tensor rank for comparison, including validator-private
 /// rank-only facts. Exact-shape validators deliberately use
-/// `arg_tensor_type_expr` instead, so a synthetic rank never masquerades as a
+/// `arg_tensor_type_expr` instead, so a rank fact never masquerades as a
 /// proved symbolic extent.
-pub(super) fn arg_tensor_rank_type_expr(
+pub(super) fn arg_tensor_rank(
     expr: &deep::Expr,
-    type_env: &IrTypeEnv,
+    type_env: &ShapeTypeEnv,
     static_env: &HashMap<String, StaticValue>,
-) -> Option<deep::Expr> {
+) -> Option<usize> {
     let inner = peel_borrow(expr);
     // An inline identity application can carry a stamped wildcard tensor
     // type even when its operands prove a concrete rank. Prefer structural
@@ -137,28 +161,43 @@ pub(super) fn arg_tensor_rank_type_expr(
     // is the same resolver used for let-bound values, so introducing or
     // removing a binding cannot change rank-honesty validation (chelis#668).
     derive_ir_builtin_output_type(inner, type_env, static_env)
-        .or_else(|| expr_type_expr(inner, type_env))
+        .or_else(|| expr_shape_type_fact(inner, type_env))
+        .and_then(|fact| fact.tensor_rank())
 }
 
-pub(super) fn type_expr_is_rank_only(expr: &deep::Expr) -> bool {
-    let Some((tag, _, kids)) = stamped_parts(expr) else {
-        return false;
-    };
-    if tag == DeepTag::TRef {
-        return kids.first().is_some_and(type_expr_is_rank_only);
+pub(super) fn expr_shape_type_fact(
+    expr: &deep::Expr,
+    type_env: &ShapeTypeEnv,
+) -> Option<ShapeTypeFact> {
+    stack_guard!("expr_shape_type_fact", expr, None);
+    match expr {
+        deep::Expr::Node(node, _) => {
+            if let Some((_, ty)) = node.meta().entries.iter().find(|(key, _)| key == "type") {
+                return Some(ShapeTypeFact::Exact(ty.clone()));
+            }
+            if node.tag() == DeepTag::Var
+                && let Some(name) = node.children_slice().first().and_then(symbol_name)
+            {
+                return type_env.get(name).cloned();
+            }
+            None
+        }
+        deep::Expr::List(list, _) => {
+            if let Some(meta) = get_meta(list)
+                && let Some((_, ty)) = meta.entries.iter().find(|(key, _)| key == "type")
+            {
+                return Some(ShapeTypeFact::Exact(ty.clone()));
+            }
+            if get_tag(list) == Some(DeepTag::Var)
+                && let Some(name) = children(list).first().and_then(symbol_name)
+            {
+                return type_env.get(name).cloned();
+            }
+            None
+        }
+        deep::Expr::MetaExpr(meta, _) => expr_shape_type_fact(&meta.expr, type_env),
+        _ => None,
     }
-    if tag != DeepTag::TTensor || kids.is_empty() {
-        return false;
-    }
-    kids[..kids.len() - 1].iter().any(|dim| {
-        let Some((DeepTag::DName, _, name_parts)) = stamped_parts(dim) else {
-            return false;
-        };
-        name_parts
-            .first()
-            .and_then(symbol_name)
-            .is_some_and(|name| name.starts_with("__chelis_rank_only_axis_"))
-    })
 }
 
 pub(super) fn peel_borrow(expr: &deep::Expr) -> &deep::Expr {

@@ -1283,12 +1283,12 @@ PP5 closes the class at two boundaries:
 1. The validator collects each check unit's declared signatures explicitly
    and binds their parameter types only inside the matching function. This is
    unit-local data, never global ambient signature state.
-2. `stride` and `expand` let-bindings preserve only the rank and precision the
-   validator can prove. Their synthesized dimension entries stay
-   non-concrete and are marked as rank-only facts. Exact-shape validators do
-   not consume those facts, so the checker neither copies nor invents runtime
-   extents and a symbolic movement result cannot masquerade as a proved
-   concrete shape.
+2. `stride` and `expand` let-bindings preserve only the rank the validator can
+   prove in a private Rust `ShapeTypeFact::RankOnly` carrier. Rank facts have
+   no Deep-syntax representation: an authored dimension name can never alias
+   validator state. Exact-shape validators consume only the enum's `Exact`
+   variant, so the checker neither copies nor invents runtime extents and a
+   symbolic movement result cannot masquerade as a proved concrete shape.
 3. Every builtin classified centrally as `ShapeClass::Identity` enters one
    rank validator. Two tensor operands with different positive ranks produce
    a located `DimensionMismatch`, make `check` exit nonzero, and force
