@@ -514,11 +514,14 @@ has its complete type inspected, and every cursor exposing a callable result has
 that result inspected independently. This covers declarations such as
 Objective-C ivars, C++ type aliases, and non-type template parameters without
 teaching the inventory their individual cursor kinds; numeric carrier
-expressions likewise do not depend on an enumerated cast-kind list. An invalid
-or unsupported main-file cursor is an oracle failure. Structurally identical
-hits retain occurrence ordinals so a repeated expression cannot disappear
-through set deduplication, while compiler source offsets stay outside the
-identity so formatting-only line movement does not churn the frozen ledger.
+expressions likewise do not depend on an enumerated cast-kind list. Width
+operations project from every valid main-file cursor because libclang does not
+categorize every version-specific width cursor as an expression; they therefore
+have no declaration, expression, or unary-kind admission gate. An invalid or
+unsupported main-file cursor is an oracle failure. Structurally identical hits
+retain occurrence ordinals so a repeated expression cannot disappear through
+set deduplication, while compiler source offsets stay outside the identity so
+formatting-only line movement does not churn the frozen ledger.
 
 Typedefs (including aggregate definitions) and object-like or function-like
 type macros are collected from every tracked C-family source as a conservative

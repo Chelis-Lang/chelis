@@ -614,6 +614,41 @@ static size_t widths(float *payload, size_t index) {
 }
 
 #[test]
+fn every_compiler_expression_category_can_expose_width_arithmetic() {
+    let source = r#"
+template<typename... Ts>
+static size_t pack_width(void) {
+    return sizeof...(Ts);
+}
+"#;
+    let rows = scan_c_source(source, "fixture").expect("valid C++17 pack width parses");
+    let widths = signatures(&rows, "width-arithmetic");
+    assert_eq!(widths.len(), 1, "sizeof-pack disappeared: {rows:#?}");
+    assert!(
+        widths[0].contains("sizeof ... ( Ts )"),
+        "sizeof-pack identity lost its authored structure: {rows:#?}"
+    );
+}
+
+#[test]
+fn non_width_parameter_pack_expressions_remain_nonnumeric() {
+    let source = r#"
+template<typename... Ts>
+static void sink(Ts...);
+
+template<typename... Ts>
+static void forward(Ts... values) {
+    sink(values...);
+}
+"#;
+    let rows = scan_c_source(source, "fixture").expect("valid C++17 pack expansion parses");
+    assert!(
+        signatures(&rows, "width-arithmetic").is_empty(),
+        "ordinary pack expansion was misclassified as width arithmetic: {rows:#?}"
+    );
+}
+
+#[test]
 fn the_compiler_prelude_supports_the_c_dialect() {
     let rows = scan_c_source_at_path(
         "static size_t widths(float values[4]) { return sizeof(values[0]); }",
@@ -738,6 +773,23 @@ fn emitted(ty: &str) -> String {
     let widths = signatures(&rows, "width-arithmetic");
     assert_eq!(widths.len(), 1);
     assert!(widths[0].contains("format-hole:ty"));
+}
+
+#[test]
+fn rust_emitted_widths_use_the_same_category_total_projection() {
+    let source = r##"
+fn emitted() -> &'static str {
+    r#"template<typename... Ts>
+static size_t pack_width(void) { return sizeof...(Ts); }"#
+}
+"##;
+    let rows = scan_rust_source(source).expect("Rust-emitted C++17 pack width parses");
+    let widths = signatures(&rows, "width-arithmetic");
+    assert_eq!(
+        widths.len(),
+        1,
+        "Rust emission silently bypassed the compiler projection: {rows:#?}"
+    );
 }
 
 #[test]

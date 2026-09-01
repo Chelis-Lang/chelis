@@ -375,12 +375,10 @@ fn lex_c_tokens(source: &str) -> Vec<String> {
             tokens.push(token);
             continue;
         }
-        if current.is_ascii_alphanumeric() || current == '_' || current == '.' {
+        if current.is_ascii_alphabetic() || current == '_' {
             let mut token = String::new();
             while index < chars.len()
-                && (chars[index].is_ascii_alphanumeric()
-                    || chars[index] == '_'
-                    || chars[index] == '.')
+                && (chars[index].is_ascii_alphanumeric() || chars[index] == '_')
             {
                 token.push(chars[index]);
                 index += 1;
@@ -395,6 +393,21 @@ fn lex_c_tokens(source: &str) -> Vec<String> {
         if index + 2 < chars.len() && chars[index..index + 3] == ['.', '.', '.'] {
             tokens.push("...".to_string());
             index += 3;
+            continue;
+        }
+        if current.is_ascii_digit()
+            || (current == '.' && chars.get(index + 1).is_some_and(char::is_ascii_digit))
+        {
+            let mut token = String::new();
+            while index < chars.len()
+                && (chars[index].is_ascii_alphanumeric()
+                    || chars[index] == '_'
+                    || chars[index] == '.')
+            {
+                token.push(chars[index]);
+                index += 1;
+            }
+            tokens.push(token);
             continue;
         }
         if index + 1 < chars.len() {
@@ -2054,14 +2067,47 @@ fn structural_owner_path(entity: Entity<'_>, source_owner: &str) -> Option<Strin
     }
 }
 
-fn walk_compiler_ast(
+fn width_arithmetic_row(
+    entity: Entity<'_>,
+    owner: &str,
+    authored_context: Option<&str>,
+) -> Option<CarrierUse> {
+    let spelling = declaration_tokens(entity);
+    let spelling_tokens = tokens(&spelling);
+    if spelling_tokens.first().map(String::as_str) != Some("sizeof") {
+        return None;
+    }
+    let (shape, open) = if spelling_tokens.get(1).map(String::as_str) == Some("...") {
+        ("sizeof-pack", 2)
+    } else if spelling_tokens.get(1).map(String::as_str) == Some("(") {
+        ("sizeof", 1)
+    } else {
+        return None;
+    };
+    if matching_close(&spelling_tokens, open, "(", ")").ok()? + 1 != spelling_tokens.len() {
+        return None;
+    }
+    let emitted = authored_context
+        .map(|context| format!(";emitted={}", emitted_context_identity(context)))
+        .unwrap_or_default();
+    Some(CarrierUse {
+        kind: "width-arithmetic".to_string(),
+        owner: owner.to_string(),
+        signature: format!(
+            "shape={shape};resolved={};declaration={spelling}{emitted}{INTERNAL_SOURCE_RANGE_MARKER}{}",
+            sizeof_resolved_type(&spelling),
+            internal_source_range(entity),
+        ),
+    })
+}
+
+fn project_compiler_entity(
     entity: Entity<'_>,
     source_owner: &str,
     owner: &str,
     source: &str,
     authored_context: Option<&str>,
-    rows: &mut Vec<CarrierUse>,
-) -> Result<(), ScanError> {
+) -> Result<(String, Vec<CarrierUse>), ScanError> {
     let in_main_file = entity
         .get_location()
         .is_some_and(|location| location.is_in_main_file());
@@ -2085,6 +2131,7 @@ fn walk_compiler_ast(
     } else {
         owner.to_string()
     };
+    let mut rows = Vec::new();
 
     if in_main_file
         && (entity.is_declaration() || entity.is_expression())
@@ -2116,27 +2163,25 @@ fn walk_compiler_ast(
     }
 
     if in_main_file
-        && matches!(
-            entity.get_kind(),
-            EntityKind::UnaryExpr | EntityKind::UnexposedExpr
-        )
+        && let Some(row) = width_arithmetic_row(entity, &structural_owner, authored_context)
     {
-        let spelling = declaration_tokens(entity);
-        if spelling.split_whitespace().next() == Some("sizeof") {
-            let emitted = authored_context
-                .map(|context| format!(";emitted={}", emitted_context_identity(context)))
-                .unwrap_or_default();
-            rows.push(CarrierUse {
-                kind: "width-arithmetic".to_string(),
-                owner: structural_owner.clone(),
-                signature: format!(
-                    "shape=sizeof;resolved={};declaration={spelling}{emitted}{INTERNAL_SOURCE_RANGE_MARKER}{}",
-                    sizeof_resolved_type(&spelling),
-                    internal_source_range(entity),
-                ),
-            });
-        }
+        rows.push(row);
     }
+
+    Ok((structural_owner, rows))
+}
+
+fn walk_compiler_ast(
+    entity: Entity<'_>,
+    source_owner: &str,
+    owner: &str,
+    source: &str,
+    authored_context: Option<&str>,
+    rows: &mut Vec<CarrierUse>,
+) -> Result<(), ScanError> {
+    let (structural_owner, entity_rows) =
+        project_compiler_entity(entity, source_owner, owner, source, authored_context)?;
+    rows.extend(entity_rows);
 
     for child in entity.get_children() {
         walk_compiler_ast(
@@ -2387,8 +2432,14 @@ pub fn scan_c_source_at_path(
 }
 
 fn scan_c_fragment(source: &str, owner: &str) -> Result<Vec<CarrierUse>, ScanError> {
+    let source_tokens = tokens(source);
+    if !has_candidate_anchor(&source_tokens) {
+        return Ok(Vec::new());
+    }
     match scan_source_tokens(source, owner, false, None) {
-        Ok(rows) if rows.is_empty() => return Ok(Vec::new()),
+        Ok(rows) if rows.is_empty() && !source_tokens.iter().any(|token| token == "sizeof") => {
+            return Ok(Vec::new());
+        }
         Ok(_) => {}
         Err(error)
             if matches!(
@@ -2400,7 +2451,7 @@ fn scan_c_fragment(source: &str, owner: &str) -> Result<Vec<CarrierUse>, ScanErr
         }
         Err(_) => {}
     }
-    let mut balanced = source.to_string();
+    let mut top_level = source.to_string();
     let open_braces =
         tokens(source)
             .into_iter()
@@ -2410,12 +2461,22 @@ fn scan_c_fragment(source: &str, owner: &str) -> Result<Vec<CarrierUse>, ScanErr
                 _ => depth,
             });
     if open_braces > 0 {
-        balanced.push_str(&"}".repeat(open_braces as usize));
-    } else {
-        balanced = format!("void __chelis_surface_fragment(void) {{ {balanced}; }}");
+        top_level.push_str(&"}".repeat(open_braces as usize));
     }
+    if let Ok(rows) = compiler_scan(
+        &top_level,
+        owner,
+        Path::new("emitted.cpp"),
+        Some(source),
+        false,
+        None,
+    ) && !rows.is_empty()
+    {
+        return Ok(rows);
+    }
+    let wrapped = format!("void __chelis_surface_fragment(void) {{ {source}; }}");
     compiler_scan(
-        &balanced,
+        &wrapped,
         owner,
         Path::new("emitted.cpp"),
         Some(source),
@@ -2425,8 +2486,14 @@ fn scan_c_fragment(source: &str, owner: &str) -> Result<Vec<CarrierUse>, ScanErr
 }
 
 fn scan_c_format_fragment(source: &str, owner: &str) -> Result<Vec<CarrierUse>, ScanError> {
+    let source_tokens = tokens(source);
+    if !has_candidate_anchor(&source_tokens) {
+        return Ok(Vec::new());
+    }
     match scan_source_tokens(source, owner, false, None) {
-        Ok(rows) if rows.is_empty() => return Ok(Vec::new()),
+        Ok(rows) if rows.is_empty() && !source_tokens.iter().any(|token| token == "sizeof") => {
+            return Ok(Vec::new());
+        }
         Err(error) if error.kind == ScanErrorKind::IncompleteFragment => return Err(error),
         Ok(_) | Err(_) => {}
     }

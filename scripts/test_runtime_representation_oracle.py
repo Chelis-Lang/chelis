@@ -308,6 +308,14 @@ class MutationContractTests(unittest.TestCase):
         )
         self.assertIn(
             (
+                "width-arithmetic",
+                "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
+                "mutate_cxx_sizeof_pack_width_authority",
+            ),
+            probes,
+        )
+        self.assertIn(
+            (
                 "descriptor-field",
                 "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
                 "mutate_descriptor_field",

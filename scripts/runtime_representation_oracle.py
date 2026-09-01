@@ -33,7 +33,7 @@ DTYPE_MUTATION_SOURCE = Path("crates/chelis-vocab/src/lib.rs")
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "221f337c6c0c6668bbafeec7ea023ad5c60b43d7169b3a03b40f49f8ada225d0"
+FREEZE_SHA256 = "0a98b50c7257e7354ec4232f0f9098e85ceaf3e6fb24f87629b24971a1c573fb"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -832,6 +832,16 @@ def mutate_c_sizeof_width_authority(source: str) -> str:
     )
 
 
+def mutate_cxx_sizeof_pack_width_authority(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_cxx_sizeof_pack",
+        "template<typename... Ts> "
+        "static size_t runtime_representation_phase0_cxx_sizeof_pack(void) "
+        "{ return sizeof...(Ts); }",
+    )
+
+
 def mutate_c_const_after_element_pointer(source: str) -> str:
     return _append_probe(
         source,
@@ -1145,6 +1155,11 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
             "width-arithmetic",
             Path("crates/chelis-backend-metal/runtime/chelis_metal_runtime.h"),
             mutate_c_sizeof_width_authority,
+        ),
+        MutationProbe(
+            "width-arithmetic",
+            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
+            mutate_cxx_sizeof_pack_width_authority,
         ),
         MutationProbe(
             "raw-element-pointer",

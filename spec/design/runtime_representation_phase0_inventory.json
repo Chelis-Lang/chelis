@@ -1882,6 +1882,9 @@
     "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_activation_helpers::x_mul|signature=b1c5cf0623556f869ff2|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_activation_helpers|signature=9ac37522a8802a6e71ad|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_json_canonical_object_helpers::order|signature=9b24c070d409bc44d095|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_scalar_conversion_helpers|signature=3dde8569c7e5c0ba1e6a|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_scalar_conversion_helpers|signature=5c8ed225a55453bd2074|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_scalar_conversion_helpers|signature=f385f271c5258e28deef|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_tensor_reshape_helper::shape|signature=c6d07ba4647dcb3853e6|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_tensor_reshape_helper::shape|signature=d6ea4f05986d361a520b|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=c_decl::chelis_dynamic_name|signature=42722c5e1af781d8be1d|occurrence=1",
@@ -2037,6 +2040,20 @@
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=fused_elementwise|signature=d9ce86d50f920d588419|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=fused_step_lines::chelis_dynamic_name|signature=a86ae805a12d2668be41|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=int_params|signature=0a20f9c1fff99f5736dc|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_flat_to_indices(int, const int *, int, int *)::out|signature=3a2c3c0b2727ba78e87a|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_flat_to_indices(int, const int *, int, int *)::shape|signature=d22ef3e6c9cd4cdc026b|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_flat_to_indices(int, const int *, int, int *)|signature=056e87d8ef9a0dffe3c5|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_flat_to_indices(int, const int *, int, int *)|signature=14b46362ad4f911afefb|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_flat_to_indices(int, const int *, int, int *)|signature=3f1df3b0ae9e430dcfa5|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_flat_to_indices(int, const int *, int, int *)|signature=918cea5aca8b32134b40|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_flat_to_indices(int, const int *, int, int *)|signature=95619f929ced4be3726b|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_flat_to_indices(int, const int *, int, int *)|signature=a78ec8620f3ec3ec13d9|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_indices_to_flat(const int *, const int *, int)::indices|signature=97b5b125b56c4126edbc|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_indices_to_flat(const int *, const int *, int)::strides|signature=41f73ee202962b752c00|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_indices_to_flat(const int *, const int *, int)|signature=1aef441f8de32ad51605|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_indices_to_flat(const int *, const int *, int)|signature=2b68b5d8e53975c9b2a3|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_indices_to_flat(const int *, const int *, int)|signature=2f5e813463c6f849f9b8|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_indices_to_flat(const int *, const int *, int)|signature=ec0fd399551897dca67f|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=reduce_fused::chelis_dynamic_name|signature=e114e9b4a2b7af5048cf|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=reduce_fused::out|signature=2b0091d178c3aa6fe66a|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=reduce_fused|signature=49df028f14a1d50293f3|occurrence=1",
@@ -2313,6 +2330,7 @@
     "kind=raw-element-pointer|path=crates/chelis-runtime/src/lib.rs|owner=validate_data_contract|signature=e6756ceb784e96f7174d|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/src/lib.rs|owner=where_copy|signature=0b50b731bd67c1e6c4de|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/src/lib.rs|owner=write_scalar_bits|signature=5ba0cffde3020e6c9b12|occurrence=1",
+    "kind=width-arithmetic|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_size_expr|signature=0c4cd3642ba7cc2b6625|occurrence=1",
     "kind=width-arithmetic|path=crates/chelis-backend-c/src/emit.rs|owner=elem_size_expr|signature=b45664443064c8ef7ecf|occurrence=1",
     "kind=width-arithmetic|path=crates/chelis-backend-c/src/emit.rs|owner=emit_binary|signature=e20c39ce476c4d666bf6|occurrence=1",
     "kind=width-arithmetic|path=crates/chelis-backend-c/src/emit.rs|owner=emit_fused_in_place_wrapper|signature=08ee671d021d3fc19dd6|occurrence=1",
@@ -2646,6 +2664,17 @@
           "implementation_sha256": "42498db1571df12bce21a1fae4adc4484a3b0ee0cc3ffde21789109645e346f1",
           "path": "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
           "witness_id": "phase0.mutate_c_sizeof_width_authority"
+        },
+        {
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+          "expected_failure": {
+            "code": "inventory.unclassified",
+            "reason_prefix": "unclassified inventory hit"
+          },
+          "expected_kind": "width-arithmetic",
+          "implementation_sha256": "2ddcfb13a97830a0f4445a1751b7a3983c29616bf7a7b397116c9c25a186eb06",
+          "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
+          "witness_id": "phase0.mutate_cxx_sizeof_pack_width_authority"
         },
         {
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
@@ -10445,6 +10474,18 @@
     },
     {
       "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_scalar_conversion_helpers|signature=3dde8569c7e5c0ba1e6a|occurrence=1"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_scalar_conversion_helpers|signature=5c8ed225a55453bd2074|occurrence=1"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_scalar_conversion_helpers|signature=f385f271c5258e28deef|occurrence=1"
+    },
+    {
+      "deletion_phase": 4,
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_tensor_reshape_helper::shape|signature=c6d07ba4647dcb3853e6|occurrence=1"
     },
     {
@@ -11062,6 +11103,62 @@
     {
       "deletion_phase": 4,
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=int_params|signature=0a20f9c1fff99f5736dc|occurrence=1"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_flat_to_indices(int, const int *, int, int *)::out|signature=3a2c3c0b2727ba78e87a|occurrence=1"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_flat_to_indices(int, const int *, int, int *)::shape|signature=d22ef3e6c9cd4cdc026b|occurrence=1"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_flat_to_indices(int, const int *, int, int *)|signature=056e87d8ef9a0dffe3c5|occurrence=1"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_flat_to_indices(int, const int *, int, int *)|signature=14b46362ad4f911afefb|occurrence=1"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_flat_to_indices(int, const int *, int, int *)|signature=3f1df3b0ae9e430dcfa5|occurrence=1"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_flat_to_indices(int, const int *, int, int *)|signature=918cea5aca8b32134b40|occurrence=1"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_flat_to_indices(int, const int *, int, int *)|signature=95619f929ced4be3726b|occurrence=1"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_flat_to_indices(int, const int *, int, int *)|signature=a78ec8620f3ec3ec13d9|occurrence=1"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_indices_to_flat(const int *, const int *, int)::indices|signature=97b5b125b56c4126edbc|occurrence=1"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_indices_to_flat(const int *, const int *, int)::strides|signature=41f73ee202962b752c00|occurrence=1"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_indices_to_flat(const int *, const int *, int)|signature=1aef441f8de32ad51605|occurrence=1"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_indices_to_flat(const int *, const int *, int)|signature=2b68b5d8e53975c9b2a3|occurrence=1"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_indices_to_flat(const int *, const int *, int)|signature=2f5e813463c6f849f9b8|occurrence=1"
+    },
+    {
+      "deletion_phase": 4,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/src/kernels.rs|owner=module::chelis_indices_to_flat(const int *, const int *, int)|signature=ec0fd399551897dca67f|occurrence=1"
     },
     {
       "deletion_phase": 4,
@@ -12169,6 +12266,10 @@
     },
     {
       "deletion_phase": 1,
+      "identity": "kind=width-arithmetic|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_size_expr|signature=0c4cd3642ba7cc2b6625|occurrence=1"
+    },
+    {
+      "deletion_phase": 1,
       "identity": "kind=width-arithmetic|path=crates/chelis-backend-c/src/emit.rs|owner=elem_size_expr|signature=b45664443064c8ef7ecf|occurrence=1"
     },
     {
@@ -12772,6 +12873,6 @@
       "identity": "kind=width-arithmetic|path=crates/chelis-vocab/src/lib.rs|owner=byte_width|signature=c5366b92e40f3eadb6cd|occurrence=1"
     }
   ],
-  "freeze_sha256": "221f337c6c0c6668bbafeec7ea023ad5c60b43d7169b3a03b40f49f8ada225d0",
+  "freeze_sha256": "0a98b50c7257e7354ec4232f0f9098e85ceaf3e6fb24f87629b24971a1c573fb",
   "schema_version": 3
 }
