@@ -1,8 +1,8 @@
 # Runtime Representation and Tensor-Access Safety
 
-**Status:** PROPOSED. This document specifies the complete implementation plan;
-no phase is implemented by this change. Tracking issue: [#893]. Code evidence was
-rechecked on `main` at `8190b6d8` unless a later receipt is named.
+**Status:** ACTIVE. Phase 0 is implemented and continuously enforced by its
+authoritative oracle; Phases 1-5 remain planned. Tracking issue: [#893]. Code
+evidence was rechecked on `main` at `8190b6d8` unless a later receipt is named.
 **Owning specs:** `spec/04-type-system.md` [04-NUM-4], [04-NUM-8],
 [04-NUM-10], [04-NUM-11], and [04-SHAPE-1], plus
 `spec/05-risc-primitives.md` [05-DIM-1], [05-DIM-2], [05-OP-31], and
@@ -475,10 +475,45 @@ or a final authority class.
 Anything neither final nor an unchanged frozen debt identity fails. The
 inventory includes descriptor fields, `data` access, pointer casts,
 width/arithmetic matches, `normalized_key` arithmetic, fixed-rank arrays,
-narrow metadata fields, backend element spellings, and load/store templates.
+narrow metadata fields, backend element spellings, load/store templates, and
+the dtype contract itself: the `Repr` and `RuntimeDType` variants and the
+element bindings that tie a Rust marker to a runtime tag. A dtype added
+without its complete contract is the mutation this last enumerator exists to
+catch, so each variant and each binding is its own row.
 A final-form exception may name a private owner function and reason, but a
 stale or unmatched entry fails and an issue citation does not authorize a raw
 path.
+
+### The inventory's universe is a file list
+
+The inventory's completeness claim is over an explicit, reviewed list of the
+repository files that can carry a seam, held in the oracle as
+`INVENTORY_SOURCES`. The oracle proves that list still equals the on-disk
+contents of its declared roots, so a new file fails until someone registers it,
+and it reads the filesystem rather than the git index because cargo compiles
+what is on disk.
+
+Stating the claim over a *language* instead would not be dischargeable: a
+reviewer can always name one more construct, and the repository would be
+committed to modelling a C++ and Objective-C surface that no file in it uses.
+Stated over a file list it is decidable, and every source in it is read by a
+total parser for its own language: Rust with `syn`, and the plain C headers with
+the numeric capacity census's own token vocabulary. Sharing that vocabulary is
+deliberate; a second, independent C classifier beside the census would be a
+second authority for the same question, which B2 invariant 3 forbids.
+
+A row's identity is its kind, its path, and its owning declaration. Reformatting
+a literal inside a function does not move the freeze; adding a function, field,
+or dtype variant that carries a seam does. That is the granularity Phases 3 and
+4 delete at, since those phases remove declarations and call sites rather than
+individual bytes.
+
+The two backend runtime headers are inventoried here rather than through the
+capacity census. Their device carrier is a bare `float *data` with fixed-rank
+`int` metadata, which [#1288]'s ratchet gives no citation or override path:
+registering them as a census surface today would produce blocking rows that
+only Phase 2's migration onto the tagged carrier can clear. Phase 2 therefore
+owns adding that census leg, and its exit is not complete until it does.
 
 The oracle self-validates with temporary mutations that are restored before it
 returns:
@@ -491,12 +526,17 @@ returns:
 - replace exact product arithmetic with saturation;
 - add a fixed-rank device field or narrow one metadata field;
 - handwrite a second ABI field list;
+- register a source file's seam without registering the file;
+- use an arithmetic type spelling no vocabulary classifies;
 - change a Bool8 lane spelling to `float`; and
 - make a Bool8 kernel store `1.0f` or omit the device failure flag.
 
-Every mutation must make the relevant phase command fail for the intended
-reason. A source scan is the completeness guard; compile-fail and execution
-tests prove its sanctioned replacements work.
+Every mutation must plant a real seam of its class rather than a token pattern,
+and must make the phase command fail for its exact intended reason. A witness
+that only a pattern-matcher would catch proves nothing about a structural
+classifier. The same command also executes the scanner's own positive and
+negative suite. A source scan is the completeness guard; compile-fail and
+execution tests prove its sanctioned replacements work.
 
 ---
 
@@ -506,7 +546,14 @@ tests prove its sanctioned replacements work.
 
 - Phase 0 freezes the derived inventory, mutation set, current accepted/rejected
   behavior, and the exact issue-to-phase map. Later phases may reduce raw hits
-  but may not add an exception.
+  but may not add an exception. The digest binds one canonical object holding
+  both the immutable foundation rows and the executable coverage manifest
+  (enumerator, universe, identity rule, command, success condition, and mutation
+  set); the separately stored active-debt list sits outside that digest so it
+  can only shrink. Each mutation binds a stable witness ID, source path, exact
+  implementation digest, expected failure code and reason, and required command,
+  so a witness cannot be weakened while its manifest entry still claims the old
+  semantics.
 - Phase 1 freezes `DTypeContract`, sealed element markers, exact capacity keys,
   and checked finite-count types. Later phases consume them without parallel
   tables.
@@ -565,11 +612,14 @@ code-generation text test.
 ## Phase 0 — executable inventory and red controls
 
 **Delivers:** the derived inventory and exact shrink-only transition-debt
-manifest in C6; release-profile reproducers for exact capacity collision,
-count/byte overflow, zero extents, and malformed foreign metadata; detection
-mutations for a new direct field access and incomplete dtype registration;
-source-only and hardware probe harnesses; all landed receipts as positive
-controls.
+manifest in C6, over the frozen source list; a structural seam scanner with its
+own positive and negative suite; release-profile reproducers for exact capacity
+collision, count/byte overflow, zero extents, and malformed foreign metadata,
+including a planner-level [#888] witness that shows the collision reaching slot
+reuse rather than only key equality; one detection mutation per classifier plus
+fail-closed controls for an unregistered source file and an unclassified
+arithmetic spelling; source-only and hardware probe harnesses; all landed
+receipts as positive controls.
 
 The inventory records identities, not mutable line numbers. Each enumerator has
 a mutation that plants a new hit in a different file/configuration. HIP and
