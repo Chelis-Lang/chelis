@@ -394,8 +394,8 @@ def _nix_workflow_events(workflow: str) -> dict[str, dict[str, str]]:
     return events
 
 
-def _nix_job_top_level_keys(block: str) -> set[str]:
-    keys: set[str] = set()
+def _nix_job_top_level_entries(block: str) -> dict[str, str]:
+    entries: dict[str, str] = {}
     for line in block.splitlines()[1:]:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -403,13 +403,13 @@ def _nix_job_top_level_keys(block: str) -> set[str]:
         indent = len(line) - len(line.lstrip(" "))
         if indent != 4:
             continue
-        key, _value = _parse_simple_yaml_mapping_entry(
+        key, value = _parse_simple_yaml_mapping_entry(
             line, expected_indent=4
         )
-        if key in keys:
+        if key in entries:
             raise AssertionError(f"duplicate Nix job key {key!r}")
-        keys.add(key)
-    return keys
+        entries[key] = value
+    return entries
 
 
 def _assert_nix_intentional_events_only(workflow: str) -> None:
@@ -431,12 +431,41 @@ def _assert_nix_intentional_events_only(workflow: str) -> None:
             "the intentional-event-only Nix workflow must contain exactly its "
             f"two native jobs: found {sorted(blocks)!r}"
         )
+    expected_job_entries = {
+        "nix-linux-x86-64": {
+            "name": "Nix Packages (x86_64-linux)",
+            "runs-on": "ubuntu-latest",
+            "timeout-minutes": "120",
+            "env": "",
+            "defaults": "",
+            "steps": "",
+        },
+        "nix-darwin-arm64": {
+            "name": "Nix Packages (aarch64-darwin)",
+            "runs-on": "macos-latest",
+            "timeout-minutes": "120",
+            "env": "",
+            "defaults": "",
+            "steps": "",
+        },
+    }
     for job in sorted(expected_jobs):
-        gates = _nix_job_top_level_keys(blocks[job]) & {"if", "needs"}
-        if gates:
+        entries = _nix_job_top_level_entries(blocks[job])
+        if entries != expected_job_entries[job]:
             raise AssertionError(
-                f"{job!r} must run on both configured events without {sorted(gates)!r}"
+                f"{job!r} must keep the exact ungated native-job shape on both "
+                f"configured events: found {entries!r}"
             )
+        for line in blocks[job].splitlines():
+            code = re.sub(r"\s+#.*$", "", line)
+            event_context = re.search(
+                r"\bgithub\b|\bGITHUB_(?:EVENT|REF)", code
+            )
+            if event_context is not None:
+                raise AssertionError(
+                    f"{job!r} must not branch on event context "
+                    f"{event_context.group(0)!r}"
+                )
 
 
 def _assert_runner_resource_bounds(workflow: str) -> None:
@@ -2968,6 +2997,38 @@ class NixPackagesWorkflowTests(unittest.TestCase):
                     1,
                 ),
                 "both configured",
+            ),
+            "event-dependent empty matrix": (
+                text.replace(
+                    "    runs-on: ubuntu-latest\n",
+                    "    strategy:\n"
+                    "      matrix:\n"
+                    "        lane: ${{ github.event_name == 'workflow_dispatch' "
+                    "&& fromJSON('[\"run\"]') || fromJSON('[]') }}\n"
+                    "    runs-on: ubuntu-latest\n",
+                    1,
+                ),
+                "both configured",
+            ),
+            "event-dependent runner": (
+                text.replace(
+                    "    runs-on: ubuntu-latest\n",
+                    "    runs-on: ${{ github.event_name == 'workflow_dispatch' "
+                    "&& 'ubuntu-latest' || 'no-such-runner' }}\n",
+                    1,
+                ),
+                "both configured",
+            ),
+            "event-gated complete check step": (
+                text.replace(
+                    "      - name: Run the complete native flake check set\n"
+                    "        run: nix flake check --print-build-logs\n",
+                    "      - name: Run the complete native flake check set\n"
+                    "        if: github.event_name == 'workflow_dispatch'\n"
+                    "        run: nix flake check --print-build-logs\n",
+                    1,
+                ),
+                "must not branch on event context",
             ),
         }
         for name, (mutated, message) in mutations.items():
