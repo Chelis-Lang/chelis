@@ -4374,37 +4374,90 @@ fn extract_numeric_leaf(expr: &Expr) -> Option<StagedScalar> {
     }
 }
 
-/// Whether a statically foldable numeric spelling ultimately originates in
-/// an integer or floating-point atom rather than a boolean atom.
+/// Read an optional scalar type stamp without treating malformed type
+/// metadata as absence. The outer `Option` is recognition success; the inner
+/// one distinguishes an unstamped expression from a stamped scalar.
+fn optional_scalar_prim(expr: &Expr) -> Option<Option<Prim>> {
+    match expr_type_metadata(expr) {
+        Some(ty) => Some(Some(LowerCtx::try_extract_prim(ty)?)),
+        None => Some(None),
+    }
+}
+
+/// Evaluate the closed static scalar grammar while preserving a checked dtype
+/// at every edge.
 ///
-/// `extract_numeric_leaf` deliberately maps booleans onto `RawScalar::Int`
-/// for general scalar folding. A random seed has a narrower source contract:
-/// [05-RNG-1] requires an actual signed `int64` value. Keep that source-kind
-/// distinction until an explicit cast has produced the checked `int64`.
-fn seed_has_non_bool_numeric_source(expr: &Expr) -> bool {
+/// This is stricter than `extract_numeric_leaf`, whose `RawScalar` form is
+/// intentionally useful for general literal folding but cannot distinguish
+/// `true` from integer `1`. A seed needs that distinction: literal payload and
+/// type metadata must agree before a wrapper can consume the value, while a
+/// successful explicit cast establishes its target dtype per [04-NUM-14].
+fn extract_type_checked_scalar(expr: &Expr) -> Option<chelis_types::ScalarValue> {
+    use chelis_types::{scalar_from_f64, scalar_from_i64};
+
+    let scalar_from_atom = |atom: &Atom, prim: Prim| match (atom, prim) {
+        (Atom::Int(value), prim) if prim.is_integer() => scalar_from_i64("lit", prim, *value).ok(),
+        (Atom::Float(value), prim) if prim.is_float() => scalar_from_f64("lit", prim, *value).ok(),
+        (Atom::Bool(value), Prim::Bool) => {
+            scalar_from_i64("lit", Prim::Bool, i64::from(*value)).ok()
+        }
+        _ => None,
+    };
+
     match expr {
-        Expr::Atom(Atom::Int(_) | Atom::Float(_), _) => true,
-        Expr::Atom(Atom::Bool(_) | Atom::Str(_) | Atom::Name(_) | Atom::Tag(_), _) => false,
+        Expr::Atom(atom @ Atom::Int(_), _) => scalar_from_atom(atom, Prim::Int64),
+        Expr::Atom(atom @ Atom::Float(_), _) => scalar_from_atom(atom, Prim::F64),
+        Expr::Atom(atom @ Atom::Bool(_), _) => scalar_from_atom(atom, Prim::Bool),
+        Expr::Atom(Atom::Str(_) | Atom::Name(_) | Atom::Tag(_), _) => None,
         Expr::List(_, _) | Expr::Node(_, _) => {
-            let Some((tag, _, kids)) = stamped_parts(expr) else {
-                return false;
-            };
+            let (tag, _, kids) = stamped_parts(expr)?;
             match tag {
-                DeepTag::Lit => matches!(
-                    kids.first(),
-                    Some(Expr::Atom(Atom::Int(_) | Atom::Float(_), _))
-                ),
-                DeepTag::Cast => kids.first().is_some_and(seed_has_non_bool_numeric_source),
-                DeepTag::App => {
-                    kids.first()
-                        .is_some_and(|callee| expr_is_var_named(callee, "neg"))
-                        && kids.get(1).is_some_and(seed_has_non_bool_numeric_source)
+                DeepTag::Lit if kids.len() == 1 => {
+                    let declared = optional_scalar_prim(expr)??;
+                    let Expr::Atom(atom, _) = &kids[0] else {
+                        return None;
+                    };
+                    scalar_from_atom(atom, declared)
                 }
-                _ => false,
+                DeepTag::Cast => {
+                    let inner = extract_type_checked_scalar(kids.first()?)?;
+                    let target = LowerCtx::try_extract_prim(kids.get(1)?)?;
+                    if optional_scalar_prim(expr)?.is_some_and(|declared| declared != target) {
+                        return None;
+                    }
+                    match chelis_deep::cast_mode_of(kids).ok()? {
+                        chelis_deep::CastMode::Checked => {
+                            chelis_types::cast_scalar("cast", inner, target).ok()
+                        }
+                        chelis_deep::CastMode::Trunc => {
+                            chelis_types::cast_trunc_scalar("cast_trunc", inner, target).ok()
+                        }
+                    }
+                }
+                DeepTag::App => {
+                    if kids.len() != 2 || !expr_is_var_named(&kids[0], "neg") {
+                        return None;
+                    }
+                    let inner = extract_type_checked_scalar(&kids[1])?;
+                    let negated = if inner.prim().is_float() {
+                        chelis_types::float_unop(chelis_types::FloatUnOp::Neg, inner).ok()?
+                    } else if inner.prim().is_integer() {
+                        chelis_types::int_unop(chelis_types::IntUnOp::Neg, inner).ok()?
+                    } else {
+                        return None;
+                    };
+                    if optional_scalar_prim(expr)?
+                        .is_some_and(|declared| declared != negated.prim())
+                    {
+                        return None;
+                    }
+                    Some(negated)
+                }
+                _ => None,
             }
         }
         Expr::Map(_, _) | Expr::MetaExpr(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => {
-            false
+            None
         }
     }
 }
@@ -11597,16 +11650,11 @@ impl LowerCtx {
         if declared != Some(Prim::Int64) {
             return None;
         }
-        if !seed_has_non_bool_numeric_source(expr) {
+        let value = extract_type_checked_scalar(expr)?;
+        if value.prim() != Prim::Int64 {
             return None;
         }
-        let signed = match extract_numeric_leaf(expr)? {
-            StagedScalar::Raw(chelis_types::RawScalar::Int(value)) => value,
-            StagedScalar::Typed(value) if value.prim() == Prim::Int64 => value.as_i64_exact()?,
-            StagedScalar::Raw(chelis_types::RawScalar::Float(_)) | StagedScalar::Typed(_) => {
-                return None;
-            }
-        };
+        let signed = value.as_i64_exact()?;
         Some(signed as u64)
     }
 
@@ -15689,6 +15737,14 @@ mod tests {
                 "(cast {} (lit {type: (t-prim {} int32)} 7) (t-prim {} int64))",
                 7,
             ),
+            (
+                "(cast {} (lit {type: (t-prim {} bool)} true) (t-prim {} int64))",
+                1,
+            ),
+            (
+                "(cast {} (lit {type: (t-prim {} f64)} 7.0) (t-prim {} int64))",
+                7,
+            ),
         ];
         let ctx = LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
         for (source, expected) in cases {
@@ -15700,6 +15756,31 @@ mod tests {
                 ctx.extract_u64_value(&expr),
                 Some(expected),
                 "signed int64 seed control must remain admitted: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_794_seed_wrappers_reject_payload_type_disagreement() {
+        let cases = [
+            "(app {type: (t-prim {} int64)} (var {} neg) \
+                 (lit {type: (t-prim {} bool)} 1))",
+            "(app {type: (t-prim {} int64)} (var {} neg) \
+                 (lit {type: (t-prim {} f64)} 1))",
+            "(app {type: (t-prim {} int64)} (var {} neg) \
+                 (lit {type: (t-prim {} string)} 1))",
+            "(cast {} (lit {type: (t-prim {} bool)} 1) (t-prim {} int64))",
+        ];
+        let ctx = LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
+        for source in cases {
+            let expr = chelis_deep::parser::parse_str(source)
+                .unwrap_or_else(|error| panic!("parse forged seed {source}: {error}"))
+                .pop()
+                .expect("one forged seed");
+            assert_eq!(
+                ctx.extract_u64_value(&expr),
+                None,
+                "payload/type disagreement must not become a seed: {source}"
             );
         }
     }
