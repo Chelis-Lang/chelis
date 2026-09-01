@@ -86,16 +86,11 @@ Status legend:
 
 | Campaign | Oracle command | Owning spec doc | Status |
 |---|---|---|---|
-| Runtime representation hardening · Phase 0 | `uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0` | `spec/design/runtime_representation.md` §Phase 0 | continuous gate (fail-closed C-surface parser contract, release reproducers, and structural mutations) |
+| Runtime representation hardening · Phase 0 | `uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0` | `spec/design/runtime_representation.md` §Phase 0 | continuous gate (frozen source list, structural seam scanner, release reproducers, and controlled mutations) |
 | Deep substrate handover | `cargo test -p chelis-compiler-api --test deep_authoring` + `cargo test -p chelis-tide --test mcp replace_function_body` + `cargo test -p chelis-tide --test mcp add_function` + `cargo test -p chelis-tide --test api replace_function_body` + `cargo test -p chelis-tide --test api add_function` + `cargo test -p chelis-types duplicate_defsig` + `cargo test -p chelis-validate duplicate_defsig` + `cargo test -p chelis-cli --test surf_round_trip` | `spec/design/chelis_agent_editing_surface.md` | default gate |
 | Deep authoring L2 query/cascade + `.dp` SMT parity | `cargo test -p chelis-deep --test authoring` + `cargo test -p chelis-compiler-api --test deep_authoring` + `cargo test -p chelis-tide --test mcp deep_query_and_rename_tools_are_model_facing_contracts` + `cargo test -p chelis-tide --test api deep_query_and_rename_http_endpoints_lock_preimage_contract` + `cargo test -p chelis-prove --features smt property_runner::tests::f7_deep -- --nocapture` + `cargo test -p chelis-tide --features smt --test mcp deep_user_property_proves_at_smt_tier_through_tide -- --nocapture` | `spec/design/chelis_agent_editing_surface.md` + `spec/design/chelis_deep_authoring_handover.md` | default gate plus SMT feature gate |
 | Compiler-vs-interpreter closure follow-up | `cargo test -p chelis-cli --test cli cross_function_seed_local_wrapper_uses_handler_seed_in_c_backend -- --exact` + `cargo test -p chelis-cli --test cli build_c_mnist_loss_tail_tensor_pipeline_compiles_object -- --exact` + `cargo test -p chelis-cli --test parity parity_mnist_library_only -- --exact --nocapture` (the `std_nn_build_acceptance cross_function_seed_stdlib` leg was removed with the ML-module cut to School, #331) | `spec/upstream-bugs/compiler-vs-interpreter-closure-2026-05-07.md` §Follow-up work | default gate |
 | Compiled value ownership Phase 0 | `.venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 0` (final line `COMPILED VALUE OWNERSHIP PHASE 0: PASS`) | `spec/design/compiled_value_ownership.md` §Phase 0 | dedicated CI gate (`compiled-value-ownership-phase0-oracle`; hardware-independent, with HIP hardware deferred to Phase 3) |
-
-The runtime-representation Phase 0 command requires libclang major 18. An active
-Devenv shell exports the pinned `LIBCLANG_PATH`; outside Devenv, point that variable at
-a libclang 18 library directory before invoking the oracle. The scanner rejects other
-majors instead of producing a version-dependent inventory.
 
 ## Phase A (Reef Distribution Unblock)
 

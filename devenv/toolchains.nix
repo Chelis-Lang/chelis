@@ -104,10 +104,6 @@ in
   # .cargo/config.toml while the Devenv shell is active.
   env = {
     PYO3_PYTHON = "${config.env.DEVENV_STATE}/venv/bin/python";
-    # Phase 0 freezes libclang's AST projection as part of its source inventory
-    # contract. Keep that parser independent of the workstation and Nixpkgs
-    # default LLVM versions.
-    LIBCLANG_PATH = "${pkgs.llvmPackages_18.libclang.lib}/lib";
     RUSTC_WRAPPER = "${patchedKache}/bin/kache";
     CARGO_BUILD_RUSTC_WRAPPER = "${patchedKache}/bin/kache";
     RUSTC_WORKSPACE_WRAPPER = "";
@@ -133,7 +129,6 @@ in
       cmake
       git
       mdbook
-      llvmPackages_18.libclang
       pkg-config
       pyright
       patchedKache

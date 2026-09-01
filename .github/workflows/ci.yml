@@ -225,13 +225,8 @@ jobs:
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     permissions:
       contents: read
-    env:
-      LIBCLANG_PATH: /usr/lib/llvm-18/lib
     steps:
       - uses: actions/checkout@v6
-
-      - name: Install pinned C-surface parser
-        run: python3 scripts/ci_apt_get.py libclang-18-dev
 
       # A small number of workflow guards inspect Cargo metadata. They do not
       # compile the workspace, but they require the stable cargo executable.
@@ -678,7 +673,6 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
-      LIBCLANG_PATH: /usr/lib/llvm-18/lib
     steps:
       - uses: actions/checkout@v6
 
@@ -690,7 +684,7 @@ jobs:
       # apt-get under retry (scripts/ci_apt_get.py); see the lint-rust
       # job for the transient-mirror-reset rationale.
       - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc libclang-18-dev libopenblas-dev libasan8 libubsan1
+        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

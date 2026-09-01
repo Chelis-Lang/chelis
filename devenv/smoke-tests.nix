@@ -29,12 +29,6 @@
       pkg-config --version
       pyright --version
       kache --version
-
-      if [ ! -f "$LIBCLANG_PATH/libclang.dylib" ] && \
-         [ ! -f "$LIBCLANG_PATH/libclang.so" ]; then
-        printf 'missing pinned libclang 18 under: %s\n' "$LIBCLANG_PATH" >&2
-        exit 1
-      fi
     '';
   };
 
