@@ -7,10 +7,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::path::Path;
+use std::sync::Mutex;
 
+use clang::{Clang, Entity, EntityKind, Index, Type, TypeKind, Unsaved, diagnostic::Severity};
+use quote::ToTokens;
 use serde::{Deserialize, Serialize};
 use syn::parse::Parser;
 use syn::punctuated::Punctuated;
+use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
 pub const NUMERIC_C_TYPES: &[&str] = &[
@@ -119,7 +124,7 @@ const EXTERNAL_NONNUMERIC_C_TYPES: &[&str] = &[
     "id",
 ];
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CarrierUse {
     pub kind: String,
     pub owner: String,
@@ -629,10 +634,11 @@ pub fn classify(signature: &str, aliases: &BTreeMap<String, Vec<String>>) -> Vec
 }
 
 fn is_identifier(token: &str) -> bool {
-    token
-        .chars()
+    let mut characters = token.chars();
+    characters
         .next()
         .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+        && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
 fn collect_macro_aliases(source: &str) -> BTreeMap<String, Vec<String>> {
@@ -1374,12 +1380,12 @@ fn canonical_signature(
 }
 
 fn has_candidate_anchor(tokens: &[String]) -> bool {
-    tokens
-        .iter()
-        .any(|token| token == "*" || token == "&" || token == "[" || token == "sizeof")
+    tokens.iter().any(|token| {
+        token == "*" || token == "&" || token == "&&" || token == "[" || token == "sizeof"
+    })
 }
 
-fn scan_source(
+fn scan_source_tokens(
     source: &str,
     owner: &str,
     require_global_balance: bool,
@@ -1508,8 +1514,694 @@ fn scan_source(
     Ok(rows)
 }
 
+static CLANG_SCAN_LOCK: Mutex<()> = Mutex::new(());
+
+const CLANG_PRELUDE: &str = r#"
+typedef __SIZE_TYPE__ size_t;
+typedef __PTRDIFF_TYPE__ ptrdiff_t;
+typedef signed char int8_t;
+typedef unsigned char uint8_t;
+typedef short int16_t;
+typedef unsigned short uint16_t;
+typedef int int32_t;
+typedef unsigned int uint32_t;
+typedef long long int64_t;
+typedef unsigned long long uint64_t;
+typedef __INTPTR_TYPE__ intptr_t;
+typedef __UINTPTR_TYPE__ uintptr_t;
+typedef struct __chelis_surface_FILE FILE;
+typedef unsigned char chelis_dtype;
+typedef unsigned long MTLGPUFamily;
+enum {
+    MTLGPUFamilyApple1 = 1,
+    MTLGPUFamilyApple2 = 2,
+    MTLGPUFamilyApple3 = 3,
+    MTLGPUFamilyApple4 = 4,
+    MTLGPUFamilyApple5 = 5,
+    MTLGPUFamilyApple6 = 6,
+    MTLGPUFamilyApple7 = 7,
+    MTLGPUFamilyApple8 = 8,
+    MTLGPUFamilyApple9 = 9
+};
+typedef long dispatch_once_t;
+typedef int hipError_t;
+typedef void *hipFunction_t;
+typedef void *hipModule_t;
+typedef void *hipblasHandle_t;
+typedef int hipblasStatus_t;
+typedef void *hiprtcProgram;
+typedef int hiprtcResult;
+typedef float chelis_dynamic_name;
+typedef unsigned short half;
+typedef unsigned short __half;
+typedef unsigned short hip_bfloat16;
+typedef unsigned short bfloat;
+typedef unsigned int uint;
+typedef unsigned short ushort;
+typedef unsigned char uchar;
+typedef float float32x4_t __attribute__((ext_vector_type(4)));
+typedef float __m256 __attribute__((vector_size(32)));
+#define __device__
+#define __global__
+#define __host__
+#define __shared__
+#define __constant__
+#define __forceinline__ inline
+#define device
+#define thread
+#define threadgroup
+#define constant
+#ifdef __cplusplus
+template <class T, int N = 0> struct vector {};
+#endif
+#ifdef __OBJC__
+@class MPSMatrix;
+@class MPSMatrixDescriptor;
+@class MPSMatrixMultiplication;
+@class NSMutableDictionary;
+@class NSError;
+@class NSString;
+@protocol MTLBuffer;
+#else
+typedef void *MPSMatrix;
+typedef void *MPSMatrixDescriptor;
+typedef void *MPSMatrixMultiplication;
+typedef void *MTLBuffer;
+typedef void *NSMutableDictionary;
+typedef void *NSError;
+typedef void *NSString;
+#endif
+"#;
+
+fn compiler_arguments(path: &Path) -> Vec<&'static str> {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    if path.to_string_lossy().contains("backend-metal") || matches!(extension, "m" | "mm" | "metal")
+    {
+        vec![
+            "-xobjective-c++",
+            "-std=gnu++17",
+            "-fblocks",
+            "-Drestrict=__restrict",
+            "-D__cplusplus=201703L",
+        ]
+    } else if matches!(extension, "c") {
+        vec!["-xc", "-std=gnu11"]
+    } else if matches!(extension, "cu" | "cuh") {
+        vec!["-xcuda", "-std=gnu++17", "-nocudainc", "-nocudalib"]
+    } else if matches!(extension, "hip") {
+        vec!["-xhip", "-std=gnu++17", "-nogpuinc", "-nogpulib"]
+    } else {
+        vec![
+            "-xobjective-c++",
+            "-std=gnu++17",
+            "-fblocks",
+            "-Drestrict=__restrict",
+            "-D__cplusplus=201703L",
+        ]
+    }
+}
+
+fn source_without_includes(source: &str, cxx: bool) -> String {
+    source
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            if cxx && matches!(trimmed, "#ifdef __cplusplus" | "#if defined(__cplusplus)") {
+                "#if 1"
+            } else if trimmed.starts_with("#include")
+                || trimmed.starts_with("#import")
+                || trimmed.starts_with("#error")
+            {
+                ""
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn materialize_format_holes(source: &str) -> Result<String, ScanError> {
+    let chars: Vec<char> = source.chars().collect();
+    let mut output = String::with_capacity(source.len());
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] != '{' {
+            if chars[index] == '}' && chars.get(index + 1) == Some(&'}') {
+                output.push('}');
+                index += 2;
+                continue;
+            }
+            output.push(chars[index]);
+            index += 1;
+            continue;
+        }
+        if chars.get(index + 1) == Some(&'{') {
+            output.push('{');
+            index += 2;
+            continue;
+        }
+        let Some(close) = chars[index + 1..]
+            .iter()
+            .position(|character| *character == '}')
+            .map(|offset| index + offset + 1)
+        else {
+            output.push('{');
+            index += 1;
+            continue;
+        };
+        let contents: String = chars[index + 1..close].iter().collect();
+        let format_name = contents
+            .split_once(':')
+            .map_or(contents.trim(), |(name, _)| name.trim());
+        if !contents.is_empty() && !is_identifier(format_name) {
+            output.push('{');
+            index += 1;
+            continue;
+        }
+        let before = output.trim_end();
+        let after: String = chars[close + 1..].iter().take(16).collect();
+        let after_trimmed = after.trim_start();
+        let starts_statement = before
+            .rsplit(['{', ';'])
+            .next()
+            .is_some_and(|prefix| prefix.trim().is_empty());
+        let after_starts_identifier = after_trimmed
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_alphabetic() || character == '_');
+        let replacement = if contents.contains(':') {
+            if before.ends_with("0x") { "0000" } else { "0" }
+        } else if after_starts_identifier
+            && after
+                .chars()
+                .next()
+                .is_some_and(|character| !character.is_whitespace())
+        {
+            ""
+        } else if before.ends_with('[') && after_trimmed.starts_with(']') {
+            "1"
+        } else if after_trimmed.starts_with('.')
+            || after_trimmed.starts_with(|character: char| character.is_ascii_digit())
+        {
+            "0"
+        } else if before.ends_with(';') && after_trimmed.is_empty() {
+            ""
+        } else if before.ends_with('*') || before.ends_with('&') {
+            "chelis_dynamic_name"
+        } else if starts_statement && after_starts_identifier {
+            "float"
+        } else if after_trimmed.starts_with('(') {
+            "chelis_dynamic_name"
+        } else if after_trimmed.starts_with(['*', '&'])
+            || after_trimmed.starts_with("const")
+            || before.ends_with("sizeof(")
+        {
+            "float"
+        } else if before.ends_with('(') && after_trimmed.starts_with(')') {
+            let call_prefix = before[..before.len() - 1].trim_end();
+            if call_prefix
+                .chars()
+                .last()
+                .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+            {
+                "0"
+            } else {
+                "float"
+            }
+        } else {
+            "0"
+        };
+        output.push_str(replacement);
+        index = close + 1;
+    }
+    Ok(output)
+}
+
+fn declaration_tokens(entity: Entity<'_>) -> String {
+    entity
+        .get_range()
+        .map(|range| {
+            range
+                .tokenize()
+                .into_iter()
+                .map(|token| token.get_spelling())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default()
+}
+
+fn is_numeric_type_spelling(spelling: &str) -> bool {
+    let words = tokens(spelling);
+    words.iter().any(|word| {
+        ELEMENT_C_TYPES.contains(&word.as_str())
+            || matches!(word.as_str(), "_Float16" | "__fp16" | "__bf16" | "__int128")
+    })
+}
+
+fn has_carrier_shape(ty: Type<'_>) -> bool {
+    let canonical = ty.get_canonical_type();
+    matches!(
+        canonical.get_kind(),
+        TypeKind::Pointer
+            | TypeKind::BlockPointer
+            | TypeKind::MemberPointer
+            | TypeKind::LValueReference
+            | TypeKind::RValueReference
+            | TypeKind::ConstantArray
+            | TypeKind::DependentSizedArray
+            | TypeKind::IncompleteArray
+            | TypeKind::VariableArray
+    ) || canonical.get_pointee_type().is_some_and(has_carrier_shape)
+        || canonical.get_element_type().is_some_and(has_carrier_shape)
+}
+
+fn type_is_numeric_carrier(entity: Entity<'_>, ty: Type<'_>, source: &str) -> bool {
+    let authored = authored_type_identity(entity, ty, source);
+    if authored
+        .split_whitespace()
+        .any(|word| EXTERNAL_NONNUMERIC_C_TYPES.contains(&word))
+    {
+        return false;
+    }
+    let canonical = ty.get_canonical_type();
+    has_carrier_shape(canonical) && is_numeric_type_spelling(&canonical.get_display_name())
+}
+
+fn declaration_shape(ty: Type<'_>) -> &'static str {
+    match ty.get_canonical_type().get_kind() {
+        TypeKind::Pointer | TypeKind::BlockPointer | TypeKind::MemberPointer => "pointer",
+        TypeKind::LValueReference => "lvalue-reference",
+        TypeKind::RValueReference => "rvalue-reference",
+        TypeKind::ConstantArray
+        | TypeKind::DependentSizedArray
+        | TypeKind::IncompleteArray
+        | TypeKind::VariableArray => "array",
+        _ => "carrier",
+    }
+}
+
+fn entity_source(entity: Entity<'_>, source: &str) -> String {
+    let Some(range) = entity.get_range() else {
+        return String::new();
+    };
+    let start = range.get_start().get_expansion_location().offset as usize;
+    let end = range.get_end().get_expansion_location().offset as usize;
+    source.get(start..end).unwrap_or_default().to_string()
+}
+
+fn declarator_details(entity: Entity<'_>, source: &str) -> String {
+    let tokens = entity_source(entity, source);
+    let mut details = Vec::new();
+    let mut chars = tokens.chars();
+    while let Some(character) = chars.next() {
+        if character == '[' {
+            let mut extent = String::from("[");
+            for inner in chars.by_ref() {
+                extent.push(inner);
+                if inner == ']' {
+                    break;
+                }
+            }
+            details.push(extent);
+        }
+    }
+    details.join("")
+}
+
+fn authored_type_identity(entity: Entity<'_>, ty: Type<'_>, source: &str) -> String {
+    if entity.get_kind() == EntityKind::TypedefDecl {
+        return entity.get_name().unwrap_or_else(|| ty.get_display_name());
+    }
+    let declaration = entity_source(entity, source);
+    let name = entity.get_name().unwrap_or_default();
+    let mut words = Vec::new();
+    for token in tokens(&declaration) {
+        if matches!(token.as_str(), "*" | "&" | "[") || token == name {
+            break;
+        }
+        if is_identifier(&token)
+            && !QUALIFIERS.contains(&token.as_str())
+            && !is_storage_specifier(&token)
+        {
+            words.push(token);
+        }
+    }
+    if words.is_empty() {
+        ty.get_display_name()
+    } else {
+        words.join(" ")
+    }
+}
+
+fn compiler_signature(
+    entity: Entity<'_>,
+    ty: Type<'_>,
+    owner: &str,
+    source: &str,
+    authored_context: Option<&str>,
+) -> String {
+    let canonical = ty.get_canonical_type();
+    let name = entity
+        .get_name()
+        .unwrap_or_else(|| "<abstract>".to_string());
+    let shape = if is_pointer_cast(entity) {
+        "cast-pointer"
+    } else {
+        declaration_shape(ty)
+    };
+    let mut signature = format!(
+        "shape={};resolved={};authored={};name={name};declarator={};enclosing={owner}",
+        shape,
+        canonical.get_display_name(),
+        authored_type_identity(entity, ty, source),
+        declarator_details(entity, source),
+    );
+    if let Some(context) = authored_context {
+        signature.push_str(";emitted=");
+        signature.push_str(&emitted_context_identity(context));
+    }
+    signature
+}
+
+fn emitted_context_identity(context: &str) -> String {
+    let source_tokens = tokens(context);
+    let mut output = Vec::new();
+    let mut index = 0usize;
+    while index < source_tokens.len() {
+        if source_tokens.get(index).map(String::as_str) == Some("{")
+            && source_tokens.get(index + 2).map(String::as_str) == Some("}")
+            && source_tokens
+                .get(index + 1)
+                .is_some_and(|token| is_identifier(token))
+        {
+            output.push(format!("format-hole:{}", source_tokens[index + 1]));
+            index += 3;
+        } else if source_tokens.get(index).map(String::as_str) == Some("{")
+            && source_tokens.get(index + 1).map(String::as_str) == Some("}")
+        {
+            output.push("format-hole:positional".to_string());
+            index += 2;
+        } else {
+            output.push(source_tokens[index].clone());
+            index += 1;
+        }
+    }
+    output.join(" ")
+}
+
+fn sizeof_resolved_type(spelling: &str) -> String {
+    let source_tokens = tokens(spelling);
+    source_tokens
+        .iter()
+        .filter(|word| ELEMENT_C_TYPES.contains(&word.as_str()) || is_base_modifier(word.as_str()))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn structural_owner_name(entity: Entity<'_>) -> Option<String> {
+    let name = entity.get_display_name().or_else(|| entity.get_name())?;
+    if name.contains("(unnamed ") || name.contains("(anonymous ") {
+        Some(format!("<anonymous:{}>", declaration_tokens(entity)))
+    } else {
+        Some(name)
+    }
+}
+
+fn is_owner(entity: Entity<'_>) -> bool {
+    matches!(
+        entity.get_kind(),
+        EntityKind::FunctionDecl
+            | EntityKind::FunctionTemplate
+            | EntityKind::Method
+            | EntityKind::Constructor
+            | EntityKind::ConversionFunction
+            | EntityKind::StructDecl
+            | EntityKind::UnionDecl
+            | EntityKind::ClassDecl
+            | EntityKind::TypedefDecl
+    )
+}
+
+fn is_carrier_declaration(entity: Entity<'_>) -> bool {
+    matches!(
+        entity.get_kind(),
+        EntityKind::ParmDecl
+            | EntityKind::FieldDecl
+            | EntityKind::VarDecl
+            | EntityKind::TypedefDecl
+    )
+}
+
+fn is_pointer_cast(entity: Entity<'_>) -> bool {
+    matches!(
+        entity.get_kind(),
+        EntityKind::CStyleCastExpr
+            | EntityKind::StaticCastExpr
+            | EntityKind::DynamicCastExpr
+            | EntityKind::ReinterpretCastExpr
+            | EntityKind::ConstCastExpr
+            | EntityKind::FunctionalCastExpr
+    )
+}
+
+fn walk_compiler_ast(
+    entity: Entity<'_>,
+    source_owner: &str,
+    owner: &str,
+    source: &str,
+    authored_context: Option<&str>,
+    rows: &mut Vec<CarrierUse>,
+) {
+    let in_main_file = entity
+        .get_location()
+        .is_some_and(|location| location.is_in_main_file());
+    let next_owner = if in_main_file
+        && is_owner(entity)
+        && entity.get_name().as_deref() != Some("__chelis_surface_fragment")
+    {
+        structural_owner_name(entity).map_or_else(
+            || owner.to_string(),
+            |name| format!("{source_owner}::{name}"),
+        )
+    } else {
+        owner.to_string()
+    };
+
+    if in_main_file
+        && (is_carrier_declaration(entity) || is_pointer_cast(entity))
+        && let Some(ty) = entity.get_type()
+        && type_is_numeric_carrier(entity, ty, source)
+    {
+        rows.push(CarrierUse {
+            kind: "raw-element-pointer".to_string(),
+            owner: owner.to_string(),
+            signature: compiler_signature(entity, ty, owner, source, authored_context),
+        });
+    }
+
+    if in_main_file
+        && matches!(
+            entity.get_kind(),
+            EntityKind::UnaryExpr | EntityKind::UnexposedExpr
+        )
+    {
+        let spelling = declaration_tokens(entity);
+        if spelling.split_whitespace().next() == Some("sizeof") {
+            let emitted = authored_context
+                .map(|context| format!(";emitted={}", emitted_context_identity(context)))
+                .unwrap_or_default();
+            rows.push(CarrierUse {
+                kind: "width-arithmetic".to_string(),
+                owner: owner.to_string(),
+                signature: format!(
+                    "shape=sizeof;resolved={};declaration={spelling}{emitted}",
+                    sizeof_resolved_type(&spelling)
+                ),
+            });
+        }
+    }
+
+    for child in entity.get_children() {
+        walk_compiler_ast(
+            child,
+            source_owner,
+            &next_owner,
+            source,
+            authored_context,
+            rows,
+        );
+    }
+}
+
+fn compiler_scan(
+    source: &str,
+    source_owner: &str,
+    path: &Path,
+    authored_context: Option<&str>,
+    materialize_holes: bool,
+    extra_prelude: Option<&str>,
+) -> Result<Vec<CarrierUse>, ScanError> {
+    let _guard = CLANG_SCAN_LOCK.lock().map_err(|_| {
+        ScanError::new(
+            ScanErrorKind::MalformedCandidate,
+            "libclang scanner lock poisoned",
+        )
+    })?;
+    let clang = Clang::new().map_err(|error| {
+        ScanError::new(
+            ScanErrorKind::MalformedCandidate,
+            format!("cannot load libclang for C-family scan: {error}"),
+        )
+    })?;
+    let index = Index::new(&clang, true, false);
+    let virtual_path = Path::new("/tmp").join(
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("chelis_surface.cpp"),
+    );
+    let prelude_path = Path::new("/tmp/chelis_c_surface_prelude.hpp");
+    let materialized = if materialize_holes {
+        materialize_format_holes(source)?
+    } else {
+        source.to_string()
+    };
+    let cxx = path.extension().and_then(|value| value.to_str()) != Some("c");
+    let mut materialized = source_without_includes(&materialized, cxx);
+    let trimmed = materialized.trim_end();
+    if !trimmed.is_empty()
+        && !trimmed.ends_with([';', '}', '{'])
+        && has_candidate_anchor(&tokens(trimmed))
+    {
+        materialized.push(';');
+    }
+    let language_prefix = if cxx {
+        "#ifndef __cplusplus\n#define __cplusplus 201703L\n#endif\n"
+    } else {
+        ""
+    };
+    let main_source = format!(
+        "{language_prefix}#include \"{}\"\n{}\n",
+        prelude_path.display(),
+        materialized,
+    );
+    let prelude = format!("{CLANG_PRELUDE}\n{}", extra_prelude.unwrap_or_default());
+    let unsaved = [
+        Unsaved::new(&virtual_path, &main_source),
+        Unsaved::new(prelude_path, prelude),
+    ];
+    let mut parser = index.parser(&virtual_path);
+    parser
+        .arguments(&compiler_arguments(path))
+        .unsaved(&unsaved)
+        .detailed_preprocessing_record(true);
+    let translation_unit = parser.parse().map_err(|error| {
+        ScanError::new(
+            ScanErrorKind::MalformedCandidate,
+            format!("libclang could not parse C-family source: {error:?}"),
+        )
+    })?;
+    for diagnostic in translation_unit.get_diagnostics() {
+        if diagnostic.get_severity() < Severity::Error
+            || !diagnostic.get_location().is_in_main_file()
+        {
+            continue;
+        }
+        let message = diagnostic.get_text();
+        let location = diagnostic.get_location().get_spelling_location();
+        let source_line = main_source
+            .lines()
+            .nth(location.line.saturating_sub(1) as usize)
+            .unwrap_or_default();
+        let located_message = format!(
+            "line {} column {}: {message}; source: {source_line:?}",
+            location.line, location.column
+        );
+        if authored_context.is_none()
+            && (message.contains("unknown type name")
+                || message.contains("no template named")
+                || message.contains("decimal type")
+                || message.contains("unknown type")
+                || source.contains("__new_"))
+        {
+            return Err(ScanError::new(ScanErrorKind::UnknownType, located_message));
+        }
+        if diagnostic.get_severity() == Severity::Fatal
+            || (authored_context.is_none()
+                && (message.contains("expected")
+                    || message.contains("unterminated")
+                    || message.contains("extraneous"))
+                && !message.starts_with("expected method"))
+        {
+            return Err(ScanError::new(
+                ScanErrorKind::MalformedCandidate,
+                located_message,
+            ));
+        }
+    }
+    let mut rows = Vec::new();
+    walk_compiler_ast(
+        translation_unit.get_entity(),
+        source_owner,
+        source_owner,
+        &main_source,
+        authored_context,
+        &mut rows,
+    );
+    rows.sort();
+    rows.dedup();
+    Ok(rows)
+}
+
 pub fn scan_c_source(source: &str, owner: &str) -> Result<Vec<CarrierUse>, ScanError> {
-    scan_source(source, owner, true, None)
+    if !has_candidate_anchor(&tokens(source)) {
+        return Ok(Vec::new());
+    }
+    validate_supported_arithmetic_spelling(source)?;
+    validate_c_lexical_closure(source)?;
+    validate_balanced(&tokens(source))?;
+    compiler_scan(source, owner, Path::new("fixture.cpp"), None, false, None)
+}
+
+fn validate_supported_arithmetic_spelling(source: &str) -> Result<(), ScanError> {
+    if tokens(source).iter().any(|word| {
+        word.starts_with("_Float")
+            || word.starts_with("_Decimal")
+            || word.starts_with("__fp")
+            || word.starts_with("__bf")
+            || word.starts_with("__int")
+    }) {
+        return Err(ScanError::new(
+            ScanErrorKind::UnknownType,
+            "unknown arithmetic spelling at a C carrier position",
+        ));
+    }
+    Ok(())
+}
+
+fn aliases_as_compiler_prelude(aliases: &BTreeMap<String, Vec<String>>) -> String {
+    let mut prelude = String::new();
+    for (name, words) in aliases {
+        let resolved = resolve_words(words.clone(), aliases);
+        let target = if resolved
+            .iter()
+            .any(|word| ELEMENT_C_TYPES.contains(&word.as_str()))
+        {
+            resolved
+                .iter()
+                .find(|word| ELEMENT_C_TYPES.contains(&word.as_str()))
+                .map_or("float", String::as_str)
+        } else {
+            "void"
+        };
+        prelude.push_str(&format!("typedef {target} {name};\n"));
+    }
+    prelude
 }
 
 pub fn scan_c_source_with_aliases(
@@ -1517,11 +2209,89 @@ pub fn scan_c_source_with_aliases(
     owner: &str,
     aliases: &BTreeMap<String, Vec<String>>,
 ) -> Result<Vec<CarrierUse>, ScanError> {
-    scan_source(source, owner, true, Some(aliases))
+    if !has_candidate_anchor(&tokens(source)) {
+        return Ok(Vec::new());
+    }
+    validate_supported_arithmetic_spelling(source)?;
+    validate_c_lexical_closure(source)?;
+    validate_balanced(&tokens(source))?;
+    let prelude = aliases_as_compiler_prelude(aliases);
+    compiler_scan(
+        source,
+        owner,
+        Path::new("fixture.cpp"),
+        None,
+        false,
+        Some(&prelude),
+    )
+}
+
+pub fn scan_c_source_at_path(
+    source: &str,
+    owner: &str,
+    path: &Path,
+    aliases: &BTreeMap<String, Vec<String>>,
+) -> Result<Vec<CarrierUse>, ScanError> {
+    validate_supported_arithmetic_spelling(source)?;
+    validate_c_lexical_closure(source)?;
+    validate_balanced(&tokens(source))?;
+    let prelude = aliases_as_compiler_prelude(aliases);
+    compiler_scan(source, owner, path, None, false, Some(&prelude))
 }
 
 fn scan_c_fragment(source: &str, owner: &str) -> Result<Vec<CarrierUse>, ScanError> {
-    scan_source(source, owner, false, None)
+    match scan_source_tokens(source, owner, false, None) {
+        Ok(rows) if rows.is_empty() => return Ok(Vec::new()),
+        Ok(_) => {}
+        Err(error)
+            if matches!(
+                error.kind,
+                ScanErrorKind::MalformedCandidate | ScanErrorKind::IncompleteFragment
+            ) =>
+        {
+            return Err(error);
+        }
+        Err(_) => {}
+    }
+    let mut balanced = source.to_string();
+    let open_braces =
+        tokens(source)
+            .into_iter()
+            .fold(0isize, |depth, token| match token.as_str() {
+                "{" => depth + 1,
+                "}" => depth - 1,
+                _ => depth,
+            });
+    if open_braces > 0 {
+        balanced.push_str(&"}".repeat(open_braces as usize));
+    } else {
+        balanced = format!("void __chelis_surface_fragment(void) {{ {balanced}; }}");
+    }
+    compiler_scan(
+        &balanced,
+        owner,
+        Path::new("emitted.cpp"),
+        Some(source),
+        false,
+        None,
+    )
+}
+
+fn scan_c_format_fragment(source: &str, owner: &str) -> Result<Vec<CarrierUse>, ScanError> {
+    match scan_source_tokens(source, owner, false, None) {
+        Ok(rows) if rows.is_empty() => return Ok(Vec::new()),
+        Err(error) if error.kind == ScanErrorKind::IncompleteFragment => return Err(error),
+        Ok(_) | Err(_) => {}
+    }
+    let wrapped = format!("void __chelis_surface_fragment(void) {{ {source}; }}");
+    compiler_scan(
+        &wrapped,
+        owner,
+        Path::new("emitted.cpp"),
+        Some(source),
+        true,
+        None,
+    )
 }
 
 #[derive(Default)]
@@ -1532,8 +2302,12 @@ struct RustStringScanner {
 }
 
 impl RustStringScanner {
-    fn owner(&self) -> &str {
-        self.owners.last().map_or("module", String::as_str)
+    fn owner(&self) -> String {
+        if self.owners.is_empty() {
+            "module".to_string()
+        } else {
+            self.owners.join("::")
+        }
     }
 
     fn scan_literal(&mut self, literal: &syn::LitStr) {
@@ -1554,7 +2328,8 @@ impl RustStringScanner {
             ));
             return;
         }
-        match scan_c_fragment(&value, self.owner()) {
+        let owner = self.owner();
+        match scan_c_fragment(&value, &owner) {
             Ok(mut rows) => self.rows.append(&mut rows),
             Err(error) => {
                 let excerpt: String = value.chars().take(120).collect();
@@ -1562,8 +2337,7 @@ impl RustStringScanner {
                     error.kind,
                     format!(
                         "Rust string in `{}` failed C-surface parsing: {}; excerpt: {excerpt:?}",
-                        self.owner(),
-                        error.message
+                        owner, error.message
                     ),
                 ));
             }
@@ -1609,15 +2383,27 @@ impl<'ast> Visit<'ast> for RustStringScanner {
     }
 
     fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
-        let is_test = module.attrs.iter().any(|attribute| {
-            attribute.path().is_ident("cfg")
-                && attribute
-                    .parse_args::<syn::Path>()
-                    .is_ok_and(|path| path.is_ident("test"))
-        });
-        if !is_test {
-            visit::visit_item_mod(self, module);
+        if !is_exact_cfg_test_module(module) {
+            self.with_owner(module.ident.to_string(), |scanner| {
+                visit::visit_item_mod(scanner, module);
+            });
         }
+    }
+
+    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+        let owner = item.self_ty.to_token_stream().to_string();
+        self.with_owner(owner, |scanner| visit::visit_item_impl(scanner, item));
+    }
+
+    fn visit_expr_field(&mut self, field: &'ast syn::ExprField) {
+        if matches!(&field.member, syn::Member::Named(name) if name == "data") {
+            self.rows.push(CarrierUse {
+                kind: "direct-data-access".to_string(),
+                owner: self.owner(),
+                signature: format!("rust-field={}", field.to_token_stream()),
+            });
+        }
+        visit::visit_expr_field(self, field);
     }
 
     fn visit_lit_str(&mut self, literal: &'ast syn::LitStr) {
@@ -1625,8 +2411,53 @@ impl<'ast> Visit<'ast> for RustStringScanner {
     }
 
     fn visit_macro(&mut self, macro_call: &'ast syn::Macro) {
+        let macro_name = macro_call
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string());
+        if macro_name.as_deref() == Some("stringify") {
+            let source = macro_call.tokens.to_string();
+            match scan_c_fragment(&source, &self.owner()) {
+                Ok(mut rows) => self.rows.append(&mut rows),
+                Err(error) => self.error = Some(error),
+            }
+            return;
+        }
         let parser = Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
         if let Ok(arguments) = parser.parse2(macro_call.tokens.clone()) {
+            if macro_name.as_deref() == Some("format")
+                && let Some(syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(format_string),
+                    ..
+                })) = arguments.first()
+            {
+                let text = format_string.value();
+                let without_holes = tokens(&text)
+                    .into_iter()
+                    .filter(|token| !matches!(token.as_str(), "{" | "}"))
+                    .filter(|token| !is_identifier(token))
+                    .collect::<Vec<_>>();
+                if text.contains('{') && without_holes.is_empty() {
+                    self.rows.push(CarrierUse {
+                        kind: "raw-element-pointer".to_string(),
+                        owner: self.owner(),
+                        signature: format!(
+                            "shape=unconstrained-emission;emitted={}",
+                            emitted_context_identity(&text)
+                        ),
+                    });
+                    return;
+                }
+                match scan_c_format_fragment(&text, &self.owner()) {
+                    Ok(mut rows) => self.rows.append(&mut rows),
+                    Err(error) => self.error = Some(error),
+                }
+                for argument in arguments.iter().skip(1) {
+                    self.visit_expr(argument);
+                }
+                return;
+            }
             for argument in &arguments {
                 self.visit_expr(argument);
             }
@@ -1634,6 +2465,72 @@ impl<'ast> Visit<'ast> for RustStringScanner {
             self.scan_token_stream_literals(macro_call.tokens.clone());
         }
     }
+}
+
+fn is_exact_cfg_test_module(module: &syn::ItemMod) -> bool {
+    module.attrs.iter().any(|attribute| {
+        attribute.path().is_ident("cfg")
+            && attribute
+                .parse_args::<syn::Path>()
+                .is_ok_and(|path| path.is_ident("test"))
+    })
+}
+
+#[derive(Default)]
+struct TestModuleSpans {
+    spans: Vec<proc_macro2::Span>,
+}
+
+impl<'ast> Visit<'ast> for TestModuleSpans {
+    fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
+        if is_exact_cfg_test_module(module) {
+            self.spans.push(module.span());
+        } else {
+            visit::visit_item_mod(self, module);
+        }
+    }
+}
+
+pub fn production_rust_source(source: &str) -> Result<String, ScanError> {
+    let file = syn::parse_file(source).map_err(|error| {
+        ScanError::new(
+            ScanErrorKind::InvalidRust,
+            format!("cannot parse Rust source before test-region exclusion: {error}"),
+        )
+    })?;
+    let mut visitor = TestModuleSpans::default();
+    visitor.visit_file(&file);
+    let mut line_starts = vec![0usize];
+    for (index, byte) in source.bytes().enumerate() {
+        if byte == b'\n' {
+            line_starts.push(index + 1);
+        }
+    }
+    let offset = |location: proc_macro2::LineColumn| -> Option<usize> {
+        line_starts
+            .get(location.line.checked_sub(1)?)
+            .and_then(|start| start.checked_add(location.column))
+    };
+    let mut bytes = source.as_bytes().to_vec();
+    for span in visitor.spans {
+        let Some(start) = offset(span.start()) else {
+            continue;
+        };
+        let Some(end) = offset(span.end()) else {
+            continue;
+        };
+        for byte in bytes.get_mut(start..end).into_iter().flatten() {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    }
+    String::from_utf8(bytes).map_err(|error| {
+        ScanError::new(
+            ScanErrorKind::InvalidRust,
+            format!("test-region exclusion damaged Rust UTF-8: {error}"),
+        )
+    })
 }
 
 pub fn scan_rust_source(source: &str) -> Result<Vec<CarrierUse>, ScanError> {

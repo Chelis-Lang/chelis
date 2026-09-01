@@ -829,6 +829,44 @@ class TestHandedOverBinary(unittest.TestCase):
         self.assertNotIn("Obligation 1", out.getvalue())
 
 
+class TestSyntheticFixtureStyleGate(unittest.TestCase):
+    """Synthetic Deep fixtures must not lint their whole temp directory."""
+
+    def setUp(self) -> None:
+        oracle._BINARY_RESOLUTION_ATTEMPTED = True
+        oracle._RESOLVED_CHELIS_BINARY = Path("/tmp/test-chelis")
+
+    def tearDown(self) -> None:
+        oracle._BINARY_RESOLUTION_ATTEMPTED = False
+        oracle._RESOLVED_CHELIS_BINARY = None
+
+    @patch("subprocess.run")
+    def test_check_disables_advisory_lint_without_dropping_the_environment(
+        self, mock_run: MagicMock
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["chelis", "check"], returncode=2, stdout="{}", stderr=""
+        )
+        with patch.dict(os.environ, {"CHELIS_ORACLE_SENTINEL": "kept"}, clear=False):
+            oracle.run_chelis_check(Path("/tmp/fixture.dp"))
+        child_env = mock_run.call_args.kwargs["env"]
+        self.assertEqual(child_env[oracle.STYLE_GATE_DISABLE_ENV], "1")
+        self.assertEqual(child_env["CHELIS_ORACLE_SENTINEL"], "kept")
+
+    @patch("subprocess.run")
+    def test_validate_disables_advisory_lint_without_dropping_the_environment(
+        self, mock_run: MagicMock
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["chelis", "validate"], returncode=2, stdout="{}", stderr=""
+        )
+        with patch.dict(os.environ, {"CHELIS_ORACLE_SENTINEL": "kept"}, clear=False):
+            oracle.run_chelis_validate(Path("/tmp/fixture.dp"))
+        child_env = mock_run.call_args.kwargs["env"]
+        self.assertEqual(child_env[oracle.STYLE_GATE_DISABLE_ENV], "1")
+        self.assertEqual(child_env["CHELIS_ORACLE_SENTINEL"], "kept")
+
+
 class TestChelisCheckCommand(unittest.TestCase):
     """Test the command builder."""
 

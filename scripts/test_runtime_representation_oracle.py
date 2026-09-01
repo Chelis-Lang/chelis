@@ -72,9 +72,6 @@ class InventoryContractTests(unittest.TestCase):
             )
             and oracle.PurePosixPath(raw.decode("utf-8")).suffix
             in oracle.SOURCE_SUFFIXES
-            and not oracle.PurePosixPath(raw.decode("utf-8")).name.endswith(
-                "_tests.rs"
-            )
         }
         observed = {
             path.as_posix() for path in oracle._tracked_source_paths(oracle.REPO_ROOT)
@@ -161,7 +158,7 @@ static size_t qualified_sizeof(void) { return sizeof(const float); }
 
     def test_foundation_digest_rejects_an_edited_row(self) -> None:
         baseline = oracle.load_baseline()
-        baseline["foundation_rows"][0]["owner"] = "forged_owner"
+        baseline["foundation_rows"][0]["identity"] += "-forged"
         with self.assertRaisesRegex(oracle.OracleFailure, "freeze digest"):
             oracle.validate_baseline(baseline, oracle.inventory_rows(oracle.REPO_ROOT))
 
@@ -188,6 +185,7 @@ static size_t qualified_sizeof(void) { return sizeof(const float); }
                 ".cc",
                 ".cpp",
                 ".cu",
+                ".cuh",
                 ".cxx",
                 ".h",
                 ".h++",
@@ -217,6 +215,65 @@ static size_t qualified_sizeof(void) { return sizeof(const float); }
 
 
 class MutationContractTests(unittest.TestCase):
+    def test_implementation_digest_is_independent_of_import_name(self) -> None:
+        def local_mutation(source: str) -> str:
+            return source + " controlled"
+
+        original_module = local_mutation.__module__
+        original_digest = oracle._mutation_implementation_sha256(local_mutation)
+        try:
+            local_mutation.__module__ = "alternate_runtime_oracle_import"
+            renamed_digest = oracle._mutation_implementation_sha256(local_mutation)
+        finally:
+            local_mutation.__module__ = original_module
+
+        self.assertEqual(original_digest, renamed_digest)
+
+    def test_manifest_binds_exact_mutation_semantics_and_command(self) -> None:
+        manifest = oracle.mutation_manifest(oracle.phase0_mutation_probes())
+        self.assertTrue(manifest)
+        for row in manifest:
+            self.assertEqual(
+                set(row),
+                {
+                    "command",
+                    "expected_failure",
+                    "expected_kind",
+                    "implementation_sha256",
+                    "path",
+                    "witness_id",
+                },
+            )
+            self.assertRegex(row["implementation_sha256"], r"^[0-9a-f]{64}$")
+            self.assertEqual(
+                row["command"],
+                "uv run --managed-python --python 3.11 --no-project python "
+                "scripts/runtime_representation_oracle.py --phase 0",
+            )
+            self.assertEqual(
+                set(row["expected_failure"]),
+                {"code", "reason_prefix"},
+            )
+
+    def test_mutation_body_change_moves_the_freeze_digest(self) -> None:
+        probes = oracle.phase0_mutation_probes()
+        baseline_manifest = oracle.coverage_manifest(probes)
+        replacement = oracle.MutationProbe(
+            witness_id=probes[0].witness_id,
+            expected_kind=probes[0].expected_kind,
+            path=probes[0].path,
+            mutate=oracle.mutate_free_standing_c_element_pointer,
+            expected_failure=probes[0].expected_failure,
+        )
+        changed = (replacement, *probes[1:])
+        changed_manifest = oracle.coverage_manifest(changed)
+        self.assertNotEqual(baseline_manifest, changed_manifest)
+        rows = [row.to_baseline_dict() for row in oracle.inventory_rows(oracle.REPO_ROOT)]
+        self.assertNotEqual(
+            oracle._freeze_digest(rows, baseline_manifest),
+            oracle._freeze_digest(rows, changed_manifest),
+        )
+
     def test_every_classifier_has_one_controlled_mutation(self) -> None:
         inventory_kinds = {
             row.kind for row in oracle.inventory_rows(oracle.REPO_ROOT)
@@ -225,7 +282,7 @@ class MutationContractTests(unittest.TestCase):
         self.assertEqual({probe.expected_kind for probe in probes}, inventory_kinds)
         self.assertEqual(
             len(probes),
-            len({(probe.path, probe.mutate.__name__) for probe in probes}),
+            len({probe.witness_id for probe in probes}),
         )
 
     def test_c_pointer_sizeof_and_metal_descriptor_edges_have_mutations(self) -> None:
@@ -271,9 +328,16 @@ class MutationContractTests(unittest.TestCase):
                 "mutate_c_unknown_arithmetic_pointer",
                 "mutate_c_redefined_alias_pointer",
                 "mutate_cxx_reference_and_template",
+                "mutate_c_declaration_relocation",
+                "mutate_c_atomic_element_pointer",
+                "mutate_cxx_rvalue_reference",
+                "mutate_c_complete_declarator_shapes",
                 "mutate_rust_dynamic_c_pointer",
                 "mutate_rust_positional_and_macro_rules_pointer",
                 "mutate_rust_split_c_pointer",
+                "mutate_rust_unconstrained_c_source",
+                "mutate_rust_stringify_pointer",
+                "mutate_direct_data_access_after_test_module",
             }
             <= names
         )

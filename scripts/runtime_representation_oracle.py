@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cache
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -32,13 +33,18 @@ DTYPE_MUTATION_SOURCE = Path("crates/chelis-vocab/src/lib.rs")
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "ef143a3c1b6b7b6ffcd6921ce974e8a4e0752c0198844c2d163c7a1d173165e0"
+FREEZE_SHA256 = "bc5e37b2c97c676abe1dc448b63f5474619626b54a4e54136913c876d0c551ec"
+PHASE0_COMMAND = (
+    "uv run --managed-python --python 3.11 --no-project python "
+    "scripts/runtime_representation_oracle.py --phase 0"
+)
 
 SOURCE_SUFFIXES = {
     ".c",
     ".cc",
     ".cpp",
     ".cu",
+    ".cuh",
     ".cxx",
     ".h",
     ".h++",
@@ -123,6 +129,10 @@ C_STRUCT_RE = re.compile(
 class OracleFailure(RuntimeError):
     """A failed runtime-representation oracle obligation."""
 
+    def __init__(self, message: str, *, code: str = "oracle.failure") -> None:
+        super().__init__(message)
+        self.code = code
+
 
 @dataclass(frozen=True, order=True)
 class InventoryRow:
@@ -144,10 +154,6 @@ class InventoryRow:
     def to_baseline_dict(self) -> dict[str, object]:
         return {
             "identity": self.identity,
-            "kind": self.kind,
-            "path": self.path,
-            "owner": self.owner,
-            "occurrence": self.occurrence,
             "deletion_phase": self.deletion_phase,
         }
 
@@ -159,11 +165,73 @@ class OracleLeg:
 
 
 @dataclass(frozen=True)
+class FailureExpectation:
+    code: str
+    reason_prefix: str
+
+
+UNCLASSIFIED_FAILURE = FailureExpectation(
+    "inventory.unclassified",
+    "unclassified inventory hit",
+)
+SOURCE_REJECTED_FAILURE = FailureExpectation(
+    "source.rejected",
+    "fail-closed C-surface parser rejected",
+)
+
+
+@dataclass(frozen=True, init=False)
 class MutationProbe:
+    witness_id: str
     expected_kind: str
     path: Path
     mutate: Callable[[str], str]
-    expected_error: str = "unclassified inventory hit"
+    expected_failure: FailureExpectation = UNCLASSIFIED_FAILURE
+
+    def __init__(
+        self,
+        expected_kind: str,
+        path: Path,
+        mutate: Callable[[str], str],
+        expected_failure: FailureExpectation | str = UNCLASSIFIED_FAILURE,
+        *,
+        witness_id: str | None = None,
+    ) -> None:
+        if isinstance(expected_failure, str):
+            expected_failure = FailureExpectation(
+                "source.rejected"
+                if expected_failure == SOURCE_REJECTED_FAILURE.reason_prefix
+                else "oracle.failure",
+                expected_failure,
+            )
+        object.__setattr__(
+            self,
+            "witness_id",
+            witness_id or f"phase0.{mutate.__name__}",
+        )
+        object.__setattr__(self, "expected_kind", expected_kind)
+        object.__setattr__(self, "path", path)
+        object.__setattr__(self, "mutate", mutate)
+        object.__setattr__(self, "expected_failure", expected_failure)
+
+    @property
+    def expected_error(self) -> str:
+        return self.expected_failure.reason_prefix
+
+
+def _mutation_probe(
+    expected_kind: str,
+    path: Path,
+    mutate: Callable[[str], str],
+    expected_failure: FailureExpectation = UNCLASSIFIED_FAILURE,
+) -> MutationProbe:
+    return MutationProbe(
+        witness_id=f"phase0.{mutate.__name__}",
+        expected_kind=expected_kind,
+        path=path,
+        mutate=mutate,
+        expected_failure=expected_failure,
+    )
 
 
 def _tracked_source_paths(root: Path) -> tuple[Path, ...]:
@@ -181,8 +249,6 @@ def _tracked_source_paths(root: Path) -> tuple[Path, ...]:
         if not relative.startswith(SOURCE_PREFIXES) and not _is_backend_source(relative):
             continue
         if PurePosixPath(relative).suffix not in SOURCE_SUFFIXES:
-            continue
-        if PurePosixPath(relative).name.endswith("_tests.rs"):
             continue
         paths.append(Path(relative))
     return tuple(sorted(paths))
@@ -245,6 +311,14 @@ def _c_surface_binary() -> Path:
 def c_surface_inventory_rows(
     root: Path, paths: Sequence[Path]
 ) -> tuple[tuple[str, str, str, str], ...]:
+    rows, _ = _c_surface_inventory(root, paths)
+    return rows
+
+
+def _c_surface_inventory(
+    root: Path,
+    paths: Sequence[Path],
+) -> tuple[tuple[tuple[str, str, str, str], ...], dict[str, str]]:
     manifest = [path.as_posix() for path in paths if _is_c_surface_source(path.as_posix())]
     completed = subprocess.run(
         (str(_c_surface_binary()), "--repo", str(root)),
@@ -257,16 +331,29 @@ def c_surface_inventory_rows(
     if completed.returncode != 0:
         raise OracleFailure(
             "fail-closed C-surface parser rejected the source tree: "
-            + completed.stderr.strip()
+            + completed.stderr.strip(),
+            code="source.rejected",
         )
     try:
         decoded = json.loads(completed.stdout)
     except json.JSONDecodeError as error:
         raise OracleFailure(f"C-surface parser emitted invalid JSON: {error}") from error
-    if not isinstance(decoded, list):
-        raise OracleFailure("C-surface parser output must be a JSON list")
+    if not isinstance(decoded, dict) or set(decoded) != {
+        "rows",
+        "production_rust_sources",
+    }:
+        raise OracleFailure("C-surface parser output must be a typed scan object")
+    decoded_rows = decoded["rows"]
+    production_sources = decoded["production_rust_sources"]
+    if not isinstance(decoded_rows, list):
+        raise OracleFailure("C-surface parser rows must be a JSON list")
+    if not isinstance(production_sources, dict) or not all(
+        isinstance(path, str) and isinstance(source, str)
+        for path, source in production_sources.items()
+    ):
+        raise OracleFailure("C-surface production Rust sources must be strings")
     rows = []
-    for row in decoded:
+    for row in decoded_rows:
         if not isinstance(row, dict) or set(row) != {
             "path",
             "kind",
@@ -278,7 +365,7 @@ def c_surface_inventory_rows(
         if not all(isinstance(value, str) for value in values):
             raise OracleFailure("C-surface parser row fields must be strings")
         rows.append(values)
-    return tuple(rows)
+    return tuple(rows), production_sources
 
 
 def _owner_after_line(line: str, owner: str) -> str:
@@ -412,14 +499,17 @@ def _line_kinds(path: str, owner: str, line: str) -> tuple[str, ...]:
 def inventory_rows(root: Path) -> tuple[InventoryRow, ...]:
     candidates: list[tuple[str, str, str, str, int]] = []
     tracked_paths = _tracked_source_paths(root)
-    for kind, path, owner, signature in c_surface_inventory_rows(root, tracked_paths):
+    c_surface_rows, production_rust_sources = _c_surface_inventory(root, tracked_paths)
+    for kind, path, owner, signature in c_surface_rows:
         candidates.append(
             (kind, path, owner, signature, _deletion_phase(kind, path, owner))
         )
     for relative in tracked_paths:
         path = relative.as_posix()
         owner = "module"
-        source = (root / relative).read_text(encoding="utf-8")
+        source = production_rust_sources.get(path)
+        if source is None:
+            source = (root / relative).read_text(encoding="utf-8")
         for descriptor_owner, signature in descriptor_field_signatures(source):
             candidates.append(
                 (
@@ -430,14 +520,8 @@ def inventory_rows(root: Path) -> tuple[InventoryRow, ...]:
                     _deletion_phase("descriptor-field", path, descriptor_owner),
                 )
             )
-        cfg_test_module = False
         for line in source.splitlines():
             stripped = line.strip()
-            if cfg_test_module and re.match(r"(?:pub\s+)?mod\s+\w+\s*\{", stripped):
-                # Production source keeps its unit-test module at EOF. Test
-                # fixtures are evidence, not raw-path transition debt.
-                break
-            cfg_test_module = stripped.startswith("#[cfg(test")
             owner = _owner_after_line(line, owner)
             signature = _normalized_signature(line)
             for kind in _line_kinds(path, owner, line):
@@ -467,16 +551,63 @@ def _freeze_digest(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def coverage_manifest() -> dict[str, object]:
+def _mutation_implementation_sha256(mutate: Callable[[str], str]) -> str:
+    pending = [mutate]
+    sources: dict[str, str] = {}
+    while pending:
+        current = pending.pop()
+        source_path = Path(inspect.getsourcefile(current) or "unknown")
+        try:
+            stable_path = source_path.resolve().relative_to(REPO_ROOT.resolve()).as_posix()
+        except ValueError:
+            stable_path = source_path.name
+        identity = f"{stable_path}::{current.__qualname__}"
+        if identity in sources:
+            continue
+        sources[identity] = inspect.getsource(current)
+        for name in current.__code__.co_names:
+            dependency = current.__globals__.get(name)
+            if (
+                inspect.isfunction(dependency)
+                and dependency.__module__ == current.__module__
+            ):
+                pending.append(dependency)
+    payload = "\n".join(
+        f"{identity}\0{sources[identity]}" for identity in sorted(sources)
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def mutation_manifest(
+    probes: Sequence[MutationProbe],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "witness_id": probe.witness_id,
+            "expected_kind": probe.expected_kind,
+            "path": probe.path.as_posix(),
+            "implementation_sha256": _mutation_implementation_sha256(probe.mutate),
+            "expected_failure": {
+                "code": probe.expected_failure.code,
+                "reason_prefix": probe.expected_failure.reason_prefix,
+            },
+            "command": PHASE0_COMMAND,
+        }
+        for probe in probes
+    ]
+
+
+def coverage_manifest(
+    probes: Sequence[MutationProbe] | None = None,
+) -> dict[str, object]:
+    probes = phase0_mutation_probes() if probes is None else probes
     return {
         "source_inventory": {
             "artifact": "tracked runtime, ABI, IR-capacity, binding, and backend sources",
             "enumerator": "git ls-files plus closed source classifiers",
             "expected_success": "every hit is exact active debt from the frozen foundation",
-            "mutations": [
-                f"new {probe.expected_kind} hit in {probe.path.as_posix()}"
-                for probe in phase0_mutation_probes()
-            ],
+            "command": PHASE0_COMMAND,
+            "mutations": mutation_manifest(probes),
         },
         "release_reproducers": [
             {"name": leg.name, "command": " ".join(leg.argv)} for leg in phase0_legs()
@@ -493,7 +624,7 @@ def build_foundation_baseline(rows: Sequence[InventoryRow]) -> dict[str, object]
     foundation = [row.to_baseline_dict() for row in rows]
     manifest = coverage_manifest()
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "freeze_sha256": _freeze_digest(foundation, manifest),
         "foundation_rows": foundation,
         "active_debt": [row.identity for row in rows],
@@ -514,7 +645,7 @@ def load_baseline() -> dict[str, object]:
 def validate_baseline(
     baseline: dict[str, object], rows: Sequence[InventoryRow]
 ) -> None:
-    if baseline.get("schema_version") != 2:
+    if baseline.get("schema_version") != 3:
         raise OracleFailure("unsupported Phase 0 inventory schema")
     manifest = baseline.get("coverage_manifest")
     if not isinstance(manifest, dict):
@@ -556,7 +687,8 @@ def validate_baseline(
     unclassified = observed_set - active_set
     if unclassified:
         raise OracleFailure(
-            "unclassified inventory hit: " + ", ".join(sorted(unclassified)[:5])
+            "unclassified inventory hit: " + ", ".join(sorted(unclassified)[:5]),
+            code="inventory.unclassified",
         )
     stale = active_set - observed_set
     if stale:
@@ -786,6 +918,48 @@ def mutate_cxx_reference_and_template(source: str) -> str:
     )
 
 
+def mutate_c_declaration_relocation(source: str) -> str:
+    anchor = "static inline float chelis_sum_f32("
+    if source.count(anchor) != 1:
+        raise OracleFailure("C declaration relocation anchor drifted")
+    return source.replace(
+        anchor,
+        "static inline float runtime_representation_phase0_relocated_sum_f32(",
+        1,
+    )
+
+
+def mutate_c_atomic_element_pointer(source: str) -> str:
+    anchor = "    float *C,"
+    if source.count(anchor) < 1:
+        raise OracleFailure("C atomic pointer anchor drifted")
+    return source.replace(anchor, "    _Atomic(float) *C,", 1)
+
+
+def mutate_cxx_rvalue_reference(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_cxx_rvalue",
+        "#ifdef __cplusplus\n"
+        "extern void runtime_representation_phase0_cxx_rvalue(float &&payload);\n"
+        "#endif",
+    )
+
+
+def mutate_c_complete_declarator_shapes(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_complete_declarators",
+        "typedef float *runtime_representation_phase0_pointer_alias;\n"
+        "extern void runtime_representation_phase0_complete_declarators(\n"
+        "    runtime_representation_phase0_pointer_alias alias_payload,\n"
+        "    float first[4][8], float (*callback)(int),\n"
+        "    float __attribute__((address_space(1))) *addressed);\n"
+        "static float *runtime_representation_phase0_first, "
+        "*runtime_representation_phase0_second;",
+    )
+
+
 def mutate_rust_dynamic_c_pointer(source: str) -> str:
     return _append_probe(
         source,
@@ -821,6 +995,41 @@ def mutate_rust_split_c_pointer(source: str) -> str:
     )
 
 
+def mutate_rust_unconstrained_c_source(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_unconstrained_source",
+        "fn runtime_representation_phase0_unconstrained_source(\n"
+        "    declaration: &str,\n"
+        ") -> String {\n"
+        "    format!(\"{declaration}\")\n"
+        "}",
+    )
+
+
+def mutate_rust_stringify_pointer(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_stringify_pointer",
+        "fn runtime_representation_phase0_stringify_pointer() -> &'static str {\n"
+        "    stringify!(float *payload)\n"
+        "}",
+    )
+
+
+def mutate_direct_data_access_after_test_module(source: str) -> str:
+    marker = "runtime_representation_phase0_after_test_access"
+    if marker in source or "#[cfg(test)]" not in source:
+        raise OracleFailure("post-test direct-access mutation anchor drifted")
+    return source + f"""
+
+#[allow(dead_code)]
+unsafe fn {marker}(tensor: *mut crate::chelis_tensor) -> *mut u8 {{
+    unsafe {{ (*tensor).data }}
+}}
+"""
+
+
 def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
     return (
         MutationProbe(
@@ -832,6 +1041,7 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
             "descriptor-field",
             Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
             mutate_descriptor_field,
+            witness_id="phase0.mutate_descriptor_field.hip",
         ),
         MutationProbe(
             "direct-data-access",
@@ -873,6 +1083,7 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
             "descriptor-field",
             Path("crates/chelis-backend-metal/runtime/chelis_metal_runtime.h"),
             mutate_descriptor_field,
+            witness_id="phase0.mutate_descriptor_field.metal",
         ),
         MutationProbe(
             "raw-element-pointer",
@@ -946,6 +1157,41 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
             mutate_rust_split_c_pointer,
             "fail-closed C-surface parser rejected",
         ),
+        MutationProbe(
+            "raw-element-pointer",
+            Path("crates/chelis-runtime/include/chelis_simd.h"),
+            mutate_c_declaration_relocation,
+        ),
+        MutationProbe(
+            "raw-element-pointer",
+            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
+            mutate_c_atomic_element_pointer,
+        ),
+        MutationProbe(
+            "raw-element-pointer",
+            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
+            mutate_cxx_rvalue_reference,
+        ),
+        MutationProbe(
+            "raw-element-pointer",
+            Path("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
+            mutate_c_complete_declarator_shapes,
+        ),
+        MutationProbe(
+            "raw-element-pointer",
+            Path("crates/chelis-backend-hip/src/kernels.rs"),
+            mutate_rust_unconstrained_c_source,
+        ),
+        MutationProbe(
+            "raw-element-pointer",
+            Path("crates/chelis-backend-hip/src/kernels.rs"),
+            mutate_rust_stringify_pointer,
+        ),
+        MutationProbe(
+            "direct-data-access",
+            DIRECT_ACCESS_MUTATION_SOURCE,
+            mutate_direct_data_access_after_test_module,
+        ),
     )
 
 
@@ -980,7 +1226,7 @@ def _expect_unclassified_mutation(
     path: Path,
     mutate: Callable[[str], str],
     expected_kind: str,
-    expected_error: str,
+    expected_failure: FailureExpectation,
 ) -> None:
     baseline = load_baseline()
     with temporary_mutation(path, mutate):
@@ -988,8 +1234,10 @@ def _expect_unclassified_mutation(
             validate_baseline(baseline, inventory_rows(REPO_ROOT))
         except OracleFailure as error:
             message = str(error)
-            if expected_error not in message or (
-                expected_error == "unclassified inventory hit"
+            if error.code != expected_failure.code or not message.startswith(
+                expected_failure.reason_prefix
+            ) or (
+                expected_failure == UNCLASSIFIED_FAILURE
                 and f"kind={expected_kind}|" not in message
             ):
                 raise OracleFailure(
@@ -1006,7 +1254,7 @@ def run_phase0_mutations() -> None:
             REPO_ROOT / probe.path,
             probe.mutate,
             probe.expected_kind,
-            probe.expected_error,
+            probe.expected_failure,
         )
 
 

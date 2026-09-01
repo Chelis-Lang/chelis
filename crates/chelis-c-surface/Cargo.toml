@@ -7,7 +7,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-proc-macro2 = "1"
+clang = { version = "2", features = ["runtime"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+quote = "1"
 serde.workspace = true
 serde_json = "1"
 syn.workspace = true

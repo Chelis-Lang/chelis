@@ -1,10 +1,11 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
 use chelis_c_surface::{
-    CarrierUse, collect_c_aliases, scan_c_source_with_aliases, scan_rust_source,
+    CarrierUse, collect_c_aliases, production_rust_source, scan_c_source_at_path, scan_rust_source,
 };
 use serde::Serialize;
 
@@ -14,6 +15,12 @@ struct LocatedCarrierUse {
     kind: String,
     owner: String,
     signature: String,
+}
+
+#[derive(Serialize)]
+struct ScanOutput {
+    rows: Vec<LocatedCarrierUse>,
+    production_rust_sources: BTreeMap<String, String>,
 }
 
 fn usage() -> ! {
@@ -87,21 +94,32 @@ fn run() -> Result<(), String> {
         .join("\n");
     let aliases = collect_c_aliases(&c_prelude);
     let mut output = Vec::new();
+    let mut production_rust_sources = BTreeMap::new();
     for (raw_path, source) in sources {
         let relative = Path::new(&raw_path);
         let rows = if relative
             .extension()
             .is_some_and(|extension| extension == "rs")
         {
+            production_rust_sources.insert(
+                raw_path.clone(),
+                production_rust_source(&source).map_err(|error| format!("{raw_path}: {error}"))?,
+            );
             scan_rust_source(&source)
         } else {
-            scan_c_source_with_aliases(&source, "c-source", &aliases)
+            scan_c_source_at_path(&source, &raw_path, relative, &aliases)
         }
         .map_err(|error| format!("{raw_path}: {error}"))?;
         output.extend(located(&raw_path, rows));
     }
-    serde_json::to_writer(io::stdout(), &output)
-        .map_err(|error| format!("write scan result: {error}"))?;
+    serde_json::to_writer(
+        io::stdout(),
+        &ScanOutput {
+            rows: output,
+            production_rust_sources,
+        },
+    )
+    .map_err(|error| format!("write scan result: {error}"))?;
     Ok(())
 }
 

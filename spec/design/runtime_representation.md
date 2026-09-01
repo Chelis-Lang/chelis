@@ -493,15 +493,18 @@ A final-form exception may name a private owner function and reason, but a
 stale or unmatched entry fails and an issue citation does not authorize a raw
 path.
 
-The C-family portion is parsed by the shared `chelis-c-surface` crate rather
-than matched as declaration text. It tokenizes comments, quoted literals, and
-C++ raw strings; normalizes qualifier placement; and classifies pointer,
-reference, array, and C++ template declarators, pointer casts, and
-`sizeof(type)` operands from token structure. Each exact identity preserves
-the complete canonical base spelling and modifiers, declarator shape, pointer
-qualifiers, and array extent; width-equal spellings such as `int` and
-`unsigned int`, or arrays of four and eight elements, cannot collapse to one
-identity.
+The C-family portion is parsed by the shared `chelis-c-surface` crate through
+libclang's compiler AST and preprocessor for the source's declared dialect,
+rather than matched as declaration text. Every carrier row is owned by its
+enclosing declaration. Its identity includes the authored declaration and
+libclang's complete canonical type: modifiers and address spaces, every
+pointer/reference layer, function signature, and every array extent.
+Relocating an unchanged carrier between functions, changing one extent of a
+multidimensional array, or changing `float *` to `_Atomic(float) *` therefore
+changes identity. Width-equal spellings such as `int` and `unsigned int`
+cannot collapse to one identity. The parser evaluates production
+preprocessor configurations explicitly; syntax rejected in every declared
+dialect fails closed rather than disappearing from the inventory.
 
 Typedefs (including aggregate definitions) and object-like or function-like
 type macros are collected from every tracked C-family source as a conservative
@@ -511,17 +514,20 @@ erase an earlier numeric meaning. This intentionally over-approximates
 preprocessor and lexical scopes; a source-specific definition may expose a
 carrier for review, but it can never launder one out of the inventory.
 
-Rust emitters are parsed with `syn`, and ordinary/raw string literals in
-expressions and `macro_rules!` token trees enter the same C-family parser.
-Named and positional format holes are explicit dynamic type or name nodes.
+Rust emitters are parsed with `syn`. Ordinary/raw string literals,
+`stringify!` inputs, and `macro_rules!` token trees enter the same C-family
+parser with their complete enclosing Rust item path. Named or positional
+format holes may stand only for a type or declarator name inside an otherwise
+complete declaration; a wholly dynamic C-family declaration fails closed.
 Only a module whose attribute is exactly `cfg(test)` is excluded;
-`cfg(not(test))` and other formulas remain production surface. The tracked
-suffix set covers C, C++, Objective-C, Objective-C++, CUDA, HIP, Metal, and
-Rust source/header forms. A complete source containing carrier syntax must
-have closed lexical constructs and balanced delimiters. An emitted Rust
-fragment may leave only its outer C block open; each carrier candidate must
-remain locally complete, so splitting the type from a pointer or array
-declarator fails instead of disappearing.
+`cfg(not(test))`, production items after a test module, and production files
+whose names end in `_tests.rs` remain in the source universe. The tracked
+suffix set covers C, C++, Objective-C, Objective-C++, CUDA (including `.cuh`
+headers), HIP, Metal, and Rust source/header forms. A complete source
+containing carrier syntax must have closed lexical constructs and balanced
+delimiters. An emitted Rust fragment may leave only its outer C block open;
+each carrier candidate must remain locally complete, so splitting the type
+from a pointer or array declarator fails instead of disappearing.
 
 The parser and the public-header capacity census share lexical normalization,
 the closed arithmetic/non-arithmetic type vocabulary, alias expansion, and
@@ -565,11 +571,14 @@ prove its sanctioned replacements work.
 - Phase 0 freezes the derived inventory, mutation set, current accepted/rejected
   behavior, and the exact issue-to-phase map. Later phases may reduce raw hits
   but may not add an exception. The Phase-0 implementation moves this freeze
-  once from schema 1 to schema 2 because schema 1 hashed only the row list and
-  used non-injective C declarator identities. Schema 2 binds rows plus coverage
-  manifest and uses the complete identities and monotone alias environment
-  defined in C6; the manifest-integrity and parser controls above are the
-  required negative evidence for that move.
+  to schema 3 because schema 2 still used an incomplete token scanner and bound
+  prose mutation labels instead of executable witness semantics. Schema 3 uses
+  the compiler-backed and Rust-AST identities defined in C6. For every mutation
+  it binds a stable witness ID, source path, exact mutation implementation
+  digest, expected failure code and reason prefix, and required phase command.
+  Changing a mutation body or expected disposition therefore moves the freeze
+  digest. The manifest-integrity and adversarial parser controls above are the
+  required negative evidence for this freeze move.
 - Phase 1 freezes `DTypeContract`, sealed element markers, exact capacity keys,
   and checked finite-count types. Later phases consume them without parallel
   tables.

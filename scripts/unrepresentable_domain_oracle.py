@@ -285,6 +285,7 @@ class OracleBinaryError(RuntimeError):
 # this oracle. Unset means "build your own", which is what a standalone run
 # and hosted CI's `workspace-tests-shard` workers both do.
 ORACLE_BINARY_ENV = "CHELIS_ORACLE_BINARY"
+STYLE_GATE_DISABLE_ENV = "CHELIS_STYLE_GATE_DISABLE"
 
 
 def chelis_check_command() -> tuple[str, ...]:
@@ -435,6 +436,7 @@ def run_chelis_check(fixture_path: Path) -> subprocess.CompletedProcess[str]:
         f"chelis check fixture {fixture_path.name}",
         cmd,
         timeout=60,
+        env={**os.environ, STYLE_GATE_DISABLE_ENV: "1"},
     )
 
 
@@ -567,6 +569,7 @@ def run_chelis_validate(fixture_path: Path) -> subprocess.CompletedProcess[str]:
         f"chelis validate fixture {fixture_path.name}",
         cmd,
         timeout=60,
+        env={**os.environ, STYLE_GATE_DISABLE_ENV: "1"},
     )
 
 

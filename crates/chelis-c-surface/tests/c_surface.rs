@@ -1,6 +1,10 @@
+use std::collections::BTreeMap;
+use std::path::Path;
+
 use chelis_c_surface::{
     CarrierUse, ScanErrorKind, canonical_c_tokens, classify, collect_c_aliases, collect_typedefs,
-    scan_c_source, scan_c_source_with_aliases, scan_rust_source, strip_c_comments,
+    scan_c_source, scan_c_source_at_path, scan_c_source_with_aliases, scan_rust_source,
+    strip_c_comments,
 };
 
 fn signatures<'a>(rows: &'a [CarrierUse], kind: &str) -> Vec<&'a str> {
@@ -106,9 +110,12 @@ typedef double chelis_vec4[4];
     assert!(raw.iter().any(|signature| {
         signature.contains("authored=chelis_sample_alias") && signature.contains("resolved=float")
     }));
-    assert!(raw.iter().any(|signature| {
-        signature.contains("authored=CHELIS_SAMPLE") && signature.contains("resolved=float")
-    }));
+    assert!(
+        raw.iter().any(|signature| {
+            signature.contains("authored=CHELIS_SAMPLE") && signature.contains("resolved=float")
+        }),
+        "{raw:#?}"
+    );
     assert!(raw.iter().any(|signature| {
         signature.contains("authored=chelis_vec4") && signature.contains("resolved=double")
     }));
@@ -157,6 +164,133 @@ fn exact_identities_preserve_base_modifiers_and_array_extents() {
 }
 
 #[test]
+fn exact_identities_include_the_enclosing_declaration() {
+    let first = scan_c_source("extern void first(float *payload);", "fixture").unwrap();
+    let second = scan_c_source("extern void second(float *payload);", "fixture").unwrap();
+    assert_ne!(first[0].owner, second[0].owner);
+    assert_ne!(first[0].signature, second[0].signature);
+    assert!(first[0].owner.contains("first"));
+    assert!(second[0].owner.contains("second"));
+}
+
+#[test]
+fn anonymous_record_identities_do_not_depend_on_source_lines() {
+    let compact = scan_c_source("typedef struct { float *data; } local_tensor;", "fixture")
+        .expect("anonymous record parses");
+    let shifted = scan_c_source(
+        "\n\n\ntypedef struct { float *data; } local_tensor;",
+        "fixture",
+    )
+    .expect("line-shifted anonymous record parses");
+
+    assert_eq!(compact, shifted);
+    assert!(compact.iter().all(|row| !row.owner.contains("/tmp/")));
+}
+
+#[test]
+fn tracked_anonymous_record_owners_do_not_expose_compiler_locations() {
+    let source = include_str!("../../chelis-runtime/include/chelis_runtime.h");
+    let rows = scan_c_source_at_path(
+        source,
+        "crates/chelis-runtime/include/chelis_runtime.h",
+        Path::new("crates/chelis-runtime/include/chelis_runtime.h"),
+        &collect_c_aliases(source),
+    )
+    .expect("tracked runtime header parses");
+
+    assert!(
+        rows.iter().all(|row| !row.owner.contains("/tmp/")),
+        "compiler location leaked into rows: {rows:#?}"
+    );
+}
+
+#[test]
+fn tracked_metal_sizeof_expressions_are_width_arithmetic() {
+    let source = include_str!("../../chelis-backend-metal/runtime/chelis_metal_runtime.h");
+    let rows = scan_c_source_at_path(
+        source,
+        "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
+        Path::new("crates/chelis-backend-metal/runtime/chelis_metal_runtime.h"),
+        &collect_c_aliases(source),
+    )
+    .expect("tracked Metal header parses");
+
+    assert!(
+        rows.iter().any(|row| row.kind == "width-arithmetic"),
+        "Metal sizeof expressions disappeared from the structural scan: {rows:#?}"
+    );
+}
+
+#[test]
+fn complete_declarator_shape_is_injective() {
+    let sources = [
+        (
+            "extern void f(float *payload);",
+            "extern void f(_Atomic(float) *payload);",
+        ),
+        (
+            "extern void f(float *payload);",
+            "extern void f(float __attribute__((address_space(1))) *payload);",
+        ),
+        (
+            "extern void f(float &payload);",
+            "extern void f(float &&payload);",
+        ),
+        (
+            "extern void f(float payload[4][8]);",
+            "extern void f(float payload[4][9]);",
+        ),
+        (
+            "extern void f(float (*callback)(int));",
+            "extern void f(float (*callback)(long));",
+        ),
+    ];
+    for (left, right) in sources {
+        let left_rows = scan_c_source(left, "fixture").expect("left declaration parses");
+        let right_rows = scan_c_source(right, "fixture").expect("right declaration parses");
+        assert_ne!(
+            left_rows, right_rows,
+            "declarators collapsed: {left} / {right}"
+        );
+    }
+}
+
+#[test]
+fn every_declarator_and_pointer_typedef_use_gets_an_identity() {
+    let rows = scan_c_source(
+        r#"
+typedef float *sample_ptr;
+extern void consume(sample_ptr payload);
+static float *first, *second;
+"#,
+        "fixture",
+    )
+    .expect("valid declarations parse");
+    assert!(rows.iter().any(|row| row.owner.contains("consume")));
+    assert!(rows.iter().any(|row| row.signature.contains("name=first")));
+    assert!(rows.iter().any(|row| row.signature.contains("name=second")));
+}
+
+#[test]
+fn active_preprocessor_branch_cannot_hide_a_cxx_rvalue_reference() {
+    let rows = scan_c_source(
+        r#"
+#ifdef __cplusplus
+extern void cxx_only(float &&payload);
+#endif
+"#,
+        "fixture",
+    )
+    .expect("the C++ configuration parses");
+    assert!(
+        rows.iter().any(|row| {
+            row.owner.contains("cxx_only") && row.signature.contains("rvalue-reference")
+        }),
+        "{rows:#?}"
+    );
+}
+
+#[test]
 fn cxx_references_templates_and_unknown_types_cannot_bypass_classification() {
     for source in [
         "extern void cpp_ref(float &payload);",
@@ -198,7 +332,7 @@ static MTLGPUFamily families[] = { MTLGPUFamilyApple7 };
 static size_t opaque_width(void) { return sizeof(struct ChelisContext); }
 "#;
     let rows = scan_c_source(source, "fixture").expect("nonnumeric types parse");
-    assert!(rows.is_empty());
+    assert!(rows.is_empty(), "{rows:#?}");
 }
 
 #[test]
@@ -212,7 +346,7 @@ extern void consume(local_tensor *tensor);
 "#;
     let rows = scan_c_source(source, "fixture").expect("aggregate typedef is structural");
     let raw = signatures(&rows, "raw-element-pointer");
-    assert_eq!(raw.len(), 1);
+    assert_eq!(raw.len(), 1, "{raw:#?}");
     assert!(raw[0].contains("resolved=float"));
 }
 
@@ -232,13 +366,13 @@ fn repository_alias_prelude_resolves_types_declared_in_included_headers() {
 fn nested_sizeof_type_names_are_parsed_without_confusing_expressions() {
     let source = r#"
 static size_t widths(float *payload, size_t index) {
-    return sizeof((const float)) + sizeof(double[4])
+    return sizeof(const float) + sizeof(double[4])
         + sizeof(payload[index]) + sizeof(index * index);
 }
 "#;
     let rows = scan_c_source(source, "fixture").expect("valid sizeof operands parse");
     let widths = signatures(&rows, "width-arithmetic");
-    assert_eq!(widths.len(), 2);
+    assert_eq!(widths.len(), 4);
     assert!(
         widths
             .iter()
@@ -249,6 +383,20 @@ static size_t widths(float *payload, size_t index) {
             .iter()
             .any(|signature| signature.contains("resolved=double"))
     );
+}
+
+#[test]
+fn the_compiler_prelude_supports_the_c_dialect() {
+    let rows = scan_c_source_at_path(
+        "static size_t widths(float values[4]) { return sizeof(values[0]); }",
+        "fixture.c",
+        Path::new("fixture.c"),
+        &BTreeMap::new(),
+    )
+    .expect("C11 source parses with the compiler prelude");
+
+    assert_eq!(signatures(&rows, "raw-element-pointer").len(), 1);
+    assert_eq!(signatures(&rows, "width-arithmetic").len(), 1);
 }
 
 #[test]
@@ -430,6 +578,51 @@ fn emitted(name: &str) -> String {
         let error = scan_rust_source(source).expect_err("split declarations are ambiguous");
         assert_eq!(error.kind, ScanErrorKind::IncompleteFragment);
     }
+}
+
+#[test]
+fn unconstrained_dynamic_c_source_fails_closed() {
+    let source = r#"
+fn emitted(declaration: &str) -> String {
+    format!("{declaration}")
+}
+"#;
+    let rows = scan_rust_source(source).expect("valid Rust parses");
+    assert!(rows.iter().any(|row| {
+        row.kind == "raw-element-pointer" && row.signature.contains("shape=unconstrained-emission")
+    }));
+}
+
+#[test]
+fn stringify_carriers_are_scanned() {
+    let source = r#"
+fn emitted() -> &'static str {
+    stringify!(float *payload)
+}
+"#;
+    let rows = scan_rust_source(source).expect("stringify input is structural Rust syntax");
+    assert!(rows.iter().any(|row| row.kind == "raw-element-pointer"));
+}
+
+#[test]
+fn production_after_a_cfg_test_module_is_still_scanned() {
+    let source = r#"
+#[cfg(test)]
+mod tests {
+    fn fixture(tensor: Tensor) { let _ = tensor.data; }
+}
+
+fn production(tensor: Tensor) {
+    let _ = tensor.data;
+}
+"#;
+    let rows = scan_rust_source(source).expect("valid Rust parses");
+    let accesses: Vec<_> = rows
+        .iter()
+        .filter(|row| row.kind == "direct-data-access")
+        .collect();
+    assert_eq!(accesses.len(), 1);
+    assert!(accesses[0].owner.contains("production"));
 }
 
 #[test]

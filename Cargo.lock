@@ -497,7 +497,9 @@ dependencies = [
 name = "chelis-c-surface"
 version = "0.18.6"
 dependencies = [
+ "clang",
  "proc-macro2",
+ "quote",
  "serde",
  "serde_json",
  "syn 2.0.117",
@@ -951,6 +953,16 @@ dependencies = [
  "tar",
  "tempfile",
  "toml",
+]
+
+[[package]]
+name = "clang"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2ed30b30e1e17966b55ddd0b9dd2758fd824f0a6da6875c8abb17e6aba47c28"
+dependencies = [
+ "clang-sys",
+ "libc",
 ]
 
 [[package]]
