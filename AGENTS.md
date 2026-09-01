@@ -698,6 +698,13 @@ python3 scripts/gate.py --list
 uv-created environment is preserved. If uv is missing, the gate exits with
 installation and Python-provisioning commands.
 
+Inside Devenv, `chelis-gate` runs the gate under the activated
+`.devenv/state/venv` interpreter, the same one `PYO3_PYTHON` names and the same
+one a developer gets by typing `python`. A Devenv script can only name a Nix
+package, so the launcher starts under the bare store CPython and hands the
+script the activated interpreter; without that handoff the gate reads its own
+runtime as unmanaged and re-executes when it should not.
+
 The gate runs `cargo nextest run --no-fail-fast` (CI's actual runner), not
 `cargo test --workspace`, and includes `chelis lint --check .` (the §8.6 /
 §12 naming gate). The sanitizer, macOS-smoke, LOC-report, no-AI-authorship, docs, and
