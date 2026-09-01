@@ -53,7 +53,7 @@ ls_1 = linspace(cast(4.0, f32), cast(9.0, f32), cast(1, int64))
         .stdout(predicate::str::contains(
             "ls_3 = tensor(shape=[3], data=[-1.0, 0.0, 1.0])",
         ))
-        // count <= 1 degenerate fallback: single-element tensor of `start`.
+        // The valid count=1 boundary is a single-element tensor of `start`.
         .stdout(predicate::str::contains(
             "ls_1 = tensor(shape=[1], data=[4.0])",
         ));

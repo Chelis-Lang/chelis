@@ -317,6 +317,82 @@ value = option_witness(Some(cast(0, int16)), cast(257, int64))
     assert_eq!(payload.dtype(), Prim::Int16);
 }
 
+#[test]
+fn generic_cast_target_survives_map_callback_specialization() {
+    let checked = checked_surf(
+        r#"
+def recast[p_int](value: p_int) -> p_int = cast(value, p_int)
+values = map(recast, [cast(127, int8)])
+value = index(values, cast(0, int64))
+"#,
+    );
+
+    let outcome = evaluate_host_program(&checked, &HashMap::new())
+        .expect("the checked map callback type must specialize the generic closure");
+    let RuntimeValue::Scalar(payload) = outcome.host_bindings.get("value").expect("value") else {
+        panic!("value should be a scalar")
+    };
+    assert_eq!(payload.dtype(), Prim::Int8);
+}
+
+#[test]
+fn generic_cast_target_survives_fold_callback_specialization() {
+    let checked = checked_surf(
+        r#"
+def keep_left[p_int](left: p_int, right: p_int) -> p_int = cast(left, p_int)
+value = fold(keep_left, cast(127, int8), [cast(1, int8)])
+"#,
+    );
+
+    let outcome = evaluate_host_program(&checked, &HashMap::new())
+        .expect("the checked fold callback type must specialize the generic closure");
+    let RuntimeValue::Scalar(payload) = outcome.host_bindings.get("value").expect("value") else {
+        panic!("value should be a scalar")
+    };
+    assert_eq!(payload.dtype(), Prim::Int8);
+}
+
+#[test]
+fn generic_cast_target_survives_every_higher_order_callback_edge() {
+    let checked = checked_surf(
+        r#"
+def nonnegative[p_int](value: p_int) -> bool =
+  gte(cast(value, p_int), cast(0, p_int))
+def keep_left_hof[p_int](left: p_int, right: p_int) -> p_int =
+  cast(left, p_int)
+def singleton[p_int](value: p_int) -> List[p_int] = [cast(value, p_int)]
+def keep_state[p_int](state: p_int, index: int64) -> p_int = cast(state, p_int)
+
+filtered = filter(nonnegative, [cast(-1, int8), cast(2, int8)])
+scanned = scan(keep_left_hof, cast(7, int8), [cast(1, int8)])
+partitioned = partition(nonnegative, [cast(-1, int8), cast(2, int8)])
+flattened = flat_map(singleton, [cast(3, int8)])
+generated = tensor_scan(cast(9, int8), keep_state, cast(2, int64))
+"#,
+    );
+
+    let outcome = evaluate_host_program(&checked, &HashMap::new())
+        .expect("every HOF callback edge must preserve its checked specialization");
+    for name in ["filtered", "scanned", "flattened"] {
+        let RuntimeValue::List(items) = outcome.host_bindings.get(name).expect(name) else {
+            panic!("{name} should be a list")
+        };
+        assert!(items.iter().all(
+            |item| matches!(item, RuntimeValue::Scalar(payload) if payload.dtype() == Prim::Int8)
+        ));
+    }
+    let RuntimeValue::Tensor(generated) =
+        outcome.host_bindings.get("generated").expect("generated")
+    else {
+        panic!("generated should be a tensor")
+    };
+    assert_eq!(generated.precision, Prim::Int8);
+    assert!(matches!(
+        outcome.host_bindings.get("partitioned"),
+        Some(RuntimeValue::Tuple(parts)) if parts.len() == 2
+    ));
+}
+
 // ----- Phase 3t.1: test_assert_* builtins -----
 
 #[test]

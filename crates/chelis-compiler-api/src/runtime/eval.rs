@@ -189,6 +189,24 @@ fn collect_checked_precision_bindings(
     }
 }
 
+fn checked_list_element(actual: &Expr) -> Option<&Expr> {
+    let (tag, children) = tagged_expr_children(actual)?;
+    match tag {
+        DeepTag::TRef => children.first().and_then(checked_list_element),
+        DeepTag::TAdt if children.first().and_then(symbol_name) == Some("List") => children.get(1),
+        _ => None,
+    }
+}
+
+fn checked_function_children(actual: &Expr) -> Option<&[Expr]> {
+    let (tag, children) = tagged_expr_children(actual)?;
+    match tag {
+        DeepTag::TRef => children.first().and_then(checked_function_children),
+        DeepTag::TFn => Some(children),
+        _ => None,
+    }
+}
+
 fn render_shape(shape: &[usize]) -> String {
     let dimensions = shape
         .iter()
@@ -724,6 +742,13 @@ impl<'a> EvalContext<'a> {
             return self.eval_named_axis_reduction_app(expand_name, kids);
         }
 
+        let arg_type_exprs = kids[1..]
+            .iter()
+            .map(|arg| self.static_type_expr_of(arg))
+            .collect::<Vec<_>>();
+        let result_type_expr = get_meta(list)
+            .and_then(|meta| meta.entries.iter().find(|(key, _)| key == "type"))
+            .map(|(_, ty)| ty.clone());
         let args = kids[1..]
             .iter()
             .map(|arg| self.eval_expr(arg))
@@ -782,7 +807,7 @@ impl<'a> EvalContext<'a> {
         }
 
         if let Some(name) = builtin_name(func) {
-            return self.eval_builtin(name, &args);
+            return self.eval_builtin(name, &args, &arg_type_exprs, result_type_expr.as_ref());
         }
 
         // chelis#338 site B: a call to a top-level def whose body needs
@@ -804,13 +829,6 @@ impl<'a> EvalContext<'a> {
             return Ok(routed);
         }
 
-        let arg_type_exprs = kids[1..]
-            .iter()
-            .map(|arg| self.static_type_expr_of(arg))
-            .collect::<Vec<_>>();
-        let result_type_expr = get_meta(list)
-            .and_then(|meta| meta.entries.iter().find(|(key, _)| key == "type"))
-            .map(|(_, ty)| ty.clone());
         // chelis#721: when the callee names a `(fn …)`-bodied top-level def and
         // is NOT a local binding, resolve it directly to its Closure. A nullary
         // (or otherwise DAG-lowerable) def folds to a constant that lands in
@@ -1048,7 +1066,7 @@ impl<'a> EvalContext<'a> {
         result_type_expr: Option<&Expr>,
     ) -> Result<RuntimeValue, String> {
         if let Some(name) = builtin_name(stage) {
-            return self.eval_builtin(name, &args);
+            return self.eval_builtin(name, &args, arg_type_exprs, result_type_expr);
         }
         match self.eval_expr(stage)? {
             value @ (RuntimeValue::Closure { .. } | RuntimeValue::Transform { .. }) => self
@@ -1247,7 +1265,13 @@ impl<'a> EvalContext<'a> {
         }
     }
 
-    fn eval_builtin(&mut self, name: &str, args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
+    fn eval_builtin(
+        &mut self,
+        name: &str,
+        args: &[RuntimeValue],
+        arg_type_exprs: &[Option<Expr>],
+        result_type_expr: Option<&Expr>,
+    ) -> Result<RuntimeValue, String> {
         match name {
             "add" => numeric_binop(args, Some(IntBinOp::Add), Some(FloatBinOp::Add)),
             "sub" => numeric_binop(args, Some(IntBinOp::Sub), Some(FloatBinOp::Sub)),
@@ -1510,9 +1534,20 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "map expects 2 arguments".to_string())?;
                 let items = expect_list_arg(args, 1)?;
+                let callback_arg_types = [arg_type_exprs
+                    .get(1)
+                    .and_then(Option::as_ref)
+                    .and_then(checked_list_element)
+                    .cloned()];
+                let callback_result_type = result_type_expr.and_then(checked_list_element);
                 let mut out = Vec::with_capacity(items.len());
                 for item in items {
-                    out.push(self.apply_resolved_callable(callback.clone(), vec![item])?);
+                    out.push(self.apply_resolved_callable_with_arg_types(
+                        callback.clone(),
+                        vec![item],
+                        &callback_arg_types,
+                        callback_result_type,
+                    )?);
                 }
                 Ok(RuntimeValue::List(out))
             }
@@ -1522,10 +1557,19 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "filter expects 2 arguments".to_string())?;
                 let items = expect_list_arg(args, 1)?;
+                let callback_arg_types = [arg_type_exprs
+                    .get(1)
+                    .and_then(Option::as_ref)
+                    .and_then(checked_list_element)
+                    .cloned()];
                 let mut out = Vec::new();
                 for item in items {
-                    let keep =
-                        self.apply_resolved_callable(callback.clone(), vec![item.clone()])?;
+                    let keep = self.apply_resolved_callable_with_arg_types(
+                        callback.clone(),
+                        vec![item.clone()],
+                        &callback_arg_types,
+                        None,
+                    )?;
                     match keep {
                         RuntimeValue::Bool(true) => out.push(item),
                         RuntimeValue::Bool(false) => {}
@@ -1546,8 +1590,21 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "fold expects 3 arguments".to_string())?;
                 let items = expect_list_arg(args, 2)?;
+                let callback_arg_types = [
+                    arg_type_exprs.get(1).cloned().flatten(),
+                    arg_type_exprs
+                        .get(2)
+                        .and_then(Option::as_ref)
+                        .and_then(checked_list_element)
+                        .cloned(),
+                ];
                 for item in items {
-                    acc = self.apply_resolved_callable(callback.clone(), vec![acc, item])?;
+                    acc = self.apply_resolved_callable_with_arg_types(
+                        callback.clone(),
+                        vec![acc, item],
+                        &callback_arg_types,
+                        result_type_expr,
+                    )?;
                 }
                 Ok(acc)
             }
@@ -1561,9 +1618,23 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "scan expects 3 arguments".to_string())?;
                 let items = expect_list_arg(args, 2)?;
+                let callback_arg_types = [
+                    arg_type_exprs.get(1).cloned().flatten(),
+                    arg_type_exprs
+                        .get(2)
+                        .and_then(Option::as_ref)
+                        .and_then(checked_list_element)
+                        .cloned(),
+                ];
+                let callback_result_type = result_type_expr.and_then(checked_list_element);
                 let mut out = Vec::with_capacity(items.len());
                 for item in items {
-                    acc = self.apply_resolved_callable(callback.clone(), vec![acc, item])?;
+                    acc = self.apply_resolved_callable_with_arg_types(
+                        callback.clone(),
+                        vec![acc, item],
+                        &callback_arg_types,
+                        callback_result_type,
+                    )?;
                     out.push(acc.clone());
                 }
                 Ok(RuntimeValue::List(out))
@@ -1617,9 +1688,24 @@ impl<'a> EvalContext<'a> {
                 let mut ints: Vec<i64> = Vec::new();
                 let mut floats: Vec<f64> = Vec::new();
                 let mut acc = initial;
+                let callback_type_children = arg_type_exprs
+                    .get(1)
+                    .and_then(Option::as_ref)
+                    .and_then(checked_function_children);
+                let initial_type = arg_type_exprs.first().cloned().flatten();
+                let callback_arg_types = [
+                    initial_type.clone(),
+                    callback_type_children.and_then(|children| children.get(1).cloned()),
+                ];
+                let callback_result_type = initial_type.as_ref();
                 for i in 0..n {
                     let index = RuntimeValue::int64(i as i64);
-                    acc = self.apply_resolved_callable(callback.clone(), vec![acc, index])?;
+                    acc = self.apply_resolved_callable_with_arg_types(
+                        callback.clone(),
+                        vec![acc, index],
+                        &callback_arg_types,
+                        callback_result_type,
+                    )?;
                     // Validate per-step that the accumulator stayed the same
                     // scalar precision; this catches a misbehaving callback
                     // that returns a different dtype before it corrupts the
@@ -1669,11 +1755,20 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "partition expects 2 arguments".to_string())?;
                 let items = expect_list_arg(args, 1)?;
+                let callback_arg_types = [arg_type_exprs
+                    .get(1)
+                    .and_then(Option::as_ref)
+                    .and_then(checked_list_element)
+                    .cloned()];
                 let mut kept = Vec::new();
                 let mut rejected = Vec::new();
                 for item in items {
-                    let keep =
-                        self.apply_resolved_callable(callback.clone(), vec![item.clone()])?;
+                    let keep = self.apply_resolved_callable_with_arg_types(
+                        callback.clone(),
+                        vec![item.clone()],
+                        &callback_arg_types,
+                        None,
+                    )?;
                     match keep {
                         RuntimeValue::Bool(true) => kept.push(item),
                         RuntimeValue::Bool(false) => rejected.push(item),
@@ -1695,10 +1790,19 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "flat_map expects 2 arguments".to_string())?;
                 let items = expect_list_arg(args, 1)?;
+                let callback_arg_types = [arg_type_exprs
+                    .get(1)
+                    .and_then(Option::as_ref)
+                    .and_then(checked_list_element)
+                    .cloned()];
                 let mut out = Vec::new();
                 for item in items {
-                    let mapped =
-                        self.apply_resolved_callable(callback.clone(), vec![item.clone()])?;
+                    let mapped = self.apply_resolved_callable_with_arg_types(
+                        callback.clone(),
+                        vec![item.clone()],
+                        &callback_arg_types,
+                        result_type_expr,
+                    )?;
                     let RuntimeValue::List(inner) = mapped else {
                         return Err(format!(
                             "flat_map callback must return List, got {mapped:?}"
