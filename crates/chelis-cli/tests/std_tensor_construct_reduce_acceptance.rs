@@ -88,6 +88,35 @@ bad = linspace(to_tensor([cast(0.0, f32)]), cast(1.0, f32), cast(5, int64))
 
 #[test]
 #[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
+fn phase3j_pre_batch2_linspace_rejects_count_below_one() {
+    // chelis#1422. [05-OP-35]: "`linspace` requires finite endpoints and int64
+    // `count >= 1`; count one returns `[start]`". Count zero is a runtime
+    // Domain failure, not a value: the pre-fix `count <= 1` branch returned
+    // `[start]` for zero and for every negative count.
+    let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-linspace-count0");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Tensor.Construct (linspace)
+
+bad = linspace(cast(0.0, f32), cast(1.0, f32), cast(0, int64))
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args(["eval", "--file", app_pkg.join("src/main.ch").to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("count must be at least 1"));
+}
+
+#[test]
+#[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
 fn phase3j_pre_batch2_arange_matches_reference_values() {
     let (_dir, reef_home, app_pkg) = make_app("phase3j-pre-arange");
     write_file(
