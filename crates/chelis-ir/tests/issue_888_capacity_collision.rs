@@ -3,6 +3,13 @@
 //! This test locks the known-bad saturating collision until Phase 1 replaces
 //! `DimExprKey` with exact, overflow-safe capacity identity. When that repair
 //! lands, this test must invert and move into the Phase 1 positive controls.
+//!
+//! This is the key-level half of the witness, and on its own it proves only
+//! that two capacities compare equal. The consequence #888 actually claims,
+//! that the collision reaches the memory planner and produces a wrong slot
+//! assignment, is pinned at
+//! `crates/chelis-backend-c/tests/issue_888_capacity_collision.rs`. Both must
+//! invert together.
 
 use chelis_ir::dag::{DimExpr, DimExprKey};
 

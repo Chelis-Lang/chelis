@@ -6,13 +6,13 @@
 //! allocation, access, or observation.
 
 use chelis_runtime::{
+    CHELIS_DTYPE_BF16, CHELIS_DTYPE_BOOL, CHELIS_DTYPE_F16, CHELIS_DTYPE_F32, CHELIS_DTYPE_F64,
+    CHELIS_DTYPE_I8, CHELIS_DTYPE_I16, CHELIS_DTYPE_I32, CHELIS_DTYPE_I64, CHELIS_VALUE_SCALAR,
     chelis_alloc, chelis_alloc_view, chelis_dtype, chelis_dtype_size, chelis_fill_scalar,
     chelis_free, chelis_parse_scalar, chelis_scalar, chelis_scalar_from_bits, chelis_scalar_tensor,
     chelis_string_from_cstr, chelis_string_release, chelis_tensor_numel, chelis_tensor_rank,
     chelis_tensor_shape, chelis_tensor_to_scalar, chelis_value, chelis_value_as_scalar,
-    chelis_value_from_scalar, CHELIS_DTYPE_BF16, CHELIS_DTYPE_BOOL, CHELIS_DTYPE_F16,
-    CHELIS_DTYPE_F32, CHELIS_DTYPE_F64, CHELIS_DTYPE_I16, CHELIS_DTYPE_I32, CHELIS_DTYPE_I64,
-    CHELIS_DTYPE_I8, CHELIS_VALUE_SCALAR,
+    chelis_value_from_scalar,
 };
 use std::env;
 use std::ffi::CString;
@@ -210,6 +210,49 @@ fn borrowed_view_copies_shape_and_honors_declared_capacity() {
     );
 }
 
+/// chelis#889 positive parity for the zero and offset legs of the capacity
+/// controls. The negative cases below must reject malformed metadata without
+/// also rejecting the legal boundary cases sitting next to it: a genuinely
+/// empty view, and a view based at an offset into a larger buffer.
+///
+/// Both assertions are profile-independent. The runtime sizes with checked
+/// int64 arithmetic rather than with debug overflow checks, so a release build
+/// must produce these same exact answers.
+#[test]
+fn zero_size_and_offset_views_are_accepted_at_their_exact_capacity() {
+    let mut backing = [1_i64, 2, 3, 4];
+    unsafe {
+        // Zero elements: null data with zero declared capacity is the accepted
+        // form, and the reported count must be a genuine zero.
+        let shape = [0_i64, 4];
+        let empty = chelis_alloc_view(2, shape.as_ptr(), CHELIS_DTYPE_I64, ptr::null_mut(), 0);
+        assert_eq!(chelis_tensor_numel(empty), 0);
+        assert_eq!((*empty).byte_capacity, 0);
+        assert!((*empty).data.is_null());
+        chelis_free(empty);
+
+        // An element-aligned base inside a larger backing buffer, declared at
+        // exactly the remaining capacity, is legal and reads from the offset
+        // onward rather than from the start of the allocation.
+        let base = backing.as_mut_ptr().add(1);
+        let shape = [3_i64];
+        let view = chelis_alloc_view(1, shape.as_ptr(), CHELIS_DTYPE_I64, base.cast(), 24);
+        assert_eq!(chelis_tensor_numel(view), 3);
+        assert_eq!((*view).byte_capacity, 24);
+        assert_eq!((*view).owns_data, 0);
+        assert_eq!(
+            std::slice::from_raw_parts((*view).data.cast::<i64>(), 3),
+            &[2, 3, 4]
+        );
+        chelis_free(view);
+    }
+    assert_eq!(
+        backing,
+        [1, 2, 3, 4],
+        "freeing a borrowed offset view must not free or disturb its backing"
+    );
+}
+
 fn run_invalid_case(case: &str) -> ! {
     unsafe {
         match case {
@@ -279,6 +322,50 @@ fn run_invalid_case(case: &str) -> ! {
                     i64::MAX,
                 );
             }
+            // chelis#889 owned-allocation leg of the byte-overflow control.
+            // The extent product 2^62 is a legal int64 element count; the f32
+            // byte size it names, 2^64, is not. `chelis_alloc` sizes its own
+            // storage, so this is the path the `byte-overflow` view case
+            // above cannot reach.
+            "alloc-byte-overflow" => {
+                let shape = [1_i64 << 31, 1_i64 << 31];
+                chelis_alloc(2, shape.as_ptr(), CHELIS_DTYPE_F32);
+            }
+            // chelis#889 view leg of the negative-rank control. `rank-negative`
+            // above covers `chelis_alloc`; the view entry point must route
+            // through the same checked metadata rather than trusting the rank
+            // it was handed.
+            "view-rank-negative" => {
+                chelis_alloc_view(-1, ptr::null(), CHELIS_DTYPE_F32, ptr::null_mut(), 0);
+            }
+            // chelis#889 view leg of the negative-extent control, the
+            // counterpart of `extent-negative` on the borrowed-data path.
+            "view-extent-negative" => {
+                let mut backing = [0_u64; 2];
+                let shape = [-1_i64];
+                chelis_alloc_view(
+                    1,
+                    shape.as_ptr(),
+                    CHELIS_DTYPE_I64,
+                    backing.as_mut_ptr().cast(),
+                    16,
+                );
+            }
+            // chelis#889 negative leg of the declared-capacity control. A
+            // negative capacity is not merely "too small": it is outside the
+            // domain, and it must be rejected before the smaller-than-required
+            // comparison the `view-capacity` case exercises.
+            "view-capacity-negative" => {
+                let mut backing = [0_u64; 2];
+                let shape = [2_i64];
+                chelis_alloc_view(
+                    1,
+                    shape.as_ptr(),
+                    CHELIS_DTYPE_I64,
+                    backing.as_mut_ptr().cast(),
+                    -1,
+                );
+            }
             "view-capacity" => {
                 let mut backing = [0_u64; 2];
                 let shape = [2_i64];
@@ -321,13 +408,79 @@ fn run_invalid_case(case: &str) -> ! {
     panic!("invalid ABI case `{case}` returned instead of terminating")
 }
 
+/// The exact diagnostic each chelis#889 tensor-metadata control owes.
+///
+/// The loop below already requires *a* typed trap, which a case can satisfy by
+/// failing somewhere else for an unrelated reason. Naming the message pins
+/// which entry point rejected the input and why, so Phase 1's move onto the
+/// checked capacity types cannot quietly relocate a control's meaning. The
+/// rows cover the five controls #889's Phase 1 exit names: negative, zero,
+/// product overflow, byte overflow, and declared capacity, on both the owned
+/// (`chelis_alloc`) and borrowed (`chelis_alloc_view`) paths.
+const CAPACITY_CONTROL_DIAGNOSTICS: &[(&str, &str)] = &[
+    // negative
+    ("rank-negative", "Domain: chelis_alloc has negative rank -1"),
+    (
+        "view-rank-negative",
+        "Domain: chelis_alloc_view has negative rank -1",
+    ),
+    (
+        "extent-negative",
+        "Domain: chelis_alloc has negative extent -1 at axis 0",
+    ),
+    (
+        "view-extent-negative",
+        "Domain: chelis_alloc_view has negative extent -1 at axis 0",
+    ),
+    (
+        "view-capacity-negative",
+        "Domain: chelis_alloc_view has negative byte capacity -1",
+    ),
+    // zero
+    (
+        "zero-view-data",
+        "Domain: chelis_alloc_view zero-size tensor requires null data and zero capacity",
+    ),
+    (
+        "zero-view-capacity",
+        "Domain: chelis_alloc_view zero-size tensor requires null data and zero capacity",
+    ),
+    // product overflow
+    (
+        "shape-overflow",
+        "Overflow: chelis_alloc_view extent product exceeds int64",
+    ),
+    // byte overflow
+    (
+        "byte-overflow",
+        "Overflow: chelis_alloc_view byte size exceeds int64",
+    ),
+    (
+        "alloc-byte-overflow",
+        "Overflow: chelis_alloc byte size exceeds int64",
+    ),
+    // declared capacity and base pointer
+    (
+        "view-capacity",
+        "Domain: chelis_alloc_view byte capacity 15 is smaller than required 16",
+    ),
+    (
+        "view-null",
+        "Domain: chelis_alloc_view nonempty tensor has null data",
+    ),
+    (
+        "view-alignment",
+        "Domain: chelis_alloc_view data pointer is not aligned for int64",
+    ),
+];
+
 #[test]
 fn malformed_foreign_carriers_and_tensor_metadata_fail_loudly() {
     if let Ok(case) = env::var(CHILD_ENV) {
         run_invalid_case(&case);
     }
     let test_binary = env::current_exe().expect("current test binary");
-    for case in [
+    let cases = [
         "dtype",
         "scalar-high-bits",
         "scalar-bool",
@@ -339,12 +492,17 @@ fn malformed_foreign_carriers_and_tensor_metadata_fail_loudly() {
         "extent-negative",
         "shape-overflow",
         "byte-overflow",
+        "alloc-byte-overflow",
+        "view-rank-negative",
+        "view-extent-negative",
+        "view-capacity-negative",
         "view-capacity",
         "view-null",
         "view-alignment",
         "zero-view-data",
         "zero-view-capacity",
-    ] {
+    ];
+    for case in cases {
         let output = Command::new(&test_binary)
             .env(CHILD_ENV, case)
             .arg("--exact")
@@ -360,6 +518,21 @@ fn malformed_foreign_carriers_and_tensor_metadata_fail_loudly() {
         assert!(
             stderr.contains("Domain") || stderr.contains("Overflow"),
             "invalid ABI case `{case}` did not report a typed trap:\n{stderr}"
+        );
+        if let Some((_, expected)) = CAPACITY_CONTROL_DIAGNOSTICS
+            .iter()
+            .find(|(name, _)| *name == case)
+        {
+            assert!(
+                stderr.contains(expected),
+                "chelis#889 control `{case}` must trap with `{expected}`:\n{stderr}"
+            );
+        }
+    }
+    for (case, _) in CAPACITY_CONTROL_DIAGNOSTICS {
+        assert!(
+            cases.contains(case),
+            "chelis#889 control `{case}` is named but never run"
         );
     }
 }

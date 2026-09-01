@@ -1,8 +1,8 @@
 # Runtime Representation and Tensor-Access Safety
 
-**Status:** ACTIVE. Phase 0 is implemented and continuously enforced by its
-authoritative oracle; Phases 1–5 remain planned. Tracking issue: [#893]. Code
-evidence was rechecked on `main` at `8190b6d8` unless a later receipt is named.
+**Status:** PROPOSED. This document specifies the complete implementation plan;
+no phase is implemented by this change. Tracking issue: [#893]. Code evidence was
+rechecked on `main` at `8190b6d8` unless a later receipt is named.
 **Owning specs:** `spec/04-type-system.md` [04-NUM-4], [04-NUM-8],
 [04-NUM-10], [04-NUM-11], and [04-SHAPE-1], plus
 `spec/05-risc-primitives.md` [05-DIM-1], [05-DIM-2], [05-OP-31], and
@@ -305,14 +305,6 @@ allocate, free, or interpret tensor values. The schema generates:
    and
 4. the corresponding internal C/HIP device declaration.
 
-Delivery ownership is intentionally asymmetric. Phase 3 creates the shared
-schema and installs the generated host and public-C artifacts. That host slice
-depends only on Phase 1 and defines every shared field class needed by a later
-device renderer. Phase 2 requires Phase 3 and consumes that landed schema for
-the generated device descriptor and the Python/device/DLPack migration. It
-does not stage or install a private host descriptor ahead of the Phase 3 host
-consumer migration.
-
 The host and device descriptors share these schema field classes: opaque data
 pointer, dynamic shape/stride pointers, `int64` element count and byte capacity,
 `int32` rank, exact dtype tag, ownership, and reserved bytes. Device ownership
@@ -473,17 +465,12 @@ source and classifies every hit into one of these final forms:
 
 Until Phase 5, a hit may instead match one exact Phase-0 transition-debt
 identity with one owning deletion phase. That frozen manifest is generated
-from the reviewed Phase-0 tree, integrity-digested, and shrink-only. The digest
-binds one canonical object containing both the immutable foundation rows and
-the executable coverage manifest (enumerator, command, success condition, and
-mutation set); the separately stored active-debt identity list is deliberately
-outside that digest so it can only shrink. Co-editing the stored and live
-coverage manifest without moving the reviewed digest therefore fails. The
-oracle may delete active rows, but regeneration cannot bless an addition,
-rename, signature change, relocation, reclassification, or weakened coverage
-contract. Such a change removes the old identity and introduces a new
-unclassified hit, which fails. At Phase 5 the debt set must be empty. This is
-an explicit migration ledger, not an allow-list or a final authority class.
+from the reviewed Phase-0 tree, integrity-digested, and shrink-only: the oracle
+may delete rows, but regeneration cannot bless an addition, rename, signature
+change, relocation, or reclassification. Such a change removes the old
+identity and introduces a new unclassified hit, which fails. At Phase 5 the
+debt set must be empty. This is an explicit migration ledger, not an allow-list
+or a final authority class.
 
 Anything neither final nor an unchanged frozen debt identity fails. The
 inventory includes descriptor fields, `data` access, pointer casts,
@@ -492,108 +479,6 @@ narrow metadata fields, backend element spellings, and load/store templates.
 A final-form exception may name a private owner function and reason, but a
 stale or unmatched entry fails and an issue citation does not authorize a raw
 path.
-
-The C-family portion is parsed by the shared `chelis-c-surface` crate through
-libclang major 18's compiler AST and preprocessor for the source's declared
-dialect, rather than matched as declaration text. The executable rejects any
-other libclang major, and Devenv and hosted Linux CI provide the same pinned
-parser. Parser version is therefore part of the Phase-0 inventory contract, not
-workstation state. Every carrier row is owned by its
-complete semantic enclosing-declaration chain, including C++ namespaces and
-classes and Objective-C interfaces; identical method selectors in different
-containers therefore remain distinct. Its identity includes the authored
-declaration and libclang's complete canonical type: modifiers and address spaces, every
-pointer/reference layer, function signature, and every array extent.
-Relocating an unchanged carrier between functions, changing one extent of a
-multidimensional array, or changing `float *` to `_Atomic(float) *` therefore
-changes identity. Width-equal spellings such as `int` and `unsigned int`
-cannot collapse to one identity. The parser evaluates production
-preprocessor configurations through a compiler-owned token boundary. It
-tokenizes the complete main file and uses libclang's preprocessing annotations
-to recover exact directive extents, including continued, nested, inactive, and
-digraph directives; directive-looking bytes inside comments or literals never
-enter configuration discovery. At that boundary, C translation-phase-two
-backslash-LF and backslash-CRLF splices are removed from every logical token
-spelling; the corresponding physical token spans remain unchanged for source
-rewrites. `#include`, `#include_next`, `#import`, and `#error` are blanked over
-their exact extents while retaining line breaks and byte offsets before the
-carrier AST is parsed.
-
-Conditional discovery accepts only constants `0` and `1`, `defined`, bare
-macros, Boolean negation/conjunction/disjunction (including their alternative
-tokens), parentheses, and literal `__has_include` queries. Arithmetic,
-comparison, bitwise, ternary, comma, token-paste, function-like, and computed
-header conditions fail closed rather than implying an unbounded or guessed
-value domain. Compiler-provided macros are cleared. A macro used only for
-definedness or only as a Boolean value is scanned as undefined and defined-one;
-a macro used in both ways is scanned as undefined, defined-zero, and
-defined-one. Source definitions of a condition-referenced macro may only be
-empty, `0`, or `1`, with an empty replacement rejected when the macro is used
-as a value; this keeps use-before-definition visible without treating computed
-aliases as configuration authority. The dialect-fixed `__cplusplus`,
-`__OBJC__`, and `defined(__has_include)` states remain compiler-owned.
-Each distinct literal header spelling is an independent absent/present
-dimension. Its libclang-reported token span is replaced by the selected Boolean
-constant while preserving byte offsets and physical line splices before the
-carrier AST is parsed; header availability therefore cannot inherit workstation
-include state or accidentally correlate `<path>` with `"path"`. The checked
-Cartesian product is capped at 256 configurations. Exceeding that cap, or syntax
-rejected in any enumerated configuration, fails instead of disappearing from
-the inventory.
-
-Carrier admission is category-total rather than an `EntityKind` allow-list.
-Every main-file cursor that libclang categorizes as a declaration or expression
-has its complete type inspected, and every cursor whose exposed type is callable
-has that type's result inspected independently. Result projection uses the
-function-or-method type operation first. Objective-C methods do not expose a
-callable type through libclang, so declaration-category cursors also use the
-cursor-result operation as a fallback; expression cursors never do, because its
-answer for non-callable expressions is not a callable contract. This covers
-declarations such as Objective-C ivars, C++ type aliases, and non-type template
-parameters without teaching the inventory their individual cursor kinds;
-numeric carrier expressions likewise do not depend on an enumerated cast-kind
-list. Width
-operations project from every valid main-file cursor because libclang does not
-categorize every version-specific width cursor as an expression; they therefore
-have no declaration, expression, or unary-kind admission gate. An invalid or
-unsupported main-file cursor is an oracle failure. Structurally identical hits
-retain occurrence ordinals so a repeated expression cannot disappear through
-set deduplication, while compiler source offsets stay outside the identity so
-formatting-only line movement does not churn the frozen ledger.
-
-Typedefs (including aggregate definitions) and object-like or function-like
-type macros are collected from every tracked C-family source as a conservative
-include prelude. Every definition of a name contributes to a monotone union:
-a later macro redefinition or block-local typedef can add meaning but cannot
-erase an earlier numeric meaning. This intentionally over-approximates
-preprocessor and lexical scopes; a source-specific definition may expose a
-carrier for review, but it can never launder one out of the inventory.
-The compiler prelude preserves each selected typedef's complete declarator or
-macro definition, including pointer/function-pointer shape and every array
-extent; reducing an alias to only its base type would be a silent carrier loss.
-
-Rust emitters are parsed with `syn`. Ordinary/raw string literals,
-`stringify!` inputs, and `macro_rules!` token trees enter the same C-family
-parser with their complete enclosing Rust item path. Named or positional
-format holes may stand only for a type or declarator name inside an otherwise
-complete declaration; a wholly dynamic C-family declaration fails closed.
-Only a module whose attribute is exactly `cfg(test)` is excluded;
-`cfg(not(test))`, production items after a test module, and production files
-whose names end in `_tests.rs` remain in the source universe. The tracked
-suffix set covers C, C++, Objective-C, Objective-C++, CUDA (including `.cuh`
-headers), HIP, Metal, and Rust source/header forms. A complete source
-containing carrier syntax must have closed lexical constructs and balanced
-delimiters. An emitted Rust fragment may leave only its outer C block open;
-each carrier candidate must remain locally complete, so splitting the type
-from a pointer or array declarator fails instead of disappearing.
-
-The parser and the public-header capacity census share lexical normalization,
-the closed arithmetic/non-arithmetic type vocabulary, alias expansion, and
-numeric classification. Known SDK handles and control enums occupy an exact
-external-nonnumeric set. An unknown arithmetic-shaped spelling, unresolved
-alias chain, malformed candidate, or recognized incomplete carrier fragment is
-a build failure, not an unclassified spelling that a later regular expression
-may or may not learn.
 
 The oracle self-validates with temporary mutations that are restored before it
 returns:
@@ -606,19 +491,12 @@ returns:
 - replace exact product arithmetic with saturation;
 - add a fixed-rank device field or narrow one metadata field;
 - handwrite a second ABI field list;
-- vary C qualifier placement, use an array declarator or pointer cast, hide a
-  carrier behind typedef/macro aliases, or add qualified `sizeof` arithmetic;
-- redefine a numeric alias as nonnumeric, add C++ reference/template carriers,
-  or introduce an unknown C arithmetic spelling;
-- use positional Rust format holes or a `macro_rules!` literal, or split one
-  emitted declarator across Rust string fragments;
 - change a Bool8 lane spelling to `float`; and
 - make a Bool8 kernel store `1.0f` or omit the device failure flag.
 
 Every mutation must make the relevant phase command fail for the intended
-reason. The same command executes the parser's positive and negative contract
-suite. A source scan is the completeness guard; compile-fail and execution tests
-prove its sanctioned replacements work.
+reason. A source scan is the completeness guard; compile-fail and execution
+tests prove its sanctioned replacements work.
 
 ---
 
@@ -628,24 +506,15 @@ prove its sanctioned replacements work.
 
 - Phase 0 freezes the derived inventory, mutation set, current accepted/rejected
   behavior, and the exact issue-to-phase map. Later phases may reduce raw hits
-  but may not add an exception. The Phase-0 implementation moves this freeze
-  to schema 3 because schema 2 still used an incomplete token scanner and bound
-  prose mutation labels instead of executable witness semantics. Schema 3 uses
-  the compiler-backed and Rust-AST identities defined in C6. For every mutation
-  it binds a stable witness ID, source path, exact mutation implementation
-  digest, expected failure code and reason prefix, and required phase command.
-  Changing a mutation body or expected disposition therefore moves the freeze
-  digest. The manifest-integrity and adversarial parser controls above are the
-  required negative evidence for this freeze move.
+  but may not add an exception.
 - Phase 1 freezes `DTypeContract`, sealed element markers, exact capacity keys,
   and checked finite-count types. Later phases consume them without parallel
   tables.
-- Phase 2 freezes the device renderer, generated device descriptor, and
-  binding-layout parity against the schema Phase 3 landed.
-- Phase 3 freezes the shared descriptor schema, generated host/public-C layout,
-  typed runtime ingress, and the private data field. Later public field changes
-  amend [05-OP-31] first and regenerate every consumer in one change. Reopening
-  a raw accessor is a design change, not a local optimization.
+- Phase 2 freezes the generated host/device schema and public-layout parity.
+  Later field changes amend [05-OP-31] first when public, regenerate every
+  consumer, and move the freeze in one change.
+- Phase 3 freezes typed runtime ingress and the private data field. Reopening a
+  raw accessor is a design change, not a local optimization.
 - Phase 4 freezes the typed lane renderer and all-lanes representation probes.
   A new dtype or lane cannot land without extending both.
 - Phase 5 freezes the composite oracle and closure receipts. No individual
@@ -697,12 +566,10 @@ code-generation text test.
 
 **Delivers:** the derived inventory and exact shrink-only transition-debt
 manifest in C6; release-profile reproducers for exact capacity collision,
-count/byte overflow, zero extents, and malformed foreign metadata; one
-detection mutation for every source classifier, including a new direct field
-access and incomplete dtype registration; a fail-closed structural parser for
-C/HIP/Metal sources and Rust-emitted C-family fragments, including monotone
-cross-source alias resolution and injective declarator identities; source-only
-and hardware probe harnesses; all landed receipts as positive controls.
+count/byte overflow, zero extents, and malformed foreign metadata; detection
+mutations for a new direct field access and incomplete dtype registration;
+source-only and hardware probe harnesses; all landed receipts as positive
+controls.
 
 The inventory records identities, not mutable line numbers. Each enumerator has
 a mutation that plants a new hit in a different file/configuration. HIP and
@@ -754,16 +621,13 @@ Final line: `RUNTIME REPRESENTATION PHASE 1: PASS`.
 
 ## Phase 2 — canonical ABI descriptors
 
-**Requires:** Phase 3, which includes Phase 1 and lands the shared schema plus
-the generated host/public-C descriptor.
+**Requires:** Phase 1.
 
-**Delivers:** C3's device half and the binding/device portion of C4: the device
-renderer over `chelis-abi`'s landed shared schema, the generated device
-descriptor, freshness and layout probes, dynamic-rank exact metadata plus
-private validated Python/DLPack wrappers, and the deletion of every handwritten
-device or binding mirror. Phase 2 requires Phase 3 and consumes that landed
-schema; it neither installs nor seals the raw host descriptor. The current
-[#1289] public ABI and [#1347] zero-extent behavior are positive receipts.
+**Delivers:** C3 completely and the binding/device portion of C4: `chelis-abi`,
+generated host/device descriptors, freshness and layout probes, dynamic-rank
+exact metadata plus private validated Python/DLPack wrappers, and the deletion
+of every handwritten mirror. The current [#1289] public ABI and [#1347]
+zero-extent behavior are positive receipts.
 
 **Issue exit:** [#1345] closes after Python host-to-device, device entry,
 device-to-host, and DLPack paths pass rank 0, 1, 8, and greater-than-8 cases,
@@ -781,21 +645,16 @@ Final line: `RUNTIME REPRESENTATION PHASE 2: PASS`.
 
 ## Phase 3 — typed host runtime access and the field seal
 
-**Requires:** Phase 1. Phase 2 does not gate this phase. Phase 3 creates the
-shared `chelis-abi` field schema, host renderer, generated raw host descriptor,
-and generated public-C descriptor without consuming the Python or device
-descriptor.
+**Requires:** Phase 1. It may run in parallel with Phase 2 and does not consume
+the Python or device descriptor.
 
-**Delivers:** C3's shared-schema and host/public-C portion plus the host-runtime
-and public-C portion of C4. Migrate
+**Delivers:** the host-runtime and public-C portion of C4. Migrate
 repository-owned allocation, views, elementwise kernels, reductions,
 formatting, collection ingress/egress, and ownership paths to validated typed
 views; foreign C entries use only the branded indexed access core. Delete
-public unchecked pointer helpers and broad raw-byte access. Install the
-generated raw host descriptor only with that migrated consumer set, then make
-every raw host descriptor field private in the owner module as the last diff.
-Phase 2 later owns the binding/device portion, and C3/C4 are complete only when
-both phases are green.
+public unchecked pointer helpers and broad raw-byte access. Make every raw host
+descriptor field private in the owner module as the last diff. Phase 2 owns the
+binding/device portion, and C4 is complete only when both phases are green.
 
 The exact-head compile after the seal must exercise every runtime target and
 test target. A compile-fail fixture outside the owner module attempts direct
@@ -813,8 +672,8 @@ Final line: `RUNTIME REPRESENTATION PHASE 3: PASS`.
 
 ## Phase 4 — typed lanes and Bool8 execution
 
-**Requires:** Phase 1 for the renderer and Phase 2 for device descriptors;
-Phase 2 already includes the Phase 3 host/schema prerequisite.
+**Requires:** Phase 1 for the renderer and Phase 2 for device descriptors; it may
+run in parallel with Phase 3 but cannot exit before both are green.
 
 **Delivers:** C5 completely across C, HIP, and Metal. Delete duplicate width and
 element-spelling tables, route loads/stores/casts through typed builders, and run
