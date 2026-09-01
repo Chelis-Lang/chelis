@@ -725,8 +725,12 @@ def fixture_manifest() -> tuple[Fixture, ...]:
                     "test",
                     "-p",
                     "chelis-backend-hip",
-                    "fused_without_reusable_input_keeps_non_in_place_kernel_shape",
+                    "--lib",
+                    "emit::tests::fused_without_reusable_input_keeps_non_in_place_kernel_shape",
+                    "--",
+                    "--exact",
                 ),
+                listed_test="emit::tests::fused_without_reusable_input_keeps_non_in_place_kernel_shape",
             ),
             _fixture(
                 "hip-caller-bytes-unchanged-hardware",

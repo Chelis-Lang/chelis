@@ -414,11 +414,32 @@ class ManifestContractTests(unittest.TestCase):
             "c-caller-owned-view-reuse",
             "hip-caller-owned-reuse",
             "hip-caller-owned-view-reuse",
+            "hip-no-reuse-control",
             "hip-caller-bytes-unchanged-hardware",
         ):
             with self.subTest(fixture=fixture_id):
                 self.assertIn(fixture_id, rows)
                 self.assertIsNotNone(rows[fixture_id].listed_test)
+
+        control = rows["hip-no-reuse-control"]
+        test_name = (
+            "emit::tests::"
+            "fused_without_reusable_input_keeps_non_in_place_kernel_shape"
+        )
+        self.assertEqual(control.listed_test, test_name)
+        self.assertEqual(
+            control.command,
+            (
+                "cargo",
+                "test",
+                "-p",
+                "chelis-backend-hip",
+                "--lib",
+                test_name,
+                "--",
+                "--exact",
+            ),
+        )
 
     def test_mutation_identity_set_is_frozen(self) -> None:
         self.assertEqual(
