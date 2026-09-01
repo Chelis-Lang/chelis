@@ -5,6 +5,8 @@ use chelis_deep::parse_and_stamp;
 use chelis_surf::{desugar::desugar_program, parser::parse_str as parse_surf};
 use chelis_types::{check_ir_program, check_typed_program};
 
+type Diagnostics = Vec<(String, String)>;
+
 fn deep_program(source: &str) -> Vec<chelis_deep::Expr> {
     parse_and_stamp(source).expect("Deep fixture must parse and stamp")
 }
@@ -14,9 +16,7 @@ fn surf_program(source: &str) -> Vec<chelis_deep::Expr> {
     desugar_program(&declarations)
 }
 
-fn diagnostics(
-    program: &[chelis_deep::Expr],
-) -> (Vec<(String, String)>, Vec<(String, String)>) {
+fn diagnostics(program: &[chelis_deep::Expr]) -> (Diagnostics, Diagnostics) {
     let summarize = |result: Result<_, chelis_types::InferResult>| match result {
         Ok(_) => Vec::new(),
         Err(result) => result
@@ -42,11 +42,7 @@ fn assert_accepts_at_both_ingresses(program: &[chelis_deep::Expr], label: &str) 
     assert!(ir.is_empty(), "{label}: expected acceptance, got {ir:#?}");
 }
 
-fn assert_rejects_identically(
-    program: &[chelis_deep::Expr],
-    expected_kind: &str,
-    label: &str,
-) {
+fn assert_rejects_identically(program: &[chelis_deep::Expr], expected_kind: &str, label: &str) {
     let (ir, typed) = diagnostics(program);
     assert_eq!(ir, typed, "{label}: ingress diagnostics diverged");
     assert!(

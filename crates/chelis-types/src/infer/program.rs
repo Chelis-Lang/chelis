@@ -254,8 +254,8 @@ pub(super) fn infer_program_with_product_in_session(
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
     let metadata_prebound_names = HashSet::new();
-    product.function_inference_plan = FunctionInferencePlan::build(&items);
-    let inference_groups = primary_inference_groups(&product.function_inference_plan, &items);
+    product.declaration_inference_plan = DeclarationInferencePlan::build(&items);
+    let inference_groups = primary_inference_groups(&product.declaration_inference_plan, &items);
     // Match the persisted-state driver: cache the TLS token once and poll at
     // declaration granularity. In particular, an incomplete recursive SCC
     // must consume its structured scope through `abort` before this schedule
@@ -1048,6 +1048,14 @@ pub(crate) fn check_typed_program_in_session(
     // located failure rather than a partially-annotated `Ok`.
     let stack_scope = StackExhaustionScope::enter();
     let product = infer_program_with_product_in_session(exprs, errors);
+    // [04-INF-4] makes eager value cycles an ingress-independent checker
+    // error. The serialized-IR ingress runs this detector from
+    // `validate_ir_program`; the stamped typed ingress reaches inference
+    // directly, so run the same detector here after normalizing the carrier.
+    // Keep it after inference to preserve the shared diagnostic order:
+    // body-inference errors first, then `CycleDetected`.
+    let normalized = normalize_nodes_to_lists(exprs);
+    detect_top_level_binding_cycles(&normalized, errors);
     let stats = product.stats();
     if errors.is_empty() {
         let annotated_exprs = annotate_ir_program(exprs, &product, errors);
@@ -1257,8 +1265,8 @@ pub(super) fn infer_ir_program_with_state(
         .keys()
         .cloned()
         .collect::<HashSet<_>>();
-    product.function_inference_plan = FunctionInferencePlan::build(&items);
-    let inference_groups = primary_inference_groups(&product.function_inference_plan, &items);
+    product.declaration_inference_plan = DeclarationInferencePlan::build(&items);
+    let inference_groups = primary_inference_groups(&product.declaration_inference_plan, &items);
     // chelis#930: cooperative cancellation at top-level-declaration
     // granularity. Body inference is one of the two front-end passes whose
     // cost scales with declaration count, so an abandoned compile has to be
@@ -1417,44 +1425,37 @@ pub(super) fn infer_ir_program_with_state(
     product
 }
 
-/// Primary body-inference schedule. Function declarations inside a lexical
-/// module use the same dependency/SCC planner as signature inference, so a
-/// forward helper's body-derived scheme is available to its caller. Bare defs
-/// and every non-function declaration retain textual order. The returned
-/// values are original flattened ordinals: scheduling never changes diagnostic
-/// ownership, collected-type origins, or output order.
+/// Primary body-inference schedule. Every top-level definition uses the same
+/// exact-namespace dependency/SCC planner, so a dependency's generalized
+/// scheme is available to its consumers independent of declaration order.
+/// The returned values are original flattened ordinals: scheduling never
+/// changes diagnostic ownership, collected-type origins, or output order.
 pub(super) fn primary_inference_schedule(
-    function_plan: &FunctionInferencePlan,
+    declaration_plan: &DeclarationInferencePlan,
     items: &[(Option<String>, &deep::Expr)],
 ) -> Vec<usize> {
-    if !function_plan.complete {
+    if !declaration_plan.complete {
         return Vec::new();
     }
-    let module_fn_indices = function_plan
+    let definition_indices = declaration_plan
         .ordered_members()
-        .filter_map(|member| {
-            items[member.item_index]
-                .0
-                .as_ref()
-                .map(|_| member.item_index)
-        })
+        .map(|member| member.item_index)
         .collect::<HashSet<_>>();
-    if module_fn_indices.is_empty() {
+    if definition_indices.is_empty() {
         return (0..items.len()).collect();
     }
 
-    let ordered_module_fns = function_plan
+    let ordered_definitions = declaration_plan
         .ordered_members()
         .map(|member| member.item_index)
-        .filter(|index| module_fn_indices.contains(index))
         .collect::<Vec<_>>();
-    let insertion = module_fn_indices.iter().copied().min().unwrap_or(0);
+    let insertion = definition_indices.iter().copied().min().unwrap_or(0);
     let mut schedule = Vec::with_capacity(items.len());
     for index in 0..items.len() {
         if index == insertion {
-            schedule.extend(ordered_module_fns.iter().copied());
+            schedule.extend(ordered_definitions.iter().copied());
         }
-        if !module_fn_indices.contains(&index) {
+        if !definition_indices.contains(&index) {
             schedule.push(index);
         }
     }
@@ -1467,19 +1468,22 @@ pub(super) struct PrimaryInferenceGroup {
     recursive: bool,
 }
 
-/// Group the flat primary schedule into recursive SCC inference units.
-/// Acyclic bare functions stay in textual order; acyclic module functions
-/// retain dependency order. Only a genuine recursive component is grouped
-/// and prebound, so a bare acyclic forward helper remains unavailable.
+/// Group the flat primary schedule into recursive function SCC inference
+/// units. Acyclic definitions retain dependency order. Only a genuine SCC
+/// containing functions exclusively is grouped and provisionally prebound;
+/// eager value cycles remain ordinary declarations and are rejected by the
+/// cycle validator.
 pub(super) fn primary_inference_groups(
-    function_plan: &FunctionInferencePlan,
+    declaration_plan: &DeclarationInferencePlan,
     items: &[(Option<String>, &deep::Expr)],
 ) -> Vec<PrimaryInferenceGroup> {
-    let schedule = primary_inference_schedule(function_plan, items);
-    let recursive_components = function_plan
+    let schedule = primary_inference_schedule(declaration_plan, items);
+    let recursive_components = declaration_plan
         .components
         .iter()
-        .filter(|component| component.recursive)
+        .filter(|component| {
+            component.recursive && component.members.iter().all(|member| member.is_function)
+        })
         .map(|component| {
             component
                 .members

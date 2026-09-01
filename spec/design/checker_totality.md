@@ -1,8 +1,9 @@
 # Checker Totality: every construct is checked or loudly rejected
 
 **Status:** Phases 0-3 and PP1-PP4 are delivered. PR [#1406] delivered the
-separately owned [#1247] kinded nominal-application residue; it is not another
-phase. Phase 3 first shipped
+separately owned [#1247] kinded nominal-application residue; the bounded
+[#1125] nominal-rank ingress repair and [#1134] forward-reference parity are
+also delivered residue rather than additional phases. Phase 3 first shipped
 `DeepTag` as derive-on-demand dispatch and was red-teamed in that form
 (round-1 QUALIFIED PASS with findings folded, round-2 PASS); a maintainer
 directive then superseded that record with the decode-once rework now in the
@@ -133,12 +134,13 @@ The current implementation has one explicit ownership chain:
    `CheckedProgram::with_linearity` changes only linearity metadata, while
    `CheckedProgram::compose` combines two already-successful, context-stacked
    checked halves. Neither operation rewrites type-owned tree structure.
-8. Recursive callable availability is planned by the canonical function SCC
-   schedule. Only a genuinely recursive SCC receives provisional monomorphic
-   bindings; its members infer, unify, remove the provisional entries, and
-   generalize as a unit. Acyclic generic helpers stay polymorphic, bare
-   acyclic forward calls retain textual semantics, and no diagnostic is
-   erased after it has been reported.
+8. Top-level availability is planned by one exact-namespace declaration SCC
+   schedule shared by both checker ingresses. Dependencies infer before their
+   consumers without changing source or output order. Only a genuinely
+   recursive all-function SCC receives provisional monomorphic bindings; its
+   members infer, unify, remove the provisional entries, and generalize as a
+   unit. Acyclic generic helpers stay polymorphic, eager value cycles remain
+   errors, and no diagnostic is erased after it has been reported.
 
 ## Why the default is the bug, not the instance
 
@@ -1323,7 +1325,7 @@ dimensions. The five `hello-chelis` Coral files named by [#1258] are an
 ecosystem migration receipt, not a substitute for the repository oracle.
 
 This slice does not absorb the remaining tag-keyed vacuity
-([#874]/[#887] Tier 1), stamped-ingress parity ([#1125]/[#1134]), or
+([#874]/[#887] Tier 1), [#1125]'s carrier-reader audit, or
 compiler-provided-name precedence ([#1076]/[#672]). Their contracts and tests
 remain independently owned.
 
@@ -1355,9 +1357,36 @@ case and positive nominal-dimension and tensor-rank controls. Supporting
 
 This slice is only **part of [#1125]**. It does not complete that issue's
 whole-module carrier-reader audit or its carrier-complete structural lint and
-justified escape hatch. It also does not absorb [#1134]'s independent
-pass-set/forward-reference decision, [#874]/[#887]'s tag-keyed vacuity, or
-[#1076]/[#672]'s compiler-provided-name precedence work.
+justified escape hatch. It also does not absorb [#1134]'s independently
+delivered pass-set/forward-reference decision, [#874]/[#887]'s tag-keyed
+vacuity, or [#1076]/[#672]'s compiler-provided-name precedence work.
+
+### Later residue: top-level forward-reference parity ([#1134])
+
+[04-INF-4] makes every top-level `def` visible throughout its exact
+declaration namespace, independent of textual order. Both the stamped typed
+and serialized-IR checker ingresses consume one canonical declaration
+dependency plan. The plan walks references with lexical binder awareness,
+orders dependencies before consumers, and preserves original declaration
+ordinals for diagnostics and emitted output. Function-only recursive SCCs
+retain [04-INF-2]/[04-INF-3]'s provisional inference; a component containing
+an eager value cycle is never promoted to a recursive function group and is
+rejected as `CycleDetected` by both ingresses. Local `let` scope remains
+sequential.
+
+The authoritative oracle for this residual is:
+
+```sh
+cargo nextest run -p chelis-types --test issue_1134_forward_reference_parity --no-fail-fast
+```
+
+It pins identical ordered diagnostics for both ingresses; legal forward and
+backward values; bare and module-wrapped generic helpers; and negative
+controls for missing names, local forward references, and eager value cycles.
+The existing signature-inference and chelis#1124 suites are supporting
+regressions. This slice does not absorb [#1125]'s reader audit,
+[#874]/[#887]'s tag-keyed vacuity, or [#1076]/[#672]'s independently owned
+name-precedence work.
 
 ### Adjacent ledger rows delivered with the class change
 
@@ -1436,6 +1465,7 @@ pass-set/forward-reference decision, [#874]/[#887]'s tag-keyed vacuity, or
 | PP4 | [#1264] and [#1261]'s raw-flat-test-scope residue; exact module scope in every checker/test entry |
 | [#1247] residue | integer nominal arguments are kind-checked and concrete dimensions constrain every checker/test/compiler lane; [#1258] round trips the same representation |
 | [#1125] nominal-rank ingress residual | ordinary `.dp` ingress, `surf`, and `validate --deep` reject `d-rank` in nominal argument slots while preserving legal dimension arguments and tensor rank spreads; the broader reader-audit/lint issue remains open |
+| [#1134] forward-reference residual | both checker ingresses use the same exact-namespace declaration schedule, accept legal forward definitions, retain sequential local scope, and reject eager value cycles identically |
 
 ## Decisions and remaining questions
 
@@ -1449,6 +1479,7 @@ pass-set/forward-reference decision, [#874]/[#887]'s tag-keyed vacuity, or
 | 6 | whether two closures may each consume one underlying value through two user-visible names (`y = x`, one capture per name), or capture forwards through the alias chain generally | DECIDED 2026-08-21: preserved and made normative. A capture consumes the binding it names; distinct user-visible bindings of one value are distinct for capture; only a destructured component (or an alias of one) forwards to its carrier. Nautilus `lu_solve` and coral depend on the spelling; the reviewer guidance on [#1209] was to specify the choice explicitly and keep any tightening separate | [04-LIN-2] + PP3 |
 | 7 | whether one linked module's uniquely matching terminal name or one batched test file's declaration can confer unimported scope on another file | DECIDED 2026-08-31: no. Value lookup is exact-only after reef rewriting; batch entries are independently module-rewritten before combination; terminal matching is diagnostic-only | spec/02 P2 + [04-FIT-2] + PP4 |
 | 8 | whether an unannotated nominal parameter is a type, a dimension, or contextually reinterpreted per application | DECIDED 2026-08-31: one checker-owned header kind is fixed before body resolution. Dimension-only evidence selects `Dimension`; mixed use rejects; unused defaults to `Type`; transitive nominal uses propagate by least fixed point | [04-ADT-3]/[04-ADT-4] + [#1247] residue |
+| 9 | whether a top-level value may refer to a later declaration, and whether the two checker ingresses may differ | DECIDED 2026-09-01: yes, every top-level `def` is visible throughout its exact declaration namespace. One dependency plan schedules dependencies before consumers at both ingresses; local `let` remains sequential and eager value cycles reject | [04-INF-4] + [#1134] residue |
 
 ## Contract summary
 
@@ -1469,6 +1500,10 @@ kind error, never an inference wildcard, and every downstream checker/test
 signal preserves that decision. The bounded [#1125] ingress residual applies
 the corresponding structural grammar at ordinary `.dp` doors: a nominal
 argument is a type or non-rank dimension, never a rank spread.
+The [#1134] residual applies the same ingress-honesty rule to top-level value
+scope: dependency order, not textual order or compiler metadata availability,
+decides when a declaration is inferred, while local bindings remain
+sequential and eager value cycles remain errors.
 
 [#696]: https://github.com/Chelis-Lang/chelis/pull/696
 [#703]: https://github.com/Chelis-Lang/chelis/issues/703

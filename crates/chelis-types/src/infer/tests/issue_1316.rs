@@ -76,12 +76,12 @@ fn generated_program(definitions: usize, shape: GraphShape) -> Vec<deep::Expr> {
     chelis_surf::desugar::desugar_program(&declarations)
 }
 
-fn plan_for(program: &[deep::Expr]) -> FunctionInferencePlan {
+fn plan_for(program: &[deep::Expr]) -> DeclarationInferencePlan {
     let items = top_level_decl_items_with_modules(program);
-    FunctionInferencePlan::build(&items)
+    DeclarationInferencePlan::build(&items)
 }
 
-fn component_names(plan: &FunctionInferencePlan) -> Vec<(Vec<String>, bool)> {
+fn component_names(plan: &DeclarationInferencePlan) -> Vec<(Vec<String>, bool)> {
     plan.components
         .iter()
         .map(|component| {
