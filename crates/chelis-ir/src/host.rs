@@ -14129,6 +14129,37 @@ mod tests {
     use crate::{DimInfo, RiscOp};
     use chelis_types::types::Prim;
 
+    fn parse_one_expr(source: &str) -> Expr {
+        deep_expr(source)
+    }
+
+    #[test]
+    fn issue_662_recursive_def_cycle_does_not_hide_a_later_forward_fail() {
+        let defs = BTreeMap::from([
+            (
+                "a".to_string(),
+                parse_one_expr("(tuple {} (var {} b) (var {} fail))"),
+            ),
+            ("b".to_string(), parse_one_expr("(var {} a)")),
+        ]);
+        assert!(
+            expr_reaches_forward_fail(&parse_one_expr("(var {} a)"), &defs, &mut UnordSet::new()),
+            "breaking the a -> b -> a cycle must continue with a's fail sibling"
+        );
+    }
+
+    #[test]
+    fn issue_662_recursive_def_cycle_without_fail_terminates_negative() {
+        let defs = BTreeMap::from([
+            ("a".to_string(), parse_one_expr("(var {} b)")),
+            ("b".to_string(), parse_one_expr("(var {} a)")),
+        ]);
+        assert!(
+            !expr_reaches_forward_fail(&parse_one_expr("(var {} a)"), &defs, &mut UnordSet::new()),
+            "a fail-free recursive cycle must terminate without inventing reachability"
+        );
+    }
+
     // ── chelis#1087: substitute_var transitional-variant pass-through ──
 
     /// The documented pass-through leaves a transitional variant unchanged

@@ -84,6 +84,35 @@ fn compile_and_run(build_dir: &Path, stem: &str) -> Output {
     StdCommand::new(binary).output().expect("run generated C")
 }
 
+fn assert_failure_parity(source: &str, stem: &str, message: &str) {
+    let evaluated = eval(source, stem);
+    assert!(
+        !evaluated.status.success(),
+        "eval must take the forward fail: stdout={} stderr={}",
+        String::from_utf8_lossy(&evaluated.stdout),
+        String::from_utf8_lossy(&evaluated.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&evaluated.stderr).contains(message),
+        "eval must retain the user's message: {}",
+        String::from_utf8_lossy(&evaluated.stderr)
+    );
+
+    let (_dir, build_dir) = build_c(source, stem);
+    let compiled = compile_and_run(&build_dir, stem);
+    assert!(
+        !compiled.status.success(),
+        "compiled forward fail must abort: stdout={} stderr={}",
+        String::from_utf8_lossy(&compiled.stdout),
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&compiled.stderr).contains(message),
+        "compiled abort must retain the user's message: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+}
+
 #[test]
 fn forward_fail_beside_grad_aborts_in_both_lanes() {
     let source = source_with_input("cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)");
@@ -184,5 +213,54 @@ out = mixed(to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4
         String::from_utf8_lossy(&compiled.stderr).contains("vmap sibling boom"),
         "compiled abort must retain the user's message: {}",
         String::from_utf8_lossy(&compiled.stderr)
+    );
+}
+
+#[test]
+fn transitive_forward_fail_through_defs_aborts_in_both_lanes() {
+    let source = "module Repro.TransitiveForwardFail\n\
+def fail_leaf(x: tensor[3, f32]) -> tensor[3, f32] = {\n\
+  total = tensor_to_scalar(sum(x, cast(0, int32)))\n\
+  if gt(total, cast(0.0, f32)) then fail(\"transitive boom\") else neg(x)\n\
+}\n\
+def fail_hop(x: tensor[3, f32]) -> tensor[3, f32] = fail_leaf(x)\n\
+def sq_sum_transitive(x: tensor[3, f32]) -> tensor[f32] = sum(mul(x, x), cast(0, int32))\n\
+def mixed_transitive(x: tensor[3, f32]) -> tensor[3, f32] = {\n\
+  g = grad(sq_sum_transitive)(x)\n\
+  add(g, fail_hop(x))\n\
+}\n\
+out = mixed_transitive(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))\n";
+    assert_failure_parity(source, "transitive_forward_fail", "transitive boom");
+}
+
+#[test]
+fn shared_fail_def_is_visible_outside_transform_in_both_traversal_orders() {
+    const PREFIX: &str = "module Repro.SharedFailDef\n\
+def maybe_fail(x: tensor[3, f32]) -> tensor[f32] = {\n\
+  total = sum(x, cast(0, int32))\n\
+  scalar = tensor_to_scalar(total)\n\
+  if gt(scalar, cast(0.0, f32)) then fail(\"shared def boom\") else total\n\
+}\n";
+    let inside_first = format!(
+        "{PREFIX}def mixed_inside_first() -> tensor[f32] = {{\n\
+           hidden = grad(maybe_fail)(to_tensor([cast(-1.0, f32), cast(-2.0, f32), cast(-3.0, f32)]))\n\
+           maybe_fail(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))\n\
+         }}\n\
+         out = mixed_inside_first()\n"
+    );
+    assert_failure_parity(&inside_first, "shared_fail_inside_first", "shared def boom");
+
+    let outside_first = format!(
+        "{PREFIX}def mixed_outside_first() -> tensor[f32] = {{\n\
+           visible = maybe_fail(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))\n\
+           hidden = grad(maybe_fail)(to_tensor([cast(-1.0, f32), cast(-2.0, f32), cast(-3.0, f32)]))\n\
+           visible\n\
+         }}\n\
+         out = mixed_outside_first()\n"
+    );
+    assert_failure_parity(
+        &outside_first,
+        "shared_fail_outside_first",
+        "shared def boom",
     );
 }
