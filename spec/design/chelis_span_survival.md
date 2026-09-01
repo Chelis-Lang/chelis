@@ -1,7 +1,9 @@
 # Chelis Span Survival: End-to-End Audit Chain
 
-**Status:** current shipped audit contract. S0-S6 are preserved below as the historical
-implementation plan and named-oracle record; the active contract is in §2.
+**Status:** S0-S6 are the shipped external-audit contract. S7 is the active
+source-identity correction owned by chelis#1172; until its oracle is green,
+Surf ranges survive as metadata but are not a source-qualified semantic
+identity.
 **Owners:** chelis-core (this repo). Octant ships span-attributed Deep upstream.
 **Companion specs:** `spec/03-deep-syntax.md` §1.1.1 (the `span` key + `span_*` namespace + synthesized markers); `spec/design/chelis_trust_stack.md` (audit story).
 
@@ -27,6 +29,13 @@ Deep `span` ID of the form `surf:<start>..<end>` onto the corresponding
 Deep node. Hand-constructed Surf nodes with the zero-length sentinel are
 treated as spanless, so synthesized-marker fallbacks remain limited to
 genuinely absent source ranges.
+
+That metadata path is an audit label, not a complete source-location model.
+The current desugarer constructs most Deep nodes with `Span::new(0, 0)`, and
+the checker/lowerer reuse map is keyed by the bare numeric offset. Two source
+units can therefore alias, while synthesized nodes can masquerade as source
+offset zero. Section 2.6 replaces those representations; no consumer may
+parse `surf:<start>..<end>` to reconstruct semantic identity after S7.
 
 ## 2. Contract
 
@@ -217,6 +226,98 @@ file through the Surf path, rename the extension or pipe through
 `chelis surf`. Conflicting cases (e.g., `--deep` with garbage in the file)
 produce the parse error from `chelis-deep`, not a silent fallback to Surf.
 
+### 2.6 Source-qualified identity (S7; chelis#1172)
+
+The source model has three independent concepts. They must not share one
+string or integer field:
+
+```rust
+pub struct SourceUnitId(/* opaque, serializable identity */);
+pub struct NodeKey(/* opaque identity allocated by SourceArena */);
+pub struct SourceSite {
+    pub unit: SourceUnitId,
+    pub range: Span,
+}
+
+pub enum NodeOrigin {
+    Parsed(SourceSite),
+    Synthesized {
+        pass: SynthesizingPass,
+        contributors: Vec<SourceSite>,
+    },
+    Unavailable,
+}
+
+pub struct SourceRef {
+    pub node: NodeKey,
+    pub origin: NodeOrigin,
+    pub external_span_id: Option<String>,
+}
+```
+
+- `SourceUnitId` identifies one compiler input. File-based CLI entry points
+  derive it from the canonical module/input identity; compiler-api and cache
+  entry points must supply it explicitly. It is serialized with checked and
+  reusable artifacts. A byte offset or display filename is not a unit ID.
+- `NodeKey` is the semantic identity used by checker and lowering maps. The
+  parser/desugarer allocates every Deep node a nonzero local identity from its
+  source unit, including compiler-authored helper nodes. It is never derived
+  from a byte offset, an external span string, or structural equality.
+  Construction is private to one `SourceArena` per unit; the arena carries
+  its next value through macro/desugar production and serialization so two
+  producers cannot restart a local counter and collide.
+- `SourceSite` is a human location. `Span` remains a byte range in exactly one
+  identified source unit; it is not meaningful without that unit.
+- `external_span_id` is the existing opaque producer audit label from Deep
+  metadata. Chelis preserves it byte-for-byte but never parses it into a
+  source range or uses it as a map key. A Deep textual parser range and an
+  Octant/other-producer ID can coexist and remain distinguishable.
+- `NodeOrigin::Unavailable` is an honest absence state for hand-constructed
+  API inputs. It never renders as offset zero. Once a parsed source unit has
+  entered the compiler, later passes may produce only `Parsed` or
+  `Synthesized`; dropping to `Unavailable` is an invariant failure.
+
+#### Attribution rules
+
+Surf AST nodes retain the parser's exact `SourceSite` through desugaring.
+Every source-spelled Deep operation receives that site. Compiler-authored
+tag/name/meta atoms and structural wrappers receive a distinct `NodeKey` and
+`Synthesized { pass: SurfDesugar, contributors: [...] }`; they do not inherit
+a fake textual range. A 1-to-N expansion cites the originating Surf site on
+every product. An N-to-1 collapse carries the lexicographically sorted,
+deduplicated union of contributor sites. A declaration-created helper cites
+the whole declaration plus the exact body/parameter sites that determine it.
+
+Later lowering and transformation passes apply the same rule already used by
+`span_id`/`merged_spans`: a region-corresponding node retains `Parsed`, while
+a new helper is `Synthesized` with every source contributor. Missing
+provenance is not repaired with an enclosing range, offset zero, or a parsed
+external ID.
+
+#### Consumer rules
+
+`CheckError`, lowering diagnostics, compiler-api diagnostics, and cached
+linearity data carry the typed `SourceRef`. Machine output exposes the source
+unit, range/origin kind, node key, and external audit ID as distinct fields.
+Human rendering may abbreviate them, but cannot invent a range for
+`Unavailable` or `Synthesized`.
+
+`LinearityInfo` is keyed by `NodeKey`, replacing
+`HashMap<usize, usize>`. `mark_reusable_input` records the checked app node's
+key and lowering queries that same key. Merging separately checked programs
+is then an ordinary disjoint-key union; an equal byte offset in two files is
+not a collision and no library-half-wins rule is needed.
+
+Generated source keeps `// span: <external-id>` for the external audit chain
+and emits source-qualified comments separately. Consumers can therefore
+distinguish a Deep parser range from an opaque external ID and can trace two
+Surf files that use the same local byte range without aliasing them.
+
+No fallback reparses `surf:<start>..<end>`, uses `Expr::span().offset` as an
+identity, or treats `Span::new(0, 0)` as both a real location and a missing
+sentinel. Those representations are deleted from semantic consumers when S7
+lands.
+
 ## 3. Phasing
 
 Each phase has one named acceptance oracle. A phase is not done until the
@@ -350,6 +451,56 @@ range, and (d) the emitted C compiles via gcc.
 bar as S5: span-survival is a customer-visible audit promise; any
 gap between sidecar and emitted C breaks the trust stack.
 
+### S7 — Source-qualified node identity (chelis#1172)
+
+S7 is delivered test-first in four dependency-ordered slices:
+
+1. Add failing source-identity tests, then introduce `SourceUnitId`,
+   `NodeKey`, `SourceSite`, `NodeOrigin`, and `SourceRef` in `chelis-deep`.
+   Source-aware Surf and Deep parser entry points allocate nonzero node keys;
+   source-less construction requires an explicit unavailable/synthesized
+   origin rather than the zero-span sentinel.
+2. Thread the source unit and origin through every Surf declaration,
+   expression, pattern, type, and desugaring helper. Lock exact nested
+   expression ranges and the attribution table in §2.6, including helpers
+   created for declarations, destructuring, pipes, and annotations.
+3. Replace diagnostic scalar offsets/IDs and `LinearityInfo`'s bare-offset
+   key with typed `SourceRef`/`NodeKey`. Serialize the key with checked and
+   reusable contexts. Delete every semantic call to `parse_span_offset` and
+   every source-unit merge policy based on numeric offset precedence.
+4. Thread the same carrier through lowering, IR, host IR, generated-source
+   emission, and compiler-api wire output. Keep opaque external audit IDs
+   separate from textual source ranges and synthesized provenance.
+
+Each slice includes positive/negative parity. Required counterexamples are:
+
+- two nested expressions on one line retain their exact distinct ranges;
+- two source units with the same local offsets retain distinct node keys,
+  diagnostics, and reusable-input facts after composition;
+- an offset-zero parsed token remains a real `Parsed` site, while a helper
+  node is explicitly `Synthesized` and missing provenance is
+  `Unavailable`—the three states never compare or render alike;
+- an opaque external span ID that looks numeric is never interpreted as a
+  text range;
+- deleting a source qualifier, restoring `HashMap<usize, usize>`, or replacing
+  synthesized origin with `Span::new(0, 0)` makes the suite red.
+
+**Authoritative oracle:**
+
+```sh
+cargo nextest run -p chelis-cli --test issue_1172_source_identity --no-fail-fast
+```
+
+The named suite exercises Surf parse → Deep desugar → check/linearity →
+lowering → diagnostic and generated-source output for every counterexample
+above. Supporting crate tests do not replace this end-to-end oracle.
+
+🔴 **Red-team gate after S7.** A fresh local subagent executes the oracle,
+plants the three representation regressions named above, and checks all
+public compiler-api and cache entry points for an unqualified source path.
+S7 is not complete while any entry point can construct a parsed program
+without a source unit or while any semantic map remains offset-keyed.
+
 ## 4. Canary verification
 
 Post-S5, the audit chain is exercised end-to-end:
@@ -379,10 +530,17 @@ metadata-preserving path for producer-supplied Deep metadata beyond parser
 byte ranges); runtime trace tooling; Octant-side
 changes; span survival through external compilation/linking (DWARF,
 post-roadmap); span performance optimization until profiling shows cost.
+S7 does not define IDE document-version protocols or path canonicalization
+outside the compiler ingestion boundary; it requires those callers to supply
+the opaque `SourceUnitId` that keeps their inputs distinct.
 
 ## 6. Backward compatibility
 
-Existing programs without span metadata compile and run unchanged. All span
-fields are optional; missing metadata is the normal case for hand-written
-Chelis. Workspace test suite is the regression backstop; any test that
-wasn't red before this work and is red after is a regression.
+Existing source programs compile and run unchanged. S7 intentionally changes
+compiler-internal and compiler-api location carriers: a parsed program has a
+source-qualified identity even when it has no external `span` metadata, while
+a hand-constructed tree must state that its origin is unavailable or
+synthesized. No compatibility adapter may recreate identity from a bare
+offset. The workspace gate plus the S7 oracle are the regression backstop;
+any unrelated test that was not red before this work and is red after is a
+regression.
