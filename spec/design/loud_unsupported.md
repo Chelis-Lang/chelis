@@ -707,6 +707,16 @@ waiting for §C7.4 to discover them.
 | 29 | `chelis-backend-c/src/host_emit.rs` checked-`cast` host arm identity fallthrough (`_ => arg_vars[0].0.clone()` closing the `cast` match, `:2566` re-measured 2026-08-04 - [#1150] filed it at `:2572`, so the arm expression is the durable anchor) | no conversion at all on a host-built tensor: the f32 buffer is reinterpreted at the target dtype, with no `chelis_checked_float_to_int` call, no cast loop, no `Overflow` trap for an out-of-range element and no `Domain` trap for a non-finite one | [#1150] | live (read-confirmed on the generated C during the PR [#1144] fold; PRE-EXISTING, not introduced there). Silently violates [04-NUM-11] and [04-NUM-14]. Maintenance item LU6 owns the failure-channel half: every checked host cast is produced from an exhaustive `(source Prim, target Prim)` plan whose only identity cells are exact same-type pairs; every other pair emits the checked conversion selected by [#729]'s semantics or a cited typed rejection. The dtype plan's checked-cast work item owns those conversion semantics and the full source x target x surface x backend conformance product. A local replacement for this wildcard is insufficient because it leaves the next source/target pair outside the plan |
 | 30 | checked-`cast` multi-offender trap identity, two sites: the eval whole-buffer int-width pre-pass (the `int_wide` collection short-circuits on domain BEFORE the per-width range loop runs) and the `#pragma omp parallel for` on the emitted conversion loop (`chelis-backend-c/src/emit.rs`) | (trap-kind skew, not a substituted value - the rows 17/18/26 shape) for a tensor carrying BOTH an out-of-range and a non-finite element: which trap kind fires is thread-scheduling-dependent under OpenMP, and eval is domain-biased rather than first-offender-in-order | [#1152] | live (execution-observed as the PR [#1144] Linux CI failure, where `cast_trunc`'s mixed-offender case exposed the class; macOS clang ignores the pragma, which is why local runs look deterministic - PRE-EXISTING for the checked `cast`, unobserved because untested). [04-NUM-12] and [04-NUM-15] fully decide this behavior, so this is numeric implementation work rather than an unsupported-channel patch. The [#729] checked-cast item owns a shared `IndexedTrapCandidate { flat_index, trap }` reduction in eval and compiled lanes; the lowest flat index wins independently of scheduling. This plan owns only rendering a candidate or implementation rejection through §C2. No separate [#730] implementation is permitted, and [#1152] is tracked under [#729] with an `Also part of #730` provenance note |
 
+**2026-09-01 Tier-F append (row 31).** The launch-blocker audit found two
+lowering helpers outside the original census that shared one substitution
+mechanism: a helper guessed the value of a structured term, or an explicit
+invalid value inherited ambient/default state. LU8 owns the mechanism and
+recurrence oracle.
+
+| # | site | substitutes | issue | status |
+|---|---|---|---|---|
+| 31 | `chelis-ir/src/lower.rs`: `extract_f64_value` read the first numeric child of any composite, while explicit `handle-effect random` seed extraction used `.or(saved_seed)` after lossy unsigned conversion | `(par {} 2.0 3.0)` was statically read as `2.0` although its result is `3.0`; a negative or otherwise unresolved explicit seed inherited an outer seed or the downstream zero default | [#794] | CONVERTED by LU8: the float extractor admits only the exact `lit` value slot (plus the already explicit cast/neg forms), and an explicit random seed must resolve as a non-negative integer or raise a fatal lowering diagnostic. The oracle pairs each rejected composite/negative case with literal and non-negative controls; replacing either rejection with a guessed child, zero, or ambient state is red |
+
 | # | site | substitutes | issue | status |
 |---|---|---|---|---|
 | 1 | `lower.rs` `lower_transcendental` non-float arm | `Const 0.0`, operand dropped | [#699] (+[#722] via grad) | live (test `cos_on_integer_tensor_is_not_silently_zeroed`) |
@@ -2130,6 +2140,40 @@ trapping parity for each applicable cell and mutates one non-identity plan to
 identity. Trap selection for multi-offender tensors belongs to [#729]'s
 indexed-trap item, not a second mechanism here.
 
+### LU7 - scoped transformed-failure reachability ([#662])
+
+Forward failure analysis is a subtree-aware reachability walk. Entering a
+`grad`, `vmap`, or `vmap-grad` subtree suppresses only failures whose entire
+path lies inside that transform, because the transform defines their masking
+semantics; it does not suppress a failure in a sibling, enclosing expression,
+or transitively referenced definition. A whole-expression "contains any
+transform" boolean is not a valid substitute for the walk.
+
+The oracle executes `eval` and build/compile/run for a forward failure beside
+each transform and requires the same nonzero user failure in both lanes. It
+pairs those cases with an untaken forward failure and a failure wholly inside
+the transform subtree, both of which retain their existing semantics. A
+mutation that returns "no forward failure" as soon as any transform appears
+must make the oracle red.
+
+### LU8 - exact static-value lowering ([#794])
+
+A lowering helper that extracts a compile-time value consumes an exact,
+tagged source form or a typed resolver result. It never guesses from a
+positional child of an unrelated composite and never maps an explicit but
+invalid value to absence, zero, or ambient state. Each caller distinguishes
+`Absent` (only where the language defines an optional argument),
+`Resolved(T)`, and `PresentButUnresolvable(Unsupported)`; the last case uses
+the lowering failure channel.
+
+The oracle drives an arbitrary composite whose first child differs from its
+result, a negative explicit random seed inside an outer seeded handler, and
+positive literal controls. It asserts that the first two produce fatal
+lowering diagnostics and that the controls preserve their exact values.
+Mutations that restore first-child extraction, lossy unsigned conversion,
+`.or(ambient)`, or a numeric default are red. LU8 is the required end state
+for census row 31; a local guard for `par` or `-1` does not satisfy it.
+
 ---
 
 # Part IV - bookkeeping
@@ -2277,7 +2321,7 @@ Same discipline as §I1; edits are bidirectional per B2.6.
 | 2 | the future supply of the class (bottom vocabularies + Result decoding + exhaustive consumers + structured emission) |
 | 3 | [#697], [#698], [#705]'s gate half, [#959] (kind/brand skew); gate rot and kind mislabeling as classes |
 | 4 | [#957] (the panic family, incl. [#919]'s pair), [#958], [#960]'s decode-on-entry half; ratchet-coverage drift as a class - a new product root, vocabulary consumer, or enumerable panic/default spelling outside the classified universe is a red test, and the non-enumerable panic routes are named §C7.2 limits owned by the behavior instruments, not silently out of scope |
-| maintenance | [#795] completes the optional-static-argument migration; LU1 [#870], LU2 [#872], LU3 [#906], LU4/LU5 [#955], and LU6 [#1150] extend the class mechanisms without reopening a phase; [#1152] is transferred to [#729]'s checked-cast work item with this plan retaining diagnostic provenance only |
+| maintenance | [#795] completes the optional-static-argument migration; LU1 [#870], LU2 [#872], LU3 [#906], LU4/LU5 [#955], LU6 [#1150], LU7 [#662], and LU8 [#794] extend the class mechanisms without reopening a phase; [#1152] is transferred to [#729]'s checked-cast work item with this plan retaining diagnostic provenance only |
 
 ## Settled ownership and remaining phase decisions
 
@@ -2312,6 +2356,7 @@ and never depends on predicting a path.
 [#257]: https://github.com/Chelis-Lang/chelis/issues/257
 [#387]: https://github.com/Chelis-Lang/chelis/issues/387
 [#409]: https://github.com/Chelis-Lang/chelis/issues/409
+[#662]: https://github.com/Chelis-Lang/chelis/issues/662
 [#680]: https://github.com/Chelis-Lang/chelis/issues/680
 [#682]: https://github.com/Chelis-Lang/chelis/issues/682
 [#687]: https://github.com/Chelis-Lang/chelis/issues/687
@@ -2351,6 +2396,7 @@ and never depends on predicting a path.
 [#776]: https://github.com/Chelis-Lang/chelis/issues/776
 [#782]: https://github.com/Chelis-Lang/chelis/pull/782
 [#791]: https://github.com/Chelis-Lang/chelis/pull/791
+[#794]: https://github.com/Chelis-Lang/chelis/issues/794
 [#795]: https://github.com/Chelis-Lang/chelis/issues/795
 [#799]: https://github.com/Chelis-Lang/chelis/pull/799
 [#815]: https://github.com/Chelis-Lang/chelis/pull/815

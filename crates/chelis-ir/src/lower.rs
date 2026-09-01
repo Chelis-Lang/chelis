@@ -11502,7 +11502,17 @@ impl LowerCtx {
             Ok(EffectKind::Random) if elems.len() >= 4 => {
                 let saved_seed = self.random_seed;
                 let saved_counter = self.random_counter;
-                self.random_seed = self.extract_u64_value(&elems[2]).or(saved_seed);
+                let seed = self.extract_u64_value(&elems[2]).unwrap_or_else(|| {
+                    raise_fatal_lowering_error(
+                        "`with seed(...)` requires a statically-resolvable non-negative \
+                         int64 seed. The DAG lowering must not replace an invalid explicit \
+                         seed with 0 or inherit an outer seed ([05-RNG-1]; \
+                         Chelis-Lang/chelis#794)",
+                        Some(elems[2].span()),
+                        elems[2].span_id().map(ToOwned::to_owned),
+                    )
+                });
+                self.random_seed = Some(seed);
                 self.random_counter = 0;
                 let result = self.lower_expr(&elems[3]);
                 self.random_seed = saved_seed;
@@ -11524,7 +11534,7 @@ impl LowerCtx {
     }
 
     fn extract_u64_value(&self, expr: &Expr) -> Option<u64> {
-        self.extract_usize_value(expr).map(|value| value as u64)
+        extract_int_for_dim(expr).and_then(|value| u64::try_from(value).ok())
     }
 
     /// Extract a compile-time-constant f64 from an expression, seeing through
@@ -11572,13 +11582,18 @@ impl LowerCtx {
                         let inner = kids.get(1)?;
                         Self::extract_f64_value(inner).map(|v| -v)
                     }
-                    // `(lit {} <atom>)` and any other list carrying a bare numeric
-                    // atom in the value slot (pre-chelis#776 behavior, preserved).
-                    _ => match kids.first() {
+                    // Only `(lit {} <atom>)` owns this value slot. Reading the
+                    // first child of an arbitrary composite silently folded
+                    // `(par {} 2.0 3.0)` to 2.0 even though `par`'s value is
+                    // its last child, 3.0 (chelis#794). Composite semantics
+                    // belong to ordinary lowering; this static extractor
+                    // rejects them instead of guessing or dropping effects.
+                    DeepTag::Lit => match kids.first() {
                         Some(Expr::Atom(Atom::Float(f), _)) => Some(*f),
                         Some(Expr::Atom(Atom::Int(n), _)) => Some(*n as f64),
                         _ => None,
                     },
+                    _ => None,
                 }
             }
             _ => None,
@@ -15500,6 +15515,88 @@ mod tests {
             !message.contains("is not a numeric dtype and has no finalize semantics"),
             "the unreachable-by-construction panic must not be the user-facing \
              message; got: {message}"
+        );
+    }
+
+    #[test]
+    fn issue_794_static_float_extraction_rejects_par_instead_of_folding_first_child() {
+        let mut exprs = chelis_deep::parser::parse_str("(par {} 2.0 3.0)").expect("parse par");
+        let par = exprs.pop().expect("one par expression");
+        assert_eq!(
+            LowerCtx::extract_f64_value(&par),
+            None,
+            "a composite `par` is not a static literal: reading its first child \
+             would substitute 2.0 for its specified last-child value 3.0"
+        );
+
+        let literal = chelis_deep::parser::parse_str("(lit {type: (t-prim {} f64)} 3.0)")
+            .expect("parse literal")
+            .pop()
+            .expect("one literal");
+        assert_eq!(
+            LowerCtx::extract_f64_value(&literal),
+            Some(3.0),
+            "narrowing the extractor must preserve the admitted literal path"
+        );
+    }
+
+    #[test]
+    fn issue_794_negative_explicit_seed_is_a_fatal_lowering_error() {
+        let expr = chelis_deep::parser::parse_str(
+            "(handle-effect {effect: random} \
+                (lit {type: (t-prim {} int64)} -1) \
+                (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} \
+                     (var {} uniform_like) \
+                     (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 0.0) \
+                     (lit {type: (t-prim {} f64)} 0.0) \
+                     (lit {type: (t-prim {} f64)} 1.0)))",
+        )
+        .expect("parse handled random expression")
+        .pop()
+        .expect("one expression");
+        let outcome = catch_lowering(move || {
+            let mut ctx = LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
+            ctx.random_seed = Some(7);
+            let _ = ctx.lower_expr(&expr);
+        });
+        let Err(diagnostic) = outcome else {
+            panic!(
+                "an explicit negative seed must not silently inherit outer seed 7 or default to 0"
+            );
+        };
+        assert!(
+            diagnostic.fatal,
+            "the host fallback must not swallow the error"
+        );
+        let message = diagnostic.to_string();
+        assert!(
+            message.contains("non-negative") && message.contains("seed"),
+            "the rejection must name the unsupported explicit seed: {message}"
+        );
+    }
+
+    #[test]
+    fn issue_794_non_negative_explicit_seed_still_lowers() {
+        let expr = chelis_deep::parser::parse_str(
+            "(handle-effect {effect: random} \
+                (lit {type: (t-prim {} int64)} 7) \
+                (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} \
+                     (var {} uniform_like) \
+                     (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 0.0) \
+                     (lit {type: (t-prim {} f64)} 0.0) \
+                     (lit {type: (t-prim {} f64)} 1.0)))",
+        )
+        .expect("parse handled random expression")
+        .pop()
+        .expect("one expression");
+        let outcome = catch_lowering(move || {
+            let mut ctx = LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
+            let _ = ctx.lower_expr(&expr);
+            ctx.dag
+        });
+        assert!(
+            outcome.is_ok(),
+            "non-negative seed control must lower: {outcome:?}"
         );
     }
 
