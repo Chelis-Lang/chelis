@@ -1334,11 +1334,18 @@ def _parse_workflow_job_header(line: str) -> str | None:
     escapes need a real YAML decoder, so this dependency-free parity parser
     fails closed for that shape instead of potentially omitting a CI job.
     """
+    indent = len(line) - len(line.lstrip(" "))
+    content = line.strip()
+    # A comment is legal YAML anywhere inside `jobs:` and is never a job id.
+    # Reject it before matching, not only on the regex-miss path: the pattern's
+    # `\S.*?` starts happily at `#`, so a comment ending in a colon matches and
+    # would otherwise be reported as a malformed job id (chelis#1443).
+    if content.startswith("#"):
+        return None
+
     match = _WORKFLOW_JOB_HEADER.fullmatch(line)
     if match is None:
-        indent = len(line) - len(line.lstrip(" "))
-        content = line.strip()
-        if indent == 2 and content and not content.startswith("#"):
+        if indent == 2 and content:
             raise AssertionError(f"unsupported workflow job entry: {line!r}")
         return None
 
@@ -2779,6 +2786,39 @@ class CiParityTests(unittest.TestCase):
                         "unsupported workflow job",
                     ):
                         parser(workflow)
+
+    def test_comments_inside_jobs_are_not_job_ids(self):
+        """A YAML comment is legal inside `jobs:` and is never a job id.
+
+        Both spellings are here on purpose. The pattern's `\\S.*?` starts at
+        `#`, so a comment whose last character is a colon matches the job-id
+        regex and used to be reported as a malformed job id, while the same
+        comment ending in a period did not (chelis#1443). Only the final
+        character differed, so testing one spelling proves nothing about the
+        other.
+        """
+        for trailer in (".", ":"):
+            workflow = (
+                "jobs:\n"
+                f"  # Rule-id: GATE-SCOPE-EXAMPLE -- why this job is exempt{trailer}\n"
+                "  exempt-job:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - run: cargo check -p chelis-types\n"
+            )
+            with self.subTest(trailer=trailer):
+                self.assertIsNone(
+                    _parse_workflow_job_header(
+                        f"  # Rule-id: GATE-SCOPE-EXAMPLE -- why this job is exempt{trailer}"
+                    )
+                )
+                # The comment must not displace the job that follows it.
+                self.assertIn("exempt-job", _parse_job_attrs(workflow))
+                self.assertIn("exempt-job", _workflow_job_blocks(workflow))
+                self.assertEqual(
+                    _parse_ci_run_commands(workflow)["exempt-job"],
+                    ["cargo check -p chelis-types"],
+                )
 
     def test_unsupported_run_step_shapes_fail_closed(self):
         steps = (
