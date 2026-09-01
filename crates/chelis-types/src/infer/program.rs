@@ -253,7 +253,7 @@ pub(super) fn infer_program_with_product_in_session(
     // module-wrapped programs.
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
-    prebind_literal_external_inputs(&items, &mut env, &mut vg, &mut subst, &adt_reg, errors);
+    let external_input_types = collect_literal_external_input_types(&items);
     let metadata_prebound_names = HashSet::new();
     product.function_inference_plan = FunctionInferencePlan::build(&items);
     let inference_groups = primary_inference_groups(&product.function_inference_plan, &items);
@@ -315,6 +315,17 @@ pub(super) fn infer_program_with_product_in_session(
                 crate::opacity::module_key_for_item(module.as_deref(), decl_name),
                 decl_name.map(str::to_string),
             );
+            let external_input_failure = prebind_literal_external_input_for_declaration(
+                declaration_index,
+                expr,
+                &external_input_types,
+                &declared_signatures,
+                &mut env,
+                &mut vg,
+                &mut subst,
+                &adt_reg,
+                errors,
+            );
             if let Some(binding) = infer_top_level(
                 expr,
                 &mut env,
@@ -323,7 +334,7 @@ pub(super) fn infer_program_with_product_in_session(
                 &adt_reg,
                 errors,
                 &mut product,
-                None,
+                external_input_failure.as_ref(),
                 provisional_types.get(&declaration_index),
                 group.recursive,
                 &user_def_names,
@@ -1197,15 +1208,18 @@ pub(super) fn infer_ir_program_with_state(
     // names intentionally retain last-declaration-wins semantics, while the
     // origin keeps an owning witness from leaking into an earlier body.
     let collected_ir_types = collect_ir_types_with_origins(items.iter().map(|(_, expr)| *expr));
+    let external_input_types = collect_literal_external_input_types(&items);
 
     // chelis#1124: names that carry an explicit `(defsig {} name ...)` in this
     // check unit already had their AUTHORITATIVE declared type bound into
     // `state.env` by `collect_all_declarations` above. The prebind below reads
-    // each def's own BODY type stamp (via `collect_ir_types_with_origins`) and
-    // rebinds the name to it — the mechanism that lets a `defsig`-less def be
-    // resolved by cross-references before its body is inferred. But letting a
-    // body stamp overwrite a defsig binding replaces the declared signature
-    // with the body's own type, so `infer_top_level`'s body-vs-defsig
+    // each function def's own BODY type stamp (via
+    // `collect_ir_types_with_origins`) and rebinds the name to it — the
+    // mechanism that lets a `defsig`-less function be resolved by recursive
+    // cross-references before its body is inferred. External inputs are bound
+    // separately at their exact declaration ordinal. Letting a body stamp
+    // overwrite a defsig binding replaces the declared signature with the
+    // body's own type, so `infer_top_level`'s body-vs-defsig
     // unification (which the IR ingress DOES run) then compares the body
     // against itself and silently accepts a `defsig`/body mismatch. The typed
     // ingress (`infer_program_with_product_in_session`) has no such rebind and
@@ -1224,7 +1238,7 @@ pub(super) fn infer_ir_program_with_state(
         .keys()
         .filter(|name| {
             let declaration_index = collected_ir_types.final_origin_by_name[*name];
-            definition_owns_metadata_prebind(items[declaration_index].1, name)
+            definition_owns_function_metadata_prebind(items[declaration_index].1)
         })
         .cloned()
         .collect::<HashSet<_>>();
@@ -1343,6 +1357,17 @@ pub(super) fn infer_ir_program_with_state(
                 crate::opacity::module_key_for_item(module.as_deref(), decl_name),
                 decl_name.map(str::to_string),
             );
+            let external_input_failure = prebind_literal_external_input_for_declaration(
+                declaration_index,
+                expr,
+                &external_input_types,
+                &declared_signatures,
+                &mut state.env,
+                &mut state.var_gen,
+                &mut state.subst,
+                &state.adt_reg,
+                errors,
+            );
             if let Some(binding) = infer_top_level(
                 expr,
                 &mut state.env,
@@ -1351,7 +1376,9 @@ pub(super) fn infer_ir_program_with_state(
                 &state.adt_reg,
                 errors,
                 &mut product,
-                prebound_type_failures.get(&declaration_index),
+                external_input_failure
+                    .as_ref()
+                    .or_else(|| prebound_type_failures.get(&declaration_index)),
                 provisional_types.get(&declaration_index),
                 group.recursive,
                 &user_def_names,
@@ -1591,63 +1618,74 @@ pub(super) struct CollectedIrTypes {
     final_origin_by_name: HashMap<String, usize>,
 }
 
-fn definition_owns_metadata_prebind(expr: &deep::Expr, name: &str) -> bool {
+fn definition_owns_function_metadata_prebind(expr: &deep::Expr) -> bool {
     let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
         return false;
     };
     let Some(body) = kids.get(1) else {
         return false;
     };
-    tagged_children(body, DeepTag::Fn).is_some() || body_is_literal_self_ref(body, name)
+    tagged_children(body, DeepTag::Fn).is_some()
 }
 
-/// The stamped typed ingress does not install arbitrary body-type metadata,
-/// but [04-INF-4]'s literal self-reference is an external-input declaration,
-/// not an eager read. Install only that exact shape before body inference so
-/// it has the same meaning at both public checker ingresses. Ordinary values
-/// remain source-ordered and are never admitted by this path.
-fn prebind_literal_external_inputs(
+fn collect_literal_external_input_types(
     items: &[(Option<String>, &deep::Expr)],
+) -> HashMap<usize, deep::Expr> {
+    let collected = collect_ir_types_with_origins(items.iter().map(|(_, expr)| *expr));
+    collected
+        .type_env
+        .iter()
+        .filter_map(|(name, ty_expr)| {
+            let declaration_index = collected.final_origin_by_name[name];
+            let expr = items[declaration_index].1;
+            let (DeepTag::Def, _, kids) = stamped_parts(expr)? else {
+                return None;
+            };
+            let body = kids.get(1)?;
+            body_is_literal_self_ref(body, name).then(|| (declaration_index, ty_expr.clone()))
+        })
+        .collect()
+}
+
+/// [04-INF-4]'s typed literal self-reference declares an external input. Its
+/// own type must therefore be visible while that declaration is inferred,
+/// but never to an earlier declaration. Bind exactly the current ordinal just
+/// before its body check; ordinary values and future external inputs remain
+/// source-ordered at both checker ingresses.
+#[allow(clippy::too_many_arguments)]
+fn prebind_literal_external_input_for_declaration(
+    declaration_index: usize,
+    expr: &deep::Expr,
+    external_input_types: &HashMap<usize, deep::Expr>,
+    declared_signatures: &HashMap<String, DeclaredSigMetadata>,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-) {
-    let collected = collect_ir_types_with_origins(items.iter().map(|(_, expr)| *expr));
-    let defsig_names = items
-        .iter()
-        .filter_map(|(_, expr)| match stamped_parts(expr) {
-            Some((DeepTag::Defsig, _, kids)) => kids.first().and_then(symbol_name),
-            _ => None,
-        })
-        .collect::<HashSet<_>>();
-    for (name, ty_expr) in &collected.type_env {
-        let declaration_index = collected.final_origin_by_name[name];
-        let expr = items[declaration_index].1;
-        let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
-            continue;
-        };
-        let Some(body) = kids.get(1) else {
-            continue;
-        };
-        if defsig_names.contains(name.as_str()) || !body_is_literal_self_ref(body, name) {
-            continue;
-        }
-        let metadata_level = subst.enter_level(vg);
-        let resolved = resolve_deep_type(
-            ty_expr,
-            vg,
-            adt_reg,
-            TypeUseSite::CompilerMetadata,
-            BinderMode::TrustedCompilerMetadata,
-            errors,
-        );
-        subst.leave_level(metadata_level, vg);
-        if let Ok(ty) = resolved {
+) -> Option<ErrorWitness> {
+    let ty_expr = external_input_types.get(&declaration_index)?;
+    let name = top_level_decl_name(expr)?;
+    if declared_signatures.contains_key(name) {
+        return None;
+    }
+    let metadata_level = subst.enter_level(vg);
+    let resolved = resolve_deep_type(
+        ty_expr,
+        vg,
+        adt_reg,
+        TypeUseSite::CompilerMetadata,
+        BinderMode::TrustedCompilerMetadata,
+        errors,
+    );
+    subst.leave_level(metadata_level, vg);
+    match resolved {
+        Ok(ty) => {
             let scheme = env.generalize(&ty, subst);
-            env.bind(name.clone(), scheme);
+            env.bind(name.to_string(), scheme);
+            None
         }
+        Err(witness) => Some(witness),
     }
 }
 

@@ -319,15 +319,24 @@ pub(super) fn every_terminal_is_self_call(expr: &deep::Expr, def_name: &str) -> 
     }
 }
 
-/// Check whether a def body is literally a self-reference — the Nautilus
-/// external-input pattern `x = x` or `x = (x : T)`. Only this structural
-/// shape earns the self-loop carve-out; self-references reached via a fn
-/// application, a tuple, an if, etc. are real cycles and must be reported.
+/// Check whether a def body is a type-stamped literal self-reference — the
+/// external-input representation produced by `x = (x : T)`. The explicit
+/// body type is essential: untyped `x = x` is an eager self-cycle. Only this
+/// typed structural shape earns the self-loop carve-out; self-references
+/// reached via a fn application, tuple, conditional, or another value remain
+/// real cycles.
 pub(super) fn body_is_literal_self_ref(body: &deep::Expr, name: &str) -> bool {
+    if expr_type_expr(body, &HashMap::new()).is_none() {
+        return false;
+    }
     let mut current = body;
     loop {
         match current {
             deep::Expr::MetaExpr(meta, _) => current = &meta.expr,
+            deep::Expr::Node(node, _) => {
+                return node.tag() == DeepTag::Var
+                    && node.children_slice().first().and_then(symbol_name) == Some(name);
+            }
             deep::Expr::List(list, _) => {
                 // Type ascription desugars into a `(cast ... )`-like node
                 // in Deep: `(x : T)` keeps `x` as the first child. When
