@@ -518,10 +518,10 @@ When a public surface has an implicit invariant, make it explicit and test it.
   time rather than committed, and `.githooks/commit-msg` and
   `.cargo-husky/hooks/commit-msg` have no file extension, so `chelis_lint`'s
   `Surface::classify` - which keys on the extension - never classifies them. All three
-  must still be minimal POSIX `sh` and `shellcheck`-clean. The bootstrap and the two
-  hooks are checked with `sh -n`; the generated launcher is checked with `bash -n` by
-  the `chelisupLauncherLint` flake check, so a bash-ism there passes CI while still
-  violating the POSIX-`sh` requirement. All other scripts remain Python.
+  must still be minimal POSIX `sh` and `shellcheck`-clean, and you have to verify that
+  yourself: CI checks only the two hooks, with `sh -n`. Nothing checks the bootstrap,
+  and the launcher's `chelisupLauncherLint` uses `bash -n` rather than `sh -n` and has
+  not run on a pull request since chelis#1450. All other scripts remain Python.
 - Existing `scripts/` directory uses Python; follow that convention.
 - **Use a uv-managed Python**, not the system Python, for every script and every
   ad-hoc invocation. [Build Toolchain](#build-toolchain) owns provisioning, the
@@ -1040,8 +1040,9 @@ and [`docs/book/src/reef.md`](docs/book/src/reef.md).
   restores itself at `$CHELIS_HOME/bin/chelisup`. The generic Rust installer
   contains no Nix root path or cleanup logic. The installed Nix wrapper removes
   all three roots after the real `self uninstall` command succeeds. The
-  `chelisupLauncherLint` flake check gates the generated launcher with `bash -n`
-  plus `shellcheck`.
+  `chelisupLauncherLint` flake check runs `bash -n` plus `shellcheck` over the
+  generated launcher, but since chelis#1450 it fires only on `workflow_dispatch` or a
+  published release, so it gates nothing on a pull request or a push to `main`.
 - **Shim resolution order** (first match wins): `+<ver>` arg → `CHELIS_TOOLCHAIN`
   → nearest `chelis-toolchain` file → nearest `reef.toml` `compiler =` pin →
   recorded default. A resolved-but-not-installed version is a loud error naming
