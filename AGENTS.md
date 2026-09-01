@@ -698,6 +698,14 @@ python3 scripts/gate.py --list
 uv-created environment is preserved. If uv is missing, the gate exits with
 installation and Python-provisioning commands.
 
+That re-exec drops `UV_PYTHON_PREFERENCE` from the child environment. uv reads
+it as `--python-preference` and rejects it beside the `--managed-python` the
+gate passes deliberately, so an ambient setting (Devenv exports `only-system`)
+otherwise turns the self-healing bootstrap into a hard `error: the argument
+--managed-python cannot be used with --python-preference`. Nothing else in the
+environment is altered: `UV_PYTHON_DOWNLOADS=never` still fails loudly rather
+than letting the gate fetch an interpreter behind that choice.
+
 Inside Devenv, `chelis-gate` runs the gate under the activated
 `.devenv/state/venv` interpreter, the same one `PYO3_PYTHON` names and the same
 one a developer gets by typing `python`. A Devenv script can only name a Nix

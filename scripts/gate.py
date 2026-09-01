@@ -465,6 +465,18 @@ def ensure_managed_runtime(
         )
         return 127
 
+    # uv reads UV_PYTHON_PREFERENCE as --python-preference and rejects it
+    # alongside the --managed-python this command passes deliberately, so an
+    # ambient setting turns the self-healing bootstrap into `error: the
+    # argument --managed-python cannot be used with --python-preference`
+    # (chelis#1421). Devenv exports only-system, but any uv user may set it,
+    # and the bootstrap is what makes a bare `python3 scripts/gate.py` safe
+    # from any shell. Drop it for this child only: the gate's own flag decides
+    # which interpreter runs the gate. UV_PYTHON_DOWNLOADS is left alone, so a
+    # workstation that forbids downloads still fails loudly rather than having
+    # the gate fetch an interpreter behind that choice.
+    environment.pop("UV_PYTHON_PREFERENCE", None)
+
     command = [
         uv,
         "run",
