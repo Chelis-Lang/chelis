@@ -2132,29 +2132,123 @@ Suggestions are structured data in the fitness report JSON, not just strings.
 
 ### 6.4 Fitness Report Format
 
+`chelis check` emits one JSON document per checked input. It is a
+machine-facing contract rather than an illustration: reward surfaces,
+conformance corpora, and downstream tooling consume it, so a change to its
+shape is a change to a published interface.
+
+> **[04-FIT-11]** The report SHALL be produced by serializing one typed
+> value. A hand-assembled document -- string concatenation, format
+> templating, or any second producer of the same shape -- is not a
+> conforming implementation, because it admits drift between the emitted
+> document and the type that describes it.
+
+> **[04-FIT-12]** Every `chelis check` failure SHALL be reported through
+> that same typed value, including Surf and Deep parse failures and any
+> preparation failure occurring before type checking begins. A failure
+> path that bypasses the report and emits a display string is not
+> conforming: a consumer cannot distinguish "no diagnostics" from
+> "the diagnostics were not transported".
+
+(Not fully implemented; tracked by chelis#886.)
+
+#### Document fields
+
+| field | type | presence |
+|---|---|---|
+| `score` | number | always |
+| `components` | object of `parse`, `structure`, `names`, `types` | always |
+| `typed_nodes`, `untyped_nodes`, `total_nodes` | integer | always |
+| `unresolved_names` | array of string | always, possibly empty |
+| `errors` | array of diagnostic | always, possibly empty |
+| `typed_ast` | annotated Deep carrying a type on every node | always |
+| `inferred_signatures` | structured signature tree | only when the caller requests inferred signatures |
+
+> **[04-FIT-13]** `typed_ast` and, when requested, `inferred_signatures`
+> SHALL be carried in the same typed value as the rest of the report.
+> They are members of the report's type -- `inferred_signatures` absent by
+> omission when not requested -- not separately spliced fragments.
+
+#### Diagnostic fields
+
+Each element of `errors` carries:
+
+| field | type | presence |
+|---|---|---|
+| `kind` | closed vocabulary member | always |
+| `message` | string | always |
+| `severity` | number | always |
+| `expected`, `got` | string | when the producing check determined them |
+| `suggestions` | array of string | when non-empty |
+| `span` | coordinate or range | when the producing node carried one |
+| `span_id` | producer-supplied identity | when the producing node carried one |
+| `deep_path` | Deep address | when the producing check determined it |
+
+> **[04-FIT-14]** `kind` SHALL be a member of a closed, validated
+> diagnostic-kind vocabulary. A debug rendering of a producer-internal
+> enumeration is not a conforming source for this field: it makes an
+> internal variant rename an unannounced change to a published interface.
+> Every diagnostic-producing stage SHALL map into that one vocabulary, and
+> a consumer SHALL be able to reject a member outside it.
+
+> **[04-FIT-15]** `expected`, `got`, `suggestions`, `severity`, and
+> `deep_path` SHALL be retained uniformly for checker, effect, and
+> linearity diagnostics alike. A field the producing stage populated SHALL
+> reach the document, and which fields the document carries SHALL NOT vary
+> by which stage produced the diagnostic.
+
+#### Location
+
+> **[04-FIT-16]** The document SHALL carry the source location as the
+> producing node held it: a local coordinate or range into the checked
+> source, and the producer-supplied identity when the node carried one. The
+> two are independently optional, and the document SHALL be able to carry
+> either without the other. An opaque or source-qualified identity SHALL be
+> transported rather than discarded, and SHALL NOT be reconstructed from a
+> coordinate: an identity minted by an external producer is not recoverable
+> from an offset and a length.
+>
+> Whether the coordinate and the identity occupy one member or two is a
+> shape choice this atom does not decide; independent optionality is the
+> requirement.
+
+(A coordinate does not yet travel without an identity; chelis#1395 owns that
+gap.)
+
+> **[04-FIT-17]** The serializer SHALL NOT fabricate an extent it did not
+> measure. Where a producer supplied only a point, or only an opaque
+> identity, the document SHALL carry neither an invented length nor a
+> zero-width range: the extent SHALL be ABSENT. Where a producer supplied
+> no location at all, `span` SHALL be absent. A zero length and a
+> silently-defaulted length are both indistinguishable from a measured
+> extent, so a consumer that reasons about ranges cannot tell whether the
+> compiler measured one.
+
+#### Example
+
+Illustrative of the shape only; the atoms above are normative.
+
 ```json
 {
   "score": 0.73,
-  "components": {
-    "parse": 1.0,
-    "structure": 1.0,
-    "names": 0.85,
-    "types": 0.62
-  },
+  "components": {"parse": 1.0, "structure": 1.0, "names": 0.85, "types": 0.62},
+  "typed_nodes": 27,
+  "untyped_nodes": 4,
+  "total_nodes": 31,
+  "unresolved_names": ["typo_var"],
   "errors": [
     {
-      "kind": "precision_mismatch",
-      "loc": {"line": 12, "col": 5},
+      "kind": "PrecisionMismatch",
+      "message": "precision mismatch: expected f32, got bf16",
+      "severity": 0.8,
       "expected": "tensor[batch, hidden, f32]",
       "got": "tensor[batch, hidden, bf16]",
-      "suggestions": ["Insert cast(y, f32)"],
-      "severity": 0.8
+      "suggestions": ["Insert explicit cast"],
+      "span": {"offset": 786, "len": 20},
+      "span_id": "surf:786..806"
     }
   ],
-  "typed_ast": "... (annotated Deep with types on every node) ...",
-  "unresolved_names": ["typo_var"],
-  "untyped_nodes": 4,
-  "total_nodes": 31
+  "typed_ast": "... (annotated Deep with types on every node) ..."
 }
 ```
 

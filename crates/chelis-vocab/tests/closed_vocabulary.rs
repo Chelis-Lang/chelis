@@ -63,6 +63,10 @@ fn diagnostic_kind_wire_spellings_are_closed_and_stable() {
         (DiagnosticKind::UnknownForm, "UnknownForm"),
         (DiagnosticKind::MalformedForm, "MalformedForm"),
         (DiagnosticKind::CheckOther, "Other"),
+        (DiagnosticKind::UnhandledEffect, "UnhandledEffect"),
+        (DiagnosticKind::InvalidHandler, "InvalidHandler"),
+        (DiagnosticKind::BuildTargetMismatch, "BuildTargetMismatch"),
+        (DiagnosticKind::TypeTotality, "TypeTotality"),
     ];
     assert_eq!(DiagnosticKind::ALL, expected.map(|(kind, _)| kind));
 
@@ -139,7 +143,11 @@ fn diagnostic_kind_consumer_match_is_a_compile_time_ratchet() {
             | DiagnosticKind::BuiltinShadowing
             | DiagnosticKind::UnknownForm
             | DiagnosticKind::MalformedForm
-            | DiagnosticKind::CheckOther => "general",
+            | DiagnosticKind::CheckOther
+            | DiagnosticKind::UnhandledEffect
+            | DiagnosticKind::InvalidHandler
+            | DiagnosticKind::BuildTargetMismatch
+            | DiagnosticKind::TypeTotality => "general",
         }
     }
 

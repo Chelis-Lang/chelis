@@ -48,6 +48,10 @@ fn take_effect_work_profile() -> EffectWorkProfile {
     EFFECT_WORK_PROFILE.with(|profile| std::mem::take(&mut *profile.borrow_mut()))
 }
 
+/// An effect diagnostic's kind.
+///
+/// Its published spelling is the governed `chelis_vocab::DiagnosticKind`
+/// identity that `Diagnostic::from_effect_error` maps it to (chelis#886).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EffectErrorKind {
     UnhandledEffect,

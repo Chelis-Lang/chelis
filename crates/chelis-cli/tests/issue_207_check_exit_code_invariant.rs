@@ -142,6 +142,14 @@ fn pipeline_artifact_semantic_reports_stay_exact() {
                     "kind": "UnhandledEffect",
                     "message": "Function `noisy` is declared with effects `{}` but its body performs effects `{Random}` that were not declared",
                     "severity": 0.8,
+                    // [04-FIT-15] again, and this fixture is the one that
+                    // proved the rule was not yet met: the effect checker
+                    // populates repair hints, and the projection dropped
+                    // them, so the field set DID vary by producing stage
+                    // while the linearity fixture below claimed it did not.
+                    "suggestions": [
+                        "Either add the missing effect(s) to the signature of `noisy` (e.g. `! { Random }`) or refactor the body so it does not perform them."
+                    ],
                 }],
             }),
             Some(CHECK_ERRORS_EXIT_CODE),
@@ -160,6 +168,14 @@ fn pipeline_artifact_semantic_reports_stay_exact() {
                     "kind": "UseAfterConsume",
                     "message": "variable `x` was already consumed by realize at surf:56..66; later use at surf:72..73 is invalid",
                     "severity": 0.9,
+                    // chelis#886 [04-FIT-15]: the field set no longer varies
+                    // by producing stage. The embedding API always carried
+                    // repair hints; the report omitting them was the
+                    // divergence, so this fixture gains the hint it was
+                    // always entitled to.
+                    "suggestions": [
+                        "Insert `copy(x)` before the first consuming use if you need to reuse it"
+                    ],
                 }],
             }),
             Some(CHECK_ERRORS_EXIT_CODE),

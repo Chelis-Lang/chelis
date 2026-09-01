@@ -1460,6 +1460,21 @@ and the generated rejection registry gains exactly the [04-FIT-9] and
 [04-FIT-10] atoms. The full Phase 4B oracle is rerun so the unchanged numeric
 matrix remains executable evidence rather than an inference from scope.
 
+[#1384] rewrites `spec/04-type-system.md` §6.4 into the typed-transport
+contract for the `chelis check` report and adds [04-FIT-11] through
+[04-FIT-17]: the document is produced by serializing one typed value, every
+failure path is carried by that value, `kind` is drawn from a closed validated
+vocabulary, and a span is emitted only where its range is derivable. These are
+diagnostic-transport rules outside the numeric contracts: they do not touch a
+frozen [04-NUM] atom, the §9.1 per-dtype table, the capability schema, or a
+numeric-surface identity, and no diagnostic carries a numeric value the census
+does not already classify. The complete-file digests for
+`spec/04-type-system.md` and this document move deliberately, every frozen atom
+and region digest and every required-literal anchor is unchanged, and the
+generated rejection registry gains exactly the seven new atoms. The full Phase
+4B oracle is rerun so the unchanged numeric matrix remains executable evidence
+rather than an inference from scope.
+
 ## B2. Invariants that hold across every boundary
 
 1. **Controls never move.** Every green control in the audit test files
@@ -2318,3 +2333,4 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#1370]: https://github.com/Chelis-Lang/chelis/pull/1370
 [#1399]: https://github.com/Chelis-Lang/chelis/pull/1399
 [#1371]: https://github.com/Chelis-Lang/chelis/pull/1371
+[#1384]: https://github.com/Chelis-Lang/chelis/pull/1384
