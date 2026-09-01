@@ -301,33 +301,141 @@ def _assert_native_devenv_recipe(workflow: str) -> None:
             )
 
 
+_SIMPLE_YAML_KEY = re.compile(
+    r"(?:[A-Za-z_][A-Za-z0-9_-]*|'(?:[^']|'')*'|\"[^\"\\]*\")"
+)
+
+
+def _parse_simple_yaml_mapping_entry(
+    line: str, *, expected_indent: int
+) -> tuple[str, str]:
+    """Parse one deliberately restricted YAML mapping entry.
+
+    The workflow policy oracle has no YAML dependency, so it accepts the plain
+    and simply quoted keys GitHub accepts and fails closed on anchors, explicit
+    keys, escaped double-quoted keys, and other shapes it cannot attribute.
+    """
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        raise AssertionError(f"expected YAML mapping entry: {line!r}")
+    indent = len(line) - len(line.lstrip(" "))
+    if indent != expected_indent:
+        raise AssertionError(f"unsupported YAML indentation: {line!r}")
+    match = re.fullmatch(
+        rf" {{{expected_indent}}}(?P<key>{_SIMPLE_YAML_KEY.pattern})\s*:\s*(?P<value>.*)",
+        line,
+    )
+    if match is None:
+        raise AssertionError(f"unsupported YAML mapping entry: {line!r}")
+
+    raw_key = match.group("key")
+    if raw_key[0] == raw_key[-1] and raw_key[0] in {"'", '"'}:
+        key = raw_key[1:-1]
+        if raw_key[0] == "'":
+            key = key.replace("''", "'")
+    else:
+        key = raw_key
+    value = re.sub(r"\s+#.*$", "", match.group("value")).strip()
+    return key, value
+
+
+def _nix_workflow_events(workflow: str) -> dict[str, dict[str, str]]:
+    lines = workflow.splitlines()
+    on_index: int | None = None
+    for index, line in enumerate(lines):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent != 0:
+            continue
+        entry = _parse_simple_yaml_mapping_entry(line, expected_indent=0)
+        if entry[0] == "on":
+            if on_index is not None:
+                raise AssertionError("the Nix workflow must define one on map")
+            if entry[1]:
+                raise AssertionError("the Nix workflow on map must use block form")
+            on_index = index
+    if on_index is None:
+        raise AssertionError("the Nix workflow must define an on map")
+
+    events: dict[str, dict[str, str]] = {}
+    current_event: str | None = None
+    for line in lines[on_index + 1 :]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent == 0:
+            break
+        if indent == 2:
+            event, value = _parse_simple_yaml_mapping_entry(
+                line, expected_indent=2
+            )
+            if event in events:
+                raise AssertionError(f"duplicate Nix workflow event {event!r}")
+            if value:
+                raise AssertionError(
+                    f"Nix workflow event {event!r} must use block form"
+                )
+            events[event] = {}
+            current_event = event
+            continue
+        if indent == 4 and current_event is not None:
+            key, value = _parse_simple_yaml_mapping_entry(
+                line, expected_indent=4
+            )
+            if key in events[current_event]:
+                raise AssertionError(
+                    f"duplicate {current_event!r} event key {key!r}"
+                )
+            events[current_event][key] = value
+            continue
+        raise AssertionError(f"unsupported Nix workflow event entry: {line!r}")
+    return events
+
+
+def _nix_job_top_level_keys(block: str) -> set[str]:
+    keys: set[str] = set()
+    for line in block.splitlines()[1:]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent != 4:
+            continue
+        key, _value = _parse_simple_yaml_mapping_entry(
+            line, expected_indent=4
+        )
+        if key in keys:
+            raise AssertionError(f"duplicate Nix job key {key!r}")
+        keys.add(key)
+    return keys
+
+
 def _assert_nix_intentional_events_only(workflow: str) -> None:
-    trigger_section = workflow.split("jobs:", 1)[0]
-    required = ("workflow_dispatch:", "release:", "types: [published]")
-    for marker in required:
-        if marker not in trigger_section:
-            raise AssertionError(
-                "the Nix workflow must run on manual dispatch and published "
-                f"releases: missing {marker!r}"
-            )
-    forbidden = ("pull_request:", "push:", "schedule:")
-    for marker in forbidden:
-        if marker in trigger_section:
-            raise AssertionError(
-                "the Nix workflow must not run automatically on pull requests, "
-                f"pushes, or schedules: found {marker!r}"
-            )
+    events = _nix_workflow_events(workflow)
+    expected_events = {
+        "workflow_dispatch": {},
+        "release": {"types": "[published]"},
+    }
+    if events != expected_events:
+        raise AssertionError(
+            "the Nix workflow must run only on manual dispatch and published "
+            f"releases: found {events!r}"
+        )
 
     blocks = _workflow_job_blocks(workflow)
-    if "changes" in blocks:
+    expected_jobs = {"nix-linux-x86-64", "nix-darwin-arm64"}
+    if set(blocks) != expected_jobs:
         raise AssertionError(
-            "the intentional-event-only Nix workflow must not run a docs-only detector"
+            "the intentional-event-only Nix workflow must contain exactly its "
+            f"two native jobs: found {sorted(blocks)!r}"
         )
-    for job in ("nix-linux-x86-64", "nix-darwin-arm64"):
-        block = blocks.get(job, "")
-        if "needs: [changes]" in block or "github.event_name" in block:
+    for job in sorted(expected_jobs):
+        gates = _nix_job_top_level_keys(blocks[job]) & {"if", "needs"}
+        if gates:
             raise AssertionError(
-                f"{job!r} must run on both configured intentional events"
+                f"{job!r} must run on both configured events without {sorted(gates)!r}"
             )
 
 
@@ -2798,14 +2906,14 @@ class NixPackagesWorkflowTests(unittest.TestCase):
 
     def test_automatic_pr_push_and_schedule_triggers_fail_the_event_lock(self):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
-        for trigger in ("pull_request:", "push:", "schedule:"):
+        for trigger in ("pull_request:", "'pull_request':", "push:", "schedule:"):
             with self.subTest(trigger=trigger):
                 mutated = text.replace(
                     "  workflow_dispatch:\n",
                     f"  workflow_dispatch:\n  {trigger}\n",
                     1,
                 )
-                with self.assertRaisesRegex(AssertionError, "must not run"):
+                with self.assertRaisesRegex(AssertionError, "only on"):
                     _assert_nix_intentional_events_only(mutated)
 
     def test_missing_release_trigger_fails_the_event_lock(self):
@@ -2824,6 +2932,48 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(AssertionError, "both configured"):
             _assert_nix_intentional_events_only(mutated)
+
+    def test_policy_oracle_rejects_comment_and_job_gate_evasions(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        mutations = {
+            "comment-only release": (
+                text.replace(
+                    "  release:\n    types: [published]\n",
+                    "  # release:\n  #   types: [published]\n",
+                    1,
+                ),
+                "published releases",
+            ),
+            "wrong release action hidden by comment": (
+                text.replace(
+                    "    types: [published]\n",
+                    "    types: [created]\n    # types: [published]\n",
+                    1,
+                ),
+                "published releases",
+            ),
+            "Linux dispatch blocked": (
+                text.replace(
+                    "    runs-on: ubuntu-latest\n",
+                    "    if: github.event.action == 'published'\n"
+                    "    runs-on: ubuntu-latest\n",
+                    1,
+                ),
+                "both configured",
+            ),
+            "Darwin disabled": (
+                text.replace(
+                    "    runs-on: macos-latest\n",
+                    "    if: false\n    runs-on: macos-latest\n",
+                    1,
+                ),
+                "both configured",
+            ),
+        }
+        for name, (mutated, message) in mutations.items():
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(AssertionError, message):
+                    _assert_nix_intentional_events_only(mutated)
 
     def test_each_job_bounds_runner_resources(self):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
