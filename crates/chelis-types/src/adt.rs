@@ -3,7 +3,7 @@
 //! Processes `deftype` Deep nodes to extract constructor type signatures.
 
 use chelis_deep::DeepTag;
-use chelis_unord::UnordMap;
+use chelis_unord::{UnordMap, UnordSet};
 use std::collections::BTreeMap;
 
 use chelis_deep::ast as deep;
