@@ -18,6 +18,7 @@ Four things are locked here:
   (d) no-ai-authorship patterns cover the current banned tool identities.
 """
 
+import hashlib
 import importlib.util
 import io
 import os
@@ -73,14 +74,22 @@ DEVENV_SETUP_ACTION = (
     "73f017c4d3179dc313844e9d5f08d17a7879c824"
 )
 PORTABLE_DEVENV_SHELL = "devenv-ci bash --noprofile --norc -e -o pipefail {0}"
-DOCS_ONLY_GATE_IF = (
-    "if: ${{ !cancelled() && (needs.changes.result != 'success' "
-    "|| needs.changes.outputs.docs_only != 'true') }}"
-)
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 CARCARA_FULL_SUITE_COMMAND = (
     "cargo test -p chelis-prove --features carcara -- --test-threads=1"
 )
+
+
+def _read_nix_packages_workflow(path: Path | None = None) -> str:
+    """Read the exact UTF-8 workflow blob without path or newline substitution."""
+    source = NIX_PACKAGES_YML if path is None else path
+    if source.is_symlink() or not source.is_file():
+        raise AssertionError("the Nix package workflow must be a regular file")
+    raw = source.read_bytes()
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise AssertionError("the Nix package workflow must be UTF-8") from error
 
 
 def _nix_supported_systems(contracts: str) -> set[str]:
@@ -301,37 +310,135 @@ def _assert_native_devenv_recipe(workflow: str) -> None:
             )
 
 
-def _assert_nix_docs_only_gate(workflow: str) -> None:
-    blocks = _workflow_job_blocks(workflow)
-    changes = blocks.get("changes", "")
-    if "scripts/ci_detect_docs_only.py" not in changes:
+_SIMPLE_YAML_KEY = re.compile(
+    r"(?:[A-Za-z_][A-Za-z0-9_-]*|'(?:[^']|'')*'|\"[^\"\\]*\")"
+)
+
+
+def _parse_simple_yaml_mapping_entry(
+    line: str, *, expected_indent: int
+) -> tuple[str, str]:
+    """Parse one deliberately restricted YAML mapping entry.
+
+    The workflow policy oracle has no YAML dependency, so it accepts the plain
+    and simply quoted keys GitHub accepts and fails closed on anchors, explicit
+    keys, escaped double-quoted keys, and other shapes it cannot attribute.
+    """
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        raise AssertionError(f"expected YAML mapping entry: {line!r}")
+    indent = len(line) - len(line.lstrip(" "))
+    if indent != expected_indent:
+        raise AssertionError(f"unsupported YAML indentation: {line!r}")
+    match = re.fullmatch(
+        rf" {{{expected_indent}}}(?P<key>{_SIMPLE_YAML_KEY.pattern})\s*:\s*(?P<value>.*)",
+        line,
+    )
+    if match is None:
+        raise AssertionError(f"unsupported YAML mapping entry: {line!r}")
+
+    raw_key = match.group("key")
+    if raw_key[0] == raw_key[-1] and raw_key[0] in {"'", '"'}:
+        key = raw_key[1:-1]
+        if raw_key[0] == "'":
+            key = key.replace("''", "'")
+    else:
+        key = raw_key
+    value = re.sub(r"\s+#.*$", "", match.group("value")).strip()
+    return key, value
+
+
+def _nix_workflow_events(workflow: str) -> dict[str, dict[str, str]]:
+    lines = workflow.splitlines()
+    on_index: int | None = None
+    for index, line in enumerate(lines):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent != 0:
+            continue
+        entry = _parse_simple_yaml_mapping_entry(line, expected_indent=0)
+        if entry[0] == "on":
+            if on_index is not None:
+                raise AssertionError("the Nix workflow must define one on map")
+            if entry[1]:
+                raise AssertionError("the Nix workflow on map must use block form")
+            on_index = index
+    if on_index is None:
+        raise AssertionError("the Nix workflow must define an on map")
+
+    events: dict[str, dict[str, str]] = {}
+    current_event: str | None = None
+    for line in lines[on_index + 1 :]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent == 0:
+            break
+        if indent == 2:
+            event, value = _parse_simple_yaml_mapping_entry(
+                line, expected_indent=2
+            )
+            if event in events:
+                raise AssertionError(f"duplicate Nix workflow event {event!r}")
+            if value:
+                raise AssertionError(
+                    f"Nix workflow event {event!r} must use block form"
+                )
+            events[event] = {}
+            current_event = event
+            continue
+        if indent == 4 and current_event is not None:
+            key, value = _parse_simple_yaml_mapping_entry(
+                line, expected_indent=4
+            )
+            if key in events[current_event]:
+                raise AssertionError(
+                    f"duplicate {current_event!r} event key {key!r}"
+                )
+            events[current_event][key] = value
+            continue
+        raise AssertionError(f"unsupported Nix workflow event entry: {line!r}")
+    return events
+
+
+_NIX_REVIEWED_WORKFLOW_SHA256 = (
+    "6f4f661e55a108b30d3bb2e6f463fbcde39c4f69e7b94f50f16c6b4ef721850b"
+)
+
+
+def _assert_nix_workflow_matches_reviewed_recipe(workflow: str) -> None:
+    """Lock the workflow while the temporary event policy is active.
+
+    YAML has enough scalar and expression spellings that a partial parser or a
+    banlist can accept a semantically gated job. Bind every workflow byte so
+    top-level defaults, concurrency, permissions, triggers, jobs, and steps are
+    one closed reviewed artifact. A future intentional policy or recipe change
+    must replace this digest explicitly rather than inheriting a permissive
+    spelling or selection-boundary gap.
+    """
+    actual = hashlib.sha256(workflow.encode("utf-8")).hexdigest()
+    if actual != _NIX_REVIEWED_WORKFLOW_SHA256:
         raise AssertionError(
-            "the Nix workflow must compute docs_only with the shared detector"
-        )
-    linux = blocks.get("nix-linux-x86-64", "")
-    if "needs: [changes]" not in linux or DOCS_ONLY_GATE_IF not in linux:
-        raise AssertionError(
-            "the Linux Nix job must skip docs-only pull requests via the "
-            "shared job-level gate"
-        )
-    darwin = blocks.get("nix-darwin-arm64", "")
-    if "needs.changes" in darwin:
-        raise AssertionError(
-            "the darwin Nix job must keep manual dispatch as its only gate"
+            "the intentional-event-only Nix workflow must match the reviewed "
+            f"native recipe and event policy: found SHA-256 {actual}"
         )
 
 
-def _assert_darwin_manual_dispatch(workflow: str) -> None:
-    trigger_section = workflow.split("jobs:", 1)[0]
-    if "workflow_dispatch:" not in trigger_section:
-        raise AssertionError("the Nix workflow must expose a workflow_dispatch trigger")
-    blocks = _workflow_job_blocks(workflow)
-    darwin = blocks.get("nix-darwin-arm64", "")
-    if "if: github.event_name == 'workflow_dispatch'" not in darwin:
-        raise AssertionError("the darwin Nix job must run on manual dispatch only")
-    linux = blocks.get("nix-linux-x86-64", "")
-    if "github.event_name" in linux:
-        raise AssertionError("the Linux Nix job must keep pull request coverage")
+def _assert_nix_intentional_events_only(workflow: str) -> None:
+    events = _nix_workflow_events(workflow)
+    expected_events = {
+        "workflow_dispatch": {},
+        "release": {"types": "[published]"},
+    }
+    if events != expected_events:
+        raise AssertionError(
+            "the Nix workflow must run only on manual dispatch and published "
+            f"releases: found {events!r}"
+        )
+
+    _assert_nix_workflow_matches_reviewed_recipe(workflow)
 
 
 def _assert_runner_resource_bounds(workflow: str) -> None:
@@ -2717,9 +2824,29 @@ class CiParityTests(unittest.TestCase):
 class NixPackagesWorkflowTests(unittest.TestCase):
     """Lock the two native Nix package jobs and their complete check command."""
 
+    def test_workflow_reader_preserves_raw_newlines_for_the_digest(self):
+        raw = NIX_PACKAGES_YML.read_bytes().replace(b"\n", b"\r\n")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nix-packages.yml"
+            path.write_bytes(raw)
+            text = _read_nix_packages_workflow(path)
+        self.assertEqual(text.encode("utf-8"), raw)
+        with self.assertRaisesRegex(AssertionError, "reviewed native recipe"):
+            _assert_nix_intentional_events_only(text)
+
+    def test_workflow_reader_rejects_a_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "canonical.yml"
+            target.write_bytes(NIX_PACKAGES_YML.read_bytes())
+            link = root / "nix-packages.yml"
+            link.symlink_to(target)
+            with self.assertRaisesRegex(AssertionError, "regular file"):
+                _read_nix_packages_workflow(link)
+
     def test_native_nix_workflow_has_both_authoritative_jobs(self):
         self.assertTrue(NIX_PACKAGES_YML.is_file(), "missing Nix package workflow")
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         required = [
             "name: Nix Packages (x86_64-linux)",
             "runs-on: ubuntu-latest",
@@ -2730,7 +2857,7 @@ class NixPackagesWorkflowTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_each_native_job_runs_the_complete_flake_check_set(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         self.assertEqual(
             text.count("run: nix flake check --print-build-logs"),
             2,
@@ -2743,14 +2870,14 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         )
 
     def test_each_native_job_rejects_the_wrong_runner_system(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         self.assertEqual(text.count("name: Verify the runner system"), 2)
         self.assertIn('assert system == "x86_64-linux", system', text)
         self.assertIn('assert system == "aarch64-darwin", system', text)
 
     def test_supported_systems_have_exact_native_job_parity(self):
         contracts = (REPO_ROOT / "nix" / "contracts.nix").read_text(encoding="utf-8")
-        workflow = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        workflow = _read_nix_packages_workflow()
         _assert_nix_system_job_parity(contracts, workflow)
 
     def test_supported_system_without_native_job_fails_parity(self):
@@ -2760,7 +2887,7 @@ class NixPackagesWorkflowTests(unittest.TestCase):
             _assert_nix_system_job_parity(contracts, workflow)
 
     def test_each_native_job_runs_the_nix_contract_suite_with_project_python(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         self.assertEqual(text.count("uses: astral-sh/setup-uv@v8.1.0"), 2)
         self.assertEqual(text.count("run: uv venv --python 3.11 .venv"), 2)
         self.assertEqual(
@@ -2769,23 +2896,23 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         )
 
     def test_each_native_job_uses_the_reviewed_portable_devenv_base(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         _assert_native_devenv_recipe(text)
 
     def test_missing_central_devenv_action_fails_the_native_recipe(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         mutated = text.replace(f"uses: {DEVENV_SETUP_ACTION}", "uses: omitted", 1)
         with self.assertRaisesRegex(AssertionError, "setup-devenv"):
             _assert_native_devenv_recipe(mutated)
 
     def test_missing_portable_shell_fails_the_native_recipe(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         mutated = text.replace(f"shell: {PORTABLE_DEVENV_SHELL}", "shell: bash", 1)
         with self.assertRaisesRegex(AssertionError, "devenv-ci"):
             _assert_native_devenv_recipe(mutated)
 
     def test_late_central_devenv_action_fails_the_native_recipe(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         setup = f"uses: {DEVENV_SETUP_ACTION}"
         mutated = text.replace(setup, "uses: omitted", 1).replace(
             "run: devenv test --no-tui",
@@ -2795,73 +2922,191 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "precede the runner verification"):
             _assert_native_devenv_recipe(mutated)
 
-    def test_linux_job_skips_docs_only_pull_requests(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
-        _assert_nix_docs_only_gate(text)
+    def test_workflow_runs_on_intentional_events_only(self):
+        text = _read_nix_packages_workflow()
+        _assert_nix_intentional_events_only(text)
 
-    def test_missing_docs_only_gate_fails_the_skip_lock(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
-        mutated = text.replace(f"    {DOCS_ONLY_GATE_IF}\n", "", 1)
-        with self.assertRaisesRegex(AssertionError, "shared job-level gate"):
-            _assert_nix_docs_only_gate(mutated)
+    def test_automatic_pr_push_and_schedule_triggers_fail_the_event_lock(self):
+        text = _read_nix_packages_workflow()
+        for trigger in ("pull_request:", "'pull_request':", "push:", "schedule:"):
+            with self.subTest(trigger=trigger):
+                mutated = text.replace(
+                    "  workflow_dispatch:\n",
+                    f"  workflow_dispatch:\n  {trigger}\n",
+                    1,
+                )
+                with self.assertRaisesRegex(AssertionError, "only on"):
+                    _assert_nix_intentional_events_only(mutated)
 
-    def test_missing_docs_only_detector_fails_the_skip_lock(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
-        mutated = text.replace("scripts/ci_detect_docs_only.py", "omitted.py", 1)
-        with self.assertRaisesRegex(AssertionError, "shared detector"):
-            _assert_nix_docs_only_gate(mutated)
+    def test_missing_release_trigger_fails_the_event_lock(self):
+        text = _read_nix_packages_workflow()
+        mutated = text.replace("  release:\n    types: [published]\n", "", 1)
+        with self.assertRaisesRegex(AssertionError, "published releases"):
+            _assert_nix_intentional_events_only(mutated)
 
-    def test_docs_only_gate_on_the_darwin_job_fails_the_skip_lock(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+    def test_event_specific_job_gate_fails_the_event_lock(self):
+        text = _read_nix_packages_workflow()
         mutated = text.replace(
-            "    if: github.event_name == 'workflow_dispatch'\n",
-            "    needs: [changes]\n"
-            f"    {DOCS_ONLY_GATE_IF}\n",
+            "    runs-on: macos-latest\n",
+            "    if: github.event_name == 'workflow_dispatch'\n"
+            "    runs-on: macos-latest\n",
             1,
         )
-        with self.assertRaisesRegex(AssertionError, "manual dispatch as its only"):
-            _assert_nix_docs_only_gate(mutated)
+        with self.assertRaisesRegex(AssertionError, "reviewed native recipe"):
+            _assert_nix_intentional_events_only(mutated)
 
-    def test_darwin_job_runs_on_manual_dispatch_only(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
-        _assert_darwin_manual_dispatch(text)
-
-    def test_darwin_pull_request_trigger_fails_the_manual_lock(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
-        mutated = text.replace(
-            "    if: github.event_name == 'workflow_dispatch'\n", "", 1
-        )
-        with self.assertRaisesRegex(AssertionError, "manual dispatch"):
-            _assert_darwin_manual_dispatch(mutated)
+    def test_policy_oracle_rejects_comment_and_job_gate_evasions(self):
+        text = _read_nix_packages_workflow()
+        mutations = {
+            "comment-only release": (
+                text.replace(
+                    "  release:\n    types: [published]\n",
+                    "  # release:\n  #   types: [published]\n",
+                    1,
+                ),
+                "published releases",
+            ),
+            "wrong release action hidden by comment": (
+                text.replace(
+                    "    types: [published]\n",
+                    "    types: [created]\n    # types: [published]\n",
+                    1,
+                ),
+                "published releases",
+            ),
+            "Linux dispatch blocked": (
+                text.replace(
+                    "    runs-on: ubuntu-latest\n",
+                    "    if: github.event.action == 'published'\n"
+                    "    runs-on: ubuntu-latest\n",
+                    1,
+                ),
+                "reviewed native recipe",
+            ),
+            "Darwin disabled": (
+                text.replace(
+                    "    runs-on: macos-latest\n",
+                    "    if: false\n    runs-on: macos-latest\n",
+                    1,
+                ),
+                "reviewed native recipe",
+            ),
+            "event-dependent empty matrix": (
+                text.replace(
+                    "    runs-on: ubuntu-latest\n",
+                    "    strategy:\n"
+                    "      matrix:\n"
+                    "        lane: ${{ github.event_name == 'workflow_dispatch' "
+                    "&& fromJSON('[\"run\"]') || fromJSON('[]') }}\n"
+                    "    runs-on: ubuntu-latest\n",
+                    1,
+                ),
+                "reviewed native recipe",
+            ),
+            "event-dependent runner": (
+                text.replace(
+                    "    runs-on: ubuntu-latest\n",
+                    "    runs-on: ${{ github.event_name == 'workflow_dispatch' "
+                    "&& 'ubuntu-latest' || 'no-such-runner' }}\n",
+                    1,
+                ),
+                "reviewed native recipe",
+            ),
+            "event-gated complete check step": (
+                text.replace(
+                    "      - name: Run the complete native flake check set\n"
+                    "        run: nix flake check --print-build-logs\n",
+                    "      - name: Run the complete native flake check set\n"
+                    "        if: github.event_name == 'workflow_dispatch'\n"
+                    "        run: nix flake check --print-build-logs\n",
+                    1,
+                ),
+                "reviewed native recipe",
+            ),
+            "escaped event-gated complete check step": (
+                text.replace(
+                    "      - name: Run the complete native flake check set\n"
+                    "        run: nix flake check --print-build-logs\n",
+                    "      - name: Run the complete native flake check set\n"
+                    "        run: nix flake check --print-build-logs\n"
+                    "        if: \"${{ gith\\u0075b.event_name == "
+                    "'workflow_dispatch' }}\"\n",
+                    1,
+                ),
+                "reviewed native recipe",
+            ),
+            "complete check allowed to fail": (
+                text.replace(
+                    "      - name: Run the complete native flake check set\n"
+                    "        run: nix flake check --print-build-logs\n",
+                    "      - name: Run the complete native flake check set\n"
+                    "        continue-on-error: true\n"
+                    "        run: nix flake check --print-build-logs\n",
+                    1,
+                ),
+                "reviewed native recipe",
+            ),
+            "sandbox false hidden by comment": (
+                text.replace(
+                    "        sandbox = true\n",
+                    "        sandbox = false # sandbox = true\n",
+                    1,
+                ),
+                "reviewed native recipe",
+            ),
+            "workflow working directory override": (
+                text.replace(
+                    "jobs:\n",
+                    "defaults:\n"
+                    "  run:\n"
+                    "    working-directory: definitely-missing-native-recipe\n\n"
+                    "jobs:\n",
+                    1,
+                ),
+                "reviewed native recipe",
+            ),
+            "workflow concurrency override": (
+                text.replace(
+                    "  group: nix-packages-${{ github.ref }}\n",
+                    "  group: all-nix-runs-share-one-group\n",
+                    1,
+                ),
+                "reviewed native recipe",
+            ),
+        }
+        for name, (mutated, message) in mutations.items():
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(AssertionError, message):
+                    _assert_nix_intentional_events_only(mutated)
 
     def test_each_job_bounds_runner_resources(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         _assert_runner_resource_bounds(text)
 
     def test_unbounded_build_parallelism_fails_the_resource_lock(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         mutated = text.replace("        max-jobs = 2\n", "", 1)
         with self.assertRaisesRegex(AssertionError, "max-jobs = 2"):
             _assert_runner_resource_bounds(mutated)
 
     def test_missing_disk_reclaim_fails_the_resource_lock(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         mutated = text.replace("name: Reclaim runner disk space", "name: omitted", 1)
         with self.assertRaisesRegex(AssertionError, "reclaim runner disk"):
             _assert_runner_resource_bounds(mutated)
 
     def test_each_job_caches_the_cvc5_toolchain_closure(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         _assert_cvc5_closure_cache(text)
 
     def test_missing_cvc5_restore_fails_the_cache_lock(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         mutated = text.replace("uses: actions/cache/restore@v4", "uses: omitted", 1)
         with self.assertRaisesRegex(AssertionError, "cvc5 closure"):
             _assert_cvc5_closure_cache(mutated)
 
     def test_direct_devenv_bootstrap_fails_the_native_recipe(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         setup = f"uses: {DEVENV_SETUP_ACTION}"
         duplicated = (
             f"{setup}\n"

@@ -270,21 +270,18 @@ read-only. The cache does not contain the custom cvc5 derivation.
 Each job stores the prebuilt cvc5 toolchain closure in the GitHub Actions cache.
 The derivation name identifies the cache entry.
 
-The Linux job runs for each code pull request and each push to `main`. The
-shared detector skips documentation-only pull requests and reports success.
-The job first removes unused preinstalled toolchains. It limits Nix to two
+Routine pull-request and push CI does not run either native Nix job. A manual
+dispatch or a published GitHub release runs both the Linux and macOS jobs. The
+Linux job first removes unused preinstalled toolchains and limits Nix to two
 concurrent builds.
 
-The macOS job is a manual gate. Default CI does not run this job.
-
-Run this command to dispatch the macOS job:
+Run this command to dispatch both jobs for a branch:
 
 ```sh
 gh workflow run "Nix Packages" --ref <branch>
 ```
 
-When the `Nix Packages (aarch64-darwin)` job completes with all checks green,
-the gate passes.
+When both native Nix jobs complete with all checks green, the gate passes.
 
 Devenv is not a product requirement.
 
