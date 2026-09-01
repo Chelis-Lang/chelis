@@ -132,7 +132,7 @@ fn expected_pair_events(kind: &str) -> Vec<String> {
 }
 
 #[test]
-fn public_trait_callbacks_never_observe_raw_table_order() {
+fn public_trait_callbacks_run_in_canonical_key_order() {
     let insertion_orders = [
         [0, 1, 2, 3, 4],
         [4, 3, 2, 1, 0],

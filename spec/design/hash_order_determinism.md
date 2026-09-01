@@ -133,12 +133,12 @@ validate, reef, macros, e2e) gains one direct dependency edge in Phase B, and
 (`chelis-deep/src/tag.rs` and `chelis-tide/tests/mcp.rs`) migrates to an ordered
 collection without the edge.
 
-The API is hashed lookup and mutation (`insert`, `get`, `get_key_value`,
+The API is keyed lookup and mutation (`insert`, `get`, `get_key_value`,
 `get_mut`, `remove`, `contains_key`, `len`, `is_empty`, `entry`, `clear`,
 `extend`, `FromIterator`, and `merge`) plus borrowed and consuming forms of one
 no-callback ordered exit (`to_sorted`, `into_sorted`). A key used in lookup or
-mutation has `Ord` as well as `Eq + Hash`: its owning authority defines that
-order as canonical identity order, never as semantic priority. The wrapper's
+mutation has `Ord`: its owning authority defines that order as canonical
+identity order, never as semantic priority. The wrapper's
 storage is a private `BTreeMap`/`BTreeSet`. Every key already carries `Ord`
 because the ordered exits require it, so the structure has exactly one order and
 there is no randomized one to leak: `Clone`, `PartialEq`, the ordered exits,
@@ -148,7 +148,8 @@ true. What the type buys over a bare `BTreeMap` is the boundary, not the storage
 there is no callback-bearing query, mutation, or projection exit, because even an
 apparently read-only closure can observe visitation order through interior
 mutability, logging, or atomics, and a consumer that wants an order must spell
-`to_sorted` or `into_sorted` and thereby claim C3.1 authority for key order. `Debug` reports only the wrapper kind and length.
+`to_sorted` or `into_sorted` and thereby claim C3.1 authority for key order.
+`Debug` reports only the wrapper kind and length.
 `Serialize` emits a key-sorted sequence and `Deserialize` rejects a duplicate
 key, so a wrapper field under derived Serde is canonical without an adapter.
 There is no `iter`, `keys`, `values`, `drain`, `IntoIterator`, or `Deref` to the
@@ -156,8 +157,8 @@ inner collection; tests pin the public inherent and trait sets, including derive
 traits, assert that the private storage is the ordered collection, and assert that
 the crate claims no `disallowed_types` allowance of its own.
 
-Most hash-map uses in the workspace are lookup-only and move to the wrapper
-unchanged; the rest iterate and move to `BTreeMap` when their key is `Ord` and
+Most former hash-map uses in the workspace are lookup-only and move to the
+wrapper unchanged; the rest iterate and move to `BTreeMap` when their key is `Ord` and
 the canonical order, or materialize the wrapper's key-sorted exit before any
 application callback runs. Numeric identity keys such as `TypeVar`, `DimVar`,
 `RankVar`, and `NodeId` implement `Ord` by their payload; `Prim` uses its
@@ -316,10 +317,12 @@ of the pull request that implemented it also surfaced cache-*key* defects, where
 a key omitted an input and a stale entry could be reused: the stdlib key hashed
 parsed declarations rather than exact source bytes, and the prepared-graph key
 and envelope carried a bare package version rather than the running build's
-identity. Those are stale-hit correctness, not hash order, and they are tracked
-as their own class. Their repairs landed here and are named below because
-removing green fixes to re-land them elsewhere would be churn, not because C4
-claims coverage of that class. A coverage finding against C4 is valid where C4
+identity. Those are stale-hit correctness, not hash order. They belong to the
+[#1156] class and were already tracked as [#952] (bundled chelis-std identity,
+stale stdlib replay) and [#1249] (prepared-graph key on release version rather
+than compiler build); no new tracker is filed. Their repairs landed here, and
+are named below, because removing green fixes to re-land them elsewhere would be
+churn, not because C4 claims coverage of that class. A coverage finding against C4 is valid where C4
 claims coverage: that no unordered carrier reaches a serialized payload, and that
 each named root has an exact-byte fresh-process test.
 The roots are `cache_envelope::save<T>` payload and envelope bytes for
@@ -524,7 +527,10 @@ expose.
 
 [#731]: https://github.com/Chelis-Lang/chelis/issues/731
 [#823]: https://github.com/Chelis-Lang/chelis/issues/823
+[#952]: https://github.com/Chelis-Lang/chelis/issues/952
+[#1156]: https://github.com/Chelis-Lang/chelis/issues/1156
 [#1198]: https://github.com/Chelis-Lang/chelis/issues/1198
+[#1249]: https://github.com/Chelis-Lang/chelis/issues/1249
 [#1265]: https://github.com/Chelis-Lang/chelis/issues/1265
 [#1277]: https://github.com/Chelis-Lang/chelis/issues/1277
 [#1338]: https://github.com/Chelis-Lang/chelis/issues/1338
