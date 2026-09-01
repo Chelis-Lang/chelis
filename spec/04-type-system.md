@@ -2053,9 +2053,8 @@ that family as a bound. `spec/05-risc-primitives.md` writes the same domains as
 the signature-table metavariables `p_float`, `p_int`, and `p_numeric`; each of
 those metavariables denotes the family of the same name.
 
-The surface spelling of a binder list and of a bound is
-`spec/02-surf-syntax.md` §P4b; the Deep encoding is
-`spec/03-deep-syntax.md` §1.1.
+The surface spelling of a binder list is `spec/02-surf-syntax.md` §P4b and of
+a bound is its §P4c; the Deep encoding is `spec/03-deep-syntax.md` §1.1.
 
 ---
 

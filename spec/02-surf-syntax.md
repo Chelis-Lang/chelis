@@ -425,41 +425,6 @@ dim-var or a precision tvar depending on its position inside a
 precision slot resolves to `t-var`. Position determines kind; the
 quantifier list is unkinded.
 
-#### P4c: Dtype-Family Bounds
-
-A binder in a `[..]` clause may declare a **dtype-family bound**,
-written after the binder name:
-
-```text
-sig linspace[p: Float]: p -> p -> int64 -> tensor[n, p]
-def linspace(start, stop, count) = ...
-
-def arange_values[p: Int](current: p, stop: p, out: List[p]) -> List[p] = ...
-```
-
-The bound is one of `Float`, `Int`, or `Numeric`, and it restricts the
-binder to the active dtypes of that family per
-`spec/04-type-system.md` §5.9 [04-DTYPE-2]. Any other name in the
-bound position is a syntax error, so an ADT name never becomes a
-silent bound and a user type named `Float` is unaffected outside this
-position. A binder with no bound keeps its existing meaning: an
-unconstrained type variable, not a dtype.
-
-A `sig`'s `[..]` clause is **partial**. It declares bounds for the
-names it lists; every other name in the sig's type is implicitly
-quantified exactly as above, so dimension names and `..r` rank spreads
-need no entry. A listed name must occur in the declared type. A bound
-belongs to one binder list per declaration: when a standalone `sig`
-declares the name, the bound goes on the `sig`, and a bound in that
-`def`'s `[..]` clause is an error.
-
-A bounded binder is a type binder only. Using one in a dimension slot
-or as a rank spread is an error, since a dtype family cannot name an
-extent.
-
-The formatter prints a bound as `name: Family` with one space after the
-colon and preserves the authored binder order.
-
 A name in a def's `[..]` clause is also a **general type variable**
 wherever it appears as a type by itself — as a bare parameter type, a
 return type, or an argument/return position of a function-typed
@@ -523,6 +488,41 @@ Writing `def f[a, b](x: &tensor[3, p])` (where `p` is not in
 
 See `spec/04-type-system.md` §5.8 for the type-system semantics and
 the `TensorPrec` representation that backs this surface rule.
+
+#### P4c: Dtype-Family Bounds
+
+A binder in a `[..]` clause may declare a **dtype-family bound**,
+written after the binder name:
+
+```text
+sig linspace[p: Float]: p -> p -> int64 -> tensor[n, p]
+def linspace(start, stop, count) = ...
+
+def arange_values[p: Int](current: p, stop: p, out: List[p]) -> List[p] = ...
+```
+
+The bound is one of `Float`, `Int`, or `Numeric`, and it restricts the
+binder to the active dtypes of that family per
+`spec/04-type-system.md` §5.9 [04-DTYPE-2]. Any other name in the
+bound position is a syntax error, so an ADT name never becomes a
+silent bound and a user type named `Float` is unaffected outside this
+position. A binder with no bound keeps its existing meaning: an
+unconstrained type variable, not a dtype.
+
+A `sig`'s `[..]` clause is **partial**. It declares bounds for the
+names it lists; every other name in the sig's type is implicitly
+quantified exactly as above, so dimension names and `..r` rank spreads
+need no entry. A listed name must occur in the declared type. A bound
+belongs to one binder list per declaration: when a standalone `sig`
+declares the name, the bound goes on the `sig`, and a bound in that
+`def`'s `[..]` clause is an error.
+
+A bounded binder is a type binder only. Using one in a dimension slot
+or as a rank spread is an error, since a dtype family cannot name an
+extent.
+
+The formatter prints a bound as `name: Family` with one space after the
+colon and preserves the authored binder order.
 
 ### P4a: Canonical Surf Style
 
