@@ -3301,16 +3301,13 @@ fn lower_tensor_helper_dag(
     // (silent-wrong, the one outcome the soundness bar forbids). Bail to
     // the host lane, whose `if`/`fail` are real control flow
     // (`chelis_fail` in the C emit). Applied defs are consulted because
-    // helper lowering INLINES them into the DAG. A `grad`/`vmap`-carrying
-    // expr is exempt: it can ONLY lower through the DAG lane, where the
+    // helper lowering INLINES them into the DAG. A `grad`/`vmap` subtree is
+    // exempt: it can ONLY lower through the DAG lane, where the
     // guard-as-mask-arithmetic form (zero placeholder included) is the
-    // documented chelis#616 differentiation semantics. KNOWN RESIDUAL
-    // (chelis#662, pre-existing): the exemption is whole-expression, so a
-    // forward `fail` sitting BESIDE a grad call in one body keeps mask
-    // semantics and its C binary silently zeros where eval aborts; the
-    // precise fix is scoping the exemption to the differentiated
-    // sub-expression.
-    if !expr_contains_grad_like(expr) && expr_reaches_fail(expr, &defs, &mut UnordSet::new()) {
+    // documented chelis#616 differentiation semantics. chelis#662 scopes
+    // that exemption to the transformed subtree itself; a sibling forward
+    // `fail` still routes the enclosing body through real host control flow.
+    if expr_reaches_forward_fail(expr, &defs, &mut UnordSet::new()) {
         record_host_work(|profile| profile.tensor_helper_fail_guard_rejections += 1);
         return None;
     }
@@ -3343,7 +3340,7 @@ fn lower_tensor_helper_dag_with_controls(
     expected: &TensorType,
 ) -> Option<crate::lower::LoweredSubexprWithControls> {
     let defs = cached_program_defs(program);
-    if !expr_contains_grad_like(expr) && expr_reaches_fail(expr, &defs, &mut UnordSet::new()) {
+    if expr_reaches_forward_fail(expr, &defs, &mut UnordSet::new()) {
         record_host_work(|profile| profile.tensor_helper_fail_guard_rejections += 1);
         return None;
     }
@@ -10439,31 +10436,14 @@ fn actualize_tensor_helper_types(
     crate::lower::apply_dim_substitutions(&actualized, &synthetic_renames)
 }
 
-/// chelis#631: does this Deep expr contain a `grad`/`vmap`/`vmap-grad`
-/// node? Such exprs lower through the DAG lane only (the host lane
-/// cannot resolve them), so the fail-reachability gate must not divert
-/// them.
-fn expr_contains_grad_like(expr: &Expr) -> bool {
-    record_host_work(|profile| profile.grad_scan_nodes += 1);
-    match expr {
-        Expr::List(list, _) => {
-            matches!(tag(list), Some(DeepTag::Grad | DeepTag::Vmap))
-                || list.unknown_tag_symbol() == Some("vmap-grad")
-                || list.elements.iter().any(expr_contains_grad_like)
-        }
-        Expr::MetaExpr(meta, _) => expr_contains_grad_like(&meta.expr),
-        _ => false,
-    }
-}
-
-/// chelis#631: does this Deep expr — or any def it (transitively)
-/// references — contain a `fail` application? Conservative: any `(var
-/// fail)` reference counts, and a referenced def is walked once (the
-/// `visiting` set both breaks recursion cycles and memoizes). Used by
-/// [`lower_tensor_helper_dag`] to keep fail-reaching bodies out of
-/// tensor-helper DAGs, where `fail` is a zero placeholder rather than an
-/// abort.
-fn expr_reaches_fail(
+/// chelis#631/#662: does this Deep expr — or any def it transitively
+/// references — contain a forward `fail` application outside a
+/// `grad`/`vmap`/`vmap-grad` subtree? Conservative: any `(var fail)`
+/// reference counts, and a referenced def is walked once (the `visiting`
+/// set both breaks recursion cycles and memoizes). A transformed subtree is
+/// opaque here because its zero placeholder is the documented AD/vector-map
+/// representation; only its forward siblings require host control flow.
+fn expr_reaches_forward_fail(
     expr: &Expr,
     defs: &BTreeMap<String, Expr>,
     visiting: &mut UnordSet<String>,
@@ -10471,6 +10451,12 @@ fn expr_reaches_fail(
     record_host_work(|profile| profile.fail_scan_nodes += 1);
     match expr {
         Expr::List(list, _) => {
+            if matches!(tag(list), Some(DeepTag::Grad | DeepTag::Vmap))
+                || list.unknown_tag_symbol() == Some("vmap-grad")
+            {
+                record_host_work(|profile| profile.grad_scan_nodes += 1);
+                return false;
+            }
             if tag(list) == Some(DeepTag::Var)
                 && let Some(name) = children(list).first().and_then(symbol_name)
             {
@@ -10480,15 +10466,32 @@ fn expr_reaches_fail(
                 if let Some(body) = defs.get(name)
                     && visiting.insert(name.to_string())
                 {
-                    return expr_reaches_fail(body, defs, visiting);
+                    return expr_reaches_forward_fail(body, defs, visiting);
                 }
                 return false;
             }
             list.elements
                 .iter()
-                .any(|kid| expr_reaches_fail(kid, defs, visiting))
+                .any(|kid| expr_reaches_forward_fail(kid, defs, visiting))
         }
-        Expr::MetaExpr(meta, _) => expr_reaches_fail(&meta.expr, defs, visiting),
+        Expr::MetaExpr(meta, _) => expr_reaches_forward_fail(&meta.expr, defs, visiting),
+        _ => false,
+    }
+}
+
+/// Does this Deep expr contain a `grad`/`vmap`/`vmap-grad` node anywhere?
+/// Entry-point routing uses the whole-expression answer because transformed
+/// result packaging is host-owned; the forward-fail gate above intentionally
+/// uses the more precise subtree-aware traversal instead.
+fn expr_contains_grad_like(expr: &Expr) -> bool {
+    record_host_work(|profile| profile.grad_scan_nodes += 1);
+    match expr {
+        Expr::List(list, _) => {
+            matches!(tag(list), Some(DeepTag::Grad | DeepTag::Vmap))
+                || list.unknown_tag_symbol() == Some("vmap-grad")
+                || list.elements.iter().any(expr_contains_grad_like)
+        }
+        Expr::MetaExpr(meta, _) => expr_contains_grad_like(&meta.expr),
         _ => false,
     }
 }

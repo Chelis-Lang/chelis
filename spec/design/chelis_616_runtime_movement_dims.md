@@ -158,9 +158,12 @@ leg is part of the oracle test now).
   control flow instead of the DAG lane's zero-placeholder mask form.
   Oracle: `issue_631_guarded_forward_concat_c_parity.rs` (build-and-run
   parity at two lengths plus fail-branch error parity in both lanes).
-  Residual: the gate's `grad`/`vmap` exemption is whole-expression, so a
-  forward `fail` beside a grad call in one body still keeps mask
-  semantics in C (chelis#662, pre-existing).
+  The `grad`/`vmap` exemption is scoped to the transformed subtree: a
+  forward `fail` beside a transformed call still routes the enclosing body
+  through host `if`/`fail`, while a failure inside the differentiated or
+  vectorized subtree retains the documented mask semantics. Oracle:
+  `issue_662_forward_fail_grad_scope.rs` (taken and untaken forward branches
+  plus a grad-internal control).
 - **Checker over-unification of movement chains** — RESOLVED
   (chelis#632, in two parts). The OBSERVABLE C-lane abort on a
   direct-return `shrink -> stride` chain was the wildcard-KEYED dim
