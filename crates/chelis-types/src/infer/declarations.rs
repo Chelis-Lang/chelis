@@ -1801,10 +1801,9 @@ pub(super) fn is_bound_name(name: &str, bound: &[HashSet<String>]) -> bool {
 
 /// Detect cycles among top-level `def` bindings.
 ///
-/// The Nautilus external-input pattern `x = (x : tensor[...])` is permitted —
-/// a self-loop (the def body references the same name it is binding, with no
-/// intermediate hops) is treated as a declaration of an external input, not as
-/// a cycle. Any cycle of length >= 2 (e.g. `a -> b -> a`, `a -> b -> c -> a`)
+/// An explicitly typed external-input pattern (`x: T = x` or `x = (x : T)`)
+/// is permitted: its literal self-loop declares an input rather than reading
+/// an eager value. An untyped `x = x`, or any cycle with an intermediate hop,
 /// is a real binding cycle and is reported as a `CycleDetected` error.
 pub(super) fn detect_top_level_binding_cycles(
     exprs: &[deep::Expr],
@@ -1813,18 +1812,23 @@ pub(super) fn detect_top_level_binding_cycles(
     let mut def_names: Vec<String> = Vec::new();
     let mut def_name_set: HashSet<String> = HashSet::new();
     let mut def_bodies: HashMap<String, &deep::Expr> = HashMap::new();
+    let mut declared_signature_names: HashSet<String> = HashSet::new();
     // Descend through `(module {} name ...)` wrappers so this check works
     // on idiomatic Surf sources (every `.ch` file starts with `module X`,
     // which desugars to a single top-level `module` list wrapping every
     // declaration). Without this, the cycle check is a no-op in practice.
     for expr in top_level_decl_items(exprs) {
-        if let deep::Expr::List(list, _) = expr
-            && get_tag(list) == Some(DeepTag::Def)
-        {
-            let kids = children(list);
-            let Some(name) = kids.first().and_then(symbol_name) else {
-                continue;
-            };
+        let Some((tag, _, kids)) = stamped_parts(expr) else {
+            continue;
+        };
+        let Some(name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        if tag == DeepTag::Defsig {
+            declared_signature_names.insert(name.to_string());
+            continue;
+        }
+        if tag == DeepTag::Def {
             let Some(body) = kids.get(1) else { continue };
             if !def_name_set.contains(name) {
                 def_name_set.insert(name.to_string());
@@ -1898,7 +1902,11 @@ pub(super) fn detect_top_level_binding_cycles(
     let mut call_edges: HashMap<String, Vec<String>> = HashMap::new();
     for name in &def_names {
         let body = def_bodies.get(name).copied();
-        let is_nautilus_literal_self = body.is_some_and(|b| body_is_literal_self_ref(b, name));
+        let is_explicit_external_input = body.is_some_and(|body| {
+            body_is_type_stamped_literal_self_ref(body, name)
+                || (declared_signature_names.contains(name)
+                    && body_is_literal_self_ref_shape(body, name))
+        });
         let body_is_fn = matches!(
             body,
             Some(deep::Expr::List(list, _)) if get_tag(list) == Some(DeepTag::Fn)
@@ -1921,7 +1929,7 @@ pub(super) fn detect_top_level_binding_cycles(
         let mut value_out: Vec<String> = raw_refs
             .into_iter()
             .filter(|r| {
-                if r == name && is_nautilus_literal_self {
+                if r == name && is_explicit_external_input {
                     return false;
                 }
                 def_name_set.contains(r)

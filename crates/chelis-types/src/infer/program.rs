@@ -1642,7 +1642,8 @@ fn collect_literal_external_input_types(
                 return None;
             };
             let body = kids.get(1)?;
-            body_is_literal_self_ref(body, name).then(|| (declaration_index, ty_expr.clone()))
+            body_is_type_stamped_literal_self_ref(body, name)
+                .then(|| (declaration_index, ty_expr.clone()))
         })
         .collect()
 }

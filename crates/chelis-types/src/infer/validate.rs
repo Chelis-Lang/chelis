@@ -319,16 +319,21 @@ pub(super) fn every_terminal_is_self_call(expr: &deep::Expr, def_name: &str) -> 
     }
 }
 
-/// Check whether a def body is a type-stamped literal self-reference — the
-/// external-input representation produced by `x = (x : T)`. The explicit
-/// body type is essential: untyped `x = x` is an eager self-cycle. Only this
-/// typed structural shape earns the self-loop carve-out; self-references
-/// reached via a fn application, tuple, conditional, or another value remain
-/// real cycles.
-pub(super) fn body_is_literal_self_ref(body: &deep::Expr, name: &str) -> bool {
+/// Check whether a def body carries its own explicit type stamp and is a
+/// literal self-reference, as produced by `x = (x : T)`. A declaration-level
+/// `x: T = x` is recognized separately by the cycle detector because Surf
+/// represents its type as a sibling `defsig`, not as body metadata.
+pub(super) fn body_is_type_stamped_literal_self_ref(body: &deep::Expr, name: &str) -> bool {
     if expr_type_expr(body, &HashMap::new()).is_none() {
         return false;
     }
+    body_is_literal_self_ref_shape(body, name)
+}
+
+/// Check the literal self-reference shape independently of its explicit type
+/// owner. Callers must first prove either a body type stamp or the matching
+/// declaration signature; bare `x = x` must never earn this carve-out.
+pub(super) fn body_is_literal_self_ref_shape(body: &deep::Expr, name: &str) -> bool {
     let mut current = body;
     loop {
         match current {
