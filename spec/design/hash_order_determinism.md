@@ -195,14 +195,32 @@ issue it, the hosts it runs on, and its cadence:
 |---|---|---|---|
 | `default-features` | default features, Linux and macOS | `scripts/gate.py` | per pull request |
 | `solver-free-features` | `sleef`, `hip-local-gpu`, `clarabel`, `extension-module`, `ownership-ledger`, and the three `chelis-types` probe features | `scripts/gate.py` | per pull request |
+| `no-default-features` | every default feature in its off-state, Linux and macOS | `scripts/gate.py` | per pull request |
 | `cvc5-features` | `smt` for `chelis-cli`, `chelis-prove`, `chelis-tide` | `ci.yml`'s `SMT Feature Build (Linux)`, which already provisions cvc5 | per pull request |
 | `all-features` | every declared feature at once | `smt-full-prove.yml`, the only runner that provisions every solver | nightly |
 
-The check fails if a declared feature is compiled by no row, if a row names a
-feature no member declares, or if a command drifts from the file that owns it.
-For `scripts/gate.py` the owner check reads the gate's own `--list` rendering
-rather than grepping its source, so a constant that is defined but reaches no
-stage does not count as coverage.
+**Both states of every feature are compiled, and cargo decides what those are.**
+`#[cfg(feature = "f")]` is linted only by a row that enables `f`, and
+`#[cfg(not(feature = "f"))]` only by a row that leaves it off, so an additive
+matrix never lints the off-state of a default feature however many rows it has;
+`--all-features` makes that worse rather than better, because it enables
+everything at once. The check therefore requires each declared feature to be
+enabled by some row and disabled by some row.
+
+Which features exist, and which a row actually enables, both come from
+`cargo metadata` rather than from the manifests or the command strings. An
+optional dependency creates an implicit feature of the same name that the
+`[features]` table never lists, and `chelis-cli`'s optional `chelis-prove`
+dependency is exactly that shape and is a *default* feature guarding 25
+`#[cfg(not(feature = "chelis-prove"))]` regions. A feature can also be turned on
+transitively by another, as `smt` turns on `cvc5-rs`. Reading either fact off
+the source would repeat the mistake C2.3 exists to correct: ask the tool that
+resolves it.
+
+The check also fails if a command drifts from the file that owns it. For
+`scripts/gate.py` the owner check reads the gate's own `--list` rendering rather
+than grepping its source, so a constant that is defined but reaches no stage
+does not count as coverage.
 
 The ban itself is Clippy's `disallowed_types`, applied to real HIR. Aliases,
 glob imports, a `type` alias definition site, macro-expanded code, and

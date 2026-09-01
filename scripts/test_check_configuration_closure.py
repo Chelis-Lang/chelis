@@ -223,90 +223,105 @@ class DeclaredConfigurationSpaceTests(unittest.TestCase):
 
 
 class MatrixCoverageTests(unittest.TestCase):
-    def test_live_matrix_covers_every_declared_feature(self) -> None:
+    """Leg 2 must cover both feature states, and read features from cargo.
+
+    Round 10 found the gap these lock: `chelis-cli`'s optional `chelis-prove`
+    dependency is an implicit *default* feature, invisible to the manifest's
+    `[features]` table, and every matrix row enabled it, so the 25
+    `#[cfg(not(feature = "chelis-prove"))]` regions were linted by no row at
+    any cadence.
+    """
+
+    def test_live_matrix_covers_every_declared_feature_both_ways(self) -> None:
         CLOSURE.check_matrix_covers_declared_features(REPO_ROOT)
 
-    def test_live_matrix_names_only_declared_features(self) -> None:
-        declared = {
+    def test_declared_features_include_implicit_optional_dependencies(self) -> None:
+        declared = CLOSURE.declared_features(REPO_ROOT)
+        self.assertIn(
+            "chelis-prove",
+            declared["chelis-cli"],
+            "an optional dependency creates a feature that `[features]` never lists",
+        )
+
+    def test_declared_features_agree_with_cargo(self) -> None:
+        metadata = CLOSURE._cargo_metadata(REPO_ROOT, no_deps=True)
+        cargo = {
+            (package["name"], feature)
+            for package in metadata["packages"]
+            for feature in package.get("features", {})
+            if feature != "default"
+        }
+        script = {
             (package, feature)
             for package, features in CLOSURE.declared_features(REPO_ROOT).items()
             for feature in features
         }
+        self.assertEqual(script, cargo)
+
+    def test_rejects_a_matrix_that_never_disables_a_default_feature(self) -> None:
+        # The exact pre-repair matrix: additive rows only.
+        additive = tuple(
+            run for run in CLOSURE.CLIPPY_MATRIX if run.label != "no-default-features"
+        )
+        with self.assertRaisesRegex(
+            CLOSURE.ConfigurationClosureFailure, "chelis-cli/chelis-prove"
+        ) as caught:
+            CLOSURE.check_matrix_covers_declared_features(REPO_ROOT, additive)
+        self.assertIn("cfg(not(feature", str(caught.exception))
+
+    def test_rejects_a_matrix_that_never_enables_a_feature(self) -> None:
+        off_only = tuple(
+            run for run in CLOSURE.CLIPPY_MATRIX if run.label == "no-default-features"
+        )
+        with self.assertRaisesRegex(
+            CLOSURE.ConfigurationClosureFailure, "no registered Clippy run enables"
+        ):
+            CLOSURE.check_matrix_covers_declared_features(REPO_ROOT, off_only)
+
+    def test_all_features_alone_does_not_satisfy_coverage(self) -> None:
+        # `--all-features` enables everything at once, which is the worst case
+        # for off-state coverage, not the best.
+        all_only = tuple(
+            run for run in CLOSURE.CLIPPY_MATRIX if run.label == "all-features"
+        )
+        with self.assertRaisesRegex(
+            CLOSURE.ConfigurationClosureFailure, "would not be linted"
+        ):
+            CLOSURE.check_matrix_covers_declared_features(REPO_ROOT, all_only)
+
+    def test_cargo_feature_flags_are_extracted_from_each_command(self) -> None:
+        flags = {run.label: run.cargo_feature_flags() for run in CLOSURE.CLIPPY_MATRIX}
+        self.assertEqual(flags["default-features"], ())
+        self.assertEqual(flags["no-default-features"], ("--no-default-features",))
+        self.assertEqual(flags["all-features"], ("--all-features",))
+        self.assertEqual(flags["cvc5-features"][0], "--features")
         for run in CLOSURE.CLIPPY_MATRIX:
-            for pair in run.explicit_features():
-                self.assertIn(pair, declared, f"{run.label} names {pair}")
+            # `-D warnings` sits after `--`; it must never be read as a flag.
+            self.assertNotIn("-D", run.cargo_feature_flags())
+
+    def test_resolved_features_come_from_cargo_not_the_command(self) -> None:
+        rows = {run.label: run for run in CLOSURE.CLIPPY_MATRIX}
+        default = CLOSURE.resolved_features(rows["default-features"], REPO_ROOT)
+        none = CLOSURE.resolved_features(rows["no-default-features"], REPO_ROOT)
+        # Named by no command, but cargo enables it through `default`.
+        self.assertIn(("chelis-cli", "chelis-prove"), default)
+        self.assertNotIn(("chelis-cli", "chelis-prove"), none)
+        # Named by no command either, but `smt` turns it on transitively.
+        cvc5 = CLOSURE.resolved_features(rows["cvc5-features"], REPO_ROOT)
+        self.assertIn(("chelis-prove", "cvc5-rs"), cvc5)
 
     def test_every_registered_run_is_issued_by_its_owner(self) -> None:
         for run in CLOSURE.CLIPPY_MATRIX:
             CLOSURE.check_owner_invokes(run, REPO_ROOT)
 
-    def test_the_gate_owns_a_per_pull_request_run(self) -> None:
-        cadences = {
-            run.cadence for run in CLOSURE.CLIPPY_MATRIX if run.owner == "scripts/gate.py"
+    def test_the_gate_owns_the_per_pull_request_rows(self) -> None:
+        gate_rows = {
+            run.label: run.cadence
+            for run in CLOSURE.CLIPPY_MATRIX
+            if run.owner == "scripts/gate.py"
         }
-        self.assertEqual(cadences, {CLOSURE.PER_PULL_REQUEST})
-
-    def test_rejects_a_feature_no_registered_run_compiles(self) -> None:
-        matrix = tuple(
-            run for run in CLOSURE.CLIPPY_MATRIX if not run.covers_all_features
-        )
-        trimmed = tuple(
-            CLOSURE.ClippyRun(
-                label=run.label,
-                command=tuple(
-                    argument
-                    for index, argument in enumerate(run.command)
-                    if argument != "--features"
-                    and (index == 0 or run.command[index - 1] != "--features")
-                ),
-                owner=run.owner,
-                hosts=run.hosts,
-                cadence=run.cadence,
-            )
-            for run in matrix
-        )
-        with self.assertRaisesRegex(
-            CLOSURE.ConfigurationClosureFailure, "compiled by no registered Clippy run"
-        ):
-            CLOSURE.check_matrix_covers_declared_features(REPO_ROOT, trimmed)
-
-    def test_rejects_a_matrix_feature_no_member_declares(self) -> None:
-        matrix = (
-            CLOSURE.ClippyRun(
-                label="invented",
-                command=(
-                    "cargo",
-                    "clippy",
-                    "--workspace",
-                    "--all-targets",
-                    "--features",
-                    "chelis-types/no-such-feature",
-                    "--",
-                    "-D",
-                    "warnings",
-                ),
-                owner="scripts/gate.py",
-                hosts=("linux",),
-                cadence=CLOSURE.PER_PULL_REQUEST,
-            ),
-        ) + CLOSURE.CLIPPY_MATRIX
-        with self.assertRaisesRegex(
-            CLOSURE.ConfigurationClosureFailure, "no workspace member declares"
-        ):
-            CLOSURE.check_matrix_covers_declared_features(REPO_ROOT, matrix)
-
-    def test_rejects_an_unqualified_feature(self) -> None:
-        run = CLOSURE.ClippyRun(
-            label="unqualified",
-            command=("cargo", "clippy", "--features", "smt"),
-            owner="scripts/gate.py",
-            hosts=("linux",),
-            cadence=CLOSURE.PER_PULL_REQUEST,
-        )
-        with self.assertRaisesRegex(
-            CLOSURE.ConfigurationClosureFailure, "unqualified feature"
-        ):
-            run.explicit_features()
+        self.assertEqual(set(gate_rows.values()), {CLOSURE.PER_PULL_REQUEST})
+        self.assertIn("no-default-features", gate_rows)
 
     def test_rejects_a_run_its_owner_does_not_issue(self) -> None:
         run = CLOSURE.ClippyRun(

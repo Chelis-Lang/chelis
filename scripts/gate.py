@@ -201,6 +201,15 @@ CLIPPY_WORKSPACE: list[str] = [
 # configuration it compiles, so a feature nobody compiles is a hole in the
 # `disallowed_types` ban. `scripts/check_configuration_closure.py` owns the
 # registry and fails if this command drifts from it.
+# The off-state half of the matrix. An additive feature matrix never compiles
+# `#[cfg(not(feature = ...))]`, and `chelis-cli`'s optional `chelis-prove`
+# dependency is an implicit *default* feature guarding 25 such regions. Clippy
+# lints only the configuration it compiles, so without this row those regions
+# are linted by nothing at any cadence.
+CLIPPY_NO_DEFAULT_FEATURES: list[str] = [
+    "cargo", "clippy", "--workspace", "--all-targets", "--no-default-features",
+    "--", "-D", "warnings",
+]
 CLIPPY_SOLVER_FREE_FEATURES: list[str] = [
     "cargo", "clippy", "--workspace", "--all-targets", "--features",
     "chelis-backend-c/sleef,"
@@ -370,6 +379,7 @@ STAGES: dict[str, list[list[str]]] = {
     "lint-and-unit": [
         CLIPPY_WORKSPACE,
         CLIPPY_SOLVER_FREE_FEATURES,
+        CLIPPY_NO_DEFAULT_FEATURES,
         FMT_CHECK,
         CHELIS_LINT_CHECK,
         CHELIS_STD_BUNDLE_CHECK,
@@ -405,6 +415,7 @@ HASH_PARTITION_RE = re.compile(
 LOCAL_STATIC_COMMANDS: list[list[str]] = [
     CLIPPY_WORKSPACE,
     CLIPPY_SOLVER_FREE_FEATURES,
+    CLIPPY_NO_DEFAULT_FEATURES,
     FMT_CHECK,
     CHELIS_LINT_CHECK,
     CHELIS_STD_BUNDLE_CHECK,

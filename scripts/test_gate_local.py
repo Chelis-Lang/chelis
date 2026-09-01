@@ -208,6 +208,8 @@ class LocalCommandListTests(unittest.TestCase):
                 "chelis-types/checkpoint-compile-probe,"
                 "chelis-types/generalize-sweep-oracle,"
                 "chelis-types/hash-order-compile-probe -- -D warnings",
+                "cargo clippy --workspace --all-targets --no-default-features "
+                "-- -D warnings",
                 "cargo fmt --all -- --check",
                 "cargo run -p chelis-cli --bin chelis --quiet -- "
                 "lint --check .",

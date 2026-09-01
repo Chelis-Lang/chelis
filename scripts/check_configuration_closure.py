@@ -34,6 +34,7 @@ Acceptance is exit 0 with the final line ``CONFIGURATION CLOSURE: PASS``.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -59,25 +60,27 @@ class ClippyRun:
     hosts: tuple[str, ...]
     cadence: str
 
-    @property
-    def covers_all_features(self) -> bool:
-        return "--all-features" in self.command
+    def cargo_feature_flags(self) -> tuple[str, ...]:
+        """The feature-selecting subset of this command, for `cargo metadata`.
 
-    def explicit_features(self) -> frozenset[tuple[str, str]]:
-        """The `(package, feature)` pairs this command names explicitly."""
-        pairs: set[tuple[str, str]] = set()
-        for index, argument in enumerate(self.command):
-            if argument != "--features" or index + 1 >= len(self.command):
-                continue
-            for entry in self.command[index + 1].replace(",", " ").split():
-                package, separator, feature = entry.partition("/")
-                if not separator:
-                    raise ConfigurationClosureFailure(
-                        f"Clippy run {self.label!r} names the unqualified feature "
-                        f"{entry!r}; use `package/feature` so coverage is attributable"
-                    )
-                pairs.add((package, feature))
-        return frozenset(pairs)
+        Asking cargo to resolve the row is the only way to know which features
+        it really enables: an implicit optional-dependency feature, a feature
+        another feature turns on, and a package's `default` set are all
+        invisible to reading the command string or the manifests.
+        """
+        flags: list[str] = []
+        index = 0
+        while index < len(self.command):
+            argument = self.command[index]
+            if argument == "--":
+                break
+            if argument in ("--all-features", "--no-default-features"):
+                flags.append(argument)
+            elif argument == "--features" and index + 1 < len(self.command):
+                flags.extend(("--features", self.command[index + 1]))
+                index += 1
+            index += 1
+        return tuple(flags)
 
 
 @dataclass(frozen=True)
@@ -132,6 +135,22 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
             "chelis-types/checkpoint-compile-probe,"
             "chelis-types/generalize-sweep-oracle,"
             "chelis-types/hash-order-compile-probe",
+            "--",
+            "-D",
+            "warnings",
+        ),
+        owner="scripts/gate.py",
+        hosts=("linux", "macos"),
+        cadence=PER_PULL_REQUEST,
+    ),
+    ClippyRun(
+        label="no-default-features",
+        command=(
+            "cargo",
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--no-default-features",
             "--",
             "-D",
             "warnings",
@@ -282,59 +301,111 @@ def check_declared_configuration_space(repo_root: Path = REPO_ROOT) -> None:
         )
 
 
+def _cargo_metadata(
+    repo_root: Path,
+    *flags: str,
+    no_deps: bool = False,
+) -> dict:
+    """Cargo's own view of the workspace under a given feature selection."""
+    command = ["cargo", "metadata", "--format-version", "1", *flags]
+    if no_deps:
+        command.append("--no-deps")
+    completed = subprocess.run(
+        command,
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(completed.stdout)
+
+
 def declared_features(repo_root: Path = REPO_ROOT) -> dict[str, frozenset[str]]:
-    """Every non-default feature declared by every member, keyed by package name."""
+    """Every non-default feature of every workspace member, from cargo.
+
+    Read from `cargo metadata`, not from the `[features]` table: an optional
+    dependency creates an implicit feature of the same name that never appears
+    in that table. `chelis-cli`'s optional `chelis-prove` dependency is exactly
+    that shape, and it is a *default* feature, so a manifest-only enumerator
+    misses the workspace's only default-feature off-state.
+    """
     features: dict[str, frozenset[str]] = {}
-    for member in workspace_members(repo_root):
-        manifest = tomllib.loads(
-            (repo_root / member / "Cargo.toml").read_text(encoding="utf-8")
-        )
-        declared = {name for name in manifest.get("features", {}) if name != "default"}
+    for package in _cargo_metadata(repo_root, no_deps=True)["packages"]:
+        declared = {name for name in package.get("features", {}) if name != "default"}
         if declared:
-            features[manifest["package"]["name"]] = frozenset(declared)
+            features[package["name"]] = frozenset(declared)
     return features
+
+
+def resolved_features(
+    run: ClippyRun,
+    repo_root: Path = REPO_ROOT,
+) -> frozenset[tuple[str, str]]:
+    """The `(package, feature)` pairs cargo actually enables for one row."""
+    metadata = _cargo_metadata(repo_root, *run.cargo_feature_flags())
+    members = set(metadata["workspace_members"])
+    names = {package["id"]: package["name"] for package in metadata["packages"]}
+    enabled: set[tuple[str, str]] = set()
+    for node in metadata["resolve"]["nodes"]:
+        if node["id"] not in members:
+            continue
+        for feature in node["features"]:
+            if feature != "default":
+                enabled.add((names[node["id"]], feature))
+    return frozenset(enabled)
 
 
 def check_matrix_covers_declared_features(
     repo_root: Path = REPO_ROOT,
     matrix: Sequence[ClippyRun] = CLIPPY_MATRIX,
 ) -> None:
-    """Leg 2: every declared feature is compiled by some registered Clippy run."""
+    """Leg 2: every declared feature is compiled both enabled and disabled.
+
+    Both states matter. `#[cfg(feature = "f")]` is linted only by a row that
+    enables `f`, and `#[cfg(not(feature = "f"))]` only by a row that leaves it
+    off. An additive matrix, however many rows it has, never compiles the
+    off-state of a default feature; `--all-features` makes that worse, not
+    better, because it enables everything at once.
+    """
     if not matrix:
         raise ConfigurationClosureFailure("the Clippy matrix is empty")
-
-    covered: set[tuple[str, str]] = set()
-    covers_everything = False
-    for run in matrix:
-        if run.covers_all_features:
-            covers_everything = True
-        covered |= run.explicit_features()
 
     declared = {
         (package, feature)
         for package, features in declared_features(repo_root).items()
         for feature in features
     }
+    by_row = {run.label: resolved_features(run, repo_root) for run in matrix}
 
-    if not covers_everything:
-        uncovered = sorted(
-            f"{package}/{feature}" for package, feature in declared - covered
-        )
-        if uncovered:
-            raise ConfigurationClosureFailure(
-                "these declared features are compiled by no registered Clippy run, so "
-                "a raw hash collection behind them would not be linted: "
-                + ", ".join(uncovered)
-                + ". Add the feature to an existing CLIPPY_MATRIX command, or register "
-                "a new run with the file that owns it."
-            )
+    enabled_somewhere: set[tuple[str, str]] = set()
+    disabled_somewhere: set[tuple[str, str]] = set()
+    for enabled in by_row.values():
+        enabled_somewhere |= enabled & declared
+        disabled_somewhere |= declared - enabled
 
-    stale = sorted(f"{package}/{feature}" for package, feature in covered - declared)
-    if stale:
+    def render(pairs: set[tuple[str, str]]) -> str:
+        return ", ".join(sorted(f"{package}/{feature}" for package, feature in pairs))
+
+    never_enabled = declared - enabled_somewhere
+    if never_enabled:
         raise ConfigurationClosureFailure(
-            "CLIPPY_MATRIX names features that no workspace member declares: "
-            + ", ".join(stale)
-            + ". A renamed or removed feature must leave the matrix in the same change."
+            "no registered Clippy run enables these declared features, so a raw "
+            "hash collection inside their `#[cfg(feature = ...)]` regions would "
+            "not be linted: "
+            + render(never_enabled)
+            + ". Add the feature to an existing CLIPPY_MATRIX command, or register "
+            "a new run with the file that owns it."
+        )
+
+    never_disabled = declared - disabled_somewhere
+    if never_disabled:
+        raise ConfigurationClosureFailure(
+            "every registered Clippy run enables these declared features, so a raw "
+            "hash collection inside their `#[cfg(not(feature = ...))]` regions "
+            "would not be linted: "
+            + render(never_disabled)
+            + ". Register a run that leaves them off, typically one passing "
+            "`--no-default-features`."
         )
 
     for run in matrix:
