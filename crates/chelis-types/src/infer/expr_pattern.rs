@@ -198,6 +198,7 @@ pub(super) fn pattern_bindings(
                     let resolved_scrutinee = subst.apply(scrutinee_ty);
                     let Some((adt_name, adt_def, variant_info)) = pattern_constructor_for_scrutinee(
                         ctor_name,
+                        CallShape::Positional,
                         &resolved_scrutinee,
                         env,
                         adt_reg,
@@ -289,6 +290,7 @@ pub(super) fn pattern_bindings(
                     let resolved_scrutinee = subst.apply(scrutinee_ty);
                     let Some((adt_name, adt_def, variant_info)) = pattern_constructor_for_scrutinee(
                         ctor_name,
+                        CallShape::Record,
                         &resolved_scrutinee,
                         env,
                         adt_reg,

@@ -334,22 +334,39 @@ pub(super) fn bare_constructor_out_of_scope(name: &str, env: &Env) -> bool {
     is_constructor_name(name) && env.lookup(name).is_none()
 }
 
-/// Resolve the exact constructor owner, scheme, and variant selected by
-/// declaration/import scope. The global ADT registry may contain multiple
-/// same-named variants; its population and iteration order are not name
-/// resolution authority.
-pub(super) fn active_constructor<'env, 'adt>(
+/// Resolve an exact in-scope constructor candidate for a call shape.
+///
+/// Mixed positional/record collisions select the matching shape regardless of
+/// declaration order (chelis#148). Candidates come only from the environment's
+/// structural constructor scope, so an unrelated registry entry cannot become
+/// visible merely because another constructor with the same spelling is in
+/// scope. When several candidates share a shape, the latest declaration keeps
+/// the established active-owner precedence.
+pub(super) fn constructor_for_shape<'env, 'adt>(
     name: &str,
+    call_shape: CallShape,
     env: &'env Env,
     adt_reg: &'adt AdtRegistry,
 ) -> Option<(&'env str, &'env Scheme, &'adt crate::adt::VariantInfo)> {
-    let (owner, scheme) = env.lookup_constructor(name)?;
-    let variant = adt_reg
-        .lookup(owner)?
-        .variants
-        .iter()
-        .find(|variant| variant.name == name)?;
-    Some((owner, scheme, variant))
+    let want_named = matches!(call_shape, CallShape::Record);
+    let mut fallback = None;
+    for (owner, scheme) in env.lookup_constructors(name).rev() {
+        let variant = adt_reg
+            .lookup(owner)?
+            .variants
+            .iter()
+            .find(|variant| variant.name == name)?;
+        fallback.get_or_insert((owner, scheme, variant));
+        let shape_matches = !variant.fields.is_empty()
+            && variant
+                .fields
+                .iter()
+                .all(|(field_name, _)| field_name.is_some() == want_named);
+        if shape_matches {
+            return Some((owner, scheme, variant));
+        }
+    }
+    fallback
 }
 
 /// Resolve a pattern constructor against the nominal scrutinee owner already
@@ -360,6 +377,7 @@ pub(super) fn active_constructor<'env, 'adt>(
 /// the scrutinee is not nominal yet.
 pub(super) fn pattern_constructor_for_scrutinee<'adt>(
     name: &str,
+    call_shape: CallShape,
     scrutinee_ty: &Type,
     env: &Env,
     adt_reg: &'adt AdtRegistry,
@@ -382,7 +400,7 @@ pub(super) fn pattern_constructor_for_scrutinee<'adt>(
         return Some((definition.name.as_str(), definition, variant));
     }
 
-    let (owner, _, variant) = active_constructor(name, env, adt_reg)?;
+    let (owner, _, variant) = constructor_for_shape(name, call_shape, env, adt_reg)?;
     let definition = adt_reg.lookup(owner)?;
     Some((definition.name.as_str(), definition, variant))
 }

@@ -157,8 +157,8 @@ pub(super) fn infer_app(
         let resolved_constructor = if constructor_out_of_scope(source_name, env) {
             None
         } else {
-            env.lookup_constructor(source_name)
-                .map(|(_, scheme)| env.instantiate(scheme, vg, subst))
+            constructor_for_shape(source_name, CallShape::Positional, env, adt_reg)
+                .map(|(_, scheme, _)| env.instantiate(scheme, vg, subst))
         };
         match resolved_constructor {
             Some(constructor_type) => constructor_type,

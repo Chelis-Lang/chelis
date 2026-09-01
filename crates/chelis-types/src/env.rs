@@ -103,12 +103,15 @@ pub struct Env {
     bindings: HashMap<String, Scheme>,
     /// Active constructor bindings, separate from ordinary value lookup.
     ///
-    /// Declaration/import order chooses one active owner for an exact name,
-    /// matching the value environment's established constructor binding. A
-    /// later lexical parameter or block binding may replace `bindings[name]`
-    /// for bare value position without changing constructor position.
+    /// Every exact owner remains available so constructor syntax can select by
+    /// positional versus record shape without consulting out-of-scope registry
+    /// entries. Declaration/import order still chooses the active owner when
+    /// several candidates have the same shape, matching the value environment's
+    /// established constructor binding. A later lexical parameter or block
+    /// binding may replace `bindings[name]` for bare value position without
+    /// changing constructor position.
     #[serde(default)]
-    constructor_bindings: HashMap<String, ConstructorBinding>,
+    constructor_bindings: HashMap<String, Vec<ConstructorBinding>>,
     /// Names introduced by the current lexical scope (function parameters,
     /// block bindings, and pattern bindings). Builtin-specific inference may
     /// only dispatch on a name from the closed builtin vocabulary when that
@@ -157,6 +160,19 @@ impl Env {
     pub(crate) fn lookup_constructor(&self, name: &str) -> Option<(&str, &Scheme)> {
         self.constructor_bindings
             .get(name)
+            .and_then(|bindings| bindings.last())
+            .map(|binding| (binding.owner.as_str(), &binding.scheme))
+    }
+
+    /// Iterate every in-scope exact constructor candidate in declaration order.
+    pub(crate) fn lookup_constructors(
+        &self,
+        name: &str,
+    ) -> impl DoubleEndedIterator<Item = (&str, &Scheme)> {
+        self.constructor_bindings
+            .get(name)
+            .into_iter()
+            .flatten()
             .map(|binding| (binding.owner.as_str(), &binding.scheme))
     }
 
@@ -258,8 +274,9 @@ impl Env {
     /// ordinary value environment used by bare/nullary references.
     pub(crate) fn bind_constructor(&mut self, name: String, owner: String, scheme: Scheme) {
         self.bindings.insert(name.clone(), scheme.clone());
-        self.constructor_bindings
-            .insert(name, ConstructorBinding { owner, scheme });
+        let candidates = self.constructor_bindings.entry(name).or_default();
+        candidates.retain(|candidate| candidate.owner != owner);
+        candidates.push(ConstructorBinding { owner, scheme });
     }
 
     /// Extend the environment with a binding introduced by ordinary lexical
@@ -789,6 +806,14 @@ mod tests {
         assert_eq!(
             bincode::serialize(active_constructor).expect("serialize active constructor"),
             bincode::serialize(&wrapper_scheme).expect("serialize expected constructor")
+        );
+        assert_eq!(
+            decoded
+                .lookup_constructors("Some")
+                .map(|(owner, _)| owner)
+                .collect::<Vec<_>>(),
+            vec!["Option", "Wrapper"],
+            "shape-aware resolution needs every in-scope owner after serialization"
         );
     }
 

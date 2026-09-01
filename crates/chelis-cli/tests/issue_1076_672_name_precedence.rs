@@ -139,6 +139,19 @@ record_out = unwrap_record(Shared { value: 1.0f64 })
 positional_out = unwrap_positional(Shared(2.0f64))
 ";
 
+const CONSTRUCTOR_SHAPE_PRECEDENCE_REVERSED_DECLARATIONS: &str = "\
+type PositionalBox = | Shared(f64)
+type RecordBox = | Shared { value: f64 }
+def unwrap_record(value: RecordBox) -> f64 = match value with {
+  | Shared { value } => value
+}
+def unwrap_positional(value: PositionalBox) -> f64 = match value with {
+  | Shared(inner) => inner
+}
+record_out = unwrap_record(Shared { value: 1.0f64 })
+positional_out = unwrap_positional(Shared(2.0f64))
+";
+
 const UNKNOWN_APPLIED_UPPERCASE: &str = "\
 def apply_n(N: (f64 -> f64), x: f64) -> f64 = N(x)
 def add_hundred(x: f64) -> f64 = add(x, 100.0f64)
@@ -327,6 +340,15 @@ fn constructor_patterns_follow_the_nominal_scrutinee_owner() {
     assert_eval_and_c(
         CONSTRUCTOR_PATTERNS_FOLLOW_SCRUTINEE_OWNER,
         "constructor_patterns_follow_scrutinee_owner",
+        "record_out = 1.0\npositional_out = 2.0\n",
+    );
+}
+
+#[test]
+fn constructor_shape_precedence_is_independent_of_declaration_order() {
+    assert_eval_and_c(
+        CONSTRUCTOR_SHAPE_PRECEDENCE_REVERSED_DECLARATIONS,
+        "constructor_shape_precedence_reversed_declarations",
         "record_out = 1.0\npositional_out = 2.0\n",
     );
 }

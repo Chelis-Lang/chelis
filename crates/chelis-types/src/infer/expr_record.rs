@@ -167,8 +167,14 @@ pub(super) fn infer_tuple_get(
 /// opacity, RFC D-CHECK). Returns the canonical constructor name.
 pub(super) fn resolve_record_head<'a>(
     head: &'a str,
+    env: &'a Env,
     adt_reg: &'a AdtRegistry,
 ) -> Option<(&'a str, &'a crate::adt::VariantInfo, String)> {
+    if let Some((adt_name, _, variant)) =
+        constructor_for_shape(head, CallShape::Record, env, adt_reg)
+    {
+        return Some((adt_name, variant, variant.name.clone()));
+    }
     if let Some((adt_name, variant)) = adt_reg
         .lookup_variant_preferring_shape(head, CallShape::Record)
         .or_else(|| adt_reg.lookup_variant_terminal_unique(head))
@@ -209,7 +215,7 @@ pub(super) fn infer_record(
         );
     };
 
-    let Some((adt_name, variant, ctor_name)) = resolve_record_head(head, adt_reg) else {
+    let Some((adt_name, variant, ctor_name)) = resolve_record_head(head, env, adt_reg) else {
         // Infer field values so nested errors still surface, then
         // reject the unknown constructor.
         for kv_expr in kids.iter().skip(1) {
