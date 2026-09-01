@@ -170,57 +170,15 @@ pub const COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// unexplained recompile-every-run slowness, it also emits a one-time
 /// stderr warning naming itself.
 pub fn build_fingerprint() -> &'static str {
-    static FINGERPRINT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    FINGERPRINT.get_or_init(|| {
-        let image = chelis_image_id::running_image();
-        if image.is_none() {
-            // Diagnosable, not silent: this path is safe (it can only
-            // cause misses) but it disables the compiled-context cache
-            // outright, and without a breadcrumb that reads as the
-            // compiler having become mysteriously slow.
-            //
-            // Deliberately not `eprintln!`: that panics if stderr is
-            // closed or full, and panicking inside a `OnceLock`
-            // initializer would defeat the graceful degradation this arm
-            // exists to provide.
-            use std::io::Write as _;
-            let _ = writeln!(
-                std::io::stderr(),
-                "chelis: warning: could not identify the running compiler image, so \
-                 compiled-context caches cannot be shared between invocations and \
-                 every run will rebuild them (chelis#1156)."
-            );
-        }
-        fingerprint_string(image.as_ref())
-    })
+    chelis_image_id::build_fingerprint()
 }
 
 /// The fingerprint text for one identification result. Split from
 /// [`build_fingerprint`] so the degraded arm is testable: the production
 /// path cannot be made to fail identification on demand.
+#[cfg(test)]
 fn fingerprint_string(image: Option<&chelis_image_id::RunningImage>) -> String {
-    match image {
-        Some(image) => format!(
-            "{COMPILER_VERSION}+{scheme}.{id}.{len:x}",
-            scheme = image.id.scheme(),
-            id = image.id.hex(),
-            len = image.len
-        ),
-        None => {
-            // Fail toward misses, not sharing (see `build_fingerprint`).
-            // The nonce comes from `RandomState`, whose per-instance keys
-            // are process-random, so two degraded processes disagree even
-            // under pid reuse.
-            use std::hash::{BuildHasher, Hasher};
-            let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-            hasher.write_u32(std::process::id());
-            let nonce = hasher.finish();
-            format!(
-                "{COMPILER_VERSION}+degraded.{pid:x}.{nonce:x}",
-                pid = std::process::id()
-            )
-        }
-    }
+    chelis_image_id::fingerprint_string(image)
 }
 
 #[cfg(test)]

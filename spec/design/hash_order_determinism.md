@@ -65,7 +65,7 @@ result.
 duplicate-index `scatter` rejection; floating-point reduction-order semantics;
 packaging reproducibility ([#1198]); benchmark reproducibility ([#823]); future
 parallel scheduling; and the degraded build-fingerprint nonce in
-`chelis-compiler-api/src/lib.rs` (`fingerprint_string`), which deliberately draws
+`chelis-image-id/src/lib.rs` (`fingerprint_string`), which deliberately draws
 process-random bytes from `RandomState` so that two degraded processes never share a
 cache entry and is documented at its site. Each has a different authority and
 oracle.
@@ -109,8 +109,8 @@ all caught; Phase B proves each spelling with a compile-fail fixture rather than
 citation. The ban applies to every target Clippy compiles, tests included: a test
 whose expected value passes through a hash walk is itself a coin flip, and a retried
 flake is the CI-hiding failure mode [#1341] records. Exactly one production
-`#[allow(clippy::disallowed_types)]` exists, on the wrapper's private raw-storage module, where
-`clippy::iter_over_hash_type` is also denied. The perturbation fixtures of C3.2
+`#[allow(clippy::disallowed_types)]` exists, on the wrapper's private raw-storage
+module, where `clippy::iter_over_hash_type` is also denied. The perturbation fixtures of C3.2
 exercise fresh hash states through the wrapper. The disallowed-type compile-fail
 fixture intentionally names raw maps and each spelling has an exact tripwire
 allow-list entry; it carries no lint allowance because rejection is the test.
@@ -134,12 +134,14 @@ The API is hashed lookup and mutation (`insert`, `get`, `get_key_value`,
 no-callback ordered exit (`to_sorted`, `into_sorted`). A key used in lookup or
 mutation has `Ord` as well as `Eq + Hash`: its owning authority defines that
 order as canonical identity order, never as semantic priority. The wrapper
-stores only randomized `u64 -> Vec<usize>` buckets in the raw hash table; user
-keys and values live in indexed slots, and a separate vector of slot indices is
-maintained in canonical key order at mutation time. Application code therefore
-never runs while raw table order is observable. `Clone`, `PartialEq`, the ordered
-exits, `Serialize`, `clear`, and destruction all walk the maintained canonical
-index rather than collecting a raw walk and sorting afterward. There is no
+stores only randomized `u64 -> usize` collision-chain heads in the raw hash table;
+the chain links and user keys and values live in one flat indexed arena, and a
+separate vector of slot indices is maintained in canonical key order at mutation
+time. Raw table values therefore own no per-bucket allocation whose destruction
+order an allocator callback could observe. Application code never runs while raw
+table order is observable. `Clone`, `PartialEq`, the ordered exits, `Serialize`,
+`clear`, and destruction all walk the maintained canonical index rather than
+collecting a raw walk and sorting afterward. There is no
 callback-bearing query, mutation, or projection exit: even an apparently
 read-only closure can observe visitation order through interior mutability,
 logging, or atomics. `Debug` reports only the wrapper kind and length.
@@ -168,16 +170,20 @@ feature or a platform `cfg` is invisible to it, and such carriers exist today
 `smt`, `carcara`, and `z3`). The completeness lock is therefore a text scan.
 
 `scripts/hash_order_determinism_oracle.py` scans every tracked `.rs` file and every
-untracked, non-ignored local `.rs` file in the repository (`git ls-files`), which is
-a superset of every committed Cargo target of every kind, every build script, and
-every committed path outside `src/`, and is blind to the feature or `cfg` that
-gates a file, a target, or a function. It matches the source
+untracked, non-ignored local `.rs` file in the repository (`git ls-files`), then
+recursively loads every direct `#[path = "relative/file.rs"] mod` target even when
+that target is ignored. A path-bearing attribute the loader cannot resolve exactly,
+a missing target, and a target that escapes the repository all fail closed. This
+source set is a superset of every committed Cargo target of every kind, every build
+script, and every committed path outside `src/`, and is blind to the feature or
+`cfg` that gates a file, a target, or a function. It matches the source
 spellings `HashMap`, `HashSet`, `hash_map::`, `hash_set::`, `FxHashMap`,
 `FxHashSet`, `rustc_hash::`, `fxhash::`, `ahash::`, `hashbrown::`, and
 `indexmap::` outside the wrapper module, and every `#[allow(clippy::disallowed_types)]`
 site. Every hit must appear in the script's allow-list, a constant of
-(path, item, reason) entries, and every entry must still hit, so a stale entry and an
-unlisted hit fail alike. The script's `unittest` twin plants a raw map in a library
+(path, item, token spelling, exact count, reason) entries, and every entry must
+still hit at that cardinality, so a changed spelling, duplicate token, stale entry,
+and unlisted hit fail alike. The script's `unittest` twin plants a raw map in a library
 target, behind a non-default feature (`checkpoint-compile-probe`), in a `build.rs`,
 in a test target, and as a new `#[allow]` without an entry, and asserts each is
 rejected. Because a build script can compose a forbidden spelling inside a string
@@ -189,8 +195,9 @@ spellings, and `use ...::include as ...` aliases; a method selector named
 script is therefore an explicit registry review, and generated Rust cannot enter
 a workspace crate through Cargo's output directory. Negative controls approve a
 malicious composed-string generator and prove that both direct and imported-alias
-macro spellings are rejected.
-itself and still rejects its `include!(concat!(env!("OUT_DIR"), ...))` consumer.
+macro spellings are rejected. A compile-backed ignored-`#[path]` fixture proves the
+scanner loads and rejects a source file that `rustc --cfg` can compile but
+`git ls-files --others --exclude-standard` alone cannot see.
 Migrated code behind a feature compiles in the workflows that already
 build those features (`smt-full-prove.yml`; the `generalize-sweep-oracle` job in
 `ci.yml`); this plan cites that evidence and adds no per-PR feature-matrix Clippy
@@ -271,18 +278,24 @@ The roots are `cache_envelope::save<T>` payload and envelope bytes for
 encoded `CompiledContext` bytes, `PreparedReefGraph::encode`, the prepared-graph
 payload/envelope, its cache filename and serialized key inputs, its persisted
 chelis-std exact-source determinant, and the serialized inputs to the stdlib,
-library, and compiled-context cache keys. The stdlib and library input artifacts
-are the exact ordered SHA-256 preimages used by production key derivation, not a
-parallel approximation; the test hashes each artifact back to its recorded final
-key. The compiled input artifact includes package name and version as well as
-source hash and compiler identity. There is no separate persisted
+library, and compiled-context cache keys. The stdlib, library, and prepared-graph
+input artifacts come from production preimage helpers and are the exact ordered
+SHA-256 preimages used by key derivation, not parallel approximations; the test
+hashes each artifact back to its recorded final key. The prepared-graph preimage is
+domain-separated and length-delimits the exact running-build identity and lossless
+canonical package-root bytes. Its envelope carries that same build identity, so two
+same-version compiler builds cannot share an entry. The compiled input artifact
+includes package name and version as well as source hash and compiler identity. One
+closed artifact enum is used by every worker producer and the reader; a worker fails
+unless the executed producer set is exactly bijective with that registry. There is
+no separate persisted
 lowering-cache key; lowered products are covered inside those complete payloads.
 The named test builds complete payloads through several filesystem insertion
 orders and serializes them in 24 fresh processes; the bytes and digests must match
 exactly. The stdlib cache key carries both canonical parsed declarations and the
 prepared graph's exact manifest/inventory/source-byte determinant, so a comment-only
 edit clean-misses even though the AST bytes do not change. Phase B advances the
-stdlib cache format to V10 and the prepared-graph cache to V3. At reviewed head
+stdlib cache format to V10 and the prepared-graph cache to V4. At reviewed head
 `5b2dfd14`, eight fixed-source
 `CompiledContext::encode` probes produced eight distinct SHA-256 digests; that probe
 is the regression. The relevant cache format version is bumped whenever canonical
@@ -333,12 +346,15 @@ the final line `HASH ORDER PHASE A ORACLE: PASS`. It passed on 2026-08-31.
 
 ### Phase B - class closure - IMPLEMENTED
 
-**Deliver:** `clippy.toml`; `chelis-unord` with its API pin, compile-fail spelling
-fixtures, and Serde tests; migration of production and test code off the std
-types, with the dependency edges and the dependency-guard constant; the tripwire
-script, its build-script digest registry, generated-Rust inclusion ban, `unittest`
-twin, and gate wiring; and the C4 exact-byte tests with the cache format bumps and
-exact-source determinant they require.
+**Deliver:** `clippy.toml`; `chelis-unord` with its API pin, allocation-free raw
+bucket values, allocator-visible destruction negative control, collision-chain
+mutation tests, compile-fail spelling fixtures, and Serde tests; migration of
+production and test code off the std types, with the dependency edges and the
+dependency-guard constant; the tripwire script, its exact token-cardinality and
+recursive `#[path]` closure, build-script digest registry, generated-Rust inclusion
+ban, `unittest` twin, and gate wiring; and the C4 exact-byte tests with the cache
+format bumps, producer-registry bijection, production key preimages, exact build
+identity, and exact-source determinant they require.
 
 **Frozen at exit:** the wrapper's public API, the tripwire's token list, and the
 exact workspace build-script registry.

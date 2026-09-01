@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 chelis-unord.workspace = true
+chelis-image-id.workspace = true
 chelis-deep.workspace = true
 chelis-macros.workspace = true
 chelis-pipeline-core.workspace = true

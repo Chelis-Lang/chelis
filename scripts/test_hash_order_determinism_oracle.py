@@ -7,6 +7,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
 
 
@@ -51,6 +52,8 @@ class HashOrderTokenTripwireTests(unittest.TestCase):
             ORACLE.AllowedHit(
                 "crates/demo/src/lib.rs",
                 "type Missing",
+                "HashMap",
+                1,
                 "test-only stale entry",
             ),
         )
@@ -62,6 +65,117 @@ class HashOrderTokenTripwireTests(unittest.TestCase):
                 allowed,
                 approved_build_scripts=(),
             )
+
+    def test_allow_list_is_exact_about_token_spelling(self) -> None:
+        allowed = (
+            ORACLE.AllowedHit(
+                "crates/demo/src/lib.rs",
+                "fn allowed",
+                "HashMap",
+                1,
+                "negative-control fixture",
+            ),
+        )
+        with self.assertRaisesRegex(
+            ORACLE.HashOrderDeterminismFailure, "unlisted token 'HashSet'"
+        ):
+            ORACLE.validate_sources(
+                {
+                    "crates/demo/src/lib.rs": (
+                        "fn allowed() {\n"
+                        "    let _: Option<HashMap<u8, u8>> = None;\n"
+                        "    let _: Option<HashSet<u8>> = None;\n"
+                        "}\n"
+                    )
+                },
+                allowed,
+                approved_build_scripts=(),
+            )
+
+    def test_allow_list_is_exact_about_token_cardinality(self) -> None:
+        allowed = (
+            ORACLE.AllowedHit(
+                "crates/demo/src/lib.rs",
+                "fn allowed",
+                "HashMap",
+                1,
+                "negative-control fixture",
+            ),
+        )
+        with self.assertRaisesRegex(
+            ORACLE.HashOrderDeterminismFailure, "token count"
+        ):
+            ORACLE.validate_sources(
+                {
+                    "crates/demo/src/lib.rs": (
+                        "fn allowed() {\n"
+                        "    let _: Option<HashMap<u8, u8>> = None;\n"
+                        "    let _: Option<HashMap<u16, u16>> = None;\n"
+                        "}\n"
+                    )
+                },
+                allowed,
+                approved_build_scripts=(),
+            )
+
+    def test_rejects_unsupported_path_bearing_attribute(self) -> None:
+        with self.assertRaisesRegex(
+            ORACLE.HashOrderDeterminismFailure, "unsupported path-bearing attribute"
+        ):
+            ORACLE.validate_sources(
+                {
+                    "crates/demo/src/lib.rs": (
+                        '#[cfg_attr(feature = "escape", path = "ignored.rs")]\n'
+                        "mod ignored;\n"
+                    )
+                },
+                allowed=(),
+                approved_build_scripts=(),
+            )
+
+    def test_ignored_path_module_is_compiled_and_scanned(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            (root / "src/generated").mkdir(parents=True)
+            (root / ".gitignore").write_text("src/generated/\n", encoding="utf-8")
+            (root / "src/lib.rs").write_text(
+                "#[cfg(round3_escape)]\n"
+                '#[path = "generated/escape.rs"]\n'
+                "mod escape;\n",
+                encoding="utf-8",
+            )
+            (root / "src/generated/escape.rs").write_text(
+                "pub type Escape = std::collections::HashMap<u8, u8>;\n",
+                encoding="utf-8",
+            )
+            subprocess.run(("git", "init", "-q"), cwd=root, check=True)
+            subprocess.run(
+                ("git", "add", ".gitignore", "src/lib.rs"), cwd=root, check=True
+            )
+            subprocess.run(
+                (
+                    "rustc",
+                    "--crate-type",
+                    "lib",
+                    "--cfg",
+                    "round3_escape",
+                    "src/lib.rs",
+                    "-o",
+                    str(root / "probe.rlib"),
+                ),
+                cwd=root,
+                check=True,
+                capture_output=True,
+            )
+
+            sources = ORACLE.tracked_rust_sources(repo_root=root)
+            self.assertIn("src/generated/escape.rs", sources)
+            with self.assertRaisesRegex(
+                ORACLE.HashOrderDeterminismFailure, "unlisted token 'HashMap'"
+            ):
+                ORACLE.validate_sources(
+                    sources, allowed=(), approved_build_scripts=()
+                )
 
     def test_rejects_composed_generated_rust_from_a_build_script(self) -> None:
         build_path = "crates/demo/build.rs"

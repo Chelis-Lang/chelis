@@ -6,6 +6,7 @@
 //! canonical package root. The artifacts are compared as bytes, not by a
 //! decoded approximation.
 
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,7 +17,7 @@ use chelis_compiler_api::{
     library_cache_key_input_bytes, load_or_build_library_context, load_or_build_stdlib_context,
     stdlib_cache_key, stdlib_cache_key_input_bytes,
 };
-use chelis_reef::prepare_reef_graph_cached;
+use chelis_reef::{prepare_reef_graph_cached, prepared_graph_cache_key_input_bytes};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -26,36 +27,103 @@ const WORKER_RESULT_DIR: &str = "CHELIS_HASH_ORDER_CACHE_RESULT_DIR";
 const PROCESS_BUDGET: usize = 24;
 const SYNTHETIC_STDLIB_SOURCE_DIGEST: [u8; 32] = [0x6b; 32];
 
-const ARTIFACTS: &[&str] = &[
-    "stdlib_key.bin",
-    "stdlib_cache_key_inputs.bin",
-    "library_key.bin",
-    "library_cache_key_inputs.bin",
-    "stdlib_cache.bin",
-    "library_cache.bin",
-    "compiled_encode.bin",
-    "compiled_save.bin",
-    "cli_worker_handoff.bin",
-    "compiled_cache_key.bin",
-    "compiled_cache_key_inputs.bin",
-    "prepared_graph_encode.bin",
-    "prepared_graph_cache.bin",
-    "prepared_graph_cache_key.bin",
-    "prepared_graph_cache_key_inputs.bin",
-    "prepared_graph_stdlib_source_digest.bin",
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum Artifact {
+    StdlibKey,
+    StdlibCacheKeyInputs,
+    LibraryKey,
+    LibraryCacheKeyInputs,
+    StdlibCache,
+    LibraryCache,
+    CompiledEncode,
+    CompiledSave,
+    CliWorkerHandoff,
+    CompiledCacheKey,
+    CompiledCacheKeyInputs,
+    PreparedGraphEncode,
+    PreparedGraphCache,
+    PreparedGraphCacheKey,
+    PreparedGraphCacheKeyInputs,
+    PreparedGraphStdlibSourceDigest,
+}
+
+const ALL_ARTIFACTS: [Artifact; 16] = [
+    Artifact::StdlibKey,
+    Artifact::StdlibCacheKeyInputs,
+    Artifact::LibraryKey,
+    Artifact::LibraryCacheKeyInputs,
+    Artifact::StdlibCache,
+    Artifact::LibraryCache,
+    Artifact::CompiledEncode,
+    Artifact::CompiledSave,
+    Artifact::CliWorkerHandoff,
+    Artifact::CompiledCacheKey,
+    Artifact::CompiledCacheKeyInputs,
+    Artifact::PreparedGraphEncode,
+    Artifact::PreparedGraphCache,
+    Artifact::PreparedGraphCacheKey,
+    Artifact::PreparedGraphCacheKeyInputs,
+    Artifact::PreparedGraphStdlibSourceDigest,
 ];
 
-#[test]
-fn cache_key_input_root_inventory_is_complete() {
-    for required in [
-        "stdlib_cache_key_inputs.bin",
-        "library_cache_key_inputs.bin",
-        "compiled_cache_key_inputs.bin",
-        "prepared_graph_cache_key_inputs.bin",
-    ] {
+impl Artifact {
+    const fn file_name(self) -> &'static str {
+        match self {
+            Self::StdlibKey => "stdlib_key.bin",
+            Self::StdlibCacheKeyInputs => "stdlib_cache_key_inputs.bin",
+            Self::LibraryKey => "library_key.bin",
+            Self::LibraryCacheKeyInputs => "library_cache_key_inputs.bin",
+            Self::StdlibCache => "stdlib_cache.bin",
+            Self::LibraryCache => "library_cache.bin",
+            Self::CompiledEncode => "compiled_encode.bin",
+            Self::CompiledSave => "compiled_save.bin",
+            Self::CliWorkerHandoff => "cli_worker_handoff.bin",
+            Self::CompiledCacheKey => "compiled_cache_key.bin",
+            Self::CompiledCacheKeyInputs => "compiled_cache_key_inputs.bin",
+            Self::PreparedGraphEncode => "prepared_graph_encode.bin",
+            Self::PreparedGraphCache => "prepared_graph_cache.bin",
+            Self::PreparedGraphCacheKey => "prepared_graph_cache_key.bin",
+            Self::PreparedGraphCacheKeyInputs => "prepared_graph_cache_key_inputs.bin",
+            Self::PreparedGraphStdlibSourceDigest => "prepared_graph_stdlib_source_digest.bin",
+        }
+    }
+}
+
+struct ArtifactWriter<'a> {
+    result_dir: &'a Path,
+    produced: BTreeSet<Artifact>,
+}
+
+impl<'a> ArtifactWriter<'a> {
+    fn new(result_dir: &'a Path) -> Self {
+        fs::create_dir_all(result_dir).expect("create worker result directory");
+        Self {
+            result_dir,
+            produced: BTreeSet::new(),
+        }
+    }
+
+    fn write(&mut self, artifact: Artifact, bytes: impl AsRef<[u8]>) {
         assert!(
-            ARTIFACTS.contains(&required),
-            "C4 cache-key input root is absent: {required}"
+            self.produced.insert(artifact),
+            "artifact producer wrote {:?} twice",
+            artifact
+        );
+        fs::write(self.result_dir.join(artifact.file_name()), bytes)
+            .unwrap_or_else(|error| panic!("write {:?}: {error}", artifact));
+    }
+
+    fn copy(&mut self, artifact: Artifact, source: &Path) {
+        let bytes = fs::read(source)
+            .unwrap_or_else(|error| panic!("read {:?} producer source: {error}", artifact));
+        self.write(artifact, bytes);
+    }
+
+    fn finish(self) {
+        assert_eq!(
+            self.produced,
+            BTreeSet::from(ALL_ARTIFACTS),
+            "the exact artifact registry and executed producers must be bijective"
         );
     }
 }
@@ -156,7 +224,7 @@ fn unique_prepared_graph_cache_file(reef_home: &Path) -> PathBuf {
 }
 
 fn write_worker_artifacts(package_root: &Path, reef_home: &Path, result_dir: &Path) {
-    fs::create_dir_all(result_dir).expect("create worker result directory");
+    let mut artifacts = ArtifactWriter::new(result_dir);
 
     let stdlib_decls = parse_decls("HashOrderCache.Base", "base_value", 11);
     let dependency_decls = parse_decls("HashOrderCache.Dependency", "dependency_value", 17);
@@ -170,17 +238,15 @@ fn write_worker_artifacts(package_root: &Path, reef_home: &Path, result_dir: &Pa
         .expect("dependency fixture must compose");
 
     let cache_dir = reef_home.join(".cache/typecheck");
-    fs::copy(
-        unique_cache_file(&cache_dir, "chelis-std-"),
-        result_dir.join("stdlib_cache.bin"),
-    )
-    .expect("copy stdlib cache bytes");
-    fs::copy(
-        unique_cache_file(&cache_dir, "chelis-lib-"),
-        result_dir.join("library_cache.bin"),
-    )
-    .expect("copy library cache bytes");
-    fs::write(result_dir.join("stdlib_key.bin"), stdlib_key).expect("write stdlib key");
+    artifacts.copy(
+        Artifact::StdlibCache,
+        &unique_cache_file(&cache_dir, "chelis-std-"),
+    );
+    artifacts.copy(
+        Artifact::LibraryCache,
+        &unique_cache_file(&cache_dir, "chelis-lib-"),
+    );
+    artifacts.write(Artifact::StdlibKey, stdlib_key);
     let stdlib_key_inputs =
         stdlib_cache_key_input_bytes(&stdlib_decls, SYNTHETIC_STDLIB_SOURCE_DIGEST);
     let stdlib_key_from_inputs: [u8; 32] = Sha256::digest(&stdlib_key_inputs).into();
@@ -188,83 +254,70 @@ fn write_worker_artifacts(package_root: &Path, reef_home: &Path, result_dir: &Pa
         stdlib_key_from_inputs, stdlib_key,
         "the recorded stdlib input root must be the exact key preimage"
     );
-    fs::write(
-        result_dir.join("stdlib_cache_key_inputs.bin"),
-        stdlib_key_inputs,
-    )
-    .expect("write stdlib cache-key inputs");
-    fs::write(result_dir.join("library_key.bin"), library_key).expect("write library key");
+    artifacts.write(Artifact::StdlibCacheKeyInputs, stdlib_key_inputs);
+    artifacts.write(Artifact::LibraryKey, library_key);
     let library_key_inputs = library_cache_key_input_bytes(&dependency_decls, stdlib_key);
     let library_key_from_inputs: [u8; 32] = Sha256::digest(&library_key_inputs).into();
     assert_eq!(
         library_key_from_inputs, library_key,
         "the recorded library input root must be the exact key preimage"
     );
-    fs::write(
-        result_dir.join("library_cache_key_inputs.bin"),
-        library_key_inputs,
-    )
-    .expect("write library cache-key inputs");
+    artifacts.write(Artifact::LibraryCacheKeyInputs, library_key_inputs);
 
     let prepared = prepare_reef_graph_cached(package_root).expect("prepare fixed package graph");
-    fs::write(
-        result_dir.join("prepared_graph_encode.bin"),
+    artifacts.write(
+        Artifact::PreparedGraphEncode,
         prepared.encode().expect("encode prepared graph"),
-    )
-    .expect("write prepared graph encoding");
-    fs::write(
-        result_dir.join("prepared_graph_stdlib_source_digest.bin"),
+    );
+    artifacts.write(
+        Artifact::PreparedGraphStdlibSourceDigest,
         prepared.stdlib_source_digest(),
-    )
-    .expect("write prepared graph stdlib source determinant");
+    );
     let prepared_cache = unique_prepared_graph_cache_file(reef_home);
-    fs::copy(&prepared_cache, result_dir.join("prepared_graph_cache.bin"))
-        .expect("copy prepared graph cache bytes");
+    artifacts.copy(Artifact::PreparedGraphCache, &prepared_cache);
     let prepared_key = prepared_cache
         .file_name()
         .and_then(OsStr::to_str)
         .expect("prepared graph cache filename is UTF-8");
-    fs::write(
-        result_dir.join("prepared_graph_cache_key.bin"),
-        prepared_key.as_bytes(),
-    )
-    .expect("write prepared graph cache key");
-    let prepared_key_inputs = bincode::serialize(&(
-        COMPILER_VERSION,
-        package_root.to_string_lossy().into_owned(),
-    ))
-    .expect("serialize prepared graph cache-key inputs");
-    fs::write(
-        result_dir.join("prepared_graph_cache_key_inputs.bin"),
-        prepared_key_inputs,
-    )
-    .expect("write prepared graph cache-key inputs");
+    artifacts.write(Artifact::PreparedGraphCacheKey, prepared_key.as_bytes());
+    let prepared_key_inputs = prepared_graph_cache_key_input_bytes(package_root)
+        .expect("construct the production prepared-graph cache-key preimage");
+    let prepared_key_digest: [u8; 32] = Sha256::digest(&prepared_key_inputs).into();
+    let expected_prepared_key = format!(
+        "{}.graph",
+        prepared_key_digest[..16]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    assert_eq!(
+        prepared_key, expected_prepared_key,
+        "the recorded prepared-graph input root must be the exact filename preimage"
+    );
+    artifacts.write(Artifact::PreparedGraphCacheKeyInputs, prepared_key_inputs);
 
     let context =
         compile_reef_context(reef_home, package_root).expect("compile fixed package context");
     let encoded = context.encode().expect("encode compiled context");
-    fs::write(result_dir.join("compiled_encode.bin"), &encoded)
-        .expect("write public encoded bytes");
+    artifacts.write(Artifact::CompiledEncode, &encoded);
 
     // The CLI parent writes `CompiledContext::encode()` directly to the worker
     // tempfile. This artifact locks that public handoff root under its product
     // name while making the intentional byte identity explicit.
-    fs::write(result_dir.join("cli_worker_handoff.bin"), &encoded)
-        .expect("write CLI worker handoff bytes");
+    artifacts.write(Artifact::CliWorkerHandoff, &encoded);
 
+    let compiled_save = result_dir.join("compiled-save-producer.tmp");
     context
-        .save(&result_dir.join("compiled_save.bin"))
+        .save(&compiled_save)
         .expect("save compiled-context envelope");
+    artifacts.copy(Artifact::CompiledSave, &compiled_save);
+    fs::remove_file(compiled_save).expect("remove compiled-save producer temporary");
     let cache_key = CompiledContext::cache_file_name(
         ("hash-order-cache", "0.1.0"),
         context.source_hash,
         &context.identity,
     );
-    fs::write(
-        result_dir.join("compiled_cache_key.bin"),
-        cache_key.as_bytes(),
-    )
-    .expect("write compiled cache key");
+    artifacts.write(Artifact::CompiledCacheKey, cache_key.as_bytes());
     let key_inputs = bincode::serialize(&(
         "hash-order-cache",
         "0.1.0",
@@ -272,8 +325,8 @@ fn write_worker_artifacts(package_root: &Path, reef_home: &Path, result_dir: &Pa
         context.identity.clone(),
     ))
     .expect("serialize compiled cache-key inputs");
-    fs::write(result_dir.join("compiled_cache_key_inputs.bin"), key_inputs)
-        .expect("write compiled cache-key inputs");
+    artifacts.write(Artifact::CompiledCacheKeyInputs, key_inputs);
+    artifacts.finish();
 }
 
 #[test]
@@ -291,11 +344,12 @@ fn hash_order_cache_worker() {
 }
 
 fn read_artifacts(result_dir: &Path) -> Vec<(&'static str, Vec<u8>)> {
-    ARTIFACTS
+    ALL_ARTIFACTS
         .iter()
-        .map(|name| {
+        .map(|artifact| {
+            let name = artifact.file_name();
             (
-                *name,
+                name,
                 fs::read(result_dir.join(name)).unwrap_or_else(|error| {
                     panic!("read worker artifact {name} from {result_dir:?}: {error}")
                 }),

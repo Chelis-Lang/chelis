@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
+from pathlib import PurePosixPath
+import posixpath
 import re
 import subprocess
 import sys
@@ -22,12 +25,23 @@ RAW_STRING_PREFIX_PATTERN = re.compile(r'(?:b|c)?r(?P<hashes>#{0,255})"')
 ITEM_PATTERN = re.compile(
     r"\b(?:fn|struct|enum|mod|type|const|static|trait)\s+([A-Za-z_][A-Za-z0-9_]*)"
 )
+PATH_BEARING_ATTRIBUTE_PATTERN = re.compile(
+    r"#\s*\[[^\]]*\bpath\b[^\]]*\]", re.DOTALL
+)
+DIRECT_PATH_ATTRIBUTE_PATTERN = re.compile(
+    r'#\s*\[\s*path\s*=\s*"(?P<target>[A-Za-z0-9_./-]+)"\s*\]', re.DOTALL
+)
+PATH_MODULE_ITEM_PATTERN = re.compile(
+    r"\s*(?:#\s*\[[^\]]*\]\s*)*mod\s+[A-Za-z_][A-Za-z0-9_]*\s*;"
+)
 
 
 @dataclass(frozen=True, order=True)
 class AllowedHit:
     path: str
     item: str
+    token: str
+    count: int
     reason: str
 
 
@@ -52,46 +66,71 @@ ALLOWED_HITS: tuple[AllowedHit, ...] = (
     AllowedHit(
         "crates/chelis-unord/src/lib.rs",
         "mod raw",
+        "#[allow(clippy::disallowed_types)]",
+        1,
         "the private wrapper boundary owns the only production lint allowance",
     ),
     AllowedHit(
         "crates/chelis-unord/src/lib.rs",
         "pub(crate) type Map",
+        "HashMap",
+        1,
         "private raw storage hidden behind the order-free wrapper",
     ),
     AllowedHit(
         "crates/chelis-unord/tests/compile_fail/disallowed_hash_types/src/main.rs",
         "use std::collections::HashMap as RenamedMap",
+        "HashMap",
+        1,
         "compile-fail fixture proves renamed imports are rejected",
     ),
     AllowedHit(
         "crates/chelis-unord/tests/compile_fail/disallowed_hash_types/src/main.rs",
         "type ForbiddenAlias",
+        "HashMap",
+        1,
         "compile-fail fixture proves type aliases are rejected",
     ),
     AllowedHit(
         "crates/chelis-unord/tests/compile_fail/disallowed_hash_types/src/main.rs",
         "fn fully_qualified",
+        "HashMap",
+        2,
         "compile-fail fixture proves fully qualified uses are rejected",
     ),
     AllowedHit(
         "crates/chelis-unord/tests/compile_fail/disallowed_hash_types/src/main.rs",
         "fn module_qualified",
+        "hash_map::",
+        2,
+        "compile-fail fixture proves module-qualified uses are rejected",
+    ),
+    AllowedHit(
+        "crates/chelis-unord/tests/compile_fail/disallowed_hash_types/src/main.rs",
+        "fn module_qualified",
+        "HashMap",
+        2,
         "compile-fail fixture proves module-qualified uses are rejected",
     ),
     AllowedHit(
         "crates/chelis-unord/tests/compile_fail/disallowed_hash_types/src/main.rs",
         "fn glob_import",
+        "HashSet",
+        2,
         "compile-fail fixture proves glob-imported sets are rejected",
     ),
     AllowedHit(
         "crates/chelis-unord/tests/compile_fail/disallowed_hash_types/src/main.rs",
         "fn aliased_receiver",
+        "HashMap",
+        1,
         "compile-fail fixture proves aliased receivers are rejected",
     ),
     AllowedHit(
-        "crates/chelis-compiler-api/src/lib.rs",
+        "crates/chelis-image-id/src/lib.rs",
         "use std::hash::{BuildHasher, Hasher}",
+        "hash_map::",
+        1,
         "degraded build fingerprints deliberately randomize toward cache misses",
     ),
 )
@@ -289,11 +328,66 @@ def token_hits(path: str, text: str) -> tuple[TokenHit, ...]:
     return tuple(hits)
 
 
+def _path_module_targets(path: str, text: str) -> tuple[str, ...]:
+    """Return every direct `#[path] mod` target, rejecting opaque forms."""
+
+    sanitized = _strip_comments_and_strings(text)
+    direct_by_start = {
+        match.start(): match for match in DIRECT_PATH_ATTRIBUTE_PATTERN.finditer(text)
+    }
+    targets: list[str] = []
+    for attribute in PATH_BEARING_ATTRIBUTE_PATTERN.finditer(sanitized):
+        direct = direct_by_start.get(attribute.start())
+        if direct is None or direct.end() != attribute.end():
+            raise HashOrderDeterminismFailure(
+                f"unsupported path-bearing attribute at {path}:"
+                f"{sanitized.count(chr(10), 0, attribute.start()) + 1}; "
+                "use one direct #[path = \"relative/file.rs\"] module attribute"
+            )
+        if PATH_MODULE_ITEM_PATTERN.match(sanitized, attribute.end()) is None:
+            raise HashOrderDeterminismFailure(
+                f"unsupported #[path] target at {path}:"
+                f"{sanitized.count(chr(10), 0, attribute.start()) + 1}; "
+                "the attribute must apply directly to an external mod item"
+            )
+        target = direct.group("target")
+        if target.startswith("/"):
+            raise HashOrderDeterminismFailure(
+                f"absolute #[path] target {target!r} at {path} is forbidden"
+            )
+        resolved = posixpath.normpath(
+            str(PurePosixPath(path).parent.joinpath(target))
+        )
+        if resolved == ".." or resolved.startswith("../"):
+            raise HashOrderDeterminismFailure(
+                f"#[path] target {target!r} at {path} escapes the repository"
+            )
+        if not resolved.endswith(".rs"):
+            raise HashOrderDeterminismFailure(
+                f"#[path] target {target!r} at {path} is not a Rust source"
+            )
+        targets.append(resolved)
+    return tuple(targets)
+
+
 def validate_sources(
     sources: Mapping[str, str],
     allowed: Sequence[AllowedHit] = ALLOWED_HITS,
     approved_build_scripts: Sequence[ApprovedBuildScript] = APPROVED_BUILD_SCRIPTS,
 ) -> None:
+    missing_path_targets = sorted(
+        (path, target)
+        for path, source in sources.items()
+        for target in _path_module_targets(path, source)
+        if target not in sources
+    )
+    if missing_path_targets:
+        details = "; ".join(
+            f"unscanned #[path] target {target} referenced by {path}"
+            for path, target in missing_path_targets
+        )
+        raise HashOrderDeterminismFailure(details)
+
     approved_build_by_path = {
         entry.path: entry for entry in approved_build_scripts
     }
@@ -330,32 +424,55 @@ def validate_sources(
         for path, source in sorted(sources.items())
         for hit in token_hits(path, source)
     )
-    allowed_by_item = {(entry.path, entry.item): entry for entry in allowed}
-    duplicate_entries = len(allowed_by_item) != len(allowed)
+    allowed_by_identity = {
+        (entry.path, entry.item, entry.token): entry for entry in allowed
+    }
+    duplicate_entries = len(allowed_by_identity) != len(allowed)
     if duplicate_entries:
         raise HashOrderDeterminismFailure("duplicate hash-order allow-list entry")
+    invalid_counts = [entry for entry in allowed if entry.count <= 0]
+    if invalid_counts:
+        raise HashOrderDeterminismFailure("allow-list token counts must be positive")
 
     unexpected = [
-        hit for hit in hits if (hit.path, hit.item) not in allowed_by_item
+        hit
+        for hit in hits
+        if (hit.path, hit.item, hit.token) not in allowed_by_identity
     ]
-    hit_items = {(hit.path, hit.item) for hit in hits}
+    observed_counts = Counter((hit.path, hit.item, hit.token) for hit in hits)
     stale = [
-        entry for entry in allowed if (entry.path, entry.item) not in hit_items
+        entry
+        for entry in allowed
+        if observed_counts[(entry.path, entry.item, entry.token)] == 0
     ]
-    if unexpected or stale:
+    wrong_counts = [
+        entry
+        for entry in allowed
+        if observed_counts[(entry.path, entry.item, entry.token)]
+        not in (0, entry.count)
+    ]
+    if unexpected or stale or wrong_counts:
         details = []
         details.extend(
             f"unlisted token {hit.token!r} at {hit.path}:{hit.line} ({hit.item})"
             for hit in unexpected
         )
         details.extend(
-            f"stale allow-list entry {entry.path} ({entry.item}): {entry.reason}"
+            f"stale allow-list entry {entry.path} ({entry.item}, {entry.token!r}): "
+            f"{entry.reason}"
             for entry in stale
+        )
+        details.extend(
+            f"allow-list token count mismatch at {entry.path} ({entry.item}, "
+            f"{entry.token!r}): expected {entry.count}, observed "
+            f"{observed_counts[(entry.path, entry.item, entry.token)]}"
+            for entry in wrong_counts
         )
         raise HashOrderDeterminismFailure("; ".join(details))
 
 
-def tracked_rust_sources() -> dict[str, str]:
+def tracked_rust_sources(repo_root: Path = REPO_ROOT) -> dict[str, str]:
+    repo_root = repo_root.resolve()
     completed = subprocess.run(
         (
             "git",
@@ -366,14 +483,36 @@ def tracked_rust_sources() -> dict[str, str]:
             "--",
             "*.rs",
         ),
-        cwd=REPO_ROOT,
+        cwd=repo_root,
         check=True,
         capture_output=True,
         text=True,
     )
     sources: dict[str, str] = {}
     for path in completed.stdout.splitlines():
-        sources[path] = (REPO_ROOT / path).read_text(encoding="utf-8")
+        sources[path] = (repo_root / path).read_text(encoding="utf-8")
+
+    pending = list(sorted(sources))
+    while pending:
+        owner = pending.pop()
+        for target in _path_module_targets(owner, sources[owner]):
+            if target in sources:
+                continue
+            candidate = repo_root / target
+            try:
+                resolved = candidate.resolve(strict=True)
+                resolved.relative_to(repo_root)
+            except (FileNotFoundError, ValueError) as error:
+                raise HashOrderDeterminismFailure(
+                    f"#[path] target {target!r} referenced by {owner} is missing or "
+                    "escapes the repository"
+                ) from error
+            if not resolved.is_file():
+                raise HashOrderDeterminismFailure(
+                    f"#[path] target {target!r} referenced by {owner} is not a file"
+                )
+            sources[target] = resolved.read_text(encoding="utf-8")
+            pending.append(target)
     return sources
 
 

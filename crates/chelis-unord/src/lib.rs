@@ -28,13 +28,21 @@ struct Storage<K, V> {
     /// The raw hash table contains numeric digests and numeric entry indices
     /// only. User-owned keys and values never live in, or are walked through,
     /// randomized table order.
-    buckets: raw::Map<u64, Vec<usize>>,
+    buckets: raw::Map<u64, usize>,
     hash_builder: RandomState,
-    entries: Vec<Option<(K, V)>>,
+    entries: Vec<Option<StoredEntry<K, V>>>,
     /// Entry indices in canonical key order, maintained at mutation time.
     order: Vec<usize>,
     free: Vec<usize>,
     len: usize,
+}
+
+struct StoredEntry<K, V> {
+    key: K,
+    value: V,
+    /// Next entry with the same digest. Collision links live in the flat
+    /// canonical-entry arena so raw table values remain allocation-free.
+    next: Option<usize>,
 }
 
 impl<K, V> Drop for UnordMap<K, V> {
@@ -141,17 +149,17 @@ impl<K, V> UnordMap<K, V> {
     }
 
     fn entry_at(&self, index: usize) -> (&K, &V) {
-        let (key, value) = self.storage.entries[index]
+        let entry = self.storage.entries[index]
             .as_ref()
             .expect("UnordMap index must name a live entry");
-        (key, value)
+        (&entry.key, &entry.value)
     }
 
     fn entry_at_mut(&mut self, index: usize) -> (&K, &mut V) {
-        let (key, value) = self.storage.entries[index]
+        let entry = self.storage.entries[index]
             .as_mut()
             .expect("UnordMap index must name a live entry");
-        (key, value)
+        (&entry.key, &mut entry.value)
     }
 }
 
@@ -165,28 +173,31 @@ impl<K: Eq + Hash + Ord, V> UnordMap<K, V> {
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        self.storage
-            .buckets
-            .get(&self.hash(key))
-            .and_then(|bucket| {
-                bucket.iter().copied().find(|index| {
-                    self.storage.entries[*index]
-                        .as_ref()
-                        .is_some_and(|(stored, _)| stored.borrow() == key)
-                })
-            })
+        let mut candidate = self.storage.buckets.get(&self.hash(key)).copied();
+        while let Some(index) = candidate {
+            let entry = self.storage.entries[index]
+                .as_ref()
+                .expect("UnordMap collision link must name a live entry");
+            if entry.key.borrow() == key {
+                return Some(index);
+            }
+            candidate = entry.next;
+        }
+        None
     }
 
     fn insert_new(&mut self, key: K, value: V) -> usize {
         let digest = self.hash(&key);
+        let next = self.storage.buckets.get(&digest).copied();
+        let entry = StoredEntry { key, value, next };
         let index = match self.storage.free.pop() {
             Some(index) => {
-                self.storage.entries[index] = Some((key, value));
+                self.storage.entries[index] = Some(entry);
                 index
             }
             None => {
                 let index = self.storage.entries.len();
-                self.storage.entries.push(Some((key, value)));
+                self.storage.entries.push(Some(entry));
                 index
             }
         };
@@ -196,7 +207,7 @@ impl<K: Eq + Hash + Ord, V> UnordMap<K, V> {
             .binary_search_by(|other| self.entry_at(*other).0.cmp(self.entry_at(index).0))
             .expect_err("a vacant UnordMap key must have a unique canonical position");
         self.storage.order.insert(ordered_position, index);
-        self.storage.buckets.entry(digest).or_default().push(index);
+        self.storage.buckets.insert(digest, index);
         self.storage.len += 1;
         index
     }
@@ -210,20 +221,32 @@ impl<K: Eq + Hash + Ord, V> UnordMap<K, V> {
             .position(|candidate| *candidate == index)
             .expect("live UnordMap entry must appear in canonical order");
         self.storage.order.remove(ordered_position);
-        let empty_bucket = {
-            let bucket = self
-                .storage
-                .buckets
-                .get_mut(&digest)
-                .expect("live UnordMap entry must appear in its hash bucket");
-            let bucket_position = bucket
-                .iter()
-                .position(|candidate| *candidate == index)
-                .expect("live UnordMap entry index must appear in its hash bucket");
-            bucket.swap_remove(bucket_position);
-            bucket.is_empty()
-        };
-        if empty_bucket {
+        let mut previous = None;
+        let mut candidate = self.storage.buckets.get(&digest).copied();
+        while candidate.is_some_and(|candidate| candidate != index) {
+            previous = candidate;
+            candidate = self.storage.entries[candidate.expect("candidate is present")]
+                .as_ref()
+                .expect("UnordMap collision link must name a live entry")
+                .next;
+        }
+        assert_eq!(
+            candidate,
+            Some(index),
+            "live UnordMap entry index must appear in its hash chain"
+        );
+        let next = self.storage.entries[index]
+            .as_ref()
+            .expect("removed UnordMap index must name a live entry")
+            .next;
+        if let Some(previous) = previous {
+            self.storage.entries[previous]
+                .as_mut()
+                .expect("UnordMap collision predecessor must be live")
+                .next = next;
+        } else if let Some(next) = next {
+            self.storage.buckets.insert(digest, next);
+        } else {
             self.storage.buckets.remove(&digest);
         }
         let entry = self.storage.entries[index]
@@ -231,7 +254,7 @@ impl<K: Eq + Hash + Ord, V> UnordMap<K, V> {
             .expect("removed UnordMap index must name a live entry");
         self.storage.free.push(index);
         self.storage.len -= 1;
-        entry
+        (entry.key, entry.value)
     }
 
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
@@ -322,6 +345,7 @@ impl<K: Eq + Hash + Ord, V> UnordMap<K, V> {
             .map(|index| {
                 self.storage.entries[index]
                     .take()
+                    .map(|entry| (entry.key, entry.value))
                     .expect("canonical UnordMap index must name a live entry")
             })
             .collect()

@@ -785,6 +785,7 @@ dependencies = [
  "bincode",
  "chelis-deep",
  "chelis-effects",
+ "chelis-image-id",
  "chelis-macros",
  "chelis-pipeline-core",
  "chelis-shell",

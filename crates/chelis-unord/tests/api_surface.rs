@@ -75,16 +75,6 @@ fn path_type<'a>(ty: &'a Type, expected: &str) -> &'a syn::TypePath {
     path
 }
 
-fn only_type_argument<'a>(segment: &'a syn::PathSegment, expected: &str) -> &'a Type {
-    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-        panic!("{expected} must have angle-bracketed arguments");
-    };
-    let [GenericArgument::Type(ty)] = arguments.args.iter().collect::<Vec<_>>().as_slice() else {
-        panic!("{expected} must have exactly one type argument");
-    };
-    ty
-}
-
 #[test]
 fn public_inherent_api_is_exact() {
     let expected = BTreeMap::from([
@@ -218,9 +208,5 @@ fn raw_hash_storage_contains_numeric_indices_only() {
         panic!("raw Map must have exactly two type arguments");
     };
     path_type(digest, "u64");
-    let bucket = path_type(bucket, "Vec");
-    path_type(
-        only_type_argument(bucket.path.segments.last().unwrap(), "Vec"),
-        "usize",
-    );
+    path_type(bucket, "usize");
 }

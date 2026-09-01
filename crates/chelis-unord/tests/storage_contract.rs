@@ -42,6 +42,41 @@ fn colliding_keys_preserve_point_lookup_mutation_and_removal() {
 }
 
 #[test]
+fn collision_chain_head_middle_tail_removal_and_slot_reuse_stay_linked() {
+    let key = |name: &str| CollidingKey(name.to_owned());
+    let mut map = UnordMap::from([
+        (key("alpha"), 1),
+        (key("beta"), 2),
+        (key("gamma"), 3),
+        (key("delta"), 4),
+        (key("epsilon"), 5),
+    ]);
+
+    // New entries become collision-chain heads, so this removes head,
+    // middle, and tail in turn before reusing every freed arena slot.
+    assert_eq!(map.remove(&key("epsilon")), Some(5));
+    assert_eq!(map.remove(&key("gamma")), Some(3));
+    assert_eq!(map.remove(&key("alpha")), Some(1));
+    assert_eq!(map.insert(key("zeta"), 6), None);
+    assert_eq!(map.entry(key("eta")).or_insert(7), &7);
+    map.merge(UnordMap::from([(key("theta"), 8), (key("beta"), 20)]));
+
+    assert_eq!(
+        map.into_sorted()
+            .into_iter()
+            .map(|(key, value)| (key.0, value))
+            .collect::<Vec<_>>(),
+        [
+            ("beta".to_owned(), 20),
+            ("delta".to_owned(), 4),
+            ("eta".to_owned(), 7),
+            ("theta".to_owned(), 8),
+            ("zeta".to_owned(), 6),
+        ]
+    );
+}
+
+#[test]
 fn entry_and_merge_keep_every_storage_index_in_sync() {
     let mut map = UnordMap::from([("alpha".to_owned(), 1), ("gamma".to_owned(), 3)]);
     map.entry("beta".to_owned())

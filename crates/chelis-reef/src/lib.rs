@@ -2257,12 +2257,16 @@ const PREPARED_GRAPH_CACHE_MAGIC: &[u8] = b"CHELIS_REEF_GRAPH_V1\n";
 // v3 (chelis#1341 Phase B): PreparedReefGraph persists the exact-source
 // chelis-std digest used by the typecheck-cache key. V2 payloads lack the field
 // and must clean-miss before positional bincode decoding.
-const PREPARED_GRAPH_CACHE_VERSION: u32 = 3;
+// v4 (chelis#1341 Phase B): the filename key and envelope carry the exact
+// running compiler build identity, not the release version shared by distinct
+// builds. V3 envelopes cannot prove that identity and must clean-miss.
+const PREPARED_GRAPH_CACHE_VERSION: u32 = 4;
+const PREPARED_GRAPH_CACHE_KEY_DOMAIN: &[u8] = b"chelis-prepared-graph-cache-key-v1\0";
 
 #[derive(Serialize, Deserialize)]
 struct PreparedGraphCacheEnvelope {
     version: u32,
-    compiler_version: String,
+    compiler_identity: String,
     source_hash: [u8; 32],
     payload_sha256: [u8; 32],
     payload: Vec<u8>,
@@ -2357,16 +2361,43 @@ fn prepared_graph_cache_path(root: &Path) -> Option<PathBuf> {
             .join("chelis")
             .join("prepared-graphs")
     };
-    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let mut hasher = Sha256::new();
-    hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
-    hasher.update(canonical.to_string_lossy().as_bytes());
-    let identity: [u8; 32] = hasher.finalize().into();
+    let inputs = prepared_graph_cache_key_input_bytes(root).ok()?;
+    let identity: [u8; 32] = Sha256::digest(inputs).into();
     let identity_hex = identity[..16]
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     Some(cache_dir.join(format!("{identity_hex}.graph")))
+}
+
+/// Exact byte preimage hashed to name the prepared-graph cache artifact.
+///
+/// Fields are domain-separated and length-delimited. The opaque compiler
+/// identity is the same shared running-image fingerprint exported by
+/// `chelis-compiler-api`, while the canonical package root is encoded with the
+/// platform's lossless `OsStr` representation rather than a lossy display
+/// string.
+pub fn prepared_graph_cache_key_input_bytes(root: &Path) -> Result<Vec<u8>, String> {
+    prepared_graph_cache_key_input_bytes_for_identity(root, chelis_image_id::build_fingerprint())
+}
+
+fn prepared_graph_cache_key_input_bytes_for_identity(
+    root: &Path,
+    compiler_identity: &str,
+) -> Result<Vec<u8>, String> {
+    let canonical = root
+        .canonicalize()
+        .map_err(|error| format!("canonicalize cache package root: {error}"))?;
+    let root_bytes = canonical.as_os_str().as_encoded_bytes();
+    let mut inputs = Vec::with_capacity(
+        PREPARED_GRAPH_CACHE_KEY_DOMAIN.len() + 16 + compiler_identity.len() + root_bytes.len(),
+    );
+    inputs.extend_from_slice(PREPARED_GRAPH_CACHE_KEY_DOMAIN);
+    inputs.extend_from_slice(&(compiler_identity.len() as u64).to_le_bytes());
+    inputs.extend_from_slice(compiler_identity.as_bytes());
+    inputs.extend_from_slice(&(root_bytes.len() as u64).to_le_bytes());
+    inputs.extend_from_slice(root_bytes);
+    Ok(inputs)
 }
 
 fn prepared_graph_source_hash(graph: &PreparedReefGraph) -> Result<[u8; 32], String> {
@@ -2413,7 +2444,7 @@ fn load_prepared_graph_cache(
             envelope.version, PREPARED_GRAPH_CACHE_VERSION
         ));
     }
-    if envelope.compiler_version != env!("CARGO_PKG_VERSION") {
+    if envelope.compiler_identity != chelis_image_id::build_fingerprint() {
         return Ok(None);
     }
     let payload_sha256: [u8; 32] = Sha256::digest(&envelope.payload).into();
@@ -2451,7 +2482,7 @@ fn save_prepared_graph_cache_with_hash(
     let payload = graph.encode()?;
     let envelope = PreparedGraphCacheEnvelope {
         version: PREPARED_GRAPH_CACHE_VERSION,
-        compiler_version: env!("CARGO_PKG_VERSION").to_string(),
+        compiler_identity: chelis_image_id::build_fingerprint().to_string(),
         source_hash,
         payload_sha256: Sha256::digest(&payload).into(),
         payload,
@@ -12987,8 +13018,60 @@ module_prefix = "RegistryLib"
         let error = load_prepared_graph_cache(&cache_path, &root)
             .expect_err("preceding positional payload must be rejected before decode");
         assert!(
-            error.contains("format version 2 unsupported (expected 3)"),
+            error.contains("format version 3 unsupported (expected 4)"),
             "unexpected version diagnostic: {error}"
+        );
+    }
+
+    #[test]
+    fn prepared_graph_cache_key_separates_exact_build_identities() {
+        let (_dir, root) = shared_graph_fixture();
+        let first = prepared_graph_cache_key_input_bytes_for_identity(&root, "build-a")
+            .expect("first key input");
+        let second = prepared_graph_cache_key_input_bytes_for_identity(&root, "build-b")
+            .expect("second key input");
+        assert_ne!(
+            first, second,
+            "different compiler builds cannot share a key"
+        );
+        assert_eq!(
+            first,
+            prepared_graph_cache_key_input_bytes_for_identity(&root, "build-a")
+                .expect("stable key input"),
+            "identical semantic inputs have one byte preimage"
+        );
+    }
+
+    #[test]
+    fn prepared_graph_cache_envelope_rejects_a_distinct_build_identity() {
+        let _guard = lock_reef_home_env();
+        let (dir, root) = shared_graph_fixture();
+        unsafe {
+            std::env::set_var("CHELIS_REEF_HOME", dir.path().join("reef-home"));
+        }
+
+        prepare_reef_graph_cached(&root).expect("cold graph");
+        let cache_path = prepared_graph_cache_path(&root).expect("cache path");
+        let bytes = fs::read(&cache_path).expect("read prepared graph cache");
+        let mut envelope: PreparedGraphCacheEnvelope =
+            bincode::deserialize(&bytes[PREPARED_GRAPH_CACHE_MAGIC.len()..])
+                .expect("decode prepared graph envelope");
+        assert_eq!(
+            envelope.compiler_identity,
+            chelis_image_id::build_fingerprint(),
+            "the envelope must carry the same opaque identity as the cache key"
+        );
+        envelope.compiler_identity.push_str("-other-build");
+        let encoded = bincode::serialize(&envelope).expect("encode changed envelope");
+        let mut changed = PREPARED_GRAPH_CACHE_MAGIC.to_vec();
+        changed.extend(encoded);
+        fs::write(&cache_path, changed).expect("write changed-build cache");
+
+        assert!(
+            load_prepared_graph_cache(&cache_path, &root)
+                .expect("build mismatch is a clean miss")
+                .is_none(),
+            "another build's prepared graph cannot be accepted"
         );
     }
 
