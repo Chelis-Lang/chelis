@@ -10210,7 +10210,37 @@ fn actualize_tensor_helper_types(
         }
     }
 
+    fn reserve_runtime_dim_name(
+        occupied: &mut UnordSet<String>,
+        node: crate::dag::NodeId,
+        axis: usize,
+    ) -> String {
+        let base = format!("_rt_shrink_dim_{}_{}", node.0, axis);
+        let mut candidate = base.clone();
+        let mut suffix = 0usize;
+        while !occupied.insert(candidate.clone()) {
+            suffix += 1;
+            candidate = format!("{base}_{suffix}");
+        }
+        candidate
+    }
+
     let mut inferred = UnordMap::<crate::dag::NodeId, TensorType>::new();
+    // Generated runtime extents share the `DimInfo::Named` carrier with
+    // source dimensions. Reserve every name already present in the DAG, then
+    // mint by insertion into that finite set. This is collision-proof even
+    // when source deliberately spells the preferred producer-qualified name;
+    // a prefix convention alone is not an identity boundary (chelis#1137
+    // red-team round 2).
+    let mut occupied_dim_names = dag
+        .nodes()
+        .iter()
+        .flat_map(|node| node.output_type.dims.iter())
+        .filter_map(|dim| match dim {
+            crate::dag::DimInfo::Named(name, _) => Some(name.clone()),
+            crate::dag::DimInfo::Lit(_) => None,
+        })
+        .collect::<UnordSet<_>>();
     let mut uses = UnordMap::<crate::dag::NodeId, Vec<crate::dag::NodeId>>::new();
     for node in dag.nodes() {
         for input in &node.inputs {
@@ -10372,13 +10402,17 @@ fn actualize_tensor_helper_types(
                             | (crate::dag::RtDim::Node(_), crate::dag::RtDim::Lit(_))
                             | (crate::dag::RtDim::Lit(_), crate::dag::RtDim::Node(_)) => {
                                 // A runtime shrink bound produces a fresh extent at this
-                                // node. Give it one stable producer-qualified symbol so
-                                // consumers reuse the extent that Shrink declares. A
-                                // wildcard would be renamed independently on the shrink
-                                // and its consumers by the C backend, leaving the consumer
-                                // symbol without a declaring Load or op (chelis#1137).
+                                // node. Reserve one collision-proof producer-qualified
+                                // symbol so consumers reuse the extent that Shrink
+                                // declares. The source language permits underscore-leading
+                                // names, so merely choosing a distinctive prefix is not
+                                // enough: allocation checks the whole DAG namespace.
                                 Some(crate::dag::DimInfo::Named(
-                                    format!("_rt_shrink_dim_{}_{}", node.id.0, axis),
+                                    reserve_runtime_dim_name(
+                                        &mut occupied_dim_names,
+                                        node.id,
+                                        axis,
+                                    ),
                                     None,
                                 ))
                             }

@@ -160,6 +160,35 @@ fn consumed_shrink_with_runtime_start_declares_its_fresh_extent() {
 }
 
 #[test]
+fn user_dimension_name_cannot_capture_runtime_shrink_extent() {
+    // The generated candidate for this helper is `_rt_shrink_dim_8_0`.
+    // A source dimension may legally spell that exact string, so the
+    // runtime-extent allocator must detect the occupied identity and mint a
+    // different one. Otherwise C incorrectly guards the three-element slice
+    // against the four-element input dimension.
+    let source = "module Repro.ShrinkGeneratedDimCollision\n\
+sig crop: tensor[_rt_shrink_dim_8_0, f32] -> tensor[u, f32]\n\
+def crop(x) = {\n\
+  k = shape(x, cast(0, int32))\n\
+  z = cast(k - k, int64)\n\
+  stop = cast(k - cast(1, int64), int64)\n\
+  shrink(x, [[z, stop]])\n\
+}\n\
+out = crop(to_tensor([\n\
+  cast(1.0, f32),\n\
+  cast(2.0, f32),\n\
+  cast(3.0, f32),\n\
+  cast(4.0, f32)\n\
+]))\n";
+    let eval = eval_stdout(source, "shrink_generated_dim_collision");
+    let (_, compiled) = build_and_run(source, "shrink_generated_dim_collision");
+    assert_eq!(
+        compiled, eval,
+        "a source-authored dimension must never capture a generated runtime extent"
+    );
+}
+
+#[test]
 fn directly_returned_shrink_over_expand_remains_a_positive_control() {
     let source = source("cast(2, int64)", false);
     let eval = eval_stdout(&source, "shrink_expand_direct");
