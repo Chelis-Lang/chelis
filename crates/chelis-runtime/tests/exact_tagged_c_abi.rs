@@ -6,13 +6,13 @@
 //! allocation, access, or observation.
 
 use chelis_runtime::{
-    CHELIS_DTYPE_BF16, CHELIS_DTYPE_BOOL, CHELIS_DTYPE_F16, CHELIS_DTYPE_F32, CHELIS_DTYPE_F64,
-    CHELIS_DTYPE_I8, CHELIS_DTYPE_I16, CHELIS_DTYPE_I32, CHELIS_DTYPE_I64, CHELIS_VALUE_SCALAR,
     chelis_alloc, chelis_alloc_view, chelis_dtype, chelis_dtype_size, chelis_fill_scalar,
     chelis_free, chelis_parse_scalar, chelis_scalar, chelis_scalar_from_bits, chelis_scalar_tensor,
     chelis_string_from_cstr, chelis_string_release, chelis_tensor_numel, chelis_tensor_rank,
     chelis_tensor_shape, chelis_tensor_to_scalar, chelis_value, chelis_value_as_scalar,
-    chelis_value_from_scalar,
+    chelis_value_from_scalar, CHELIS_DTYPE_BF16, CHELIS_DTYPE_BOOL, CHELIS_DTYPE_F16,
+    CHELIS_DTYPE_F32, CHELIS_DTYPE_F64, CHELIS_DTYPE_I16, CHELIS_DTYPE_I32, CHELIS_DTYPE_I64,
+    CHELIS_DTYPE_I8, CHELIS_VALUE_SCALAR,
 };
 use std::env;
 use std::ffi::CString;
