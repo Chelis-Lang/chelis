@@ -319,55 +319,6 @@ pub(super) fn every_terminal_is_self_call(expr: &deep::Expr, def_name: &str) -> 
     }
 }
 
-/// Check whether a def body carries its own explicit type stamp and is a
-/// literal self-reference, as produced by `x = (x : T)`. A declaration-level
-/// `x: T = x` is recognized separately by the cycle detector because Surf
-/// represents its type as a sibling `defsig`, not as body metadata.
-pub(super) fn body_is_type_stamped_literal_self_ref(body: &deep::Expr, name: &str) -> bool {
-    if expr_type_expr(body, &HashMap::new()).is_none() {
-        return false;
-    }
-    body_is_literal_self_ref_shape(body, name)
-}
-
-/// Check the literal self-reference shape independently of its explicit type
-/// owner. Callers must first prove either a body type stamp or the matching
-/// declaration signature; bare `x = x` must never earn this carve-out.
-pub(super) fn body_is_literal_self_ref_shape(body: &deep::Expr, name: &str) -> bool {
-    let mut current = body;
-    loop {
-        match current {
-            deep::Expr::MetaExpr(meta, _) => current = &meta.expr,
-            deep::Expr::Node(node, _) => {
-                return node.tag() == DeepTag::Var
-                    && node.children_slice().first().and_then(symbol_name) == Some(name);
-            }
-            deep::Expr::List(list, _) => {
-                // Type ascription desugars into a `(cast ... )`-like node
-                // in Deep: `(x : T)` keeps `x` as the first child. When
-                // the underlying is a var with the self name, treat it as
-                // the Nautilus pattern. These legacy spellings are outside
-                // the closed vocabulary, so they stay symbol-headed and are
-                // recognized at the raw-string boundary.
-                if matches!(list.unknown_tag_symbol(), Some("ascribe" | ":")) {
-                    match children(list).first() {
-                        Some(inner) => current = inner,
-                        None => return false,
-                    }
-                    continue;
-                }
-                match get_tag(list) {
-                    Some(DeepTag::Var) => {
-                        return children(list).first().and_then(symbol_name) == Some(name);
-                    }
-                    _ => return false,
-                }
-            }
-            _ => return false,
-        }
-    }
-}
-
 /// Yield each top-level declaration, flattening through a `(module {} name ...)`
 /// wrapper if present. Deep sources produced by Surf `module X` desugaring
 /// have every def/defsig/deftype inside this wrapper; without flattening,
