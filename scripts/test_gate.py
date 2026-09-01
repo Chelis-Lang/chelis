@@ -84,6 +84,18 @@ CARCARA_FULL_SUITE_COMMAND = (
 )
 
 
+def _read_nix_packages_workflow(path: Path | None = None) -> str:
+    """Read the exact UTF-8 workflow blob without path or newline substitution."""
+    source = NIX_PACKAGES_YML if path is None else path
+    if source.is_symlink() or not source.is_file():
+        raise AssertionError("the Nix package workflow must be a regular file")
+    raw = source.read_bytes()
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise AssertionError("the Nix package workflow must be UTF-8") from error
+
+
 def _nix_supported_systems(contracts: str) -> set[str]:
     supported_block = re.search(
         r"supportedSystems\s*=\s*\[(?P<body>.*?)\];",
@@ -2816,9 +2828,29 @@ class CiParityTests(unittest.TestCase):
 class NixPackagesWorkflowTests(unittest.TestCase):
     """Lock the two native Nix package jobs and their complete check command."""
 
+    def test_workflow_reader_preserves_raw_newlines_for_the_digest(self):
+        raw = NIX_PACKAGES_YML.read_bytes().replace(b"\n", b"\r\n")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nix-packages.yml"
+            path.write_bytes(raw)
+            text = _read_nix_packages_workflow(path)
+        self.assertEqual(text.encode("utf-8"), raw)
+        with self.assertRaisesRegex(AssertionError, "reviewed native recipe"):
+            _assert_nix_intentional_events_only(text)
+
+    def test_workflow_reader_rejects_a_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "canonical.yml"
+            target.write_bytes(NIX_PACKAGES_YML.read_bytes())
+            link = root / "nix-packages.yml"
+            link.symlink_to(target)
+            with self.assertRaisesRegex(AssertionError, "regular file"):
+                _read_nix_packages_workflow(link)
+
     def test_native_nix_workflow_has_both_authoritative_jobs(self):
         self.assertTrue(NIX_PACKAGES_YML.is_file(), "missing Nix package workflow")
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         required = [
             "name: Nix Packages (x86_64-linux)",
             "runs-on: ubuntu-latest",
@@ -2829,7 +2861,7 @@ class NixPackagesWorkflowTests(unittest.TestCase):
             self.assertIn(marker, text)
 
     def test_each_native_job_runs_the_complete_flake_check_set(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         self.assertEqual(
             text.count("run: nix flake check --print-build-logs"),
             2,
@@ -2842,14 +2874,14 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         )
 
     def test_each_native_job_rejects_the_wrong_runner_system(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         self.assertEqual(text.count("name: Verify the runner system"), 2)
         self.assertIn('assert system == "x86_64-linux", system', text)
         self.assertIn('assert system == "aarch64-darwin", system', text)
 
     def test_supported_systems_have_exact_native_job_parity(self):
         contracts = (REPO_ROOT / "nix" / "contracts.nix").read_text(encoding="utf-8")
-        workflow = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        workflow = _read_nix_packages_workflow()
         _assert_nix_system_job_parity(contracts, workflow)
 
     def test_supported_system_without_native_job_fails_parity(self):
@@ -2859,7 +2891,7 @@ class NixPackagesWorkflowTests(unittest.TestCase):
             _assert_nix_system_job_parity(contracts, workflow)
 
     def test_each_native_job_runs_the_nix_contract_suite_with_project_python(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         self.assertEqual(text.count("uses: astral-sh/setup-uv@v8.1.0"), 2)
         self.assertEqual(text.count("run: uv venv --python 3.11 .venv"), 2)
         self.assertEqual(
@@ -2868,23 +2900,23 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         )
 
     def test_each_native_job_uses_the_reviewed_portable_devenv_base(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         _assert_native_devenv_recipe(text)
 
     def test_missing_central_devenv_action_fails_the_native_recipe(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         mutated = text.replace(f"uses: {DEVENV_SETUP_ACTION}", "uses: omitted", 1)
         with self.assertRaisesRegex(AssertionError, "setup-devenv"):
             _assert_native_devenv_recipe(mutated)
 
     def test_missing_portable_shell_fails_the_native_recipe(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         mutated = text.replace(f"shell: {PORTABLE_DEVENV_SHELL}", "shell: bash", 1)
         with self.assertRaisesRegex(AssertionError, "devenv-ci"):
             _assert_native_devenv_recipe(mutated)
 
     def test_late_central_devenv_action_fails_the_native_recipe(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         setup = f"uses: {DEVENV_SETUP_ACTION}"
         mutated = text.replace(setup, "uses: omitted", 1).replace(
             "run: devenv test --no-tui",
@@ -2895,11 +2927,11 @@ class NixPackagesWorkflowTests(unittest.TestCase):
             _assert_native_devenv_recipe(mutated)
 
     def test_workflow_runs_on_intentional_events_only(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         _assert_nix_intentional_events_only(text)
 
     def test_automatic_pr_push_and_schedule_triggers_fail_the_event_lock(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         for trigger in ("pull_request:", "'pull_request':", "push:", "schedule:"):
             with self.subTest(trigger=trigger):
                 mutated = text.replace(
@@ -2911,13 +2943,13 @@ class NixPackagesWorkflowTests(unittest.TestCase):
                     _assert_nix_intentional_events_only(mutated)
 
     def test_missing_release_trigger_fails_the_event_lock(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         mutated = text.replace("  release:\n    types: [published]\n", "", 1)
         with self.assertRaisesRegex(AssertionError, "published releases"):
             _assert_nix_intentional_events_only(mutated)
 
     def test_event_specific_job_gate_fails_the_event_lock(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         mutated = text.replace(
             "    runs-on: macos-latest\n",
             "    if: github.event_name == 'workflow_dispatch'\n"
@@ -2928,7 +2960,7 @@ class NixPackagesWorkflowTests(unittest.TestCase):
             _assert_nix_intentional_events_only(mutated)
 
     def test_policy_oracle_rejects_comment_and_job_gate_evasions(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         mutations = {
             "comment-only release": (
                 text.replace(
@@ -3052,33 +3084,33 @@ class NixPackagesWorkflowTests(unittest.TestCase):
                     _assert_nix_intentional_events_only(mutated)
 
     def test_each_job_bounds_runner_resources(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         _assert_runner_resource_bounds(text)
 
     def test_unbounded_build_parallelism_fails_the_resource_lock(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         mutated = text.replace("        max-jobs = 2\n", "", 1)
         with self.assertRaisesRegex(AssertionError, "max-jobs = 2"):
             _assert_runner_resource_bounds(mutated)
 
     def test_missing_disk_reclaim_fails_the_resource_lock(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         mutated = text.replace("name: Reclaim runner disk space", "name: omitted", 1)
         with self.assertRaisesRegex(AssertionError, "reclaim runner disk"):
             _assert_runner_resource_bounds(mutated)
 
     def test_each_job_caches_the_cvc5_toolchain_closure(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         _assert_cvc5_closure_cache(text)
 
     def test_missing_cvc5_restore_fails_the_cache_lock(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         mutated = text.replace("uses: actions/cache/restore@v4", "uses: omitted", 1)
         with self.assertRaisesRegex(AssertionError, "cvc5 closure"):
             _assert_cvc5_closure_cache(mutated)
 
     def test_direct_devenv_bootstrap_fails_the_native_recipe(self):
-        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        text = _read_nix_packages_workflow()
         setup = f"uses: {DEVENV_SETUP_ACTION}"
         duplicated = (
             f"{setup}\n"
