@@ -32,12 +32,19 @@ pub(super) fn infer_app(
             })
             .flatten()
     });
-    // Compiler-provided application rules are selected only after ordinary
+    // Builtin-specific application rules are selected only after ordinary
     // lexical lookup. A parameter, block binding, or pattern binding with the
-    // same spelling owns the call; its inferred function type, rather than a
-    // builtin's name-keyed checker route, decides whether the application is
-    // valid (spec/04-type-system.md §8.6; chelis#1076).
-    let func_name = source_func_name.filter(|name| !env.is_lexically_bound(name));
+    // same builtin spelling owns the call; its inferred function type, rather
+    // than the builtin's name-keyed checker route, decides whether the
+    // application is valid (spec/04-type-system.md §8.6; chelis#1076).
+    //
+    // Keep the override exact to the closed builtin vocabulary. In particular,
+    // applied uppercase heads retain constructor classification under
+    // spec/01-nomenclature.md §3.2 even when a single-letter value binder with
+    // the same spelling is in scope.
+    let func_name = source_func_name.filter(|name| {
+        !builtins::BUILTIN_NAMES.contains(&name.as_str()) || !env.is_lexically_bound(name)
+    });
 
     if matches!(func_name.as_deref(), Some("permute")) {
         return infer_permute_app(list, env, vg, subst, adt_reg, errors, product);

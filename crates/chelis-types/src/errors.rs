@@ -255,7 +255,7 @@ pub enum CheckErrorKind {
     /// signature, so they are rejected at declaration time
     /// (spec/04-type-system.md §8.6). Ordinary lexical bindings are
     /// different: function parameters, block locals, and pattern bindings
-    /// take precedence over compiler-provided dispatch in every lane
+    /// take precedence over builtin dispatch in every lane
     /// (chelis#1076). Reef package modules are also unaffected: their decls
     /// are internal-name-rewritten (`pkg__...`) before the checker runs, and
     /// their call sites are rewritten with them.

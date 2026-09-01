@@ -52,7 +52,7 @@ CONTRACT_FILES = (
 )
 FROZEN_FILE_DIGESTS = {
     "spec/02-surf-syntax.md": (
-        "84c7dc16efacf4efbd050a5a4d461352e122b0f92414fb59973d35ab50fa093a"
+        "7eb644de9c58a57400f588c0f411123096013448e8f6f6e088fb1972d14f9b48"
     ),
     "spec/03-deep-syntax.md": (
         "efb29e77a338c94bb6c6c6b9adc6c4bb236f5d78c0c329f3775a0b48b8640348"

@@ -91,9 +91,10 @@ pub struct Env {
     bindings: HashMap<String, Scheme>,
     /// Names introduced by the current lexical scope (function parameters,
     /// block bindings, and pattern bindings). Builtin-specific inference may
-    /// only dispatch on a callee spelling when that spelling has not been
-    /// replaced by one of these bindings. This is check-time provenance, not
-    /// part of the reusable or serialized type environment.
+    /// only dispatch on a name from the closed builtin vocabulary when that
+    /// spelling has not been replaced by one of these bindings. This is
+    /// check-time provenance, not part of the reusable or serialized type
+    /// environment.
     #[serde(skip)]
     lexical_bindings: HashSet<String>,
     /// Current declaration's type/dimension/rank binders. Installed only on
@@ -227,8 +228,8 @@ impl Env {
     }
 
     /// Extend the environment with a binding introduced by ordinary lexical
-    /// scope. Unlike [`Self::bind`], this also records that compiler-provided
-    /// callable dispatch must not claim the name while this environment lives.
+    /// scope. Unlike [`Self::bind`], this also records that builtin callable
+    /// dispatch must not claim the name while this environment lives.
     pub(crate) fn bind_lexical(&mut self, name: String, scheme: Scheme) {
         self.lexical_bindings.insert(name.clone());
         self.bind(name, scheme);
