@@ -160,10 +160,12 @@ leg is part of the oracle test now).
   parity at two lengths plus fail-branch error parity in both lanes).
   The `grad`/`vmap` exemption is scoped to the transformed subtree: a
   forward `fail` beside a transformed call still routes the enclosing body
-  through host `if`/`fail`, while a failure inside the differentiated or
-  vectorized subtree retains the documented mask semantics. Oracle:
-  `issue_662_forward_fail_grad_scope.rs` (taken and untaken forward branches
-  plus a grad-internal control).
+  through host `if`/`fail`. This routing repair deliberately leaves
+  transformed-subtree handling unchanged; it does not claim that a taken
+  internal `fail` may become a numeric placeholder. chelis#1464 owns that
+  pre-existing spec divergence. Oracle:
+  `issue_662_forward_fail_grad_scope.rs` (taken and untaken forward siblings
+  plus an untaken grad-internal routing control).
 - **Checker over-unification of movement chains** — RESOLVED
   (chelis#632, in two parts). The OBSERVABLE C-lane abort on a
   direct-return `shrink -> stride` chain was the wildcard-KEYED dim

@@ -3302,11 +3302,11 @@ fn lower_tensor_helper_dag(
     // the host lane, whose `if`/`fail` are real control flow
     // (`chelis_fail` in the C emit). Applied defs are consulted because
     // helper lowering INLINES them into the DAG. A `grad`/`vmap` subtree is
-    // exempt: it can ONLY lower through the DAG lane, where the
-    // guard-as-mask-arithmetic form (zero placeholder included) is the
-    // documented chelis#616 differentiation semantics. chelis#662 scopes
-    // that exemption to the transformed subtree itself; a sibling forward
-    // `fail` still routes the enclosing body through real host control flow.
+    // exempt because transformed-subtree behavior is outside chelis#662.
+    // This scope guard does not endorse replacement of a taken internal
+    // `fail` with a numeric placeholder; chelis#1464 owns that pre-existing
+    // divergence. A sibling forward `fail` still routes the enclosing body
+    // through real host control flow.
     if expr_reaches_forward_fail(expr, &defs, &mut UnordSet::new()) {
         record_host_work(|profile| profile.tensor_helper_fail_guard_rejections += 1);
         return None;
@@ -10441,8 +10441,9 @@ fn actualize_tensor_helper_types(
 /// `grad`/`vmap`/`vmap-grad` subtree? Conservative: any `(var fail)`
 /// reference counts, and a referenced def is walked once (the `visiting`
 /// set both breaks recursion cycles and memoizes). A transformed subtree is
-/// opaque here because its zero placeholder is the documented AD/vector-map
-/// representation; only its forward siblings require host control flow.
+/// opaque here because transformed-subtree behavior is outside chelis#662;
+/// chelis#1464 separately owns preservation of an internal taken `fail`.
+/// Only forward siblings are classified by this traversal.
 fn expr_reaches_forward_fail(
     expr: &Expr,
     defs: &BTreeMap<String, Expr>,

@@ -1,6 +1,6 @@
 //! chelis#662: a forward `fail` beside a grad/vmap expression must retain
-//! real host control flow in generated C.  Only failure inside the transformed
-//! subtree may use the DAG lane's documented masked-zero semantics.
+//! real host control flow in generated C. Transformed-subtree behavior is
+//! unchanged by this repair; chelis#1464 owns its taken-`fail` divergence.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -161,7 +161,7 @@ fn untaken_forward_fail_beside_grad_has_exact_lane_parity() {
 }
 
 #[test]
-fn fail_inside_grad_subtree_keeps_differentiation_semantics() {
+fn untaken_fail_inside_grad_subtree_does_not_change_sibling_routing() {
     let source = "module Repro.GradInternalFail\n\
 def loss(x: tensor[4, f32]) -> tensor[f32] =\n\
   if gt(cast(2, int64), cast(shape(x, cast(0, int32)), int64))\n\
