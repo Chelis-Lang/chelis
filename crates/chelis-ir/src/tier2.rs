@@ -20,7 +20,7 @@
 
 use chelis_types::types::Prim;
 
-use crate::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType};
+use crate::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, RtAxis, RtDim, TensorType};
 
 /// Canonical synthesized marker for Tier 2 decomposition sub-nodes when
 /// the parent op had no source span. Locked by spec/03-deep-syntax.md
@@ -470,6 +470,17 @@ pub fn dim_size(ty: &TensorType, axis: usize) -> Option<usize> {
     })
 }
 
+fn dim_known_size(dim: &DimInfo) -> Option<usize> {
+    match dim {
+        DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => Some(*size),
+        DimInfo::Named(_, None) => None,
+    }
+}
+
+fn rt_axis(axis: usize) -> RtAxis {
+    RtAxis::Lit(i32::try_from(axis).expect("tensor rank fits the int32 axis carrier"))
+}
+
 /// Extract a runtime-capable dimension expression from a tensor type at the given axis.
 pub fn dim_expr(ty: &TensorType, axis: usize) -> Option<DimExpr> {
     ty.dims.get(axis).map(DimExpr::from)
@@ -511,6 +522,7 @@ fn expand_to_match(
     dag: &mut Dag,
     mut node: NodeId,
     mut ty: TensorType,
+    target: NodeId,
     target_dims: &[DimInfo],
     parent_span: Option<&str>,
 ) -> NodeId {
@@ -518,7 +530,13 @@ fn expand_to_match(
         let missing = target_dims.len() - ty.dims.len();
         let insert_at = 0;
         let source_dim = target_dims[missing - 1].clone();
-        let size = DimExpr::from(&source_dim);
+        let size = match dim_known_size(&source_dim) {
+            Some(size) => RtDim::Lit(size),
+            None => RtDim::InputAxis {
+                tensor: 1,
+                axis: rt_axis(missing - 1),
+            },
+        };
         let mut next_dims = ty.dims.clone();
         next_dims.insert(insert_at, source_dim);
         let next_ty = TensorType {
@@ -529,9 +547,13 @@ fn expand_to_match(
             dag,
             RiscOp::Expand {
                 axis: insert_at,
-                size,
+                size: size.clone(),
             },
-            vec![node],
+            if matches!(size, RtDim::Lit(_)) {
+                vec![node]
+            } else {
+                vec![node, target]
+            },
             next_ty.clone(),
             parent_span,
         );
@@ -577,8 +599,20 @@ pub fn lower_matmul(
         "matmul shared axis",
     );
     let k_dim = require_dim(b_ty.dims.last(), "matmul rhs col axis");
-    let i_size = DimExpr::from(&i_dim);
-    let k_size = DimExpr::from(&k_dim);
+    let i_size = match dim_known_size(&i_dim) {
+        Some(size) => RtDim::Lit(size),
+        None => RtDim::InputAxis {
+            tensor: 1,
+            axis: rt_axis(a_ty.dims.len() - 2),
+        },
+    };
+    let k_size = match dim_known_size(&k_dim) {
+        Some(size) => RtDim::Lit(size),
+        None => RtDim::InputAxis {
+            tensor: 1,
+            axis: rt_axis(b_ty.dims.len() - 1),
+        },
+    };
 
     // The intermediate expanded type is [..., i, j, k].
     let mut expanded_dims = lead_dims.clone();
@@ -600,6 +634,7 @@ pub fn lower_matmul(
         dag,
         a,
         a_ty,
+        (b, b_ty),
         &lead_dims,
         &[i_dim.clone(), j_dim.clone()],
         parent_span,
@@ -608,9 +643,13 @@ pub fn lower_matmul(
         dag,
         RiscOp::Expand {
             axis: lead_len + 2,
-            size: k_size,
+            size: k_size.clone(),
         },
-        vec![a_aligned],
+        if matches!(k_size, RtDim::Lit(_)) {
+            vec![a_aligned]
+        } else {
+            vec![a_aligned, b]
+        },
         expanded_ty.clone(),
         parent_span,
     );
@@ -619,6 +658,7 @@ pub fn lower_matmul(
         dag,
         b,
         b_ty,
+        (a, a_ty),
         &lead_dims,
         &[j_dim.clone(), k_dim.clone()],
         parent_span,
@@ -627,9 +667,13 @@ pub fn lower_matmul(
         dag,
         RiscOp::Expand {
             axis: lead_len,
-            size: i_size,
+            size: i_size.clone(),
         },
-        vec![b_aligned],
+        if matches!(i_size, RtDim::Lit(_)) {
+            vec![b_aligned]
+        } else {
+            vec![b_aligned, a]
+        },
         expanded_ty.clone(),
         parent_span,
     );
@@ -679,16 +723,28 @@ fn align_matmul_operand(
     dag: &mut Dag,
     node: NodeId,
     ty: &TensorType,
+    counterpart: (NodeId, &TensorType),
     lead_dims: &[DimInfo],
     matrix_dims: &[DimInfo; 2],
     parent_span: Option<&str>,
 ) -> NodeId {
+    let (counterpart, counterpart_ty) = counterpart;
     let source_lead = &ty.dims[..ty.dims.len() - 2];
     let mut current = node;
     let mut current_dims = ty.dims.clone();
     let missing = lead_dims.len().saturating_sub(source_lead.len());
     for (axis, lead_dim) in lead_dims.iter().take(missing).enumerate() {
-        let size = DimExpr::from(lead_dim);
+        let counterpart_lead_len = counterpart_ty.dims.len() - 2;
+        let counterpart_axis = axis
+            .checked_sub(lead_dims.len().saturating_sub(counterpart_lead_len))
+            .expect("a missing matmul lead axis must be supplied by the counterpart");
+        let size = match dim_known_size(lead_dim) {
+            Some(size) => RtDim::Lit(size),
+            None => RtDim::InputAxis {
+                tensor: 1,
+                axis: rt_axis(counterpart_axis),
+            },
+        };
         current_dims.insert(axis, lead_dim.clone());
         let out_ty = TensorType {
             dims: current_dims.clone(),
@@ -696,8 +752,15 @@ fn align_matmul_operand(
         };
         current = add_synth(
             dag,
-            RiscOp::Expand { axis, size },
-            vec![current],
+            RiscOp::Expand {
+                axis,
+                size: size.clone(),
+            },
+            if matches!(size, RtDim::Lit(_)) {
+                vec![current]
+            } else {
+                vec![current, counterpart]
+            },
             out_ty,
             parent_span,
         );
@@ -710,13 +773,28 @@ fn align_matmul_operand(
                 dims: current_dims.clone(),
                 precision: ty.precision,
             };
+            let counterpart_lead_len = counterpart_ty.dims.len() - 2;
+            let counterpart_axis = lead_axis
+                .checked_sub(lead_dims.len().saturating_sub(counterpart_lead_len))
+                .expect("a broadcast matmul lead axis must be supplied by the counterpart");
+            let size = match dim_known_size(&lead_dims[lead_axis]) {
+                Some(size) => RtDim::Lit(size),
+                None => RtDim::InputAxis {
+                    tensor: 1,
+                    axis: rt_axis(counterpart_axis),
+                },
+            };
             current = add_synth(
                 dag,
                 RiscOp::Expand {
                     axis: lead_axis,
-                    size: DimExpr::from(&lead_dims[lead_axis]),
+                    size: size.clone(),
                 },
-                vec![current],
+                if matches!(size, RtDim::Lit(_)) {
+                    vec![current]
+                } else {
+                    vec![current, counterpart]
+                },
                 out_ty,
                 parent_span,
             );
@@ -769,7 +847,14 @@ pub fn lower_softmax(
     parent_span: Option<&str>,
 ) -> NodeId {
     let red_ty = reduced_type(ty, axis);
-    let size = DimExpr::from(&require_dim(ty.dims.get(axis), "softmax axis"));
+    let axis_dim = require_dim(ty.dims.get(axis), "softmax axis");
+    let size = match dim_known_size(&axis_dim) {
+        Some(size) => RtDim::Lit(size),
+        None => RtDim::InputAxis {
+            tensor: 1,
+            axis: rt_axis(axis),
+        },
+    };
 
     // 1. max_reduce(x, axis)
     let max_val = add_synth(
@@ -787,7 +872,11 @@ pub fn lower_softmax(
             axis,
             size: size.clone(),
         },
-        vec![max_val],
+        if matches!(size, RtDim::Lit(_)) {
+            vec![max_val]
+        } else {
+            vec![max_val, x]
+        },
         ty.clone(),
         parent_span,
     );
@@ -811,8 +900,15 @@ pub fn lower_softmax(
     // 6. expand sum back to original shape
     let sum_expanded = add_synth(
         dag,
-        RiscOp::Expand { axis, size },
-        vec![sum_exp],
+        RiscOp::Expand {
+            axis,
+            size: size.clone(),
+        },
+        if matches!(size, RtDim::Lit(_)) {
+            vec![sum_exp]
+        } else {
+            vec![sum_exp, x]
+        },
         ty.clone(),
         parent_span,
     );
@@ -912,7 +1008,7 @@ pub fn lower_layer_norm(
     parent_span: Option<&str>,
 ) -> NodeId {
     let axis = x_ty.dims.len().saturating_sub(1);
-    let axis_size = DimExpr::Concrete(require_axis_size(x_ty, axis, "layer_norm"));
+    let axis_size = RtDim::Lit(require_axis_size(x_ty, axis, "layer_norm"));
     let mean = lower_mean(dag, x, axis, x_ty, parent_span);
     let mean_expanded = add_synth(
         dag,
@@ -960,8 +1056,8 @@ pub fn lower_layer_norm(
     let denom = add_synth(dag, RiscOp::Sqrt, vec![denom_sq], x_ty.clone(), parent_span);
     let normed = lower_div(dag, centered, denom, x_ty, parent_span);
 
-    let gamma_node = expand_to_match(dag, gamma, gamma_ty.clone(), &x_ty.dims, parent_span);
-    let beta_node = expand_to_match(dag, beta, beta_ty.clone(), &x_ty.dims, parent_span);
+    let gamma_node = expand_to_match(dag, gamma, gamma_ty.clone(), x, &x_ty.dims, parent_span);
+    let beta_node = expand_to_match(dag, beta, beta_ty.clone(), x, &x_ty.dims, parent_span);
     let scaled = add_synth(
         dag,
         RiscOp::Mul,
@@ -2114,9 +2210,13 @@ mod tests {
             .collect();
 
         assert!(
-            expand_sizes
-                .iter()
-                .all(|size| matches!(size, DimExpr::Sym(name) if name == "batch")),
+            expand_sizes.iter().all(|size| matches!(
+                size,
+                RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0)
+                }
+            )),
             "softmax should preserve a symbolic axis extent through expand nodes"
         );
         assert_eq!(dag.get(out).unwrap().output_type, ty);

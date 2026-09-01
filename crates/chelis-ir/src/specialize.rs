@@ -6,7 +6,7 @@
 
 use chelis_unord::UnordMap;
 
-use crate::dag::{Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType};
+use crate::dag::{Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, RtAxis, RtDim, TensorType};
 use chelis_types::types::Prim;
 
 /// Compiler pipeline ordering around backend specialization.
@@ -350,7 +350,7 @@ fn lower_one_hot_node(out: &mut Dag, indices: NodeId, source: &DagNode, vocab: u
         let col = out.add_node(
             RiscOp::Expand {
                 axis: vocab_axis,
-                size: DimExpr::Concrete(1),
+                size: RtDim::Lit(1),
             },
             vec![eq_f32],
             col_ty.clone(),
@@ -531,6 +531,38 @@ fn dims_equivalent(lhs: &DimInfo, rhs: &DimInfo) -> bool {
     DimExpr::from(lhs).normalized_key() == DimExpr::from(rhs).normalized_key()
 }
 
+fn expand_extent_matches_inserted_axis(dag: &Dag, node: &DagNode, axis: usize) -> bool {
+    let RiscOp::Expand { size, .. } = &node.op else {
+        return false;
+    };
+    let Some(inserted) = node.output_type.dims.get(axis) else {
+        return false;
+    };
+    match size {
+        RtDim::Lit(size) => match inserted {
+            DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => value == size,
+            DimInfo::Named(_, None) => false,
+        },
+        RtDim::InputAxis {
+            tensor,
+            axis: RtAxis::Lit(source_axis),
+        } => {
+            let Ok(source_axis) = usize::try_from(*source_axis) else {
+                return false;
+            };
+            let Some(source) = node.inputs.get(*tensor).and_then(|id| dag.get(*id)) else {
+                return false;
+            };
+            source
+                .output_type
+                .dims
+                .get(source_axis)
+                .is_some_and(|source_dim| dims_equivalent(source_dim, inserted))
+        }
+        RtDim::Node(_) | RtDim::Sym(_) | RtDim::ToEnd => false,
+    }
+}
+
 fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
     let sum_node = dag.get(sum_id)?;
     let sum_axis = match &sum_node.op {
@@ -574,7 +606,9 @@ fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
     if axis_a != lead_len + 2 || axis_b != lead_len {
         return None;
     }
-    if expand_a.inputs.len() != 1 || expand_b.inputs.len() != 1 {
+    if !expand_extent_matches_inserted_axis(dag, expand_a, axis_a)
+        || !expand_extent_matches_inserted_axis(dag, expand_b, axis_b)
+    {
         return None;
     }
 
@@ -863,7 +897,7 @@ mod tests {
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: DimExpr::Concrete(4),
+                size: RtDim::Lit(4),
             },
             vec![a],
             t3(2, 3, 4),
@@ -872,7 +906,7 @@ mod tests {
         let eb = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: DimExpr::Concrete(2),
+                size: RtDim::Lit(2),
             },
             vec![b],
             t3(2, 3, 4),
@@ -947,18 +981,24 @@ mod tests {
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: DimExpr::Sym("n".into()),
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(1),
+                },
             },
-            vec![a],
+            vec![a, b],
             symbolic_t3("m", "k", "n"),
             None,
         );
         let eb = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: DimExpr::Sym("m".into()),
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
             },
-            vec![b],
+            vec![b, a],
             symbolic_t3("m", "k", "n"),
             None,
         );
@@ -1022,7 +1062,7 @@ mod tests {
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: DimExpr::Concrete(4),
+                size: RtDim::Lit(4),
             },
             vec![a],
             t3(2, 3, 4),
@@ -1031,7 +1071,7 @@ mod tests {
         let eb = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: DimExpr::Concrete(2),
+                size: RtDim::Lit(2),
             },
             vec![b],
             t3(2, 3, 4),
@@ -1165,7 +1205,7 @@ mod tests {
         let one_hot_exp = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: DimExpr::Concrete(3),
+                size: RtDim::Lit(3),
             },
             vec![one_hot],
             t3(4, 2, 3),
@@ -1174,7 +1214,7 @@ mod tests {
         let values_exp = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: DimExpr::Concrete(4),
+                size: RtDim::Lit(4),
             },
             vec![values],
             t3(4, 2, 3),
@@ -1258,7 +1298,7 @@ mod tests {
         let one_hot_exp = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: DimExpr::Concrete(3),
+                size: RtDim::Lit(3),
             },
             vec![one_hot],
             t3(4, 2, 3),
@@ -1267,7 +1307,7 @@ mod tests {
         let values_exp = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: DimExpr::Concrete(4),
+                size: RtDim::Lit(4),
             },
             vec![values],
             t3(4, 2, 3),

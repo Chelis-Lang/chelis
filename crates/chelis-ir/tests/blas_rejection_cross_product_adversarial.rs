@@ -48,7 +48,7 @@
 //! covers F64 specifically; this red-team file extends it to a
 //! matrix of Surf-reachable precisions).
 
-use chelis_ir::dag::{Dag, DimExpr, RiscOp};
+use chelis_ir::dag::{Dag, RiscOp};
 use chelis_ir::host::{
     BlasSummaryAttempt, HostTensorInput, SummaryRejectionClass, SummaryRejectionDetail,
     try_summarize_blas_helper_for_test,
@@ -100,7 +100,7 @@ fn build_matmul_helper(prim: Prim) -> (Dag, Vec<HostTensorInput>, TensorType) {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         t3(prim, 8, 16, 4),
@@ -109,7 +109,7 @@ fn build_matmul_helper(prim: Prim) -> (Dag, Vec<HostTensorInput>, TensorType) {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(8),
+            size: chelis_ir::dag::RtDim::Lit(8),
         },
         vec![b],
         t3(prim, 8, 16, 4),

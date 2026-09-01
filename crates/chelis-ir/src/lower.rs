@@ -558,7 +558,7 @@ use chelis_types::{
 };
 use chelis_vocab::EffectKind;
 
-use crate::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType};
+use crate::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, RtAxis, RtDim, TensorType};
 use crate::grad::grad_dag_checked;
 use crate::tier2;
 use crate::vmap;
@@ -1465,7 +1465,7 @@ pub fn remap_tensor_dim_symbols(
 
 /// Rewrite every symbolic-dim reference in `dag` through
 /// `substitutions`: node OUTPUT types and the op-internal fields that
-/// carry dims (`Expand::size`, `Reshape::new_shape`,
+/// carry dims (`Reshape::new_shape`,
 /// `BlasMatmul::{batch_dims, m, n, k}`). Rewriting only output types
 /// while op fields keep the stale names produces the chelis#345 mixed
 /// state (`Load: n` next to `Expand { size: Sym("dN") }`) that the
@@ -1518,10 +1518,7 @@ pub(crate) fn apply_dim_substitutions(dag: &Dag, substitutions: &UnordMap<String
             .map(|dim| rewrite_dim_info(dim, substitutions))
             .collect();
         let op = match node.op {
-            RiscOp::Expand { axis, size } => RiscOp::Expand {
-                axis,
-                size: rewrite_dim_expr(&size, substitutions),
-            },
+            RiscOp::Expand { axis, size } => RiscOp::Expand { axis, size },
             RiscOp::Reshape { new_shape } => RiscOp::Reshape {
                 new_shape: new_shape
                     .iter()
@@ -5571,11 +5568,20 @@ impl LowerCtx {
         }
     }
 
-    fn dim_info_from_dim_expr(size: &DimExpr) -> Option<DimInfo> {
+    fn dim_info_from_rt_dim(&self, size: &RtDim, inputs: &[NodeId]) -> Option<DimInfo> {
         match size {
-            DimExpr::Concrete(value) => Some(DimInfo::Lit(*value)),
-            DimExpr::Sym(name) => Some(DimInfo::Named(name.clone(), None)),
-            DimExpr::Mul(_, _) | DimExpr::Div(_, _) => None,
+            RtDim::Lit(value) => Some(DimInfo::Lit(*value)),
+            RtDim::InputAxis {
+                tensor,
+                axis: RtAxis::Lit(axis),
+            } => self
+                .dag
+                .get(*inputs.get(*tensor)?)?
+                .output_type
+                .dims
+                .get(usize::try_from(*axis).ok()?)
+                .cloned(),
+            RtDim::Node(_) | RtDim::ToEnd | RtDim::Sym(_) => None,
         }
     }
 
@@ -5583,10 +5589,11 @@ impl LowerCtx {
         &self,
         input: NodeId,
         axis: usize,
-        size: &DimExpr,
+        size: &RtDim,
+        inputs: &[NodeId],
     ) -> Option<TensorType> {
         let input_ty = self.dag.get(input)?.output_type.clone();
-        let inserted_dim = Self::dim_info_from_dim_expr(size)?;
+        let inserted_dim = self.dim_info_from_rt_dim(size, inputs)?;
         let mut dims = input_ty.dims;
         if axis > dims.len() {
             return None;
@@ -7242,20 +7249,34 @@ impl LowerCtx {
         let mut dims = Vec::new();
         for (axis, dim) in ty.dims.iter().enumerate() {
             dims.push(dim.clone());
-            let size = DimExpr::from(dim);
-            let symbolic = size.as_concrete().is_none();
+            let (size, inputs) = match dim {
+                DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => {
+                    (RtDim::Lit(*value), vec![node])
+                }
+                DimInfo::Named(_, None) => {
+                    let source = primal.unwrap_or_else(|| {
+                        panic!(
+                            "symbolic zero tensor axis {axis} requires its differentiated primal shape source"
+                        )
+                    });
+                    (
+                        RtDim::InputAxis {
+                            tensor: 1,
+                            axis: RtAxis::Lit(i32::try_from(axis).expect("tensor rank fits int32")),
+                        },
+                        vec![node, source],
+                    )
+                }
+            };
             node = self.dag.add_node(
                 RiscOp::Expand { axis, size },
-                vec![node],
+                inputs,
                 TensorType {
                     dims: dims.clone(),
                     precision: ty.precision,
                 },
                 self.current_span_id.clone(),
             );
-            if symbolic && let Some(primal) = primal {
-                self.dag.add_shape_dep(node, primal);
-            }
         }
         node
     }
@@ -7694,6 +7715,15 @@ impl LowerCtx {
             ),
         };
 
+        let batch_source = param_types
+            .iter()
+            .zip(canonical_args.iter().copied())
+            .find_map(|(param_ty, arg_id)| {
+                self.dag
+                    .get(arg_id)
+                    .filter(|node| node.output_type.dims.len() > param_ty.dims.len())
+                    .map(|_| arg_id)
+            });
         let mut arg_map = UnordMap::new();
         for ((name, param_ty), arg_id) in param_names
             .iter()
@@ -7702,7 +7732,7 @@ impl LowerCtx {
         {
             arg_map.insert(
                 name.clone(),
-                self.materialize_vmapped_arg(arg_id, param_ty, &batch_dim),
+                self.materialize_vmapped_arg(arg_id, param_ty, &batch_dim, batch_source),
             );
         }
         arg_map.merge(captured_bindings);
@@ -7912,6 +7942,15 @@ impl LowerCtx {
             ),
         };
 
+        let batch_source = param_types
+            .iter()
+            .zip(canonical_args.iter().copied())
+            .find_map(|(param_ty, arg_id)| {
+                self.dag
+                    .get(arg_id)
+                    .filter(|node| node.output_type.dims.len() > param_ty.dims.len())
+                    .map(|_| arg_id)
+            });
         let mut arg_map = UnordMap::new();
         for ((name, param_ty), arg_id) in param_names
             .iter()
@@ -7920,7 +7959,7 @@ impl LowerCtx {
         {
             arg_map.insert(
                 name.clone(),
-                self.materialize_vmapped_arg(arg_id, param_ty, &batch_dim),
+                self.materialize_vmapped_arg(arg_id, param_ty, &batch_dim, batch_source),
             );
         }
         arg_map.merge(captured_bindings);
@@ -7974,6 +8013,7 @@ impl LowerCtx {
         arg_id: NodeId,
         original_ty: &TensorType,
         batch_dim: &DimInfo,
+        batch_source: Option<NodeId>,
     ) -> NodeId {
         let actual_ty = self
             .dag
@@ -7986,12 +8026,24 @@ impl LowerCtx {
 
         let mut out_ty = actual_ty.clone();
         out_ty.dims.insert(0, batch_dim.clone());
+        let (size, inputs) = match batch_dim {
+            DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => {
+                (RtDim::Lit(*value), vec![arg_id])
+            }
+            DimInfo::Named(_, None) => (
+                RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
+                vec![
+                    arg_id,
+                    batch_source.expect("symbolic vmap batch requires a batched tensor actual"),
+                ],
+            ),
+        };
         self.dag.add_node(
-            RiscOp::Expand {
-                axis: 0,
-                size: DimExpr::from(batch_dim),
-            },
-            vec![arg_id],
+            RiscOp::Expand { axis: 0, size },
+            inputs,
             out_ty,
             self.current_span_id.clone(),
         )
@@ -9231,7 +9283,7 @@ impl LowerCtx {
                 // extent symbol is declared by `src`'s shape; without the dep,
                 // a `src` referenced only via `shape(src, ...)` is DCE'd and
                 // the symbol loses its source (silent wrong shape in C).
-                let mut shape_source: Option<NodeId> = None;
+                let mut inputs = vec![x];
                 let size = if args.len() >= 3 {
                     let size_arg = &args[2];
                     // (1) A fully-static size: a literal, `cast(N, _)`,
@@ -9246,7 +9298,7 @@ impl LowerCtx {
                         .fold_static_size(size_arg)
                         .and_then(|n| usize::try_from(n).ok())
                     {
-                        DimExpr::Concrete(v)
+                        RtDim::Lit(v)
                     }
                     // (2) A shape source: an inline `shape(x, axis)` read OR a
                     //     `let`-bound `len = shape(x, axis)` name (followed
@@ -9258,19 +9310,67 @@ impl LowerCtx {
                     //     asymmetry #469 tracks). The source node is recorded
                     //     as a `shape_dep` below so its `Load` survives DCE and
                     //     declares the extent symbol (chelis#384/#397).
-                    else if let Some((dim, src)) =
-                        self.dim_expr_from_shape_arg_with_source(size_arg)
+                    else if let Some((src, source_axis, _)) =
+                        self.input_axis_source_from_shape_arg(size_arg)
                     {
-                        shape_source = Some(src);
-                        dim
+                        let tensor = inputs.len();
+                        inputs.push(src);
+                        RtDim::InputAxis {
+                            tensor,
+                            axis: RtAxis::Lit(i32::try_from(source_axis).unwrap_or_else(|_| {
+                                raise_lowering_error(
+                                    format!(
+                                        "shape axis {source_axis} exceeds the int32 axis carrier"
+                                    ),
+                                    Some(size_arg.span()),
+                                    size_arg.span_id().map(ToOwned::to_owned),
+                                )
+                            })),
+                        }
                     }
                     // (3) A bare `var` naming a §4.7.2 Form-2 symbolic dim (an
                     //     in-scope tensor dimension, or a monomorphized dim
                     //     substitution). The post-node sourceless guard below
                     //     validates the symbol has a real tensor source and
                     //     fails closed otherwise.
-                    else if let Some(dim) = self.extract_dim_expr_value(size_arg) {
-                        dim
+                    else if let Some(name) = bare_var_name(strip_cast_wrappers(size_arg)) {
+                        if let Some(value) =
+                            self.dim_substitutions.get(&name).and_then(|dim| match dim {
+                                DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => {
+                                    Some(*value)
+                                }
+                                DimInfo::Named(_, None) => None,
+                            })
+                        {
+                            RtDim::Lit(value)
+                        } else if let Some((src, source_axis, _)) =
+                            self.tensor_source_for_symbol(&name)
+                        {
+                            let tensor = inputs.len();
+                            inputs.push(src);
+                            RtDim::InputAxis {
+                                tensor,
+                                axis: RtAxis::Lit(i32::try_from(source_axis).unwrap_or_else(
+                                    |_| {
+                                        raise_lowering_error(
+                                            format!(
+                                                "tensor axis {source_axis} exceeds the int32 axis carrier"
+                                            ),
+                                            Some(size_arg.span()),
+                                            size_arg.span_id().map(ToOwned::to_owned),
+                                        )
+                                    },
+                                )),
+                            }
+                        } else {
+                            raise_fatal_lowering_error(
+                                format!(
+                                    "`expand` size resolves to `{name}`, but no in-scope tensor axis supplies that extent. Use an int64 literal or a shape(tensor, int32-axis) read. Tracked by Chelis-Lang/chelis#469"
+                                ),
+                                Some(app_span),
+                                self.current_span_id.clone(),
+                            )
+                        }
                     }
                     // (4) Fail closed (chelis#469): a check-clean runtime size
                     //     the backend cannot yet materialize as an extent —
@@ -9289,8 +9389,8 @@ impl LowerCtx {
                              materialize as an extent: integer arithmetic that combines a \
                              `shape(tensor, axis)` read (or a symbolic dimension) with another \
                              term (e.g. `mul(shape(x, 0), 2)` or `add(shape(x, 0), 1)`) has no \
-                             single tensor axis to read the extent from. Use a literal/`cast(N, \
-                             int32)` size, a bare `shape(tensor, axis)` read, or an in-scope \
+                             single tensor axis to read the extent from. Use an exact `int64` \
+                             literal size, a bare `shape(tensor, int32-axis)` read, or an in-scope \
                              tensor dimension. Tracked by Chelis-Lang/chelis#469 \
                              (spec/04-type-system.md \u{00a7}4.7.2)",
                             Some(app_span),
@@ -9298,7 +9398,7 @@ impl LowerCtx {
                         );
                     }
                 } else {
-                    DimExpr::Concrete(1)
+                    RtDim::Lit(1)
                 };
                 // For a named insert, the new dim carries the inserted NAME
                 // (with its concrete extent when the size is static) so a
@@ -9307,13 +9407,11 @@ impl LowerCtx {
                 // DimInfo (it must be declared by a Load; the inserted name
                 // would be an undeclared symbol for the C codegen).
                 let named_dim = match (&named_insert, &size) {
-                    (Some(name), DimExpr::Concrete(n)) => {
-                        Some(DimInfo::Named(name.clone(), Some(*n)))
-                    }
+                    (Some(name), RtDim::Lit(n)) => Some(DimInfo::Named(name.clone(), Some(*n))),
                     _ => None,
                 };
                 let out_ty = self
-                    .fallback_expand_type(x, axis, &size)
+                    .fallback_expand_type(x, axis, &size, &inputs)
                     .map(|mut t| {
                         if let Some(dim) = named_dim {
                             t.dims[axis] = dim;
@@ -9321,51 +9419,12 @@ impl LowerCtx {
                         t
                     })
                     .unwrap_or_else(|| ty.clone());
-                let expand_id = self.dag.add_node(
+                self.dag.add_node(
                     RiscOp::Expand { axis, size },
-                    vec![x],
+                    inputs,
                     out_ty,
                     self.current_span_id.clone(),
-                );
-                // chelis#384/#397: keep the `shape(src, ...)` extent source
-                // alive through DCE so the symbolic dim it declares binds from
-                // the correct tensor input.
-                if let Some(src) = shape_source {
-                    self.dag.add_shape_dep(expand_id, src);
-                }
-                // chelis#384/#397 (B): a §4.7.2 Form-3 runtime expand size that
-                // resolves to a symbolic dim with NO tensor source — neither a
-                // `shape(tensor, ...)` argument (which the shape_dep above
-                // keeps live) nor a dim carried by any tensor in scope — has no
-                // representation the backend can emit. The C codegen would read
-                // the extent from a fabricated/out-of-range operand axis
-                // (silent wrong shape — the original bug) or emit an undeclared
-                // identifier. Reject loudly at lowering with a clean diagnostic
-                // rather than the downstream `symbolic_occurrences` ICE. The
-                // size of `expand(x, 1, k)` where `k` is a scalar `int32`
-                // parameter (or a rank-var output dim like #397's `a`, sourced
-                // from a scalar `int64`) is exactly this case.
-                if shape_source.is_none()
-                    && let Some(RiscOp::Expand { size, .. }) =
-                        self.dag.get(expand_id).map(|n| &n.op)
-                    && let DimExpr::Sym(name) = size.clone()
-                    && !self.symbol_has_tensor_source(&name)
-                {
-                    raise_fatal_lowering_error(
-                        format!(
-                            "`expand` size resolves to the symbolic dimension `{name}`, but no \
-                             tensor in scope carries it: a §4.7.2 Form-3 runtime size must be a \
-                             literal/`cast(N, int32)`, an in-scope tensor dimension, or a \
-                             `shape(tensor, axis)` read. A bare runtime scalar (e.g. an `int32`/\
-                             `int64` parameter) has no shape source the backend can emit, so the \
-                             extent cannot be materialized. Tracked by Chelis-Lang/chelis#469 \
-                             (spec/04-type-system.md \u{00a7}4.7.2)"
-                        ),
-                        Some(app_span),
-                        self.current_span_id.clone(),
-                    );
-                }
-                expand_id
+                )
             }
             "pad" if !args.is_empty() => {
                 let x = self.lower_expr_node(&args[0], "pad input");
@@ -9542,22 +9601,16 @@ impl LowerCtx {
                     .and_then(|a| usize::try_from(a).ok())
                     .expect("axis literal guarded by the arm predicate");
                 let x = self.lower_expr_node(&args[0], "shape input");
-                // The checker types `shape(...)` as an `int64` scalar
-                // ([05-DIM-2]). Pin
-                // a rank-0 integer output regardless of the incoming `ty`
-                // shape so the value node is always a well-formed scalar
-                // extent (verified by `chelis_ir::verify`).
-                let precision = if ty.precision.is_integer() {
-                    ty.precision
-                } else {
-                    Prim::Int64
-                };
+                // The checker types `shape(...)` as an exact `int64`
+                // scalar ([05-DIM-2]). Pin that carrier rather than
+                // trusting a stale incoming type, so lowering cannot
+                // narrow a runtime extent.
                 self.dag.add_node(
                     RiscOp::Shape { axis },
                     vec![x],
                     TensorType {
                         dims: Vec::new(),
-                        precision,
+                        precision: Prim::Int64,
                     },
                     self.current_span_id.clone(),
                 )
@@ -10059,20 +10112,27 @@ impl LowerCtx {
         let mut expanded_dims = Vec::with_capacity(stacked_dims.len());
         for (axis, dim) in stacked_dims.iter().enumerate() {
             expanded_dims.push(dim.clone());
-            let size = DimExpr::from(dim);
-            let symbolic = size.as_concrete().is_none();
+            let (size, inputs) = match dim {
+                DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => {
+                    (RtDim::Lit(*value), vec![table])
+                }
+                DimInfo::Named(_, None) => (
+                    RtDim::InputAxis {
+                        tensor: 1,
+                        axis: RtAxis::Lit(i32::try_from(axis - 1).expect("tensor rank fits int32")),
+                    },
+                    vec![table, first],
+                ),
+            };
             table = self.dag.add_node(
                 RiscOp::Expand { axis, size },
-                vec![table],
+                inputs,
                 TensorType {
                     dims: expanded_dims.clone(),
                     precision: out_ty.precision,
                 },
                 self.current_span_id.clone(),
             );
-            if symbolic {
-                self.dag.add_shape_dep(table, first);
-            }
         }
         for (position, item) in items.iter().enumerate() {
             let position = self.int64_constant(i64::try_from(position).ok()?);
@@ -11085,67 +11145,13 @@ impl LowerCtx {
         extract_int_for_dim(expr).and_then(|n| usize::try_from(n).ok())
     }
 
-    /// Const-fold a fully-static integer `expand` SIZE to its value
-    /// (chelis#469 / #528). Extends [`extract_int_for_dim`] (literal / `(lit
-    /// …)` / `cast`) with (a) the integer arithmetic the §4.7.2 checker
-    /// classifies as `SizeClass::Static` (`classify_arith_app`:
-    /// `add`/`sub`/`mul`/`mod`/`neg`) and (b) a bare/`cast`-wrapped `var`
-    /// bound by a prior `let` to a static value ([`Self::static_size_bindings`]
-    /// — the checker's "followed transitively through `let` bindings"). Folds
-    /// only when EVERY leaf is itself static; a `shape(x, …)`-touching or a
-    /// runtime-parameter-touching size returns `None` so the caller routes it
-    /// to the shape-source or fail-closed arm. (`div` is float-only per
-    /// chelis#178 and is rejected at check before lowering; `floor_div`/
-    /// `trunc_div` are not in the checker's arith set — neither reaches here
-    /// as an accepted size.) Overflow / mod-by-zero use checked arithmetic and
-    /// return `None`, never a wrapped or otherwise wrong extent.
-    ///
-    /// Deliberately kept SEPARATE from the shared [`extract_int_for_dim`]
-    /// walker, which also drives reduction / softmax / gather AXES: the
-    /// checker rejects a static-arithmetic *axis* ("sum axis must be a
-    /// compile-time constant or a named axis"), so folding arithmetic in the
-    /// shared walker would silently widen the axis contract (chelis#364).
-    /// Extent-side folding lives only here; the axis side is unchanged.
+    /// Const-fold a fully-static integer `expand` SIZE with the same checked
+    /// arithmetic walker the checker uses. Axis folding remains on the
+    /// narrower [`extract_int_for_dim`] path.
     fn fold_static_size(&self, expr: &Expr) -> Option<i64> {
-        if let Some(n) = extract_int_for_dim(expr) {
-            return Some(n);
-        }
-        let (tag, _, kids) = stamped_parts(expr)?;
-        match tag {
-            // A bare `var` bound to a static value by a prior `let`.
-            DeepTag::Var => self
-                .static_size_bindings
-                .get(&bare_var_name(expr)?)
-                .copied(),
-            // `cast(<inner>, ty)` — fold the inner value.
-            DeepTag::Cast => self.fold_static_size(kids.first()?),
-            // Integer arithmetic over static operands.
-            DeepTag::App => {
-                let op = bare_var_name(kids.first()?)?;
-                let operands = &kids[1..];
-                match (op.as_str(), operands.len()) {
-                    ("neg", 1) => self.fold_static_size(&operands[0])?.checked_neg(),
-                    ("add", 2) => self
-                        .fold_static_size(&operands[0])?
-                        .checked_add(self.fold_static_size(&operands[1])?),
-                    ("sub", 2) => self
-                        .fold_static_size(&operands[0])?
-                        .checked_sub(self.fold_static_size(&operands[1])?),
-                    ("mul", 2) => self
-                        .fold_static_size(&operands[0])?
-                        .checked_mul(self.fold_static_size(&operands[1])?),
-                    ("mod", 2) => {
-                        let divisor = self.fold_static_size(&operands[1])?;
-                        if divisor == 0 {
-                            return None;
-                        }
-                        self.fold_static_size(&operands[0])?.checked_rem(divisor)
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
+        chelis_types::fold_static_int_expr(expr, |name| {
+            self.static_size_bindings.get(name).copied()
+        })
     }
 
     /// chelis#620: resolve an already-lowered `if` condition to a
@@ -11336,7 +11342,7 @@ impl LowerCtx {
     ///
     /// Takes `&mut self` because resolving a shape read lowers its operand
     /// (idempotent for the bound-`var` operands this walks; the same contract
-    /// as [`Self::dim_expr_from_shape_arg_with_source`]).
+    /// as [`Self::input_axis_source_from_shape_arg`]).
     fn fold_shape_derived_static_size(&mut self, expr: &Expr) -> Option<i64> {
         if let Some(n) = extract_int_for_dim(expr) {
             return Some(n);
@@ -11481,30 +11487,6 @@ impl LowerCtx {
         }
     }
 
-    fn extract_dim_expr_value(&self, expr: &Expr) -> Option<DimExpr> {
-        if let Some(value) = self.extract_usize_value(expr) {
-            return Some(DimExpr::Concrete(value));
-        }
-
-        match expr {
-            Expr::Atom(Atom::Name(name), _) => Some(self.resolve_dim_expr_symbol(name)),
-            Expr::List(list, _) => match (list.tag(), list.elements.get(2)) {
-                (Some(DeepTag::Var), Some(Expr::Atom(Atom::Name(name), _))) => {
-                    Some(self.resolve_dim_expr_symbol(name))
-                }
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
-    fn resolve_dim_expr_symbol(&self, name: &str) -> DimExpr {
-        self.dim_substitutions
-            .get(name)
-            .map(DimExpr::from)
-            .unwrap_or_else(|| DimExpr::Sym(name.to_string()))
-    }
-
     /// Recover a broadcast extent from a `shape(operand, axis)` size
     /// argument (issue #318). The operand is lowered (idempotently — a
     /// bound `var` returns its cached DAG node) and the extent is read
@@ -11540,14 +11522,14 @@ impl LowerCtx {
     /// distinguish a valid §4.7.2 Form-2 symbolic `expand` size (an in-scope
     /// tensor dim) from a sourceless Form-3 scalar-parameter size that the
     /// backend cannot materialize.
-    fn symbol_has_tensor_source(&self, name: &str) -> bool {
-        self.dag.nodes().iter().any(|node| {
-            matches!(node.op, RiscOp::Load { .. })
-                && node
-                    .output_type
-                    .dims
-                    .iter()
-                    .any(|dim| matches!(dim, DimInfo::Named(n, _) if n == name))
+    fn tensor_source_for_symbol(&self, name: &str) -> Option<(NodeId, usize, DimInfo)> {
+        self.dag.nodes().iter().find_map(|node| {
+            let axis = node
+                .output_type
+                .dims
+                .iter()
+                .position(|dim| matches!(dim, DimInfo::Named(n, _) if n == name))?;
+            Some((node.id, axis, node.output_type.dims[axis].clone()))
         })
     }
 
@@ -11558,12 +11540,15 @@ impl LowerCtx {
     /// DCE — otherwise a `shape(x, ...)`-only-referenced `x` is eliminated and
     /// the symbolic dim it declares loses its source (silent wrong shape in
     /// the backend).
-    fn dim_expr_from_shape_arg_with_source(&mut self, expr: &Expr) -> Option<(DimExpr, NodeId)> {
+    fn input_axis_source_from_shape_arg(
+        &mut self,
+        expr: &Expr,
+    ) -> Option<(NodeId, usize, DimInfo)> {
         let (operand, axis) = self.shape_app_operand_axis_resolved(expr)?;
         let operand_id = self.lower_expr(&operand).as_single_node()?;
         let operand_ty = self.dag.get(operand_id)?.output_type.clone();
-        let dim = operand_ty.dims.get(axis)?;
-        Some((DimExpr::from(dim), operand_id))
+        let dim = operand_ty.dims.get(axis)?.clone();
+        Some((operand_id, axis, dim))
     }
 
     /// chelis#369: like the free [`shape_app_operand_axis`], but also
@@ -11911,7 +11896,7 @@ impl LowerCtx {
         let elements: Vec<Expr> = collect_cons_chain(expr)?.into_iter().cloned().collect();
         let mut op_dims = Vec::with_capacity(elements.len());
         let mut ty_dims = Vec::with_capacity(elements.len());
-        let mut srcs = Vec::new();
+        let srcs = Vec::new();
         for (axis, elem) in elements.iter().enumerate() {
             if let Some(value) = extract_int_for_dim(elem) {
                 if value < 0 {
@@ -11928,12 +11913,16 @@ impl LowerCtx {
                 // back to an unresolved checker symbol.
                 op_dims.push(RtDim::Lit(value));
                 ty_dims.push(DimInfo::Lit(value));
-            } else if let Some((dim_expr, src)) = self.dim_expr_from_shape_arg_with_source(elem)
-                && let Some(dim) = Self::dim_info_from_dim_expr(&dim_expr)
+            } else if let Some((src, source_axis, dim)) =
+                self.input_axis_source_from_shape_arg(elem)
             {
-                op_dims.push(RtDim::from_dim_info(&dim));
+                let slot = inputs.len();
+                inputs.push(src);
+                op_dims.push(RtDim::InputAxis {
+                    tensor: slot,
+                    axis: RtAxis::Lit(i32::try_from(source_axis).ok()?),
+                });
                 ty_dims.push(dim);
-                srcs.push(src);
             } else if let Some(value) = self.fold_shape_derived_static_size(elem) {
                 // chelis#513 gap 3: static integer arithmetic over shape()
                 // reads of statically-sized axes (the school im2col target
@@ -13454,21 +13443,26 @@ impl LowerCtx {
             let mut dims = Vec::new();
             for (axis, dim) in out_ty.dims.iter().enumerate() {
                 dims.push(dim.clone());
-                expanded = self.dag.add_node(
-                    RiscOp::Expand {
-                        axis,
-                        size: DimExpr::from(dim),
+                let size = match dim {
+                    DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => RtDim::Lit(*value),
+                    DimInfo::Named(_, None) => RtDim::InputAxis {
+                        tensor: 1,
+                        axis: RtAxis::Lit(i32::try_from(axis).expect("tensor rank fits int32")),
                     },
-                    vec![expanded],
+                };
+                expanded = self.dag.add_node(
+                    RiscOp::Expand { axis, size },
+                    if matches!(dim, DimInfo::Named(_, None)) {
+                        vec![expanded, shape_source]
+                    } else {
+                        vec![expanded]
+                    },
                     TensorType {
                         dims: dims.clone(),
                         precision: out_ty.precision,
                     },
                     self.current_span_id.clone(),
                 );
-                // chelis#616: an unbound (possibly wildcard) `size` resolves
-                // from the branch value's actual shape at eval time.
-                self.dag.add_shape_dep(expanded, shape_source);
             }
             return expanded;
         }
@@ -13835,7 +13829,7 @@ mod tests {
         ctx.dag
     }
 
-    fn only_expand(dag: &Dag) -> (DimExpr, Vec<DimInfo>) {
+    fn only_expand(dag: &Dag) -> (RtDim, Vec<DimInfo>) {
         dag.nodes()
             .iter()
             .find_map(|n| match &n.op {
@@ -13875,8 +13869,11 @@ mod tests {
         let (size, dims) = only_expand(&dag);
         assert_eq!(
             size,
-            DimExpr::Concrete(2),
-            "shape-derived extent must recover x's axis-0 size 2, not the default 1; got {size:?}",
+            RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+            "shape-derived extent must retain x's axis-0 source structurally; got {size:?}",
         );
         assert_eq!(
             dims,
@@ -13957,8 +13954,11 @@ mod tests {
         let (size, dims) = only_expand(&dag);
         assert_eq!(
             size,
-            DimExpr::Concrete(2),
-            "shape-derived extent must recover 2 at the inserted axis, not the default 1; got {size:?}",
+            RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+            "shape-derived extent must retain x's inserted-axis source structurally; got {size:?}",
         );
         assert_eq!(
             dims,
@@ -13991,8 +13991,11 @@ mod tests {
         let (size, dims) = only_expand(&dag);
         assert_eq!(
             size,
-            DimExpr::Concrete(3),
-            "extent must track the named tensor x's axis-0 size 3; got {size:?}",
+            RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+            "extent must track the named tensor x's axis-0 source; got {size:?}",
         );
         assert_eq!(
             dims,
@@ -14019,7 +14022,7 @@ mod tests {
         let (size, dims) = only_expand(&dag);
         assert_eq!(
             size,
-            DimExpr::Concrete(2),
+            RtDim::Lit(2),
             "literal size 2 must still extract; got {size:?}"
         );
         assert_eq!(
@@ -14080,10 +14083,12 @@ mod tests {
         let (size, dims) = only_expand(&dag);
         assert_eq!(
             size,
-            DimExpr::Concrete(3),
-            "a `let len = shape(x, 0)`-bound extent must recover x's axis-0 \
-             size 3 through the `let` indirection, not the default 1 \
-             (chelis#369); got {size:?}",
+            RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+            "a `let len = shape(x, 0)`-bound extent must retain x's axis-0 \
+             source through the `let` indirection (chelis#369); got {size:?}",
         );
         assert_eq!(
             dims,
@@ -14126,9 +14131,12 @@ mod tests {
         let (size, dims) = only_expand(&dag);
         assert_eq!(
             size,
-            DimExpr::Concrete(5),
+            RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
             "a `let len = shape(x, 0)`-bound extent on `x: tensor[5]` must \
-             recover Concrete(5), not a hardcoded 3 or the default 1 \
+             retain the witnessed source, not a hardcoded value \
              (chelis#369 non-hardcoding); got {size:?}",
         );
         assert_eq!(
@@ -14169,7 +14177,7 @@ mod tests {
         // default, proving the static value is materialized).
         assert_eq!(
             size,
-            DimExpr::Concrete(7),
+            RtDim::Lit(7),
             "a `let`-bound static size must fold to its own extent 7, never \
              recover x's 3 or default to 1; got {size:?}",
         );
@@ -14208,7 +14216,7 @@ mod tests {
         let (size, _dims) = only_expand(&dag);
         assert_eq!(
             size,
-            DimExpr::Concrete(5),
+            RtDim::Lit(5),
             "a re-bound (shadowed) `len` must fold to the NEW static 5, never \
              recover the stale shape extent 3; got {size:?}",
         );

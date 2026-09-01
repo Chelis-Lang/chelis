@@ -52,13 +52,24 @@ impl TensorType {
 /// matters; the HIP shrink kernel, like C, reads only the per-axis `start`.
 pub const SHRINK_TO_END: usize = usize::MAX;
 
-/// A single movement-op (`Pad` / `Shrink` / `Stride`) bound value.
+/// A literal axis carried by a folded tensor-shape read.
+///
+/// Slice A of chelis#1277 admits only the normalized literal form. A
+/// node-valued axis is owned by chelis#1298 and will extend this closed carrier
+/// together with its own wire-schema version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RtAxis {
+    /// A normalized axis in `0..rank(tensor)`.
+    Lit(i32),
+}
+
+/// A single runtime-capable tensor extent.
 ///
 /// chelis#616: movement bounds were compile-time `usize` only, so a runtime
 /// (`shape()`-derived) `shrink`/`stride` bound was dropped to empty at lowering
 /// and the windowed axis degraded to a `Named("*")` wildcard. A `RtDim` can now
-/// be a compile-time literal, the full-axis sentinel, or a *runtime* value read
-/// from a rank-0 integer node.
+/// be a compile-time literal, the full-axis sentinel, a *runtime* value read
+/// from a rank-0 integer node, or a folded read from a tensor input's shape.
 ///
 /// `Node(i)` is an **absolute** index into the owning node's `inputs`, where
 /// `inputs[0]` is always the tensor operand and `inputs[1..]` are rank-0 integer
@@ -78,6 +89,11 @@ pub const SHRINK_TO_END: usize = usize::MAX;
 /// (verify rejects it in movement-bound positions): a movement bound is a
 /// scalar *value*, lowered to `Lit` or `Node`, while a reshape target may
 /// restate an axis the checker already named.
+///
+/// `InputAxis { tensor, axis }` is an **absolute** input-slot reference to a
+/// tensor whose shape supplies this extent. It is legal only in `Expand` and
+/// `Reshape`; Slice A produces only `RtAxis::Lit` axes. The tensor is a real
+/// shape-only value edge, so ordinary DCE and graph rebuilding preserve it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RtDim {
     /// A compile-time-constant bound.
@@ -88,6 +104,8 @@ pub enum RtDim {
     Node(usize),
     /// A symbolic dimension declared elsewhere; `Reshape` targets only.
     Sym(String),
+    /// A folded read of `inputs[tensor]` shape metadata.
+    InputAxis { tensor: usize, axis: RtAxis },
 }
 
 impl RtDim {
@@ -99,11 +117,15 @@ impl RtDim {
         }
     }
 
-    /// Whether this bound is only known at runtime (`Node` or `ToEnd`).
+    /// Whether this bound is only known at runtime (`Node`, `InputAxis`, or
+    /// `ToEnd`).
     /// `Sym` is not "runtime" in this sense: its extent is bound from an
     /// input shape before evaluation, not computed by a node.
     pub fn is_runtime(&self) -> bool {
-        matches!(self, RtDim::Node(_) | RtDim::ToEnd)
+        matches!(
+            self,
+            RtDim::Node(_) | RtDim::InputAxis { .. } | RtDim::ToEnd
+        )
     }
 
     /// The `inputs` slot index if this bound is node-valued.
@@ -536,12 +558,12 @@ pub enum SymbolicDimSource {
     /// `int name = inputs[slot]->shape[axis];` and the eval lane binds the
     /// value from the corresponding input before evaluation.
     Load { input_label: String, axis: usize },
-    /// chelis#616: declared at run time by the owning op itself — a
-    /// node-valued movement output axis (or a runtime reshape target) whose
-    /// extent is computed from rank-0 bound scalars. The C declaration is
-    /// emitted inline at the op (the scalars are computed tensors that do
-    /// not exist at prologue time); the eval lane resolves the extent from
-    /// actual values during evaluation and never pre-binds the symbol. When
+    /// chelis#616/#1277: declared at run time by the owning op itself — a
+    /// movement output axis whose extent is computed from a rank-0 bound
+    /// scalar or an explicit `InputAxis` metadata read. The C declaration is
+    /// emitted inline at the op (the source may be a computed tensor that
+    /// does not exist at prologue time); the eval lane resolves the extent
+    /// from actual values during evaluation and never pre-binds the symbol. When
     /// the same symbol also has a `Load` source (or an earlier `OpDeclared`
     /// declarer), this site is an equality-guard site: the C emitter aborts
     /// at run time if the op's extent disagrees with the declared value.
@@ -869,7 +891,7 @@ pub enum RiscOp {
     },
     Expand {
         axis: usize,
-        size: DimExpr,
+        size: RtDim,
     },
     /// Internal dense one-hot marker used by IR specialization.
     ///
@@ -1935,35 +1957,22 @@ fn op_declared_output_axes(dag: &Dag, node: &DagNode) -> Vec<(String, usize)> {
                 _ => None,
             })
             .collect(),
-        // chelis#616: an Expand whose inserted/set axis has an ANONYMOUS
-        // (wildcard) size and a shape-dep extent source (the Sum-adjoint
-        // restore over a runtime axis, the `lower_if` mask expansion — both
-        // constructed with a POSITIONALLY-ALIGNED dep, whose `shape[axis]`
-        // is the extent) declares that axis at run time from the dep's
-        // actual shape. A real-symbol size (a Form-3 broadcast like
-        // `expand(g, 1, h)`, whose shape-dep is the SOURCE tensor with a
-        // different axis layout) resolves through its Load-declared symbol
-        // and must NOT be op-declared — a positional read of its dep would
-        // compare the wrong axis.
-        RiscOp::Expand { axis, size } => {
-            fn size_is_anon(expr: &DimExpr) -> bool {
-                match expr {
-                    DimExpr::Sym(name) => name.is_empty() || name == "*",
-                    DimExpr::Concrete(_) => false,
-                    DimExpr::Mul(lhs, rhs) | DimExpr::Div(lhs, rhs) => {
-                        size_is_anon(lhs) || size_is_anon(rhs)
-                    }
-                }
+        // A node-valued Expand size computes the inserted/set axis at run
+        // time. InputAxis normally traces to a Load, but when its explicit
+        // tensor input is itself a runtime-shaped movement result, the
+        // Expand site declares the extent directly from that tensor's
+        // metadata instead of inventing an undeclared symbolic name.
+        RiscOp::Expand { axis, size } => match (node.output_type.dims.get(*axis), size) {
+            (Some(DimInfo::Named(symbol, None)), RtDim::Node(_)) if !is_anon(symbol) => {
+                vec![(symbol.clone(), *axis)]
             }
-            match node.output_type.dims.get(*axis) {
-                Some(DimInfo::Named(symbol, None))
-                    if !is_anon(symbol) && size_is_anon(size) && !node.shape_deps.is_empty() =>
-                {
-                    vec![(symbol.clone(), *axis)]
-                }
-                _ => Vec::new(),
+            (Some(DimInfo::Named(symbol, None)), RtDim::InputAxis { .. })
+                if !is_anon(symbol) && shape_source_for_axis(dag, node.id, *axis).is_none() =>
+            {
+                vec![(symbol.clone(), *axis)]
             }
-        }
+            _ => Vec::new(),
+        },
         _ => Vec::new(),
     }
 }
@@ -1988,22 +1997,11 @@ pub(crate) fn op_declarable_axes(dag: &Dag, node: &DagNode) -> Vec<usize> {
             .enumerate()
             .filter_map(|(axis, target)| matches!(target, RtDim::Node(_)).then_some(axis))
             .collect(),
-        RiscOp::Expand { axis, size } => {
-            fn size_is_anon(expr: &DimExpr) -> bool {
-                match expr {
-                    DimExpr::Sym(name) => name.is_empty() || name == "*",
-                    DimExpr::Concrete(_) => false,
-                    DimExpr::Mul(lhs, rhs) | DimExpr::Div(lhs, rhs) => {
-                        size_is_anon(lhs) || size_is_anon(rhs)
-                    }
-                }
-            }
-            if size_is_anon(size) && !node.shape_deps.is_empty() {
-                vec![*axis]
-            } else {
-                Vec::new()
-            }
-        }
+        RiscOp::Expand {
+            axis,
+            size: RtDim::Node(_) | RtDim::InputAxis { .. },
+        } => vec![*axis],
+        RiscOp::Expand { .. } => Vec::new(),
         _ => Vec::new(),
     }
 }
@@ -2109,9 +2107,8 @@ fn bind_symbol_from_any_load(
 }
 
 /// Symbolic dim names referenced by an op's internal fields rather than
-/// its output type: `Expand::size`, `Reshape::new_shape`, and
-/// `BlasMatmul::{batch_dims, m, n, k}`. These are the only `RiscOp`
-/// fields that carry `DimExpr` / unbound `DimInfo` payloads.
+/// its output type: `Reshape::new_shape` and
+/// `BlasMatmul::{batch_dims, m, n, k}`.
 fn op_internal_symbolic_dims(op: &RiscOp) -> Vec<String> {
     fn collect_dim_expr(expr: &DimExpr, out: &mut Vec<String>) {
         match expr {
@@ -2126,7 +2123,6 @@ fn op_internal_symbolic_dims(op: &RiscOp) -> Vec<String> {
 
     let mut out = Vec::new();
     match op {
-        RiscOp::Expand { size, .. } => collect_dim_expr(size, &mut out),
         RiscOp::Reshape { new_shape } => {
             for dim in new_shape {
                 if let RtDim::Sym(name) = dim {
@@ -2223,7 +2219,20 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
             let operand_rank = dag.get(operand)?.output_type.dims.len();
             let inserts = node.output_type.dims.len() == operand_rank + 1;
             if axis == *expand_axis {
-                return None;
+                return match &node.op {
+                    RiscOp::Expand {
+                        size:
+                            RtDim::InputAxis {
+                                tensor,
+                                axis: RtAxis::Lit(source_axis),
+                            },
+                        ..
+                    } => {
+                        let source_axis = usize::try_from(*source_axis).ok()?;
+                        shape_source_for_axis(dag, *node.inputs.get(*tensor)?, source_axis)
+                    }
+                    _ => None,
+                };
             }
             if inserts && axis > *expand_axis {
                 shape_source_for_axis(dag, operand, axis - 1)
@@ -2376,10 +2385,7 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &UnordMap<String, usize>) -> Resu
         let op = match &node.op {
             RiscOp::Expand { axis, size } => RiscOp::Expand {
                 axis: *axis,
-                // chelis#616: an op-declared size (e.g. the Sum adjoint's
-                // Expand over a runtime reshape extent) resolves during
-                // evaluation, not here.
-                size: size.bind_except(bindings, &op_declared)?,
+                size: size.clone(),
             },
             RiscOp::Reshape { new_shape } => RiscOp::Reshape {
                 new_shape: new_shape
@@ -2402,6 +2408,10 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &UnordMap<String, usize>) -> Resu
                         // resolved by the evaluator from `inputs`, not here.
                         RtDim::Lit(n) => Ok(RtDim::Lit(*n)),
                         RtDim::Node(i) => Ok(RtDim::Node(*i)),
+                        RtDim::InputAxis { tensor, axis } => Ok(RtDim::InputAxis {
+                            tensor: *tensor,
+                            axis: *axis,
+                        }),
                         RtDim::ToEnd => {
                             Err("reshape target dim cannot be a shrink-to-end sentinel".to_string())
                         }
@@ -2793,7 +2803,7 @@ mod tests {
     }
 
     #[test]
-    fn bind_symbolic_dims_rewrites_output_types_and_expand_sizes() {
+    fn bind_symbolic_dims_rewrites_output_types_and_preserves_input_axis_sizes() {
         let mut dag = Dag::new();
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
@@ -2804,12 +2814,24 @@ mod tests {
             },
             None,
         );
+        let h = dag.add_node(
+            RiscOp::Load { name: "h".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named("hidden".into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
         let y = dag.add_node(
             RiscOp::Expand {
                 axis: 1,
-                size: DimExpr::Sym("hidden".into()),
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
             },
-            vec![x],
+            vec![x, h],
             TensorType {
                 dims: vec![
                     DimInfo::Named("batch".into(), None),
@@ -2841,7 +2863,10 @@ mod tests {
             node.op,
             RiscOp::Expand {
                 axis: 1,
-                size: DimExpr::Concrete(8),
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
             }
         );
         assert_eq!(rebound.roots(), &[y]);
@@ -2945,10 +2970,7 @@ mod tests {
     // panic-don't-emit contract as output dims.
 
     #[test]
-    fn symbolic_occurrences_expand_size_sym_binds_from_load() {
-        // Positive: the op-internal `Expand::size` sym is declared by a
-        // Load, so the sweep stays quiet and the Load occurrence is the
-        // canonical (and only) source — no duplicate occurrences.
+    fn symbolic_occurrences_input_axis_uses_only_its_structural_load_source() {
         let mut dag = Dag::new();
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
@@ -2959,14 +2981,23 @@ mod tests {
             },
             None,
         );
+        let value = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            TensorType::scalar_f32(),
+            None,
+        );
         dag.add_node(
             RiscOp::Expand {
-                axis: 1,
-                size: DimExpr::Sym("n".into()),
+                axis: 0,
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
             },
-            vec![x],
+            vec![value, x],
             TensorType {
-                dims: vec![DimInfo::Lit(2), DimInfo::Lit(2)],
+                dims: vec![DimInfo::Named("n".into(), None)],
                 precision: Prim::F32,
             },
             None,
@@ -2985,12 +3016,62 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "internal compiler error: symbolic dim `d7` is referenced")]
-    fn symbolic_occurrences_panics_on_expand_size_sym_without_load() {
-        // Negative: concrete output dims everywhere, but the Expand's
-        // op-internal `size` references `d7`, which no Load declares.
-        // This is the chelis#345 mixed state; the sweep must panic
-        // instead of letting an undeclared identifier reach a backend.
+    fn symbolic_occurrences_input_axis_from_runtime_movement_is_op_declared() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let runtime_source = dag.add_node(
+            RiscOp::Shrink {
+                bounds: vec![(RtDim::Lit(1), RtDim::Lit(3))],
+            },
+            vec![x],
+            TensorType {
+                dims: vec![DimInfo::Named("m".into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let value = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            TensorType::scalar_f32(),
+            None,
+        );
+        let expanded = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
+            },
+            vec![value, runtime_source],
+            TensorType {
+                dims: vec![DimInfo::Named("k".into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+
+        let occurrences = symbolic_occurrences(&dag);
+        assert!(occurrences.contains(&SymbolicDimOccurrence {
+            name: "k".into(),
+            source: SymbolicDimSource::OpDeclared {
+                node: expanded,
+                axis: 0,
+            },
+        }));
+    }
+
+    #[test]
+    fn verifier_rejects_expand_size_sym_without_consulting_the_symbol_walk() {
         let mut dag = Dag::new();
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
@@ -3004,7 +3085,7 @@ mod tests {
         dag.add_node(
             RiscOp::Expand {
                 axis: 1,
-                size: DimExpr::Sym("d7".into()),
+                size: RtDim::Sym("d7".into()),
             },
             vec![x],
             TensorType {
@@ -3013,7 +3094,13 @@ mod tests {
             },
             None,
         );
-        let _ = symbolic_occurrences(&dag);
+        let errors = crate::verify::verify(&dag);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("expand") && error.contains("Sym")),
+            "{errors:?}"
+        );
     }
 
     #[test]
@@ -3107,7 +3194,7 @@ mod tests {
         dag.add_node(
             RiscOp::Expand {
                 axis: 1,
-                size: DimExpr::Concrete(3),
+                size: RtDim::Lit(3),
             },
             vec![x],
             TensorType {
@@ -3276,7 +3363,7 @@ mod tests {
             RiscOp::Permute { axes: vec![0] },
             RiscOp::Expand {
                 axis: 0,
-                size: DimExpr::Concrete(4),
+                size: RtDim::Lit(4),
             },
             RiscOp::OneHot { vocab: 8 },
             RiscOp::zero_pad(Prim::F32, vec![(RtDim::Lit(0), RtDim::Lit(0))]),

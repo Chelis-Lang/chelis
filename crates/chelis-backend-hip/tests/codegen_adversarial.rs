@@ -3,7 +3,7 @@
 //! These probe edge cases not covered by S1-S13 structural tests.
 
 use chelis_backend_hip::{HipCodegenResult, codegen_hip};
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{RejectionAuthorityKind, Stage, Unsupported, UnsupportedKind};
 
@@ -277,7 +277,7 @@ fn rt5_stride_op_multiplies_strides() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
     let _s = dag.add_node(
         RiscOp::Stride {
-            strides: vec![RtDim::Lit(2)],
+            strides: vec![chelis_ir::dag::RtDim::Lit(2)],
         },
         vec![x],
         vec_f32(3),
@@ -459,7 +459,7 @@ fn rt9_expand_sets_stride_zero() {
     let e = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![x],
         mat_f32(4, 3),
@@ -491,7 +491,7 @@ fn rt10_reshape_view_correct() {
     );
     let r = dag.add_node(
         RiscOp::Reshape {
-            new_shape: vec![RtDim::Lit(6)],
+            new_shape: vec![chelis_ir::dag::RtDim::Lit(6)],
         },
         vec![x],
         vec_f32(6),
@@ -798,7 +798,7 @@ fn rt15_matmul_specialization_respects_contiguity() {
     let ea = contiguous.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         tensor3_f32(2, 3, 4),
@@ -807,7 +807,7 @@ fn rt15_matmul_specialization_respects_contiguity() {
     let eb = contiguous.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::DimExpr::Concrete(2),
+            size: chelis_ir::dag::RtDim::Lit(2),
         },
         vec![b],
         tensor3_f32(2, 3, 4),
@@ -854,7 +854,7 @@ fn rt15_matmul_specialization_respects_contiguity() {
     let ea = fallback.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a_perm],
         tensor3_f32(2, 3, 4),
@@ -863,7 +863,7 @@ fn rt15_matmul_specialization_respects_contiguity() {
     let eb = fallback.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::DimExpr::Concrete(2),
+            size: chelis_ir::dag::RtDim::Lit(2),
         },
         vec![b],
         tensor3_f32(2, 3, 4),

@@ -299,12 +299,12 @@ closed the forward case; it is now locked across the build+run+eval
 oracle in
 `crates/chelis-cli/tests/rank_poly_tier3.rs::issue_383_vmap_two_stage_named_reduce_regression_matrix`
 (plus `variadic_reduce_builds_runs_and_evals`, whose `out_v` now uses the
-once-ICEing top-level binding). RESIDUAL (chelis#513 family, NOT #383):
-the grad+vmap form (`vmap(grad(f))(y)`) still ICEs the same guard in the
-C-build lane via the grad-backward `Expand { size: Sym(..) }` over a
-monomorphized concrete Load; its eval lane is correct (finite-difference
-validated). The positional (integer-axis) reduction and expand paths on
-concrete operands are unchanged.
+once-ICEing top-level binding). CLOSED by the chelis#1277 Slice A carrier
+work (chelis#592): the grad+vmap form (`vmap(grad(f))(y)`) now carries the
+grad-backward `Expand` extent as a typed runtime dimension rather than
+recovering it from a symbolic string. The exact acceptance row builds and
+executes C and agrees with Eval. The positional (integer-axis) reduction and
+expand paths on concrete operands are unchanged.
 
 ## Why this is needed
 

@@ -75,6 +75,7 @@ mod expr_transform;
 mod program;
 pub(crate) mod recursion;
 mod shape_honesty;
+mod static_int;
 mod static_value;
 mod validate;
 
@@ -100,6 +101,7 @@ use expr_pattern::*;
 use expr_record::*;
 use expr_transform::*;
 use program::*;
+pub use static_int::fold_static_int_expr;
 use static_value::*;
 use validate::*;
 

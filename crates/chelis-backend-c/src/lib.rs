@@ -701,7 +701,7 @@ mod tests {
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::DimExpr::Concrete(4),
+                size: chelis_ir::dag::RtDim::Lit(4),
             },
             vec![a],
             TensorType {
@@ -713,7 +713,7 @@ mod tests {
         let eb = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::DimExpr::Concrete(2),
+                size: chelis_ir::dag::RtDim::Lit(2),
             },
             vec![b],
             TensorType {
@@ -763,7 +763,7 @@ mod tests {
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::DimExpr::Concrete(4),
+                size: chelis_ir::dag::RtDim::Lit(4),
             },
             vec![a],
             TensorType {
@@ -775,7 +775,7 @@ mod tests {
         let eb = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::DimExpr::Concrete(2),
+                size: chelis_ir::dag::RtDim::Lit(2),
             },
             vec![b],
             TensorType {
@@ -1950,7 +1950,7 @@ int main(void) {{
         let expanded = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::DimExpr::Concrete(3),
+                size: chelis_ir::dag::RtDim::Lit(3),
             },
             vec![a],
             vec_f32(3),
@@ -2797,7 +2797,7 @@ int main(void) {
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::DimExpr::Concrete(4),
+                size: chelis_ir::dag::RtDim::Lit(4),
             },
             vec![a],
             TensorType {
@@ -2809,7 +2809,7 @@ int main(void) {
         let eb = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::DimExpr::Concrete(2),
+                size: chelis_ir::dag::RtDim::Lit(2),
             },
             vec![b],
             TensorType {
@@ -2901,7 +2901,7 @@ int main(void) {
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::DimExpr::Concrete(4),
+                size: chelis_ir::dag::RtDim::Lit(4),
             },
             vec![a],
             TensorType {
@@ -2913,7 +2913,7 @@ int main(void) {
         let eb = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::DimExpr::Concrete(2),
+                size: chelis_ir::dag::RtDim::Lit(2),
             },
             vec![b],
             TensorType {
@@ -2971,7 +2971,7 @@ int main(void) {
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::DimExpr::Concrete(4),
+                size: chelis_ir::dag::RtDim::Lit(4),
             },
             vec![a],
             TensorType {
@@ -2983,7 +2983,7 @@ int main(void) {
         let eb = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::DimExpr::Concrete(2),
+                size: chelis_ir::dag::RtDim::Lit(2),
             },
             vec![b],
             TensorType {

@@ -34,7 +34,7 @@ fn direct_sub_payload(version: Option<u32>) -> String {
 
 fn count_payload(axes: &[usize]) -> String {
     serde_json::json!({
-        "schema_version": 6,
+        "schema_version": 7,
         "nodes": [
             {
                 "id": 0,
@@ -93,14 +93,14 @@ fn assert_version_rejected_before_node_decode(payload: &str, expected: &str) {
 }
 
 #[test]
-fn explicit_exact_v6_round_trips_direct_sub_identity() {
-    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 6);
-    let payload = direct_sub_payload(Some(6));
-    let decoded = WireDag::from_validated_json(&payload).expect("exact v6 Sub must decode");
+fn current_exact_wire_round_trips_direct_sub_identity() {
+    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 7);
+    let payload = direct_sub_payload(Some(7));
+    let decoded = WireDag::from_validated_json(&payload).expect("exact current Sub must decode");
     assert!(matches!(decoded.nodes[2].op, WireRiscOp::Sub));
 
-    let encoded = serde_json::to_value(&decoded).expect("exact v6 Sub must re-encode");
-    assert_eq!(encoded["schema_version"], 6);
+    let encoded = serde_json::to_value(&decoded).expect("exact current Sub must re-encode");
+    assert_eq!(encoded["schema_version"], 7);
     assert_eq!(encoded["nodes"][2]["op"]["kind"], "sub");
 }
 
@@ -123,13 +123,13 @@ fn missing_older_and_future_versions_fail_before_node_decode() {
     };
 
     assert_version_rejected_before_node_decode(&unknown_op(None), "missing");
-    for version in 1..=5 {
+    for version in 1..=6 {
         assert_version_rejected_before_node_decode(
             &unknown_op(Some(version)),
             &version.to_string(),
         );
     }
-    assert_version_rejected_before_node_decode(&unknown_op(Some(7)), "7");
+    assert_version_rejected_before_node_decode(&unknown_op(Some(8)), "8");
 }
 
 #[test]
@@ -138,10 +138,10 @@ fn v5_payload_cannot_smuggle_the_v6_only_sub_identity() {
 }
 
 #[test]
-fn exact_v6_includes_the_canonical_count_form_owned_by_issue_1287() {
+fn current_wire_includes_the_canonical_count_form_owned_by_issue_1287() {
     let payload = count_payload(&[2, 0]);
-    let decoded = WireDag::from_validated_json(&payload).expect("canonical v6 Count must decode");
-    let encoded = serde_json::to_value(&decoded).expect("canonical v6 Count must re-encode");
+    let decoded = WireDag::from_validated_json(&payload).expect("canonical Count must decode");
+    let encoded = serde_json::to_value(&decoded).expect("canonical Count must re-encode");
     assert_eq!(encoded["nodes"][1]["op"]["kind"], "count");
     assert_eq!(encoded["nodes"][1]["op"]["axes"], serde_json::json!([2, 0]));
 
@@ -157,7 +157,7 @@ fn exact_v6_includes_the_canonical_count_form_owned_by_issue_1287() {
 }
 
 #[test]
-fn exact_v6_has_no_legacy_pad_migration_or_raw_fill_spelling() {
+fn current_wire_has_no_legacy_pad_migration_or_raw_fill_spelling() {
     let legacy = r#"{
         "schema_version": 4,
         "nodes": [{
@@ -170,9 +170,9 @@ fn exact_v6_has_no_legacy_pad_migration_or_raw_fill_spelling() {
     }"#;
     assert_version_rejected_before_node_decode(legacy, "4");
 
-    let raw_v6 = legacy.replace("\"schema_version\": 4", "\"schema_version\": 6");
-    let error = WireDag::from_validated_json(&raw_v6)
-        .expect_err("v6 Pad.fill must use an exact ScalarValue payload");
+    let raw_current = legacy.replace("\"schema_version\": 4", "\"schema_version\": 7");
+    let error = WireDag::from_validated_json(&raw_current)
+        .expect_err("current Pad.fill must use an exact ScalarValue payload");
     assert!(matches!(error, WireDagDecodeError::Parse(_)));
-    assert!(serde_json::from_str::<WireDag>(&raw_v6).is_err());
+    assert!(serde_json::from_str::<WireDag>(&raw_current).is_err());
 }

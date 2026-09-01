@@ -128,7 +128,6 @@ fn m7_chain_of_elementwise_does_not_collapse_to_one_kernel() {
 #[test]
 fn wsm1_matmul_at_tile_boundary_routes_to_mps() {
     // M=K=N exactly equals TILE — tests boundary handling of the tiled kernel.
-    use chelis_ir::dag::DimExpr;
 
     fn tensor3_f32(a: usize, b: usize, c: usize) -> TensorType {
         TensorType {
@@ -153,7 +152,7 @@ fn wsm1_matmul_at_tile_boundary_routes_to_mps() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(16),
+            size: chelis_ir::dag::RtDim::Lit(16),
         },
         vec![a],
         tensor3_f32(16, 16, 16),
@@ -162,7 +161,7 @@ fn wsm1_matmul_at_tile_boundary_routes_to_mps() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(16),
+            size: chelis_ir::dag::RtDim::Lit(16),
         },
         vec![b],
         tensor3_f32(16, 16, 16),

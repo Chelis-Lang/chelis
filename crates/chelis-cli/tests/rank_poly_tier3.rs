@@ -879,12 +879,9 @@ fn variadic_reduce_builds_runs_and_evals() {
 /// FD note: the forward reduce cases carry no gradient, so their oracle is
 /// build-vs-eval agreement on exact per-slice sums. The grad+vmap case below
 /// (`vmap(grad(vsq))`) is the finite-difference twin: grad of `sum(x^2)` is
-/// `2 x`, exactly the central-difference gradient. Its EVAL result matches
-/// `2 y`. Its C-BUILD lane still ICEs on the same symbolic-dim guard via the
-/// grad-backward `Expand { size: Sym("seq") }` over a monomorphized (concrete)
-/// Load — a distinct grad-build symbolic-dim gap (chelis#513 family, the
-/// grad+vmap interaction), NOT the forward #383 case this locks. Recorded as a
-/// residual; the eval lane is correct today.
+/// `2 x`, exactly the central-difference gradient. Chelis#1277 Slice A gives
+/// the grad-backward `Expand` a structural runtime extent, so both Eval and
+/// compiled C must now produce `2 y`; this is the chelis#592 acceptance row.
 #[test]
 fn issue_383_vmap_two_stage_named_reduce_regression_matrix() {
     // Forward lane: all three build + run + eval-agree. `y` is a top-level
@@ -919,29 +916,27 @@ fn issue_383_vmap_two_stage_named_reduce_regression_matrix() {
     }
     assert_eval_agrees_with_backend(forward, "issue_383_forward", &backend);
 
-    // FD twin (eval lane): grad of a two-stage `sum(x^2)` reduce, vmapped over
-    // the top-level binding, must equal `2 y` (== the central-difference
-    // gradient). Eval only — the C-build lane of this grad+vmap form has a
-    // separate symbolic-dim-grad residual (see doc comment).
+    // FD twin: grad of a two-stage `sum(x^2)` reduce, vmapped over the
+    // top-level binding, must equal `2 y` on compiled C and Eval.
     let grad_src = "def vsq(x: &tensor[seq, head, f32]) -> f32 = tensor_to_scalar(sum(sum(mul(x, x), head), seq))\n\
          y = to_tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]])\n\
          out_grad_two = vmap(grad(vsq))(y)\n";
-    let dir = tempdir().expect("tempdir");
-    let eval = eval_stdout(dir.path(), grad_src, "issue_383_grad");
-    let eval_tensors = parse_printed_tensors(&eval);
-    let (_, shape, data) = eval_tensors
+    let grad_backend = build_compile_run(grad_src, "issue_592_grad_vmap");
+    let grad_tensors = parse_printed_tensors(&grad_backend);
+    let (_, shape, data) = grad_tensors
         .iter()
         .find(|(n, _, _)| n == "out_grad_two")
-        .unwrap_or_else(|| panic!("eval missing `out_grad_two`: {eval}"));
-    assert_eq!(shape, &vec![2, 2, 2], "grad+vmap shape ({eval})");
+        .unwrap_or_else(|| panic!("compiled C missing `out_grad_two`: {grad_backend}"));
+    assert_eq!(shape, &vec![2, 2, 2], "grad+vmap shape ({grad_backend})");
     // 2 * y (central-difference gradient of sum(x^2)).
     let want = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
     for (i, (g, w)) in data.iter().zip(want.iter()).enumerate() {
         assert!(
             (g - w).abs() < 1e-4,
-            "grad+vmap elem {i}: eval {g} != 2*y {w} (finite-difference twin)"
+            "grad+vmap elem {i}: C {g} != 2*y {w} (finite-difference twin)"
         );
     }
+    assert_eval_agrees_with_backend(grad_src, "issue_592_grad_vmap", &grad_backend);
 }
 
 /// NEGATIVE: a duplicate axis name in the variadic list is rejected, never

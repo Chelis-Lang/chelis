@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_types::unsupported::Unsupported;
 use chelis_types::{
@@ -1811,7 +1811,10 @@ pub struct WireRecordPatternField {
 ///   or default-on-read spellings. Chelis#1306 added direct `Sub`, `MinElem`,
 ///   and `ExtremaAdjoint` identities plus matching fused-step identities to
 ///   that exact encoding.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 6;
+/// - `7`: chelis#1277 Slice A — `WireRiscOp::Expand::size` changed from a
+///   display string to `WireRtDim`, and `WireRtDim` gained the structural
+///   `InputAxis` metadata read.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 7;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -1934,7 +1937,8 @@ impl<'de> Deserialize<'de> for WireDag {
             .map_err(<D::Error as serde::de::Error>::custom)?;
 
         // The version gate above intentionally runs while nodes are still
-        // untyped JSON. Only an exact v6 payload may construct WireRiscOp.
+        // untyped JSON. Only an exact current-version payload may construct
+        // WireRiscOp.
         let fields: WireDagFields =
             serde_json::from_value(value).map_err(<D::Error as serde::de::Error>::custom)?;
         let dag = Self {
@@ -1986,6 +1990,107 @@ impl WireDag {
     /// Validate fields whose exact encoding depends on surrounding DAG shape.
     pub fn validate_wire_contract(&self) -> Result<(), WireDagContractError> {
         for (index, node) in self.nodes.iter().enumerate() {
+            match &node.op {
+                WireRiscOp::Expand { size, .. } => {
+                    validate_wire_rt_dim(&self.nodes, index, node, size, false, true, "Expand")?;
+                    let expected_inputs = match size {
+                        WireRtDim::Lit { .. } => 1,
+                        WireRtDim::Node { input: 1 } | WireRtDim::InputAxis { tensor: 1, .. } => 2,
+                        WireRtDim::Node { input } | WireRtDim::InputAxis { tensor: input, .. } => {
+                            return Err(WireDagContractError::new(format!(
+                                "WireDag Expand node {} size must reference absolute input slot 1, found {input}",
+                                node.id
+                            )));
+                        }
+                        WireRtDim::ToEnd | WireRtDim::Sym { .. } => {
+                            unreachable!("owner validation rejects forbidden Expand carriers")
+                        }
+                    };
+                    if node.inputs.len() != expected_inputs {
+                        return Err(WireDagContractError::new(format!(
+                            "WireDag Expand node {} has {} inputs; size requires {expected_inputs}",
+                            node.id,
+                            node.inputs.len()
+                        )));
+                    }
+                }
+                WireRiscOp::Reshape { new_shape } => {
+                    for dim in new_shape {
+                        validate_wire_rt_dim(&self.nodes, index, node, dim, true, true, "Reshape")?;
+                    }
+                    validate_exact_wire_rt_dim_inputs(node, new_shape, "Reshape")?;
+                }
+                WireRiscOp::Pad { padding, .. } => {
+                    for (start, end) in padding {
+                        validate_wire_rt_dim(
+                            &self.nodes,
+                            index,
+                            node,
+                            start,
+                            false,
+                            false,
+                            "Pad start",
+                        )?;
+                        validate_wire_rt_dim(
+                            &self.nodes,
+                            index,
+                            node,
+                            end,
+                            false,
+                            false,
+                            "Pad end",
+                        )?;
+                    }
+                    validate_exact_wire_rt_dim_inputs(
+                        node,
+                        padding.iter().flat_map(|(start, end)| [start, end]),
+                        "Pad",
+                    )?;
+                }
+                WireRiscOp::Shrink { bounds } => {
+                    for (start, end) in bounds {
+                        validate_wire_rt_dim(
+                            &self.nodes,
+                            index,
+                            node,
+                            start,
+                            false,
+                            false,
+                            "Shrink start",
+                        )?;
+                        validate_wire_rt_dim(
+                            &self.nodes,
+                            index,
+                            node,
+                            end,
+                            false,
+                            false,
+                            "Shrink end",
+                        )?;
+                    }
+                    validate_exact_wire_rt_dim_inputs(
+                        node,
+                        bounds.iter().flat_map(|(start, end)| [start, end]),
+                        "Shrink",
+                    )?;
+                }
+                WireRiscOp::Stride { strides } => {
+                    for stride in strides {
+                        validate_wire_rt_dim(
+                            &self.nodes,
+                            index,
+                            node,
+                            stride,
+                            false,
+                            false,
+                            "Stride",
+                        )?;
+                    }
+                    validate_exact_wire_rt_dim_inputs(node, strides, "Stride")?;
+                }
+                _ => {}
+            }
+
             if let WireRiscOp::Pad { fill, .. } = &node.op {
                 let output_prim =
                     Prim::parse_name(&node.output_type.precision).ok_or_else(|| {
@@ -2115,6 +2220,109 @@ impl WireDag {
             .map_err(WireDagDecodeError::Contract)?;
         Ok(dag)
     }
+}
+
+fn validate_wire_rt_dim(
+    nodes: &[WireDagNode],
+    owner_index: usize,
+    owner: &WireDagNode,
+    dim: &WireRtDim,
+    allow_sym: bool,
+    allow_input_axis: bool,
+    label: &str,
+) -> Result<(), WireDagContractError> {
+    let resolve_slot = |slot: usize| -> Result<&WireDagNode, WireDagContractError> {
+        if slot == 0 || slot >= owner.inputs.len() {
+            return Err(WireDagContractError::new(format!(
+                "WireDag {label} node {} references invalid input slot {slot} (inputs len {})",
+                owner.id,
+                owner.inputs.len()
+            )));
+        }
+        let source_id = owner.inputs[slot];
+        nodes[..owner_index]
+            .iter()
+            .find(|candidate| candidate.id == source_id)
+            .ok_or_else(|| {
+                WireDagContractError::new(format!(
+                    "WireDag {label} node {} input slot {slot} does not resolve to an earlier node",
+                    owner.id
+                ))
+            })
+    };
+
+    match dim {
+        WireRtDim::Lit { .. } => Ok(()),
+        WireRtDim::ToEnd if label == "Shrink end" => Ok(()),
+        WireRtDim::ToEnd => Err(WireDagContractError::new(format!(
+            "WireDag {label} node {} forbids the to_end carrier",
+            owner.id
+        ))),
+        WireRtDim::Sym { .. } if allow_sym => Ok(()),
+        WireRtDim::Sym { .. } => Err(WireDagContractError::new(format!(
+            "WireDag {label} node {} forbids the sym carrier",
+            owner.id
+        ))),
+        WireRtDim::Node { input } => {
+            let source = resolve_slot(*input)?;
+            if !source.output_type.dims.is_empty() || source.output_type.precision != "int64" {
+                return Err(WireDagContractError::new(format!(
+                    "WireDag {label} node {} input slot {input} must be an exact rank-0 int64 extent scalar",
+                    owner.id
+                )));
+            }
+            Ok(())
+        }
+        WireRtDim::InputAxis { .. } if !allow_input_axis => {
+            Err(WireDagContractError::new(format!(
+                "WireDag {label} node {} forbids the input_axis carrier",
+                owner.id
+            )))
+        }
+        WireRtDim::InputAxis {
+            tensor,
+            axis: WireRtAxis::Lit { value },
+        } => {
+            let source = resolve_slot(*tensor)?;
+            let axis = usize::try_from(*value).map_err(|_| {
+                WireDagContractError::new(format!(
+                    "WireDag {label} node {} InputAxis value {value} is not normalized",
+                    owner.id
+                ))
+            })?;
+            if axis >= source.output_type.dims.len() {
+                return Err(WireDagContractError::new(format!(
+                    "WireDag {label} node {} InputAxis {axis} is out of range for source rank {}",
+                    owner.id,
+                    source.output_type.dims.len()
+                )));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_exact_wire_rt_dim_inputs<'a>(
+    owner: &WireDagNode,
+    dims: impl IntoIterator<Item = &'a WireRtDim>,
+    label: &str,
+) -> Result<(), WireDagContractError> {
+    let owned = dims
+        .into_iter()
+        .filter_map(|dim| match dim {
+            WireRtDim::Node { input } | WireRtDim::InputAxis { tensor: input, .. } => Some(*input),
+            WireRtDim::Lit { .. } | WireRtDim::ToEnd | WireRtDim::Sym { .. } => None,
+        })
+        .collect::<BTreeSet<_>>();
+    for input in 1..owner.inputs.len() {
+        if !owned.contains(&input) {
+            return Err(WireDagContractError::new(format!(
+                "WireDag {label} node {} has unowned runtime extent input slot {input}",
+                owner.id
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn wire_dim_info_equal(left: &WireDimInfo, right: &WireDimInfo) -> bool {
@@ -2271,6 +2479,13 @@ pub enum WireRtDim {
     ToEnd,
     Node { input: usize },
     Sym { name: String },
+    InputAxis { tensor: usize, axis: WireRtAxis },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "axis", rename_all = "snake_case")]
+pub enum WireRtAxis {
+    Lit { value: i32 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2366,7 +2581,7 @@ pub enum WireRiscOp {
     },
     Expand {
         axis: usize,
-        size: String,
+        size: WireRtDim,
     },
     OneHot {
         vocab: usize,
@@ -2567,9 +2782,9 @@ mod tests {
     }
 
     #[test]
-    fn wire_dag_v6_rejects_raw_pad_fill() {
-        let current_with_legacy_fill = r#"{
-            "schema_version": 6,
+    fn current_wire_dag_rejects_raw_pad_fill() {
+        let current_with_legacy_fill = serde_json::json!({
+            "schema_version": WIRE_DAG_SCHEMA_VERSION,
             "nodes": [{
                 "id": 0,
                 "op": {"kind": "pad", "padding": [], "fill": 1.5},
@@ -2577,13 +2792,14 @@ mod tests {
                 "output_type": {"dims": [], "precision": "f32"}
             }],
             "roots": [0]
-        }"#;
+        })
+        .to_string();
         assert!(
             matches!(
-                WireDag::from_validated_json(current_with_legacy_fill),
+                WireDag::from_validated_json(&current_with_legacy_fill),
                 Err(WireDagDecodeError::Parse(_))
             ),
-            "v6 must not retain a raw-number alternate Pad.fill spelling"
+            "the current schema must not retain a raw-number alternate Pad.fill spelling"
         );
     }
 

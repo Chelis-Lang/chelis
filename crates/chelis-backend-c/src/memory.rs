@@ -388,6 +388,7 @@ fn dim_size(dim: &DimInfo) -> DimExpr {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chelis_ir::dag::RtDim;
 
     fn vec_f32(n: usize) -> TensorType {
         TensorType {
@@ -506,7 +507,7 @@ mod tests {
         let v = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: DimExpr::Concrete(4),
+                size: RtDim::Lit(4),
             },
             vec![x],
             TensorType {
@@ -544,7 +545,7 @@ mod tests {
         let v = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: DimExpr::Concrete(4),
+                size: RtDim::Lit(4),
             },
             vec![a],
             TensorType {
@@ -575,7 +576,7 @@ mod tests {
         let v = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: DimExpr::Concrete(4),
+                size: RtDim::Lit(4),
             },
             vec![a],
             TensorType {

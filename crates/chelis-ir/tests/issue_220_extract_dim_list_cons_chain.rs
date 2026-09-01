@@ -35,7 +35,7 @@
 use chelis_unord::UnordMap;
 
 use chelis_deep::Expr;
-use chelis_ir::dag::{DimInfo, RiscOp, RtDim, TensorType};
+use chelis_ir::dag::{DimInfo, RiscOp, TensorType};
 use chelis_ir::lower::lower_subexpr_program;
 use chelis_types::types::Prim;
 
@@ -133,7 +133,7 @@ fn reshape_cons_chain_extracts_integer_dim_list() {
     };
     assert_eq!(
         new_shape,
-        &vec![RtDim::Lit(2), RtDim::Lit(3)],
+        &vec![chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(3)],
         "reshape new_shape did not match the integer Cons-chain head \
          literals; got {new_shape:?}",
     );

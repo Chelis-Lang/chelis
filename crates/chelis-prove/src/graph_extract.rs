@@ -514,7 +514,10 @@ const _: () = {
     // Chelis#1306 adds direct `Sub`, `MinElem`, and `ExtremaAdjoint`
     // identities plus their fused-step identities to v6. They carry no
     // embedded float field and are covered by the f64-free operation group.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 6);
+    // Moved to `7` for chelis#1277 Slice A: Expand's display-string size
+    // became the existing typed WireRtDim carrier, which gained InputAxis.
+    // Both remain in the f64-free operation group above.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 7);
 };
 
 #[cfg(test)]

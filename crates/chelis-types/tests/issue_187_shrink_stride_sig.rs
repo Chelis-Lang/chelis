@@ -815,25 +815,21 @@ def f(x: tensor[2, f32]) -> tensor[3, 2, f32] = expand(&x, cast(0, int32), cast(
     }
 }
 
-/// R3-sibling-sweep: cast-wrapped expand size of 0 must be rejected at
-/// infer (was bypassing the positive-size check).
+/// chelis#1277 Slice A: zero is a valid extent, including through the
+/// canonical cast-aware static folder.
 #[test]
-fn red_team_214_r3_expand_cast_wrapped_zero_size_is_error() {
+fn red_team_214_r3_expand_cast_wrapped_zero_size_typechecks() {
     let src = r#"
 def f(x: tensor[2, f32]) -> tensor[0, 2, f32] = expand(&x, cast(0, int32), cast(0, int64))
 "#;
     let deep = surf_to_deep(src);
-    let res = check_ir_program(&deep);
-    let rep = res.expect_err("expected check to fail on cast-wrapped zero expand size");
-    assert!(
-        rep.errors
-            .iter()
-            .any(|e| e.message.to_lowercase().contains("expand")
-                && (e.message.contains("positive") || e.message.contains("size"))),
-        "expected an expand positive-size error, got {:?}",
-        rep.errors
-            .iter()
-            .map(|e| e.message.clone())
-            .collect::<Vec<_>>()
-    );
+    if let Err(rep) = check_ir_program(&deep) {
+        panic!(
+            "cast-wrapped zero expand size must check cleanly, got {:?}",
+            rep.errors
+                .iter()
+                .map(|error| error.message.clone())
+                .collect::<Vec<_>>()
+        );
+    }
 }

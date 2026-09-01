@@ -398,7 +398,13 @@ pub(super) fn infer_let(
                 // (BLOCKER B) — does not inherit the earlier shape-sourced entry.
                 match classify_expand_size(rhs_expr, &let_env) {
                     SizeClass::Static => {
-                        let_env.mark_size_provenance(name, crate::env::SizeProvenance::Static);
+                        if let Some(value) =
+                            fold_static_int_expr(rhs_expr, |bound| let_env.static_size_value(bound))
+                        {
+                            let_env.mark_static_size_value(name, value);
+                        } else {
+                            let_env.mark_size_provenance(name, crate::env::SizeProvenance::Static);
+                        }
                     }
                     SizeClass::ShapeSourced => {
                         let_env

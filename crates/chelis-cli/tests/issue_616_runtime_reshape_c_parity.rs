@@ -4,7 +4,7 @@
 //! `m` computed from `shape()` arithmetic at run time.
 //!
 //! The reshape target `m` lowers to a rank-0 integer scalar node the op
-//! references as `RtDim::Node` (exactly like a movement bound); the C lane
+//! references as `chelis_ir::dag::RtDim::Node` (exactly like a movement bound); the C lane
 //! declares `int m = <scalar>` at the reshape behind negativity + numel
 //! abort guards, and the eval lane resolves the scalar and enforces the
 //! numel invariant with a clean error. One compiled binary handles every

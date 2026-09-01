@@ -71,11 +71,11 @@ fn assert_contract_rejects_encode_and_decode(dag: &WireDag, expected: &str) {
 }
 
 #[test]
-fn wire_dag_v6_count_round_trips_canonical_axes() {
-    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 6);
+fn current_wire_dag_count_round_trips_canonical_axes() {
+    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 7);
     let dag = count_dag(vec![2, 0]);
     let json = serde_json::to_string(&dag).expect("canonical Count must encode");
-    assert!(json.contains(r#""schema_version":6"#));
+    assert!(json.contains(r#""schema_version":7"#));
     assert!(json.contains(r#""kind":"count","axes":[2,0]"#));
 
     let decoded = WireDag::from_validated_json(&json).expect("canonical Count must decode");
@@ -86,7 +86,7 @@ fn wire_dag_v6_count_round_trips_canonical_axes() {
 }
 
 #[test]
-fn wire_dag_v6_rejects_missing_older_and_future_versions_before_op_decode() {
+fn current_wire_dag_rejects_missing_older_and_future_versions_before_op_decode() {
     let cases = [
         (
             r#"{"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
@@ -97,8 +97,8 @@ fn wire_dag_v6_rejects_missing_older_and_future_versions_before_op_decode() {
             Some(5),
         ),
         (
-            r#"{"schema_version":7,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
-            Some(7),
+            r#"{"schema_version":8,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
+            Some(8),
         ),
     ];
 
@@ -109,7 +109,7 @@ fn wire_dag_v6_rejects_missing_older_and_future_versions_before_op_decode() {
                     supported,
                 })),
                 None,
-            ) => assert_eq!(supported, 6),
+            ) => assert_eq!(supported, 7),
             (
                 Err(WireDagDecodeError::Schema(WireDagSchemaError::UnsupportedSchemaVersion {
                     found: actual,
@@ -118,7 +118,7 @@ fn wire_dag_v6_rejects_missing_older_and_future_versions_before_op_decode() {
                 Some(expected),
             ) => {
                 assert_eq!(actual, expected);
-                assert_eq!(supported, 6);
+                assert_eq!(supported, 7);
             }
             (other, _) => panic!("schema mismatch must win before op decode, got {other:?}"),
         }
@@ -131,7 +131,7 @@ fn wire_dag_v6_rejects_missing_older_and_future_versions_before_op_decode() {
         );
     }
 
-    let current_unknown = r#"{"schema_version":6,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#;
+    let current_unknown = r#"{"schema_version":7,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#;
     assert!(matches!(
         WireDag::from_validated_json(current_unknown),
         Err(WireDagDecodeError::Parse(_))
@@ -139,8 +139,8 @@ fn wire_dag_v6_rejects_missing_older_and_future_versions_before_op_decode() {
 }
 
 #[test]
-fn wire_dag_v6_rejects_every_older_explicit_version_and_legacy_pad() {
-    for version in 1..=5 {
+fn current_wire_dag_rejects_every_older_explicit_version_and_legacy_pad() {
+    for version in 1..=6 {
         let mut dag = count_dag(vec![2, 0]);
         dag.schema_version = version;
         assert!(
@@ -154,7 +154,7 @@ fn wire_dag_v6_rejects_every_older_explicit_version_and_legacy_pad() {
             Err(WireDagDecodeError::Schema(
                 WireDagSchemaError::UnsupportedSchemaVersion {
                     found,
-                    supported: 6
+                    supported: 7
                 }
             )) if found == version
         ));
@@ -175,14 +175,14 @@ fn wire_dag_v6_rejects_every_older_explicit_version_and_legacy_pad() {
         Err(WireDagDecodeError::Schema(
             WireDagSchemaError::UnsupportedSchemaVersion {
                 found: 4,
-                supported: 6
+                supported: 7
             }
         ))
     ));
 }
 
 #[test]
-fn wire_dag_v6_rejects_noncanonical_count_axes_on_encode_and_decode() {
+fn current_wire_dag_rejects_noncanonical_count_axes_on_encode_and_decode() {
     for axes in [vec![], vec![0, 2], vec![2, 2], vec![3]] {
         let dag = count_dag(axes.clone());
         let encoded = serde_json::to_string(&dag);
@@ -192,7 +192,7 @@ fn wire_dag_v6_rejects_noncanonical_count_axes_on_encode_and_decode() {
         );
 
         let value = serde_json::json!({
-            "schema_version": 6,
+            "schema_version": 7,
             "nodes": [
                 {
                     "id": 0,
@@ -227,7 +227,7 @@ fn wire_dag_v6_rejects_noncanonical_count_axes_on_encode_and_decode() {
 }
 
 #[test]
-fn wire_dag_v6_rejects_count_semantic_dtype_and_shape_corruption() {
+fn current_wire_dag_rejects_count_semantic_dtype_and_shape_corruption() {
     let mut wrong_input_dtype = count_dag(vec![2, 0]);
     wrong_input_dtype.nodes[0].output_type.precision = "f32".to_string();
     assert_contract_rejects_encode_and_decode(
@@ -251,7 +251,7 @@ fn wire_dag_v6_rejects_count_semantic_dtype_and_shape_corruption() {
 }
 
 #[test]
-fn wire_dag_v6_rejects_pad_fill_dtype_mismatch_on_encode_and_decode() {
+fn current_wire_dag_rejects_pad_fill_dtype_mismatch_on_encode_and_decode() {
     let fill = scalar_from_i64("wire_pad_mismatch", Prim::Int64, 7).expect("exact int64 Pad fill");
     let dag = WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
@@ -299,7 +299,7 @@ fn wire_dag_v6_rejects_pad_fill_dtype_mismatch_on_encode_and_decode() {
 }
 
 #[test]
-fn wire_dag_v6_rejects_count_without_one_resolvable_input() {
+fn current_wire_dag_rejects_count_without_one_resolvable_input() {
     for inputs in [vec![], vec![0, 0], vec![99]] {
         let mut dag = count_dag(vec![2, 0]);
         dag.nodes[1].inputs = inputs;
@@ -308,13 +308,13 @@ fn wire_dag_v6_rejects_count_without_one_resolvable_input() {
 }
 
 #[test]
-fn wire_dag_v6_requires_accumulator_fields_in_current_ops() {
+fn current_wire_dag_requires_accumulator_fields_in_current_ops() {
     for op in [
         r#"{"kind":"sum","axis":0}"#,
         r#"{"kind":"blas_matmul","batch_dims":[],"m":{"kind":"concrete","value":1},"n":{"kind":"concrete","value":1},"k":{"kind":"concrete","value":1}}"#,
     ] {
         let json = format!(
-            r#"{{"schema_version":6,"nodes":[{{"id":0,"op":{op},"inputs":[],"output_type":{{"dims":[],"precision":"f32"}}}}],"roots":[0]}}"#
+            r#"{{"schema_version":7,"nodes":[{{"id":0,"op":{op},"inputs":[],"output_type":{{"dims":[],"precision":"f32"}}}}],"roots":[0]}}"#
         );
         assert!(matches!(
             WireDag::from_validated_json(&json),
@@ -327,8 +327,9 @@ fn wire_dag_v6_requires_accumulator_fields_in_current_ops() {
         r#"{"kind":"blas_matmul","batch_dims":[],"m":{"kind":"concrete","value":1},"n":{"kind":"concrete","value":1},"k":{"kind":"concrete","value":1},"accumulator":"f32"}"#,
     ] {
         let json = format!(
-            r#"{{"schema_version":6,"nodes":[{{"id":0,"op":{op},"inputs":[],"output_type":{{"dims":[],"precision":"f32"}}}}],"roots":[0]}}"#
+            r#"{{"schema_version":7,"nodes":[{{"id":0,"op":{op},"inputs":[],"output_type":{{"dims":[],"precision":"f32"}}}}],"roots":[0]}}"#
         );
-        WireDag::from_validated_json(&json).expect("explicit v6 accumulator fields must decode");
+        WireDag::from_validated_json(&json)
+            .expect("explicit current-version accumulator fields must decode");
     }
 }

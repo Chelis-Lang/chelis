@@ -27,7 +27,7 @@ class CommandManifestTests(unittest.TestCase):
                 "exact typed scalar and tensor kernels",
                 "direct IR lowering, evaluation, and AD",
                 "direct constant folding",
-                "exact WireDag v6 decoder contract",
+                "exact current WireDag decoder contract",
                 "wire and target disposition contracts",
                 "compiled C exact-value and trap behavior",
                 "HIP structural contracts",
@@ -60,7 +60,7 @@ class CommandManifestTests(unittest.TestCase):
         leg = next(
             leg
             for leg in oracle.oracle_legs(sys.executable)
-            if leg.name == "exact WireDag v6 decoder contract"
+            if leg.name == "exact current WireDag decoder contract"
         )
         self.assertIn("--test", leg.argv)
         self.assertIn("wire_dag_v6_direct_arithmetic", leg.argv)
@@ -171,10 +171,10 @@ class SourceContractMutationTests(unittest.TestCase):
     def test_wire_identity_mutation_fails(self) -> None:
         self.mutate(
             "crates/chelis-compiler-api/src/schema.rs",
-            "pub const WIRE_DAG_SCHEMA_VERSION: u32 = 6;",
+            "pub const WIRE_DAG_SCHEMA_VERSION: u32 = 7;",
             "pub const WIRE_DAG_SCHEMA_VERSION: u32 = 5;",
         )
-        with self.assertRaisesRegex(oracle.OracleFailure, "WireDag v6 identities"):
+        with self.assertRaisesRegex(oracle.OracleFailure, "current WireDag identities"):
             oracle.validate_source_contracts(self.repo)
 
     def test_surface_surrogate_narrative_mutation_fails(self) -> None:

@@ -407,7 +407,6 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             | RiscOp::Argmax { .. }
             | RiscOp::Argmin { .. }
             | RiscOp::Permute { .. }
-            | RiscOp::Expand { .. }
             | RiscOp::OneHot { .. }
             | RiscOp::Shape { .. }
             | RiscOp::Cast { .. }
@@ -445,7 +444,8 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             RiscOp::Pad { .. }
             | RiscOp::Shrink { .. }
             | RiscOp::Stride { .. }
-            | RiscOp::Reshape { .. } => {
+            | RiscOp::Reshape { .. }
+            | RiscOp::Expand { .. } => {
                 if arity < 1 {
                     errors.push(format!(
                         "movement op at node {} has {} inputs (expected at least 1)",
@@ -500,9 +500,9 @@ pub fn verify(dag: &Dag) -> Vec<String> {
         }
 
         // Shape query (chelis#513/#558): the read axis must be in range
-        // of the input rank, and the output must be a rank-0 integer
-        // scalar (the runtime extent). A non-scalar or non-integer output
-        // would misdeclare the value node's type to the backend.
+        // of the input rank, and the output must be a rank-0 exact int64
+        // scalar (the runtime extent). A different output type would
+        // misdeclare the value node to the backend or narrow its carrier.
         if let RiscOp::Shape { axis } = &node.op {
             if arity == 1
                 && let Some(input) = dag.get(node.inputs[0])
@@ -522,9 +522,9 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                     node.output_type.dims.len()
                 ));
             }
-            if !node.output_type.precision.is_integer() {
+            if node.output_type.precision != Prim::Int64 {
                 errors.push(format!(
-                    "shape read at node {} must produce an integer scalar, got precision `{}`",
+                    "shape read at node {} must produce an exact int64 scalar, got precision `{}`",
                     node.id.0,
                     node.output_type.precision.name()
                 ));
@@ -814,6 +814,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                     ));
                 }
             }
+            check_exact_bound_inputs(node, new_shape, "reshape", &mut errors);
         }
 
         // C8: Cast validation — dims must not change, output precision must match target.
@@ -861,7 +862,38 @@ pub fn verify(dag: &Dag) -> Vec<String> {
         // C10: Movement op shape validation.
         match &node.op {
             RiscOp::Expand { axis, size } => {
-                if arity == 1 {
+                let expected_arity = match size {
+                    RtDim::Lit(_) => 1,
+                    RtDim::Node(1) | RtDim::InputAxis { tensor: 1, .. } => 2,
+                    RtDim::Node(_) | RtDim::InputAxis { .. } => {
+                        errors.push(format!(
+                            "expand at node {}: runtime size must reference absolute input slot 1, got {size:?}",
+                            node.id.0
+                        ));
+                        arity
+                    }
+                    RtDim::ToEnd | RtDim::Sym(_) => {
+                        errors.push(format!(
+                            "expand at node {}: size carrier {size:?} is forbidden; expected Lit, Node, or InputAxis",
+                            node.id.0
+                        ));
+                        arity
+                    }
+                };
+                if arity != expected_arity {
+                    errors.push(format!(
+                        "expand at node {} has {} inputs (expected {} for {size:?})",
+                        node.id.0, arity, expected_arity
+                    ));
+                }
+                check_bound_source(
+                    dag,
+                    node,
+                    size,
+                    &format!("Expand at node {}", node.id.0),
+                    &mut errors,
+                );
+                if arity >= 1 {
                     let input = dag.get(node.inputs[0]).unwrap();
                     let input_rank = input.output_type.dims.len();
                     let output_rank = node.output_type.dims.len();
@@ -870,9 +902,6 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                             "expand at node {}: axis {} > input rank {}",
                             node.id.0, axis, input_rank
                         ));
-                    }
-                    if matches!(size.as_concrete(), Some(0)) {
-                        errors.push(format!("expand at node {}: size must be > 0", node.id.0));
                     }
                     if node.output_type.precision != input.output_type.precision {
                         errors.push(format!(
@@ -885,11 +914,14 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                             if out_i == *axis {
                                 if let Some(out_size) =
                                     dim_known_size(&node.output_type.dims[out_i])
-                                    && size.as_concrete().is_some_and(|size| out_size != size)
+                                    && size.as_lit().is_some_and(|size| out_size != size)
                                 {
                                     errors.push(format!(
                                         "expand at node {}: inserted axis {} has size {}, expected {}",
-                                        node.id.0, axis, out_size, size
+                                        node.id.0,
+                                        axis,
+                                        out_size,
+                                        size.as_lit().unwrap()
                                     ));
                                 }
                             } else {
@@ -921,11 +953,14 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                                 ));
                             }
                             if let Some(out_size) = dim_known_size(&node.output_type.dims[*axis])
-                                && size.as_concrete().is_some_and(|size| out_size != size)
+                                && size.as_lit().is_some_and(|size| out_size != size)
                             {
                                 errors.push(format!(
                                     "expand at node {}: output axis {} has size {}, expected {}",
-                                    node.id.0, axis, out_size, size
+                                    node.id.0,
+                                    axis,
+                                    out_size,
+                                    size.as_lit().unwrap()
                                 ));
                             }
                             for out_i in 0..output_rank {
@@ -1039,7 +1074,21 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                                 node.id.0, axis
                             ));
                         }
+                        if matches!(before, RtDim::InputAxis { .. })
+                            || matches!(after, RtDim::InputAxis { .. })
+                        {
+                            errors.push(format!(
+                                "Pad at node {} axis {} cannot own RtDim::InputAxis; folded shape reads are legal only for Expand and Reshape",
+                                node.id.0, axis
+                            ));
+                        }
                     }
+                    check_exact_bound_inputs(
+                        node,
+                        padding.iter().flat_map(|(before, after)| [before, after]),
+                        "pad",
+                        &mut errors,
+                    );
                     if node.output_type.dims.len() != input_rank {
                         errors.push(format!(
                             "pad at node {}: output rank {} != input rank {}",
@@ -1120,7 +1169,21 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                                 node.id.0, axis
                             ));
                         }
+                        if matches!(start, RtDim::InputAxis { .. })
+                            || matches!(end, RtDim::InputAxis { .. })
+                        {
+                            errors.push(format!(
+                                "Shrink at node {} axis {} cannot own RtDim::InputAxis; materialize the shape read as a Node bound",
+                                node.id.0, axis
+                            ));
+                        }
                     }
+                    check_exact_bound_inputs(
+                        node,
+                        bounds.iter().flat_map(|(start, end)| [start, end]),
+                        "shrink",
+                        &mut errors,
+                    );
                     if node.output_type.dims.len() != input_rank {
                         errors.push(format!(
                             "shrink at node {}: output rank {} != input rank {}",
@@ -1208,7 +1271,14 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                                 node.id.0, axis
                             ));
                         }
+                        if matches!(step, RtDim::InputAxis { .. }) {
+                            errors.push(format!(
+                                "Stride at node {} axis {} cannot own RtDim::InputAxis; materialize the shape read as a Node bound",
+                                node.id.0, axis
+                            ));
+                        }
                     }
+                    check_exact_bound_inputs(node, strides, "stride", &mut errors);
                     if node.output_type.dims.len() != input_rank {
                         errors.push(format!(
                             "stride at node {}: output rank {} != input rank {}",
@@ -1446,10 +1516,8 @@ fn dim_known_size(dim: &DimInfo) -> Option<usize> {
 }
 
 /// chelis#616: validate a single movement `RtDim` against the owning node. A
-/// `RtDim::Node(i)` must reference a real bound-scalar input slot
-/// (`1 <= i < inputs.len()`) that is a rank-0 integer node. Pushes an error for
-/// each violation. `Lit` / `ToEnd` carry no input reference and are accepted
-/// here (`ToEnd`'s position legality is checked by the caller).
+/// `RtDim::Node(i)` must reference a rank-0 int64 input; `InputAxis` must
+/// reference a tensor input and a normalized in-range axis.
 fn check_bound_source(
     dag: &Dag,
     node: &crate::dag::DagNode,
@@ -1457,32 +1525,82 @@ fn check_bound_source(
     label: &str,
     errors: &mut Vec<String>,
 ) {
-    let RtDim::Node(i) = bound else {
-        return;
-    };
-    let i = *i;
-    if i == 0 || i >= node.inputs.len() {
-        errors.push(format!(
-            "{label}: node-valued bound references invalid input slot {i} \
-             (inputs len {})",
-            node.inputs.len()
-        ));
-        return;
+    match bound {
+        RtDim::Node(i) => {
+            let i = *i;
+            if i == 0 || i >= node.inputs.len() {
+                errors.push(format!(
+                    "{label}: node-valued bound references invalid input slot {i} \
+                     (inputs len {})",
+                    node.inputs.len()
+                ));
+                return;
+            }
+            let src = dag.get(node.inputs[i]).unwrap();
+            if !src.output_type.dims.is_empty() {
+                errors.push(format!(
+                    "{label}: node-valued bound source (input slot {i}) must be a rank-0 \
+                     scalar, got rank {}",
+                    src.output_type.dims.len()
+                ));
+            }
+            if src.output_type.precision != Prim::Int64 {
+                errors.push(format!(
+                    "{label}: node-valued bound source (input slot {i}) must be int64, got `{}`",
+                    src.output_type.precision.name()
+                ));
+            }
+        }
+        RtDim::InputAxis {
+            tensor,
+            axis: crate::dag::RtAxis::Lit(axis),
+        } => {
+            if *tensor == 0 || *tensor >= node.inputs.len() {
+                errors.push(format!(
+                    "{label}: InputAxis references invalid tensor input slot {tensor} (inputs len {})",
+                    node.inputs.len()
+                ));
+                return;
+            }
+            let source = dag.get(node.inputs[*tensor]).unwrap();
+            let Ok(axis) = usize::try_from(*axis) else {
+                errors.push(format!("{label}: InputAxis axis {axis} is not normalized"));
+                return;
+            };
+            if axis >= source.output_type.dims.len() {
+                errors.push(format!(
+                    "{label}: InputAxis axis {axis} out of bounds for rank {} tensor in input slot {tensor}",
+                    source.output_type.dims.len()
+                ));
+            }
+        }
+        RtDim::Lit(_) | RtDim::ToEnd | RtDim::Sym(_) => {}
     }
-    let src = dag.get(node.inputs[i]).unwrap();
-    if !src.output_type.dims.is_empty() {
-        errors.push(format!(
-            "{label}: node-valued bound source (input slot {i}) must be a rank-0 \
-             scalar, got rank {}",
-            src.output_type.dims.len()
-        ));
-    }
-    if !src.output_type.precision.is_integer() {
-        errors.push(format!(
-            "{label}: node-valued bound source (input slot {i}) must be an integer, \
-             got `{}`",
-            src.output_type.precision.name()
-        ));
+}
+
+/// Every non-data movement input is an explicit runtime-extent edge. Reject
+/// stale or accidental inputs that no typed `RtDim` owns instead of letting
+/// serialization or a rebuild silently preserve an ambiguous dependency.
+fn check_exact_bound_inputs<'a>(
+    node: &crate::dag::DagNode,
+    bounds: impl IntoIterator<Item = &'a RtDim>,
+    label: &str,
+    errors: &mut Vec<String>,
+) {
+    let owned = bounds
+        .into_iter()
+        .filter_map(|bound| match bound {
+            RtDim::Node(input) | RtDim::InputAxis { tensor: input, .. } => Some(*input),
+            RtDim::Lit(_) | RtDim::ToEnd | RtDim::Sym(_) => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    for input in 1..node.inputs.len() {
+        if !owned.contains(&input) {
+            errors.push(format!(
+                "{label} at node {} has unowned runtime extent input slot {input}",
+                node.id.0
+            ));
+        }
     }
 }
 
@@ -1581,6 +1699,34 @@ mod tests {
             dims: dims.iter().copied().map(DimInfo::Lit).collect(),
             precision,
         }
+    }
+
+    #[test]
+    fn shape_read_requires_exact_int64_scalar_output() {
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            tensor_ty(&[3], Prim::F32),
+            None,
+        );
+        dag.add_node(
+            RiscOp::Shape { axis: 0 },
+            vec![input],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Int32,
+            },
+            None,
+        );
+
+        let errors = verify(&dag);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("shape read") && error.contains("int64")),
+            "int32 shape output must fail the exact runtime-extent invariant: {errors:?}"
+        );
     }
 
     #[test]
@@ -2238,7 +2384,7 @@ mod tests {
         dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: crate::dag::DimExpr::Concrete(4),
+                size: crate::dag::RtDim::Lit(4),
             },
             vec![x],
             TensorType {
@@ -2262,7 +2408,7 @@ mod tests {
         dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: crate::dag::DimExpr::Concrete(4),
+                size: crate::dag::RtDim::Lit(4),
             },
             vec![x],
             TensorType {
@@ -2285,7 +2431,7 @@ mod tests {
         dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: crate::dag::DimExpr::Concrete(4),
+                size: crate::dag::RtDim::Lit(4),
             },
             vec![x],
             TensorType {

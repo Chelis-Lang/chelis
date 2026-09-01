@@ -2,7 +2,7 @@
 
 use chelis_ir::dag::{
     Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep,
-    FusedStepOp, NodeId, ReduceWindowKind, RiscOp, RtDim, SymbolicDimSource, TensorType,
+    FusedStepOp, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim, SymbolicDimSource, TensorType,
     symbolic_bindings,
 };
 use chelis_types::types::Prim;
@@ -6269,25 +6269,17 @@ impl CEmitter {
         &mut self,
         id: usize,
         axis: usize,
-        _size: &DimExpr,
+        size: &RtDim,
         inputs: &[NodeId],
         ty: &TensorType,
         dag: &Dag,
     ) {
         let a = inputs[0].0;
-        // chelis#616: an op-declared expanded-axis extent (a Sum-adjoint
-        // restore over a runtime axis, the `lower_if` mask expansion) is
-        // declared from the node's shape-dep source — the tensor whose
-        // actual shape carries the extent (the dep is a computed tensor
-        // emitted earlier, so the read is valid here and never at prologue
-        // time). The strides below never read the size; only the allocation
-        // references the declared name via `shape_literal`.
-        if self.runtime_dim_sites.contains_key(&(id, axis))
-            && let Some(dep) = dag
-                .get(NodeId(id))
-                .and_then(|node| node.shape_deps.first().copied())
-        {
-            let extent = format!("t{}->shape[{axis}]", dep.0);
+        // An op-declared expanded axis is bound from the exact structural
+        // size carrier. This keeps the value edge explicit and makes
+        // `shape_deps` unnecessary for Expand.
+        if self.runtime_dim_sites.contains_key(&(id, axis)) {
+            let extent = Self::bound_c_expr(size, inputs, a, axis, dag);
             self.emit_runtime_dim_site(id, axis, &extent);
         }
         let ndim = Self::ndim(ty);
@@ -6343,8 +6335,18 @@ impl CEmitter {
             RtDim::ToEnd => format!("t{a}->shape[{axis}]"),
             RtDim::Node(i) => {
                 let n = inputs[*i].0;
-                let ct = Self::elem_type(&dag.get(inputs[*i]).unwrap().output_type);
-                format!("((int)((({ct}*)t{n}->data)[0]))")
+                debug_assert_eq!(
+                    dag.get(inputs[*i]).unwrap().output_type.precision,
+                    Prim::Int64
+                );
+                format!("((int64_t*)t{n}->data)[0]")
+            }
+            RtDim::InputAxis {
+                tensor,
+                axis: RtAxis::Lit(source_axis),
+            } => {
+                let source = inputs[*tensor].0;
+                format!("t{source}->shape[{source_axis}]")
             }
             // A symbolic dim (reshape targets only; verify rejects it in
             // movement bounds) is a declared C variable, exactly as
@@ -7426,7 +7428,7 @@ mod tests {
         dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::DimExpr::Concrete(4),
+                size: chelis_ir::dag::RtDim::Lit(4),
             },
             vec![a],
             vec_f32(4),
@@ -8197,7 +8199,7 @@ mod tests {
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::DimExpr::Concrete(4),
+                size: chelis_ir::dag::RtDim::Lit(4),
             },
             vec![a],
             TensorType {
@@ -8209,7 +8211,7 @@ mod tests {
         let eb = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::DimExpr::Concrete(2),
+                size: chelis_ir::dag::RtDim::Lit(2),
             },
             vec![b],
             TensorType {
@@ -8266,7 +8268,7 @@ mod tests {
         let ea = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: chelis_ir::dag::DimExpr::Concrete(4),
+                size: chelis_ir::dag::RtDim::Lit(4),
             },
             vec![a],
             TensorType {
@@ -8278,7 +8280,7 @@ mod tests {
         let eb = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::DimExpr::Concrete(2),
+                size: chelis_ir::dag::RtDim::Lit(2),
             },
             vec![b],
             TensorType {
@@ -8388,7 +8390,7 @@ mod tests {
         let a_exp = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: chelis_ir::dag::DimExpr::Concrete(4),
+                size: chelis_ir::dag::RtDim::Lit(4),
             },
             vec![a],
             vec_f32(4),

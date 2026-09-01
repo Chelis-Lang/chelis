@@ -2028,25 +2028,21 @@ y = expand(b, cast(0, int32), cast(4, int64))
 
 #[test]
 fn host_runtime_expand_negative_count_errors() {
-    // PR #214 / red team round 3 sibling sweep: `infer_expand_app`
-    // now extracts cast-wrapped int literals via `extract_int_for_dim`
-    // and rejects `cast(0, int32)` at infer time. To keep this test
-    // exercising the host-runtime arm (defense in depth for direct-DAG
-    // callers and any non-literal size that evaluates to 0 at runtime),
-    // the count is built from arithmetic that the infer-time literal
-    // extractor cannot resolve.
+    // chelis#1277 Slice A admits zero and continues to reject negative
+    // runtime extents. Derive -1 from shape metadata so the checker cannot
+    // fold it and this test reaches the host-runtime defense in depth.
     let checked = checked_surf(
         r#"
 b = to_tensor([cast(1.0, f32), cast(2.0, f32)])
-zero_count = sub(cast(0, int64), cast(0, int64))
-y = expand(b, cast(0, int32), zero_count)
+negative_count = sub(shape(b, cast(0, int32)), cast(3, int64))
+y = expand(b, cast(0, int32), negative_count)
 "#,
     );
     let err = evaluate_host_program(&checked, &UnordMap::new())
-        .expect_err("expand with non-positive count must fail");
+        .expect_err("expand with negative count must fail");
     assert!(
-        err.contains("expand") && err.contains("count"),
-        "expected expand count diagnostic, got: {err}"
+        err.contains("expand") && err.contains("extent") && err.contains("-1"),
+        "expected exact negative-extent diagnostic, got: {err}"
     );
 }
 

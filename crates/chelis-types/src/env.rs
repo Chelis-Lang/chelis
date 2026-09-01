@@ -149,6 +149,9 @@ pub struct Env {
     /// from serialization (it is a check-time-only analysis artifact).
     #[serde(skip)]
     size_provenance: UnordMap<String, SizeProvenance>,
+    /// Exact values for the `Static` subset of `size_provenance`.
+    #[serde(skip)]
+    static_size_values: UnordMap<String, i64>,
     /// chelis#631: literal element counts of `let`-bound list expressions,
     /// so `concat(rows, axis)` can size its concat axis through the
     /// binding (a list's length is not part of its type). Same
@@ -222,6 +225,14 @@ impl Env {
     /// Record the size provenance of a `let`-bound name (chelis#397/#469).
     pub fn mark_size_provenance(&mut self, name: &str, prov: SizeProvenance) {
         self.size_provenance.insert(name.to_string(), prov);
+        self.static_size_values.remove(name);
+    }
+
+    /// Record one checked, fully folded integer extent binding.
+    pub fn mark_static_size_value(&mut self, name: &str, value: i64) {
+        self.size_provenance
+            .insert(name.to_string(), SizeProvenance::Static);
+        self.static_size_values.insert(name.to_string(), value);
     }
 
     /// Clear any recorded size provenance for `name` (chelis#397/#469).
@@ -238,11 +249,17 @@ impl Env {
     /// the checked type (a check↔eval divergence / check-clean-fails-build).
     pub fn clear_size_provenance(&mut self, name: &str) {
         self.size_provenance.remove(name);
+        self.static_size_values.remove(name);
     }
 
     /// The recorded size provenance of a name, if any (chelis#397/#469).
     pub fn size_provenance(&self, name: &str) -> Option<SizeProvenance> {
         self.size_provenance.get(name).copied()
+    }
+
+    /// Exact checked value of a previously folded lexical extent.
+    pub fn static_size_value(&self, name: &str) -> Option<i64> {
+        self.static_size_values.get(name).copied()
     }
 
     /// Record the literal element count of a `let`-bound list (chelis#631).

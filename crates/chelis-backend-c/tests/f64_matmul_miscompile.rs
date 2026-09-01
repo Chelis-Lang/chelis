@@ -22,7 +22,7 @@
 //! filter would fail these assertions.
 
 use chelis_backend_c::{CodegenOptions, codegen_with_options};
-use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
 
 fn t(prim: Prim, dims: Vec<usize>) -> TensorType {
@@ -52,7 +52,7 @@ fn f64_matmul_subgraph_stays_off_blas_path_in_c_backend() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         t(Prim::F64, vec![8, 16, 4]),
@@ -61,7 +61,7 @@ fn f64_matmul_subgraph_stays_off_blas_path_in_c_backend() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(8),
+            size: chelis_ir::dag::RtDim::Lit(8),
         },
         vec![b],
         t(Prim::F64, vec![8, 16, 4]),
@@ -150,7 +150,7 @@ fn f32_matmul_subgraph_still_hits_blas_path_in_c_backend() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         t(Prim::F32, vec![8, 16, 4]),
@@ -159,7 +159,7 @@ fn f32_matmul_subgraph_still_hits_blas_path_in_c_backend() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(8),
+            size: chelis_ir::dag::RtDim::Lit(8),
         },
         vec![b],
         t(Prim::F32, vec![8, 16, 4]),

@@ -1302,6 +1302,17 @@ on the file digest) so the new rules are defended rather than only re-hashed,
 while connective sentences rest on the file digests. The [05-OP-7] blockquote and
 §4.7.1's anchored sentences are byte-identical to their prior state.
 
+[#1277] Slice A realizes that already-decided runtime-extent carrier at the
+public wire boundary. It corrects one connective sentence in
+`spec/05-risc-primitives.md` to name `InputAxis` rather than the retired
+symbolic recovery mechanism and bumps `spec/10-serialization.md` from exact
+WireDag version 6 to version 7, where `Expand.size` is the tagged `WireRtDim`
+and `InputAxis` is structural. This deliberately moves the complete-file
+digests for those two chapters and this document. It changes no frozen
+`[05-OP-N]` atom, numeric semantic, capability disposition, or frozen region;
+the version-rejection mutations and the runtime-extent wire corpus defend the
+new boundary before these digests move.
+
 [#1370] amends `spec/04-type-system.md` §4.7.2 to decide the order in which
 deferred positional `expand` defaults settle at the program freeze point, the
 settlement order that [#1338] exposed and `hash_order_determinism.md`

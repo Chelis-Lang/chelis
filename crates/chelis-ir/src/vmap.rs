@@ -1,4 +1,6 @@
-use crate::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
+use std::collections::{HashMap, HashSet};
+
+use crate::dag::{Dag, DimInfo, NodeId, RiscOp, RtAxis, RtDim, TensorType};
 
 pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
     let mut out = Dag::new();
@@ -8,8 +10,22 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
         DimInfo::Named(_, None) => None,
     };
 
+    // A node-valued movement extent is one scalar for the whole mapped
+    // invocation, not one scalar per element. Prove that its dependency
+    // closure is shape-only (or a scalar parameter/constant) before cloning.
+    // An element-derived scalar would make the result ragged, which the dense
+    // tensor IR cannot represent.
+    let shared_bound_nodes = shared_bound_nodes(dag)?;
+    let mut mapped_ids = Vec::with_capacity(dag.nodes().len());
+    let mut expanded_shared = HashMap::<NodeId, NodeId>::new();
+
     for node in dag.nodes() {
-        let output_type = prepend_batch_type(&node.output_type, &batch_dim);
+        let shared = shared_bound_nodes.contains(&node.id);
+        let output_type = if shared {
+            node.output_type.clone()
+        } else {
+            prepend_batch_type(&node.output_type, &batch_dim)
+        };
         let op = match &node.op {
             RiscOp::Sum { axis, accumulator } => RiscOp::Sum {
                 axis: axis + 1,
@@ -27,7 +43,7 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
                 // `RtDim::Node` slots index this node's `inputs`, which vmap
                 // clones verbatim, so prepending a target axis shifts nothing.
                 new_shape: std::iter::once(RtDim::from_dim_info(&batch_dim))
-                    .chain(new_shape.iter().cloned())
+                    .chain(new_shape.iter().map(shift_input_axis))
                     .collect(),
             },
             RiscOp::Permute { axes } => RiscOp::Permute {
@@ -37,58 +53,299 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
             },
             RiscOp::Expand { axis, size } => RiscOp::Expand {
                 axis: axis + 1,
-                size: size.clone(),
+                size: shift_input_axis(size),
             },
             RiscOp::Pad { padding, fill } => RiscOp::Pad {
                 padding: std::iter::once((RtDim::Lit(0), RtDim::Lit(0)))
-                    .chain(padding.iter().cloned())
+                    .chain(
+                        padding
+                            .iter()
+                            .map(|(start, end)| (shift_input_axis(start), shift_input_axis(end))),
+                    )
                     .collect(),
                 fill: *fill,
             },
-            RiscOp::Shrink { bounds } => {
-                let Some(batch) = concrete_batch else {
-                    return Err(
-                        "vmap over shrink requires a concrete batch size for the preserved batch axis"
-                            .to_string(),
-                    );
-                };
-                RiscOp::Shrink {
-                    bounds: std::iter::once((RtDim::Lit(0), RtDim::Lit(batch)))
-                        .chain(bounds.iter().cloned())
-                        .collect(),
-                }
-            }
-            RiscOp::Stride { strides } => RiscOp::Stride {
-                strides: std::iter::once(RtDim::Lit(1))
-                    .chain(strides.iter().cloned())
+            RiscOp::Shrink { bounds } => RiscOp::Shrink {
+                bounds: std::iter::once((RtDim::Lit(0), RtDim::ToEnd))
+                    .chain(
+                        bounds
+                            .iter()
+                            .map(|(start, end)| (shift_input_axis(start), shift_input_axis(end))),
+                    )
                     .collect(),
             },
+            RiscOp::Stride { strides } => RiscOp::Stride {
+                strides: std::iter::once(RtDim::Lit(1))
+                    .chain(strides.iter().map(shift_input_axis))
+                    .collect(),
+            },
+            RiscOp::Shape { axis } if shared => RiscOp::Shape { axis: axis + 1 },
             RiscOp::Load { name } => RiscOp::Load { name: name.clone() },
             other => other.clone(),
         };
+
+        let bound_slots = bound_input_slots(&node.op);
+        let batch_witness = node
+            .inputs
+            .iter()
+            .copied()
+            .find(|input| !shared_bound_nodes.contains(input))
+            .map(|input| mapped_ids[input.0])
+            .or_else(|| {
+                mapped_ids.iter().enumerate().find_map(|(index, mapped)| {
+                    (!shared_bound_nodes.contains(&NodeId(index))).then_some(*mapped)
+                })
+            });
+        let mut inputs = Vec::with_capacity(node.inputs.len());
+        for (slot, input) in node.inputs.iter().copied().enumerate() {
+            let mapped = mapped_ids[input.0];
+            if shared || bound_slots.contains(&slot) || !shared_bound_nodes.contains(&input) {
+                inputs.push(mapped);
+                continue;
+            }
+
+            let expanded = if let Some(expanded) = expanded_shared.get(&input) {
+                *expanded
+            } else {
+                let (size, expand_inputs) = match concrete_batch {
+                    Some(batch) => (RtDim::Lit(batch), vec![mapped]),
+                    None => {
+                        let witness = batch_witness.ok_or_else(|| {
+                            "vmap cannot locate a batched tensor witness for a shared extent \
+                             scalar used as ordinary data"
+                                .to_string()
+                        })?;
+                        (
+                            RtDim::InputAxis {
+                                tensor: 1,
+                                axis: RtAxis::Lit(0),
+                            },
+                            vec![mapped, witness],
+                        )
+                    }
+                };
+                let expanded = out.add_node(
+                    RiscOp::Expand { axis: 0, size },
+                    expand_inputs,
+                    prepend_batch_type(&dag.get(input).unwrap().output_type, &batch_dim),
+                    node.span_id.clone(),
+                );
+                expanded_shared.insert(input, expanded);
+                expanded
+            };
+            inputs.push(expanded);
+        }
 
         // Vmap is a pure clone of the per-node operator (with axis
         // shifts) onto a new DAG. Per spec/design/chelis_span_survival.md
         // §2.3 vmap row, span_id and merged_spans are cloned unchanged
         // — every input span survives the pass.
-        let new_id = out.add_node(op, node.inputs.clone(), output_type, node.span_id.clone());
+        let new_id = out.add_node(op, inputs, output_type, node.span_id.clone());
+        mapped_ids.push(new_id);
         if let Some(new_node) = out.node_mut(new_id) {
             if !node.merged_spans.is_empty() {
                 new_node.merged_spans = node.merged_spans.clone();
             }
             // chelis#384/#397: vmap is a 1:1 id-preserving clone, so a
             // Form-3 `expand` shape-dep maps to the same id verbatim.
-            new_node.shape_deps = node.shape_deps.clone();
+            new_node.shape_deps = node
+                .shape_deps
+                .iter()
+                .map(|dep| mapped_ids[dep.0])
+                .collect();
         }
         if let Some(reusable_input) = node.reusable_input {
-            out.set_reusable_input(new_id, reusable_input);
-        }
-        if dag.is_root(node.id) {
-            out.add_root(new_id);
+            out.set_reusable_input(new_id, mapped_ids[reusable_input.0]);
         }
     }
 
+    for root in dag.roots() {
+        let mapped = mapped_ids[root.0];
+        if !shared_bound_nodes.contains(root) {
+            out.add_root(mapped);
+            continue;
+        }
+        let expanded = if let Some(expanded) = expanded_shared.get(root) {
+            *expanded
+        } else {
+            let (size, expand_inputs) = match concrete_batch {
+                Some(batch) => (RtDim::Lit(batch), vec![mapped]),
+                None => {
+                    let witness = mapped_ids
+                        .iter()
+                        .enumerate()
+                        .find_map(|(index, mapped)| {
+                            (!shared_bound_nodes.contains(&NodeId(index))).then_some(*mapped)
+                        })
+                        .ok_or_else(|| {
+                            "vmap cannot locate a batched tensor witness for a shared extent \
+                             scalar root"
+                                .to_string()
+                        })?;
+                    (
+                        RtDim::InputAxis {
+                            tensor: 1,
+                            axis: RtAxis::Lit(0),
+                        },
+                        vec![mapped, witness],
+                    )
+                }
+            };
+            let expanded = out.add_node(
+                RiscOp::Expand { axis: 0, size },
+                expand_inputs,
+                prepend_batch_type(&dag.get(*root).unwrap().output_type, &batch_dim),
+                dag.get(*root).unwrap().span_id.clone(),
+            );
+            expanded_shared.insert(*root, expanded);
+            expanded
+        };
+        out.add_root(expanded);
+    }
+
     Ok(out)
+}
+
+fn shift_input_axis(dim: &RtDim) -> RtDim {
+    match dim {
+        RtDim::InputAxis {
+            tensor,
+            axis: RtAxis::Lit(axis),
+        } => RtDim::InputAxis {
+            tensor: *tensor,
+            axis: RtAxis::Lit(axis.checked_add(1).expect("vmap axis fits int32")),
+        },
+        other => other.clone(),
+    }
+}
+
+fn bound_input_slots(op: &RiscOp) -> HashSet<usize> {
+    let mut slots = HashSet::new();
+    let mut add = |dim: &RtDim| {
+        if let RtDim::Node(slot) = dim {
+            slots.insert(*slot);
+        }
+    };
+    match op {
+        RiscOp::Expand { size, .. } => add(size),
+        RiscOp::Reshape { new_shape } => new_shape.iter().for_each(add),
+        RiscOp::Pad { padding, .. } | RiscOp::Shrink { bounds: padding } => {
+            for (start, end) in padding {
+                add(start);
+                add(end);
+            }
+        }
+        RiscOp::Stride { strides } => strides.iter().for_each(add),
+        _ => {}
+    }
+    slots
+}
+
+fn shared_bound_nodes(dag: &Dag) -> Result<HashSet<NodeId>, String> {
+    let mut shared = HashSet::new();
+    for owner in dag.nodes() {
+        for slot in bound_input_slots(&owner.op) {
+            let Some(source) = owner.inputs.get(slot).copied() else {
+                continue;
+            };
+            mark_shared_bound(dag, source, &mut shared)?;
+        }
+    }
+    // Once an extent producer is shared, a scalar-only computation over
+    // shared values is shared too. This preserves the spec/06 §3.7 rule for
+    // a shape read used through a cast/arithmetic chain both as a bound and
+    // as an ordinary value; the chain executes once and is broadcast only at
+    // its first batched consumer or root.
+    loop {
+        let mut changed = false;
+        for node in dag.nodes() {
+            if shared.contains(&node.id)
+                || !node.output_type.dims.is_empty()
+                || node.inputs.is_empty()
+                || !node.inputs.iter().all(|input| shared.contains(input))
+                || !shared_scalar_op(&node.op)
+            {
+                continue;
+            }
+            shared.insert(node.id);
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+    }
+    Ok(shared)
+}
+
+fn shared_scalar_op(op: &RiscOp) -> bool {
+    matches!(
+        op,
+        RiscOp::Cast { .. }
+            | RiscOp::CastTrunc { .. }
+            | RiscOp::Copy
+            | RiscOp::Realize
+            | RiscOp::Neg
+            | RiscOp::Abs
+            | RiscOp::Add
+            | RiscOp::Sub
+            | RiscOp::Mul
+            | RiscOp::FloorDiv
+            | RiscOp::TruncDiv
+            | RiscOp::MaxElem
+            | RiscOp::MinElem
+    )
+}
+
+fn mark_shared_bound(dag: &Dag, id: NodeId, shared: &mut HashSet<NodeId>) -> Result<(), String> {
+    if shared.contains(&id) {
+        return Ok(());
+    }
+    let node = dag.get(id).ok_or_else(|| {
+        format!(
+            "batch_varying_extent: bound references missing node {}",
+            id.0
+        )
+    })?;
+    if !node.output_type.dims.is_empty() {
+        return Err(format!(
+            "batch_varying_extent: node {} produces rank {} rather than one shared scalar",
+            id.0,
+            node.output_type.dims.len()
+        ));
+    }
+
+    match &node.op {
+        RiscOp::Shape { .. } | RiscOp::Const { .. } | RiscOp::Load { .. } => {}
+        RiscOp::Cast { .. }
+        | RiscOp::CastTrunc { .. }
+        | RiscOp::Copy
+        | RiscOp::Realize
+        | RiscOp::Neg
+        | RiscOp::Abs => {
+            for input in &node.inputs {
+                mark_shared_bound(dag, *input, shared)?;
+            }
+        }
+        RiscOp::Add
+        | RiscOp::Sub
+        | RiscOp::Mul
+        | RiscOp::FloorDiv
+        | RiscOp::TruncDiv
+        | RiscOp::MaxElem
+        | RiscOp::MinElem => {
+            for input in &node.inputs {
+                mark_shared_bound(dag, *input, shared)?;
+            }
+        }
+        other => {
+            return Err(format!(
+                "batch_varying_extent: node {} derives a movement extent from element data via {other:?}",
+                id.0
+            ));
+        }
+    }
+    shared.insert(id);
+    Ok(())
 }
 
 fn prepend_batch_type(ty: &TensorType, batch_dim: &DimInfo) -> TensorType {
@@ -108,7 +365,7 @@ fn prepend_batch_dims(dims: &[DimInfo], batch_dim: &DimInfo) -> Vec<DimInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag::{DimExpr, NodeId, RiscOp, TensorType};
+    use crate::dag::{NodeId, RiscOp, TensorType};
     use crate::eval::{TensorValue, eval_tensor_roots_with_strict};
     use chelis_types::types::Prim;
     use chelis_unord::UnordMap;
@@ -240,7 +497,7 @@ mod tests {
         let a_exp = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: DimExpr::Concrete(4),
+                size: RtDim::Lit(4),
             },
             vec![a],
             TensorType {
@@ -252,7 +509,7 @@ mod tests {
         let b_exp = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: DimExpr::Concrete(2),
+                size: RtDim::Lit(2),
             },
             vec![b],
             TensorType {
