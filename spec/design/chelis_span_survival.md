@@ -433,18 +433,30 @@ even if raw AST values retain them inside untrusted or pre-seal modules.
 `NodeKey` and provenance are compiler identity, not language semantics.
 `Expr::PartialEq`, canonical Deep printing, parse/reprint comparison, and the
 semantic `expanded_deep_digest` exclude them. That exclusion never weakens a
-cache carrying node-keyed facts. Each sourced carrier computes a canonical
-`NodeAssignmentDigest` over the identity-schema and path-grammar versions and
-one reconstructed row for every structural occurrence: canonical structural
-path, issued `NodeKey`, sealed origin, external audit ID, and contributor
-references. The rows are ordered by structural path, not allocation or
-hash-map iteration order.
+cache carrying source sites or node-keyed facts. The two sourced carriers have
+different, explicitly tagged assignment schemas:
 
-Any artifact that stores node-keyed facts uses a provenance-sensitive
-`SourceIdentityDigest` over the cache-format version, ordered source-unit
-table, semantic digest, consumer-supplied expected-graph digest,
-issuance-recipe digest, and
-`NodeAssignmentDigest`. Decode first resolves the exact source blobs and
+- `SurfSiteAssignmentDigest` covers every Surf structural occurrence. Each
+  reconstructed row contains its canonical Surf path, exact parser-issued
+  `SourceSite`, and any opaque external audit ID. It contains no `NodeKey`,
+  `NodeOrigin`, or semantic-fact key.
+- `DeepNodeAssignmentDigest` begins only at direct Deep parsing or Surf
+  desugaring and covers every identity-bearing Deep occurrence. Each
+  reconstructed row contains its canonical Deep path, issued `NodeKey`, sealed
+  origin, external audit ID, and contributor references.
+
+Both digests bind the identity-schema and path-grammar versions and order rows
+by structural path, not allocation or hash-map iteration order. The
+Surf-to-Deep transform consumes the validated Surf site digest as evidence but
+never reinterprets a Surf path/site row as a pre-existing semantic key.
+
+Any source-aware artifact uses a provenance-sensitive `SourceIdentityDigest`
+over the cache-format version, ordered source-unit table, semantic digest,
+consumer-supplied expected-graph digest, issuance-recipe digest, and the
+carrier-tagged `SurfSiteAssignmentDigest` or `DeepNodeAssignmentDigest`. A
+syntax-only Surf cache carries the Surf form and cannot expose node-keyed
+facts; any cache that carries such facts must carry the Deep form. Decode first
+resolves the exact source blobs and
 recipe graph, reparses parsed roots, replays every registered traversal or
 attribution function, and derives the expected ledger without consulting the
 decoded ledger rows or their stored digests. It compares the decoded tree,
@@ -522,10 +534,15 @@ typed edges:
   the only argument accepted by public Surf/Deep parsing. Surf success returns
   `SourcedSurfProgram`; direct Deep success returns `SourcedDeepProgram`;
   parser failure returns a validated `SourceSite` without a fabricated node.
-  The raw lexer/parser core is a private child module and additionally requires
-  an unnameable `ParserLease` issued only after `SourceInput` has installed its
-  arena, so another adapter module cannot call it with bare `&str`/`&[u8]` even
-  inside the crate.
+  `SourceInput` has no public/default constructor and cannot derive logical
+  identity from source bytes alone. A sealed adapter-owned
+  `IngressContext<R>` constructs it from the exact bytes plus the typed file,
+  request-field, batch-element, buffer-version, or package-member identity
+  supplied by that adapter. Parser modules hold no ingress authority. The raw
+  lexer/parser core is a private child module and additionally requires an
+  unnameable `ParserLease` issued only by consuming a valid `SourceInput`, so
+  another adapter—or a raw-input export in the parser module itself—cannot call
+  it with bare `&str`/`&[u8]` or mint a default identity.
 - `TransformContext<P>` exists only for a sealed registered pass `P`. Its
   private builder binds the pass schema, complete output-affecting
   configuration, semantic input/contributors, semantic output, and canonical
@@ -558,17 +575,36 @@ distinct, batch identities bind the element and field, and no public adapter
 can recover a raw parser or construct a sourced tree from `Vec<Expr>`.
 
 Closure against future bypass exports is mechanically derived, not asserted by
-a fixed fixture. A Python S7 API-surface guard generates rustdoc JSON for every
-public item in `chelis-surf`, `chelis-deep`, and the compiler/pipeline adapter
-crates, resolves aliases and generic wrappers, and classifies signatures by
-type shape rather than item name. It rejects any public callable that accepts
-raw source bytes and returns a raw Surf/Deep AST, any semantic consumer that
-accepts raw AST instead of a sourced carrier, any public constructor/decoder
-for identity-bearing parts, and any cache decoder that returns facts without a
-sourced carrier. Those closed type-shape rules classify the complete enumerated
-surface in the same run; there is no expected-row baseline or editable
-allowlist. A new public parser, adapter, AST consumer, or identity constructor
-therefore fails the guard even when no role/pass/cache enum was edited.
+a fixed fixture. A Python S7 API-surface guard derives every workspace Rust
+library target from `cargo metadata --workspace`, generates rustdoc JSON for
+all of them, resolves aliases and generic/result wrappers, and classifies
+signatures by type shape rather than item name. Raw input is classified
+independently of raw output: any public callable whose result contains a raw or
+sourced Surf/Deep program or a qualified Surf/Deep parse failure must take
+`SourceInput<R>`, never `&str`, `String`, `Cow<str>`, `&[u8]`, `Vec<u8>`,
+`Box<[u8]>`, or an alias of those closed raw carrier families. Thus both
+`fn parse(&str) -> Vec<surf::Decl>` and
+`fn parse(&str) -> SourcedSurfProgram` fail.
+
+The same guard rejects any semantic consumer that accepts raw AST instead of a
+sourced carrier, any public constructor/decoder for identity-bearing parts,
+and any cache decoder that returns facts without a sourced carrier. These
+closed rules classify the complete cargo-derived public universe in the same
+run; there is no crate list, expected-row baseline, or editable allowlist. A
+new public parser, adapter, AST consumer, or identity constructor therefore
+fails the guard even when no role/pass/cache enum was edited.
+
+A second, body-aware leg derives the reverse Rust call graph from the same
+cargo-metadata universe. Its typed roots are the private `ParserLease` consumer
+and sealed `IngressContext::issue` methods, not function-name patterns. Every
+public ancestor that can reach either root must accept `SourceInput<R>` or a
+registered request/file/buffer carrier whose type contains the required
+logical-instance identity; a direct raw text/byte parameter is forbidden even
+when the callable returns only a score, diagnostic, or other non-AST result.
+This is the mechanically derived check for `run_source`, `prepare_source`, and
+prove/MCP-style adapters that the result-shape leg cannot identify. Adding a
+new caller changes the reverse graph in the same build and cannot be hidden by
+leaving a manifest row unchanged.
 
 Compile-fail controls reject public construction/recombination of identity
 parts and an unregistered pass/builder/cache; the derived API-surface guard,
@@ -775,10 +811,10 @@ as commits but cannot merge independently.
    require its decoder's independent `ExpectedSourceGraph<C>`,
    bump its then-live format, and lock immediate-predecessor,
    duplicate/recombined-key, forged-origin-after-redigest, unresolved-source,
-   source-table, semantic-digest, recipe-digest, and node-assignment-digest
-   rejection before facts are exposed. Delete every semantic call to
-   `parse_span_offset` and every source-unit merge policy based on numeric
-   offset precedence.
+   source-table, semantic-digest, recipe-digest, Surf-site-assignment, and
+   Deep-node-assignment rejection before facts are exposed. Delete every
+   semantic call to `parse_span_offset` and every source-unit merge policy
+   based on numeric offset precedence.
 3. Thread the same carrier through lowering, IR, host IR, every synthesizing
    transformation, and generated-source emission. Every new artifact is
    returned only by `TransformContext<P>` or `SourceLessContext<B>` after the
@@ -818,15 +854,20 @@ Each slice includes positive/negative parity. Required counterexamples are:
   promotion rather than normalizing silently;
 - Surf parsing returns `SourcedSurfProgram`; formatting and LSP indexing retain
   that carrier; only `TransformContext<SurfDesugar>` produces
-  `SourcedDeepProgram`; checking/lowering reject raw Surf/Deep AST values;
+  `SourcedDeepProgram`; checking/lowering reject raw Surf/Deep AST values; the
+  Surf ledger-bijection oracle proves every path has a site and no pre-desugar
+  `NodeKey`, while the Deep oracle proves every identity-bearing path has
+  exactly one key/origin row;
 - a Surf or Deep parse error before AST construction carries a qualified
   source range and no node key;
 - every sealed `SourceInput<R>` role has a successful parse and parse-before-
   node failure; multi-buffer and batch fields remain distinct; private-module
   tests cannot obtain `ParserLease`; and a rustdoc-JSON mutation that adds a
-  raw public `run_source`, `prepare_source`, parser, prove/MCP edge, raw AST
-  semantic consumer, or identity constructor is discovered and rejected
-  without editing an expected manifest;
+  raw-input public parser returning raw Surf/Deep, `SourcedSurfProgram`,
+  `SourcedDeepProgram`, or a qualified parse failure is rejected for both text
+  and byte carriers; mutations adding raw public `run_source`, `prepare_source`,
+  prove/MCP edges, raw AST semantic consumers, or identity constructors are
+  likewise discovered without editing a crate list or expected manifest;
 - parser-only, parsed-node, synthesized-node, and unavailable-node diagnostics
   preserve the typed identity distinctions through the compiler API and
   resolve every referenced unit; #886 separately locks their exact JSON
@@ -840,8 +881,8 @@ Each slice includes positive/negative parity. Required counterexamples are:
   their immediate predecessor version and any stale source table or provenance
   digest before exposing a declaration, diagnostic, or reusable-input fact;
 - swapping two same-unit local IDs while preserving exact source bytes and
-  semantic Deep changes the canonical node-assignment digest and rejects the
-  cache before a node-keyed fact is exposed;
+  semantic Deep changes the canonical `DeepNodeAssignmentDigest` and rejects
+  the cache before a node-keyed fact is exposed;
 - swapping two valid parsed origins or changing a synthesized contributor set
   while keeping keys and semantics fixed, then recomputing every stored digest,
   still disagrees with reconstruction from the source/transform evidence and
