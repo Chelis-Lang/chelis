@@ -761,6 +761,19 @@ recursive binding group, whether the recursion is direct or mutual.
 > HIP, and Metal paths reject an offending program identically, before any
 > lane-specific stage runs.
 
+#### 3.1.2 Top-level declaration scope
+
+> **[04-INF-4]** A top-level `def` binding SHALL be in scope throughout its
+> exact declaration namespace, independent of textual declaration order.
+> After module, import, and link rewriting have established exact binding
+> identities, inference SHALL process a dependency before every declaration
+> that consumes it; it SHALL NOT resolve a dependency by terminal-name or
+> other fuzzy matching. Dependency scheduling does not change source or
+> emitted declaration order. Local `let` bindings remain sequential. A
+> recursive group containing only function definitions is governed by
+> [04-INF-2] and [04-INF-3]; an eager value cycle is a type error reported as
+> `CycleDetected`, not a recursive binding group.
+
 ### 3.2 Inference Rules
 
 Standard notation: Γ ⊢ e : τ means "in environment Γ, expression e has type τ."
