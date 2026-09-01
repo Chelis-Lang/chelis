@@ -1777,6 +1777,15 @@ fn compiler_arguments(path: &Path, configuration: &CompilerConfiguration) -> Vec
     arguments
 }
 
+fn preprocessing_token_spelling(spelling: &str) -> String {
+    // C translation phase two deletes each backslash-newline splice before
+    // preprocessing tokens are interpreted. Libclang's range tokenizer retains
+    // the physical LF or CRLF bytes when a splice falls inside some tokens, so
+    // establish the logical token spelling once at this boundary while leaving
+    // the physical source offsets untouched for later materialization.
+    spelling.replace("\\\r\n", "").replace("\\\n", "")
+}
+
 fn preprocessing_directives(
     index: &Index<'_>,
     source: &str,
@@ -1851,7 +1860,7 @@ fn preprocessing_directives(
                     let token_start = range.get_start().get_spelling_location().offset as usize;
                     let token_end = range.get_end().get_spelling_location().offset as usize;
                     (token_start >= start && token_end <= end).then(|| PreprocessorToken {
-                        spelling: token.get_spelling(),
+                        spelling: preprocessing_token_spelling(&token.get_spelling()),
                         start: token_start,
                         end: token_end,
                     })

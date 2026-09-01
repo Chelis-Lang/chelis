@@ -390,6 +390,40 @@ extern double *continued_selected(void);{newline}\
 }
 
 #[test]
+fn token_internal_condition_splices_follow_translation_phase_two() {
+    for newline in ["\n", "\r\n"] {
+        let source = [
+            "#if __has_include(\\",
+            "<virtual/shared.h>)",
+            "extern float *header_token_splice(void);",
+            "#else",
+            "extern double *header_token_splice(void);",
+            "#endif",
+            "#if defined(FEATURE) &\\",
+            "& 1",
+            "extern long *operator_token_splice(void);",
+            "#else",
+            "extern int *operator_token_splice(void);",
+            "#endif",
+            "",
+        ]
+        .join(newline);
+
+        let rows = scan_c_source(&source, "fixture")
+            .expect("translation-phase line splices are removed from every condition token");
+        let returns: Vec<_> = rows
+            .iter()
+            .filter(|row| {
+                (row.owner.contains("header_token_splice")
+                    || row.owner.contains("operator_token_splice"))
+                    && row.signature.contains("shape=return-pointer")
+            })
+            .collect();
+        assert_eq!(returns.len(), 4, "newline {newline:?}: {rows:#?}");
+    }
+}
+
+#[test]
 fn continued_conditionals_cannot_bypass_the_configuration_cap() {
     let source = r#"
 #if defined(FEATURE_0) && \

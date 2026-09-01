@@ -512,9 +512,12 @@ preprocessor configurations through a compiler-owned token boundary. It
 tokenizes the complete main file and uses libclang's preprocessing annotations
 to recover exact directive extents, including continued, nested, inactive, and
 digraph directives; directive-looking bytes inside comments or literals never
-enter configuration discovery. `#include`, `#include_next`, `#import`, and
-`#error` are blanked over those exact extents while retaining line breaks and
-byte offsets before the carrier AST is parsed.
+enter configuration discovery. At that boundary, C translation-phase-two
+backslash-LF and backslash-CRLF splices are removed from every logical token
+spelling; the corresponding physical token spans remain unchanged for source
+rewrites. `#include`, `#include_next`, `#import`, and `#error` are blanked over
+their exact extents while retaining line breaks and byte offsets before the
+carrier AST is parsed.
 
 Conditional discovery accepts only constants `0` and `1`, `defined`, bare
 macros, Boolean negation/conjunction/disjunction (including their alternative
