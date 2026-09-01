@@ -7,17 +7,33 @@
 //! tensors. The positional-expand rows also lock ordinary consumer selection,
 //! scalar/trailing insertion, and rejection of a third output rank.
 
+use chelis_deep::parse_and_stamp_file;
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::errors::{CheckError, CheckErrorKind};
 use chelis_types::{
-    TypeEnv, build_type_env_from_library, check_ir_with_context, check_typed_program,
+    TypeEnv, build_compiled_library_context_with_base, build_type_env_from_library,
+    check_ir_program, check_ir_with_context, check_typed_program,
 };
 
 fn typecheck(source: &str) -> Vec<CheckError> {
     let decls = parse_surf(source).expect("surf parse should succeed");
     let deep = desugar_program(&decls);
     match check_typed_program(&deep) {
+        Ok(_) => Vec::new(),
+        Err(errors) => errors.errors,
+    }
+}
+
+fn typecheck_ir(exprs: &[chelis_deep::Expr]) -> Vec<CheckError> {
+    match check_ir_program(exprs) {
+        Ok(_) => Vec::new(),
+        Err(errors) => errors.errors,
+    }
+}
+
+fn typecheck_stamped(exprs: &[chelis_deep::Expr]) -> Vec<CheckError> {
+    match check_typed_program(exprs) {
         Ok(_) => Vec::new(),
         Err(errors) => errors.errors,
     }
@@ -106,46 +122,64 @@ fn serialized_library_context_preserves_later_expand_shape_selection() {
 }
 
 #[test]
-fn serialized_context_preserves_candidate_dependent_reshape_relation() {
-    let library_decls = parse_surf(
-        "bias = to_tensor([[[0.5f32], [1.5f32]]])\n\
-         expanded = expand(bias, 0, 3i64)\n\
-         reshaped = reshape(expanded, [shape(expanded, 1), shape(expanded, 2), 3i64])",
-    )
-    .expect("library surf parse should succeed");
-    let library = desugar_program(&library_decls);
-    let context = build_type_env_from_library(&library).expect("library context should build");
-    let bytes = bincode::serialize(&context).expect("type context should serialize");
-    let restored: TypeEnv = bincode::deserialize(&bytes).expect("type context should deserialize");
+fn composed_context_freeze_reports_base_layer_before_later_layer() {
+    let base = desugar_program(
+        &parse_surf(
+            "base_bad = add(expand(to_tensor([1.0f32, 2.0f32]), 0, 3i64), expand(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]), 0, 5i64))",
+        )
+        .expect("base surf parse"),
+    );
+    let base_context = build_type_env_from_library(&base)
+        .expect("a reusable library must carry its unresolved freeze obligation");
 
-    let consistent_decls = parse_surf(
-        "def require_inserted(x: tensor[3, 1, 2, 1, f32]) -> tensor[3, 1, 2, 1, f32] = x\n\
-         def require_reshape(x: tensor[1, 2, 3, f32]) -> tensor[1, 2, 3, f32] = x\n\
-         selected = require_reshape(reshaped)\n\
-         inserted = require_inserted(expanded)",
-    )
-    .expect("consistent consumer surf parse should succeed");
-    let consistent = desugar_program(&consistent_decls);
-    check_ir_with_context(&restored, &consistent)
-        .expect("the serialized relation must permit one consistent candidate pair");
+    let later = desugar_program(
+        &parse_surf(
+            "later_bad = add(expand(to_tensor([1.0f32, 2.0f32, 3.0f32]), 0, 7i64), expand(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32]), 0, 11i64))",
+        )
+        .expect("later-layer surf parse"),
+    );
+    let (composed, _) = build_compiled_library_context_with_base(&base_context, &later)
+        .expect("the later reusable layer must compose without freezing either layer");
 
-    let contradictory_decls = parse_surf(
-        "def require_replaced(x: tensor[3, 2, 1, f32]) -> tensor[3, 2, 1, f32] = x\n\
-         def require_reshape(x: tensor[1, 2, 3, f32]) -> tensor[1, 2, 3, f32] = x\n\
-         selected = require_reshape(reshaped)\n\
-         replaced = require_replaced(expanded)",
-    )
-    .expect("contradictory consumer surf parse should succeed");
-    let contradictory = desugar_program(&contradictory_decls);
-    let errors = check_ir_with_context(&restored, &contradictory)
-        .expect_err("the serialized relation must reject a contradictory candidate pair");
+    let errors = check_ir_with_context(&composed, &[])
+        .expect_err("the downstream freeze point must reject both incompatible obligations");
+    let messages = summary(&errors.errors);
     assert!(
-        errors
-            .errors
-            .iter()
-            .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
-        "the contradiction must fail as a dimension mismatch:\n{}",
-        summary(&errors.errors)
+        messages.contains("dimension mismatch: Lit(5) vs Lit(3)"),
+        "the base layer must settle and report before the later layer:\n{messages}"
+    );
+}
+
+#[test]
+fn imported_first_reference_uses_source_order_not_dependency_schedule() {
+    let base = desugar_program(
+        &parse_surf(
+            "a_bad = add(expand(to_tensor([1.0f32, 2.0f32]), 0, 3i64), expand(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]), 0, 5i64))\n\
+             b_bad = add(expand(to_tensor([1.0f32, 2.0f32, 3.0f32]), 0, 7i64), expand(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32]), 0, 11i64))",
+        )
+        .expect("base surf parse"),
+    );
+    let context = build_type_env_from_library(&base)
+        .expect("a reusable library must carry both unresolved freeze obligations");
+
+    let downstream = desugar_program(
+        &parse_surf(
+            "module ImportOrder\n\
+             def first() = {\n\
+               early_a = a_bad\n\
+               from_second = second()\n\
+               (early_a, from_second)\n\
+             }\n\
+             def second() = (b_bad, a_bad)",
+        )
+        .expect("downstream surf parse"),
+    );
+    let errors = check_ir_with_context(&context, &downstream)
+        .expect_err("both imported obligations are incompatible at the downstream freeze point");
+    let messages = summary(&errors.errors);
+    assert!(
+        messages.contains("dimension mismatch: Lit(5) vs Lit(3)"),
+        "a_bad is the earliest source reference even though second is inferred first:\n{messages}"
     );
 }
 
@@ -216,42 +250,88 @@ flat = flatten_expanded(to_tensor([1.0f32, 2.0f32]))
 }
 
 #[test]
-fn reshape_shape_read_selects_inserted_expand_axis() {
-    let decls = parse_surf(
-        r#"
-def f(bias: tensor[2, f32]) = {
-  expanded = expand(bias, 0, 3i64)
-  reshape(expanded, [shape(expanded, 1), 3i64])
-}
-"#,
-    )
-    .expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
-    let checked = check_typed_program(&deep).expect("the insertion case should typecheck");
-    let rendered = chelis_deep::printer::print_canonical(checked.annotated_exprs());
-    assert!(
-        rendered.contains("(t-tensor {} (d-lit {} 3) (d-lit {} 2) (t-prim {} f32))"),
-        "the inserted-axis read must select tensor[3, 2, f32]:\n{rendered}"
-    );
+fn reshape_shape_read_selects_expand_replacement() {
+    for (borrow, source) in [
+        (
+            "unborrowed",
+            "def f(bias: tensor[2, f32]) = {\n\
+               expanded = expand(bias, 0, 3i64)\n\
+               reshape(expanded, [shape(expanded, 0)])\n\
+             }",
+        ),
+        (
+            "borrowed",
+            "def f(bias: tensor[2, f32]) = {\n\
+               expanded = expand(bias, 0, 3i64)\n\
+               reshape(expanded, [shape(&expanded, 0)])\n\
+             }",
+        ),
+    ] {
+        let decls = parse_surf(source).expect("surf parse should succeed");
+        let lists = desugar_program(&decls);
+        let canonical = chelis_deep::printer::print_canonical(&lists);
+        let nodes = parse_and_stamp_file(&canonical).expect("canonical Deep should stamp");
+
+        for (ingress, checked) in [
+            ("list", check_ir_program(&lists)),
+            ("node", check_typed_program(&nodes)),
+        ] {
+            let checked = checked.unwrap_or_else(|errors| {
+                panic!(
+                    "the {borrow} replacement case through {ingress} ingress should typecheck:\n{}",
+                    summary(&errors.errors)
+                )
+            });
+            let rendered = chelis_deep::printer::print_canonical(checked.annotated_exprs());
+            assert!(
+                rendered.contains("(t-tensor {} (d-lit {} 3) (t-prim {} f32))"),
+                "the {borrow} shape read through {ingress} ingress must select \
+                 tensor[3, f32] replacement:\n{rendered}"
+            );
+        }
+    }
 }
 
 #[test]
-fn reshape_rejects_axis_outside_every_deferred_expand_candidate() {
-    let errors = typecheck(
-        r#"
-def f(bias: tensor[2, f32]) = {
-  expanded = expand(bias, 0, 3i64)
-  reshape(expanded, [shape(expanded, 2)])
-}
-"#,
-    );
-    assert!(
-        errors
-            .iter()
-            .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
-        "axis two exists in neither legal expand shape:\n{}",
-        summary(&errors)
-    );
+fn reshape_shape_read_selects_replacement_before_axis_validation_on_every_ingress() {
+    for (borrow, source) in [
+        (
+            "unborrowed",
+            "expanded = expand(to_tensor([0.0f32]), 0, 6i64)\n\
+             result = reshape(expanded, [shape(expanded, 1), 6i64])",
+        ),
+        (
+            "borrowed",
+            "expanded = expand(to_tensor([0.0f32]), 0, 6i64)\n\
+             result = reshape(expanded, [shape(&expanded, 1), 6i64])",
+        ),
+    ] {
+        let decls = parse_surf(source).expect("surf parse should succeed");
+        let lists = desugar_program(&decls);
+        let canonical = chelis_deep::printer::print_canonical(&lists);
+        let nodes = parse_and_stamp_file(&canonical).expect("canonical Deep should stamp");
+
+        for (ingress, errors) in [
+            ("list", typecheck_ir(&lists)),
+            ("node", typecheck_stamped(&nodes)),
+        ] {
+            assert_eq!(
+                errors.len(),
+                1,
+                "a {borrow} shape read through {ingress} ingress must reject exactly once:\n{}",
+                summary(&errors)
+            );
+            assert!(
+                matches!(errors[0].kind, CheckErrorKind::DimensionMismatch)
+                    && errors[0]
+                        .message
+                        .contains("shape axis 1 is out of bounds for rank 1 tensor"),
+                "a {borrow} shape read through {ingress} ingress must select same-rank \
+                 replacement before checking its axis:\n{}",
+                summary(&errors)
+            );
+        }
+    }
 }
 
 #[test]
@@ -377,103 +457,7 @@ def f(bias: tensor[2, f32], shape_source: tensor[6, f32]) = {
 }
 
 #[test]
-fn candidate_dependent_reshape_output_selects_expand_insertion() {
-    let errors = typecheck(
-        r#"
-def require_inserted(x: tensor[3, 1, 2, 1, f32]) -> tensor[3, 1, 2, 1, f32] = x
-def require_inserted_reshape(x: tensor[1, 2, 3, f32]) -> tensor[1, 2, 3, f32] = x
-def f(bias: tensor[1, 2, 1, f32]) -> tensor[1, 2, 3, f32] = {
-  expanded = expand(bias, 0, 3i64)
-  reshaped = reshape(expanded, [shape(expanded, 1), shape(expanded, 2), 3i64])
-  selected = require_inserted_reshape(reshaped)
-  inserted = require_inserted(expanded)
-  selected
-}
-"#,
-    );
-    assert!(
-        errors.is_empty(),
-        "the reshape output must select the matching expand insertion candidate:\n{}",
-        summary(&errors)
-    );
-}
-
-#[test]
-fn candidate_dependent_reshape_output_rejects_contradictory_expand_replacement() {
-    let errors = typecheck(
-        r#"
-def require_replaced(x: tensor[3, 2, 1, f32]) -> tensor[3, 2, 1, f32] = x
-def require_inserted_reshape(x: tensor[1, 2, 3, f32]) -> tensor[1, 2, 3, f32] = x
-def f(bias: tensor[1, 2, 1, f32]) -> tensor[1, 2, 3, f32] = {
-  expanded = expand(bias, 0, 3i64)
-  reshaped = reshape(expanded, [shape(expanded, 1), shape(expanded, 2), 3i64])
-  selected = require_inserted_reshape(reshaped)
-  replaced = require_replaced(expanded)
-  selected
-}
-"#,
-    );
-    assert!(
-        errors
-            .iter()
-            .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
-        "an insertion-shaped reshape output must reject replacement of the same expand:\n{}",
-        summary(&errors)
-    );
-}
-
-#[test]
-fn wildcard_reshape_consumer_does_not_erase_later_insertion_selection() {
-    let errors = typecheck(
-        r#"
-def accept_partial(x: tensor[*, *, 3, f32]) -> tensor[*, *, 3, f32] = x
-def require_inserted(x: tensor[3, 1, 2, 1, f32]) -> tensor[3, 1, 2, 1, f32] = x
-def require_inserted_reshape(x: tensor[1, 2, 3, f32]) -> tensor[1, 2, 3, f32] = x
-def f(bias: tensor[1, 2, 1, f32]) -> tensor[1, 2, 3, f32] = {
-  expanded = expand(bias, 0, 3i64)
-  reshaped = reshape(expanded, [shape(expanded, 1), shape(expanded, 2), 3i64])
-  partial = accept_partial(reshaped)
-  selected = require_inserted_reshape(reshaped)
-  inserted = require_inserted(expanded)
-  selected
-}
-"#,
-    );
-    assert!(
-        errors.is_empty(),
-        "a partial consumer must retain the relation for later insertion selection:\n{}",
-        summary(&errors)
-    );
-}
-
-#[test]
-fn wildcard_reshape_consumer_does_not_hide_later_shape_contradiction() {
-    let errors = typecheck(
-        r#"
-def accept_partial(x: tensor[*, *, 3, f32]) -> tensor[*, *, 3, f32] = x
-def require_replaced(x: tensor[3, 2, 1, f32]) -> tensor[3, 2, 1, f32] = x
-def require_inserted_reshape(x: tensor[1, 2, 3, f32]) -> tensor[1, 2, 3, f32] = x
-def f(bias: tensor[1, 2, 1, f32]) -> tensor[1, 2, 3, f32] = {
-  expanded = expand(bias, 0, 3i64)
-  reshaped = reshape(expanded, [shape(expanded, 1), shape(expanded, 2), 3i64])
-  partial = accept_partial(reshaped)
-  selected = require_inserted_reshape(reshaped)
-  replaced = require_replaced(expanded)
-  selected
-}
-"#,
-    );
-    assert!(
-        errors
-            .iter()
-            .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
-        "a partial consumer must not hide a later insertion/replacement contradiction:\n{}",
-        summary(&errors)
-    );
-}
-
-#[test]
-fn expand_replacement_selects_candidate_dependent_reshape_output() {
+fn expand_replacement_and_reshape_output_agree() {
     let errors = typecheck(
         r#"
 def require_replaced(x: tensor[3, 2, 1, f32]) -> tensor[3, 2, 1, f32] = x
@@ -489,13 +473,13 @@ def f(bias: tensor[1, 2, 1, f32]) -> tensor[2, 1, 3, f32] = {
     );
     assert!(
         errors.is_empty(),
-        "expand replacement must refine the dependent reshape output:\n{}",
+        "expand replacement must agree with the immediately published reshape output:\n{}",
         summary(&errors)
     );
 }
 
 #[test]
-fn expand_replacement_rejects_contradictory_candidate_dependent_reshape_output() {
+fn reshape_output_rejects_a_contradictory_consumer() {
     let errors = typecheck(
         r#"
 def require_replaced(x: tensor[3, 2, 1, f32]) -> tensor[3, 2, 1, f32] = x
@@ -513,13 +497,13 @@ def f(bias: tensor[1, 2, 1, f32]) -> tensor[1, 2, 3, f32] = {
         errors
             .iter()
             .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
-        "expand replacement must reject the insertion-specific reshape output:\n{}",
+        "the published reshape output must reject a contradictory consumer:\n{}",
         summary(&errors)
     );
 }
 
 #[test]
-fn chained_reshape_preserves_deferred_candidate_relation() {
+fn chained_reshape_consumes_the_published_first_shape() {
     let errors = typecheck(
         r#"
 def f(bias: tensor[1, 2, 1, f32]) -> tensor[6, f32] = {
@@ -531,7 +515,7 @@ def f(bias: tensor[1, 2, 1, f32]) -> tensor[6, f32] = {
     );
     assert!(
         errors.is_empty(),
-        "a second reshape must preserve and resolve the first reshape's deferred relation:\n{}",
+        "a second reshape must consume the first reshape's published shape:\n{}",
         summary(&errors)
     );
 }
@@ -735,9 +719,12 @@ def f(a: tensor[8, 16, f32], b: tensor[16, 5, f32]) = {
 "#,
     );
     assert!(
-        errors
-            .iter()
-            .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
+        errors.iter().any(|error| {
+            matches!(error.kind, CheckErrorKind::DimensionMismatch)
+                && error.message.contains("settle in source order")
+                && error.message.contains("program freeze point")
+                && error.message.contains("declare the result tensor shape")
+        }),
         "deferred expands with no common elementwise shape must fail:\n{}",
         summary(&errors)
     );

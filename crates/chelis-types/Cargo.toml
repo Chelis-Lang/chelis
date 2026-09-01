@@ -8,6 +8,7 @@ repository.workspace = true
 
 [features]
 checkpoint-compile-probe = []
+hash-order-compile-probe = []
 generalize-sweep-oracle = []
 
 [dependencies]

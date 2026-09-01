@@ -133,13 +133,12 @@ pub struct Subst {
     /// letting an unrelated tensor shape slip through. Reusable library
     /// contexts serialize this obligation so a downstream checking unit can
     /// make the first shape-bearing choice after a cache round trip.
-    deferred_expand_constraints: Mutex<HashMap<TypeVar, Vec<DeferredExpandConstraint>>>,
-    /// A `reshape` of an unresolved positional-expand result can itself have
-    /// candidate-dependent output dimensions. Keep the legal input/output
-    /// pairs attached to the reshape result variable until either side
-    /// selects one pair. This prevents a wildcard summary from forgetting
-    /// which reshape output belongs to the eventual expand shape.
-    deferred_reshape_constraints: Mutex<HashMap<TypeVar, Vec<DeferredReshapeConstraint>>>,
+    deferred_expand_constraints: Mutex<DeferredExpandConstraints>,
+    /// Element-count obligations imposed by `reshape` while a positional
+    /// `expand` input is unresolved. The reshape output itself is immediately
+    /// shape-bearing from its shape list (spec/04 §4.7.2-§4.7.3); only this
+    /// relation to the input remains deferred.
+    deferred_reshape_constraints: Mutex<DeferredReshapeConstraints>,
     /// Current lexical generalization level. Serialized because a cloned
     /// checking context must preserve in-flight transactional state.
     #[serde(default)]
@@ -170,18 +169,274 @@ pub struct DeferredExpandConstraint {
     pub size: Dim,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct DeferredReshapeConstraint {
-    input_var: TypeVar,
-    candidates: Vec<DeferredReshapeCandidate>,
-    output_requirements: Vec<Type>,
+/// Preorder position in the canonical Deep program. This is deliberately
+/// distinct from `TypeVar`: inference allocates type variables in callee-first
+/// dependency order, while positional-expand settlement is source ordered.
+mod deferred_order {
+    use super::*;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    pub(crate) struct SourceOrdinal(u64);
+
+    impl SourceOrdinal {
+        pub(crate) const fn new(value: u64) -> Self {
+            Self(value)
+        }
+
+        const fn get(self) -> u64 {
+            self.0
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub(super) enum DeferredSourcePosition {
+        Program(SourceOrdinal),
+        Imported {
+            first_reference: Option<SourceOrdinal>,
+            library_ordinal: u64,
+        },
+    }
+
+    impl DeferredSourcePosition {
+        fn sort_key(self) -> (u8, u64, u64) {
+            match self {
+                Self::Program(ordinal) => (0, ordinal.get(), 0),
+                Self::Imported {
+                    first_reference: Some(ordinal),
+                    library_ordinal,
+                } => (0, ordinal.get(), library_ordinal.saturating_add(1)),
+                Self::Imported {
+                    first_reference: None,
+                    library_ordinal,
+                } => (1, library_ordinal, 0),
+            }
+        }
+
+        /// Rebase a completed checking unit into a reusable library layer.
+        /// Existing imports belong to earlier composed layers and therefore
+        /// precede every obligation authored by the unit being completed.
+        /// First-reference positions are deliberately ignored here: they are
+        /// local to the check that just ended and will be recorded anew by the
+        /// next downstream consumer.
+        fn composition_key(self) -> (u8, u64) {
+            match self {
+                Self::Imported {
+                    library_ordinal, ..
+                } => (0, library_ordinal),
+                Self::Program(ordinal) => (1, ordinal.get()),
+            }
+        }
+
+        fn note_reference(&mut self, at: SourceOrdinal) {
+            if let Self::Imported {
+                first_reference, ..
+            } = self
+            {
+                // Dependency inference can visit a later textual reference first.
+                // The precomputed ordinal, rather than visit order, owns this choice.
+                *first_reference = Some(first_reference.map_or(at, |current| current.min(at)));
+            }
+        }
+
+        #[cfg(test)]
+        pub(super) fn observed_ordinal(self) -> u64 {
+            match self {
+                Self::Program(ordinal) => ordinal.get(),
+                Self::Imported {
+                    first_reference: Some(ordinal),
+                    ..
+                } => ordinal.get(),
+                Self::Imported {
+                    first_reference: None,
+                    library_ordinal,
+                } => library_ordinal,
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub(super) struct Sourced<T> {
+        pub(super) position: DeferredSourcePosition,
+        pub(super) obligation: T,
+    }
+
+    impl<T> Sourced<T> {
+        fn program(ordinal: SourceOrdinal, obligation: T) -> Self {
+            Self {
+                position: DeferredSourcePosition::Program(ordinal),
+                obligation,
+            }
+        }
+    }
+
+    fn prepare_store_for_downstream<T>(store: &mut HashMap<TypeVar, Vec<Sourced<T>>>) {
+        let mut positions = store
+            .iter_mut()
+            .flat_map(|(var, constraints)| {
+                let var_id = var.0;
+                constraints
+                    .iter_mut()
+                    .enumerate()
+                    .map(move |(constraint_index, entry)| (var_id, constraint_index, entry))
+            })
+            .collect::<Vec<_>>();
+        positions.sort_by_key(|(var_id, constraint_index, entry)| {
+            (entry.position.composition_key(), *var_id, *constraint_index)
+        });
+        for (library_ordinal, (_, _, entry)) in positions.into_iter().enumerate() {
+            entry.position = DeferredSourcePosition::Imported {
+                first_reference: None,
+                library_ordinal: library_ordinal as u64,
+            };
+        }
+        for constraints in store.values_mut() {
+            constraints.sort_by_key(|entry| entry.position.sort_key());
+        }
+    }
+
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub(super) struct DeferredExpandConstraints(
+        HashMap<TypeVar, Vec<Sourced<DeferredExpandConstraint>>>,
+    );
+
+    impl DeferredExpandConstraints {
+        pub(super) fn insert(
+            &mut self,
+            var: TypeVar,
+            ordinal: SourceOrdinal,
+            constraint: DeferredExpandConstraint,
+        ) {
+            let obligations = self.0.entry(var).or_default();
+            obligations.push(Sourced::program(ordinal, constraint));
+            obligations.sort_by_key(|entry| entry.position.sort_key());
+        }
+
+        pub(super) fn contains(&self, var: TypeVar) -> bool {
+            self.0.contains_key(&var)
+        }
+
+        pub(super) fn get(&self, var: TypeVar) -> Option<Vec<Sourced<DeferredExpandConstraint>>> {
+            self.0.get(&var).cloned()
+        }
+
+        pub(super) fn take(
+            &mut self,
+            var: TypeVar,
+        ) -> Option<Vec<Sourced<DeferredExpandConstraint>>> {
+            self.0.remove(&var)
+        }
+
+        pub(super) fn merge_alias(&mut self, from: TypeVar, to: TypeVar) {
+            let Some(mut moved) = self.0.remove(&from) else {
+                return;
+            };
+            let target = self.0.entry(to).or_default();
+            target.append(&mut moved);
+            target.sort_by_key(|entry| entry.position.sort_key());
+        }
+
+        pub(super) fn settlement_order(&self) -> Vec<TypeVar> {
+            let mut vars = self
+                .0
+                .iter()
+                .filter_map(|(var, constraints)| {
+                    constraints
+                        .first()
+                        .map(|first| (first.position.sort_key(), var.0, *var))
+                })
+                .collect::<Vec<_>>();
+            vars.sort_by_key(|entry| (entry.0, entry.1));
+            vars.into_iter().map(|(_, _, var)| var).collect()
+        }
+
+        pub(super) fn prepare_for_downstream(&mut self) {
+            prepare_store_for_downstream(&mut self.0);
+        }
+
+        pub(super) fn note_reference(&mut self, vars: &[TypeVar], at: SourceOrdinal) {
+            for var in vars {
+                let Some(constraints) = self.0.get_mut(var) else {
+                    continue;
+                };
+                for entry in &mut *constraints {
+                    entry.position.note_reference(at);
+                }
+                constraints.sort_by_key(|entry| entry.position.sort_key());
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub(super) struct DeferredReshapeConstraint {
+        pub(super) target_dims: Vec<Dim>,
+    }
+
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub(super) struct DeferredReshapeConstraints(
+        HashMap<TypeVar, Vec<Sourced<DeferredReshapeConstraint>>>,
+    );
+
+    impl DeferredReshapeConstraints {
+        pub(super) fn insert(
+            &mut self,
+            var: TypeVar,
+            ordinal: SourceOrdinal,
+            target_dims: Vec<Dim>,
+        ) {
+            let obligations = self.0.entry(var).or_default();
+            obligations.push(Sourced::program(
+                ordinal,
+                DeferredReshapeConstraint { target_dims },
+            ));
+            obligations.sort_by_key(|entry| entry.position.sort_key());
+        }
+
+        pub(super) fn contains(&self, var: TypeVar) -> bool {
+            self.0.contains_key(&var)
+        }
+
+        #[cfg(test)]
+        pub(super) fn get(&self, var: TypeVar) -> Vec<Sourced<DeferredReshapeConstraint>> {
+            self.0.get(&var).cloned().unwrap_or_default()
+        }
+
+        pub(super) fn take(&mut self, var: TypeVar) -> Vec<Sourced<DeferredReshapeConstraint>> {
+            self.0.remove(&var).unwrap_or_default()
+        }
+
+        pub(super) fn merge_alias(&mut self, from: TypeVar, to: TypeVar) {
+            let Some(mut moved) = self.0.remove(&from) else {
+                return;
+            };
+            let target = self.0.entry(to).or_default();
+            target.append(&mut moved);
+            target.sort_by_key(|entry| entry.position.sort_key());
+        }
+
+        pub(super) fn prepare_for_downstream(&mut self) {
+            prepare_store_for_downstream(&mut self.0);
+        }
+
+        pub(super) fn note_reference(&mut self, vars: &[TypeVar], at: SourceOrdinal) {
+            for var in vars {
+                let Some(constraints) = self.0.get_mut(var) else {
+                    continue;
+                };
+                for entry in &mut *constraints {
+                    entry.position.note_reference(at);
+                }
+                constraints.sort_by_key(|entry| entry.position.sort_key());
+            }
+        }
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct DeferredReshapeCandidate {
-    input: Type,
-    output: Type,
-}
+pub(crate) use deferred_order::SourceOrdinal;
+use deferred_order::{
+    DeferredExpandConstraints, DeferredReshapeConstraint, DeferredReshapeConstraints, Sourced,
+};
 
 /// Which deferred use shape registered a ledger entry (determines the
 /// violation action text at validation time).
@@ -244,6 +499,23 @@ impl Subst {
         Self::default()
     }
 
+    /// Compile-fail-only opaque view of the real expand store. The fixture
+    /// proves that enabling its inspection seam still exposes no raw map API.
+    #[cfg(feature = "hash-order-compile-probe")]
+    pub fn deferred_expand_store_compile_probe(&self) -> impl std::fmt::Debug + '_ {
+        self.deferred_expand_constraints
+            .lock()
+            .expect("subst.deferred_expand_constraints poisoned")
+    }
+
+    /// Compile-fail-only opaque view of the real reshape store.
+    #[cfg(feature = "hash-order-compile-probe")]
+    pub fn deferred_reshape_store_compile_probe(&self) -> impl std::fmt::Debug + '_ {
+        self.deferred_reshape_constraints
+            .lock()
+            .expect("subst.deferred_reshape_constraints poisoned")
+    }
+
     pub(crate) fn current_level(&self) -> u32 {
         self.current_level
     }
@@ -302,6 +574,14 @@ impl Subst {
             level: 0,
             watermarks: floors,
         });
+        self.deferred_expand_constraints
+            .lock()
+            .expect("subst.deferred_expand_constraints poisoned")
+            .prepare_for_downstream();
+        self.deferred_reshape_constraints
+            .lock()
+            .expect("subst.deferred_reshape_constraints poisoned")
+            .prepare_for_downstream();
     }
 
     fn mint_level(&self, id: u32, class: VarClass) -> u32 {
@@ -504,28 +784,27 @@ impl Subst {
     }
 
     /// Attach a positional-expand obligation to its unresolved result.
-    pub fn record_deferred_expand_constraint(
+    pub(crate) fn record_deferred_expand_constraint(
         &self,
         v: TypeVar,
+        ordinal: SourceOrdinal,
         constraint: DeferredExpandConstraint,
     ) {
         self.deferred_expand_constraints
             .lock()
             .expect("subst.deferred_expand_constraints poisoned")
-            .entry(v)
-            .or_default()
-            .push(constraint);
+            .insert(v, ordinal, constraint);
     }
 
     /// Whether `v` is an unresolved output carrying a positional-expand
     /// obligation. Generalization uses this to keep one produced value
     /// monomorphic: two consumers may not independently choose two shapes for
     /// the same binding.
-    pub fn has_deferred_expand_constraint(&self, v: TypeVar) -> bool {
+    pub(crate) fn has_deferred_expand_constraint(&self, v: TypeVar) -> bool {
         self.deferred_expand_constraints
             .lock()
             .expect("subst.deferred_expand_constraints poisoned")
-            .contains_key(&v)
+            .contains(v)
     }
 
     /// Whether `v` carries any deferred shape relation and must therefore
@@ -536,14 +815,14 @@ impl Subst {
                 .deferred_reshape_constraints
                 .lock()
                 .expect("subst.deferred_reshape_constraints poisoned")
-                .contains_key(&v)
+                .contains(v)
     }
 
     /// Materialize the context-free positional-expand default for `v`.
     /// Existing-axis calls choose same-rank replacement; `axis == rank` has
     /// no replacement form and therefore chooses trailing insertion. Every
     /// obligation attached through alias unification must agree.
-    pub fn materialize_deferred_expand_default(
+    pub(crate) fn materialize_deferred_expand_default(
         &mut self,
         v: TypeVar,
     ) -> Result<Option<Type>, TypeError> {
@@ -551,8 +830,7 @@ impl Subst {
             .deferred_expand_constraints
             .lock()
             .expect("subst.deferred_expand_constraints poisoned")
-            .get(&v)
-            .cloned();
+            .get(v);
         let Some(constraints) = constraints else {
             return Ok(None);
         };
@@ -567,15 +845,11 @@ impl Subst {
         // already bound dimension variables before discovering a later
         // mismatch; rejected candidates must not mutate the real state.
         let mut first_rejection = None;
-        for candidate in constraints[0].candidate_types()? {
+        for candidate in constraints[0].obligation.candidate_types()? {
             let mut trial = self.clone();
-            let compatible = constraints.iter().try_for_each(|constraint| {
-                let canonical = constraint.canonical_for_output(&candidate)?;
-                unify(&canonical, &candidate, &mut trial)
-            });
-            match compatible {
+            match unify(&Type::Var(v), &candidate, &mut trial) {
                 Ok(()) => {
-                    unify(&Type::Var(v), &candidate, self)?;
+                    *self = trial;
                     return Ok(Some(self.apply(&candidate)));
                 }
                 Err(error) => {
@@ -586,218 +860,62 @@ impl Subst {
         Err(first_rejection.expect("deferred expand constraint set has at least one candidate"))
     }
 
-    /// Resolve a positional-expand result consumed by `reshape`.
-    /// Reshape does not preserve rank or individual dimensions, but it does
-    /// preserve element count. Derive the target separately for every legal
-    /// expand candidate because `shape(expanded, axis)` may itself distinguish
-    /// replacement from insertion or reject an out-of-bounds candidate. If
-    /// more than one candidate survives, retain their input/output relation
-    /// on a fresh reshape result variable so either side can select the same
-    /// candidate later.
-    pub fn resolve_deferred_expand_for_reshape<F>(
+    /// Publish a `reshape` result immediately while retaining only its
+    /// element-count relation to an unresolved positional-expand input.
+    pub(crate) fn resolve_deferred_expand_for_reshape(
         &mut self,
         input_var: TypeVar,
-        output_var: TypeVar,
-        mut target_dims_for_candidate: F,
-    ) -> Result<Option<Type>, TypeError>
-    where
-        F: FnMut(&[Dim]) -> Result<Vec<Dim>, TypeError>,
-    {
+        ordinal: SourceOrdinal,
+        target_dims: Vec<Dim>,
+    ) -> Result<Option<Type>, TypeError> {
         let constraints = self
             .deferred_expand_constraints
             .lock()
             .expect("subst.deferred_expand_constraints poisoned")
-            .get(&input_var)
-            .cloned();
+            .get(input_var);
         let Some(constraints) = constraints else {
             return Ok(None);
         };
 
+        let precision = constraints[0].obligation.input_prec.clone();
         let mut first_rejection = None;
         let mut compatible_candidates = Vec::new();
-        for candidate in constraints[0].candidate_types()? {
-            let Type::Tensor(candidate_dims, _) = &candidate else {
-                unreachable!("deferred expand candidates are tensors");
-            };
-            let target_dims = match target_dims_for_candidate(candidate_dims) {
-                Ok(target_dims) => target_dims,
+        for candidate in constraints[0].obligation.candidate_types()? {
+            let mut trial = self.clone();
+            trial.record_deferred_reshape_constraint(input_var, ordinal, target_dims.clone());
+            match unify(&Type::Var(input_var), &candidate, &mut trial) {
+                Ok(()) => compatible_candidates.push((candidate, trial)),
                 Err(error) => {
                     first_rejection.get_or_insert(error);
-                    continue;
                 }
-            };
-            if self.static_dim_products_match(candidate_dims, &target_dims) == Some(false) {
-                let candidate_numel = self.static_dim_product(candidate_dims);
-                let target_numel = self.static_dim_product(&target_dims);
-                first_rejection.get_or_insert_with(|| TypeError {
-                    kind: TypeErrorKind::DimensionMismatch,
-                    message: match (target_numel, candidate_numel) {
-                        (Some(target), Some(candidate)) => format!(
-                            "reshape target has {target} elements, which matches no legal expand \
-                             output shape (candidate has {candidate} elements)"
-                        ),
-                        _ => "reshape target element count matches no legal expand output shape"
-                            .to_string(),
-                    },
-                });
-                continue;
-            }
-
-            let mut trial = self.clone();
-            let compatible = constraints.iter().try_for_each(|constraint| {
-                let canonical = constraint.canonical_for_output(&candidate)?;
-                unify(&canonical, &candidate, &mut trial)
-            });
-            if let Err(error) = compatible {
-                first_rejection.get_or_insert(error);
-                continue;
-            }
-            compatible_candidates.push((candidate, target_dims));
-        }
-        match compatible_candidates.as_slice() {
-            [(candidate, target_dims)] => {
-                let Type::Tensor(_, precision) = candidate else {
-                    unreachable!("deferred expand candidates are tensors");
-                };
-                unify(&Type::Var(input_var), candidate, self)?;
-                Ok(Some(self.apply(&Type::Tensor(
-                    target_dims.clone(),
-                    precision.clone(),
-                ))))
-            }
-            [] => Err(first_rejection.expect("every deferred expand candidate was rejected")),
-            candidates => {
-                let candidates = candidates
-                    .iter()
-                    .map(|(input, target_dims)| {
-                        let Type::Tensor(_, precision) = input else {
-                            unreachable!("deferred expand candidates are tensors");
-                        };
-                        DeferredReshapeCandidate {
-                            input: input.clone(),
-                            output: Type::Tensor(target_dims.clone(), precision.clone()),
-                        }
-                    })
-                    .collect();
-                self.deferred_reshape_constraints
-                    .lock()
-                    .expect("subst.deferred_reshape_constraints poisoned")
-                    .entry(output_var)
-                    .or_default()
-                    .push(DeferredReshapeConstraint {
-                        input_var,
-                        candidates,
-                        output_requirements: Vec::new(),
-                    });
-                Ok(Some(Type::Var(output_var)))
             }
         }
+        match compatible_candidates.len() {
+            1 => {
+                let (_, trial) = compatible_candidates
+                    .pop()
+                    .expect("one compatible candidate");
+                *self = trial;
+            }
+            0 => {
+                return Err(first_rejection
+                    .expect("every deferred expand candidate was rejected by reshape"));
+            }
+            _ => self.record_deferred_reshape_constraint(input_var, ordinal, target_dims.clone()),
+        }
+        Ok(Some(self.apply(&Type::Tensor(target_dims, precision))))
     }
 
-    /// Compose a `reshape` over the output of an earlier unresolved
-    /// `reshape`, retaining the original expand candidate that owns each
-    /// intermediate shape.
-    pub fn resolve_deferred_reshape_for_reshape<F>(
-        &mut self,
-        input_output_var: TypeVar,
-        output_var: TypeVar,
-        mut target_dims_for_candidate: F,
-    ) -> Result<Option<Type>, TypeError>
-    where
-        F: FnMut(&[Dim]) -> Result<Vec<Dim>, TypeError>,
-    {
-        let constraints = self
-            .deferred_reshape_constraints
+    fn record_deferred_reshape_constraint(
+        &self,
+        input_var: TypeVar,
+        ordinal: SourceOrdinal,
+        target_dims: Vec<Dim>,
+    ) {
+        self.deferred_reshape_constraints
             .lock()
             .expect("subst.deferred_reshape_constraints poisoned")
-            .get(&input_output_var)
-            .cloned();
-        let Some(constraints) = constraints else {
-            return Ok(None);
-        };
-
-        let mut pending = Vec::new();
-        let mut selected = Vec::new();
-        for constraint in constraints {
-            let (compatible, mut first_rejection) =
-                self.deferred_reshape_candidates(&constraint, None);
-            let mut derived = Vec::new();
-            for candidate in compatible {
-                let Type::Tensor(input_dims, precision) = &candidate.output else {
-                    unreachable!("deferred reshape candidates are tensors");
-                };
-                let precision = precision.clone();
-                let target_dims = match target_dims_for_candidate(input_dims) {
-                    Ok(target_dims) => target_dims,
-                    Err(error) => {
-                        first_rejection.get_or_insert(error);
-                        continue;
-                    }
-                };
-                if self.static_dim_products_match(input_dims, &target_dims) == Some(false) {
-                    first_rejection.get_or_insert_with(|| TypeError {
-                        kind: TypeErrorKind::DimensionMismatch,
-                        message: "reshape target element count matches no legal deferred reshape \
-                                  input shape"
-                            .to_string(),
-                    });
-                    continue;
-                }
-                derived.push((candidate, Type::Tensor(target_dims, precision)));
-            }
-
-            match derived.as_slice() {
-                [] => {
-                    return Err(first_rejection.unwrap_or_else(|| TypeError {
-                        kind: TypeErrorKind::DimensionMismatch,
-                        message: "reshape target matches no legal deferred input shape".to_string(),
-                    }));
-                }
-                [(candidate, output)] => {
-                    selected.push((
-                        constraint.input_var,
-                        candidate.input.clone(),
-                        candidate.output.clone(),
-                        output.clone(),
-                    ));
-                }
-                _ => {
-                    pending.push(DeferredReshapeConstraint {
-                        input_var: constraint.input_var,
-                        candidates: derived
-                            .into_iter()
-                            .map(|(candidate, output)| DeferredReshapeCandidate {
-                                input: candidate.input,
-                                output,
-                            })
-                            .collect(),
-                        output_requirements: Vec::new(),
-                    });
-                }
-            }
-        }
-
-        // Install pending relations before singleton selection so a concrete
-        // result also constrains every relation attached to the new output.
-        // Work on a clone so any rejected candidate leaves the original
-        // substitution and its serialized obligations unchanged.
-        let mut trial = self.clone();
-        if !pending.is_empty() {
-            trial
-                .deferred_reshape_constraints
-                .lock()
-                .expect("subst.deferred_reshape_constraints poisoned")
-                .entry(output_var)
-                .or_default()
-                .extend(pending);
-        }
-        for (root_var, root_input, intermediate, output) in selected {
-            unify(&Type::Var(input_output_var), &intermediate, &mut trial)?;
-            unify(&Type::Var(root_var), &root_input, &mut trial)?;
-            unify(&Type::Var(output_var), &output, &mut trial)?;
-        }
-        *self = trial;
-        Ok(Some(self.apply(&Type::Var(output_var))))
+            .insert(input_var, ordinal, target_dims);
     }
 
     pub(crate) fn static_dim_product(&self, dims: &[Dim]) -> Option<i128> {
@@ -863,188 +981,43 @@ impl Subst {
         )
     }
 
-    fn has_deferred_reshape_output(&self, output_var: TypeVar) -> bool {
+    #[cfg(test)]
+    fn deferred_reshape_constraints_for_input(
+        &self,
+        input_var: TypeVar,
+    ) -> Vec<Sourced<DeferredReshapeConstraint>> {
         self.deferred_reshape_constraints
             .lock()
             .expect("subst.deferred_reshape_constraints poisoned")
-            .contains_key(&output_var)
+            .get(input_var)
     }
 
-    fn transfer_deferred_reshape_alias(&self, from: TypeVar, to: TypeVar) {
-        let mut constraints = self
-            .deferred_reshape_constraints
-            .lock()
-            .expect("subst.deferred_reshape_constraints poisoned");
-        if let Some(output_constraints) = constraints.remove(&from) {
-            constraints
-                .entry(to)
-                .or_default()
-                .extend(output_constraints);
-        }
-        for output_constraints in constraints.values_mut() {
-            for constraint in output_constraints {
-                if constraint.input_var == from {
-                    constraint.input_var = to;
-                }
-            }
-        }
-    }
-
-    fn deferred_reshape_candidates(
+    fn validate_deferred_reshape_constraints(
         &self,
-        constraint: &DeferredReshapeConstraint,
-        input_requirement: Option<&Type>,
-    ) -> (Vec<DeferredReshapeCandidate>, Option<TypeError>) {
-        let current_input = self.apply(&Type::Var(constraint.input_var));
-        let current_input = (!matches!(current_input, Type::Var(_))).then_some(current_input);
-        let mut first_rejection = None;
-        let mut compatible = Vec::new();
-        for candidate in &constraint.candidates {
-            let mut trial = self.clone();
-            let result = (|| {
-                if let Some(input) = current_input.as_ref() {
-                    unify(&candidate.input, input, &mut trial)?;
-                }
-                if let Some(input) = input_requirement {
-                    unify(&candidate.input, input, &mut trial)?;
-                }
-                for output in &constraint.output_requirements {
-                    unify(&candidate.output, output, &mut trial)?;
-                }
-                Ok(())
-            })();
-            match result {
-                Ok(()) => compatible.push(candidate.clone()),
-                Err(error) => {
-                    first_rejection.get_or_insert(error);
-                }
-            }
-        }
-        (compatible, first_rejection)
-    }
-
-    /// Add an observed type requirement to a deferred reshape output. If it
-    /// selects one legal pair, bind both sides. If more than one pair still
-    /// fits, retain the requirement without binding the result to a wildcard
-    /// summary that could erase the dependency.
-    fn constrain_deferred_reshape_output(
-        &mut self,
-        output_var: TypeVar,
-        requirement: &Type,
-    ) -> Result<bool, TypeError> {
-        let mut trial = self.clone();
-        let constrained =
-            trial.constrain_deferred_reshape_output_in_place(output_var, requirement)?;
-        if constrained {
-            *self = trial;
-        }
-        Ok(constrained)
-    }
-
-    fn constrain_deferred_reshape_output_in_place(
-        &mut self,
-        output_var: TypeVar,
-        requirement: &Type,
-    ) -> Result<bool, TypeError> {
-        let constraints = self
-            .deferred_reshape_constraints
-            .lock()
-            .expect("subst.deferred_reshape_constraints poisoned")
-            .remove(&output_var);
-        let Some(constraints) = constraints else {
-            return Ok(false);
-        };
-
-        let mut pending = Vec::new();
-        for mut constraint in constraints {
-            constraint.output_requirements.push(requirement.clone());
-            let (compatible, rejection) = self.deferred_reshape_candidates(&constraint, None);
-            match compatible.as_slice() {
-                [] => {
-                    return Err(rejection.unwrap_or_else(|| TypeError {
-                        kind: TypeErrorKind::DimensionMismatch,
-                        message: "reshape output matches no legal deferred expand shape"
-                            .to_string(),
-                    }));
-                }
-                [candidate] => {
-                    for output in &constraint.output_requirements {
-                        unify(&candidate.output, output, self)?;
-                    }
-                    unify(&Type::Var(output_var), &candidate.output, self)?;
-                    unify(&Type::Var(constraint.input_var), &candidate.input, self)?;
-                }
-                _ => pending.push(constraint),
-            }
-        }
-        if !pending.is_empty() {
-            self.deferred_reshape_constraints
-                .lock()
-                .expect("subst.deferred_reshape_constraints poisoned")
-                .entry(output_var)
-                .or_default()
-                .extend(pending);
-        }
-        Ok(true)
-    }
-
-    fn take_deferred_reshapes_for_input(
-        &self,
-        input_var: TypeVar,
-    ) -> Vec<(TypeVar, DeferredReshapeConstraint)> {
-        let mut constraints = self
-            .deferred_reshape_constraints
-            .lock()
-            .expect("subst.deferred_reshape_constraints poisoned");
-        let mut dependent = Vec::new();
-        for (output_var, output_constraints) in constraints.iter_mut() {
-            let all = std::mem::take(output_constraints);
-            for constraint in all {
-                if constraint.input_var == input_var {
-                    dependent.push((*output_var, constraint));
-                } else {
-                    output_constraints.push(constraint);
-                }
-            }
-        }
-        constraints.retain(|_, output_constraints| !output_constraints.is_empty());
-        dependent
-    }
-
-    /// Refine every reshape result that depends on a newly selected expand
-    /// input. A concrete insertion/replacement shape normally leaves exactly
-    /// one legal pair; an intentionally wildcard input keeps the relation.
-    fn resolve_deferred_reshapes_for_input(
-        &mut self,
-        input_var: TypeVar,
         input: &Type,
+        constraints: &[Sourced<DeferredReshapeConstraint>],
     ) -> Result<(), TypeError> {
-        let constraints = self.take_deferred_reshapes_for_input(input_var);
-        for (output_var, constraint) in constraints {
-            let (compatible, rejection) =
-                self.deferred_reshape_candidates(&constraint, Some(input));
-            match compatible.as_slice() {
-                [] => {
-                    return Err(rejection.unwrap_or_else(|| TypeError {
-                        kind: TypeErrorKind::DimensionMismatch,
-                        message: "selected expand shape has no legal reshape output".to_string(),
-                    }));
-                }
-                [candidate] => {
-                    unify(&candidate.input, input, self)?;
-                    for output in &constraint.output_requirements {
-                        unify(&candidate.output, output, self)?;
-                    }
-                    unify(&Type::Var(output_var), &candidate.output, self)?;
-                }
-                _ => {
-                    self.deferred_reshape_constraints
-                        .lock()
-                        .expect("subst.deferred_reshape_constraints poisoned")
-                        .entry(output_var)
-                        .or_default()
-                        .push(constraint);
-                }
+        let Type::Tensor(input_dims, _) = self.apply(input) else {
+            return Err(TypeError {
+                kind: TypeErrorKind::TypeMismatch,
+                message: format!("reshape expects tensor input, got {}", self.apply(input)),
+            });
+        };
+        for constraint in constraints {
+            if self.static_dim_products_match(&input_dims, &constraint.obligation.target_dims)
+                == Some(false)
+            {
+                let input_numel = self.static_dim_product(&input_dims);
+                let target_numel = self.static_dim_product(&constraint.obligation.target_dims);
+                return Err(TypeError {
+                    kind: TypeErrorKind::DimensionMismatch,
+                    message: match (target_numel, input_numel) {
+                        (Some(target), Some(input)) => format!(
+                            "reshape target has {target} elements but input tensor has {input}"
+                        ),
+                        _ => "reshape target element count does not match input tensor".to_string(),
+                    },
+                });
             }
         }
         Ok(())
@@ -1055,20 +1028,75 @@ impl Subst {
     /// get the first opportunity to select either legal shape; only the
     /// program freeze point invokes this fallback so no unresolved result can
     /// escape into checked annotations.
-    pub fn materialize_deferred_expand_defaults(&mut self) -> Result<(), TypeError> {
+    pub(crate) fn materialize_deferred_expand_defaults(&mut self) -> Result<(), TypeError> {
         let vars = self
             .deferred_expand_constraints
             .lock()
             .expect("subst.deferred_expand_constraints poisoned")
-            .keys()
-            .copied()
-            .collect::<Vec<_>>();
+            .settlement_order();
         for var in vars {
             if self.has_deferred_expand_constraint(var) {
-                self.materialize_deferred_expand_default(var)?;
+                self.materialize_deferred_expand_default(var)
+                    .map_err(|error| TypeError {
+                        kind: error.kind,
+                        message: format!(
+                            "positional expand defaults could not settle in source order at the \
+                             program freeze point; declare the result tensor shape to select a \
+                             compatible form. Underlying mismatch: {}",
+                            error.message
+                        ),
+                    })?;
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn note_deferred_reference(&self, ty: &Type, at: SourceOrdinal) {
+        let vars = crate::env::free_tvars(&self.apply(ty));
+        self.deferred_expand_constraints
+            .lock()
+            .expect("subst.deferred_expand_constraints poisoned")
+            .note_reference(&vars, at);
+        self.deferred_reshape_constraints
+            .lock()
+            .expect("subst.deferred_reshape_constraints poisoned")
+            .note_reference(&vars, at);
+    }
+
+    #[cfg(test)]
+    fn deferred_expand_settlement_order_for_test(&self) -> Vec<TypeVar> {
+        self.deferred_expand_constraints
+            .lock()
+            .expect("subst.deferred_expand_constraints poisoned")
+            .settlement_order()
+    }
+
+    #[cfg(test)]
+    fn deferred_expand_ordinals_for_test(&self, var: TypeVar) -> Vec<u64> {
+        self.deferred_expand_constraints
+            .lock()
+            .expect("subst.deferred_expand_constraints poisoned")
+            .get(var)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| entry.position.observed_ordinal())
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn deferred_reshape_ordinals_for_test(&self, var: TypeVar) -> Vec<u64> {
+        self.deferred_reshape_constraints_for_input(var)
+            .into_iter()
+            .map(|entry| entry.position.observed_ordinal())
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn deferred_reshape_target_dims_for_test(&self, var: TypeVar) -> Vec<Vec<Dim>> {
+        self.deferred_reshape_constraints_for_input(var)
+            .into_iter()
+            .map(|entry| entry.obligation.target_dims)
+            .collect()
     }
 
     /// Snapshot of the rank-variable bindings.
@@ -2009,44 +2037,48 @@ fn bind_tvar(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeError> 
         ensure_tvar_restriction(restriction, ty)?;
     }
 
-    if !matches!(ty, Type::Var(_) | Type::Error(_))
-        && subst.has_deferred_reshape_output(v)
-        && subst.constrain_deferred_reshape_output(v, ty)?
-    {
-        return Ok(());
-    }
-
-    let constraints = subst
-        .deferred_expand_constraints
-        .lock()
-        .expect("subst.deferred_expand_constraints poisoned")
-        .get(&v)
-        .cloned();
-    if let Some(constraints) = constraints {
-        if let Type::Var(target) = ty {
-            let mut deferred = subst
-                .deferred_expand_constraints
-                .lock()
-                .expect("subst.deferred_expand_constraints poisoned");
-            deferred.remove(&v);
-            deferred.entry(*target).or_default().extend(constraints);
-        } else {
-            // Resolving more than one deferred candidate is one transaction:
-            // an early candidate may lower reachable variables before a later
-            // candidate rejects. Run the complete set on a clone and publish
-            // it only after every candidate accepts, preserving all bindings,
-            // constraints, and level metadata on failure.
+    if let Type::Var(target) = ty {
+        subst
+            .deferred_expand_constraints
+            .lock()
+            .expect("subst.deferred_expand_constraints poisoned")
+            .merge_alias(v, *target);
+        subst
+            .deferred_reshape_constraints
+            .lock()
+            .expect("subst.deferred_reshape_constraints poisoned")
+            .merge_alias(v, *target);
+    } else if !matches!(ty, Type::Error(_)) {
+        let has_expand = subst.has_deferred_expand_constraint(v);
+        let has_reshape = subst
+            .deferred_reshape_constraints
+            .lock()
+            .expect("subst.deferred_reshape_constraints poisoned")
+            .contains(v);
+        if has_expand || has_reshape {
+            // Settlement is one transaction across both ledgers. A rejected
+            // candidate may have bound dimensions or lowered variables before
+            // a later obligation fails, so no part of the trial can leak.
             let mut trial = subst.clone();
-            trial
+            let expand_constraints = trial
                 .deferred_expand_constraints
                 .lock()
                 .expect("subst.deferred_expand_constraints poisoned")
-                .remove(&v);
-            for constraint in constraints {
-                let canonical = constraint.canonical_for_output(ty)?;
+                .take(v)
+                .unwrap_or_default();
+            for constraint in expand_constraints {
+                let canonical = constraint.obligation.canonical_for_output(ty)?;
                 unify(&canonical, ty, &mut trial)?;
             }
+            let reshape_constraints = trial
+                .deferred_reshape_constraints
+                .lock()
+                .expect("subst.deferred_reshape_constraints poisoned")
+                .take(v);
+            trial.validate_deferred_reshape_constraints(ty, &reshape_constraints)?;
+            bind_tvar(v, ty, &mut trial)?;
             *subst = trial;
+            return Ok(());
         }
     }
     // An older variable that becomes bound to a younger composite makes all
@@ -2059,11 +2091,6 @@ fn bind_tvar(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeError> 
     subst.remove_tvar_restriction(v);
     if let (Some(restriction), Type::Var(target)) = (merged_restriction, ty) {
         subst.install_tvar_restriction(*target, restriction);
-    }
-    if let Type::Var(target) = ty {
-        subst.transfer_deferred_reshape_alias(v, *target);
-    } else {
-        subst.resolve_deferred_reshapes_for_input(v, ty)?;
     }
     Ok(())
 }
@@ -3445,6 +3472,7 @@ mod tests {
         let mut s = Subst::new();
         s.record_deferred_expand_constraint(
             result,
+            SourceOrdinal::new(0),
             DeferredExpandConstraint {
                 input_dims: vec![Dim::Lit(2)],
                 input_prec: tprec(Prim::F32),
@@ -3470,6 +3498,7 @@ mod tests {
         let mut s = Subst::new();
         s.record_deferred_expand_constraint(
             result,
+            SourceOrdinal::new(0),
             DeferredExpandConstraint {
                 input_dims: vec![Dim::Lit(2)],
                 input_prec: tprec(Prim::F32),
@@ -3491,10 +3520,10 @@ mod tests {
     fn reshape_numel_selects_rank_increasing_deferred_expand() {
         let mut g = var_gen();
         let result = g.fresh_tvar();
-        let output = g.fresh_tvar();
         let mut s = Subst::new();
         s.record_deferred_expand_constraint(
             result,
+            SourceOrdinal::new(0),
             DeferredExpandConstraint {
                 input_dims: vec![Dim::Lit(2)],
                 input_prec: tprec(Prim::F32),
@@ -3504,7 +3533,7 @@ mod tests {
         );
 
         let output = s
-            .resolve_deferred_expand_for_reshape(result, output, |_| Ok(vec![Dim::Lit(6)]))
+            .resolve_deferred_expand_for_reshape(result, SourceOrdinal::new(1), vec![Dim::Lit(6)])
             .expect("a six-element reshape target must select insertion")
             .expect("the result carries a deferred expand constraint");
         assert_eq!(
@@ -3524,10 +3553,10 @@ mod tests {
     fn reshape_numel_rejects_every_incompatible_deferred_expand_shape() {
         let mut g = var_gen();
         let result = g.fresh_tvar();
-        let output = g.fresh_tvar();
         let mut s = Subst::new();
         s.record_deferred_expand_constraint(
             result,
+            SourceOrdinal::new(0),
             DeferredExpandConstraint {
                 input_dims: vec![Dim::Lit(2)],
                 input_prec: tprec(Prim::F32),
@@ -3537,24 +3566,20 @@ mod tests {
         );
 
         let error = s
-            .resolve_deferred_expand_for_reshape(result, output, |_| Ok(vec![Dim::Lit(5)]))
+            .resolve_deferred_expand_for_reshape(result, SourceOrdinal::new(1), vec![Dim::Lit(5)])
             .expect_err("five elements match neither tensor[3] nor tensor[3, 2]");
         assert!(matches!(error.kind, TypeErrorKind::DimensionMismatch));
-        assert!(
-            error
-                .message
-                .contains("matches no legal expand output shape")
-        );
+        assert!(error.message.contains("reshape target has 5 elements"));
     }
 
     #[test]
-    fn reshape_unknown_numel_leaves_deferred_expand_unresolved() {
+    fn reshape_unknown_numel_publishes_output_and_leaves_input_unresolved() {
         let mut g = var_gen();
         let result = g.fresh_tvar();
-        let output = g.fresh_tvar();
         let mut s = Subst::new();
         s.record_deferred_expand_constraint(
             result,
+            SourceOrdinal::new(0),
             DeferredExpandConstraint {
                 input_dims: vec![Dim::Lit(2)],
                 input_prec: tprec(Prim::F32),
@@ -3564,25 +3589,25 @@ mod tests {
         );
 
         let output = s
-            .resolve_deferred_expand_for_reshape(result, output, |_| Ok(vec![Dim::Wildcard]))
+            .resolve_deferred_expand_for_reshape(result, SourceOrdinal::new(1), vec![Dim::Wildcard])
             .expect("an unknown reshape target is compatible with either expand shape")
             .expect("the reshape still has its own output type");
-        assert!(matches!(output, Type::Var(_)));
+        assert_eq!(
+            output,
+            Type::Tensor(vec![Dim::Wildcard], TensorPrec::Concrete(Prim::F32))
+        );
         assert!(s.has_deferred_expand_constraint(result));
-        let Type::Var(output_var) = output else {
-            unreachable!();
-        };
-        assert!(s.has_deferred_shape_constraint(output_var));
+        assert!(s.has_deferred_shape_constraint(result));
     }
 
     #[test]
-    fn reshape_ambiguous_candidates_preserve_common_target_dims() {
+    fn reshape_ambiguous_candidates_publish_declared_target_dims() {
         let mut g = var_gen();
         let result = g.fresh_tvar();
-        let output = g.fresh_tvar();
         let mut s = Subst::new();
         s.record_deferred_expand_constraint(
             result,
+            SourceOrdinal::new(0),
             DeferredExpandConstraint {
                 input_dims: vec![Dim::Lit(2), Dim::Lit(4)],
                 input_prec: tprec(Prim::F32),
@@ -3592,27 +3617,32 @@ mod tests {
         );
 
         let output = s
-            .resolve_deferred_expand_for_reshape(result, output, |candidate_dims| {
-                Ok(vec![candidate_dims[0].clone(), Dim::Wildcard])
-            })
+            .resolve_deferred_expand_for_reshape(
+                result,
+                SourceOrdinal::new(1),
+                vec![Dim::Lit(3), Dim::Wildcard],
+            )
             .expect("both expand candidates remain possible")
             .expect("the reshape still has its own output type");
-        assert!(matches!(output, Type::Var(_)));
+        assert_eq!(
+            output,
+            Type::Tensor(
+                vec![Dim::Lit(3), Dim::Wildcard],
+                TensorPrec::Concrete(Prim::F32)
+            )
+        );
         assert!(s.has_deferred_expand_constraint(result));
-        let Type::Var(output_var) = output else {
-            unreachable!();
-        };
-        assert!(s.has_deferred_shape_constraint(output_var));
+        assert!(s.has_deferred_shape_constraint(result));
     }
 
     #[test]
     fn rejected_deferred_reshape_requirement_preserves_relation() {
         let mut g = var_gen();
         let input = g.fresh_tvar();
-        let output = g.fresh_tvar();
         let mut s = Subst::new();
         s.record_deferred_expand_constraint(
             input,
+            SourceOrdinal::new(0),
             DeferredExpandConstraint {
                 input_dims: vec![Dim::Lit(1), Dim::Lit(2), Dim::Lit(1)],
                 input_prec: tprec(Prim::F32),
@@ -3620,19 +3650,13 @@ mod tests {
                 size: Dim::Lit(3),
             },
         );
-        let output = s
-            .resolve_deferred_expand_for_reshape(input, output, |candidate_dims| {
-                Ok(vec![
-                    candidate_dims[1].clone(),
-                    candidate_dims[2].clone(),
-                    Dim::Lit(3),
-                ])
-            })
-            .expect("both expand candidates have legal reshape outputs")
-            .expect("the input carries a deferred expand relation");
-        let Type::Var(output_var) = output else {
-            panic!("ambiguous reshape output must remain deferred");
-        };
+        s.resolve_deferred_expand_for_reshape(
+            input,
+            SourceOrdinal::new(1),
+            vec![Dim::Wildcard, Dim::Wildcard, Dim::Lit(3)],
+        )
+        .expect("both expand candidates have legal reshape outputs")
+        .expect("the input carries a deferred expand relation");
 
         let inner = s.enter_level(&g);
         let younger_precision = g.fresh_tvar();
@@ -3644,9 +3668,12 @@ mod tests {
             s.lowered_rvar_levels.clone(),
             s.resume_floors,
         );
-        let incompatible = Type::Tensor(vec![Dim::Lit(5)], TensorPrec::Var(younger_precision));
-        unify(&Type::Var(output_var), &incompatible, &mut s)
-            .expect_err("five elements match neither deferred reshape candidate");
+        let incompatible = Type::Tensor(
+            vec![Dim::Lit(5), Dim::Lit(1), Dim::Lit(1)],
+            TensorPrec::Var(younger_precision),
+        );
+        unify(&Type::Var(input), &incompatible, &mut s)
+            .expect_err("five elements violate the retained reshape relation");
         assert_eq!(
             (
                 s.current_level,
@@ -3660,7 +3687,7 @@ mod tests {
             "a rejected speculative shape candidate must not mutate level state"
         );
         assert!(
-            s.has_deferred_shape_constraint(output_var),
+            s.has_deferred_shape_constraint(input),
             "a rejected consumer must not erase the deferred relation"
         );
         s.leave_level(inner, &g);
@@ -3673,9 +3700,10 @@ mod tests {
         let older_dim = g.fresh_dvar();
         let mut s = Subst::new();
 
-        for prim in [Prim::F32, Prim::F64] {
+        for (ordinal, prim) in [Prim::F32, Prim::F64].into_iter().enumerate() {
             s.record_deferred_expand_constraint(
                 output,
+                SourceOrdinal::new(ordinal as u64),
                 DeferredExpandConstraint {
                     input_dims: vec![Dim::Var(older_dim)],
                     input_prec: tprec(prim),
@@ -3889,5 +3917,236 @@ mod tests {
         unify(&Type::Var(a), &Type::Var(b), &mut s).unwrap();
         unify(&Type::Var(b), &Type::Prim(Prim::F32), &mut s).unwrap();
         assert_eq!(s.apply(&Type::Var(a)), Type::Prim(Prim::F32));
+    }
+
+    fn hash_order_constraint(size: i64) -> DeferredExpandConstraint {
+        DeferredExpandConstraint {
+            input_dims: vec![Dim::Lit(2)],
+            input_prec: tprec(Prim::F32),
+            axis: 0,
+            size: Dim::Lit(size),
+        }
+    }
+
+    #[test]
+    fn hash_order_expand_store_uses_source_order_under_insertion_perturbation() {
+        let insertion_orders = [[0, 1, 2], [2, 1, 0], [1, 2, 0], [2, 0, 1]];
+        for insertion_order in insertion_orders {
+            let mut g = var_gen();
+            let vars = [g.fresh_tvar(), g.fresh_tvar(), g.fresh_tvar()];
+            let ordinals = [7_u64, 2, 11];
+            let subst = Subst::new();
+            for index in insertion_order {
+                subst.record_deferred_expand_constraint(
+                    vars[index],
+                    SourceOrdinal::new(ordinals[index]),
+                    hash_order_constraint(3 + index as i64),
+                );
+            }
+            assert_eq!(
+                subst.deferred_expand_settlement_order_for_test(),
+                vec![vars[1], vars[0], vars[2]],
+                "fresh hash state and insertion order must not affect settlement"
+            );
+        }
+    }
+
+    #[test]
+    fn hash_order_alias_merge_keeps_expand_obligations_in_source_order() {
+        let mut g = var_gen();
+        let later = g.fresh_tvar();
+        let earlier = g.fresh_tvar();
+        let mut subst = Subst::new();
+        subst.record_deferred_expand_constraint(
+            later,
+            SourceOrdinal::new(20),
+            hash_order_constraint(3),
+        );
+        subst.record_deferred_expand_constraint(
+            earlier,
+            SourceOrdinal::new(4),
+            hash_order_constraint(3),
+        );
+
+        unify(&Type::Var(later), &Type::Var(earlier), &mut subst)
+            .expect("aliasing two compatible deferred results must succeed");
+        assert_eq!(
+            subst.deferred_expand_ordinals_for_test(earlier),
+            vec![4, 20]
+        );
+    }
+
+    #[test]
+    fn hash_order_reshape_obligations_use_reshape_source_order() {
+        let mut g = var_gen();
+        let input = g.fresh_tvar();
+        let subst = Subst::new();
+        subst.record_deferred_expand_constraint(
+            input,
+            SourceOrdinal::new(1),
+            hash_order_constraint(3),
+        );
+        subst.record_deferred_reshape_constraint(
+            input,
+            SourceOrdinal::new(19),
+            vec![Dim::Wildcard],
+        );
+        subst.record_deferred_reshape_constraint(input, SourceOrdinal::new(8), vec![Dim::Wildcard]);
+        assert_eq!(subst.deferred_reshape_ordinals_for_test(input), vec![8, 19]);
+    }
+
+    #[test]
+    fn hash_order_imported_obligation_rebases_to_first_reference() {
+        let mut g = var_gen();
+        let unreferenced = g.fresh_tvar();
+        let referenced = g.fresh_tvar();
+        let mut subst = Subst::new();
+        subst.record_deferred_expand_constraint(
+            unreferenced,
+            SourceOrdinal::new(1),
+            hash_order_constraint(3),
+        );
+        subst.record_deferred_expand_constraint(
+            referenced,
+            SourceOrdinal::new(9),
+            hash_order_constraint(3),
+        );
+        subst.resume_for_new_check(&g);
+        subst.note_deferred_reference(&Type::Var(referenced), SourceOrdinal::new(4));
+
+        assert_eq!(
+            subst.deferred_expand_settlement_order_for_test(),
+            vec![referenced, unreferenced],
+            "a referenced import takes its downstream first-reference position"
+        );
+    }
+
+    #[test]
+    fn hash_order_imported_obligations_keep_earliest_source_reference() {
+        let mut g = var_gen();
+        let expand = g.fresh_tvar();
+        let reshape = g.fresh_tvar();
+        let mut subst = Subst::new();
+        subst.record_deferred_expand_constraint(
+            expand,
+            SourceOrdinal::new(1),
+            hash_order_constraint(3),
+        );
+        subst.record_deferred_reshape_constraint(reshape, SourceOrdinal::new(2), vec![Dim::Lit(3)]);
+        subst.resume_for_new_check(&g);
+
+        subst.note_deferred_reference(&Type::Var(expand), SourceOrdinal::new(100));
+        subst.note_deferred_reference(&Type::Var(expand), SourceOrdinal::new(10));
+        subst.note_deferred_reference(&Type::Var(reshape), SourceOrdinal::new(100));
+        subst.note_deferred_reference(&Type::Var(reshape), SourceOrdinal::new(10));
+
+        assert_eq!(subst.deferred_expand_ordinals_for_test(expand), vec![10]);
+        assert_eq!(subst.deferred_reshape_ordinals_for_test(reshape), vec![10]);
+    }
+
+    #[test]
+    fn hash_order_unreferenced_imports_follow_program_results_in_library_order() {
+        let mut g = var_gen();
+        let imported_first = g.fresh_tvar();
+        let imported_second = g.fresh_tvar();
+        let local = g.fresh_tvar();
+        let mut subst = Subst::new();
+        subst.record_deferred_expand_constraint(
+            imported_first,
+            SourceOrdinal::new(2),
+            hash_order_constraint(3),
+        );
+        subst.record_deferred_expand_constraint(
+            imported_second,
+            SourceOrdinal::new(5),
+            hash_order_constraint(3),
+        );
+        subst.resume_for_new_check(&g);
+        subst.record_deferred_expand_constraint(
+            local,
+            SourceOrdinal::new(100),
+            hash_order_constraint(3),
+        );
+
+        assert_eq!(
+            subst.deferred_expand_settlement_order_for_test(),
+            vec![local, imported_first, imported_second]
+        );
+    }
+
+    #[test]
+    fn hash_order_composed_expand_contexts_keep_base_before_later_layer() {
+        let mut g = var_gen();
+        let base = g.fresh_tvar();
+        let later = g.fresh_tvar();
+        let mut subst = Subst::new();
+        subst.record_deferred_expand_constraint(
+            base,
+            SourceOrdinal::new(8),
+            hash_order_constraint(3),
+        );
+        subst.resume_for_new_check(&g);
+        subst.record_deferred_expand_constraint(
+            later,
+            SourceOrdinal::new(1),
+            hash_order_constraint(5),
+        );
+
+        assert_eq!(
+            subst.deferred_expand_settlement_order_for_test(),
+            vec![later, base],
+            "program-local obligations precede unreferenced imports in the current layer"
+        );
+
+        subst.resume_for_new_check(&g);
+        assert_eq!(
+            subst.deferred_expand_settlement_order_for_test(),
+            vec![base, later],
+            "once composed, the base library must retain its order before the later layer"
+        );
+    }
+
+    #[test]
+    fn hash_order_composed_reshape_contexts_keep_base_before_later_layer() {
+        let mut g = var_gen();
+        let input = g.fresh_tvar();
+        let mut subst = Subst::new();
+        subst.record_deferred_reshape_constraint(input, SourceOrdinal::new(8), vec![Dim::Lit(3)]);
+        subst.resume_for_new_check(&g);
+        subst.record_deferred_reshape_constraint(input, SourceOrdinal::new(1), vec![Dim::Lit(7)]);
+        subst.resume_for_new_check(&g);
+
+        assert_eq!(
+            subst.deferred_reshape_target_dims_for_test(input),
+            vec![vec![Dim::Lit(3)], vec![Dim::Lit(7)]],
+            "the base reshape relation must retain its order before the later layer"
+        );
+    }
+
+    #[test]
+    fn hash_order_serialization_preserves_import_order_and_reference_rebasing() {
+        let mut g = var_gen();
+        let first = g.fresh_tvar();
+        let second = g.fresh_tvar();
+        let subst = Subst::new();
+        subst.record_deferred_expand_constraint(
+            first,
+            SourceOrdinal::new(3),
+            hash_order_constraint(3),
+        );
+        subst.record_deferred_expand_constraint(
+            second,
+            SourceOrdinal::new(12),
+            hash_order_constraint(3),
+        );
+        let bytes = bincode::serialize(&subst).expect("serialize substitution");
+        let mut restored: Subst = bincode::deserialize(&bytes).expect("deserialize substitution");
+        restored.resume_for_new_check(&g);
+        restored.note_deferred_reference(&Type::Var(second), SourceOrdinal::new(1));
+
+        assert_eq!(
+            restored.deferred_expand_settlement_order_for_test(),
+            vec![second, first]
+        );
     }
 }

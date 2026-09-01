@@ -59,6 +59,7 @@ REQUIRED_TESTS = {
     PARITY_SOURCE: {
         "parity_dict_foundation",
         "parity_count_bool_axes",
+        "parity_hash_order_determinism",
         "parity_constraint_directed_risk_guards_library_only",
         "parity_iter_foundation",
         "parity_list_foundation",
@@ -139,6 +140,10 @@ REQUIRED_EVAL_RECEIPTS = {
 # chelis#1287 adds parity_count_bool_axes and count_bool_axes.ch together; the
 # executable parity row itself plus the dedicated Count oracle are the
 # independent evidence for extending this guard.
+# chelis#1338 adds hash_order_determinism.ch and its eval/C parity row together.
+# The Phase A oracle invokes that exact row and the 24-process acceptance and
+# rejection matrix independently, so extending the frozen corpus cannot replace
+# the behavior evidence that justified it.
 REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
     PARITY_SOURCE: {
         "parity_comparator_accepts_byte_identical_tensor_lines": "9224411d844dc758300d5880b424edd89deea5eb9dfa9d12a34ba7257a58e38f",
@@ -148,8 +153,9 @@ REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
         "parity_comparator_reports_sub_tolerance_float_drift": "40d029638fe1b70c1611adab72eeb31c1befed97d74c5400f5aae82f8c86aafe",
         "parity_constraint_directed_risk_guards_library_only": "ac6933d790a89ff00d7658e1260d61614ccc2547d9a91a67a0aa98918e33ca32",
         "parity_count_bool_axes": "66e82bb4aeedafabc5d77eefeec25cb2728085becf2fdf44c335631fde750ba9",
-        "parity_corpus_is_complete": "b6f6656ee9c69f86386ed4f71f0ed7bd195a864295cfda8e1204628937005f2a",
+        "parity_corpus_is_complete": "df5b96414b964efa948363bb89f4efc8949e40e663d7ceafa7529b794f97709b",
         "parity_dict_foundation": "1bfd21bf0d78c9f36869908852a963037e0f13e36d5f9bc73b77131ff9d2970f",
+        "parity_hash_order_determinism": "148c637280b238c9a119e22196960703873e291f1f0df59323c33ddb96b47170",
         # chelis#912 applies [05-OBS-7] uniformly: hello_tensor's pure
         # nullary `main` and opaque_invariants_simplex's top-level `eps`
         # are now owed manifest roots. Their definitions changed only from

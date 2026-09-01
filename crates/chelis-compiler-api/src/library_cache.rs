@@ -90,13 +90,15 @@ use crate::stdlib_cache::{StdLibContext, cache_disabled, typecheck_cache_dir};
 /// `TypeEnv`; a V2 dependency-library payload is a clean miss.
 /// V4 adds quantified type-variable restrictions and their live substitution
 /// ledger.
+/// V5 records canonical source positions on deferred positional-expand and
+/// reshape obligations inside `TypeEnv`.
 ///
 /// V2: the sub-context now stores a proof-bound `CheckedLibrary`, and decode
 /// reruns effect/linearity checks to rebind the proof (mirroring the stdlib
 /// and compiled-context caches). The wire `CheckedProgram` also grew the
 /// library-proof-identity fields. A V1 `chelis-lib-*.tc` written by a
 /// pre-extraction binary at the same compiler version is a clean miss.
-const LIBRARY_CACHE_FORMAT_VERSION: u32 = 4;
+const LIBRARY_CACHE_FORMAT_VERSION: u32 = 5;
 
 /// The typechecked composed `chelis-std ++ dependency-packages`
 /// sub-context.
@@ -563,8 +565,8 @@ mod tests {
     use crate::stdlib_cache::build_stdlib_context;
 
     #[test]
-    fn cache_format_version_tracks_type_variable_restrictions() {
-        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 4);
+    fn cache_format_version_tracks_ordered_deferred_constraints() {
+        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 5);
     }
 
     #[test]

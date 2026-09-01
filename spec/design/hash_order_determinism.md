@@ -1,11 +1,11 @@
 # Hash-Order Determinism: observable behavior never depends on hash iteration order
 
-**Status:** PROPOSED. No phase is implemented. Tracking issue: [#1341].
+**Status:** ACTIVE. Phase A is implemented; Phase B remains proposed. Tracking
+issue: [#1341].
 Amended 2026-08-28: the mechanism moved from the census enumerator that PR #1366
 merged to a type-level ban, then was cut to what defends a known instance or a spec
-sentence; see § Rationale and alternatives set aside. Code evidence was rechecked on
-`main` at `53607a64` unless a different commit is named. Function names are the
-durable anchors.
+sentence; see § Rationale and alternatives set aside. Phase A was implemented and
+its named oracle passed on 2026-08-31. Function names are the durable anchors.
 **Owning specs:** `spec/00-context.md` §5 states the rule this plan implements:
 for fixed program text, compiler build, target, and declared inputs, every check,
 evaluation, and build result is a function of those inputs. `spec/04-type-system.md`
@@ -49,8 +49,8 @@ carries no false-pass probability claim.
 
 | site | observable effect | status |
 |---|---|---|
-| `Subst::materialize_deferred_expand_defaults` (`unify.rs`; `.keys()` over `HashMap<TypeVar, _>`) | identical source is accepted or rejected across processes; the original 24-run sample split 17/7, and a later review split 15/9 | OPEN - [#1338] |
-| `Subst::take_deferred_reshapes_for_input` (`unify.rs`; `iter_mut()` over the same map shape) | coupled deferred-reshape resolution order is hash order; no reproducer currently isolates this second site | OPEN - [#1338], same implementation change |
+| `Subst::materialize_deferred_expand_defaults` (`unify.rs`; formerly `.keys()` over `HashMap<TypeVar, _>`) | identical source was accepted or rejected across processes; the original 24-run sample split 17/7, and a later review split 15/9 | resolved in Phase A by source-ordinal settlement |
+| deferred reshape obligations (`unify.rs`; formerly an `iter_mut()` walk over the same map shape) | coupled deferred-reshape resolution order was hash order; no reproducer isolated this second site | resolved in Phase A by reshape-source ordering and immediate result-shape publication |
 | linearity capture walk (`linearity.rs`, `free_vars`) | one program alternated between success and `UseAfterConsume` | resolved in the chelis#1200 fix by a semantically required sort |
 | ADT variant dispatch (`adt.rs`, `lookup_variant_preferring_shape`) | hash order selected the first matching variant | resolved by sorting candidates by ADT name |
 | input-validation preamble (C and HIP emitters) | validation-block order changed emitted bytes | resolved at `17a28b9`; regression in `codegen_determinism.rs` |
@@ -252,10 +252,13 @@ reproducibility but is not the authority or a prerequisite here.
 
 ### C5 Oracles
 
-Each phase names one command. Phase A's is a named nextest suite; Phase B's is the
-tripwire script, which runs in the gate's `lint-and-unit` stage and the `--local`
-subset and whose membership `scripts/test_gate.py` locks, plus the named cache-byte
-tests. The fresh-process stability tests cover the [#1338] reproducer, its
+Each phase names one command. Phase A's Python runner composes the compile-fail,
+source-order perturbation, cache-version, executable-example, executable eval/C
+parity, reshape-regression, and fresh-process CLI suites; the raw-store compile-fail
+leg also runs in the gate's
+`lint-and-unit` stage and the `--local` subset, whose membership
+`scripts/test_gate.py` locks. Phase B's tripwire script and named cache-byte tests
+remain proposed. The fresh-process stability tests cover the [#1338] reproducer, its
 mirrored operand order, the aliased pair, and the three-way case of Phase A, and the
 existing byte-determinism regressions (`codegen_determinism.rs`,
 `rank_poly_tier3::form3_bias_broadcast_c_is_byte_deterministic`) stay present and
@@ -264,7 +267,7 @@ confidence or false-pass claim.
 
 ## Part II: phases
 
-### Phase A - the specified open sites
+### Phase A - the specified open sites - IMPLEMENTED
 
 **Prerequisite:** none. The settlement order and the `reshape` rule are decided in
 `spec/04` §4.7.2. This phase may land before Phase B.
@@ -278,14 +281,15 @@ mirrored operand order, `add(expand(x, 0, 3i64), expand(y, 0, 3i64))`, and
 `sub(reshape(expand(a, 0, 6i64), [3i64, 2i64]), add(expand(x, 0, 3i64), expand(y, 0, 3i64)))`
 in both operand orders, and a rejecting row for `reshape(e, [shape(e, 1), 6i64])`;
 and a freeze-point rejection diagnostic that names the settlement rule and
-suggests a declared result shape.
+suggests a declared result shape. Because the ordered obligation fields change the
+serialized `TypeEnv` shape, the compiled-context, stdlib, and library cache format
+versions advance in the same phase; Phase B still owns canonical cache bytes.
 
 **Explicitly excluded:** consumer-selection totality such as [#1265]. This phase
 guarantees one specified order, not equal results under arbitrary orders.
 
-**Oracle:** `cargo nextest run -p chelis-cli --test hash_order_stability
---no-fail-fast` green, with the `chelis-types` compile-fail and perturbation tests
-in the same run.
+**Oracle:** `.venv/bin/python scripts/hash_order_phase_a_oracle.py` exits 0 with
+the final line `HASH ORDER PHASE A ORACLE: PASS`. It passed on 2026-08-31.
 
 ### Phase B - class closure
 

@@ -834,6 +834,7 @@ pub(super) fn check_expand_signature(
     arg_exprs: &[deep::Expr],
     arg_tys: &[Type],
     result_ty: &Type,
+    source_ordinal: SourceOrdinal,
     axis_is_dim_name: bool,
     size_class: SizeClass,
     env: &Env,
@@ -1088,6 +1089,7 @@ pub(super) fn check_expand_signature(
             // documented context-free default (chelis#942).
             subst.record_deferred_expand_constraint(
                 result_var,
+                source_ordinal,
                 crate::unify::DeferredExpandConstraint {
                     input_dims,
                     input_prec,
