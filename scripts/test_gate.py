@@ -1593,6 +1593,24 @@ def _assert_executable_run_once(job_block: str, command: str) -> None:
         )
 
 
+def _ci_step_block(job_block: str, step_name: str) -> str:
+    """Return one step's raw text from a job block, without the next step.
+
+    Steps are `      - name: ...` items, so a step ends at the next line with
+    that exact indentation and dash. Splitting on the marker keeps every
+    continuation line, including a `run:` scalar and any `if:` condition.
+    """
+    marker = f"      - name: {step_name}\n"
+    if job_block.count(marker) != 1:
+        raise AssertionError(
+            f"expected exactly one step named {step_name!r}, "
+            f"found {job_block.count(marker)}"
+        )
+    tail = job_block[job_block.index(marker) + len(marker) :]
+    end = re.search(r"^      - ", tail, re.MULTILINE)
+    return tail[: end.start()] if end else tail
+
+
 def _workflow_job_block(path: Path, job: str) -> str:
     """Return the raw workflow text block for one job."""
     block = _workflow_job_blocks(path.read_text()).get(job)
@@ -2276,6 +2294,18 @@ class CiParityTests(unittest.TestCase):
             "dtype_phase4b_oracle.py",
             _ci_job_block("changes"),
             "the docs-only detector must not gate the freeze oracle",
+        )
+        # A job-level `if:` is caught by test_always_run_jobs_are_not_gated, but
+        # a STEP-level one is not, and the step is where a future editor would
+        # add `docs_only` -- the exact evasion this wiring exists to prevent.
+        step = _ci_step_block(docs_block, "Validate the chelis#729 Phase 4B freeze")
+        conditioned = [
+            line for line in step.splitlines() if re.match(r"^\s+if:", line)
+        ]
+        self.assertEqual(
+            conditioned,
+            [],
+            f"the freeze step must run unconditionally; found {conditioned}",
         )
 
     def test_commented_phase4b_oracle_is_not_an_executable_step(self):
