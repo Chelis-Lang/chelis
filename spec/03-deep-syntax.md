@@ -412,11 +412,14 @@ environment or a cached compiler context. Resolution is fail-closed:
   alias body unresolved.
 - A `defsig` implicitly binds each well-formed `t-var`/`d-var`/`d-rank` name on
   first occurrence and reuses that binding throughout the signature. A
-  `deftype` or `typealias` binds only names in its explicit parameter list;
-  an undeclared variable name is an error. Surf declaration desugaring is
-  scope-aware: a declared parameter becomes the corresponding variable form
-  at a type/dimension/rank use site, while an unlisted symbolic tensor axis is
-  emitted as `d-name` rather than inventing an implicit declaration binder.
+  `deftype` or `typealias` binds only names in its explicit parameter list and
+  assigns each one exactly one header kind, `Type` or single `Dimension`, under
+  [04-ADT-3]; a declaration parameter cannot bind a `d-rank` spread. An
+  undeclared variable name, a rank use, or conflicting type/dimension uses are
+  errors. Surf declaration desugaring is scope-aware: a declared parameter
+  becomes the variable form selected by that fixed header kind, while an
+  unlisted symbolic tensor axis is emitted as `d-name` rather than inventing
+  an implicit declaration binder.
 - `t-fn` has at least one child (the last is its return type), `t-ref` has
   exactly one child, `t-tensor` has at least one child (the last is a
   primitive or bound type-variable precision), `t-unit` has no children, and

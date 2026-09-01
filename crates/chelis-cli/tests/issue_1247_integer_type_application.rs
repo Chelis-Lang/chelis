@@ -431,3 +431,103 @@ out = print(main())
     );
     assert!(String::from_utf8_lossy(&output.stdout).starts_with("3.0"));
 }
+
+#[test]
+fn generic_dimension_kinded_tensor_alias_preserves_authored_symbol_in_c() {
+    let source = "\
+type Row[n] = tensor[n, f32]
+def double_it[batch](value: Row[batch]) -> Row[batch] = add(copy(value), value)
+def main() -> f32 = tensor_to_scalar(sum(double_it(to_tensor([cast(1.0, f32), cast(2.0, f32)])), cast(0, int32)))
+out = print(main())
+";
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("generic_alias.ch");
+    let out_dir = dir.path().join("out");
+    write_file(&path, source);
+
+    Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let generated = fs::read_to_string(out_dir.join("generic_alias.c")).expect("generated C");
+    assert!(
+        generated.contains("int64_t batch = inputs[0]->shape[0];"),
+        "alias expansion must preserve the authored dimension name:\n{generated}"
+    );
+    assert!(
+        !generated.contains("int64_t d0 = inputs[0]->shape[0];"),
+        "checker-minted dimension identities must not replace authored symbols:\n{generated}"
+    );
+
+    let linked = common::link_generated(&out_dir, "generic_alias.c", "run");
+    assert!(linked.success(), "generated C must link");
+    let output = StdCommand::new(out_dir.join("run"))
+        .output()
+        .expect("run C binary");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("6.0"));
+}
+
+#[test]
+fn chained_alias_reorders_multiple_authored_dimensions_in_c() {
+    let source = "\
+type Matrix[rows, cols] = tensor[rows, cols, f32]
+type Transposed[cols, rows] = Matrix[rows, cols]
+def double_it[batch, width](value: Transposed[width, batch]) -> Transposed[width, batch] = add(copy(value), value)
+def main() -> f32 = cast(1.0, f32)
+";
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("reordered_alias.ch");
+    let out_dir = dir.path().join("out");
+    write_file(&path, source);
+
+    Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let generated = fs::read_to_string(out_dir.join("reordered_alias.c")).expect("generated C");
+    assert!(
+        generated.contains("int64_t batch = inputs[0]->shape[0];"),
+        "the reordered row dimension must retain its authored name:\n{generated}"
+    );
+    assert!(
+        generated.contains("int64_t width = inputs[0]->shape[1];"),
+        "the reordered column dimension must retain its authored name:\n{generated}"
+    );
+    assert!(
+        !generated.lines().any(|line| {
+            line.trim_start()
+                .strip_prefix("int64_t d")
+                .and_then(|suffix| suffix.chars().next())
+                .is_some_and(|character| character.is_ascii_digit())
+        }),
+        "no checker-minted dimension may escape chained alias expansion:\n{generated}"
+    );
+
+    let compiled = common::link_generated(&out_dir, "reordered_alias.c", "run");
+    assert!(compiled.success(), "generated C must compile");
+}

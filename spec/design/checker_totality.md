@@ -1,7 +1,8 @@
 # Checker Totality: every construct is checked or loudly rejected
 
-**Status:** Phases 0-3, PP1-PP4, and the separately owned [#1247] kinded
-nominal-application residue are delivered. Phase 3 first shipped
+**Status:** Phases 0-3 and PP1-PP4 are delivered. The separately owned [#1247]
+kinded nominal-application residue is not another phase; PR [#1406] is its
+delivery vehicle. Phase 3 first shipped
 `DeepTag` as derive-on-demand dispatch and was red-teamed in that form
 (round-1 QUALIFIED PASS with findings folded, round-2 PASS); a maintainer
 directive then superseded that record with the decode-once rework now in the
@@ -1260,10 +1261,11 @@ fail-closed synthetic identity in addition to the two checker edges above.
 
 ### Later residue: kinded nominal applications ([#1247], with [#1258])
 
-**Delivered 2026-08-31 by PR [#1406].** This is a separately landable #731
-residue mechanism, not PP4 or a fifth historical phase. [#1247] owns checker
-honesty; [#1258] is the same boundary viewed from #1024's Surf/Deep
-round-trip contract.
+**Delivery vehicle: PR [#1406].** This is a separately landable #731 residue
+mechanism, not PP4 or a fifth historical phase. [#1247] owns checker honesty;
+[#1258] is the same boundary viewed from #1024's Surf/Deep round-trip
+contract. Completion requires the PR's acceptance oracle and merge; this
+design record alone does not claim delivery.
 
 Before this slice, Surf correctly admitted an integer only inside a nominal
 argument such as `Column[3]`, but desugared it as `(t-var {} 3)`. Nominal
@@ -1428,7 +1430,7 @@ continuous-oracle guarantees. PP4 additionally makes module scope exact at
 both package and batched-test boundaries: a foreign terminal-name match is
 never a binding, and the fitness report cannot describe an unresolved value or
 constructor as fully resolved.
-The separately delivered [#1247] residue applies the same honesty rule to
+The separately owned [#1247] residue applies the same honesty rule to
 nominal arguments: integer syntax is either an exact checked dimension or a
 kind error, never an inference wildcard, and every downstream checker/test
 signal preserves that decision.

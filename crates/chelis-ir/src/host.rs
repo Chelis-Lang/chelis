@@ -10,7 +10,7 @@ use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_deep::decode_effect_kind;
 use chelis_types::adt::{AdtDef, AdtRegistry};
 use chelis_types::infer::type_to_deep_expr;
-use chelis_types::types::{Dim, NominalArg, Prim, TensorPrec, Type};
+use chelis_types::types::{Dim, NominalArg, NominalParamKind, Prim, TensorPrec, Type};
 use chelis_types::{BUILTIN_NAMES, CheckedProgram};
 use chelis_vocab::EffectKind;
 
@@ -1744,7 +1744,7 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
     }
 
     let declared_param_tys = lookup_declared_type_expr(program, name)
-        .and_then(|ty| parse_fn_type_expr(&ty))
+        .and_then(|ty| parse_expanded_fn_type_expr(program, &ty))
         .map(|(params, _)| params)
         .unwrap_or_default();
     let mut scope = HashMap::new();
@@ -1753,7 +1753,7 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
         let pty = declared_param_tys
             .get(index)
             .cloned()
-            .or_else(|| param_host_type(param))
+            .or_else(|| param_host_type(param).map(|ty| expand_host_type_aliases(program, ty)))
             .filter(|ty| !ty.is_unresolved())?;
         let tensor_ty = tensor_type_from_host_input(&pty)?;
         scope.insert(pname, tensor_ty);
@@ -3013,11 +3013,10 @@ fn lower_host_function(
     ty_expr: Option<&Expr>,
     program: &CheckedProgram,
 ) -> Result<Option<HostFunction>, crate::lower::LowerDiagnostic> {
-    // Host lowering consumes the checker's alias-expanded signature. The
-    // authored Deep annotation is a display/source artifact and can still
-    // contain a nominal alias whose erased dimension argument has no host ABI
-    // field. Preferring it here would reintroduce that alias as a rank-zero
-    // ADT after the checker had already proved its tensor shape.
+    // Preserve authored dimension identities while expanding only the
+    // checker-validated nominal aliases below. Replacing this expression with
+    // the canonical checked signature turns `batch` into an anonymous `dN`
+    // and can collapse distinct runtime guards onto one checker variable.
     let declared_fn_type_expr =
         lookup_declared_type_expr(program, name).or_else(|| ty_expr.cloned());
     let fn_type_parts = declared_fn_type_expr
@@ -3031,8 +3030,10 @@ fn lower_host_function(
     // Form-3 materialization rejection.
     let (param_tys, ret_ty) = declared_fn_type_expr
         .as_ref()
-        .and_then(parse_fn_type_expr)
-        .or_else(|| expr_fn_type(body))
+        .and_then(|ty| parse_expanded_fn_type_expr(program, ty))
+        .or_else(|| {
+            expr_fn_type(body).map(|signature| expand_host_fn_type_aliases(program, signature))
+        })
         .or_else(|| lookup_declared_fn_type(program, name))
         .unwrap_or((Vec::new(), fresh_host_inference()));
 
@@ -3056,7 +3057,11 @@ fn lower_host_function(
                     .get(index)
                     .cloned()
                     .filter(|ty| !ty.is_unresolved())
-                    .or_else(|| param_host_type(param).filter(|ty| !ty.is_unresolved()))
+                    .or_else(|| {
+                        param_host_type(param)
+                            .map(|ty| expand_host_type_aliases(program, ty))
+                            .filter(|ty| !ty.is_unresolved())
+                    })
                     .unwrap_or_else(fresh_host_inference);
                 scope.insert(pname.clone(), pty.clone());
                 params.push(HostParam {
@@ -9675,25 +9680,6 @@ fn checked_authored_function_signature<'a>(
     matches.next().is_none().then_some(first)
 }
 
-/// Return the checker's canonical signature for host representation.
-///
-/// Unlike [`checked_authored_function_signature`], this deliberately uses
-/// `checked_signature`: nominal aliases are transparent after checking, and
-/// their dimension arguments may be erased from an ADT's runtime layout.
-fn checked_function_signature<'a>(program: &'a CheckedProgram, name: &str) -> Option<&'a Type> {
-    if let Some(inference) = program.signature_inference().functions.get(name) {
-        return Some(&inference.checked_signature);
-    }
-    let mut matches = program
-        .signature_inference()
-        .functions
-        .iter()
-        .filter(|(candidate, _)| terminal_name_matches(candidate, name))
-        .map(|(_, inference)| &inference.checked_signature);
-    let first = matches.next()?;
-    matches.next().is_none().then_some(first)
-}
-
 fn checker_type_has_stored_variable(
     ty: &Type,
     registry: &AdtRegistry,
@@ -11001,9 +10987,10 @@ fn expr_host_type(
 /// happened to work only when the type was a direct ADT. In particular,
 /// `type Pair[n] = Column[n]` left an access through `Pair[2]` looking for a
 /// nonexistent `Pair` constructor layout. Resolve the alias at the single
-/// host-type boundary so every downstream consumer sees `Column[Unit]`, with
-/// the nominal dimension retained only as the existing private erased-layout
-/// witness.
+/// host-type boundary so every downstream consumer sees the expanded field or
+/// tensor type. Dimension-kinded alias arguments remain dimensions during
+/// substitution; they are erased only when an enclosing nominal value's host
+/// layout deliberately has no slot for them.
 fn expand_host_type_aliases(program: &CheckedProgram, ty: HostTypeTerm) -> HostTypeTerm {
     fn expand(
         program: &CheckedProgram,
@@ -11037,13 +11024,39 @@ fn expand_host_type_aliases(program: &CheckedProgram, ty: HostTypeTerm) -> HostT
                     })
                     .collect::<HashMap<_, _>>();
                 let body = rename_host_type_variables(
-                    decode_host_type_or_raise(&type_to_deep_expr(&alias.body), &HashMap::new()),
+                    decode_host_type_or_raise(
+                        &type_to_deep_expr(&program.adt_registry().expand_aliases(&alias.body)),
+                        &HashMap::new(),
+                    ),
                     &checker_parameter_names,
                 );
-                let substitutions = alias.params.iter().cloned().zip(args).collect();
+                let parameter_kinds = if alias.param_kinds.len() == alias.params.len() {
+                    Cow::Borrowed(alias.param_kinds.as_slice())
+                } else {
+                    Cow::Owned(vec![NominalParamKind::Type; alias.params.len()])
+                };
+                let mut type_substitutions = HashMap::new();
+                let mut dimension_substitutions = HashMap::new();
+                for ((parameter, kind), argument) in
+                    alias.params.iter().zip(parameter_kinds.iter()).zip(args)
+                {
+                    match (kind, argument) {
+                        (NominalParamKind::Type, argument) => {
+                            type_substitutions.insert(parameter.clone(), argument);
+                        }
+                        (NominalParamKind::Dimension, HostTypeTerm::TypeVariable(argument)) => {
+                            dimension_substitutions
+                                .insert(parameter.clone(), DimInfo::Named(argument, None));
+                        }
+                        (NominalParamKind::Dimension, _) => {}
+                    }
+                }
                 let expanded = expand(
                     program,
-                    substitute_host_type_term(body, &substitutions),
+                    substitute_host_dimension_terms(
+                        substitute_host_type_term(body, &type_substitutions),
+                        &dimension_substitutions,
+                    ),
                     visiting,
                 );
                 visiting.remove(&name);
@@ -11530,16 +11543,42 @@ fn lookup_type_expr<'a>(type_env: &'a HashMap<String, Expr>, name: &str) -> Opti
     })
 }
 
+fn lookup_authored_defsig_type_expr(program: &CheckedProgram, name: &str) -> Option<Expr> {
+    let mut exact = None;
+    let mut terminal_matches = Vec::new();
+    for expr in top_level_items(program.exprs()) {
+        let Some((DeepTag::Defsig, _, kids)) = stamped_parts(expr) else {
+            continue;
+        };
+        let (Some(candidate), Some(signature)) = (kids.first().and_then(symbol_name), kids.get(1))
+        else {
+            continue;
+        };
+        if candidate == name {
+            exact = Some(signature.clone());
+            break;
+        }
+        if terminal_name_matches(candidate, name) {
+            terminal_matches.push(signature.clone());
+        }
+    }
+    exact.or_else(|| {
+        (terminal_matches.len() == 1)
+            .then(|| terminal_matches.into_iter().next())
+            .flatten()
+    })
+}
+
 fn lookup_declared_type_expr(program: &CheckedProgram, name: &str) -> Option<Expr> {
-    checked_function_signature(program, name)
-        .map(type_to_deep_expr)
+    lookup_authored_defsig_type_expr(program, name)
+        .or_else(|| checked_authored_function_signature(program, name).map(type_to_deep_expr))
         .or_else(|| lookup_type_expr(program.type_env(), name).cloned())
 }
 
 fn lookup_declared_host_type(program: &CheckedProgram, name: &str) -> Option<HostTypeTerm> {
     lookup_declared_type_expr(program, name)
         .as_ref()
-        .map(|ty| decode_host_type_or_raise(ty, &HashMap::new()))
+        .and_then(|ty| decode_expanded_host_type_expr(program, ty))
 }
 
 fn lookup_declared_fn_type(
@@ -11548,7 +11587,7 @@ fn lookup_declared_fn_type(
 ) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
     lookup_declared_type_expr(program, name)
         .as_ref()
-        .and_then(parse_fn_type_expr)
+        .and_then(|ty| parse_expanded_fn_type_expr(program, ty))
 }
 
 fn lookup_program_def<'a>(defs: &'a HashMap<String, Expr>, name: &str) -> Option<&'a Expr> {
@@ -11663,6 +11702,132 @@ fn parse_fn_type_expr(expr: &Expr) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> 
     ))
 }
 
+fn expand_host_fn_type_aliases(
+    program: &CheckedProgram,
+    signature: (Vec<HostTypeTerm>, HostTypeTerm),
+) -> (Vec<HostTypeTerm>, HostTypeTerm) {
+    let (params, ret) = signature;
+    (
+        params
+            .into_iter()
+            .map(|param| expand_host_type_aliases(program, param))
+            .collect(),
+        expand_host_type_aliases(program, ret),
+    )
+}
+
+fn authored_nominal_dimension(expr: &Expr) -> Option<DimInfo> {
+    match expr {
+        Expr::MetaExpr(meta, _) => return authored_nominal_dimension(&meta.expr),
+        Expr::Atom(Atom::Name(name), _) => return Some(DimInfo::Named(name.clone(), None)),
+        Expr::Atom(Atom::Int(value), _) => {
+            return usize::try_from(*value).ok().map(DimInfo::Lit);
+        }
+        _ => {}
+    }
+    let (tag, _, children) = stamped_parts(expr)?;
+    match tag {
+        // Before nominal-parameter kinds are resolved, Surf spells every
+        // symbolic application argument as `t-var`. The declaration's kind
+        // is the authority that lets this boundary interpret it as a
+        // dimension without changing the public Deep vocabulary.
+        DeepTag::TVar | DeepTag::DName | DeepTag::DVar => children
+            .first()
+            .and_then(symbol_name)
+            .map(|name| DimInfo::Named(name.to_string(), None)),
+        DeepTag::DLit => match children.first() {
+            Some(Expr::Atom(Atom::Int(value), _)) => usize::try_from(*value).ok().map(DimInfo::Lit),
+            _ => None,
+        },
+        DeepTag::DRank => None,
+        _ => None,
+    }
+}
+
+fn decode_expanded_host_type_expr(program: &CheckedProgram, expr: &Expr) -> Option<HostTypeTerm> {
+    if let Expr::MetaExpr(meta, _) = expr {
+        return decode_expanded_host_type_expr(program, &meta.expr);
+    }
+    if let Some((DeepTag::TAdt, _, children)) = stamped_parts(expr)
+        && let Some((name, arguments)) = children
+            .split_first()
+            .and_then(|(name, arguments)| symbol_name(name).map(|name| (name, arguments)))
+        && let Some(alias) = program.adt_registry().resolve_alias(name)
+        && alias.params.len() == arguments.len()
+    {
+        let parameter_kinds = if alias.param_kinds.len() == alias.params.len() {
+            Cow::Borrowed(alias.param_kinds.as_slice())
+        } else {
+            Cow::Owned(vec![NominalParamKind::Type; alias.params.len()])
+        };
+        let mut type_substitutions = HashMap::new();
+        let mut dimension_substitutions = HashMap::new();
+        for ((parameter, kind), argument) in alias
+            .params
+            .iter()
+            .zip(parameter_kinds.iter())
+            .zip(arguments)
+        {
+            match kind {
+                NominalParamKind::Type => {
+                    type_substitutions.insert(
+                        parameter.clone(),
+                        decode_expanded_host_type_expr(program, argument)?,
+                    );
+                }
+                NominalParamKind::Dimension => {
+                    dimension_substitutions
+                        .insert(parameter.clone(), authored_nominal_dimension(argument)?);
+                }
+            }
+        }
+        let checker_parameter_names = alias
+            .param_args
+            .iter()
+            .zip(&alias.params)
+            .filter_map(|(argument, parameter)| match argument {
+                NominalArg::Type(Type::Var(variable)) => {
+                    Some((format!("t{}", variable.0), parameter.clone()))
+                }
+                NominalArg::Dimension(Dim::Var(variable)) => {
+                    Some((format!("d{}", variable.0), parameter.clone()))
+                }
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>();
+        let body = rename_host_type_variables(
+            decode_host_type(&type_to_deep_expr(
+                &program.adt_registry().expand_aliases(&alias.body),
+            ))
+            .ok()?,
+            &checker_parameter_names,
+        );
+        return Some(expand_host_type_aliases(
+            program,
+            substitute_host_dimension_terms(
+                substitute_host_type_term(body, &type_substitutions),
+                &dimension_substitutions,
+            ),
+        ));
+    }
+    decode_host_type(expr)
+        .ok()
+        .map(|term| expand_host_type_aliases(program, term))
+}
+
+fn parse_expanded_fn_type_expr(
+    program: &CheckedProgram,
+    expr: &Expr,
+) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
+    let (args, ret) = parse_fn_type_expr_parts(expr)?;
+    Some((
+        args.iter()
+            .map(|argument| decode_expanded_host_type_expr(program, argument))
+            .collect::<Option<Vec<_>>>()?,
+        decode_expanded_host_type_expr(program, &ret)?,
+    ))
+}
+
 fn parse_fn_type_expr_parts(expr: &Expr) -> Option<(Vec<Expr>, Expr)> {
     let (DeepTag::TFn, _, kids) = stamped_parts(expr)? else {
         return None;
@@ -11743,6 +11908,71 @@ fn substitute_host_type_term(
             }
         }
         concrete_or_state => concrete_or_state,
+    }
+}
+
+fn substitute_host_dimension_terms(
+    term: HostTypeTerm,
+    subst: &HashMap<String, DimInfo>,
+) -> HostTypeTerm {
+    let substitute_dim = |dim: DimInfo| match dim {
+        DimInfo::Named(name, _) if subst.contains_key(&name) => subst[&name].clone(),
+        other => other,
+    };
+    match term {
+        HostTypeTerm::Fn(params, ret) => HostTypeTerm::Fn(
+            params
+                .into_iter()
+                .map(|param| substitute_host_dimension_terms(param, subst))
+                .collect(),
+            Box::new(substitute_host_dimension_terms(*ret, subst)),
+        ),
+        HostTypeTerm::Adt(name, args) => HostTypeTerm::Adt(
+            name,
+            args.into_iter()
+                .map(|argument| substitute_host_dimension_terms(argument, subst))
+                .collect(),
+        ),
+        HostTypeTerm::List(inner) => {
+            HostTypeTerm::List(Box::new(substitute_host_dimension_terms(*inner, subst)))
+        }
+        HostTypeTerm::Dict(key, value) => HostTypeTerm::Dict(
+            Box::new(substitute_host_dimension_terms(*key, subst)),
+            Box::new(substitute_host_dimension_terms(*value, subst)),
+        ),
+        HostTypeTerm::Tuple(items) => HostTypeTerm::Tuple(
+            items
+                .into_iter()
+                .map(|item| substitute_host_dimension_terms(item, subst))
+                .collect(),
+        ),
+        HostTypeTerm::Option(inner) => {
+            HostTypeTerm::Option(Box::new(substitute_host_dimension_terms(*inner, subst)))
+        }
+        HostTypeTerm::Tensor(TensorType { dims, precision }) => HostTypeTerm::Tensor(TensorType {
+            dims: dims.into_iter().map(substitute_dim).collect(),
+            precision,
+        }),
+        HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm { precision, shape }) => {
+            let shape = match shape {
+                HostShapeTerm::Concrete(dims) => {
+                    HostShapeTerm::Concrete(dims.into_iter().map(substitute_dim).collect())
+                }
+                HostShapeTerm::Polymorphic(slots) => HostShapeTerm::Polymorphic(
+                    slots
+                        .into_iter()
+                        .map(|slot| match slot {
+                            crate::host_type_state::HostShapeSlot::Dim(dim) => {
+                                crate::host_type_state::HostShapeSlot::Dim(substitute_dim(dim))
+                            }
+                            rank => rank,
+                        })
+                        .collect(),
+                ),
+            };
+            HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm { precision, shape })
+        }
+        other => other,
     }
 }
 
@@ -13042,6 +13272,12 @@ fn adt_constructor_definitions(program: &CheckedProgram) -> Vec<GenericAdtConstr
 }
 
 fn rename_host_type_variables(term: HostTypeTerm, names: &HashMap<String, String>) -> HostTypeTerm {
+    let rename_dim = |dim: DimInfo| match dim {
+        DimInfo::Named(name, extent) => {
+            DimInfo::Named(names.get(&name).cloned().unwrap_or(name), extent)
+        }
+        literal => literal,
+    };
     match term {
         HostTypeTerm::TypeVariable(name) => {
             HostTypeTerm::TypeVariable(names.get(&name).cloned().unwrap_or(name))
@@ -13078,12 +13314,36 @@ fn rename_host_type_variables(term: HostTypeTerm, names: &HashMap<String, String
         HostTypeTerm::Option(inner) => {
             HostTypeTerm::Option(Box::new(rename_host_type_variables(*inner, names)))
         }
+        HostTypeTerm::Tensor(TensorType { dims, precision }) => HostTypeTerm::Tensor(TensorType {
+            dims: dims.into_iter().map(rename_dim).collect(),
+            precision,
+        }),
         HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm { precision, shape }) => {
             let precision = match precision {
                 HostPrecisionTerm::Variable(name) => {
                     HostPrecisionTerm::Variable(names.get(&name).cloned().unwrap_or(name))
                 }
                 concrete => concrete,
+            };
+            let shape = match shape {
+                HostShapeTerm::Concrete(dims) => {
+                    HostShapeTerm::Concrete(dims.into_iter().map(rename_dim).collect())
+                }
+                HostShapeTerm::Polymorphic(slots) => HostShapeTerm::Polymorphic(
+                    slots
+                        .into_iter()
+                        .map(|slot| match slot {
+                            crate::host_type_state::HostShapeSlot::Dim(dim) => {
+                                crate::host_type_state::HostShapeSlot::Dim(rename_dim(dim))
+                            }
+                            crate::host_type_state::HostShapeSlot::RankVariable(name) => {
+                                crate::host_type_state::HostShapeSlot::RankVariable(
+                                    names.get(&name).cloned().unwrap_or(name),
+                                )
+                            }
+                        })
+                        .collect(),
+                ),
             };
             HostTypeTerm::PolymorphicTensor(HostTensorTypeTerm { precision, shape })
         }
