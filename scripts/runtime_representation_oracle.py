@@ -33,7 +33,7 @@ DTYPE_MUTATION_SOURCE = Path("crates/chelis-vocab/src/lib.rs")
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "6cd0147af6601599d43fe025cfda7742c4320d20aa7177f54f50fd463cb438f9"
+FREEZE_SHA256 = "8e48f40e30267db7529806c930f24244bc043861ed073260cbe5617160eca262"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -929,6 +929,17 @@ def mutate_c_declaration_relocation(source: str) -> str:
     )
 
 
+def mutate_cxx_enclosing_namespace(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_enclosing_namespace",
+        "namespace runtime_representation_phase0_enclosing_namespace {\n"
+        "static inline float chelis_sum_f32("
+        "const float * CHELIS_RESTRICT data, int n);\n"
+        "}",
+    )
+
+
 def mutate_c_atomic_element_pointer(source: str) -> str:
     anchor = "    float *C,"
     if source.count(anchor) < 1:
@@ -1179,6 +1190,11 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
             "raw-element-pointer",
             Path("crates/chelis-runtime/include/chelis_simd.h"),
             mutate_c_declaration_relocation,
+        ),
+        MutationProbe(
+            "raw-element-pointer",
+            Path("crates/chelis-runtime/include/chelis_simd.h"),
+            mutate_cxx_enclosing_namespace,
         ),
         MutationProbe(
             "raw-element-pointer",

@@ -496,8 +496,10 @@ path.
 The C-family portion is parsed by the shared `chelis-c-surface` crate through
 libclang's compiler AST and preprocessor for the source's declared dialect,
 rather than matched as declaration text. Every carrier row is owned by its
-enclosing declaration. Its identity includes the authored declaration and
-libclang's complete canonical type: modifiers and address spaces, every
+complete semantic enclosing-declaration chain, including C++ namespaces and
+classes and Objective-C interfaces; identical method selectors in different
+containers therefore remain distinct. Its identity includes the authored
+declaration and libclang's complete canonical type: modifiers and address spaces, every
 pointer/reference layer, function signature, and every array extent.
 Relocating an unchanged carrier between functions, changing one extent of a
 multidimensional array, or changing `float *` to `_Atomic(float) *` therefore

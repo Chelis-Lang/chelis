@@ -1962,6 +1962,29 @@ fn structural_owner_name(entity: Entity<'_>) -> Option<String> {
     }
 }
 
+fn structural_owner_path(entity: Entity<'_>, source_owner: &str) -> Option<String> {
+    let mut names = Vec::new();
+    let mut current = Some(entity);
+    while let Some(candidate) = current {
+        let parent = candidate.get_semantic_parent();
+        if candidate.get_kind() == EntityKind::TranslationUnit || parent.is_none() {
+            break;
+        }
+        if candidate.get_name().as_deref() != Some("__chelis_surface_fragment")
+            && let Some(name) = structural_owner_name(candidate)
+        {
+            names.push(name);
+        }
+        current = parent;
+    }
+    if names.is_empty() {
+        None
+    } else {
+        names.reverse();
+        Some(format!("{source_owner}::{}", names.join("::")))
+    }
+}
+
 fn is_owner(entity: Entity<'_>) -> bool {
     entity.get_result_type().is_some()
         || matches!(
@@ -2011,10 +2034,7 @@ fn walk_compiler_ast(
         && is_owner(entity)
         && entity.get_name().as_deref() != Some("__chelis_surface_fragment")
     {
-        structural_owner_name(entity).map_or_else(
-            || owner.to_string(),
-            |name| format!("{source_owner}::{name}"),
-        )
+        structural_owner_path(entity, source_owner).unwrap_or_else(|| owner.to_string())
     } else {
         owner.to_string()
     };

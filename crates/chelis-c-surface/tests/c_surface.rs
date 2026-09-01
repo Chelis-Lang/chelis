@@ -285,30 +285,87 @@ fn numeric_pointer_return_declarators_get_an_identity() {
 }
 
 #[test]
+fn cxx_method_result_identities_include_the_full_enclosing_declaration_chain() {
+    let rows = scan_c_source(
+        r#"
+namespace first {
+struct Provider {
+    float *values();
+    float &reference_result();
+    float &&rvalue_result();
+    float (*function_result())(int);
+    float (*array_result())[4];
+};
+}
+namespace second {
+struct Provider {
+    float *values();
+};
+}
+"#,
+        "fixture",
+    )
+    .expect("C++ method result declarations parse");
+    let raw: Vec<_> = rows
+        .iter()
+        .filter(|row| row.kind == "raw-element-pointer")
+        .collect();
+    assert_eq!(
+        raw.len(),
+        6,
+        "C++ method result identities collided: {rows:#?}"
+    );
+    assert!(
+        raw.iter()
+            .any(|row| row.owner.contains("first::Provider::values")),
+        "first namespace and class are absent from the owner: {rows:#?}"
+    );
+    assert!(
+        raw.iter()
+            .any(|row| row.owner.contains("second::Provider::values")),
+        "second namespace and class are absent from the owner: {rows:#?}"
+    );
+}
+
+#[test]
 fn objective_c_method_results_use_the_same_structural_result_path() {
     let rows = scan_c_source(
         r#"
-@interface RuntimeRepresentationProvider
+@interface FirstRuntimeRepresentationProvider
 - (float *)values;
 + (double *)sharedValues;
 - (NSString *)label;
+@end
+@interface SecondRuntimeRepresentationProvider
+- (float *)values;
 @end
 "#,
         "fixture",
     )
     .expect("Objective-C++ method declarations parse");
-    let raw = signatures(&rows, "raw-element-pointer");
+    let raw: Vec<_> = rows
+        .iter()
+        .filter(|row| row.kind == "raw-element-pointer")
+        .collect();
     assert_eq!(
         raw.len(),
-        2,
-        "Objective-C method result disappeared: {rows:#?}"
+        3,
+        "Objective-C method result identities collided: {rows:#?}"
     );
-    assert!(raw.iter().any(|signature| signature.contains("values")));
     assert!(
-        raw.iter()
-            .any(|signature| signature.contains("sharedValues"))
+        raw.iter().any(|row| row
+            .owner
+            .contains("FirstRuntimeRepresentationProvider::values")),
+        "first interface is absent from the owner: {rows:#?}"
     );
-    assert!(raw.iter().all(|signature| !signature.contains("label")));
+    assert!(
+        raw.iter().any(|row| row
+            .owner
+            .contains("SecondRuntimeRepresentationProvider::values")),
+        "second interface is absent from the owner: {rows:#?}"
+    );
+    assert!(raw.iter().any(|row| row.signature.contains("sharedValues")));
+    assert!(raw.iter().all(|row| !row.signature.contains("label")));
 }
 
 #[test]

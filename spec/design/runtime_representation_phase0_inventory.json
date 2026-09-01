@@ -2661,6 +2661,17 @@
             "reason_prefix": "unclassified inventory hit"
           },
           "expected_kind": "raw-element-pointer",
+          "implementation_sha256": "f4bcb52875bf2e7a98a059e0008f1bbb36f0d57c0f7ba9c12c468f387d2b296c",
+          "path": "crates/chelis-runtime/include/chelis_simd.h",
+          "witness_id": "phase0.mutate_cxx_enclosing_namespace"
+        },
+        {
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+          "expected_failure": {
+            "code": "inventory.unclassified",
+            "reason_prefix": "unclassified inventory hit"
+          },
+          "expected_kind": "raw-element-pointer",
           "implementation_sha256": "4cefac162fce79c985d8fa7742898ceb3bee1e94fdd7a2a63dc84eb32253171d",
           "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
           "witness_id": "phase0.mutate_c_atomic_element_pointer"
@@ -12059,6 +12070,6 @@
       "identity": "kind=width-arithmetic|path=crates/chelis-vocab/src/lib.rs|owner=byte_width|signature=c5366b92e40f3eadb6cd|occurrence=1"
     }
   ],
-  "freeze_sha256": "6cd0147af6601599d43fe025cfda7742c4320d20aa7177f54f50fd463cb438f9",
+  "freeze_sha256": "8e48f40e30267db7529806c930f24244bc043861ed073260cbe5617160eca262",
   "schema_version": 3
 }

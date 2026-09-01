@@ -329,6 +329,7 @@ class MutationContractTests(unittest.TestCase):
                 "mutate_c_redefined_alias_pointer",
                 "mutate_cxx_reference_and_template",
                 "mutate_c_declaration_relocation",
+                "mutate_cxx_enclosing_namespace",
                 "mutate_c_atomic_element_pointer",
                 "mutate_cxx_rvalue_reference",
                 "mutate_c_complete_declarator_shapes",
@@ -371,6 +372,14 @@ class MutationContractTests(unittest.TestCase):
             oracle.REPO_ROOT / oracle.DIRECT_ACCESS_MUTATION_SOURCE,
             oracle.mutate_direct_data_access,
         ):
+            rows = oracle.inventory_rows(oracle.REPO_ROOT)
+            with self.assertRaisesRegex(oracle.OracleFailure, "unclassified inventory hit"):
+                oracle.validate_baseline(baseline, rows)
+
+    def test_cxx_enclosing_namespace_relocation_is_unclassified(self) -> None:
+        baseline = oracle.load_baseline()
+        path = oracle.REPO_ROOT / "crates/chelis-runtime/include/chelis_simd.h"
+        with oracle.temporary_mutation(path, oracle.mutate_cxx_enclosing_namespace):
             rows = oracle.inventory_rows(oracle.REPO_ROOT)
             with self.assertRaisesRegex(oracle.OracleFailure, "unclassified inventory hit"):
                 oracle.validate_baseline(baseline, rows)
