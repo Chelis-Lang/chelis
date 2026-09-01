@@ -936,6 +936,49 @@ jobs:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
         run: .venv/bin/python scripts/faithful_observation_phase2_oracle.py
 
+  # Freeze chelis#1286's complete initial ownership fixture universe and its
+  # typed expected-failure receipts before production ownership changes begin.
+  # This phase is hardware-independent; the HIP hardware row becomes mandatory
+  # in Phase 3.
+  compiled-value-ownership-phase0-oracle:
+    name: Compiled Value Ownership Phase 0 Oracle
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [changes]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
+
+      - name: Install C dependencies
+        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
+          # Restore the workspace cache while leaving shard 1 of the workspace
+          # suite as the single writer for this namespace.
+          save-if: false
+
+      - name: Compiled value ownership Phase 0 oracle
+        run: .venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 0
+
   # chelis#1207's authoritative parity corpus compares every production
   # level-based generalization with the retained reference sweep and bypasses
   # nextest's default filter so no discovered non-ignored test is omitted.
@@ -1033,13 +1076,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    needs: [changes, workspace-tests, dtype-phase3-oracle, faithful-observation-phase2-oracle, generalize-sweep-oracle]
+    needs: [changes, workspace-tests, dtype-phase3-oracle, faithful-observation-phase2-oracle, compiled-value-ownership-phase0-oracle, generalize-sweep-oracle]
     if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     steps:
       - uses: actions/checkout@v6
 
       - name: Require all integration legs
-        run: python3 scripts/ci_require_success.py workspace-tests=${{ needs.workspace-tests.result }} dtype-phase3-oracle=${{ needs.dtype-phase3-oracle.result }} faithful-observation-phase2-oracle=${{ needs.faithful-observation-phase2-oracle.result }} generalize-sweep-oracle=${{ needs.generalize-sweep-oracle.result }}
+        run: python3 scripts/ci_require_success.py workspace-tests=${{ needs.workspace-tests.result }} dtype-phase3-oracle=${{ needs.dtype-phase3-oracle.result }} faithful-observation-phase2-oracle=${{ needs.faithful-observation-phase2-oracle.result }} compiled-value-ownership-phase0-oracle=${{ needs.compiled-value-ownership-phase0-oracle.result }} generalize-sweep-oracle=${{ needs.generalize-sweep-oracle.result }}
 
   # NOTE: the LOC report moved to its own weekly workflow
   # (.github/workflows/loc-report.yml) so it no longer commits a bot

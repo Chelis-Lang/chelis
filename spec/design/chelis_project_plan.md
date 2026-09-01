@@ -1495,7 +1495,7 @@ depends on it.
 | Deep formal grammar | `spec/03-deep-syntax.md` — tag vocabulary, 3-tuple node structure, canonical form, PEG | ✅ Complete (consumed by Phase 0b) |
 | RISC primitive semantics | `spec/05-risc-primitives.md` — ops, types, AD adjoints, lowerings | ✅ Complete (consumed by IR check) |
 | Type system formal rules | `spec/04-type-system.md` — HM inference, tensor algebra, precision rules, fitness scoring | ✅ Complete (consumed by Phase 0d) |
-| Compiled value ownership | `spec/design/compiled_value_ownership.md` — verified ownership IR, unified heap, opaque tensor ABI, shared reuse proof, and phased class oracle | ✅ Design frozen; implementation tracked by chelis#1286 |
+| Compiled value ownership | `spec/design/compiled_value_ownership.md` — verified ownership IR, unified heap, opaque tensor ABI, shared reuse proof, and phased class oracle | 🚧 Phase 0 executable detector/ledger oracle implemented; structural Phases 1-4 tracked by chelis#1286 |
 | Standard op lowerings | Included in `spec/05` | ✅ Complete |
 | Deep tag vocabulary | explicit `app` / `var` / `lit`, closed structural set | ✅ Settled |
 | Deep metadata format | universal `(tag {} children...)` shape | ✅ Settled |

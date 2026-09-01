@@ -1,7 +1,9 @@
 # Compiled Value Ownership
 
-**Status:** Design freeze and source/FFI ownership-contract freeze for [#1286]. No delivery
-phase in this document is implemented by the design change that introduces it.
+**Status:** Design freeze and source/FFI ownership-contract freeze for [#1286].
+Phase 0's executable detectors are implemented and enforced by the dedicated
+`compiled-value-ownership-phase0-oracle` CI job. Phases 1 through 4 remain
+unimplemented.
 
 **Owning specs:** `spec/04-type-system.md` [04-LIN-1..8],
 `spec/05-risc-primitives.md` [05-OP-31..33], and `spec/11-ffi.md` §2.1.
@@ -613,6 +615,18 @@ ledger event schema, mutation identities, and zero-vacuity rule.
 **Authoritative oracle:**
 `.venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 0`;
 exit zero and final line `COMPILED VALUE OWNERSHIP PHASE 0: PASS`.
+
+**Phase 0 delivery receipt (2026-08-31):** the oracle freezes the complete
+initial fixture, command, detector, mutation, and exact ledger-receipt universe.
+The ledger is compiled only by the private `ownership-ledger` runtime feature;
+normal runtime behavior and the public ABI are unchanged. Its JSONL event stream
+uses deterministic logical owner identities and portable payload-byte counts,
+then fails closed on malformed transitions, invalid ownership operations, an
+empty allocation stream, or a mismatched final summary. The typed expected
+failures remain red for their exact current reasons. In particular, the ledger
+finds the small aggregate-string leaks that the historical platform leak
+thresholds treated as controls. Phase 0 is hardware-independent: it freezes the
+HIP execution row, but `--require-hip` does not become mandatory until Phase 3.
 
 ## Phase 1 — unified heap and atomic ABI cutover
 
