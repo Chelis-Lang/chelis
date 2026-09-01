@@ -10212,10 +10212,11 @@ fn actualize_tensor_helper_types(
 
     fn reserve_runtime_dim_name(
         occupied: &mut UnordSet<String>,
+        operation: &str,
         node: crate::dag::NodeId,
         axis: usize,
     ) -> String {
-        let base = format!("_rt_shrink_dim_{}_{}", node.0, axis);
+        let base = format!("_rt_{operation}_dim_{}_{}", node.0, axis);
         let mut candidate = base.clone();
         let mut suffix = 0usize;
         while !occupied.insert(candidate.clone()) {
@@ -10225,7 +10226,161 @@ fn actualize_tensor_helper_types(
         candidate
     }
 
+    fn known_extent(dim: &crate::dag::DimInfo) -> Option<usize> {
+        match dim {
+            crate::dag::DimInfo::Lit(value) | crate::dag::DimInfo::Named(_, Some(value)) => {
+                Some(*value)
+            }
+            crate::dag::DimInfo::Named(_, None) => None,
+        }
+    }
+
+    fn rank_preserving_movement_type(
+        op: &crate::dag::RiscOp,
+        node_id: crate::dag::NodeId,
+        input: &TensorType,
+        fallback: &TensorType,
+        occupied_dim_names: &mut UnordSet<String>,
+    ) -> Option<TensorType> {
+        // Pad, Shrink, and Stride all preserve input rank, but each axis can
+        // either forward the input extent, compute a static extent, or mint
+        // an op-declared runtime extent. Keep that complete shape calculus in
+        // one function: a downstream movement consumer must never fall back
+        // to checker metadata whose rank predates helper actualization.
+        fn unresolved_axis(
+            operation: &str,
+            node_id: crate::dag::NodeId,
+            axis: usize,
+            input_rank: usize,
+            fallback: &TensorType,
+            occupied_dim_names: &mut UnordSet<String>,
+        ) -> crate::dag::DimInfo {
+            if fallback.dims.len() == input_rank
+                && let Some(dim) = fallback.dims.get(axis)
+                && !matches!(dim, crate::dag::DimInfo::Named(name, None) if name.is_empty() || name == "*")
+            {
+                return dim.clone();
+            }
+            crate::dag::DimInfo::Named(
+                reserve_runtime_dim_name(occupied_dim_names, operation, node_id, axis),
+                None,
+            )
+        }
+
+        let dims = match op {
+            crate::dag::RiscOp::Pad { padding, .. } => {
+                if padding.len() != input.dims.len() {
+                    return None;
+                }
+                padding
+                    .iter()
+                    .zip(input.dims.iter())
+                    .enumerate()
+                    .map(
+                        |(axis, ((before, after), input_dim))| match (before, after) {
+                            (crate::dag::RtDim::Lit(0), crate::dag::RtDim::Lit(0)) => {
+                                Some(input_dim.clone())
+                            }
+                            (crate::dag::RtDim::Lit(before), crate::dag::RtDim::Lit(after)) => {
+                                known_extent(input_dim)
+                                    .and_then(|extent| extent.checked_add(*before))
+                                    .and_then(|extent| extent.checked_add(*after))
+                                    .map(crate::dag::DimInfo::Lit)
+                                    .or_else(|| {
+                                        Some(unresolved_axis(
+                                            "pad",
+                                            node_id,
+                                            axis,
+                                            input.dims.len(),
+                                            fallback,
+                                            occupied_dim_names,
+                                        ))
+                                    })
+                            }
+                            _ => Some(crate::dag::DimInfo::Named(
+                                reserve_runtime_dim_name(occupied_dim_names, "pad", node_id, axis),
+                                None,
+                            )),
+                        },
+                    )
+                    .collect::<Option<Vec<_>>>()?
+            }
+            crate::dag::RiscOp::Shrink { bounds } => {
+                if bounds.len() != input.dims.len() {
+                    return None;
+                }
+                bounds
+                    .iter()
+                    .zip(input.dims.iter())
+                    .enumerate()
+                    .map(|(axis, ((start, end), input_dim))| match (start, end) {
+                        (crate::dag::RtDim::Lit(start), crate::dag::RtDim::Lit(end))
+                            if start <= end =>
+                        {
+                            Some(crate::dag::DimInfo::Lit(end - start))
+                        }
+                        (crate::dag::RtDim::Lit(0), crate::dag::RtDim::ToEnd) => {
+                            Some(input_dim.clone())
+                        }
+                        (crate::dag::RtDim::Node(_), crate::dag::RtDim::Node(_))
+                        | (crate::dag::RtDim::Node(_), crate::dag::RtDim::Lit(_))
+                        | (crate::dag::RtDim::Lit(_), crate::dag::RtDim::Node(_)) => {
+                            Some(crate::dag::DimInfo::Named(
+                                reserve_runtime_dim_name(
+                                    occupied_dim_names,
+                                    "shrink",
+                                    node_id,
+                                    axis,
+                                ),
+                                None,
+                            ))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()?
+            }
+            crate::dag::RiscOp::Stride { strides } => {
+                if strides.len() != input.dims.len() {
+                    return None;
+                }
+                strides
+                    .iter()
+                    .zip(input.dims.iter())
+                    .enumerate()
+                    .map(|(axis, (stride, input_dim))| match stride {
+                        crate::dag::RtDim::Lit(0) => None,
+                        crate::dag::RtDim::Lit(1) => Some(input_dim.clone()),
+                        crate::dag::RtDim::Lit(stride) => known_extent(input_dim)
+                            .and_then(|extent| extent.checked_add(stride - 1))
+                            .map(|extent| crate::dag::DimInfo::Lit(extent / stride))
+                            .or_else(|| {
+                                Some(unresolved_axis(
+                                    "stride",
+                                    node_id,
+                                    axis,
+                                    input.dims.len(),
+                                    fallback,
+                                    occupied_dim_names,
+                                ))
+                            }),
+                        crate::dag::RtDim::Node(_) => Some(crate::dag::DimInfo::Named(
+                            reserve_runtime_dim_name(occupied_dim_names, "stride", node_id, axis),
+                            None,
+                        )),
+                        crate::dag::RtDim::ToEnd | crate::dag::RtDim::Sym(_) => None,
+                    })
+                    .collect::<Option<Vec<_>>>()?
+            }
+            _ => return None,
+        };
+        Some(TensorType {
+            dims,
+            precision: fallback.precision,
+        })
+    }
+
     let mut inferred = UnordMap::<crate::dag::NodeId, TensorType>::new();
+    let mut authoritative_shape_nodes = UnordSet::<crate::dag::NodeId>::new();
     // Generated runtime extents share the `DimInfo::Named` carrier with
     // source dimensions. Reserve the canonical complete DAG namespace plus
     // names that host-scope actualization can introduce later, then mint by
@@ -10263,6 +10418,9 @@ fn actualize_tensor_helper_types(
             crate::dag::RiscOp::Add
             | crate::dag::RiscOp::Sub
             | crate::dag::RiscOp::Mul
+            | crate::dag::RiscOp::Div
+            | crate::dag::RiscOp::FloorDiv
+            | crate::dag::RiscOp::TruncDiv
             | crate::dag::RiscOp::CmpLt
             | crate::dag::RiscOp::MaxElem
             | crate::dag::RiscOp::MinElem => node
@@ -10311,12 +10469,15 @@ fn actualize_tensor_helper_types(
             | crate::dag::RiscOp::Floor
             | crate::dag::RiscOp::Ceil
             | crate::dag::RiscOp::Round
+            | crate::dag::RiscOp::Recip
             | crate::dag::RiscOp::UniformLike { .. }
             | crate::dag::RiscOp::Dropout { .. }
             | crate::dag::RiscOp::Copy
             | crate::dag::RiscOp::Drop
             | crate::dag::RiscOp::Realize
-            | crate::dag::RiscOp::Cast { .. } => node
+            | crate::dag::RiscOp::Cast { .. }
+            | crate::dag::RiscOp::CastTrunc { .. }
+            | crate::dag::RiscOp::FusedElem { .. } => node
                 .inputs
                 .first()
                 .and_then(|id| inferred.get(id))
@@ -10387,50 +10548,24 @@ fn actualize_tensor_helper_types(
                         precision: node.output_type.precision,
                     })
                 }),
-            crate::dag::RiscOp::Shrink { bounds } => node
+            crate::dag::RiscOp::Pad { .. }
+            | crate::dag::RiscOp::Shrink { .. }
+            | crate::dag::RiscOp::Stride { .. } => node
                 .inputs
                 .first()
                 .and_then(|id| inferred.get(id))
-                .filter(|input| input.dims.len() == bounds.len())
                 .and_then(|input| {
-                    let dims = bounds
-                        .iter()
-                        .zip(input.dims.iter())
-                        .enumerate()
-                        .map(|(axis, ((start, end), input_dim))| match (start, end) {
-                            (crate::dag::RtDim::Lit(start), crate::dag::RtDim::Lit(end))
-                                if start <= end =>
-                            {
-                                Some(crate::dag::DimInfo::Lit(end - start))
-                            }
-                            (crate::dag::RtDim::Lit(0), crate::dag::RtDim::ToEnd) => {
-                                Some(input_dim.clone())
-                            }
-                            (crate::dag::RtDim::Node(_), crate::dag::RtDim::Node(_))
-                            | (crate::dag::RtDim::Node(_), crate::dag::RtDim::Lit(_))
-                            | (crate::dag::RtDim::Lit(_), crate::dag::RtDim::Node(_)) => {
-                                // A runtime shrink bound produces a fresh extent at this
-                                // node. Reserve one collision-proof producer-qualified
-                                // symbol so consumers reuse the extent that Shrink
-                                // declares. The source language permits underscore-leading
-                                // names, so merely choosing a distinctive prefix is not
-                                // enough: allocation checks the whole DAG namespace.
-                                Some(crate::dag::DimInfo::Named(
-                                    reserve_runtime_dim_name(
-                                        &mut occupied_dim_names,
-                                        node.id,
-                                        axis,
-                                    ),
-                                    None,
-                                ))
-                            }
-                            _ => None,
-                        })
-                        .collect::<Option<Vec<_>>>()?;
-                    Some(TensorType {
-                        dims,
-                        precision: node.output_type.precision,
-                    })
+                    let actual = rank_preserving_movement_type(
+                        &node.op,
+                        node.id,
+                        input,
+                        &node.output_type,
+                        &mut occupied_dim_names,
+                    );
+                    if actual.is_some() {
+                        authoritative_shape_nodes.insert(node.id);
+                    }
+                    actual
                 }),
             _ => None,
         }
@@ -10492,9 +10627,10 @@ fn actualize_tensor_helper_types(
         let Some(actual) = inferred.get(&id) else {
             continue;
         };
-        let shrink_rank_repair = matches!(node.op, crate::dag::RiscOp::Shrink { .. });
-        if (!synthetic_dims(&node.output_type) && !shrink_rank_repair)
-            || (node.output_type.dims.len() != actual.dims.len() && !shrink_rank_repair)
+        let operation_shape_is_authoritative = authoritative_shape_nodes.contains(&node.id);
+        if (!synthetic_dims(&node.output_type) && !operation_shape_is_authoritative)
+            || (node.output_type.dims.len() != actual.dims.len()
+                && !operation_shape_is_authoritative)
         {
             continue;
         }

@@ -29,6 +29,17 @@ fn runtime_bound_source(start: &str, end: &str) -> String {
     )
 }
 
+fn runtime_bound_movement_consumer_source(consumer: &str) -> String {
+    format!(
+        "module Repro.ShrinkExpandMovementConsumer\n\
+         x = to_tensor([cast(11.0, f32), cast(22.0, f32)])\n\
+         e = expand(x, cast(0, int32), cast(2, int64))\n\
+         k = shape(x, cast(0, int32))\n\
+         s = shrink(e, [[cast(0, int64), cast(1, int64)], [cast(k - k, int64), k]])\n\
+         out = {consumer}\n"
+    )
+}
+
 fn eval_stdout(source: &str, stem: &str) -> String {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join(format!("{stem}.ch"));
@@ -157,6 +168,31 @@ fn consumed_shrink_with_runtime_start_declares_its_fresh_extent() {
     let eval = eval_stdout(&source, "shrink_expand_runtime_start");
     let (_, compiled) = build_and_run(&source, "shrink_expand_runtime_start");
     assert_eq!(compiled, eval, "runtime-start shrink must retain C parity");
+}
+
+#[test]
+fn zero_pad_after_runtime_shrink_keeps_the_repaired_rank() {
+    let source = runtime_bound_movement_consumer_source(
+        "pad(s, [[cast(0, int64), cast(0, int64)], [cast(0, int64), cast(0, int64)]], cast(0.0, f32))",
+    );
+    let eval = eval_stdout(&source, "shrink_expand_zero_pad");
+    let (_, compiled) = build_and_run(&source, "shrink_expand_zero_pad");
+    assert_eq!(
+        compiled, eval,
+        "zero pad must preserve the actual rank repaired at Shrink"
+    );
+}
+
+#[test]
+fn identity_stride_after_runtime_shrink_keeps_the_repaired_rank() {
+    let source =
+        runtime_bound_movement_consumer_source("stride(s, cast(1, int64), cast(1, int64))");
+    let eval = eval_stdout(&source, "shrink_expand_identity_stride");
+    let (_, compiled) = build_and_run(&source, "shrink_expand_identity_stride");
+    assert_eq!(
+        compiled, eval,
+        "identity stride must preserve the actual rank repaired at Shrink"
+    );
 }
 
 #[test]
