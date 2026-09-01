@@ -389,6 +389,13 @@ pub(crate) fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> Ti
     // 2. Assert preconditions. cvc5's `assert_formula` requires a Bool-sorted
     //    term; asserting a non-Bool aborts ("Expected term with sort Bool"),
     //    so a precondition that lowers to a non-Bool sort routes to Tier C.
+    //
+    //    Each asserted term is retained so step 4 can ask the solver to
+    //    evaluate it under the solver's OWN returned model (chelis#1224). An
+    //    assumption that never reached the assertion stack is otherwise
+    //    invisible: the model simply comes back unconstrained by it.
+    let mut precondition_terms: Vec<cvc5_rs::Term> =
+        Vec::with_capacity(property.preconditions.len());
     for pre in &property.preconditions {
         let term = match lower_to_cvc5(&tm, pre, &vars, &sorts) {
             Ok((t, SmtSort::Bool)) => t,
@@ -399,7 +406,8 @@ pub(crate) fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> Ti
             }
             Err(reason) => return TierBResult::Error(reason),
         };
-        solver.assert_formula(term);
+        solver.assert_formula(term.clone());
+        precondition_terms.push(term);
     }
 
     // 3. Assert negation of postcondition. cvc5's NOT requires a Bool operand;
@@ -429,11 +437,185 @@ pub(crate) fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> Ti
             let val = solver.get_value(var.clone());
             bindings.insert(name.clone(), Value::String(val.to_string()));
         }
+        // chelis#1224: a returned model MUST satisfy every stated assumption.
+        // A model that violates one is not a counterexample to this property,
+        // it is evidence that the query the solver answered was not the query
+        // we built. Report that as a typed error so the disproof is never
+        // laundered into a `Failed` verdict.
+        if let Err(reason) = validate_model_satisfies_preconditions(
+            property,
+            &bindings,
+            &solver,
+            &precondition_terms,
+        ) {
+            return TierBResult::Error(reason);
+        }
         TierBResult::Disproved(Value::Object(bindings))
     } else {
         // Unknown or timeout
         TierBResult::Unknown
     }
+}
+
+/// Reject a `sat` model that does not satisfy the property's own assumptions
+/// (chelis#1224).
+///
+/// The observed failure was a model with `d = -4.0` returned for a property
+/// whose `where` clause states `d > 0.5`. Such a model is a sound
+/// counterexample to the goal *without* that assumption, so reporting it as a
+/// disproof of the stated property is a wrong answer, not a weak one.
+///
+/// Two independent checks run, and both must pass:
+///
+/// 1. **Solver-side.** Ask cvc5 to evaluate each retained precondition term
+///    under its own model. This is exact and needs no value parsing, but it
+///    shares whatever state produced the model.
+/// 2. **Independent.** Parse the model back into a [`ConcreteEnv`] and
+///    re-evaluate the preconditions with the same evaluator Tier C uses, so
+///    the two tiers agree by construction. This check does not consult the
+///    solver at all, which is the point: if the solver's own state is the
+///    thing that went wrong, only an independent evaluation can see it.
+///
+/// The independent leg builds its environment from the *declared* variable
+/// set, never from the precondition's free names, so it cannot silently
+/// inherit `concrete_eval`'s unbound-variable-reads-zero behaviour: a declared
+/// variable missing from the model, or carrying a value this function cannot
+/// parse, is itself a validation failure.
+#[cfg(feature = "smt")]
+fn validate_model_satisfies_preconditions(
+    property: &SmtProperty,
+    bindings: &serde_json::Map<String, Value>,
+    solver: &cvc5_rs::Solver,
+    precondition_terms: &[cvc5_rs::Term],
+) -> Result<(), String> {
+    // Leg 1: the solver's own evaluation of each assumption under its model.
+    for (index, term) in precondition_terms.iter().enumerate() {
+        let evaluated = solver.get_value(term.clone()).to_string();
+        if evaluated.trim() != "true" {
+            return Err(format!(
+                "cvc5 returned a model that does not satisfy precondition {index}: the solver \
+                 evaluates it to `{evaluated}` under its own model. The query the solver answered \
+                 is not the query this property states, so the model is not a counterexample \
+                 (chelis#1224); routing to Tier C"
+            ));
+        }
+    }
+
+    // Leg 2: independent re-evaluation, without consulting the solver.
+    validate_model_independently(property, bindings)
+}
+
+/// The solver-free half of [`validate_model_satisfies_preconditions`].
+///
+/// Split out so the check that matters most can be unit-tested against a
+/// planted model without standing up cvc5: if the solver's own state is what
+/// went wrong, this is the leg that catches it.
+#[cfg(feature = "smt")]
+fn validate_model_independently(
+    property: &SmtProperty,
+    bindings: &serde_json::Map<String, Value>,
+) -> Result<(), String> {
+    let mut env = crate::concrete_eval::ConcreteEnv::new();
+    for (name, sort) in &property.variables {
+        let Some(raw) = bindings.get(name).and_then(Value::as_str) else {
+            return Err(format!(
+                "cvc5 returned a model with no value for the declared variable `{name}`, so the \
+                 stated assumptions cannot be revalidated (chelis#1224); routing to Tier C"
+            ));
+        };
+        let Some(value) = parse_smt_model_value(raw, *sort) else {
+            return Err(format!(
+                "cvc5 returned the value `{raw}` for `{name}`, which this build cannot parse back \
+                 into a concrete scalar, so the stated assumptions cannot be revalidated \
+                 (chelis#1224); routing to Tier C"
+            ));
+        };
+        env.insert(name.clone(), value);
+    }
+    for (index, pre) in property.preconditions.iter().enumerate() {
+        if !crate::concrete_eval::eval_bool_strict(pre, &env) {
+            return Err(format!(
+                "cvc5 returned a model that violates precondition {index} under independent \
+                 evaluation, so it is not a counterexample to the stated property \
+                 (chelis#1224); routing to Tier C"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Parse one SMT-LIB model value into a dtype-carrying scalar.
+///
+/// cvc5 renders model values as SMT-LIB terms rather than plain numerals:
+/// negatives are `(- 4.0)` and exact rationals are `(/ 3.0 2.0)`, either of
+/// which may nest. Returning `None` for anything unrecognised keeps the
+/// caller fail-closed: an unparsable value fails validation rather than
+/// silently passing it.
+#[cfg(feature = "smt")]
+fn parse_smt_model_value(raw: &str, sort: SmtSort) -> Option<chelis_types::ScalarValue> {
+    use chelis_types::{scalar_from_f64, scalar_from_i64, types::Prim};
+
+    match sort {
+        SmtSort::Bool => match raw.trim() {
+            "true" => scalar_from_i64("prove-model-bool", Prim::Bool, 1).ok(),
+            "false" => scalar_from_i64("prove-model-bool", Prim::Bool, 0).ok(),
+            _ => None,
+        },
+        SmtSort::Int => {
+            let value = parse_smt_rational(raw)?;
+            if value.fract() != 0.0 {
+                return None;
+            }
+            scalar_from_i64("prove-model-int", Prim::Int64, value as i64).ok()
+        }
+        SmtSort::Real => {
+            let value = parse_smt_rational(raw)?;
+            scalar_from_f64("prove-model-real", Prim::F64, value).ok()
+        }
+    }
+}
+
+/// Evaluate an SMT-LIB numeric model term to `f64`.
+///
+/// Handles the numeral/decimal forms plus the `(- x)` and `(/ n d)` wrappers
+/// cvc5 emits, nested to any depth. Anything else yields `None`.
+#[cfg(feature = "smt")]
+fn parse_smt_rational(raw: &str) -> Option<f64> {
+    let text = raw.trim();
+    if let Some(inner) = text.strip_prefix('(').and_then(|t| t.strip_suffix(')')) {
+        let inner = inner.trim();
+        if let Some(rest) = inner.strip_prefix("- ") {
+            return Some(-parse_smt_rational(rest)?);
+        }
+        if let Some(rest) = inner.strip_prefix("/ ") {
+            let (numerator, denominator) = split_smt_operands(rest.trim())?;
+            let denominator = parse_smt_rational(&denominator)?;
+            if denominator == 0.0 {
+                return None;
+            }
+            return Some(parse_smt_rational(&numerator)? / denominator);
+        }
+        return None;
+    }
+    text.parse::<f64>().ok()
+}
+
+/// Split `"a b"` into its two top-level operands, respecting nesting.
+#[cfg(feature = "smt")]
+fn split_smt_operands(text: &str) -> Option<(String, String)> {
+    let mut depth = 0usize;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.checked_sub(1)?,
+            ' ' if depth == 0 => {
+                let (left, right) = text.split_at(index);
+                return Some((left.to_string(), right.trim_start().to_string()));
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Build the cvc5 BOUND variables for a quantifier's binder list. cvc5's
@@ -2052,5 +2234,159 @@ mod tests {
             matches!(solve_property(&bound, 5000), TierBResult::Error(_)),
             "a NUL-containing bound-variable name must be a clean Error, not a panic"
         );
+    }
+
+    // ---- chelis#1224: a counterexample must satisfy the stated assumptions ----
+
+    /// The property from the observed failure: `d > 0.5, r > g, r < 9.5`.
+    /// Only the assumptions matter here; the postcondition is never consulted
+    /// by the validator.
+    fn quotient_grad_property() -> SmtProperty {
+        let var = |name: &str| Box::new(SmtExpr::Var(name.to_string()));
+        SmtProperty {
+            variables: vec![
+                ("d".to_string(), SmtSort::Real),
+                ("r".to_string(), SmtSort::Real),
+                ("g".to_string(), SmtSort::Real),
+            ],
+            preconditions: vec![
+                SmtExpr::Cmp(CmpOp::Gt, var("d"), Box::new(SmtExpr::RealLit(0.5))),
+                SmtExpr::Cmp(CmpOp::Gt, var("r"), var("g")),
+                SmtExpr::Cmp(CmpOp::Lt, var("r"), Box::new(SmtExpr::RealLit(9.5))),
+            ],
+            postcondition: SmtExpr::BoolLit(true),
+        }
+    }
+
+    fn model(pairs: &[(&str, &str)]) -> serde_json::Map<String, Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), Value::String((*v).to_string())))
+            .collect()
+    }
+
+    #[test]
+    fn model_violating_a_precondition_is_rejected() {
+        // The exact model CI run 31554449486 reported as a counterexample.
+        // `d = -4.0` violates `d > 0.5`, so this is a counterexample to the
+        // UNGUARDED goal and must never be reported as a disproof.
+        let rejected = validate_model_independently(
+            &quotient_grad_property(),
+            &model(&[("d", "(- 4.0)"), ("r", "4.0"), ("g", "2.0")]),
+        );
+        let reason = rejected.expect_err("a precondition-violating model must be rejected");
+        assert!(
+            reason.contains("violates precondition 0"),
+            "the diagnostic must name which assumption failed: {reason}"
+        );
+    }
+
+    #[test]
+    fn model_satisfying_every_precondition_is_accepted() {
+        // Negative parity: the guard must not reject legitimate counterexamples,
+        // or every disproof would degrade to an error. This is the model the
+        // named-`def` polarity probe returns.
+        assert!(
+            validate_model_independently(
+                &quotient_grad_property(),
+                &model(&[("d", "2.0"), ("r", "5.0"), ("g", "1.0")]),
+            )
+            .is_ok(),
+            "a model satisfying every stated assumption is a valid counterexample"
+        );
+    }
+
+    #[test]
+    fn model_missing_a_declared_variable_is_rejected() {
+        let reason = validate_model_independently(
+            &quotient_grad_property(),
+            &model(&[("d", "2.0"), ("r", "5.0")]),
+        )
+        .expect_err("an incomplete model cannot revalidate the assumptions");
+        assert!(
+            reason.contains("no value for the declared variable `g`"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn model_with_an_unparsable_value_is_rejected() {
+        // Fail closed: an unrecognised value must not be waved through, and it
+        // must not be silently read as zero the way `concrete_eval` treats an
+        // unbound variable.
+        let reason = validate_model_independently(
+            &quotient_grad_property(),
+            &model(&[
+                ("d", "(root-obj (+ (^ x 2) (- 2)) 1)"),
+                ("r", "5.0"),
+                ("g", "1.0"),
+            ]),
+        )
+        .expect_err("an unparsable model value must fail validation");
+        assert!(reason.contains("cannot parse back"), "{reason}");
+    }
+
+    #[test]
+    fn smt_model_values_round_trip_through_the_parser() {
+        assert_eq!(parse_smt_rational("4.0"), Some(4.0));
+        assert_eq!(parse_smt_rational("(- 4.0)"), Some(-4.0));
+        assert_eq!(parse_smt_rational("(/ 3.0 2.0)"), Some(1.5));
+        assert_eq!(parse_smt_rational("(- (/ 3.0 2.0))"), Some(-1.5));
+        assert_eq!(parse_smt_rational("(/ (- 3.0) 2.0)"), Some(-1.5));
+        // Fail closed on division by zero and on anything unrecognised.
+        assert_eq!(parse_smt_rational("(/ 1.0 0.0)"), None);
+        assert_eq!(parse_smt_rational("(root-obj x 1)"), None);
+        assert_eq!(parse_smt_rational("(- )"), None);
+    }
+
+    #[test]
+    fn parsed_model_values_carry_their_declared_dtype() {
+        use chelis_types::types::Prim;
+        assert_eq!(
+            parse_smt_model_value("(- 4.0)", SmtSort::Real).map(|v| v.prim()),
+            Some(Prim::F64)
+        );
+        assert_eq!(
+            parse_smt_model_value("7", SmtSort::Int).map(|v| v.prim()),
+            Some(Prim::Int64)
+        );
+        assert_eq!(
+            parse_smt_model_value("true", SmtSort::Bool).map(|v| v.prim()),
+            Some(Prim::Bool)
+        );
+        // A non-integral value for an Int-sorted variable is not silently
+        // truncated.
+        assert_eq!(parse_smt_model_value("(/ 3.0 2.0)", SmtSort::Int), None);
+    }
+
+    #[test]
+    fn a_real_disproof_still_reports_a_counterexample_end_to_end() {
+        // The whole guard, through cvc5: a genuinely false property under its
+        // own preconditions must still come back Disproved, not Error.
+        let var = |name: &str| Box::new(SmtExpr::Var(name.to_string()));
+        let prop = SmtProperty {
+            variables: vec![
+                ("d".to_string(), SmtSort::Real),
+                ("r".to_string(), SmtSort::Real),
+            ],
+            preconditions: vec![SmtExpr::Cmp(
+                CmpOp::Gt,
+                var("d"),
+                Box::new(SmtExpr::RealLit(0.5)),
+            )],
+            // False under `d > 0.5`: nothing forces d < 0.
+            postcondition: SmtExpr::Cmp(CmpOp::Lt, var("d"), Box::new(SmtExpr::RealLit(0.0))),
+        };
+        match solve_property(&prop, 5000) {
+            TierBResult::Disproved(model) => {
+                let raw = model["d"].as_str().expect("model carries d");
+                let value = parse_smt_rational(raw).expect("model value parses");
+                assert!(
+                    value > 0.5,
+                    "the reported counterexample must satisfy the stated precondition: {raw}"
+                );
+            }
+            other => panic!("expected a counterexample, got {other:?}"),
+        }
     }
 }
