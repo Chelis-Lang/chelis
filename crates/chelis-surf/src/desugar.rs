@@ -322,9 +322,6 @@ fn internal_node(tag: &str, children: Vec<deep::Expr>) -> deep::Expr {
     deep::Expr::List(deep::List { elements }, sp())
 }
 
-/// Build a stamped Deep node with custom metadata. The `meta` argument
-/// must be an `Expr::Map(MetaMap { .. }, _)` — the MetaMap is extracted
-/// and passed to `Node::new`.
 /// Attach `dtype_bounds` metadata for every bounded binder in `binders`
 /// (`spec/03-deep-syntax.md` §1.1). A list with no bound leaves the node
 /// untouched, so canonical Deep for an unbounded declaration is unchanged.
@@ -349,6 +346,9 @@ fn with_dtype_bounds(expr: deep::Expr, binders: &[TypeBinder]) -> deep::Expr {
     deep::Expr::Node(node, span)
 }
 
+/// Build a stamped Deep node with custom metadata. The `meta` argument
+/// must be an `Expr::Map(MetaMap { .. }, _)` — the MetaMap is extracted
+/// and passed to `Node::new`.
 fn node_meta(tag: DeepTag, meta: deep::Expr, children: Vec<deep::Expr>) -> deep::Expr {
     let meta_map = match meta {
         deep::Expr::Map(m, _) => m,
@@ -3164,7 +3164,10 @@ mod tests {
         // batch and hidden should be d-var (polymorphic), NOT d-name
         let decl = Decl::FunDef {
             name: "transpose".to_string(),
-            type_binders: vec![TypeBinder::unbounded("batch"), TypeBinder::unbounded("hidden")],
+            type_binders: vec![
+                TypeBinder::unbounded("batch"),
+                TypeBinder::unbounded("hidden"),
+            ],
             params: vec![param(
                 "x",
                 Some(TypeExpr::Tensor(

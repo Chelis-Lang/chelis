@@ -185,15 +185,17 @@ fn desugar_of_resugar_is_the_identity_on_bounded_declarations() {
     ] {
         let decls = surf_parse(source).expect("parse");
         let deep = desugar_program(&decls);
-        let recovered = resugar_program(&deep)
-            .unwrap_or_else(|error| panic!("resugar `{source}`: {error}"));
+        let recovered =
+            resugar_program(&deep).unwrap_or_else(|error| panic!("resugar `{source}`: {error}"));
         // `span` is derived surface provenance normalized away by
         // spec/03 §6.3.2, exactly as the canonical-Surf law harness does.
         assert_eq!(
             print_canonical(&chelis_surf::resugar::normalize_deep_for_surface_roundtrip(
                 &desugar_program(&recovered)
             )),
-            print_canonical(&chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&deep)),
+            print_canonical(&chelis_surf::resugar::normalize_deep_for_surface_roundtrip(
+                &deep
+            )),
             "resugar/desugar is not the identity for `{source}`"
         );
     }

@@ -78,7 +78,10 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
         exported(&schema_json, "restricted_close", "functions")["type_variable_restrictions"],
         expected_active_float()
     );
-    for (name, domain) in [("int_bounded", "active_int"), ("numeric_bounded", "active_numeric")] {
+    for (name, domain) in [
+        ("int_bounded", "active_int"),
+        ("numeric_bounded", "active_numeric"),
+    ] {
         assert_eq!(
             exported(&schema_json, name, "functions")["type_variable_restrictions"],
             expected_domain(domain),
@@ -112,7 +115,10 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
         exported(&shell_json, "restricted_close", "exports")["type_variable_restrictions"],
         expected_active_float()
     );
-    for (name, domain) in [("int_bounded", "active_int"), ("numeric_bounded", "active_numeric")] {
+    for (name, domain) in [
+        ("int_bounded", "active_int"),
+        ("numeric_bounded", "active_numeric"),
+    ] {
         assert_eq!(
             exported(&shell_json, name, "exports")["type_variable_restrictions"],
             expected_domain(domain),

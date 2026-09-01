@@ -121,7 +121,12 @@ fn a_float_bounded_signature_accepts_every_active_float() {
 #[test]
 fn no_family_admits_bool() {
     for dtype in NON_NUMERIC {
-        assert_family_rejection(&arange_shaped(dtype), "an `Int` bound at bool", "Int", dtype);
+        assert_family_rejection(
+            &arange_shaped(dtype),
+            "an `Int` bound at bool",
+            "Int",
+            dtype,
+        );
         assert_family_rejection(
             &linspace_shaped(dtype),
             "a `Float` bound at bool",
@@ -279,11 +284,11 @@ def probe[r](x: r) -> r = only_ints(only_floats(x))
 "#,
     );
     assert!(
-        errors
-            .iter()
-            .any(|error| matches!(error.kind, CheckErrorKind::PrecisionMismatch)
+        errors.iter().any(
+            |error| matches!(error.kind, CheckErrorKind::PrecisionMismatch)
                 && error.message.contains("Float")
-                && error.message.contains("Int")),
+                && error.message.contains("Int")
+        ),
         "an empty family intersection must name both families; got:\n{}",
         rendered(&errors)
     );
@@ -372,9 +377,9 @@ def f[p: Float](x: p) -> p = x
 "#,
     );
     assert!(
-        errors
-            .iter()
-            .any(|error| error.message.contains("its `sig` owns the declaration's binders")),
+        errors.iter().any(|error| error
+            .message
+            .contains("its `sig` owns the declaration's binders")),
         "a bound belongs to one binder list; got:\n{}",
         rendered(&errors)
     );

@@ -2836,7 +2836,8 @@ mod tests {
         let boundary = subst.enter_level(&vg);
         let restricted = vg.fresh_tvar();
         let alias = vg.fresh_tvar();
-        subst.narrow_tvar_restriction(restricted, TypeVarRestriction::ActiveFloat)
+        subst
+            .narrow_tvar_restriction(restricted, TypeVarRestriction::ActiveFloat)
             .expect("an unbounded variable accepts any single dtype family");
         unify(&Type::Var(restricted), &Type::Var(alias), &mut subst)
             .expect("restriction must flow through an ordinary type-variable alias");
@@ -2870,14 +2871,18 @@ mod tests {
         let other_var = TypeVar(80_002);
         let shared_var = TypeVar(80_003);
         let mut receiver = Subst::new();
-        receiver.narrow_tvar_restriction(receiver_var, TypeVarRestriction::ActiveFloat)
+        receiver
+            .narrow_tvar_restriction(receiver_var, TypeVarRestriction::ActiveFloat)
             .expect("an unbounded variable accepts any single dtype family");
-        receiver.narrow_tvar_restriction(shared_var, TypeVarRestriction::ActiveFloat)
+        receiver
+            .narrow_tvar_restriction(shared_var, TypeVarRestriction::ActiveFloat)
             .expect("an unbounded variable accepts any single dtype family");
         let other = Subst::new();
-        other.narrow_tvar_restriction(other_var, TypeVarRestriction::ActiveFloat)
+        other
+            .narrow_tvar_restriction(other_var, TypeVarRestriction::ActiveFloat)
             .expect("an unbounded variable accepts any single dtype family");
-        other.narrow_tvar_restriction(shared_var, TypeVarRestriction::ActiveFloat)
+        other
+            .narrow_tvar_restriction(shared_var, TypeVarRestriction::ActiveFloat)
             .expect("an unbounded variable accepts any single dtype family");
 
         receiver
@@ -2907,7 +2912,8 @@ mod tests {
         let middle = TypeVar(80_005);
         let terminal = TypeVar(80_006);
         let mut receiver = Subst::new();
-        receiver.narrow_tvar_restriction(source, TypeVarRestriction::ActiveFloat)
+        receiver
+            .narrow_tvar_restriction(source, TypeVarRestriction::ActiveFloat)
             .expect("an unbounded variable accepts any single dtype family");
         receiver
             .insert_type(source, Type::Var(middle))
@@ -2937,7 +2943,8 @@ mod tests {
     fn compose_rejects_forbidden_bindings_transactionally_in_either_operand() {
         let restricted_in_receiver = TypeVar(80_007);
         let mut receiver = Subst::new();
-        receiver.narrow_tvar_restriction(restricted_in_receiver, TypeVarRestriction::ActiveFloat)
+        receiver
+            .narrow_tvar_restriction(restricted_in_receiver, TypeVarRestriction::ActiveFloat)
             .expect("an unbounded variable accepts any single dtype family");
         let mut other = Subst::new();
         other
@@ -2963,7 +2970,8 @@ mod tests {
             .insert_type(restricted_in_other, Type::Prim(Prim::Int16))
             .expect("the receiver does not yet know the restriction");
         let other = Subst::new();
-        other.narrow_tvar_restriction(restricted_in_other, TypeVarRestriction::ActiveFloat)
+        other
+            .narrow_tvar_restriction(restricted_in_other, TypeVarRestriction::ActiveFloat)
             .expect("an unbounded variable accepts any single dtype family");
         let receiver_types_before = receiver.types_snapshot();
         let receiver_restrictions_before = receiver.tvar_restrictions_snapshot();
@@ -2984,7 +2992,8 @@ mod tests {
     fn direct_type_insertion_cannot_bypass_active_float_restrictions() {
         let restricted = TypeVar(80_009);
         let mut subst = Subst::new();
-        subst.narrow_tvar_restriction(restricted, TypeVarRestriction::ActiveFloat)
+        subst
+            .narrow_tvar_restriction(restricted, TypeVarRestriction::ActiveFloat)
             .expect("an unbounded variable accepts any single dtype family");
 
         let error = subst
@@ -3007,7 +3016,8 @@ mod tests {
         let restricted = TypeVar(80_010);
         let alias = TypeVar(80_011);
         let mut subst = Subst::new();
-        subst.narrow_tvar_restriction(restricted, TypeVarRestriction::ActiveFloat)
+        subst
+            .narrow_tvar_restriction(restricted, TypeVarRestriction::ActiveFloat)
             .expect("an unbounded variable accepts any single dtype family");
 
         subst
@@ -3031,7 +3041,8 @@ mod tests {
         let inferred_precision = TypeVar(80_012);
         let declared_precision = TypeVar(80_013);
         let mut subst = Subst::new();
-        subst.narrow_tvar_restriction(inferred_precision, TypeVarRestriction::ActiveFloat)
+        subst
+            .narrow_tvar_restriction(inferred_precision, TypeVarRestriction::ActiveFloat)
             .expect("an unbounded variable accepts any single dtype family");
         let inferred_tensor = Type::Tensor(vec![Dim::Lit(2)], TensorPrec::Var(inferred_precision));
         let declared_tensor = Type::Tensor(vec![Dim::Lit(2)], TensorPrec::Var(declared_precision));
@@ -3069,9 +3080,11 @@ mod tests {
         let second_source = TypeVar(80_015);
         let first_target = TypeVar(80_016);
         let mut subst = Subst::new();
-        subst.narrow_tvar_restriction(first_source, TypeVarRestriction::ActiveFloat)
+        subst
+            .narrow_tvar_restriction(first_source, TypeVarRestriction::ActiveFloat)
             .expect("an unbounded variable accepts any single dtype family");
-        subst.narrow_tvar_restriction(second_source, TypeVarRestriction::ActiveFloat)
+        subst
+            .narrow_tvar_restriction(second_source, TypeVarRestriction::ActiveFloat)
             .expect("an unbounded variable accepts any single dtype family");
         let inferred = Type::Tuple(vec![Type::Var(first_source), Type::Var(second_source)]);
         let declared = Type::Tuple(vec![Type::Var(first_target), Type::Prim(Prim::Int32)]);

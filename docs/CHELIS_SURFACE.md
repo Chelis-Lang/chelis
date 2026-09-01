@@ -480,6 +480,12 @@ build also rejects runtime-symbolic windowed axes and bf16/f16 (cast to f32 firs
   sites). `realize` and explicit `drop` consume owned params.
 - **Rank polymorphism** (`..r`): Tier-2 shape-identity bodies and Tier-3 named-axis
   reductions (`sum`/`mean`) — see [`spec/design/rank_polymorphism.md`](../spec/design/rank_polymorphism.md); owning issue chelis#258. Body discipline limits which builtins are admissible (`shape_class` in `builtins.rs`).
+- **Dtype-family bounds** ([04-DTYPE-2], §5.9): a binder in a `def` or `sig`
+  `[...]` clause may declare `Float`, `Int`, or `Numeric`, restricting the dtypes
+  it instantiates at. The bound lives on the scheme, so it survives aliases,
+  wrappers, higher-order values, and imports; two bounded variables that unify
+  keep the intersection of their families. An unbounded binder is still a general
+  type variable, not a dtype variable.
 
 ---
 
@@ -547,7 +553,7 @@ chelis-std 0.4.0 — there is no upstream NN fallback. Use these; do not reimple
 
 | Module | Key exports |
 |---|---|
-| `Std.Tensor.Construct` | `linspace`, `arange` (evaluator; dtype-family enforcement and compiled-host generic casts remain [chelis#1417](https://github.com/Chelis-Lang/chelis/issues/1417) and [chelis#1418](https://github.com/Chelis-Lang/chelis/issues/1418)); `stack`, `squeeze`, and `unsqueeze` are exported but concrete-call typing is not fully implemented ([chelis#1416](https://github.com/Chelis-Lang/chelis/issues/1416)) |
+| `Std.Tensor.Construct` | `linspace`, `arange` (evaluator; their `Float`/`Int` dtype families are declared bounds and are enforced, while compiled-host generic casts remain [chelis#1418](https://github.com/Chelis-Lang/chelis/issues/1418)); `stack`, `squeeze`, and `unsqueeze` are exported but concrete-call typing is not fully implemented ([chelis#1416](https://github.com/Chelis-Lang/chelis/issues/1416)) |
 | `Std.Tensor.Mask` | `where_indices` |
 | `Std.Init.{Random,Xavier,Kaiming,XavierExt}` | `normal_like`, `kaiming_*`, `xavier_*`, `trunc_normal` (seeded, Box-Muller; handlers advance only for draws on the executed runtime path, including computed/nested conditionals inside `grad`) |
 | `Std.Sort` | `sort` (rank-polymorphic numeric tensor; returns sorted values and `int64` indices) |

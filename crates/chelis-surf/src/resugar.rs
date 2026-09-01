@@ -15,8 +15,7 @@ use thiserror::Error;
 
 use crate::ast::{
     BinOp, Decl, EffectExpr, Expr, ImportKind, LetBinding, LetPattern, Literal, MatchArm, Param,
-    Pattern, PropertyOption, TypeBinder, TypeExpr, TypeInvariant, UnaryOp, Variant,
-    VariantFields,
+    Pattern, PropertyOption, TypeBinder, TypeExpr, TypeInvariant, UnaryOp, Variant, VariantFields,
 };
 
 /// Failure to structurally resugar a Deep expression.

@@ -938,7 +938,10 @@ pub(super) fn install_declared_bounds(
                 errors,
                 CheckError::new(
                     CheckErrorKind::TypeMismatch,
-                    format!("`{declaration}` declares conflicting dtype bounds: {}", error.message),
+                    format!(
+                        "`{declaration}` declares conflicting dtype bounds: {}",
+                        error.message
+                    ),
                     vec![],
                 ),
             ));

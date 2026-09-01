@@ -35,11 +35,7 @@ pub enum DtypeFamily {
 impl DtypeFamily {
     /// Every family, in declaration order. The list is closed: a new family
     /// is a numbered-spec change to §5.9, not a local addition.
-    pub const ALL: [DtypeFamily; 3] = [
-        DtypeFamily::Float,
-        DtypeFamily::Int,
-        DtypeFamily::Numeric,
-    ];
+    pub const ALL: [DtypeFamily; 3] = [DtypeFamily::Float, DtypeFamily::Int, DtypeFamily::Numeric];
 
     /// The lowercase Deep spelling.
     pub fn deep_name(self) -> &'static str {
@@ -310,8 +306,14 @@ mod tests {
     #[test]
     fn surf_and_deep_spellings_are_distinct_and_total() {
         for family in DtypeFamily::ALL {
-            assert_eq!(DtypeFamily::from_deep_name(family.deep_name()), Some(family));
-            assert_eq!(DtypeFamily::from_surf_name(family.surf_name()), Some(family));
+            assert_eq!(
+                DtypeFamily::from_deep_name(family.deep_name()),
+                Some(family)
+            );
+            assert_eq!(
+                DtypeFamily::from_surf_name(family.surf_name()),
+                Some(family)
+            );
             assert_ne!(family.deep_name(), family.surf_name());
         }
         assert_eq!(DtypeFamily::from_surf_name("float"), None);
