@@ -208,6 +208,7 @@ class LocalCommandListTests(unittest.TestCase):
                 "cargo test -p chelis-compiler-api --doc",
                 "cargo test -p chelis-pipeline-core --doc",
                 "<managed-python> scripts/check_checkpoint_compile_fail.py",
+                "<managed-python> scripts/check_hash_order_compile_fail.py",
                 "<managed-python> scripts/pipeline_core_dependency_guard.py",
                 "<managed-python> scripts/pipeline_core_documentation_guard.py",
                 "<managed-python> scripts/unrepresentable_domain_oracle.py",

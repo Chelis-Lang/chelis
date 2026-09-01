@@ -99,7 +99,15 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
             // no `_` arm, so a 63rd `DeepTag` variant fails to compile
             // until this dispatch chooses its disposition.
             match get_tag(list) {
-                Some(DeepTag::Var) => infer_var(list, env, vg, subst, adt_reg, errors),
+                Some(DeepTag::Var) => infer_var(
+                    list,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    product.source_ordinal_for_expr(expr),
+                ),
                 Some(DeepTag::Lit) => {
                     infer_lit(list, env, vg, adt_reg, errors, type_metadata_resolution)
                 }
@@ -390,9 +398,18 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
             // those functions are migrated to accept Node directly, this
             // `to_list` call becomes dead code.
             let list = node.to_list(*span);
+            product.register_bridge_list(expr, &list);
             product.register_bridge_children(node.children_slice(), children(&list));
             match node.tag() {
-                DeepTag::Var => infer_var(&list, env, vg, subst, adt_reg, errors),
+                DeepTag::Var => infer_var(
+                    &list,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    product.source_ordinal_for_expr(expr),
+                ),
                 DeepTag::Lit => {
                     infer_lit(&list, env, vg, adt_reg, errors, type_metadata_resolution)
                 }
@@ -928,6 +945,7 @@ pub(super) fn infer_var(
     subst: &Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
+    source_ordinal: SourceOrdinal,
 ) -> Type {
     let kids = children(list);
     if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
@@ -975,6 +993,7 @@ pub(super) fn infer_var(
                 env.instantiate(&scheme, vg, subst)
             };
             let resolved = subst.apply(&ty);
+            subst.note_deferred_reference(&resolved, source_ordinal);
             // RFC D-CHECK: a bare reference to an out-of-module
             // opaque constructor is hidden, and an out-of-module
             // reference to an unexported binding whose signature

@@ -691,6 +691,17 @@ class ListOutputTests(unittest.TestCase):
         ):
             self.assertIn(command, rendered)
 
+    def test_hash_order_compile_fail_contract_is_continuous_and_local(self):
+        command = "<managed-python> scripts/check_hash_order_compile_fail.py"
+        self.assertIn(
+            command,
+            [gate.render(entry) for entry in gate.STAGES["lint-and-unit"]],
+        )
+        self.assertIn(
+            command,
+            [gate.render(entry) for entry in gate.LOCAL_STATIC_COMMANDS],
+        )
+
     def test_pipeline_core_boundary_guards_are_in_the_lint_and_unit_stage(self):
         # The dependency guard, documentation guard, and pipeline-artifact
         # compile-fail fixture must run in the per-PR gate (hosted CI runs

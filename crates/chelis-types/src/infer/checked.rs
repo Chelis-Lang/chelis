@@ -286,6 +286,10 @@ pub(super) struct InferenceProduct {
     pub(super) type_headers: TypeResolutionEnv,
     pub(super) adt_registry: AdtRegistry,
     pub(super) function_inference_plan: FunctionInferencePlan,
+    /// Canonical whole-program preorder, computed before dependency/SCC
+    /// scheduling. Deferred constraints must never derive their order from
+    /// allocation or hash-table traversal.
+    source_ordinals: HashMap<usize, SourceOrdinal>,
     shape_lambda_tvars: HashSet<TypeVar>,
     deferred_type_derivations: Vec<DeferredTypeDerivation>,
     next_deferred_shape_id: u64,
@@ -299,6 +303,7 @@ pub(super) enum DeferredShapeRule {
         name: String,
     },
     Expand {
+        source_ordinal: SourceOrdinal,
         axis_is_dim_name: bool,
         size_class: SizeClass,
         env: Box<Env>,
@@ -363,6 +368,47 @@ impl InferenceProduct {
             typed_nodes: self.typed_nodes,
             total_nodes: self.total_nodes,
         }
+    }
+
+    pub(super) fn index_source_order(&mut self, exprs: &[deep::Expr]) {
+        self.source_ordinals.clear();
+        let mut stack = exprs.iter().rev().collect::<Vec<_>>();
+        let mut next = 0_u64;
+        while let Some(expr) = stack.pop() {
+            let ordinal = SourceOrdinal::new(next);
+            next = next
+                .checked_add(1)
+                .expect("canonical Deep source ordinal overflow");
+            self.source_ordinals.insert(expr_key(expr), ordinal);
+            match expr {
+                deep::Expr::List(list, _) => {
+                    self.source_ordinals
+                        .insert(std::ptr::from_ref(list).addr(), ordinal);
+                    stack.extend(children(list).iter().rev());
+                }
+                deep::Expr::Node(node, _) => {
+                    stack.extend(node.children_slice().iter().rev());
+                }
+                deep::Expr::BareList(elements, _) => stack.extend(elements.iter().rev()),
+                deep::Expr::MetaExpr(meta, _) => stack.push(&meta.expr),
+                deep::Expr::UnknownForm(data) => stack.extend(data.children.iter().rev()),
+                deep::Expr::Atom(_, _) | deep::Expr::Map(_, _) => {}
+            }
+        }
+    }
+
+    pub(super) fn source_ordinal_for_list(&self, list: &deep::List) -> SourceOrdinal {
+        self.source_ordinals
+            .get(&std::ptr::from_ref(list).addr())
+            .copied()
+            .expect("inference list missing from canonical Deep source-order index")
+    }
+
+    pub(super) fn source_ordinal_for_expr(&self, expr: &deep::Expr) -> SourceOrdinal {
+        self.source_ordinals
+            .get(&expr_key(expr))
+            .copied()
+            .expect("inference expression missing from canonical Deep source-order index")
     }
 
     pub(super) fn begin_root(&mut self, root: &deep::Expr) {
@@ -540,6 +586,7 @@ impl InferenceProduct {
                     errors,
                 ),
                 DeferredShapeRule::Expand {
+                    source_ordinal,
                     axis_is_dim_name,
                     size_class,
                     env,
@@ -547,6 +594,7 @@ impl InferenceProduct {
                     &check.arg_exprs,
                     &check.arg_tys,
                     &check.result_ty,
+                    *source_ordinal,
                     *axis_is_dim_name,
                     *size_class,
                     env,
@@ -653,6 +701,9 @@ impl InferenceProduct {
         while let Some((stamped, bridged)) = pending.pop() {
             let stamped_key = epoch.canonical_key(expr_key(stamped));
             epoch.bridge_aliases.insert(expr_key(bridged), stamped_key);
+            if let Some(ordinal) = self.source_ordinals.get(&expr_key(stamped)).copied() {
+                self.source_ordinals.insert(expr_key(bridged), ordinal);
+            }
             match (stamped, bridged) {
                 (deep::Expr::Node(left, _), deep::Expr::Node(right, _)) => {
                     pending.extend(left.children_slice().iter().zip(right.children_slice()));
@@ -700,6 +751,12 @@ impl InferenceProduct {
                 _ => {}
             }
         }
+    }
+
+    pub(super) fn register_bridge_list(&mut self, stamped: &deep::Expr, bridged: &deep::List) {
+        let ordinal = self.source_ordinal_for_expr(stamped);
+        self.source_ordinals
+            .insert(std::ptr::from_ref(bridged).addr(), ordinal);
     }
 
     pub(super) fn finish_root(&mut self, subst: &Subst, errors: &mut DiagnosticSink<'_>) {

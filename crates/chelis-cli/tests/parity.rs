@@ -473,6 +473,11 @@ fn parity_hello_tensor_library_only() {
 }
 
 #[test]
+fn parity_hash_order_determinism() {
+    drive_parity(&examples_root().join("hash_order_determinism.ch"), true);
+}
+
+#[test]
 fn parity_induction_bond_library_only() {
     drive_parity(&examples_root().join("induction_bond.ch"), false);
 }
@@ -541,6 +546,7 @@ fn parity_corpus_is_complete() {
         "constraint_directed_risk_guards.ch",
         "count_bool_axes.ch",
         "dict_foundation.ch",
+        "hash_order_determinism.ch",
         "hello_tensor.ch",
         "induction_bond.ch",
         "iter_foundation.ch",

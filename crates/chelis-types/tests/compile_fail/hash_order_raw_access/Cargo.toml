@@ -1,0 +1,10 @@
+[package]
+name = "hash-order-raw-access-compile-fail"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+chelis-types = { path = "../../..", features = ["hash-order-compile-probe"] }

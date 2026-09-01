@@ -184,6 +184,7 @@ pub(super) fn finish_unified_app(
                 if owes_shape_replay {
                     product.defer_shape_check(
                         DeferredShapeRule::Expand {
+                            source_ordinal: product.source_ordinal_for_list(list),
                             axis_is_dim_name,
                             size_class,
                             env: Box::new(env.clone()),
@@ -198,6 +199,7 @@ pub(super) fn finish_unified_app(
                     &kids[1..],
                     &arg_tys,
                     &result_ty,
+                    product.source_ordinal_for_list(list),
                     axis_is_dim_name,
                     size_class,
                     env,
@@ -577,6 +579,15 @@ pub(super) fn finish_unified_app(
             }
             "shape" => {
                 let input_dims = if let Some(first_arg) = arg_tys.first() {
+                    // A read-only operand may carry the open expand result as
+                    // `Ref<Var>`. Peel that wrapper before selecting the
+                    // context-free shape so borrowed and unborrowed reads use
+                    // the same rule before axis validation.
+                    if let Type::Var(var) = type_for_readonly_check(first_arg, subst)
+                        && let Err(error) = subst.materialize_deferred_expand_default(var)
+                    {
+                        return report(errors, error.into());
+                    }
                     match type_for_readonly_check(first_arg, subst) {
                         Type::Tensor(dims, _) => Some(dims),
                         Type::Var(_) | Type::Error(_) => None,
