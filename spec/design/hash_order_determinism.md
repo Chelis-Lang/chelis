@@ -1,11 +1,13 @@
 # Hash-Order Determinism: observable behavior never depends on hash iteration order
 
-**Status:** IMPLEMENTED. Phases A and B are implemented. Tracking issue: [#1341].
+**Status:** Phase A is implemented; Phase B is in review. Tracking issue: [#1341].
 Amended 2026-08-28: the mechanism moved from the census enumerator that PR #1366
 merged to a type-level ban, then was cut to what defends a known instance or a spec
-sentence; see § Rationale and alternatives set aside. Phase A was implemented and
-its named oracle passed on 2026-08-31. Phase B's named oracle passed on
-2026-09-01. Function names are the durable anchors.
+sentence. Amended 2026-09-01: Phase B's completeness leg moved from a
+configuration-blind source census to compiler-reported configuration closure, and
+the wrapper's storage from a hand-rolled arena hash table to an ordered
+collection; see § Rationale and alternatives set aside. Phase A's named oracle
+passed on 2026-08-31. Function names are the durable anchors.
 **Owning specs:** `spec/00-context.md` §5 states the rule this plan implements:
 for fixed program text, compiler build, target, and declared inputs, every check,
 evaluation, and build result is a function of those inputs. `spec/04-type-system.md`
@@ -40,7 +42,8 @@ named standard-library types. Closure therefore lands at the compile-error rung:
    needed and `Ord` is the canonical order;
 2. require one authority-backed canonical order wherever order reaches behavior;
 3. keep every cache root byte-locked by an exact-byte fresh-process test; and
-4. lock the ban with a configuration-blind token tripwire whose allow-list is exact.
+4. bound the configuration space with a compile error, compile all of it with a
+   registered Clippy matrix, and reconcile every source against rustc's dep-info.
 
 Fresh-process repetition is regression coverage, not proof of completeness, and
 carries no false-pass probability claim.
@@ -64,7 +67,9 @@ result.
 **Not in this class:** deliberate language-level nondeterminism semantics such as
 duplicate-index `scatter` rejection; floating-point reduction-order semantics;
 packaging reproducibility ([#1198]); benchmark reproducibility ([#823]); future
-parallel scheduling; and the degraded build-fingerprint nonce in
+parallel scheduling; the order in which a container's internal allocations are
+released, which a process-global allocator can observe but which reaches none of
+C1's outputs because nothing in the compiler orders by address; and the degraded build-fingerprint nonce in
 `chelis-image-id/src/lib.rs` (`fingerprint_string`), which deliberately draws
 process-random bytes from `RandomState` so that two degraded processes never share a
 cache entry and is documented at its site. Each has a different authority and
@@ -85,15 +90,16 @@ points is invariant under process hash seeds. Observable results include:
 - dispatch choices and ABI-visible ordering.
 
 **Scope of the mechanism.** Workspace code, its four build scripts and every test
-included, is covered by construction: the ban and the tripwire in C2 leave no raw
-hash carrier for an order to escape from. Third-party runtime code is not scanned
+included, is covered by construction: C2's ban is enforced by the compiler over a
+configuration space that is declared, compiled, and reconciled, so no raw hash
+carrier is left for an order to escape from. Third-party runtime code is not scanned
 and is outside this claim; it is covered only by the fresh-process stability tests
 named in C5, and an instance those expose is fixed by a canonical boundary at the
-workspace call site and added to the tripwire's allow-list with its reason. External
+workspace call site. External
 procedural-macro and build-script output is a property of the pinned `Cargo.lock`
 and belongs to [#1198].
 
-### C2 The ban, the wrapper, and the tripwire
+### C2 The ban, the wrapper, and the configuration closure
 
 #### C2.1 The ban
 
@@ -108,12 +114,11 @@ imports, a `HashMap::new()` receiver, and the definition site of a `type` alias 
 all caught; Phase B proves each spelling with a compile-fail fixture rather than by
 citation. The ban applies to every target Clippy compiles, tests included: a test
 whose expected value passes through a hash walk is itself a coin flip, and a retried
-flake is the CI-hiding failure mode [#1341] records. Exactly one production
-`#[allow(clippy::disallowed_types)]` exists, on the wrapper's private raw-storage
-module, where `clippy::iter_over_hash_type` is also denied. The perturbation fixtures of C3.2
-exercise fresh hash states through the wrapper. The disallowed-type compile-fail
-fixture intentionally names raw maps and each spelling has an exact tripwire
-allow-list entry; it carries no lint allowance because rejection is the test.
+flake is the CI-hiding failure mode [#1341] records. No production `#[allow(clippy::disallowed_types)]` exists: with ordered storage the
+wrapper needs no exemption, so the ban covers the workspace without a hole. The disallowed-type compile-fail
+fixture intentionally names raw maps; it is a standalone Cargo project outside the
+workspace build, recorded in `UNCOMPILED_EXCEPTIONS` with the gate that compiles
+it, and it carries no lint allowance because rejection is the test.
 
 #### C2.2 The order-free workspace map and set
 
@@ -133,23 +138,23 @@ The API is hashed lookup and mutation (`insert`, `get`, `get_key_value`,
 `extend`, `FromIterator`, and `merge`) plus borrowed and consuming forms of one
 no-callback ordered exit (`to_sorted`, `into_sorted`). A key used in lookup or
 mutation has `Ord` as well as `Eq + Hash`: its owning authority defines that
-order as canonical identity order, never as semantic priority. The wrapper
-stores only randomized `u64 -> usize` collision-chain heads in the raw hash table;
-the chain links and user keys and values live in one flat indexed arena, and a
-separate vector of slot indices is maintained in canonical key order at mutation
-time. Raw table values therefore own no per-bucket allocation whose destruction
-order an allocator callback could observe. Application code never runs while raw
-table order is observable. `Clone`, `PartialEq`, the ordered exits, `Serialize`,
-`clear`, and destruction all walk the maintained canonical index rather than
-collecting a raw walk and sorting afterward. There is no
-callback-bearing query, mutation, or projection exit: even an apparently
-read-only closure can observe visitation order through interior mutability,
-logging, or atomics. `Debug` reports only the wrapper kind and length.
+order as canonical identity order, never as semantic priority. The wrapper's
+storage is a private `BTreeMap`/`BTreeSet`. Every key already carries `Ord`
+because the ordered exits require it, so the structure has exactly one order and
+there is no randomized one to leak: `Clone`, `PartialEq`, the ordered exits,
+`Serialize`, `clear`, and destruction all traverse key order because that is the
+only order available, and no wrapper-side index has to be maintained to make that
+true. What the type buys over a bare `BTreeMap` is the boundary, not the storage:
+there is no callback-bearing query, mutation, or projection exit, because even an
+apparently read-only closure can observe visitation order through interior
+mutability, logging, or atomics, and a consumer that wants an order must spell
+`to_sorted` or `into_sorted` and thereby claim C3.1 authority for key order. `Debug` reports only the wrapper kind and length.
 `Serialize` emits a key-sorted sequence and `Deserialize` rejects a duplicate
 key, so a wrapper field under derived Serde is canonical without an adapter.
 There is no `iter`, `keys`, `values`, `drain`, `IntoIterator`, or `Deref` to the
-inner map; tests pin the public inherent and trait sets and exercise lawful
-side-effectful trait implementations across 64 equivalent fresh hash states.
+inner collection; tests pin the public inherent and trait sets, including derived
+traits, assert that the private storage is the ordered collection, and assert that
+the crate claims no `disallowed_types` allowance of its own.
 
 Most hash-map uses in the workspace are lookup-only and move to the wrapper
 unchanged; the rest iterate and move to `BTreeMap` when their key is `Ord` and
@@ -159,93 +164,82 @@ application callback runs. Numeric identity keys such as `TypeVar`, `DimVar`,
 canonical dtype spelling and `LoadStoreName` its validated string payload. C3.1
 classifies each as byte or cache order, never semantic authority. A consumer that needs value
 order first materializes key order, then sorts the resulting ordinary vector.
-Hot lookup paths (`Subst::apply` and `apply_dim`, `Env::bindings`, the
-`lower.rs` symbol tables, `dag.rs` remaps) stay hashed.
+Lookup is therefore `O(log n)` over cheap key comparisons rather than `O(1)`; the
+complexity gate is `scripts/compiler_front_end_performance.py`, which counts
+deterministic work rather than wall time. Restoring a hash index for a measured
+hot path is a private change inside the crate, not an API move.
 
-#### C2.3 The token tripwire
+#### C2.3 Configuration closure
 
 Clippy sees only the configuration it compiles: a raw map behind a non-default
 feature or a platform `cfg` is invisible to it, and such carriers exist today
 (`chelis-prove/src/tier_b.rs`, `carcara_audit.rs`, and `z3_engine.rs` behind
-`smt`, `carcara`, and `z3`). The completeness lock is therefore a
-configuration-blind source census.
+`smt`, `carcara`, and `z3`). Closure therefore bounds the configuration space
+and compiles all of it. It does not search source text for banned spellings in
+configurations nobody builds; see § Rationale for why that alternative was set
+aside.
 
-`scripts/hash_order_determinism_oracle.py` scans every tracked `.rs` file and every
-untracked, non-ignored local `.rs` file in the repository (`git ls-files`). It
-then closes the actual Rust module ingress, including ignored existing sources.
-The internal `hash-order-rust-literals` helper parses each source through both
-`proc_macro2::TokenStream` and `syn::parse_file`. It returns direct path-module
-targets, every inline-module path, and every potential external `mod name;` in
-the recursive token tree, including declarations in a macro transcriber. A
-dynamic `mod $name;` cannot be inventoried and therefore fails closed. For a
-non-`mod.rs` owner, the filesystem side conservatively retains both legal roles:
-target root with children beside the file and external module with children below
-the file stem. It resolves ordinary modules through both `name.rs` and
-`name/mod.rs`, and it appends every parsed inline-module path before resolving a
-nested module or path target.
+**The space is declared.** `[workspace.lints.rust] unexpected_cfgs = "deny"`,
+inherited through every member's `[lints]` table, makes a `cfg` name that is
+neither a declared Cargo feature nor a well-known rustc cfg a compile error
+rather than a warning. Workspace source uses only `test`, `unix`, `target_os`,
+and `debug_assertions`, and declares no `cfg`-gated module, so the space is
+exactly declared features times supported hosts: finite and enumerable.
 
-The same compiled helper recursively visits every token group and uses
-`syn::Lit::Str` as the sole decoder for ordinary and raw UTF-8 string literals.
-This is the token model exposed to procedural macros: it
-distinguishes lifetimes from character literals and desugars all four
-outer/inner line/block doc-comment forms into `#[doc = "..."]` strings while
-discarding non-doc comments. The Python oracle owns filesystem closure but has no
-hand-written Rust character, string, comment, or token-tree lexer in the
-literal-provenance path; its separate token-spelling sanitizer remains only for
-the exact allow-list census over the already closed source set.
+**The matrix compiles it.** `scripts/check_configuration_closure.py` holds
+`CLIPPY_MATRIX`, a constant whose rows each carry a command, the file that must
+issue it, the hosts it runs on, and its cadence:
 
-Every decoded value ending in `.rs` is resolved against every target-root,
-external-module, and inline-module directory in that compiled census, recursing
-into each existing in-repository target. A declarative macro
-may split the `#`, attribute group, `path` name, and literal across metavariables,
-but a path literal must originate in a string token exposed by that compiled token
-model. Compile-backed controls confirm that `concat!`, `env!`, `stringify!`, and
-macro-emitted `#[path = concat!(...)]` values are rejected by rustc. This complete
-literal-provenance closure therefore scans the target without enumerating expansion
-spellings.
-Missing ordinary fixture-name strings do not become inputs. An existing target
-outside the repository, an opaque direct path-bearing attribute, a missing direct
-target, and a direct target that escapes the repository fail closed. Compile-backed
-controls cover direct attributes, ordinary external modules, inline-module path
-resolution, fully interpolated attributes, grouped
-`#$attribute`, split `$pound[path = ...]`, raw strings, escaped string literals,
-all four doc-comment desugarings, and a path literal between two lifetime tokens;
-ordinary four-slash line comments, triple-star block comments, byte strings, and C
-strings are negative controls that must not become UTF-8 literal sources. The
-resulting source set is
-a superset of every committed Cargo target of every kind, every build script, and
-every committed path outside `src/`, and is blind to the feature or `cfg` that gates
-a file, a target, or a function. It matches the source
-spellings `HashMap`, `HashSet`, `hash_map::`, `hash_set::`, `FxHashMap`,
-`FxHashSet`, `rustc_hash::`, `fxhash::`, `ahash::`, `hashbrown::`, and
-`indexmap::` outside the wrapper module, and every `#[allow(clippy::disallowed_types)]`
-site. Every hit must appear in the script's allow-list, a constant of
-(path, item, token spelling, exact count, reason) entries, and every entry must
-still hit at that cardinality, so a changed spelling, duplicate token, stale entry,
-and unlisted hit fail alike. The script's `unittest` twin plants a raw map in a library
-target, behind a non-default feature (`checkpoint-compile-probe`), in a `build.rs`,
-in a test target, and as a new `#[allow]` without an entry, and asserts each is
-rejected. The ordinary-module and inline-module controls place their target below
-an ignored directory, compile it with `rustc --cfg`, and prove the source census
-still finds the raw map. Because a build script can compose a forbidden spelling
-inside a string and write Rust to `OUT_DIR`, the scanner also freezes every
-workspace `build.rs`
-by exact path and SHA-256 and reserves the standalone Rust identifier `include`
-across tracked source. That rejects the built-in `include!` macro, qualified
-spellings, and `use ...::include as ...` aliases; a method selector named
-`.include` is not macro ingress and remains valid. Adding or changing a build
-script is therefore an explicit registry review, and generated Rust cannot enter
-a workspace crate through Cargo's output directory. Negative controls approve a
-malicious composed-string generator and prove that both direct and imported-alias
-macro spellings are rejected. The ignored-`#[path]` fixtures prove the scanner
-loads and rejects source files that `rustc --cfg` can compile but
-`git ls-files --others --exclude-standard` alone cannot see, including when a local
-transcriber composes the attribute across token boundaries or emits it within an
-inline module.
-Migrated code behind a feature compiles in the workflows that already
-build those features (`smt-full-prove.yml`; the `generalize-sweep-oracle` job in
-`ci.yml`); this plan cites that evidence and adds no per-PR feature-matrix Clippy
-run.
+| row | compiles | owner | cadence |
+|---|---|---|---|
+| `default-features` | default features, Linux and macOS | `scripts/gate.py` | per pull request |
+| `solver-free-features` | `sleef`, `hip-local-gpu`, `clarabel`, `extension-module`, `ownership-ledger`, and the three `chelis-types` probe features | `scripts/gate.py` | per pull request |
+| `cvc5-features` | `smt` for `chelis-cli`, `chelis-prove`, `chelis-tide` | `ci.yml`'s `SMT Feature Build (Linux)`, which already provisions cvc5 | per pull request |
+| `all-features` | every declared feature at once | `smt-full-prove.yml`, the only runner that provisions every solver | nightly |
+
+The check fails if a declared feature is compiled by no row, if a row names a
+feature no member declares, or if a command drifts from the file that owns it.
+For `scripts/gate.py` the owner check reads the gate's own `--list` rendering
+rather than grepping its source, so a constant that is defined but reaches no
+stage does not count as coverage.
+
+The ban itself is Clippy's `disallowed_types`, applied to real HIR. Aliases,
+glob imports, a `type` alias definition site, macro-expanded code, and
+`include!`-ed `OUT_DIR` code are therefore the compiler's problem rather than a
+scanner's, and each is proved by a compile-fail fixture in Phase B rather than
+by citation.
+
+**Nothing is left out.** After the matrix runs, the same script reconciles every
+repository `.rs` file (`git ls-files --cached --others --exclude-standard`)
+against the prerequisite lists rustc itself wrote to `target/<profile>/deps/*.d`.
+A file that no registered configuration compiled fails the gate by name. The
+only accepted absences are `UNCOMPILED_EXCEPTIONS`: the standalone compile-fail
+fixture projects, each naming the gate that compiles it, each verified to exist
+and to hold a Cargo project so a stale entry cannot survive. Stale dep-info can
+only name a file some earlier run of this matrix did compile, so it cannot mask
+a file the matrix has never compiled, which is the property this leg asserts.
+
+**Executable controls.** `scripts/test_check_configuration_closure.py` proves
+the two properties the rest rests on, with rustc rather than assertion:
+an undeclared `cfg` name does not compile under the workspace lint config, while
+a declared feature `cfg` still does; and a `.gitignore`d `#[path]` target that
+rustc compiles appears in its dep-info and so in the reconciled set. The
+remaining tests cover dep-info parsing, a member that fails to inherit the lint,
+a workspace that only warns, an uncovered feature, an invented feature, an
+unqualified feature spelling, a run its owner does not issue, an uncompiled
+source, an empty dep-info set, and a stale or ungated exception.
+
+**Residual, named and exact.** `z3` and `arb` need external solver toolchains
+whose per-pull-request cost this repository has already declined, so three
+sources are linted nightly rather than per pull request:
+`chelis-prove/src/z3_engine.rs` and the two `certify_*_envelope` binaries.
+`NIGHTLY_ONLY_SOURCES` lists them by path with the feature and the nightly row
+that covers each, and the list prunes itself: an entry a per-pull-request row
+does compile is reported as stale, an entry whose file is gone is reported as
+stale, and the nightly job runs the reconciliation with `--require-complete`,
+which drops the allowance so a new uncovered file cannot be parked there.
+`--all-features` is also where a `#[cfg(all(feature = ..., feature = ...))]`
+combination is compiled.
 
 ### C3 Canonical order and private stores
 
@@ -316,6 +310,18 @@ that would test the stronger, out-of-scope property of order-independent resolut
 Persisted, hashed, returned, and cross-process handoff bytes are part of C1. With
 the ban in place, no derived `Serialize` reaches an unordered carrier, so canonical
 bytes follow from the types; one exact-byte test per root keeps that executable.
+
+**This section's claim is exactly that**, and it is frozen at that width. Review
+of the pull request that implemented it also surfaced cache-*key* defects, where
+a key omitted an input and a stale entry could be reused: the stdlib key hashed
+parsed declarations rather than exact source bytes, and the prepared-graph key
+and envelope carried a bare package version rather than the running build's
+identity. Those are stale-hit correctness, not hash order, and they are tracked
+as their own class. Their repairs landed here and are named below because
+removing green fixes to re-land them elsewhere would be churn, not because C4
+claims coverage of that class. A coverage finding against C4 is valid where C4
+claims coverage: that no unordered carrier reaches a serialized payload, and that
+each named root has an exact-byte fresh-process test.
 The roots are `cache_envelope::save<T>` payload and envelope bytes for
 `LibraryContext` and `StdLibContext`, `CompiledContext::encode` public bytes,
 `CompiledContext::save` payload and envelope, the CLI worker handoff that writes
@@ -359,8 +365,9 @@ source-order perturbation, cache-version, executable-example, executable eval/C
 parity, reshape-regression, and fresh-process CLI suites; the raw-store compile-fail
 leg also runs in the gate's
 `lint-and-unit` stage and the `--local` subset, whose membership
-`scripts/test_gate.py` locks. Phase B's tripwire script and named cache-byte tests
-run in its named oracle. The fresh-process stability tests cover the [#1338] reproducer, its
+`scripts/test_gate.py` locks. Phase B's configuration-closure check and named
+cache-byte tests run in its named oracle, and the closure check also runs as its
+own gate stage after the two Clippy stages that produce the dep-info it reads. The fresh-process stability tests cover the [#1338] reproducer, its
 mirrored operand order, the aliased pair, and the three-way case of Phase A, and the
 existing byte-determinism regressions (`codegen_determinism.rs`,
 `rank_poly_tier3::form3_bias_broadcast_c_is_byte_deterministic`) stay present and
@@ -398,24 +405,26 @@ the final line `HASH ORDER PHASE A ORACLE: PASS`. It passed on 2026-08-31.
 
 ### Phase B - class closure - IMPLEMENTED
 
-**Deliver:** `clippy.toml`; `chelis-unord` with its API pin, allocation-free raw
-bucket values, allocator-visible destruction negative control, collision-chain
-mutation tests, compile-fail spelling fixtures, and Serde tests; migration of
-production and test code off the std types, with the dependency edges and the
-dependency-guard constant; the tripwire script, its exact token-cardinality and
-recursive `#[path]` closure, compiled proc-macro token literal census, lifetime and
-doc-comment provenance controls, build-script digest registry, generated-Rust
-inclusion ban, `unittest` twin, and gate wiring;
-and the C4 exact-byte tests plus the production source-only cache mutation with the
-cache format bumps, producer-registry bijection, production key preimages, exact
-build identity, and exact-source determinant they require.
+**Deliver:** `clippy.toml`; `chelis-unord` over ordered storage, with its
+inherent/trait API pin, private-storage assertion, no-self-exemption assertion,
+compile-fail spelling fixtures, and Serde tests; migration of production and test
+code off the std types, with the dependency edges and the dependency-guard
+constant; the workspace `unexpected_cfgs` deny and its per-member inheritance;
+`scripts/check_configuration_closure.py` with its Clippy matrix, owner and
+feature-coverage checks, dep-info reconciliation, nightly-only inventory, and
+`unittest` twin including the two compile-backed controls; the matrix's gate and
+workflow wiring; and the C4 exact-byte tests plus the production source-only cache
+mutation with the cache format bumps they require.
 
-**Frozen at exit:** the wrapper's public API, the tripwire's token list, and the
-exact workspace build-script registry.
+**Frozen at exit:** the wrapper's public API, `CLIPPY_MATRIX` and its owners, and
+`NIGHTLY_ONLY_SOURCES`.
 
 **Oracle:** `.venv/bin/python scripts/hash_order_determinism_oracle.py` exits 0
-with the final line `HASH ORDER DETERMINISM ORACLE: PASS`, and the C4 tests are
-green. It passed on 2026-09-01.
+with the final line `HASH ORDER DETERMINISM ORACLE: PASS`. The script is a command
+registry, not an analysis: its first command is
+`scripts/check_configuration_closure.py`, because without proven coverage of the
+compiled configuration space the remaining evidence is about an unbounded surface.
+It must run after the gate's Clippy stages, which produce the dep-info it reads.
 
 ## Part III: interlocks and non-goals
 
@@ -471,6 +480,36 @@ head keeps only what defends a known instance or a spec sentence, and the rule f
 future review is the same: a coverage finding is valid where this document claims
 coverage, and a proposed addition names the instance it defends or is recorded here
 as out of scope.
+
+The third design set aside is the one this revision replaces: a configuration-blind
+source census. It kept the ban and the wrapper but added a Python scanner that
+reconstructed rustc's compiled-source set from source text and matched banned
+token spellings against it, with an exact allow-list of (path, item, spelling,
+cardinality) rows and a SHA-256 registry of every workspace build script.
+
+Nine exact-head review rounds are recorded on its pull request. Seven of them
+found live compiled Rust the reconstruction did not see: a `#[path]` module, a
+macro-synthesised path attribute, an attribute split across metavariable
+boundaries, a doc comment desugaring to a `#[doc = "..."]` literal that a macro
+then captured, a path literal hidden between two lifetime tokens that the
+hand-written character-literal lexer mis-scanned, an ordinary `mod name;` with
+Rust's inline-module directory semantics, and a macro-emitted `mod name;` that
+resolves at its invocation site rather than its definition site. Each was
+repaired by adding the missing piece of a Rust lexer, module resolver, or macro
+model, and the next round found the next piece. That is the same shape as the
+first census above, and it has the same cause: the set of files the compiler
+compiles is not computable beside the compiler.
+
+Two observations ended it. Every one of those probes was *proved* live by running
+Clippy under the escaping configuration, so Clippy already saw them all; and every
+one but the last hid behind an undeclared `cfg`, which `unexpected_cfgs` makes a
+compile error. The scanner was therefore strictly weaker than the check it existed
+to supplement, defending a configuration space that cannot legally exist. C2.3
+keeps the obligation and changes the authority: bound the space with a compile
+error, compile all of it with the registered matrix, and let rustc's own dep-info
+say what it read. The durable rule, for this document and any successor: **the set
+of files the compiler compiles is reported by the compiler, never recomputed
+beside it.**
 
 Keeping `HashMap` with a fixed hasher (`FxHash`) was also set aside: it removes the
 cross-process flake but leaves an arbitrary order that changes with insertion

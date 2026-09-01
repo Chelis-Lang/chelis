@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
-import hashlib
 import io
 from contextlib import redirect_stdout
 from pathlib import Path
 import subprocess
 import sys
-import tempfile
 import unittest
 
 
@@ -19,666 +17,25 @@ sys.modules[SPEC.name] = ORACLE
 SPEC.loader.exec_module(ORACLE)
 
 
-class HashOrderTokenTripwireTests(unittest.TestCase):
-    def assert_rejected(self, path: str, text: str) -> None:
-        with self.assertRaises(ORACLE.HashOrderDeterminismFailure):
-            ORACLE.validate_sources(
-                {path: text}, allowed=(), approved_build_scripts=()
-            )
+class CommandRegistryTests(unittest.TestCase):
+    """The registry is the contract: a leg nobody runs proves nothing."""
 
-    def compiled_macro_path_sources(
-        self,
-        *,
-        source: str,
-        cfg: str,
-        target: str = "src/generated/escape.rs",
-    ) -> dict[str, str]:
-        raw_root = tempfile.TemporaryDirectory()
-        self.addCleanup(raw_root.cleanup)
-        root = Path(raw_root.name)
-        target_path = root / target
-        target_path.parent.mkdir(parents=True)
-        (root / ".gitignore").write_text("src/generated/\n", encoding="utf-8")
-        (root / "src").mkdir(exist_ok=True)
-        (root / "src/lib.rs").write_text(source, encoding="utf-8")
-        target_path.write_text(
-            "pub type Escape = std::collections::HashMap<u8, u8>;\n",
-            encoding="utf-8",
-        )
-        subprocess.run(("git", "init", "-q"), cwd=root, check=True)
-        subprocess.run(("git", "add", ".gitignore", "src/lib.rs"), cwd=root, check=True)
-        subprocess.run(
-            (
-                "rustc",
-                "--crate-type",
-                "lib",
-                "--cfg",
-                cfg,
-                "src/lib.rs",
-                "-o",
-                str(root / "probe.rlib"),
-            ),
-            cwd=root,
-            check=True,
-            capture_output=True,
-        )
-        return ORACLE.tracked_rust_sources(repo_root=root)
+    def test_registers_the_configuration_closure_check(self) -> None:
+        commands = [tuple(command) for command in ORACLE.COMMANDS]
+        closure = [
+            command
+            for command in commands
+            if command[-1] == "scripts/check_configuration_closure.py"
+        ]
+        self.assertEqual(len(closure), 1)
+        # It must run first: without proven coverage of the compiled
+        # configuration space, the remaining evidence is about an unbounded
+        # surface.
+        self.assertEqual(commands[0], closure[0])
 
-    def test_rejects_library_target(self) -> None:
-        self.assert_rejected("crates/demo/src/lib.rs", "type M = HashMap<String, i32>;")
-
-    def test_rejects_non_default_feature_source(self) -> None:
-        self.assert_rejected(
-            "crates/demo/src/checkpoint_compile_probe.rs",
-            "use std::collections::HashSet;",
-        )
-
-    def test_rejects_build_script(self) -> None:
-        self.assert_rejected("crates/demo/build.rs", "use hashbrown::HashMap;")
-
-    def test_rejects_test_target(self) -> None:
-        self.assert_rejected("crates/demo/tests/order.rs", "FxHashMap::default();")
-
-    def test_rejects_unlisted_disallowed_type_allowance(self) -> None:
-        self.assert_rejected(
-            "crates/demo/src/lib.rs",
-            "#[allow(clippy::disallowed_types)]\nstruct Escape;",
-        )
-
-    def test_rejects_stale_allow_list_entry(self) -> None:
-        allowed = (
-            ORACLE.AllowedHit(
-                "crates/demo/src/lib.rs",
-                "type Missing",
-                "HashMap",
-                1,
-                "test-only stale entry",
-            ),
-        )
-        with self.assertRaisesRegex(
-            ORACLE.HashOrderDeterminismFailure, "stale allow-list entry"
-        ):
-            ORACLE.validate_sources(
-                {"crates/demo/src/lib.rs": "fn clean() {}"},
-                allowed,
-                approved_build_scripts=(),
-            )
-
-    def test_allow_list_is_exact_about_token_spelling(self) -> None:
-        allowed = (
-            ORACLE.AllowedHit(
-                "crates/demo/src/lib.rs",
-                "fn allowed",
-                "HashMap",
-                1,
-                "negative-control fixture",
-            ),
-        )
-        with self.assertRaisesRegex(
-            ORACLE.HashOrderDeterminismFailure, "unlisted token 'HashSet'"
-        ):
-            ORACLE.validate_sources(
-                {
-                    "crates/demo/src/lib.rs": (
-                        "fn allowed() {\n"
-                        "    let _: Option<HashMap<u8, u8>> = None;\n"
-                        "    let _: Option<HashSet<u8>> = None;\n"
-                        "}\n"
-                    )
-                },
-                allowed,
-                approved_build_scripts=(),
-            )
-
-    def test_allow_list_is_exact_about_token_cardinality(self) -> None:
-        allowed = (
-            ORACLE.AllowedHit(
-                "crates/demo/src/lib.rs",
-                "fn allowed",
-                "HashMap",
-                1,
-                "negative-control fixture",
-            ),
-        )
-        with self.assertRaisesRegex(
-            ORACLE.HashOrderDeterminismFailure, "token count"
-        ):
-            ORACLE.validate_sources(
-                {
-                    "crates/demo/src/lib.rs": (
-                        "fn allowed() {\n"
-                        "    let _: Option<HashMap<u8, u8>> = None;\n"
-                        "    let _: Option<HashMap<u16, u16>> = None;\n"
-                        "}\n"
-                    )
-                },
-                allowed,
-                approved_build_scripts=(),
-            )
-
-    def test_rejects_unsupported_path_bearing_attribute(self) -> None:
-        with self.assertRaisesRegex(
-            ORACLE.HashOrderDeterminismFailure, "unsupported path-bearing attribute"
-        ):
-            ORACLE.validate_sources(
-                {
-                    "crates/demo/src/lib.rs": (
-                        '#[cfg_attr(feature = "escape", path = "ignored.rs")]\n'
-                        "mod ignored;\n"
-                    )
-                },
-                allowed=(),
-                approved_build_scripts=(),
-            )
-
-    def test_ignored_path_module_is_compiled_and_scanned(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root)
-            (root / "src/generated").mkdir(parents=True)
-            (root / ".gitignore").write_text("src/generated/\n", encoding="utf-8")
-            (root / "src/lib.rs").write_text(
-                "#[cfg(round3_escape)]\n"
-                '#[path = "generated/escape.rs"]\n'
-                "mod escape;\n",
-                encoding="utf-8",
-            )
-            (root / "src/generated/escape.rs").write_text(
-                "pub type Escape = std::collections::HashMap<u8, u8>;\n",
-                encoding="utf-8",
-            )
-            subprocess.run(("git", "init", "-q"), cwd=root, check=True)
-            subprocess.run(
-                ("git", "add", ".gitignore", "src/lib.rs"), cwd=root, check=True
-            )
-            subprocess.run(
-                (
-                    "rustc",
-                    "--crate-type",
-                    "lib",
-                    "--cfg",
-                    "round3_escape",
-                    "src/lib.rs",
-                    "-o",
-                    str(root / "probe.rlib"),
-                ),
-                cwd=root,
-                check=True,
-                capture_output=True,
-            )
-
-            sources = ORACLE.tracked_rust_sources(repo_root=root)
-            self.assertIn("src/generated/escape.rs", sources)
-            with self.assertRaisesRegex(
-                ORACLE.HashOrderDeterminismFailure, "unlisted token 'HashMap'"
-            ):
-                ORACLE.validate_sources(
-                    sources, allowed=(), approved_build_scripts=()
-                )
-
-    def test_ignored_ordinary_external_module_is_compiled_and_scanned(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root)
-            (root / "tests/round8_generated").mkdir(parents=True)
-            (root / ".gitignore").write_text(
-                "tests/round8_generated/\n", encoding="utf-8"
-            )
-            (root / "tests/owner.rs").write_text(
-                "#[cfg(round8_ordinary_module)]\n"
-                "mod round8_generated;\n",
-                encoding="utf-8",
-            )
-            (root / "tests/round8_generated/mod.rs").write_text(
-                "pub type Escape = std::collections::HashMap<u8, u8>;\n",
-                encoding="utf-8",
-            )
-            subprocess.run(("git", "init", "-q"), cwd=root, check=True)
-            subprocess.run(
-                ("git", "add", ".gitignore", "tests/owner.rs"),
-                cwd=root,
-                check=True,
-            )
-            subprocess.run(
-                (
-                    "rustc",
-                    "--crate-type",
-                    "lib",
-                    "--cfg",
-                    "round8_ordinary_module",
-                    "tests/owner.rs",
-                    "-o",
-                    str(root / "probe.rlib"),
-                ),
-                cwd=root,
-                check=True,
-                capture_output=True,
-            )
-
-            sources = ORACLE.tracked_rust_sources(repo_root=root)
-            self.assertIn("tests/round8_generated/mod.rs", sources)
-            with self.assertRaisesRegex(
-                ORACLE.HashOrderDeterminismFailure, "unlisted token 'HashMap'"
-            ):
-                ORACLE.validate_sources(
-                    sources, allowed=(), approved_build_scripts=()
-                )
-
-    def test_macro_path_inside_inline_module_uses_the_module_directory(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root)
-            (root / "tests/outer/generated").mkdir(parents=True)
-            (root / ".gitignore").write_text(
-                "tests/outer/generated/\n", encoding="utf-8"
-            )
-            (root / "tests/owner.rs").write_text(
-                "macro_rules! load_path_module {\n"
-                "    ($attribute:ident, $target:literal) => {\n"
-                "        #[$attribute = $target]\n"
-                "        mod escaped;\n"
-                "    };\n"
-                "}\n"
-                "#[cfg(round8_inline_module)]\n"
-                "mod outer {\n"
-                '    load_path_module!(path, "generated/escape.rs");\n'
-                "}\n",
-                encoding="utf-8",
-            )
-            (root / "tests/outer/generated/escape.rs").write_text(
-                "pub type Escape = std::collections::HashMap<u8, u8>;\n",
-                encoding="utf-8",
-            )
-            subprocess.run(("git", "init", "-q"), cwd=root, check=True)
-            subprocess.run(
-                ("git", "add", ".gitignore", "tests/owner.rs"),
-                cwd=root,
-                check=True,
-            )
-            subprocess.run(
-                (
-                    "rustc",
-                    "--crate-type",
-                    "lib",
-                    "--cfg",
-                    "round8_inline_module",
-                    "tests/owner.rs",
-                    "-o",
-                    str(root / "probe.rlib"),
-                ),
-                cwd=root,
-                check=True,
-                capture_output=True,
-            )
-
-            sources = ORACLE.tracked_rust_sources(repo_root=root)
-            self.assertIn("tests/outer/generated/escape.rs", sources)
-            with self.assertRaisesRegex(
-                ORACLE.HashOrderDeterminismFailure, "unlisted token 'HashMap'"
-            ):
-                ORACLE.validate_sources(
-                    sources, allowed=(), approved_build_scripts=()
-                )
-
-    def test_scans_interpolated_macro_path_attribute_target(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root)
-            (root / "src/generated").mkdir(parents=True)
-            (root / ".gitignore").write_text("src/generated/\n", encoding="utf-8")
-            (root / "src/lib.rs").write_text(
-                "macro_rules! load_path_module {\n"
-                "    ($attribute:ident, $target:literal) => {\n"
-                "        #[$attribute = $target]\n"
-                "        mod escaped;\n"
-                "    };\n"
-                "}\n"
-                "#[cfg(round4_escape)]\n"
-                'load_path_module!(path, "generated/escape.rs");\n',
-                encoding="utf-8",
-            )
-            (root / "src/generated/escape.rs").write_text(
-                "pub type Escape = std::collections::HashMap<u8, u8>;\n",
-                encoding="utf-8",
-            )
-            subprocess.run(("git", "init", "-q"), cwd=root, check=True)
-            subprocess.run(
-                ("git", "add", ".gitignore", "src/lib.rs"), cwd=root, check=True
-            )
-            subprocess.run(
-                (
-                    "rustc",
-                    "--crate-type",
-                    "lib",
-                    "--cfg",
-                    "round4_escape",
-                    "src/lib.rs",
-                    "-o",
-                    str(root / "probe.rlib"),
-                ),
-                cwd=root,
-                check=True,
-                capture_output=True,
-            )
-
-            sources = ORACLE.tracked_rust_sources(repo_root=root)
-            self.assertIn("src/generated/escape.rs", sources)
-
-    def test_scans_grouped_macro_path_attribute_target(self) -> None:
-        sources = self.compiled_macro_path_sources(
-            cfg="round5_group_escape",
-            source=(
-                "macro_rules! load_grouped_path_module {\n"
-                "    ($attribute:tt) => {\n"
-                "        #$attribute\n"
-                "        mod escaped;\n"
-                "    };\n"
-                "}\n"
-                "#[cfg(round5_group_escape)]\n"
-                'load_grouped_path_module!([path = "generated/escape.rs"]);\n'
-            ),
-        )
-        self.assertIn("src/generated/escape.rs", sources)
-        with self.assertRaisesRegex(
-            ORACLE.HashOrderDeterminismFailure, "unlisted token 'HashMap'"
-        ):
-            ORACLE.validate_sources(sources, allowed=(), approved_build_scripts=())
-
-    def test_scans_split_macro_path_attribute_target(self) -> None:
-        sources = self.compiled_macro_path_sources(
-            cfg="round5_split_escape",
-            source=(
-                "macro_rules! load_split_path_module {\n"
-                "    ($pound:tt) => {\n"
-                '        $pound[path = "generated/escape.rs"]\n'
-                "        mod escaped;\n"
-                "    };\n"
-                "}\n"
-                "#[cfg(round5_split_escape)]\n"
-                "load_split_path_module!(#);\n"
-            ),
-        )
-        self.assertIn("src/generated/escape.rs", sources)
-        with self.assertRaisesRegex(
-            ORACLE.HashOrderDeterminismFailure, "unlisted token 'HashMap'"
-        ):
-            ORACLE.validate_sources(sources, allowed=(), approved_build_scripts=())
-
-    def test_scans_escaped_rs_literal_target(self) -> None:
-        sources = self.compiled_macro_path_sources(
-            cfg="escaped_literal",
-            source=(
-                "macro_rules! load_grouped_path_module {\n"
-                "    ($attribute:tt) => {\n"
-                "        #$attribute\n"
-                "        mod escaped;\n"
-                "    };\n"
-                "}\n"
-                "#[cfg(escaped_literal)]\n"
-                'load_grouped_path_module!([path = "generated/\\u{65}scape.rs"]);\n'
-            ),
-        )
-        self.assertIn("src/generated/escape.rs", sources)
-
-    def test_scans_raw_rs_literal_target(self) -> None:
-        sources = self.compiled_macro_path_sources(
-            cfg="raw_literal",
-            source=(
-                "macro_rules! load_grouped_path_module {\n"
-                "    ($attribute:tt) => {\n"
-                "        #$attribute\n"
-                "        mod escaped;\n"
-                "    };\n"
-                "}\n"
-                "#[cfg(raw_literal)]\n"
-                'load_grouped_path_module!([path = r"generated/escape.rs"]);\n'
-            ),
-        )
-        self.assertIn("src/generated/escape.rs", sources)
-
-    def test_scans_macro_path_from_outer_line_doc_literal(self) -> None:
-        sources = self.compiled_macro_path_sources(
-            cfg="outer_line_doc_literal",
-            source=(
-                "macro_rules! load_doc_path_module {\n"
-                "    ($pound:tt, #[doc = $target:literal]) => {\n"
-                "        $pound[path = $target]\n"
-                "        mod escaped;\n"
-                "    };\n"
-                "}\n"
-                "#[cfg(outer_line_doc_literal)]\n"
-                "load_doc_path_module!(\n"
-                "    #,\n"
-                "    ///generated/escape.rs\n"
-                ");\n"
-            ),
-        )
-        self.assertIn("src/generated/escape.rs", sources)
-
-    def test_scans_macro_path_from_inner_line_doc_literal(self) -> None:
-        sources = self.compiled_macro_path_sources(
-            cfg="inner_line_doc_literal",
-            source=(
-                "macro_rules! load_doc_path_module {\n"
-                "    ($pound:tt, #![doc = $target:literal]) => {\n"
-                "        $pound[path = $target]\n"
-                "        mod escaped;\n"
-                "    };\n"
-                "}\n"
-                "#[cfg(inner_line_doc_literal)]\n"
-                "load_doc_path_module!(\n"
-                "    #,\n"
-                "    //!generated/escape.rs\n"
-                ");\n"
-            ),
-        )
-        self.assertIn("src/generated/escape.rs", sources)
-
-    def test_scans_macro_path_from_outer_block_doc_literal(self) -> None:
-        sources = self.compiled_macro_path_sources(
-            cfg="outer_block_doc_literal",
-            source=(
-                "macro_rules! load_doc_path_module {\n"
-                "    ($pound:tt, #[doc = $target:literal]) => {\n"
-                "        $pound[path = $target]\n"
-                "        mod escaped;\n"
-                "    };\n"
-                "}\n"
-                "#[cfg(outer_block_doc_literal)]\n"
-                "load_doc_path_module!(#, /**generated/escape.rs*/);\n"
-            ),
-        )
-        self.assertIn("src/generated/escape.rs", sources)
-
-    def test_scans_macro_path_from_inner_block_doc_literal(self) -> None:
-        sources = self.compiled_macro_path_sources(
-            cfg="inner_block_doc_literal",
-            source=(
-                "macro_rules! load_doc_path_module {\n"
-                "    ($pound:tt, #![doc = $target:literal]) => {\n"
-                "        $pound[path = $target]\n"
-                "        mod escaped;\n"
-                "    };\n"
-                "}\n"
-                "#[cfg(inner_block_doc_literal)]\n"
-                "load_doc_path_module!(#, /*!generated/escape.rs*/);\n"
-            ),
-        )
-        self.assertIn("src/generated/escape.rs", sources)
-
-    def test_scans_macro_path_literal_between_lifetime_tokens(self) -> None:
-        sources = self.compiled_macro_path_sources(
-            cfg="lifetime_literal",
-            source=(
-                "macro_rules! load_path_between_lifetimes {\n"
-                "    ($pound:tt, $before:lifetime, $target:literal, $after:lifetime) => {\n"
-                "        $pound[path = $target]\n"
-                "        mod escaped;\n"
-                "    };\n"
-                "}\n"
-                "#[cfg(lifetime_literal)]\n"
-                "load_path_between_lifetimes!(\n"
-                "    #, 'before, \"generated/escape.rs\", 'after\n"
-                ");\n"
-            ),
-        )
-        self.assertIn("src/generated/escape.rs", sources)
-
-    def test_literal_provenance_uses_the_compiled_token_parser_only(self) -> None:
-        self.assertEqual(
-            ORACLE.RUST_LITERAL_HELPER_COMMAND,
-            (
-                "cargo",
-                "run",
-                "--quiet",
-                "-p",
-                "chelis-lint",
-                "--bin",
-                "hash-order-rust-literals",
-            ),
-        )
-        for handwritten_lexer in (
-            "_char_literal_end",
-            "_normal_rust_string",
-            "_block_comment_end",
-            "_token_tree_end",
-        ):
-            self.assertFalse(hasattr(ORACLE, handwritten_lexer))
-
-    def test_non_doc_line_comment_is_not_a_literal_source(self) -> None:
-        sources = self.compiled_macro_path_sources(
-            cfg="ordinary_line_comment",
-            source=(
-                "////generated/escape.rs\n"
-                "#[cfg(ordinary_line_comment)]\n"
-                "pub type Visible = u8;\n"
-            ),
-        )
-        self.assertNotIn("src/generated/escape.rs", sources)
-
-    def test_non_doc_block_comment_is_not_a_literal_source(self) -> None:
-        sources = self.compiled_macro_path_sources(
-            cfg="ordinary_block_comment",
-            source=(
-                "/***generated/escape.rs*/\n"
-                "#[cfg(ordinary_block_comment)]\n"
-                "pub type Visible = u8;\n"
-            ),
-        )
-        self.assertNotIn("src/generated/escape.rs", sources)
-
-    def test_ordinary_missing_rs_literal_does_not_expand_source_set(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root)
-            (root / "src").mkdir()
-            (root / "src/lib.rs").write_text(
-                'const FIXTURE_NAME: &str = "not/a/module.rs";\n', encoding="utf-8"
-            )
-            subprocess.run(("git", "init", "-q"), cwd=root, check=True)
-            subprocess.run(("git", "add", "src/lib.rs"), cwd=root, check=True)
-
-            self.assertEqual(
-                ORACLE.tracked_rust_sources(repo_root=root),
-                {"src/lib.rs": 'const FIXTURE_NAME: &str = "not/a/module.rs";\n'},
-            )
-
-    def test_allows_macro_attribute_matcher_when_transcriber_discards_it(self) -> None:
-        ORACLE.validate_sources(
-            {
-                "crates/demo/src/lib.rs": (
-                    "macro_rules! declare_names {\n"
-                    "    ($(#[$meta:meta])* $name:ident) => {\n"
-                    "        enum Names { $name }\n"
-                    "    };\n"
-                    "}\n"
-                    "declare_names!(#[doc = \"kept at the call site\"] One);\n"
-                )
-            },
-            allowed=(),
-            approved_build_scripts=(),
-        )
-
-    def test_rejects_composed_generated_rust_from_a_build_script(self) -> None:
-        build_path = "crates/demo/build.rs"
-        generated_build = (
-            "fn main() {\n"
-            "    let name = [\"Hash\", \"Map\"].concat();\n"
-            "    let output = std::path::PathBuf::from(std::env::var(\"OUT_DIR\").unwrap())\n"
-            "        .join(\"generated.rs\");\n"
-            "    std::fs::write(output, format!(\"type Escape = {name}<u8, u8>;\")).unwrap();\n"
-            "}\n"
-        )
-        approved = (
-            ORACLE.ApprovedBuildScript(
-                build_path,
-                hashlib.sha256(generated_build.encode("utf-8")).hexdigest(),
-                "negative-control fixture",
-            ),
-        )
-        with self.assertRaisesRegex(
-            ORACLE.HashOrderDeterminismFailure, "unlisted token 'include'"
-        ):
-            ORACLE.validate_sources(
-                {
-                    build_path: generated_build,
-                    "crates/demo/src/lib.rs": (
-                        'include!(concat!(env!("OUT_DIR"), "/generated.rs"));\n'
-                    ),
-                },
-                allowed=(),
-                approved_build_scripts=approved,
-            )
-
-    def test_rejects_aliased_include_of_generated_rust(self) -> None:
-        build_path = "crates/demo/build.rs"
-        generated_build = (
-            "fn main() {\n"
-            "    let name = [\"Hash\", \"Map\"].concat();\n"
-            "    let output = std::path::PathBuf::from(std::env::var(\"OUT_DIR\").unwrap())\n"
-            "        .join(\"generated.rs\");\n"
-            "    std::fs::write(output, format!(\"type Escape = {name}<u8, u8>;\")).unwrap();\n"
-            "}\n"
-        )
-        approved = (
-            ORACLE.ApprovedBuildScript(
-                build_path,
-                hashlib.sha256(generated_build.encode("utf-8")).hexdigest(),
-                "negative-control fixture",
-            ),
-        )
-        with self.assertRaisesRegex(
-            ORACLE.HashOrderDeterminismFailure, "unlisted token 'include'"
-        ):
-            ORACLE.validate_sources(
-                {
-                    build_path: generated_build,
-                    "crates/demo/src/lib.rs": (
-                        "use std::include as include_generated;\n"
-                        'include_generated!(concat!(env!("OUT_DIR"), "/generated.rs"));\n'
-                    ),
-                },
-                allowed=(),
-                approved_build_scripts=approved,
-            )
-
-    def test_rejects_a_changed_approved_build_script(self) -> None:
-        build_path = "crates/demo/build.rs"
-        approved_source = "fn main() {}\n"
-        approved = (
-            ORACLE.ApprovedBuildScript(
-                build_path,
-                hashlib.sha256(approved_source.encode("utf-8")).hexdigest(),
-                "negative-control fixture",
-            ),
-        )
-        with self.assertRaisesRegex(
-            ORACLE.HashOrderDeterminismFailure, "changed approved build script"
-        ):
-            ORACLE.validate_sources(
-                {build_path: 'fn main() { std::fs::write("generated.rs", "").unwrap(); }'},
-                allowed=(),
-                approved_build_scripts=approved,
-            )
-
-
-class HashOrderOracleRunnerTests(unittest.TestCase):
-    def test_authoritative_commands_include_production_source_byte_mutation(self) -> None:
+    def test_registers_the_production_source_byte_mutation(self) -> None:
+        # `cargo test --exact`, not `cargo nextest`: the repository's default
+        # nextest filter can select zero tests and still exit 0.
         command = (
             "cargo",
             "test",
@@ -693,51 +50,67 @@ class HashOrderOracleRunnerTests(unittest.TestCase):
         )
         self.assertEqual(ORACLE.COMMANDS.count(command), 1)
 
-    def test_scan_only_prints_the_tripwire_marker(self) -> None:
-        output = io.StringIO()
-        with redirect_stdout(output):
-            ORACLE.validate_tripwire(
-                source_loader=lambda: {}, allowed=(), approved_build_scripts=()
+    def test_registers_the_phase_b_compile_fail_controls(self) -> None:
+        self.assertTrue(
+            any(
+                command[-1] == "scripts/check_hash_order_phase_b_compile_fail.py"
+                for command in ORACLE.COMMANDS
             )
-        self.assertEqual(output.getvalue(), "HASH ORDER TOKEN TRIPWIRE: PASS\n")
+        )
 
+    def test_every_registered_script_exists(self) -> None:
+        for command in ORACLE.COMMANDS:
+            for argument in command:
+                if argument.endswith(".py"):
+                    self.assertTrue(
+                        (ORACLE.REPO_ROOT / argument).is_file(),
+                        f"registered script is missing: {argument}",
+                    )
+
+
+class RunnerTests(unittest.TestCase):
     def test_runs_every_component_and_prints_one_pass_marker(self) -> None:
         seen: list[tuple[str, ...]] = []
 
-        def runner(command: tuple[str, ...], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        def runner(
+            command: tuple[str, ...], **_kwargs: object
+        ) -> subprocess.CompletedProcess[bytes]:
             seen.append(tuple(command))
             return subprocess.CompletedProcess(command, 0)
 
         output = io.StringIO()
         with redirect_stdout(output):
-            ORACLE.validate(
-                runner=runner,
-                source_loader=lambda: {},
-                allowed=(),
-                approved_build_scripts=(),
-            )
-        self.assertEqual(seen, list(ORACLE.COMMANDS))
+            ORACLE.validate(runner=runner)
+        self.assertEqual(seen, [tuple(command) for command in ORACLE.COMMANDS])
         self.assertEqual(output.getvalue(), "HASH ORDER DETERMINISM ORACLE: PASS\n")
 
     def test_stops_at_the_first_failed_component(self) -> None:
         commands = (("first",), ("second",), ("third",))
         seen: list[tuple[str, ...]] = []
 
-        def runner(command: tuple[str, ...], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        def runner(
+            command: tuple[str, ...], **_kwargs: object
+        ) -> subprocess.CompletedProcess[bytes]:
             seen.append(tuple(command))
-            return subprocess.CompletedProcess(command, 7 if command == ("second",) else 0)
+            return subprocess.CompletedProcess(
+                command, 7 if command == ("second",) else 0
+            )
 
         with self.assertRaisesRegex(
             ORACLE.HashOrderDeterminismFailure, "exited 7: second"
         ):
-            ORACLE.validate(
-                runner=runner,
-                commands=commands,
-                source_loader=lambda: {},
-                allowed=(),
-                approved_build_scripts=(),
-            )
+            ORACLE.validate(commands=commands, runner=runner)
         self.assertEqual(seen, [("first",), ("second",)])
+
+    def test_rejects_arguments(self) -> None:
+        # `--scan-only` is gone with the source census it drove; a caller that
+        # still passes it must fail loudly rather than run a different check.
+        argv = sys.argv
+        sys.argv = ["hash_order_determinism_oracle.py", "--scan-only"]
+        try:
+            self.assertEqual(ORACLE.main(), 2)
+        finally:
+            sys.argv = argv
 
 
 if __name__ == "__main__":

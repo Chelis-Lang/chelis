@@ -61,12 +61,12 @@ fn debug_is_deterministic_and_does_not_expose_contents() {
     assert_eq!(
         format!("{map:?}"),
         "UnordMap { len: 2 }",
-        "Debug must not walk or expose the private raw table"
+        "Debug must not expose the private collection's contents"
     );
     assert_eq!(
         format!("{set:?}"),
         "UnordSet { len: 2 }",
-        "Debug must not walk or expose the private raw table"
+        "Debug must not expose the private collection's contents"
     );
 }
 

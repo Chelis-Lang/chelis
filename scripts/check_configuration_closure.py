@@ -175,6 +175,39 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
     ),
 )
 
+@dataclass(frozen=True)
+class NightlyOnlySource:
+    """A source whose only Clippy coverage is a nightly matrix row."""
+
+    path: str
+    feature: str
+    row: str
+
+
+# The exact residual. These sources sit behind solver features whose external
+# toolchains the repository does not provision per pull request, so the only
+# row that compiles them is nightly. The list is self-pruning: a file that a
+# per-pull-request row does compile is reported as stale, and `--require-complete`
+# (run by the nightly job) drops the allowance entirely, so a new uncovered file
+# cannot hide behind it.
+NIGHTLY_ONLY_SOURCES: tuple[NightlyOnlySource, ...] = (
+    NightlyOnlySource(
+        path="crates/chelis-prove/src/z3_engine.rs",
+        feature="chelis-prove/z3",
+        row="all-features",
+    ),
+    NightlyOnlySource(
+        path="crates/chelis-prove/src/bin/certify_erf_envelope.rs",
+        feature="chelis-prove/arb",
+        row="all-features",
+    ),
+    NightlyOnlySource(
+        path="crates/chelis-prove/src/bin/certify_special_fn_envelope.rs",
+        feature="chelis-prove/arb",
+        row="all-features",
+    ),
+)
+
 # Directories holding `.rs` sources that the workspace build deliberately does
 # not compile. Each is a standalone Cargo project driven by its own named gate,
 # which compiles it and asserts the expected rejection.
@@ -428,8 +461,22 @@ def check_every_source_is_compiled(
     target_directories: Sequence[Path],
     repo_root: Path = REPO_ROOT,
     exceptions: Sequence[UncompiledException] = UNCOMPILED_EXCEPTIONS,
+    nightly_only: Sequence[NightlyOnlySource] = NIGHTLY_ONLY_SOURCES,
+    require_complete: bool = False,
 ) -> None:
     """Leg 3: reconcile repository sources against rustc's own dep-info."""
+    labels = {run.label: run for run in CLIPPY_MATRIX}
+    for source in nightly_only:
+        if not (repo_root / source.path).is_file():
+            raise ConfigurationClosureFailure(
+                f"stale nightly-only source: {source.path} does not exist"
+            )
+        run = labels.get(source.row)
+        if run is None or run.cadence != NIGHTLY:
+            raise ConfigurationClosureFailure(
+                f"nightly-only source {source.path} names {source.row!r}, which is "
+                "not a nightly row of CLIPPY_MATRIX"
+            )
     for exception in exceptions:
         if not (repo_root / exception.directory).is_dir():
             raise ConfigurationClosureFailure(
@@ -449,10 +496,23 @@ def check_every_source_is_compiled(
             + ", ".join(str(directory) for directory in target_directories)
         )
 
+    allowed_nightly = (
+        set() if require_complete else {source.path for source in nightly_only}
+    )
+    if not require_complete:
+        stale = sorted(path for path in allowed_nightly if path in compiled)
+        if stale:
+            raise ConfigurationClosureFailure(
+                "these sources are recorded as nightly-only but a registered run "
+                "compiled them here: "
+                + ", ".join(stale)
+                + ". Delete their NIGHTLY_ONLY_SOURCES entries; the residual has shrunk."
+            )
+
     excepted = tuple(f"{exception.directory}/" for exception in exceptions)
     uncompiled = sorted(
         source
-        for source in repository_rust_sources(repo_root) - compiled
+        for source in repository_rust_sources(repo_root) - compiled - allowed_nightly
         if not source.startswith(excepted)
     )
     if uncompiled:
@@ -461,7 +521,8 @@ def check_every_source_is_compiled(
             "configuration, so the hash-collection ban is unproven for them: "
             + ", ".join(uncompiled)
             + ". Either add the configuration that compiles them to CLIPPY_MATRIX, "
-            "or record them in UNCOMPILED_EXCEPTIONS with the gate that owns them."
+            "record them in NIGHTLY_ONLY_SOURCES with the nightly row that does, or "
+            "record them in UNCOMPILED_EXCEPTIONS with the gate that owns them."
         )
 
 
@@ -478,6 +539,7 @@ def default_target_directories(repo_root: Path = REPO_ROOT) -> tuple[Path, ...]:
 def validate(
     repo_root: Path = REPO_ROOT,
     target_directories: Sequence[Path] | None = None,
+    require_complete: bool = False,
 ) -> None:
     check_declared_configuration_space(repo_root)
     check_matrix_covers_declared_features(repo_root)
@@ -486,22 +548,31 @@ def validate(
         if target_directories is not None
         else default_target_directories(repo_root),
         repo_root,
+        require_complete=require_complete,
     )
     print("CONFIGURATION CLOSURE: PASS", flush=True)
 
 
 def main(argv: Sequence[str]) -> int:
     directories: list[Path] = []
+    require_complete = False
     for argument in argv:
+        if argument == "--require-complete":
+            require_complete = True
+            continue
         if argument.startswith("-"):
             print(
-                "usage: check_configuration_closure.py [TARGET_DIR ...]",
+                "usage: check_configuration_closure.py [--require-complete] "
+                "[TARGET_DIR ...]",
                 file=sys.stderr,
             )
             return 2
         directories.append(Path(argument))
     try:
-        validate(target_directories=directories or None)
+        validate(
+            target_directories=directories or None,
+            require_complete=require_complete,
+        )
     except (ConfigurationClosureFailure, OSError, subprocess.SubprocessError) as error:
         print(f"CONFIGURATION CLOSURE: FAIL: {error}", file=sys.stderr)
         return 1

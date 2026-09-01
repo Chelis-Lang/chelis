@@ -286,10 +286,8 @@ HASH_ORDER_COMPILE_FAIL: list[str] = [
     MANAGED_PYTHON,
     "scripts/check_hash_order_compile_fail.py",
 ]
-# chelis#1341 Phase B: scan every Rust source independent of Cargo features
-# and reject raw hash carriers or unreviewed lint allowances. The full
-# executable oracle remains the phase acceptance command; this scan-only form
-# is the cheap continuous completeness lock.
+# chelis#1341 Phase B completeness lock. Clippy's `disallowed_types` bans the
+# raw hash collections, but lints only the configuration it compiles.
 # Reconciles the repository's Rust sources against rustc's own dep-info from
 # the Clippy stages above, so the compiler reports what it compiled instead
 # of a script recomputing it. Must run after both Clippy commands.

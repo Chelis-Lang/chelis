@@ -1,11 +1,30 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::iter_over_hash_type)]
 
-//! Order-free hash collections.
+//! Order-free collections for compiler internals.
+//!
+//! `spec/design/hash_order_determinism.md` bans `std::collections::HashMap`
+//! and `HashSet` across the workspace because their per-process hash seeds let
+//! an iteration order reach a checker verdict, a dispatch choice, emitted
+//! artifact bytes, or a persisted cache payload. These two types are the
+//! replacement for the hashed-lookup uses.
+//!
+//! The storage is a `BTreeMap`/`BTreeSet`, so there is no randomized order to
+//! leak in the first place: cloning, comparison, serialization, `clear`, and
+//! destruction all traverse key order because that is the only order the
+//! structure has. Every key already carried `Ord`, since the ordered exits
+//! below require it.
+//!
+//! What the type still buys over using `BTreeMap` directly is the *boundary*:
+//! there is no `iter`, `keys`, `values`, `drain`, `IntoIterator`, or `Deref`.
+//! A consumer that needs an order must spell [`UnordMap::to_sorted`] or
+//! [`UnordMap::into_sorted`], which reads as a claim that its owning authority
+//! makes key order canonical here, rather than picking up whatever order the
+//! container happened to have.
 
 use std::borrow::Borrow;
+use std::collections::{BTreeMap, BTreeSet, btree_map};
 use std::fmt;
-use std::hash::{BuildHasher, Hash, RandomState};
 use std::iter::FromIterator;
 use std::marker::PhantomData;
 use std::ops::Index;
@@ -14,361 +33,144 @@ use serde::de::{Error as _, SeqAccess, Visitor};
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-#[allow(clippy::disallowed_types)]
-mod raw {
-    pub(crate) type Map<K, V> = std::collections::HashMap<K, V>;
-}
-
-/// A hash map whose public API cannot expose the table's iteration order.
+/// A map whose public API cannot expose an incidental iteration order.
+#[derive(Clone, PartialEq, Eq)]
 pub struct UnordMap<K, V> {
-    storage: Box<Storage<K, V>>,
-}
-
-struct Storage<K, V> {
-    /// The raw hash table contains numeric digests and numeric entry indices
-    /// only. User-owned keys and values never live in, or are walked through,
-    /// randomized table order.
-    buckets: raw::Map<u64, usize>,
-    hash_builder: RandomState,
-    entries: Vec<Option<StoredEntry<K, V>>>,
-    /// Entry indices in canonical key order, maintained at mutation time.
-    order: Vec<usize>,
-    free: Vec<usize>,
-    len: usize,
-}
-
-struct StoredEntry<K, V> {
-    key: K,
-    value: V,
-    /// Next entry with the same digest. Collision links live in the flat
-    /// canonical-entry arena so raw table values remain allocation-free.
-    next: Option<usize>,
-}
-
-impl<K, V> Drop for UnordMap<K, V> {
-    fn drop(&mut self) {
-        // `HashMap`'s own drop walks randomized table order. User-owned
-        // entries live outside that table, so retire them through the
-        // maintained canonical index before the numeric buckets are dropped.
-        for index in std::mem::take(&mut self.storage.order) {
-            drop(self.storage.entries[index].take());
-        }
-    }
-}
-
-impl<K, V> Clone for UnordMap<K, V>
-where
-    K: Clone + Eq + Hash + Ord,
-    V: Clone,
-{
-    fn clone(&self) -> Self {
-        let mut cloned = Self::new();
-        for index in &self.storage.order {
-            let (key, value) = self.entry_at(*index);
-            cloned.insert(key.clone(), value.clone());
-        }
-        cloned
-    }
+    inner: BTreeMap<K, V>,
 }
 
 impl<K, V> fmt::Debug for UnordMap<K, V> {
+    /// Report the kind and length only.
+    ///
+    /// A content-bearing `Debug` is an ordered rendering of the contents, and
+    /// a diagnostic or snapshot that embeds one turns a container's order into
+    /// observable output. Callers that want the contents ask for them.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("UnordMap")
-            .field("len", &self.storage.len)
-            .finish()
+        write!(formatter, "UnordMap {{ len: {} }}", self.inner.len())
     }
 }
 
-impl<K, V> PartialEq for UnordMap<K, V>
-where
-    K: Eq + Hash + Ord,
-    V: PartialEq,
-{
-    fn eq(&self, other: &Self) -> bool {
-        self.storage.len == other.storage.len
-            && self
-                .storage
-                .order
-                .iter()
-                .zip(&other.storage.order)
-                .all(|(left, right)| {
-                    let left = self.entry_at(*left);
-                    let right = other.entry_at(*right);
-                    left.0 == right.0 && left.1 == right.1
-                })
-    }
-}
-
-impl<K, V> Eq for UnordMap<K, V>
-where
-    K: Eq + Hash + Ord,
-    V: Eq,
-{
-}
-
+/// An empty map needs nothing of `K` or `V`, so this carries no bound.
 impl<K, V> Default for UnordMap<K, V> {
     fn default() -> Self {
-        Self {
-            storage: Box::new(Storage {
-                buckets: raw::Map::new(),
-                hash_builder: RandomState::new(),
-                entries: Vec::new(),
-                order: Vec::new(),
-                free: Vec::new(),
-                len: 0,
-            }),
-        }
+        Self::new()
     }
 }
 
 impl<K, V> UnordMap<K, V> {
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            inner: BTreeMap::new(),
+        }
     }
 
     #[must_use]
     pub fn len(&self) -> usize {
-        self.storage.len
+        self.inner.len()
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.storage.len == 0
+        self.inner.is_empty()
     }
 
     pub fn clear(&mut self) {
-        for index in std::mem::take(&mut self.storage.order) {
-            drop(self.storage.entries[index].take());
-        }
-        self.storage.buckets.clear();
-        self.storage.entries.clear();
-        self.storage.free.clear();
-        self.storage.len = 0;
-    }
-
-    fn entry_at(&self, index: usize) -> (&K, &V) {
-        let entry = self.storage.entries[index]
-            .as_ref()
-            .expect("UnordMap index must name a live entry");
-        (&entry.key, &entry.value)
-    }
-
-    fn entry_at_mut(&mut self, index: usize) -> (&K, &mut V) {
-        let entry = self.storage.entries[index]
-            .as_mut()
-            .expect("UnordMap index must name a live entry");
-        (&entry.key, &mut entry.value)
+        self.inner.clear();
     }
 }
 
-impl<K: Eq + Hash + Ord, V> UnordMap<K, V> {
-    fn hash<Q: Hash + ?Sized>(&self, key: &Q) -> u64 {
-        self.storage.hash_builder.hash_one(key)
-    }
-
-    fn find_index<Q>(&self, key: &Q) -> Option<usize>
-    where
-        K: Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
-    {
-        let mut candidate = self.storage.buckets.get(&self.hash(key)).copied();
-        while let Some(index) = candidate {
-            let entry = self.storage.entries[index]
-                .as_ref()
-                .expect("UnordMap collision link must name a live entry");
-            if entry.key.borrow() == key {
-                return Some(index);
-            }
-            candidate = entry.next;
-        }
-        None
-    }
-
-    fn insert_new(&mut self, key: K, value: V) -> usize {
-        let digest = self.hash(&key);
-        let next = self.storage.buckets.get(&digest).copied();
-        let entry = StoredEntry { key, value, next };
-        let index = match self.storage.free.pop() {
-            Some(index) => {
-                self.storage.entries[index] = Some(entry);
-                index
-            }
-            None => {
-                let index = self.storage.entries.len();
-                self.storage.entries.push(Some(entry));
-                index
-            }
-        };
-        let ordered_position = self
-            .storage
-            .order
-            .binary_search_by(|other| self.entry_at(*other).0.cmp(self.entry_at(index).0))
-            .expect_err("a vacant UnordMap key must have a unique canonical position");
-        self.storage.order.insert(ordered_position, index);
-        self.storage.buckets.insert(digest, index);
-        self.storage.len += 1;
-        index
-    }
-
-    fn remove_index(&mut self, index: usize) -> (K, V) {
-        let digest = self.hash(self.entry_at(index).0);
-        let ordered_position = self
-            .storage
-            .order
-            .iter()
-            .position(|candidate| *candidate == index)
-            .expect("live UnordMap entry must appear in canonical order");
-        self.storage.order.remove(ordered_position);
-        let mut previous = None;
-        let mut candidate = self.storage.buckets.get(&digest).copied();
-        while candidate.is_some_and(|candidate| candidate != index) {
-            previous = candidate;
-            candidate = self.storage.entries[candidate.expect("candidate is present")]
-                .as_ref()
-                .expect("UnordMap collision link must name a live entry")
-                .next;
-        }
-        assert_eq!(
-            candidate,
-            Some(index),
-            "live UnordMap entry index must appear in its hash chain"
-        );
-        let next = self.storage.entries[index]
-            .as_ref()
-            .expect("removed UnordMap index must name a live entry")
-            .next;
-        if let Some(previous) = previous {
-            self.storage.entries[previous]
-                .as_mut()
-                .expect("UnordMap collision predecessor must be live")
-                .next = next;
-        } else if let Some(next) = next {
-            self.storage.buckets.insert(digest, next);
-        } else {
-            self.storage.buckets.remove(&digest);
-        }
-        let entry = self.storage.entries[index]
-            .take()
-            .expect("removed UnordMap index must name a live entry");
-        self.storage.free.push(index);
-        self.storage.len -= 1;
-        (entry.key, entry.value)
-    }
-
+impl<K: Ord, V> UnordMap<K, V> {
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
-        if let Some(index) = self.find_index(&key) {
-            return Some(std::mem::replace(self.entry_at_mut(index).1, value));
-        }
-        self.insert_new(key, value);
-        None
+        self.inner.insert(key, value)
     }
 
     #[must_use]
     pub fn get<Q>(&self, key: &Q) -> Option<&V>
     where
         K: Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
+        Q: Ord + ?Sized,
     {
-        self.find_index(key).map(|index| self.entry_at(index).1)
+        self.inner.get(key)
     }
 
     #[must_use]
     pub fn get_key_value<Q>(&self, key: &Q) -> Option<(&K, &V)>
     where
         K: Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
+        Q: Ord + ?Sized,
     {
-        self.find_index(key).map(|index| self.entry_at(index))
+        self.inner.get_key_value(key)
     }
 
     pub fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
     where
         K: Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
+        Q: Ord + ?Sized,
     {
-        let index = self.find_index(key)?;
-        Some(self.entry_at_mut(index).1)
+        self.inner.get_mut(key)
     }
 
     pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
+        Q: Ord + ?Sized,
     {
-        let index = self.find_index(key)?;
-        Some(self.remove_index(index).1)
+        self.inner.remove(key)
     }
 
     #[must_use]
     pub fn contains_key<Q>(&self, key: &Q) -> bool
     where
         K: Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
+        Q: Ord + ?Sized,
     {
-        self.find_index(key).is_some()
+        self.inner.contains_key(key)
     }
 
     pub fn entry(&mut self, key: K) -> Entry<'_, K, V> {
-        match self.find_index(&key) {
-            Some(index) => Entry::Occupied(OccupiedEntry { map: self, index }),
-            None => Entry::Vacant(VacantEntry { map: self, key }),
+        match self.inner.entry(key) {
+            btree_map::Entry::Occupied(entry) => Entry::Occupied(OccupiedEntry(entry)),
+            btree_map::Entry::Vacant(entry) => Entry::Vacant(VacantEntry(entry)),
         }
     }
 
     pub fn merge(&mut self, other: Self) {
-        self.extend(other.into_sorted());
+        self.inner.extend(other.inner);
     }
 
     /// Return the contents in the key's canonical `Ord` order.
     ///
-    /// This exit is available only when the caller's owning authority makes
-    /// the key order canonical. Unlike a projection-based sort, no user code
-    /// runs while the raw table order is still observable.
+    /// Available only where the caller's owning authority makes key order
+    /// canonical; see `spec/design/hash_order_determinism.md` C3.1.
     #[must_use]
     pub fn to_sorted(&self) -> Vec<(&K, &V)> {
-        self.storage
-            .order
-            .iter()
-            .map(|index| self.entry_at(*index))
-            .collect()
+        self.inner.iter().collect()
     }
 
     /// Consume the map and return its contents in the key's canonical `Ord`
     /// order. See [`Self::to_sorted`] for the authority requirement.
     #[must_use]
-    pub fn into_sorted(mut self) -> Vec<(K, V)> {
-        let order = std::mem::take(&mut self.storage.order);
-        order
-            .into_iter()
-            .map(|index| {
-                self.storage.entries[index]
-                    .take()
-                    .map(|entry| (entry.key, entry.value))
-                    .expect("canonical UnordMap index must name a live entry")
-            })
-            .collect()
+    pub fn into_sorted(self) -> Vec<(K, V)> {
+        self.inner.into_iter().collect()
     }
 }
 
-impl<K: Eq + Hash + Ord, V> Extend<(K, V)> for UnordMap<K, V> {
+impl<K: Ord, V> Extend<(K, V)> for UnordMap<K, V> {
     fn extend<T: IntoIterator<Item = (K, V)>>(&mut self, iter: T) {
-        for (key, value) in iter {
-            self.insert(key, value);
+        self.inner.extend(iter);
+    }
+}
+
+impl<K: Ord, V> FromIterator<(K, V)> for UnordMap<K, V> {
+    fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
+        Self {
+            inner: iter.into_iter().collect(),
         }
     }
 }
 
-impl<K: Eq + Hash + Ord, V> FromIterator<(K, V)> for UnordMap<K, V> {
-    fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
-        let mut result = Self::new();
-        result.extend(iter);
-        result
-    }
-}
-
-impl<K: Eq + Hash + Ord, V, const N: usize> From<[(K, V); N]> for UnordMap<K, V> {
+impl<K: Ord, V, const N: usize> From<[(K, V); N]> for UnordMap<K, V> {
     fn from(entries: [(K, V); N]) -> Self {
         entries.into_iter().collect()
     }
@@ -376,8 +178,8 @@ impl<K: Eq + Hash + Ord, V, const N: usize> From<[(K, V); N]> for UnordMap<K, V>
 
 impl<K, Q, V> Index<&Q> for UnordMap<K, V>
 where
-    K: Eq + Hash + Ord + Borrow<Q>,
-    Q: Hash + Eq + ?Sized,
+    K: Ord + Borrow<Q>,
+    Q: Ord + ?Sized,
 {
     type Output = V;
 
@@ -391,7 +193,7 @@ pub enum Entry<'a, K, V> {
     Vacant(VacantEntry<'a, K, V>),
 }
 
-impl<'a, K: Eq + Hash + Ord, V> Entry<'a, K, V> {
+impl<'a, K: Ord, V> Entry<'a, K, V> {
     pub fn or_insert(self, default: V) -> &'a mut V {
         match self {
             Self::Occupied(entry) => entry.into_mut(),
@@ -442,109 +244,83 @@ impl<'a, K: Eq + Hash + Ord, V> Entry<'a, K, V> {
     }
 }
 
-pub struct OccupiedEntry<'a, K, V> {
-    map: &'a mut UnordMap<K, V>,
-    index: usize,
-}
+pub struct OccupiedEntry<'a, K, V>(btree_map::OccupiedEntry<'a, K, V>);
 
-impl<'a, K: Eq + Hash + Ord, V> OccupiedEntry<'a, K, V> {
+impl<'a, K: Ord, V> OccupiedEntry<'a, K, V> {
     #[must_use]
     pub fn key(&self) -> &K {
-        self.map.entry_at(self.index).0
+        self.0.key()
     }
 
     #[must_use]
     pub fn get(&self) -> &V {
-        self.map.entry_at(self.index).1
+        self.0.get()
     }
 
     pub fn get_mut(&mut self) -> &mut V {
-        self.map.entry_at_mut(self.index).1
+        self.0.get_mut()
     }
 
     pub fn into_mut(self) -> &'a mut V {
-        self.map.entry_at_mut(self.index).1
+        self.0.into_mut()
     }
 
     pub fn insert(&mut self, value: V) -> V {
-        std::mem::replace(self.map.entry_at_mut(self.index).1, value)
+        self.0.insert(value)
     }
 
     pub fn remove(self) -> V {
-        self.map.remove_index(self.index).1
+        self.0.remove()
     }
 
     pub fn remove_entry(self) -> (K, V) {
-        self.map.remove_index(self.index)
+        self.0.remove_entry()
     }
 }
 
-pub struct VacantEntry<'a, K, V> {
-    map: &'a mut UnordMap<K, V>,
-    key: K,
-}
+pub struct VacantEntry<'a, K, V>(btree_map::VacantEntry<'a, K, V>);
 
-impl<'a, K: Eq + Hash + Ord, V> VacantEntry<'a, K, V> {
+impl<'a, K: Ord, V> VacantEntry<'a, K, V> {
     #[must_use]
     pub fn key(&self) -> &K {
-        &self.key
+        self.0.key()
     }
 
     pub fn into_key(self) -> K {
-        self.key
+        self.0.into_key()
     }
 
     pub fn insert(self, value: V) -> &'a mut V {
-        let index = self.map.insert_new(self.key, value);
-        self.map.entry_at_mut(index).1
+        self.0.insert(value)
     }
 }
 
-/// A hash set whose public API cannot expose the table's iteration order.
+/// A set whose public API cannot expose an incidental iteration order.
+#[derive(Clone, PartialEq, Eq)]
 pub struct UnordSet<T> {
-    inner: UnordMap<T, ()>,
-}
-
-impl<T> Clone for UnordSet<T>
-where
-    T: Clone + Eq + Hash + Ord,
-{
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-        }
-    }
+    inner: BTreeSet<T>,
 }
 
 impl<T> fmt::Debug for UnordSet<T> {
+    /// Report the kind and length only; see [`UnordMap`]'s `Debug`.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("UnordSet")
-            .field("len", &self.inner.len())
-            .finish()
+        write!(formatter, "UnordSet {{ len: {} }}", self.inner.len())
     }
 }
 
-impl<T: Eq + Hash + Ord> PartialEq for UnordSet<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.inner == other.inner
-    }
-}
-
-impl<T: Eq + Hash + Ord> Eq for UnordSet<T> {}
-
+/// An empty set needs nothing of `T`, so this carries no bound.
 impl<T> Default for UnordSet<T> {
     fn default() -> Self {
-        Self {
-            inner: UnordMap::new(),
-        }
+        Self::new()
     }
 }
 
 impl<T> UnordSet<T> {
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            inner: BTreeSet::new(),
+        }
     }
 
     #[must_use]
@@ -562,75 +338,61 @@ impl<T> UnordSet<T> {
     }
 }
 
-impl<T: Eq + Hash + Ord> UnordSet<T> {
+impl<T: Ord> UnordSet<T> {
     pub fn insert(&mut self, value: T) -> bool {
-        self.inner.insert(value, ()).is_none()
+        self.inner.insert(value)
     }
 
     #[must_use]
     pub fn contains<Q>(&self, value: &Q) -> bool
     where
         T: Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
+        Q: Ord + ?Sized,
     {
-        self.inner.contains_key(value)
+        self.inner.contains(value)
     }
 
     pub fn remove<Q>(&mut self, value: &Q) -> bool
     where
         T: Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
+        Q: Ord + ?Sized,
     {
-        self.inner.remove(value).is_some()
+        self.inner.remove(value)
     }
 
     pub fn merge(&mut self, other: Self) {
-        self.inner.merge(other.inner);
+        self.inner.extend(other.inner);
     }
 
     /// Return the contents in the element's canonical `Ord` order.
     #[must_use]
-    pub fn to_sorted(&self) -> Vec<&T>
-    where
-        T: Ord,
-    {
-        self.inner
-            .to_sorted()
-            .into_iter()
-            .map(|(value, ())| value)
-            .collect()
+    pub fn to_sorted(&self) -> Vec<&T> {
+        self.inner.iter().collect()
     }
 
     /// Consume the set and return its contents in the element's canonical
     /// `Ord` order.
     #[must_use]
-    pub fn into_sorted(self) -> Vec<T>
-    where
-        T: Ord,
-    {
-        self.inner
-            .into_sorted()
-            .into_iter()
-            .map(|(value, ())| value)
-            .collect()
+    pub fn into_sorted(self) -> Vec<T> {
+        self.inner.into_iter().collect()
     }
 }
 
-impl<T: Eq + Hash + Ord> Extend<T> for UnordSet<T> {
+impl<T: Ord> Extend<T> for UnordSet<T> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
-        self.inner.extend(iter.into_iter().map(|value| (value, ())));
+        self.inner.extend(iter);
     }
 }
 
-impl<T: Eq + Hash + Ord> FromIterator<T> for UnordSet<T> {
+impl<T: Ord> FromIterator<T> for UnordSet<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         Self {
-            inner: iter.into_iter().map(|value| (value, ())).collect(),
+            inner: iter.into_iter().collect(),
         }
     }
 }
 
-impl<T: Eq + Hash + Ord, const N: usize> From<[T; N]> for UnordSet<T> {
+impl<T: Ord, const N: usize> From<[T; N]> for UnordSet<T> {
     fn from(entries: [T; N]) -> Self {
         entries.into_iter().collect()
     }
@@ -638,13 +400,12 @@ impl<T: Eq + Hash + Ord, const N: usize> From<[T; N]> for UnordSet<T> {
 
 impl<K, V> Serialize for UnordMap<K, V>
 where
-    K: Eq + Hash + Ord + Serialize,
+    K: Ord + Serialize,
     V: Serialize,
 {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let entries = self.to_sorted();
-        let mut sequence = serializer.serialize_seq(Some(entries.len()))?;
-        for entry in entries {
+        let mut sequence = serializer.serialize_seq(Some(self.inner.len()))?;
+        for entry in &self.inner {
             sequence.serialize_element(&entry)?;
         }
         sequence.end()
@@ -655,7 +416,7 @@ struct MapVisitor<K, V>(PhantomData<fn() -> (K, V)>);
 
 impl<'de, K, V> Visitor<'de> for MapVisitor<K, V>
 where
-    K: Eq + Hash + Ord + Deserialize<'de>,
+    K: Ord + Deserialize<'de>,
     V: Deserialize<'de>,
 {
     type Value = UnordMap<K, V>;
@@ -677,7 +438,7 @@ where
 
 impl<'de, K, V> Deserialize<'de> for UnordMap<K, V>
 where
-    K: Eq + Hash + Ord + Deserialize<'de>,
+    K: Ord + Deserialize<'de>,
     V: Deserialize<'de>,
 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -687,12 +448,11 @@ where
 
 impl<T> Serialize for UnordSet<T>
 where
-    T: Eq + Hash + Ord + Serialize,
+    T: Ord + Serialize,
 {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let entries = self.to_sorted();
-        let mut sequence = serializer.serialize_seq(Some(entries.len()))?;
-        for value in entries {
+        let mut sequence = serializer.serialize_seq(Some(self.inner.len()))?;
+        for value in &self.inner {
             sequence.serialize_element(value)?;
         }
         sequence.end()
@@ -703,7 +463,7 @@ struct SetVisitor<T>(PhantomData<fn() -> T>);
 
 impl<'de, T> Visitor<'de> for SetVisitor<T>
 where
-    T: Eq + Hash + Ord + Deserialize<'de>,
+    T: Ord + Deserialize<'de>,
 {
     type Value = UnordSet<T>;
 
@@ -724,7 +484,7 @@ where
 
 impl<'de, T> Deserialize<'de> for UnordSet<T>
 where
-    T: Eq + Hash + Ord + Deserialize<'de>,
+    T: Ord + Deserialize<'de>,
 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         deserializer.deserialize_seq(SetVisitor(PhantomData))

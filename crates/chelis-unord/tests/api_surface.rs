@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 
-use syn::{GenericArgument, ImplItem, Item, PathArguments, Type};
+use syn::{ImplItem, Item, Type};
 
 fn public_methods(type_name: &str) -> BTreeSet<String> {
     let source = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"))
@@ -60,7 +60,34 @@ fn public_traits(type_name: &str) -> BTreeSet<String> {
                 .and_then(|(_, path, _)| path.segments.last())
                 .map(|segment| segment.ident.to_string())
         })
+        .chain(derived_traits(&syntax, type_name))
         .collect()
+}
+
+/// Traits the type gets from a `#[derive(...)]`, which are as public as an
+/// explicit `impl` and must be pinned the same way.
+fn derived_traits(syntax: &syn::File, type_name: &str) -> BTreeSet<String> {
+    let mut derived = BTreeSet::new();
+    for item in &syntax.items {
+        let Item::Struct(item) = item else { continue };
+        if item.ident != type_name {
+            continue;
+        }
+        for attribute in &item.attrs {
+            if !attribute.path().is_ident("derive") {
+                continue;
+            }
+            attribute
+                .parse_nested_meta(|meta| {
+                    if let Some(segment) = meta.path.segments.last() {
+                        derived.insert(segment.ident.to_string());
+                    }
+                    Ok(())
+                })
+                .expect("parse derive list");
+        }
+    }
+    derived
 }
 
 fn path_type<'a>(ty: &'a Type, expected: &str) -> &'a syn::TypePath {
@@ -139,7 +166,6 @@ fn public_trait_api_is_exact() {
                 "Debug",
                 "Default",
                 "Deserialize",
-                "Drop",
                 "Eq",
                 "Extend",
                 "From",
@@ -172,41 +198,41 @@ fn public_trait_api_is_exact() {
 }
 
 #[test]
-fn raw_hash_storage_contains_numeric_indices_only() {
+fn private_storage_is_an_ordered_collection() {
     let source = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"))
         .expect("read chelis-unord source");
     let syntax = syn::parse_file(&source).expect("parse chelis-unord source");
-    let storage = syntax
-        .items
-        .iter()
-        .find_map(|item| match item {
-            Item::Struct(item) if item.ident == "Storage" => Some(item),
-            _ => None,
-        })
-        .expect("Storage struct must exist");
-    let fields = storage
-        .fields
-        .iter()
-        .map(|field| (field.ident.as_ref().unwrap().to_string(), &field.ty))
-        .collect::<BTreeMap<_, _>>();
-    assert_eq!(
-        fields.keys().cloned().collect::<BTreeSet<_>>(),
-        ["buckets", "entries", "free", "hash_builder", "len", "order"]
-            .map(str::to_owned)
-            .into_iter()
-            .collect()
-    );
 
-    let map = path_type(fields["buckets"], "Map");
-    let PathArguments::AngleBracketed(arguments) = &map.path.segments.last().unwrap().arguments
-    else {
-        panic!("raw Map must have type arguments");
-    };
-    let arguments = arguments.args.iter().collect::<Vec<_>>();
-    let [GenericArgument::Type(digest), GenericArgument::Type(bucket)] = arguments.as_slice()
-    else {
-        panic!("raw Map must have exactly two type arguments");
-    };
-    path_type(digest, "u64");
-    path_type(bucket, "usize");
+    let expected = BTreeMap::from([("UnordMap", "BTreeMap"), ("UnordSet", "BTreeSet")]);
+    for (type_name, storage) in expected {
+        let item = syntax
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Struct(item) if item.ident == type_name => Some(item),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{type_name} must exist"));
+        let fields = item
+            .fields
+            .iter()
+            .map(|field| (field.ident.as_ref().unwrap().to_string(), &field.ty))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            fields.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from(["inner".to_owned()]),
+            "{type_name} must store exactly one private collection"
+        );
+        path_type(fields["inner"], storage);
+    }
+
+    // The determinism claim rests on there being no randomized order to leak,
+    // not on a wrapper hiding one behind an exemption. This crate used to
+    // carry the workspace's only production `disallowed_types` allowance, for
+    // a private raw hash table; with ordered storage it needs none, so the
+    // workspace ban now covers the wrapper itself.
+    assert!(
+        !source.contains("allow(clippy::disallowed_types)"),
+        "chelis-unord must not exempt itself from the hash-collection ban"
+    );
 }

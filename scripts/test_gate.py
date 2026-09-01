@@ -238,11 +238,35 @@ def _assert_carcara_full_suite_command(workflow: str) -> None:
                     return True
         return False
 
+    # Cargo subcommands that only type-check or lint. The invariant here is
+    # that the Carcara *suite* runs exactly once and serialized, because a
+    # second concurrent run is the hazard; a step that merely compiles the
+    # feature executes no test and cannot violate it. The list is of
+    # non-executing subcommands rather than executing ones, so an unrecognized
+    # subcommand is treated as executing and the guard stays strict.
+    non_executing = frozenset(
+        ("check", "clippy", "doc", "fmt", "metadata", "tree", "verify-project")
+    )
+
+    def executes_tests(command: str) -> bool:
+        try:
+            words = shlex.split(command, comments=True)
+        except ValueError:
+            return True
+        for index, word in enumerate(words):
+            if word != "cargo":
+                continue
+            for candidate in words[index + 1 :]:
+                if candidate.startswith("+"):
+                    continue
+                return candidate not in non_executing
+        return True
+
     steps = run_steps()
     carcara_steps = [
         (command, conditional)
         for command, conditional in steps
-        if enables_carcara(command)
+        if enables_carcara(command) and executes_tests(command)
     ]
     canonical_words = shlex.split(CARCARA_FULL_SUITE_COMMAND)
     canonical_steps = [
@@ -813,10 +837,8 @@ class ListOutputTests(unittest.TestCase):
             [gate.render(entry) for entry in gate.LOCAL_STATIC_COMMANDS],
         )
 
-    def test_hash_order_token_tripwire_is_continuous_and_local(self):
-        command = (
-            "<managed-python> scripts/hash_order_determinism_oracle.py --scan-only"
-        )
+    def test_configuration_closure_is_continuous_and_local(self):
+        command = "<managed-python> scripts/check_configuration_closure.py"
         self.assertIn(
             command,
             [gate.render(entry) for entry in gate.STAGES["lint-and-unit"]],
@@ -3316,6 +3338,37 @@ class SmtCiSplitTests(unittest.TestCase):
                     AssertionError, "complete serialized Carcara suite"
                 ):
                     _assert_carcara_full_suite_command(mutated)
+
+        # The narrowing is to non-executing subcommands only: a Clippy step
+        # that enables every feature compiles the Carcara lane without running
+        # its suite, and must not read as a second run.
+        for lint_only in (
+            "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+            "cargo check -p chelis-prove --features carcara",
+        ):
+            with self.subTest(lint_only=lint_only):
+                _assert_carcara_full_suite_command(
+                    text.replace(
+                        f"run: {CARCARA_FULL_SUITE_COMMAND}",
+                        f"run: {CARCARA_FULL_SUITE_COMMAND}\n"
+                        "      - name: Lint-only Carcara compile\n"
+                        f"        run: {lint_only}",
+                    )
+                )
+
+        # ... but an unrecognized subcommand still counts as executing.
+        with self.assertRaisesRegex(
+            AssertionError, "complete serialized Carcara suite"
+        ):
+            _assert_carcara_full_suite_command(
+                text.replace(
+                    f"run: {CARCARA_FULL_SUITE_COMMAND}",
+                    f"run: {CARCARA_FULL_SUITE_COMMAND}\n"
+                    "      - name: Unknown Carcara subcommand\n"
+                    "        run: cargo some-new-runner -p chelis-prove "
+                    "--features carcara",
+                )
+            )
 
         multiline = text.replace(
             f"run: {CARCARA_FULL_SUITE_COMMAND}",
