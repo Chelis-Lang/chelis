@@ -497,8 +497,11 @@ Stating the claim over a *language* instead would not be dischargeable: a
 reviewer can always name one more construct, and the repository would be
 committed to modelling a C++ and Objective-C surface that no file in it uses.
 Stated over a file list it is decidable, and every source in it is read by a
-total parser for its own language: Rust with `syn`, and the plain C headers with
-the numeric capacity census's own token vocabulary. Sharing that vocabulary is
+total parser for its own language: forty-eight Rust files with `syn`, and seven
+C headers with the numeric capacity census's own token vocabulary. A token walk
+suffices for the headers precisely because it reads type words, pointers, and
+`sizeof` rather than a grammar, which is why the Objective-C constructs in
+`chelis_metal_runtime.h` need no Objective-C parser. Sharing that vocabulary is
 deliberate; a second, independent C classifier beside the census would be a
 second authority for the same question, which B2 invariant 3 forbids.
 

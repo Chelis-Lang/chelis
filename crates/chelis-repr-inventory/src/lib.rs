@@ -9,8 +9,12 @@
 //! # Why there is no C-family compiler front end here
 //!
 //! The inventory's universe is a frozen list of repository files, not a
-//! language. Nineteen of them are Rust and four are plain C headers; the
-//! repository contains no C++, Objective-C, CUDA, or Metal source at all.
+//! language. Forty-eight of them are Rust and seven are C headers. The
+//! repository contains no `.m`, `.mm`, `.cu`, `.cuh`, `.hip`, or `.metal`
+//! source file at all, which is what makes the file list closed and small.
+//! `chelis_metal_runtime.h` does carry Objective-C constructs, and a token
+//! walk reads its declarations without needing to model that language: it
+//! looks for type words, pointers, and `sizeof`, not for message sends.
 //! Rust is read with `syn`, which is a total parser for the language, so a
 //! completeness claim over Rust is one that can actually be discharged. The
 //! four C headers are read with the same token vocabulary the numeric capacity
@@ -32,6 +36,8 @@ use std::fmt;
 
 use quote::ToTokens;
 use serde::{Deserialize, Serialize};
+use syn::parse::Parser;
+use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
@@ -357,6 +363,20 @@ fn c_element_spelling(text: &str) -> Option<&'static str> {
     })
 }
 
+/// Does this callee path select a representation width?
+///
+/// The path is matched segment by segment with any turbofish removed, so
+/// `size_of::<f32>()`, `std::mem::size_of::<f32>()`, and
+/// `core::mem::size_of::<f32>()` are one rule rather than three spellings, and
+/// a prefix test cannot miss the qualified forms.
+fn is_width_selecting_path(rendered: &str) -> bool {
+    let without_generics = rendered.split('<').next().unwrap_or(rendered);
+    without_generics
+        .split("::")
+        .map(str::trim)
+        .any(|segment| segment == "size_of" || WIDTH_SELECTORS.contains(&segment))
+}
+
 /// A load/store template dereferences or indexes; an element spelling only
 /// names the type. Keeping them disjoint means a row cannot be counted twice.
 fn is_load_store_template(text: &str) -> bool {
@@ -367,6 +387,7 @@ struct RustSeamScanner {
     class: SourceClass,
     owners: Vec<String>,
     rows: Vec<SeamRow>,
+    error: Option<ScanError>,
 }
 
 impl RustSeamScanner {
@@ -402,6 +423,24 @@ impl RustSeamScanner {
             "backend-element-spelling"
         };
         self.push(kind, value);
+    }
+
+    /// Walk every literal in a macro's token tree, including nested groups.
+    /// A template one group deep is still emitted text.
+    fn scan_token_stream_literals(&mut self, stream: proc_macro2::TokenStream) {
+        for token in stream {
+            match token {
+                proc_macro2::TokenTree::Group(group) => {
+                    self.scan_token_stream_literals(group.stream());
+                }
+                proc_macro2::TokenTree::Literal(literal) => {
+                    if let Ok(syn::Lit::Str(text)) = syn::parse_str(&literal.to_string()) {
+                        self.scan_literal(&text.value());
+                    }
+                }
+                proc_macro2::TokenTree::Ident(_) | proc_macro2::TokenTree::Punct(_) => {}
+            }
+        }
     }
 
     fn scan_descriptor_fields(&mut self, name: &str, fields: &syn::Fields) {
@@ -454,6 +493,26 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
     fn visit_impl_item_fn(&mut self, function: &'ast syn::ImplItemFn) {
         self.with_owner(function.sig.ident.to_string(), |scanner| {
             visit::visit_impl_item_fn(scanner, function);
+        });
+    }
+
+    fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
+        self.with_owner(item.ident.to_string(), |scanner| {
+            visit::visit_item_const(scanner, item);
+        });
+    }
+
+    fn visit_item_static(&mut self, item: &'ast syn::ItemStatic) {
+        self.with_owner(item.ident.to_string(), |scanner| {
+            visit::visit_item_static(scanner, item);
+        });
+    }
+
+    fn visit_foreign_item_fn(&mut self, item: &'ast syn::ForeignItemFn) {
+        // An `unsafe extern "C"` declaration carries the same carriers a
+        // definition does, and Phase 3 deletes it the same way.
+        self.with_owner(item.sig.ident.to_string(), |scanner| {
+            visit::visit_foreign_item_fn(scanner, item);
         });
     }
 
@@ -513,6 +572,16 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
         visit::visit_expr_field(self, field);
     }
 
+    fn visit_type_ptr(&mut self, pointer: &'ast syn::TypePtr) {
+        // Casts are not the only place a raw element pointer appears: a
+        // parameter, a return type, and a foreign declaration all hand one
+        // out, and Phase 3's seal has to reach every one of them.
+        if is_rust_element_type(&pointer.elem) || is_raw_element_pointer(&pointer.elem) {
+            self.push("raw-element-pointer", pointer.to_token_stream().to_string());
+        }
+        visit::visit_type_ptr(self, pointer);
+    }
+
     fn visit_expr_cast(&mut self, cast: &'ast syn::ExprCast) {
         if is_raw_element_pointer(&cast.ty) {
             self.push("raw-element-pointer", cast.to_token_stream().to_string());
@@ -542,8 +611,7 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
 
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
         let rendered = call.func.to_token_stream().to_string();
-        let tail = rendered.rsplit("::").next().unwrap_or_default().trim();
-        if WIDTH_SELECTORS.contains(&tail) || rendered.starts_with("size_of") {
+        if is_width_selecting_path(&rendered) {
             self.push("width-arithmetic", call.to_token_stream().to_string());
         }
         visit::visit_expr_call(self, call);
@@ -570,15 +638,30 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
     }
 
     fn visit_macro(&mut self, macro_call: &'ast syn::Macro) {
-        // A `format!`/`write!` template is emitted C text; its literal is the
-        // seam, and the interpolated arguments are ordinary expressions.
-        for token in macro_call.tokens.clone() {
-            if let proc_macro2::TokenTree::Literal(literal) = token
-                && let Ok(syn::Lit::Str(text)) = syn::parse_str(&literal.to_string())
-            {
-                self.scan_literal(&text.value());
+        // `include!` splices a file cargo compiles into a registered source.
+        // Admitting one silently would reopen the closed universe through the
+        // back door, so it fails until the target is registered and scanned in
+        // its own right.
+        if macro_call.path.is_ident("include") {
+            let owner = self.owner();
+            if self.error.is_none() {
+                self.error = Some(ScanError::new(format!(
+                    "`include!` in `{owner}` splices an unscanned file into a registered \
+                     source: register the included file in INVENTORY_SOURCES, or inline it"
+                )));
+            }
+            return;
+        }
+        // A `format!`/`write!` template is emitted C text, so its literal is
+        // the seam. Its arguments are ordinary expressions and must be walked
+        // as such; `syn` does not descend into macro tokens on its own.
+        let parser = Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
+        if let Ok(arguments) = parser.parse2(macro_call.tokens.clone()) {
+            for argument in &arguments {
+                self.visit_expr(argument);
             }
         }
+        self.scan_token_stream_literals(macro_call.tokens.clone());
         visit::visit_macro(self, macro_call);
     }
 }
@@ -599,9 +682,13 @@ pub fn scan_rust_source(path: &str, source: &str) -> Result<Vec<SeamRow>, ScanEr
         class,
         owners: Vec::new(),
         rows: Vec::new(),
+        error: None,
     };
     scanner.visit_file(&file);
-    Ok(scanner.rows)
+    match scanner.error {
+        Some(error) => Err(error),
+        None => Ok(scanner.rows),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -659,6 +746,7 @@ pub fn scan_c_header(path: &str, source: &str) -> Result<Vec<SeamRow>, ScanError
     let mut rows = c_descriptor_rows(&stripped);
     let mut depth = 0usize;
     let mut enclosing = String::from("module");
+    let mut owners: Vec<String> = Vec::new();
     let mut statement: Vec<String> = Vec::new();
     let mut candidate: Option<String> = None;
     let mut pending_block_owner: Option<String> = None;
@@ -678,32 +766,72 @@ pub fn scan_c_header(path: &str, source: &str) -> Result<Vec<SeamRow>, ScanError
                     candidate = Some(previous.clone());
                     pending_block_owner = Some(previous.clone());
                 }
+                // The parenthesis is part of the statement. Dropping it would
+                // leave `is_declaration_statement` with no parameter list to
+                // find, so every file-scope prototype would fall back to its
+                // enclosing frame.
+                statement.push(token.clone());
             }
             "{" => {
-                if depth == 0
-                    && let Some(owner) = pending_block_owner.take()
-                {
-                    enclosing = owner;
-                }
+                // Push a frame per brace, inheriting the enclosing owner when
+                // the brace opens no declaration. Resetting only at depth zero
+                // would let one file-scope wrapper, `extern "C" {`, own every
+                // declaration after it: the token before that brace is a
+                // string literal, not a declarator, so nothing would ever set
+                // an owner again.
+                // Only a DECLARATION's brace opens a new owner. A call whose
+                // argument is a block, `dispatch_once(&once, ^{ ... })`, would
+                // otherwise make the callee own every statement inside it.
+                let owner = pending_block_owner
+                    .take()
+                    .filter(|_| is_declaration_statement(&statement))
+                    .unwrap_or_else(|| enclosing.clone());
+                owners.push(std::mem::replace(&mut enclosing, owner));
                 depth += 1;
                 flush_c_statement(&mut rows, &mut statement, &enclosing, &mut candidate, depth);
             }
             "}" => {
                 depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    enclosing = String::from("module");
-                }
+                enclosing = owners.pop().unwrap_or_else(|| String::from("module"));
                 flush_c_statement(&mut rows, &mut statement, &enclosing, &mut candidate, depth);
             }
             ";" => {
                 flush_c_statement(&mut rows, &mut statement, &enclosing, &mut candidate, depth);
                 pending_block_owner = None;
             }
+            "#" | "%:" => {
+                // A preprocessor directive is its own statement. Without this
+                // boundary the tokens of `#include <immintrin.h>` run into the
+                // declaration that follows it, and the stray `.` makes that
+                // declaration read as a member access rather than a prototype.
+                flush_c_statement(&mut rows, &mut statement, &enclosing, &mut candidate, depth);
+                pending_block_owner = None;
+                statement.push(token.clone());
+            }
             _ => statement.push(token.clone()),
         }
     }
     flush_c_statement(&mut rows, &mut statement, &enclosing, &mut candidate, depth);
     Ok(rows)
+}
+
+/// Does this statement DECLARE something, rather than call or assign?
+///
+/// The read is positional, the way the capacity census separates type words
+/// from declarator names: a declaration's name is preceded by its type, so it
+/// is never the statement's first token, and no assignment or member access
+/// appears before its parameter list. `CHELIS_HIP_CHECK(...)` fails the first
+/// test and `t->size * chelis_gpu_dtype_size(...)` fails the second.
+fn is_declaration_statement(words: &[String]) -> bool {
+    let Some(open) = words.iter().position(|word| word == "(") else {
+        return false;
+    };
+    if open < 2 {
+        return false;
+    }
+    !words[..open]
+        .iter()
+        .any(|word| word == "=" || word == "->" || word == ".")
 }
 
 /// A declarator name is an ordinary identifier, never a control-flow keyword
@@ -738,11 +866,17 @@ fn flush_c_statement(
     if words.is_empty() {
         return;
     }
-    let owner = if depth > 0 {
-        enclosing.to_string()
-    } else {
-        declared.unwrap_or_else(|| enclosing.to_string())
+    // A DECLARATION names its own owner wherever it appears, including inside
+    // a linkage block. Any other statement belongs to the frame that encloses
+    // it, which is what puts a function body's statements on that function.
+    // Without the distinction a called function is mistaken for a declared
+    // one, and `CHELIS_HIP_CHECK(hipMemcpy(t->data, ...))` files its row under
+    // `hipMemcpy`.
+    let owner = match declared {
+        Some(name) if is_declaration_statement(&words) => name,
+        _ => enclosing.to_string(),
     };
+    let _ = depth;
     let text = words.join(" ");
     let has_element = words
         .iter()

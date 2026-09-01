@@ -819,7 +819,7 @@ Deliverables, with phase homes:
    `canonical_c_tokens`, `lex_c_tokens`, `resolve_words`, `classify`,
    `NUMERIC_C_TYPES`, and the closed `NON_NUMERIC_C_TYPE_WORDS`. They moved
    out of the tripwire body so the runtime-representation inventory
-   (chelis#893) could read the two backend runtime headers with the SAME
+   (chelis#893) could read its seven registered C headers with the SAME
    classifier rather than standing up a second one; B2 invariant 3 of
    `spec/design/runtime_representation.md` forbids a second authority for one
    question. Two behaviors widened in that move and are locked by

@@ -359,3 +359,184 @@ fn an_unknown_c_arithmetic_spelling_is_a_failure_not_an_unflagged_row() {
     // A known spelling still classifies without rejection.
     assert!(scan_c_header(HEADER, "extern float *carrier(void);").is_ok());
 }
+
+// ---------------------------------------------------------------------------
+// Regressions from the first red-team round on the rebuilt architecture.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_linkage_block_does_not_swallow_the_rest_of_a_header() {
+    // `extern "C" {` opens at file scope and the token before its brace is a
+    // string literal, not a declarator. Resetting the owner only at depth zero
+    // made every later declaration inherit `module`, so 54 of 65 rows in
+    // chelis_runtime.h collapsed onto one identity and a NEW public export
+    // could not move the freeze.
+    let rows = scan_c_header(
+        HEADER,
+        r#"
+        #ifdef __cplusplus
+        extern "C" {
+        #endif
+        float *chelis_probe_row(const chelis_tensor *t);
+        int64_t *chelis_probe_shape(const chelis_tensor *t);
+        #ifdef __cplusplus
+        }
+        #endif
+        "#,
+    )
+    .expect("header must scan");
+    let owners: Vec<&str> = rows.iter().map(|row| row.owner.as_str()).collect();
+    assert!(owners.contains(&"chelis_probe_row"), "{owners:?}");
+    assert!(owners.contains(&"chelis_probe_shape"), "{owners:?}");
+    assert!(
+        !owners.contains(&"module"),
+        "a declaration inside a linkage block owns its own row: {owners:?}"
+    );
+}
+
+#[test]
+fn a_called_function_never_becomes_the_owner_of_its_callers_body() {
+    let rows = scan_c_header(
+        HEADER,
+        r#"
+        static inline void chelis_probe_copy(chelis_tensor *t, const float *src) {
+            CHELIS_CHECK(memcpy(t->data, src, t->size * sizeof(float)));
+        }
+        "#,
+    )
+    .expect("header must scan");
+    let owners: Vec<&str> = rows.iter().map(|row| row.owner.as_str()).collect();
+    assert!(
+        owners.iter().all(|owner| *owner == "chelis_probe_copy"),
+        "a statement belongs to the function that encloses it, not to what it calls: {owners:?}"
+    );
+}
+
+#[test]
+fn a_block_argument_call_does_not_open_an_owner() {
+    // `dispatch_once(&once, ^{ ... })` is a call whose argument is a block.
+    // Its brace must not make `dispatch_once` own the enclosing function's
+    // statements.
+    let rows = scan_c_header(
+        HEADER,
+        r#"
+        static inline void chelis_probe_once(void) {
+            dispatch_once(&once, ^{
+                for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); ++i) { use(i); }
+            });
+        }
+        "#,
+    )
+    .expect("header must scan");
+    let owners: Vec<&str> = rows.iter().map(|row| row.owner.as_str()).collect();
+    assert!(!owners.contains(&"dispatch_once"), "{owners:?}");
+    assert!(owners.contains(&"chelis_probe_once"), "{owners:?}");
+}
+
+#[test]
+fn a_preprocessor_directive_does_not_bleed_into_the_next_declaration() {
+    // The tokens of `#include <immintrin.h>` used to run into the declaration
+    // that followed, and the stray `.` made it read as a member access.
+    let rows = scan_c_header(
+        HEADER,
+        r#"
+        #ifdef __AVX2__
+        #include <immintrin.h>
+        #endif
+        static inline float chelis_probe_sum(const float *p, int n);
+        "#,
+    )
+    .expect("header must scan");
+    let owners: Vec<&str> = rows.iter().map(|row| row.owner.as_str()).collect();
+    assert!(owners.contains(&"chelis_probe_sum"), "{owners:?}");
+}
+
+#[test]
+fn a_raw_element_pointer_in_a_signature_is_a_carrier_too() {
+    // Casts are not the only place one appears. A parameter, a return type,
+    // and a foreign declaration all hand one out, and Phase 3's seal has to
+    // reach every one.
+    for source in [
+        "pub fn f(p: *const i64) -> usize { 0 }",
+        "pub fn f() -> *mut f32 { std::ptr::null_mut() }",
+        r#"unsafe extern "C" { pub fn chelis_probe(p: *mut f64); }"#,
+    ] {
+        assert!(
+            kinds(RUNTIME, source).contains(&"raw-element-pointer".to_string()),
+            "signature carrier missed in: {source}"
+        );
+    }
+    // A byte pointer is still not an element pointer.
+    assert!(
+        !kinds(RUNTIME, "pub fn f(p: *mut u8) {}").contains(&"raw-element-pointer".to_string())
+    );
+}
+
+#[test]
+fn width_selection_is_one_rule_across_every_path_spelling() {
+    for source in [
+        "fn f() -> usize { size_of::<f32>() }",
+        "fn f() -> usize { std::mem::size_of::<f32>() }",
+        "fn f() -> usize { core::mem::size_of::<f32>() }",
+    ] {
+        assert_eq!(
+            kinds(RUNTIME, source),
+            vec!["width-arithmetic".to_string()],
+            "missed in: {source}"
+        );
+    }
+}
+
+#[test]
+fn seams_inside_macro_arguments_are_visited() {
+    // `syn` does not descend into macro tokens as expressions, so a seam in a
+    // `format!` argument was invisible.
+    let rows = identities(
+        BACKEND,
+        r#"unsafe fn f(t: *mut Tensor) -> String { format!("{}", (*t).data as *mut f32 as usize) }"#,
+    );
+    let found: Vec<&str> = rows.iter().map(|(kind, _)| kind.as_str()).collect();
+    assert!(found.contains(&"direct-data-access"), "{rows:?}");
+    assert!(
+        found.contains(&"raw-element-pointer"),
+        "an element cast inside a macro argument is still a carrier: {rows:?}"
+    );
+
+    // A template nested one group deep is still emitted text.
+    assert!(
+        kinds(
+            BACKEND,
+            r#"fn f() -> String { format!("{}", ("((float *)t->data)[i]")) }"#
+        )
+        .contains(&"load-store-template".to_string())
+    );
+}
+
+#[test]
+fn include_reopens_the_closed_universe_and_is_rejected() {
+    let error = scan_rust_source(RUNTIME, r#"include!("probe.in");"#)
+        .expect_err("include! splices an unscanned file and must fail closed");
+    assert!(error.message.contains("include!"), "{}", error.message);
+    assert!(
+        error.message.contains("INVENTORY_SOURCES"),
+        "the failure must name the sanctioned action: {}",
+        error.message
+    );
+}
+
+#[test]
+fn a_module_level_item_owns_its_rows() {
+    // A const or static at module scope is a declaration; its rows must not
+    // collapse onto a placeholder that names nothing.
+    let rows = identities(
+        BACKEND,
+        r#"pub const PROBE_KERNEL: &str = "((float *)t->data)[i] = 1.0f;";"#,
+    );
+    assert_eq!(
+        rows,
+        vec![(
+            "load-store-template".to_string(),
+            "PROBE_KERNEL".to_string()
+        )]
+    );
+}

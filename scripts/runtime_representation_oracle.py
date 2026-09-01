@@ -15,7 +15,7 @@ kernel behavior. It proves three things and nothing more:
 
 The inventory's completeness claim is over `INVENTORY_SOURCES`: an explicit,
 reviewed list of the repository files that can carry a representation seam.
-Fifty-one are Rust and four are plain C headers. A completeness claim stated
+Forty-eight are Rust and seven are C headers. A completeness claim stated
 over a *language* instead cannot be discharged, because a reviewer can always
 name one more construct; stated over a file list it is decidable, and
 `_assert_source_list_current` proves the list still equals the tracked contents
@@ -52,7 +52,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "31b574b80a4301d5f6d1f44cb6fb4ecaa231cd697a08e84c94b17b175fd12299"
+FREEZE_SHA256 = "fc1d7f60e3cff535af43484f7ef6d340bf3891efa335a54925279d769d940c24"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -62,13 +62,13 @@ PHASE0_COMMAND = (
 # the roots beside the list is what makes the list checkable rather than
 # aspirational.
 INVENTORY_ROOTS = (
-    "crates/chelis-runtime/src/*.rs",
-    "crates/chelis-runtime/include/*.h",
-    "crates/chelis-vocab/src/*.rs",
-    "crates/chelis-ir/src/*.rs",
-    "crates/chelis-python/src/*.rs",
-    "crates/chelis-backend-*/src/*.rs",
-    "crates/chelis-backend-*/runtime/*.h",
+    "crates/chelis-runtime/src/**/*.rs",
+    "crates/chelis-runtime/include/**/*.h",
+    "crates/chelis-vocab/src/**/*.rs",
+    "crates/chelis-ir/src/**/*.rs",
+    "crates/chelis-python/src/**/*.rs",
+    "crates/chelis-backend-*/src/**/*.rs",
+    "crates/chelis-backend-*/runtime/**/*.h",
 )
 
 INVENTORY_SOURCES: tuple[str, ...] = (
@@ -597,6 +597,17 @@ def validate_baseline(baseline: dict[str, object], rows: Sequence[InventoryRow])
         if foundation_by_id[identity] != observed.to_baseline_dict():
             raise OracleFailure(f"inventory metadata drifted for {identity}")
 
+    # The sample is evidence for a reviewer, not identity, so it stays outside
+    # the digest and may be rewritten freely by a regeneration. It must still
+    # be TRUE: an artifact whose evidence column has no currency check invites
+    # a reader to trust a line that no longer exists.
+    stored_samples = {str(row["identity"]): row.get("sample", "") for row in active}
+    for identity, observed in observed_by_id.items():
+        if stored_samples[identity] != observed.sample:
+            raise OracleFailure(
+                f"active-debt sample is stale for {identity}; regenerate the baseline"
+            )
+
 
 def validate_phase0_inventory() -> None:
     validate_baseline(load_baseline(), inventory_rows(REPO_ROOT))
@@ -774,6 +785,53 @@ def mutate_unknown_c_arithmetic_spelling(source: str) -> str:
     )
 
 
+def mutate_c_public_element_pointer_export(source: str) -> str:
+    """A new public `float *` export inside the header's linkage block.
+
+    This is the witness the C token walker previously lacked: the descriptor
+    mutation is caught by the independent `typedef struct` scan, and the
+    unknown-spelling mutation fails before owner attribution runs, so neither
+    proves this path works.
+    """
+
+    anchor = "chelis_tensor *chelis_alloc("
+    if source.count(anchor) != 1:
+        raise OracleFailure("public element-pointer mutation anchor drifted")
+    return source.replace(
+        anchor,
+        "float *runtime_representation_phase0_probe_row(chelis_tensor *t);\n" + anchor,
+        1,
+    )
+
+
+def mutate_c_body_direct_data_access(source: str) -> str:
+    """A new `->data` access inside a function body in a tracked header."""
+
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_probe_touch",
+        """static inline void runtime_representation_phase0_probe_touch(chelis_gpu_tensor *t) {
+    t->data = 0;
+}""",
+    )
+
+
+def mutate_unregistered_subdirectory_source(_source: str) -> str:
+    """A seam in a SUBDIRECTORY of an inventory root.
+
+    Cargo compiles it, so it is production source. A single-level glob did not
+    see it, which made the closure check evadable.
+    """
+
+    return """//! Temporary Phase 0 detector probe.
+
+#[allow(dead_code)]
+pub fn runtime_representation_phase0_subdirectory(concrete: usize, value: usize) -> usize {
+    concrete.saturating_mul(value)
+}
+"""
+
+
 def mutate_unregistered_inventory_source(_source: str) -> str:
     """A new file under an inventory root must fail until it is registered."""
 
@@ -809,9 +867,25 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
             SOURCE_REJECTED_FAILURE,
         ),
         _probe(
+            "raw-element-pointer",
+            "crates/chelis-runtime/include/chelis_runtime.h",
+            mutate_c_public_element_pointer_export,
+        ),
+        _probe(
+            "direct-data-access",
+            "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
+            mutate_c_body_direct_data_access,
+        ),
+        _probe(
             "unregistered-inventory-source",
             "crates/chelis-runtime/src/runtime_representation_phase0_probe.rs",
             mutate_unregistered_inventory_source,
+            SOURCE_LIST_FAILURE,
+        ),
+        _probe(
+            "unregistered-inventory-source",
+            "crates/chelis-ir/src/repr_probe/mod.rs",
+            mutate_unregistered_subdirectory_source,
             SOURCE_LIST_FAILURE,
         ),
     )
@@ -828,6 +902,12 @@ def temporary_mutation(path: Path, mutate: Callable[[str], str]) -> Iterator[Non
     _assert_source_clean(path)
     existed = path.exists()
     original = path.read_bytes() if existed else None
+    created_directories = []
+    if not existed:
+        for parent in reversed(path.parents):
+            if not parent.exists():
+                created_directories.append(parent)
+        path.parent.mkdir(parents=True, exist_ok=True)
     _invalidate_inventory_cache()
     path.write_text(mutate(original.decode("utf-8") if original else ""), encoding="utf-8")
     try:
@@ -836,6 +916,9 @@ def temporary_mutation(path: Path, mutate: Callable[[str], str]) -> Iterator[Non
         _invalidate_inventory_cache()
         if original is None:
             path.unlink(missing_ok=True)
+            for directory in reversed(created_directories):
+                if directory.is_dir() and not any(directory.iterdir()):
+                    directory.rmdir()
             if path.exists():
                 raise OracleFailure(f"failed to remove controlled mutation: {path}")
         else:

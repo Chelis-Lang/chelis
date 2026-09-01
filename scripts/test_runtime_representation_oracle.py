@@ -307,3 +307,44 @@ class ManifestTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RedTeamRegressionTests(unittest.TestCase):
+    """Regressions from the first red-team round on the rebuilt architecture."""
+
+    def test_a_subdirectory_of_a_root_is_a_candidate(self) -> None:
+        # Single-level globs did not see a file cargo compiles from a
+        # subdirectory, so the closure check could be evaded by placing a seam
+        # one directory down.
+        for root in oracle.INVENTORY_ROOTS:
+            self.assertIn("**", root, f"inventory root is not recursive: {root}")
+
+    def test_a_stale_active_debt_sample_fails(self) -> None:
+        baseline = oracle.load_baseline()
+        rows = oracle.inventory_rows(REPO_ROOT)
+        mutated = json.loads(json.dumps(baseline))
+        mutated["active_debt"][0]["sample"] = "THIS SAMPLE IS A LIE"
+        with self.assertRaisesRegex(oracle.OracleFailure, "sample is stale"):
+            oracle.validate_baseline(mutated, rows)
+
+    def test_the_c_token_walker_has_its_own_witnesses(self) -> None:
+        # The descriptor mutation is caught by an independent `typedef struct`
+        # scan and the unknown-spelling mutation fails before owner attribution
+        # runs, so neither proves the token walker works.
+        witnesses = {probe.witness_id for probe in oracle.phase0_mutation_probes()}
+        self.assertIn("phase0.mutate_c_public_element_pointer_export", witnesses)
+        self.assertIn("phase0.mutate_c_body_direct_data_access", witnesses)
+
+    def test_the_closure_check_has_a_subdirectory_witness(self) -> None:
+        paths = {probe.path.as_posix() for probe in oracle.phase0_mutation_probes()}
+        self.assertTrue(
+            any(path.count("/") > 3 and path.endswith("mod.rs") for path in paths),
+            f"no subdirectory closure witness among {sorted(paths)}",
+        )
+
+    def test_the_docstring_source_counts_match_the_frozen_list(self) -> None:
+        rust = sum(1 for path in oracle.INVENTORY_SOURCES if path.endswith(".rs"))
+        headers = len(oracle.INVENTORY_SOURCES) - rust
+        source = Path(oracle.__file__).read_text(encoding="utf-8")
+        self.assertIn(f"Forty-eight are Rust and seven are C headers", source)
+        self.assertEqual((rust, headers), (48, 7))
