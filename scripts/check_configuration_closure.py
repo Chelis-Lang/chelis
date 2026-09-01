@@ -489,9 +489,13 @@ def compiled_rust_sources(
 ) -> set[str]:
     """The repository-relative `.rs` files rustc reports having read.
 
-    Stale dep-info can only name a file some earlier run of this matrix did
-    compile, so it cannot mask a file the matrix has never compiled, which is
-    the property this leg asserts.
+    Dep-info accumulates, and every cargo invocation writes it, not only a
+    registered matrix row. A worktree where an unregistered configuration was
+    once built therefore carries dep-info for it, and this reconciliation will
+    count those files as covered. The authoritative run is consequently the CI
+    one, where the cache prunes workspace-member artifacts before saving and
+    only the registered rows execute; locally this leg can be too generous,
+    never too strict.
     """
     repo_root = repo_root.resolve()
     compiled: set[str] = set()

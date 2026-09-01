@@ -145,6 +145,41 @@ fn public_inherent_api_is_exact() {
                 .map(str::to_owned),
             ),
         ),
+        // The entry types are public API too. A new order-bearing exit could
+        // be added through one of them without touching either collection.
+        (
+            "Entry",
+            BTreeSet::from(
+                [
+                    "and_modify",
+                    "key",
+                    "or_default",
+                    "or_insert",
+                    "or_insert_with",
+                    "or_insert_with_key",
+                ]
+                .map(str::to_owned),
+            ),
+        ),
+        (
+            "OccupiedEntry",
+            BTreeSet::from(
+                [
+                    "get",
+                    "get_mut",
+                    "insert",
+                    "into_mut",
+                    "key",
+                    "remove",
+                    "remove_entry",
+                ]
+                .map(str::to_owned),
+            ),
+        ),
+        (
+            "VacantEntry",
+            BTreeSet::from(["insert", "into_key", "key"].map(str::to_owned)),
+        ),
     ]);
 
     for (type_name, methods) in expected {
@@ -191,6 +226,44 @@ fn public_trait_api_is_exact() {
                 "FromIterator",
                 "PartialEq",
                 "Serialize",
+            ]
+            .map(str::to_owned)
+        )
+    );
+}
+
+#[test]
+fn the_crate_exports_no_other_public_item() {
+    // The pinned types above are the whole public surface. A free function or
+    // a fourth type could otherwise add an exit nobody has pinned.
+    let source = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"))
+        .expect("read chelis-unord source");
+    let syntax = syn::parse_file(&source).expect("parse chelis-unord source");
+    let public: BTreeSet<String> = syntax
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Struct(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+                Some(item.ident.to_string())
+            }
+            Item::Enum(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+                Some(item.ident.to_string())
+            }
+            Item::Fn(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
+                Some(item.sig.ident.to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        public,
+        BTreeSet::from(
+            [
+                "Entry",
+                "OccupiedEntry",
+                "UnordMap",
+                "UnordSet",
+                "VacantEntry"
             ]
             .map(str::to_owned)
         )

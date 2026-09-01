@@ -1,5 +1,4 @@
 #![forbid(unsafe_code)]
-#![deny(clippy::iter_over_hash_type)]
 
 //! Order-free collections for compiler internals.
 //!

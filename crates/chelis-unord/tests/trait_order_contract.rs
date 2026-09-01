@@ -179,7 +179,7 @@ fn public_trait_callbacks_run_in_canonical_key_order() {
         );
         assert!(
             trace.take().is_empty(),
-            "the ordered exit must use the maintained canonical index without comparison callbacks"
+            "the ordered exit must not run a user comparison callback"
         );
 
         assert_eq!(

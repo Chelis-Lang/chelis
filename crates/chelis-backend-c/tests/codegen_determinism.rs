@@ -5,7 +5,7 @@
 //! iterated a `UnordMap<String, TensorType>` of input parameters; UnordMap
 //! iteration order is non-deterministic across process runs (and across
 //! compilations within a single run, since each emitter call constructs a
-//! fresh UnordMap with its own random seed under stdlib's RandomState).
+//! fresh collection, and before this PR that collection was hash-seeded).
 //!
 //! The user-visible symptom was that the input-validation block (NULL
 //! checks, ndim checks, fixed-axis-size checks, and symbolic-dim binding
@@ -16,7 +16,7 @@
 //! The two assertions below lock the invariant:
 //!   1. **Cross-process determinism.** Building the same DAG in many fresh
 //!      `CEmitter` instances within one test run produces byte-identical C.
-//!      Stdlib `RandomState` uses a per-UnordMap seed, so multiple maps
+//!      A hash map seeds per instance, so multiple maps
 //!      within one process exercise the same non-determinism that a fresh
 //!      `chelis build` would.
 //!   2. **Lex-sorted preamble.** The input-validation block lists labels
@@ -66,7 +66,7 @@ fn build_multi_input_dag() -> Dag {
 fn codegen_is_byte_deterministic_across_repeated_emissions() {
     let dag = build_multi_input_dag();
     let baseline = codegen(&dag, "multi_input").unwrap().c_source;
-    // Run many times; every emission constructs fresh HashMaps internally,
+    // Run many times; every emission constructs fresh collections internally,
     // so any residual hash-iteration non-determinism would show up here.
     for i in 0..32 {
         let again = codegen(&dag, "multi_input").unwrap().c_source;

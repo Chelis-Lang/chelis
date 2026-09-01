@@ -127,16 +127,18 @@ The wrapper lives in a new leaf crate, `chelis-unord`, that depends on `std` and
 dependency-free, and purity-locked by `crates/chelis-vocab/tests/crate_purity.rs`.
 Every crate whose sources carry a hash map (types, ir, the C, HIP, and Metal
 backends, compiler-api, cli, effects, surf, prove, lint, pipeline-core, lsp,
-validate, reef, macros, e2e) gains one direct dependency edge in Phase B, and
+validate, reef, macros, e2e, and runtime behind its `ownership-ledger` feature:
+eighteen) gains one direct dependency edge in Phase B, and
 `scripts/pipeline_core_dependency_guard.py` adds the crate to
 `APPROVED_DIRECT_DEPENDENCIES` in the same change. A test-only hit
 (`chelis-deep/src/tag.rs` and `chelis-tide/tests/mcp.rs`) migrates to an ordered
 collection without the edge.
 
-The API is keyed lookup and mutation (`insert`, `get`, `get_key_value`,
+The API is keyed lookup and mutation (`new`, `insert`, `get`, `get_key_value`,
 `get_mut`, `remove`, `contains_key`, `len`, `is_empty`, `entry`, `clear`,
-`extend`, `FromIterator`, and `merge`) plus borrowed and consuming forms of one
-no-callback ordered exit (`to_sorted`, `into_sorted`). A key used in lookup or
+`extend`, `Default`, `Index`, `From<[(K, V); N]>`, `FromIterator`, and `merge`),
+the `Entry`/`OccupiedEntry`/`VacantEntry` trio, plus borrowed and consuming
+forms of one no-callback ordered exit (`to_sorted`, `into_sorted`). A key used in lookup or
 mutation has `Ord`: its owning authority defines that order as canonical
 identity order, never as semantic priority. The wrapper's
 storage is a private `BTreeMap`/`BTreeSet`. Every key already carries `Ord`
@@ -234,9 +236,15 @@ against the prerequisite lists rustc itself wrote to `target/<profile>/deps/*.d`
 A file that no registered configuration compiled fails the gate by name. The
 only accepted absences are `UNCOMPILED_EXCEPTIONS`: the standalone compile-fail
 fixture projects, each naming the gate that compiles it, each verified to exist
-and to hold a Cargo project so a stale entry cannot survive. Stale dep-info can
-only name a file some earlier run of this matrix did compile, so it cannot mask
-a file the matrix has never compiled, which is the property this leg asserts.
+and to hold a Cargo project so a stale entry cannot survive.
+
+Dep-info accumulates, and every cargo invocation writes it, not only a
+registered row. A developer who has once built an unregistered configuration in
+that worktree therefore has dep-info for it, and leg 3 would count those files
+as covered. The authoritative reconciliation is consequently the CI one, where
+`Swatinem/rust-cache` prunes workspace-member artifacts before saving and the
+job runs only the registered rows; the local run is a fast approximation that
+can be too generous, never too strict.
 
 **Executable controls.** `scripts/test_check_configuration_closure.py` proves
 the two properties the rest rests on, with rustc rather than assertion:
@@ -248,12 +256,15 @@ a workspace that only warns, an uncovered feature, an invented feature, an
 unqualified feature spelling, a run its owner does not issue, an uncompiled
 source, an empty dep-info set, and a stale or ungated exception.
 
-**Residual, named and exact.** `z3` and `arb` need external solver toolchains
-whose per-pull-request cost this repository has already declined, so three
-sources are linted nightly rather than per pull request:
-`chelis-prove/src/z3_engine.rs` and the two `certify_*_envelope` binaries.
-`NIGHTLY_ONLY_SOURCES` lists them by path with the feature and the nightly row
-that covers each, and the list prunes itself: an entry a per-pull-request row
+**Residual, named.** `z3`, `carcara`, and `arb` need external solver toolchains
+whose per-pull-request cost this repository has already declined, so everything
+they gate is linted nightly rather than per pull request. That is three whole
+sources plus every region those three features gate inside sources the
+per-pull-request matrix does compile: `NIGHTLY_ONLY_SOURCES` names the whole
+files (`chelis-prove/src/z3_engine.rs` and the two `certify_*_envelope`
+binaries), while leg 3's reconciliation is file-granular and therefore records
+a partly-gated file as covered. The nightly `--all-features` row compiles both
+kinds, and the matrix records that cadence. The list prunes itself: an entry a per-pull-request row
 does compile is reported as stale, an entry whose file is gone is reported as
 stale, and the nightly job runs the reconciliation with `--require-complete`,
 which drops the allowance so a new uncovered file cannot be parked there.
@@ -370,8 +381,14 @@ runs the production CLI test that performs that source-only mutation; the synthe
 24-process worker is supporting byte evidence and cannot substitute for production
 threading from `PreparedReefGraph` into the stdlib cache call. After rebasing over the
 independent nominal-kind formats, Phase B advances the compiled-context cache to
-V14, the library cache to V7, the stdlib cache to V11, and the prepared-graph cache
-to V5 so neither branch-specific predecessor can decode as current. At reviewed head
+V14, the library cache to V7, the stdlib cache to V11, and the prepared-graph
+cache to V5, each strictly above the corresponding constant on `main`, so a
+payload written by `main` is a clean version mismatch rather than a misparse.
+Version numbers alone do not separate this branch's own pre-rebase head, which
+carried the same four constants with a different `TypeEnv` shape; every root
+keys on the running compiler's exact build fingerprint rather than its release
+version, so two differently built compilers never share a cache filename in the
+first place. That is the property doing the work here. At reviewed head
 `5b2dfd14`, eight fixed-source
 `CompiledContext::encode` probes produced eight distinct SHA-256 digests; that probe
 is the regression. The relevant cache format version is bumped whenever canonical
@@ -387,8 +404,9 @@ parity, reshape-regression, and fresh-process CLI suites; the raw-store compile-
 leg also runs in the gate's
 `lint-and-unit` stage and the `--local` subset, whose membership
 `scripts/test_gate.py` locks. Phase B's configuration-closure check and named
-cache-byte tests run in its named oracle, and the closure check also runs as its
-own gate stage after the two Clippy stages that produce the dep-info it reads. The fresh-process stability tests cover the [#1338] reproducer, its
+cache-byte tests run in its named oracle, and the closure check also runs in the
+gate's `lint-and-unit` stage, ordered after the Clippy commands that produce the
+dep-info it reads. The fresh-process stability tests cover the [#1338] reproducer, its
 mirrored operand order, the aliased pair, and the three-way case of Phase A, and the
 existing byte-determinism regressions (`codegen_determinism.rs`,
 `rank_poly_tier3::form3_bias_broadcast_c_is_byte_deterministic`) stay present and
