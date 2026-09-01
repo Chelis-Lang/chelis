@@ -1804,9 +1804,9 @@ pub(super) fn collect_declarations(
                 errors.push(CheckError::new(
                     CheckErrorKind::TypeMismatch,
                     format!(
-                        "`{name}` declares a dtype-family bound on its `def`, but its `sig` owns the declaration's binders"
+                        "`{name}` declares a dtype-family bound on its `def`, but a declaration's `defsig` owns its binders"
                     ),
-                    vec![format!("move the bound to `sig {name}[..]`")],
+                    vec![format!("declare the bound on `{name}`'s signature")],
                 ));
             }
         }

@@ -379,7 +379,7 @@ def f[p: Float](x: p) -> p = x
     assert!(
         errors.iter().any(|error| error
             .message
-            .contains("its `sig` owns the declaration's binders")),
+            .contains("a declaration's `defsig` owns its binders")),
         "a bound belongs to one binder list; got:\n{}",
         rendered(&errors)
     );

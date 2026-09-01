@@ -79,7 +79,7 @@ FROZEN_FILE_DIGESTS = {
         "4a6013c2dc5a074d19ae12696c109a35218facfdb423d29ff07cef79fe6689b9"
     ),
     "spec/design/dtype_semantics.md": (
-        "f0ffd7d8f1479976fa0481754751ff0b519b6557036e0dacb21ae45305a2650a"
+        "c31b56bff446ce4a562431e37e70a0128c2ff8d9c8699dbc6ad35b7833b96adb"
     ),
     "spec/design/implicit_linearity.md": (
         "f03302f4b328841d79824f6326f1edf2e954a9b98c0118992d4a3a1f2dfb67cf"

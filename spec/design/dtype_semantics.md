@@ -1357,12 +1357,31 @@ deliberately moves the complete-file digests for `spec/02-surf-syntax.md`,
 one atom to the generated rejection registry. It authors no `[05-OP]` atom and
 moves no `[05-OP]`, `[04-NUM]`, or region digest: [05-OP-35]'s metavariables
 already denoted these domains, and §5.9 names the families they denote rather
-than restating them. It changes no Table-A/Table-B cell, no §C1 semantics row,
-and no numeric-surface identity. It does bump the §C3 shell wire schema, whose
-`TypeVariableDomain` gains the two new families, so `SHELL_FORMAT_VERSION`
-moves 2 -> 3 with the encoder, decoder, and regenerated bundle artifacts in the
-same change set. Six required-literal anchors with matching mutation tests
-defend the new normative rules; connective prose rests on the file digests.
+than restating them. The `[05-OP-35]` registry is unchanged for the same
+reason: `(p_float)->p_float` is that chapter's notation for a domain, not the
+stdlib's binder spelling. It changes no Table-A/Table-B cell and no §C1
+semantics row.
+
+It does change two frozen surfaces. The §C3 shell wire schema gains two
+`TypeVariableDomain` families, so `SHELL_FORMAT_VERSION` moves 2 -> 3 with the
+encoder, decoder, and regenerated bundle artifacts in the same change set. The
+§C6 census changes in the way the ratchet prescribes for a renamed identity.
+Every stdlib signature that declared its domain through a `p_float`-style
+binder NAME now declares it as a bound, so fifteen `std-def-numeric` rows are
+removed and fifteen successors are registered; each successor carries the
+bound in its identity (`contracts::normal_cdf: [p: Float] (t-fn {} ...)`) and
+keeps its exact `[05-OP-35]` registration. The census's numeric-capacity rule
+is widened, never weakened: a declared bound is now capacity on its own, and
+the `p_float | p_int | p_numeric | q | Q` name list stays as a conservative
+backstop, so an unbounded metavariable spelling is still enumerated. Without
+that widening the rename would have silently dropped four signatures with no
+tensor type - `scalar::abs/max/min` and `contracts::normal_cdf` - out of the
+numeric surface entirely. Three controls defend it: a bounded signature with
+no other numeric spelling enumerates, the same signature without a bound does
+not, and two signatures differing only in family have distinct identities.
+
+Six required-literal anchors with matching mutation tests defend the new
+normative rules; connective prose rests on the file digests.
 
 ## B2. Invariants that hold across every boundary
 
