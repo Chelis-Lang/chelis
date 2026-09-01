@@ -99,9 +99,18 @@ clipped = clamp(running, floor15, ceil30)
 
 `Std.Tensor.Construct` builds and reshapes tensors:
 
-- `linspace(start, stop, count)`, `arange(start, stop)`.
-- `stack(xs)` concatenates a list of rows along a new leading axis.
-- `squeeze(x)` removes a size-1 dimension, `unsqueeze(x)` inserts one.
+- `linspace(start, stop, count)` uses float endpoints and an `int64` count;
+  `arange(start, stop)` uses signed-integer endpoints.
+- `stack(xs, axis)` concatenates tensors along a new axis.
+- `squeeze(x, axis)` removes a size-1 dimension; `unsqueeze(x, axis)` inserts
+  one.
+
+The three rank-changing exports are specified but their public signatures do
+not yet type-check for concrete tensor callers; see [chelis#1416](https://github.com/Chelis-Lang/chelis/issues/1416).
+The checker does not yet enforce the endpoint dtype families
+([chelis#1417](https://github.com/Chelis-Lang/chelis/issues/1417)), and C builds
+do not yet actualize the helpers' generic cast targets
+([chelis#1418](https://github.com/Chelis-Lang/chelis/issues/1418)).
 
 `Std.Tensor.Mask`:
 
@@ -132,8 +141,9 @@ repeated or nested seed handlers.
 
 `Std.Sort`:
 
-- `sort_1d(values, axis)`, `sort_2d(values, axis)`, each returning a `(values, indices)`
-  tuple.
+- `sort(values, axis)` accepts a numeric tensor of any rank and returns
+  `(sorted_values, indices)`, with both tensors preserving the input shape and
+  the indices using `int64`.
 
 `Std.Scan`:
 

@@ -177,8 +177,16 @@ pub enum RuntimeValue {
         /// Consulted by the chelis#338 named-axis routing to recover a
         /// frame binding's static tensor type (named dims) at eval time.
         param_types: Vec<Option<Expr>>,
+        /// Declared result type from the owning `defsig`, when available.
+        /// Generic cast actualization matches this against the checker-owned
+        /// call expression result, including context-fixed empty containers.
+        return_type: Option<Expr>,
         body: Expr,
         env: HashMap<String, RuntimeValue>,
+        /// Lexically captured concrete precision variables. A call derives a
+        /// fresh specialization from checked argument/result types and lets
+        /// the callee's own binders shadow same-spelled outer binders.
+        precision_env: HashMap<String, Prim>,
     },
     /// A captured `grad(f)` / `vmap(f)` waiting to be applied to args. The
     /// `transform_expr` holds the original `(grad ...)` or `(vmap ...)`
@@ -458,6 +466,10 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
 
     let mut top_level_defs = HashMap::new();
     let mut top_level_order = Vec::new();
+    let mut declared_signatures = HashMap::new();
+
+    register_declared_signatures(library_exprs, &mut declared_signatures);
+    register_declared_signatures(program.exprs(), &mut declared_signatures);
 
     // Register library defs FIRST. New-code defs will overwrite on
     // name collision below — matching the Phase C type-env shadow rule
@@ -497,9 +509,11 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     let mut ctx = EvalContext {
         bindings: HashMap::new(),
         binding_types: HashMap::new(),
+        precision_bindings: HashMap::new(),
         named_axis_route_cache: HashMap::new(),
         named_axis_route_visiting: HashSet::new(),
         top_level_defs,
+        declared_signatures,
         adt_registry: program.adt_registry().clone(),
         type_env,
         adt_fields,
@@ -637,6 +651,19 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         host_root_errors,
         transcript: ctx.transcript,
     })
+}
+
+fn register_declared_signatures(exprs: &[Expr], signatures: &mut HashMap<String, Expr>) {
+    for expr in top_level_items(exprs) {
+        let Some((DeepTag::Defsig, kids)) = tagged_expr_children(expr) else {
+            continue;
+        };
+        let (Some(name), Some(signature)) = (kids.first().and_then(symbol_name), kids.get(1))
+        else {
+            continue;
+        };
+        signatures.insert(name.to_string(), signature.clone());
+    }
 }
 
 fn register_top_level_defs(
@@ -880,11 +907,19 @@ struct EvalContext<'a> {
     /// same-named top-level `type_env` entry so a local shadow is never
     /// typed with the outer binding's type (chelis#338 named-axis routing).
     binding_types: HashMap<String, Option<Expr>>,
+    /// Call-frame actualizations for precision variables used by generic
+    /// casts. Values come only from checker-owned call-site argument/result
+    /// types matched against the callee's declared signature.
+    precision_bindings: HashMap<String, Prim>,
     /// Memoized per-def result of [`Self::def_requires_named_axis_routing`].
     named_axis_route_cache: HashMap<String, bool>,
     /// Cycle guard for the recursive routing detection walk.
     named_axis_route_visiting: HashSet<String>,
     top_level_defs: HashMap<String, Expr>,
+    /// Authored `defsig` function types, including source binder spellings.
+    /// The inferred `type_env` intentionally freshens those binders, so the
+    /// evaluator keeps this separate map for generic cast targets in bodies.
+    declared_signatures: HashMap<String, Expr>,
     /// Checker-owned nominal definitions used when the executed constructor
     /// alone cannot reveal whether the parameter type has a float leaf.
     adt_registry: chelis_types::adt::AdtRegistry,

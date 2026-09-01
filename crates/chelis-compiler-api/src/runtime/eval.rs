@@ -82,6 +82,131 @@ fn float_element_is_nan(value: ElementRef) -> bool {
     }
 }
 
+fn bind_checked_precision(
+    name: &str,
+    prim: Prim,
+    bindings: &mut HashMap<String, Prim>,
+) -> Result<(), String> {
+    match bindings.get(name) {
+        Some(existing) if *existing != prim => Err(format!(
+            "generic precision `{name}` actualized as both `{}` and `{}`",
+            existing.name(),
+            prim.name()
+        )),
+        Some(_) => Ok(()),
+        None => {
+            bindings.insert(name.to_string(), prim);
+            Ok(())
+        }
+    }
+}
+
+fn checked_precision_leaf(actual: &Expr, caller_bindings: &HashMap<String, Prim>) -> Option<Prim> {
+    let (actual_tag, actual_children) = tagged_expr_children(actual)?;
+    match actual_tag {
+        DeepTag::TPrim | DeepTag::TVar => actual_children
+            .first()
+            .and_then(symbol_name)
+            .and_then(|name| prim_from_name(name).or_else(|| caller_bindings.get(name).copied())),
+        DeepTag::TRef => actual_children
+            .first()
+            .and_then(|inner| checked_precision_leaf(inner, caller_bindings)),
+        _ => None,
+    }
+}
+
+/// Match a declared callee type against the checker's concrete call-site type
+/// and collect numeric precision actualizations. This consumes only static
+/// type evidence: runtime values cannot recover an empty container's element
+/// type and textual binder names are not identities across nested calls.
+fn collect_checked_precision_bindings(
+    declared: &Expr,
+    actual: &Expr,
+    caller_bindings: &HashMap<String, Prim>,
+    bindings: &mut HashMap<String, Prim>,
+) -> Result<(), String> {
+    let Some((declared_tag, declared_children)) = tagged_expr_children(declared) else {
+        return Ok(());
+    };
+    if declared_tag == DeepTag::TRef {
+        let Some(declared_inner) = declared_children.first() else {
+            return Ok(());
+        };
+        let actual_inner = tagged_expr_children(actual)
+            .filter(|(tag, _)| *tag == DeepTag::TRef)
+            .and_then(|(_, children)| children.first())
+            .unwrap_or(actual);
+        return collect_checked_precision_bindings(
+            declared_inner,
+            actual_inner,
+            caller_bindings,
+            bindings,
+        );
+    }
+    if declared_tag == DeepTag::TVar {
+        if let (Some(name), Some(prim)) = (
+            declared_children.first().and_then(symbol_name),
+            checked_precision_leaf(actual, caller_bindings),
+        ) {
+            return bind_checked_precision(name, prim, bindings);
+        }
+        return Ok(());
+    }
+
+    let Some((actual_tag, actual_children)) = tagged_expr_children(actual) else {
+        return Ok(());
+    };
+    if declared_tag != actual_tag {
+        return Ok(());
+    }
+
+    match declared_tag {
+        DeepTag::TTensor => {
+            let (Some(declared_precision), Some(actual_precision)) =
+                (declared_children.last(), actual_children.last())
+            else {
+                return Ok(());
+            };
+            collect_checked_precision_bindings(
+                declared_precision,
+                actual_precision,
+                caller_bindings,
+                bindings,
+            )
+        }
+        DeepTag::TAdt | DeepTag::TTuple | DeepTag::TFn => {
+            for (declared_child, actual_child) in declared_children.iter().zip(actual_children) {
+                collect_checked_precision_bindings(
+                    declared_child,
+                    actual_child,
+                    caller_bindings,
+                    bindings,
+                )?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn checked_list_element(actual: &Expr) -> Option<&Expr> {
+    let (tag, children) = tagged_expr_children(actual)?;
+    match tag {
+        DeepTag::TRef => children.first().and_then(checked_list_element),
+        DeepTag::TAdt if children.first().and_then(symbol_name) == Some("List") => children.get(1),
+        _ => None,
+    }
+}
+
+fn checked_function_children(actual: &Expr) -> Option<&[Expr]> {
+    let (tag, children) = tagged_expr_children(actual)?;
+    match tag {
+        DeepTag::TRef => children.first().and_then(checked_function_children),
+        DeepTag::TFn => Some(children),
+        _ => None,
+    }
+}
+
 fn render_shape(shape: &[usize]) -> String {
     let dimensions = shape
         .iter()
@@ -131,6 +256,19 @@ impl<'a> EvalContext<'a> {
                     .is_none()
                     .then_some((key.clone(), value.clone()))
             })
+    }
+
+    fn lookup_declared_signature(&self, name: &str) -> Option<&Expr> {
+        self.declared_signatures.get(name).or_else(|| {
+            let mut matches = self
+                .declared_signatures
+                .iter()
+                .filter_map(|(key, signature)| {
+                    terminal_name_matches(key, name).then_some(signature)
+                });
+            let signature = matches.next()?;
+            matches.next().is_none().then_some(signature)
+        })
     }
 
     pub(super) fn eval_expr(&mut self, expr: &Expr) -> Result<RuntimeValue, String> {
@@ -544,9 +682,20 @@ impl<'a> EvalContext<'a> {
             .get(1)
             .ok_or_else(|| "fn missing body".to_string())?
             .clone();
+        let return_type = self
+            .resolving_top_levels
+            .last()
+            .and_then(|name| self.lookup_declared_signature(name))
+            .and_then(|signature| {
+                tagged_expr_children(signature)
+                    .filter(|(tag, _)| *tag == DeepTag::TFn)
+                    .and_then(|(_, children)| children.last())
+            })
+            .cloned();
         Ok(RuntimeValue::Closure {
             params,
             param_types,
+            return_type,
             body,
             env: self
                 .bindings
@@ -554,6 +703,7 @@ impl<'a> EvalContext<'a> {
                 .filter(|(name, _)| !self.top_level_defs.contains_key(*name))
                 .map(|(name, value)| (name.clone(), value.clone()))
                 .collect(),
+            precision_env: self.precision_bindings.clone(),
         })
     }
 
@@ -592,6 +742,13 @@ impl<'a> EvalContext<'a> {
             return self.eval_named_axis_reduction_app(expand_name, kids);
         }
 
+        let arg_type_exprs = kids[1..]
+            .iter()
+            .map(|arg| self.static_type_expr_of(arg))
+            .collect::<Vec<_>>();
+        let result_type_expr = get_meta(list)
+            .and_then(|meta| meta.entries.iter().find(|(key, _)| key == "type"))
+            .map(|(_, ty)| ty.clone());
         let args = kids[1..]
             .iter()
             .map(|arg| self.eval_expr(arg))
@@ -650,7 +807,7 @@ impl<'a> EvalContext<'a> {
         }
 
         if let Some(name) = builtin_name(func) {
-            return self.eval_builtin(name, &args);
+            return self.eval_builtin(name, &args, &arg_type_exprs, result_type_expr.as_ref());
         }
 
         // chelis#338 site B: a call to a top-level def whose body needs
@@ -672,10 +829,6 @@ impl<'a> EvalContext<'a> {
             return Ok(routed);
         }
 
-        let arg_type_exprs = kids[1..]
-            .iter()
-            .map(|arg| self.static_type_expr_of(arg))
-            .collect::<Vec<_>>();
         // chelis#721: when the callee names a `(fn …)`-bodied top-level def and
         // is NOT a local binding, resolve it directly to its Closure. A nullary
         // (or otherwise DAG-lowerable) def folds to a constant that lands in
@@ -694,7 +847,12 @@ impl<'a> EvalContext<'a> {
         } else {
             self.eval_expr(func)?
         };
-        self.apply_resolved_callable_with_arg_types(callable, args, &arg_type_exprs)
+        self.apply_resolved_callable_with_arg_types(
+            callable,
+            args,
+            &arg_type_exprs,
+            result_type_expr.as_ref(),
+        )
     }
 
     fn eval_if(&mut self, list: &List) -> Result<RuntimeValue, String> {
@@ -839,7 +997,7 @@ impl<'a> EvalContext<'a> {
         let mut value = self.eval_expr(head)?;
         for stage in kids.iter().skip(1) {
             let next_ty = self.pipe_stage_output_type(stage, value_ty.as_ref());
-            value = self.apply_callable(stage, vec![value], &[value_ty])?;
+            value = self.apply_callable(stage, vec![value], &[value_ty], next_ty.as_ref())?;
             value_ty = next_ty;
         }
         Ok(value)
@@ -905,14 +1063,19 @@ impl<'a> EvalContext<'a> {
         stage: &Expr,
         args: Vec<RuntimeValue>,
         arg_type_exprs: &[Option<Expr>],
+        result_type_expr: Option<&Expr>,
     ) -> Result<RuntimeValue, String> {
         if let Some(name) = builtin_name(stage) {
-            return self.eval_builtin(name, &args);
+            return self.eval_builtin(name, &args, arg_type_exprs, result_type_expr);
         }
         match self.eval_expr(stage)? {
-            value @ (RuntimeValue::Closure { .. } | RuntimeValue::Transform { .. }) => {
-                self.apply_resolved_callable_with_arg_types(value, args, arg_type_exprs)
-            }
+            value @ (RuntimeValue::Closure { .. } | RuntimeValue::Transform { .. }) => self
+                .apply_resolved_callable_with_arg_types(
+                    value,
+                    args,
+                    arg_type_exprs,
+                    result_type_expr,
+                ),
             other => Err(format!("pipe stage is not callable: {other:?}")),
         }
     }
@@ -922,7 +1085,7 @@ impl<'a> EvalContext<'a> {
         callable: RuntimeValue,
         args: Vec<RuntimeValue>,
     ) -> Result<RuntimeValue, String> {
-        self.apply_resolved_callable_with_arg_types(callable, args, &[])
+        self.apply_resolved_callable_with_arg_types(callable, args, &[], None)
     }
 
     /// Like [`Self::apply_resolved_callable`], but additionally records a
@@ -935,13 +1098,16 @@ impl<'a> EvalContext<'a> {
         callable: RuntimeValue,
         args: Vec<RuntimeValue>,
         arg_type_exprs: &[Option<Expr>],
+        result_type_expr: Option<&Expr>,
     ) -> Result<RuntimeValue, String> {
         match callable {
             RuntimeValue::Closure {
                 params,
                 param_types,
+                return_type,
                 body,
                 env,
+                precision_env,
             } => {
                 if params.len() != args.len() {
                     return Err(format!(
@@ -952,31 +1118,61 @@ impl<'a> EvalContext<'a> {
                 }
                 let saved = self.bindings.clone();
                 let saved_types = std::mem::take(&mut self.binding_types);
+                let saved_precisions = std::mem::take(&mut self.precision_bindings);
                 self.bindings = env;
-                for (index, (param, arg)) in params.into_iter().zip(args).enumerate() {
-                    let declared = param_types
-                        .get(index)
-                        .cloned()
-                        .flatten()
-                        .or_else(|| arg_type_exprs.get(index).cloned().flatten());
-                    // chelis#729 Phase 1: a tensor argument ingress-finalizes
-                    // at the param's DECLARED element dtype (the host-lane
-                    // mirror of the DAG evaluator's Load ingress). Without
-                    // this, an Int64-tagged `to_tensor` literal flows into an
-                    // int8-typed param and the arithmetic runs at the wrong
-                    // width (the chelis#718 eval-tensor cell).
-                    let arg = match (declared.as_ref().and_then(declared_tensor_prim), arg) {
-                        (Some(prim), RuntimeValue::Tensor(tensor)) => {
-                            RuntimeValue::Tensor(ingress_tensor_to_declared(tensor, prim)?)
+                self.precision_bindings = precision_env;
+                let value = (|| {
+                    let caller_precisions = saved_precisions.clone();
+                    let mut call_precisions = HashMap::new();
+                    for (declared, actual) in param_types.iter().zip(arg_type_exprs) {
+                        if let (Some(declared), Some(actual)) = (declared, actual) {
+                            collect_checked_precision_bindings(
+                                declared,
+                                actual,
+                                &caller_precisions,
+                                &mut call_precisions,
+                            )?;
                         }
-                        (_, arg) => arg,
-                    };
-                    self.binding_types.insert(param.clone(), declared);
-                    self.bindings.insert(param, arg);
-                }
-                let value = self.eval_expr(&body);
+                    }
+                    if let (Some(declared), Some(actual)) = (return_type.as_ref(), result_type_expr)
+                    {
+                        collect_checked_precision_bindings(
+                            declared,
+                            actual,
+                            &caller_precisions,
+                            &mut call_precisions,
+                        )?;
+                    }
+                    // The call-site instantiation is fresh (spec/04 §5.8):
+                    // callee-owned binders shadow a same-spelled lexical
+                    // binding instead of conflicting with it.
+                    self.precision_bindings.extend(call_precisions);
+                    for (index, (param, arg)) in params.into_iter().zip(args).enumerate() {
+                        let declared = param_types
+                            .get(index)
+                            .cloned()
+                            .flatten()
+                            .or_else(|| arg_type_exprs.get(index).cloned().flatten());
+                        // chelis#729 Phase 1: a tensor argument ingress-finalizes
+                        // at the param's DECLARED element dtype (the host-lane
+                        // mirror of the DAG evaluator's Load ingress). Without
+                        // this, an Int64-tagged `to_tensor` literal flows into an
+                        // int8-typed param and the arithmetic runs at the wrong
+                        // width (the chelis#718 eval-tensor cell).
+                        let arg = match (declared.as_ref().and_then(declared_tensor_prim), arg) {
+                            (Some(prim), RuntimeValue::Tensor(tensor)) => {
+                                RuntimeValue::Tensor(ingress_tensor_to_declared(tensor, prim)?)
+                            }
+                            (_, arg) => arg,
+                        };
+                        self.binding_types.insert(param.clone(), declared);
+                        self.bindings.insert(param, arg);
+                    }
+                    self.eval_expr(&body)
+                })();
                 self.bindings = saved;
                 self.binding_types = saved_types;
+                self.precision_bindings = saved_precisions;
                 value
             }
             RuntimeValue::Transform {
@@ -1005,6 +1201,7 @@ impl<'a> EvalContext<'a> {
         // f8e4m3 (spec/04-type-system.md §1.1.1) at this point so the
         // host eval lane just needs to pick the right re-pack.
         let target_prim = prim_from_name(target)
+            .or_else(|| self.precision_bindings.get(target).copied())
             .ok_or_else(|| format!("cast target `{target}` is not a recognized primitive type"))?;
         // [05-OP-6]: the truncating rung has its own sealed kernel and
         // its own trap brand. The checker has already pinned the pair to
@@ -1068,7 +1265,13 @@ impl<'a> EvalContext<'a> {
         }
     }
 
-    fn eval_builtin(&mut self, name: &str, args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
+    fn eval_builtin(
+        &mut self,
+        name: &str,
+        args: &[RuntimeValue],
+        arg_type_exprs: &[Option<Expr>],
+        result_type_expr: Option<&Expr>,
+    ) -> Result<RuntimeValue, String> {
         match name {
             "add" => numeric_binop(args, Some(IntBinOp::Add), Some(FloatBinOp::Add)),
             "sub" => numeric_binop(args, Some(IntBinOp::Sub), Some(FloatBinOp::Sub)),
@@ -1331,9 +1534,20 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "map expects 2 arguments".to_string())?;
                 let items = expect_list_arg(args, 1)?;
+                let callback_arg_types = [arg_type_exprs
+                    .get(1)
+                    .and_then(Option::as_ref)
+                    .and_then(checked_list_element)
+                    .cloned()];
+                let callback_result_type = result_type_expr.and_then(checked_list_element);
                 let mut out = Vec::with_capacity(items.len());
                 for item in items {
-                    out.push(self.apply_resolved_callable(callback.clone(), vec![item])?);
+                    out.push(self.apply_resolved_callable_with_arg_types(
+                        callback.clone(),
+                        vec![item],
+                        &callback_arg_types,
+                        callback_result_type,
+                    )?);
                 }
                 Ok(RuntimeValue::List(out))
             }
@@ -1343,10 +1557,19 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "filter expects 2 arguments".to_string())?;
                 let items = expect_list_arg(args, 1)?;
+                let callback_arg_types = [arg_type_exprs
+                    .get(1)
+                    .and_then(Option::as_ref)
+                    .and_then(checked_list_element)
+                    .cloned()];
                 let mut out = Vec::new();
                 for item in items {
-                    let keep =
-                        self.apply_resolved_callable(callback.clone(), vec![item.clone()])?;
+                    let keep = self.apply_resolved_callable_with_arg_types(
+                        callback.clone(),
+                        vec![item.clone()],
+                        &callback_arg_types,
+                        None,
+                    )?;
                     match keep {
                         RuntimeValue::Bool(true) => out.push(item),
                         RuntimeValue::Bool(false) => {}
@@ -1367,8 +1590,21 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "fold expects 3 arguments".to_string())?;
                 let items = expect_list_arg(args, 2)?;
+                let callback_arg_types = [
+                    arg_type_exprs.get(1).cloned().flatten(),
+                    arg_type_exprs
+                        .get(2)
+                        .and_then(Option::as_ref)
+                        .and_then(checked_list_element)
+                        .cloned(),
+                ];
                 for item in items {
-                    acc = self.apply_resolved_callable(callback.clone(), vec![acc, item])?;
+                    acc = self.apply_resolved_callable_with_arg_types(
+                        callback.clone(),
+                        vec![acc, item],
+                        &callback_arg_types,
+                        result_type_expr,
+                    )?;
                 }
                 Ok(acc)
             }
@@ -1382,9 +1618,23 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "scan expects 3 arguments".to_string())?;
                 let items = expect_list_arg(args, 2)?;
+                let callback_arg_types = [
+                    arg_type_exprs.get(1).cloned().flatten(),
+                    arg_type_exprs
+                        .get(2)
+                        .and_then(Option::as_ref)
+                        .and_then(checked_list_element)
+                        .cloned(),
+                ];
+                let callback_result_type = result_type_expr.and_then(checked_list_element);
                 let mut out = Vec::with_capacity(items.len());
                 for item in items {
-                    acc = self.apply_resolved_callable(callback.clone(), vec![acc, item])?;
+                    acc = self.apply_resolved_callable_with_arg_types(
+                        callback.clone(),
+                        vec![acc, item],
+                        &callback_arg_types,
+                        callback_result_type,
+                    )?;
                     out.push(acc.clone());
                 }
                 Ok(RuntimeValue::List(out))
@@ -1438,9 +1688,24 @@ impl<'a> EvalContext<'a> {
                 let mut ints: Vec<i64> = Vec::new();
                 let mut floats: Vec<f64> = Vec::new();
                 let mut acc = initial;
+                let callback_type_children = arg_type_exprs
+                    .get(1)
+                    .and_then(Option::as_ref)
+                    .and_then(checked_function_children);
+                let initial_type = arg_type_exprs.first().cloned().flatten();
+                let callback_arg_types = [
+                    initial_type.clone(),
+                    callback_type_children.and_then(|children| children.get(1).cloned()),
+                ];
+                let callback_result_type = initial_type.as_ref();
                 for i in 0..n {
                     let index = RuntimeValue::int64(i as i64);
-                    acc = self.apply_resolved_callable(callback.clone(), vec![acc, index])?;
+                    acc = self.apply_resolved_callable_with_arg_types(
+                        callback.clone(),
+                        vec![acc, index],
+                        &callback_arg_types,
+                        callback_result_type,
+                    )?;
                     // Validate per-step that the accumulator stayed the same
                     // scalar precision; this catches a misbehaving callback
                     // that returns a different dtype before it corrupts the
@@ -1490,11 +1755,20 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "partition expects 2 arguments".to_string())?;
                 let items = expect_list_arg(args, 1)?;
+                let callback_arg_types = [arg_type_exprs
+                    .get(1)
+                    .and_then(Option::as_ref)
+                    .and_then(checked_list_element)
+                    .cloned()];
                 let mut kept = Vec::new();
                 let mut rejected = Vec::new();
                 for item in items {
-                    let keep =
-                        self.apply_resolved_callable(callback.clone(), vec![item.clone()])?;
+                    let keep = self.apply_resolved_callable_with_arg_types(
+                        callback.clone(),
+                        vec![item.clone()],
+                        &callback_arg_types,
+                        None,
+                    )?;
                     match keep {
                         RuntimeValue::Bool(true) => kept.push(item),
                         RuntimeValue::Bool(false) => rejected.push(item),
@@ -1516,10 +1790,19 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "flat_map expects 2 arguments".to_string())?;
                 let items = expect_list_arg(args, 1)?;
+                let callback_arg_types = [arg_type_exprs
+                    .get(1)
+                    .and_then(Option::as_ref)
+                    .and_then(checked_list_element)
+                    .cloned()];
                 let mut out = Vec::new();
                 for item in items {
-                    let mapped =
-                        self.apply_resolved_callable(callback.clone(), vec![item.clone()])?;
+                    let mapped = self.apply_resolved_callable_with_arg_types(
+                        callback.clone(),
+                        vec![item.clone()],
+                        &callback_arg_types,
+                        result_type_expr,
+                    )?;
                     let RuntimeValue::List(inner) = mapped else {
                         return Err(format!(
                             "flat_map callback must return List, got {mapped:?}"
