@@ -229,3 +229,22 @@ fn matching_inline_identity_chain_still_checks() {
     assert_eq!(report["score"], 1, "clean control must score perfectly");
     assert_eq!(report["errors"], serde_json::json!([]));
 }
+
+#[test]
+fn lexical_floor_div_parameter_is_not_reclassified_by_identity_registry() {
+    let source = "module Repro.ShadowedIdentity\n\
+def lift(x: tensor[n, f32]) -> tensor[2, n, f32] = expand(x, 0i32, 2i64)\n\
+def apply(floor_div: (tensor[n, f32] -> tensor[2, n, f32]), x: tensor[n, f32]) -> tensor[2, n, f32] = {\n\
+  s = stride(x, 2i64)\n\
+  e = expand(x, 0i32, 2i64)\n\
+  add(floor_div(s), e)\n\
+}\n\
+out = apply(lift, to_tensor([1.0, 2.0, 3.0, 4.0]))\n";
+    let (status, report) = check(source);
+    assert!(
+        status.success(),
+        "lexical precedence must win over the central builtin registry: {report}"
+    );
+    assert_eq!(report["score"], 1, "clean control must score perfectly");
+    assert_eq!(report["errors"], serde_json::json!([]));
+}

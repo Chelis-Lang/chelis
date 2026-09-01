@@ -1404,6 +1404,7 @@ pub(super) fn validate_ir_expr(
                         type_env,
                         &mut scoped_static_env,
                         failed_let_names,
+                        declared_signatures,
                         errors,
                     );
                 }
@@ -1532,6 +1533,7 @@ pub(super) fn validate_ir_expr(
                         list,
                         func_name,
                         type_env,
+                        static_env,
                         failed_let_names,
                         errors,
                     );
@@ -2139,11 +2141,12 @@ pub(super) fn validate_ir_builtin_symbolic_requirements(
     list: &deep::List,
     func_name: &str,
     type_env: &IrTypeEnv,
+    static_env: &UnordMap<String, StaticValue>,
     failed_let_names: &UnordSet<String>,
     errors: &mut DiagnosticSink<'_>,
 ) {
     if crate::shape_class(func_name) == crate::ShapeClass::Identity {
-        validate_identity_builtin_rank_requirements(list, func_name, type_env, errors);
+        validate_identity_builtin_rank_requirements(list, func_name, type_env, static_env, errors);
     }
     match func_name {
         "conv2d" => validate_conv2d_symbolic_requirements(list, type_env, failed_let_names, errors),
@@ -2553,8 +2556,8 @@ pub(super) fn derive_ir_builtin_output_type(
     let func_name = active_ir_builtin_name(list, static_env)?;
     match func_name {
         "conv2d" => derive_conv2d_output_type(list, type_env),
-        "stride" => derive_movement_rank_output_type(list, type_env, 0),
-        "expand" => derive_movement_rank_output_type(list, type_env, 1),
+        "stride" => derive_movement_rank_output_type(list, type_env, static_env, 0),
+        "expand" => derive_movement_rank_output_type(list, type_env, static_env, 1),
         // softmax takes a (tensor, axis) tuple but its output shape
         // equals the input tensor's shape, but it is intentionally not in the
         // rank-polymorphism Identity class because its axis is positional.
@@ -2599,9 +2602,7 @@ pub(super) fn derive_identity_shape_passthrough(
     list.elements
         .iter()
         .skip(3)
-        .find_map(|argument| {
-            resolve_let_value_tensor_rank_type(argument, type_env, static_env)
-        })
+        .find_map(|argument| resolve_let_value_tensor_rank_type(argument, type_env, static_env))
 }
 
 /// Resolve a tensor type for an identity op's output, retaining a rank-only
@@ -2614,7 +2615,7 @@ fn resolve_let_value_tensor_rank_type(
     type_env: &IrTypeEnv,
     static_env: &UnordMap<String, StaticValue>,
 ) -> Option<deep::Expr> {
-    if let Some(ty) = arg_tensor_rank_type_expr(expr, type_env) {
+    if let Some(ty) = arg_tensor_rank_type_expr(expr, type_env, static_env) {
         return Some(ty);
     }
     // Peek through borrow before recursing in case a wrapper op

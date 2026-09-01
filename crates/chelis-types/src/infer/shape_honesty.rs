@@ -48,11 +48,12 @@ pub(super) fn validate_identity_builtin_rank_requirements(
     list: &deep::List,
     func_name: &str,
     type_env: &IrTypeEnv,
+    static_env: &HashMap<String, StaticValue>,
     errors: &mut DiagnosticSink<'_>,
 ) {
     let mut expected_rank: Option<usize> = None;
     for argument in list.elements.iter().skip(3) {
-        let Some(dims) = arg_tensor_rank_type_expr(argument, type_env)
+        let Some(dims) = arg_tensor_rank_type_expr(argument, type_env, static_env)
             .as_ref()
             .and_then(tensor_dims_from_type_expr)
         else {
@@ -91,12 +92,13 @@ pub(super) fn validate_identity_builtin_rank_requirements(
 pub(super) fn derive_movement_rank_output_type(
     list: &deep::List,
     type_env: &IrTypeEnv,
+    static_env: &HashMap<String, StaticValue>,
     added_axes: usize,
 ) -> Option<deep::Expr> {
     let input_ty = list
         .elements
         .get(3)
-        .and_then(|argument| arg_tensor_rank_type_expr(argument, type_env))?;
+        .and_then(|argument| arg_tensor_rank_type_expr(argument, type_env, static_env))?;
     let input_rank = tensor_dims_from_type_expr(&input_ty)?.len();
     let precision = tensor_precision_expr(&input_ty)?;
     let mut children = (0..input_rank.checked_add(added_axes)?)
@@ -126,6 +128,7 @@ pub(super) fn arg_tensor_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> O
 pub(super) fn arg_tensor_rank_type_expr(
     expr: &deep::Expr,
     type_env: &IrTypeEnv,
+    static_env: &HashMap<String, StaticValue>,
 ) -> Option<deep::Expr> {
     let inner = peel_borrow(expr);
     // An inline identity application can carry a stamped wildcard tensor
@@ -133,7 +136,8 @@ pub(super) fn arg_tensor_rank_type_expr(
     // derivation for recognized builtins before consulting that stamp. This
     // is the same resolver used for let-bound values, so introducing or
     // removing a binding cannot change rank-honesty validation (chelis#668).
-    derive_ir_builtin_output_type(inner, type_env).or_else(|| expr_type_expr(inner, type_env))
+    derive_ir_builtin_output_type(inner, type_env, static_env)
+        .or_else(|| expr_type_expr(inner, type_env))
 }
 
 pub(super) fn type_expr_is_rank_only(expr: &deep::Expr) -> bool {
