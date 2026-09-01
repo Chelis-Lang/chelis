@@ -172,9 +172,6 @@ pub(super) fn expr_shape_type_fact(
     stack_guard!("expr_shape_type_fact", expr, None);
     match expr {
         deep::Expr::Node(node, _) => {
-            if let Some((_, ty)) = node.meta().entries.iter().find(|(key, _)| key == "type") {
-                return Some(ShapeTypeFact::Exact(ty.clone()));
-            }
             if node.tag() == DeepTag::Var
                 && let Some(name) = node.children_slice().first().and_then(symbol_name)
             {
@@ -183,11 +180,6 @@ pub(super) fn expr_shape_type_fact(
             None
         }
         deep::Expr::List(list, _) => {
-            if let Some(meta) = get_meta(list)
-                && let Some((_, ty)) = meta.entries.iter().find(|(key, _)| key == "type")
-            {
-                return Some(ShapeTypeFact::Exact(ty.clone()));
-            }
             if get_tag(list) == Some(DeepTag::Var)
                 && let Some(name) = children(list).first().and_then(symbol_name)
             {

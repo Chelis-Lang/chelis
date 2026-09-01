@@ -1289,6 +1289,10 @@ PP5 closes the class at two boundaries:
    validator state. Exact-shape validators consume only the enum's `Exact`
    variant, so the checker neither copies nor invents runtime extents and a
    symbolic movement result cannot masquerade as a proved concrete shape.
+   The carrier accepts exact facts only from checker-owned lexical bindings;
+   raw `type` metadata on any runtime expression is source syntax, not
+   validator evidence, and cannot override either an exact or rank-only
+   binding.
 3. Every builtin classified centrally as `ShapeClass::Identity` enters one
    rank validator. Two tensor operands with different positive ranks produce
    a located `DimensionMismatch`, make `check` exit nonzero, and force

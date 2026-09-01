@@ -31,6 +31,26 @@ fn check(source: &str) -> (std::process::ExitStatus, Value) {
     (output.status, report)
 }
 
+fn check_deep(source: &str) -> (std::process::ExitStatus, Value) {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("rank_honesty.dp");
+    fs::write(&path, source).expect("write Deep source");
+    let output = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["check", path.to_str().expect("UTF-8 path")])
+        .output()
+        .expect("run chelis check on Deep source");
+    let report = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "Deep check must emit JSON ({error}); stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    (output.status, report)
+}
+
 fn rank_divergent_source(rhs: &str) -> String {
     format!(
         "module Repro.RankDivergent\n\
@@ -263,4 +283,47 @@ def convolve(\n\
     );
     assert_eq!(report["score"], 1, "clean control must score perfectly");
     assert_eq!(report["errors"], serde_json::json!([]));
+}
+
+#[test]
+fn authored_deep_type_metadata_cannot_override_checker_owned_rank_facts() {
+    let control = "(def {}
+  f
+  (fn {}
+    (params {} (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))}))
+    (let {}
+      (bind {}
+        s
+        (app {} (var {} stride) (var {} x) (lit {type: (t-prim {} int64)} 2)))
+      (let {}
+        (bind {}
+          e
+          (app {}
+            (var {} expand)
+            (var {} x)
+            (lit {type: (t-prim {} int32)} 0)
+            (lit {type: (t-prim {} int64)} 2)))
+        (app {} (var {} add) (var {} s) (var {} e))))))
+";
+    let forged = control.replace(
+        "(app {} (var {} add) (var {} s) (var {} e))",
+        "(app {}
+          (var {} add)
+          (var {type: (t-tensor {} (d-lit {} 2) (d-name {} n) (t-prim {} f32))} s)
+          (var {} e))",
+    );
+
+    for (label, source) in [("control", control), ("forged", forged.as_str())] {
+        let (status, report) = check_deep(source);
+        assert!(
+            !status.success(),
+            "{label} rank mismatch must fail even when authored metadata claims another rank: {report}"
+        );
+        assert!(
+            report["errors"].as_array().is_some_and(|errors| errors
+                .iter()
+                .any(|error| error["kind"] == "DimensionMismatch")),
+            "{label} must retain the checker-owned dimension mismatch: {report}"
+        );
+    }
 }
