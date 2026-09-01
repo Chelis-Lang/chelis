@@ -236,14 +236,15 @@ pub(super) fn infer_program_with_product_in_session(
     // `(module {} name ...)` wrappers so declarations in every idiomatic
     // Surf source (every .ch starts with `module X`) get collected.
     let items = top_level_decl_items_with_modules(exprs);
-    collect_all_declarations(&items, &mut env, &mut vg, &mut subst, &mut adt_reg, errors);
+    let source_ordered_signatures =
+        collect_all_declarations(&items, &mut env, &mut vg, &mut subst, &mut adt_reg, errors);
     product.type_headers = adt_reg.resolution_env().clone();
     product.adt_registry = adt_reg.clone();
 
     // Checker-enforced opacity (RFC D-CHECK): install the per-run
     // context so the inference hooks see module identity, exports,
     // and producer text. Dropped at the end of this function.
-    let opacity_meta = build_opacity_meta(&items, &adt_reg, &env);
+    let opacity_meta = build_opacity_meta(&items, &adt_reg, &env, &source_ordered_signatures);
     let _opacity_guard = crate::opacity::install_opacity_context(
         crate::opacity::OpacityContextData::from_meta(opacity_meta),
     );
@@ -314,6 +315,11 @@ pub(super) fn infer_program_with_product_in_session(
             crate::opacity::set_current_item(
                 crate::opacity::module_key_for_item(module.as_deref(), decl_name),
                 decl_name.map(str::to_string),
+            );
+            prebind_source_ordered_signature_for_declaration(
+                expr,
+                &source_ordered_signatures,
+                &mut env,
             );
             let external_input_failure = prebind_literal_external_input_for_declaration(
                 declaration_index,
@@ -1182,7 +1188,7 @@ pub(super) fn infer_ir_program_with_state(
     // Surf source wraps its declarations in `module X`, and without
     // flattening none of the walkers below see any def/defsig/deftype.
     let items = top_level_decl_items_with_modules(exprs);
-    collect_all_declarations(
+    let source_ordered_signatures = collect_all_declarations(
         &items,
         &mut state.env,
         &mut state.var_gen,
@@ -1197,7 +1203,12 @@ pub(super) fn infer_ir_program_with_state(
     // program-shape metadata into the persistent state (so the
     // stacked library/new-code paths keep library exports visible)
     // and install the per-run context for the inference hooks.
-    let phase_meta = build_opacity_meta(&items, &state.adt_reg, &state.env);
+    let phase_meta = build_opacity_meta(
+        &items,
+        &state.adt_reg,
+        &state.env,
+        &source_ordered_signatures,
+    );
     state.opacity.merge_from(&phase_meta);
     let _opacity_guard = crate::opacity::install_opacity_context(
         crate::opacity::OpacityContextData::from_meta(state.opacity.clone()),
@@ -1356,6 +1367,11 @@ pub(super) fn infer_ir_program_with_state(
             crate::opacity::set_current_item(
                 crate::opacity::module_key_for_item(module.as_deref(), decl_name),
                 decl_name.map(str::to_string),
+            );
+            prebind_source_ordered_signature_for_declaration(
+                expr,
+                &source_ordered_signatures,
+                &mut state.env,
             );
             let external_input_failure = prebind_literal_external_input_for_declaration(
                 declaration_index,
@@ -1618,16 +1634,6 @@ pub(super) struct CollectedIrTypes {
     final_origin_by_name: HashMap<String, usize>,
 }
 
-fn definition_owns_function_metadata_prebind(expr: &deep::Expr) -> bool {
-    let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
-        return false;
-    };
-    let Some(body) = kids.get(1) else {
-        return false;
-    };
-    tagged_children(body, DeepTag::Fn).is_some()
-}
-
 fn collect_literal_external_input_types(
     items: &[(Option<String>, &deep::Expr)],
 ) -> HashMap<usize, deep::Expr> {
@@ -1646,6 +1652,22 @@ fn collect_literal_external_input_types(
                 .then(|| (declaration_index, ty_expr.clone()))
         })
         .collect()
+}
+
+/// Install an eager value's authored signature at the matching `def`, never
+/// during the global header pass. Function signatures are absent from this
+/// map and remain globally visible for forward calls and SCC inference.
+fn prebind_source_ordered_signature_for_declaration(
+    expr: &deep::Expr,
+    source_ordered_signatures: &SourceOrderedValueSignatures,
+    env: &mut Env,
+) {
+    let Some(name) = top_level_decl_name(expr) else {
+        return;
+    };
+    if let Some(signature) = source_ordered_signatures.get(name) {
+        env.bind(name.to_string(), signature.clone());
+    }
 }
 
 /// [04-INF-4]'s typed literal self-reference declares an external input. Its

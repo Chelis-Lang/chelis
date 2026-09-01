@@ -887,9 +887,24 @@ pub(super) enum DeclPhase {
     Rest,
 }
 
+pub(super) type SourceOrderedValueSignatures = HashMap<String, Scheme>;
+
+pub(super) fn definition_owns_function_metadata_prebind(expr: &deep::Expr) -> bool {
+    let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
+        return false;
+    };
+    let Some(body) = kids.get(1) else {
+        return false;
+    };
+    tagged_children(body, DeepTag::Fn).is_some()
+}
+
 /// Run the two-phase declaration collection over `items` (already flattened
-/// past `module` wrappers, each paired with its lexical module key):
-/// register all type aliases, then everything else.
+/// past `module` wrappers, each paired with its lexical module key): register
+/// all type aliases, then everything else. Function signatures stay globally
+/// visible for SCC inference. Signatures owned by eager values are returned
+/// separately and removed from the environment so the body schedule can
+/// install each one at its exact source position.
 pub(super) fn collect_all_declarations(
     items: &[(Option<String>, &deep::Expr)],
     env: &mut Env,
@@ -897,7 +912,7 @@ pub(super) fn collect_all_declarations(
     subst: &mut Subst,
     adt_reg: &mut AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-) {
+) -> SourceOrderedValueSignatures {
     // chelis#258 (main): duplicate-def / builtin-shadowing rejection runs
     // over the bare item list. Our `items` is paired with module keys, so
     // project to the `&deep::Expr` slice the reporters expect.
@@ -907,6 +922,30 @@ pub(super) fn collect_all_declarations(
     report_orphan_defsigs(items, errors);
     report_builtin_shadowing(&bare_items, errors);
     let resolution_env = precollect_type_resolution_env(items, adt_reg);
+    let eager_value_names = items
+        .iter()
+        .filter_map(|(_, expr)| {
+            let (DeepTag::Def, _, kids) = stamped_parts(expr)? else {
+                return None;
+            };
+            let name = kids.first().and_then(symbol_name)?;
+            (!definition_owns_function_metadata_prebind(expr)).then(|| name.to_string())
+        })
+        .collect::<HashSet<_>>();
+    let source_ordered_names = items
+        .iter()
+        .filter_map(|(_, expr)| {
+            let (DeepTag::Defsig, _, kids) = stamped_parts(expr)? else {
+                return None;
+            };
+            let name = kids.first().and_then(symbol_name)?;
+            eager_value_names.contains(name).then(|| name.to_string())
+        })
+        .collect::<HashSet<_>>();
+    let prior_bindings = source_ordered_names
+        .iter()
+        .map(|name| (name.clone(), env.lookup(name).cloned()))
+        .collect::<HashMap<_, _>>();
     // Install the provisional self/forward header scope explicitly in this
     // per-check registry clone. Declaration bodies resolve against it, while
     // only successful bodies enter the validated maps that survive serde.
@@ -920,7 +959,7 @@ pub(super) fn collect_all_declarations(
     let cancel = crate::cancel::current_cancel_token();
     for (module, expr) in items {
         if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
-            return;
+            return HashMap::new();
         }
         collect_declarations(
             expr,
@@ -934,9 +973,11 @@ pub(super) fn collect_all_declarations(
             DeclPhase::Aliases,
         );
     }
+    let mut rest_cancelled = false;
     for (module, expr) in items {
         if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
-            return;
+            rest_cancelled = true;
+            break;
         }
         collect_declarations(
             expr,
@@ -949,6 +990,22 @@ pub(super) fn collect_all_declarations(
             errors,
             DeclPhase::Rest,
         );
+    }
+
+    let mut source_ordered_signatures = HashMap::new();
+    for name in source_ordered_names {
+        if let Some(signature) = env.lookup(&name).cloned() {
+            source_ordered_signatures.insert(name.clone(), signature);
+        }
+        match prior_bindings.get(&name).and_then(Clone::clone) {
+            Some(prior) => env.bind(name, prior),
+            None => env.remove_binding(&name),
+        }
+    }
+    if rest_cancelled {
+        HashMap::new()
+    } else {
+        source_ordered_signatures
     }
 }
 
@@ -1176,6 +1233,7 @@ pub(super) fn build_opacity_meta(
     items: &[(Option<String>, &deep::Expr)],
     adt_reg: &AdtRegistry,
     env: &Env,
+    source_ordered_signatures: &SourceOrderedValueSignatures,
 ) -> crate::opacity::OpacityModuleMeta {
     let mut meta = crate::opacity::OpacityModuleMeta::default();
     // Declared signature types (from `defsig` nodes) for producer
@@ -1239,10 +1297,13 @@ pub(super) fn build_opacity_meta(
             continue;
         };
         meta.bindings.insert(name.to_string(), target);
-        if tag == DeepTag::Defsig
-            && let Some(scheme) = env.lookup(name)
-        {
-            declared_sigs.insert(name.to_string(), scheme.body.clone());
+        if tag == DeepTag::Defsig {
+            let scheme = source_ordered_signatures
+                .get(name)
+                .or_else(|| env.lookup(name));
+            if let Some(scheme) = scheme {
+                declared_sigs.insert(name.to_string(), scheme.body.clone());
+            }
         }
     }
     // Producer enumeration per opaque type: exported bindings of the
