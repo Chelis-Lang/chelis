@@ -1866,14 +1866,16 @@ host leg, narrows no Table-A signature, and still admits no host fallback,
 inert stub, silent default, zero adjoint, or target-shaped language
 restriction.
 
-Two consequences are accepted deliberately. Phase 4E's generated product
-cannot execute the `hip` and `metal` Table-B columns; it asserts their typed
-diagnostics instead, which for Metal is already the only available outcome
-([#737]: that runtime has never been executed). And [#1291] and the device
-residual of [#1306] stay open while their cells cite them, so the
-rejection-authority liveness gate keeps reporting honestly. Neither closes on
-this narrowing; each closes when its kernels land and its own hardware gate is
-green.
+Two consequences are accepted deliberately. Phase 4E asserts the typed
+diagnostic for each device cell this narrowing leaves unbuilt rather than
+executing it. For Metal that is already the only available outcome ([#737]:
+that runtime has never been executed). For HIP it reaches only the cells that
+stay `Unimplemented`: the backend has real kernels and a documented hardware
+gate (`scripts/hip_test.py`), and an `Implemented { kernel_id }` cell still
+owes that gate rather than a diagnostic. And [#1291] and the device residual of
+[#1306] stay open while their cells cite them, so the rejection-authority
+liveness gate keeps reporting honestly. Neither closes on this narrowing; each
+closes when its kernels land and its own hardware gate is green.
 
 The [#1287] child command is
 `.venv/bin/python scripts/dtype_count_oracle.py`; success ends with

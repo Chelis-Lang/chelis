@@ -73,13 +73,13 @@ FROZEN_FILE_DIGESTS = {
         "0d0b5065f90ae704ecea26744208e76f1075907f8ea49279a1a958db6f1c14b3"
     ),
     "spec/design/capability_table.md": (
-        "b3e0d12edb097cb6a0decf9339488980dcaf46c42536a7cdd63429cee997ef2a"
+        "b0de5579fa3b7c076ff5e809b2b6d8accf741d82305fe198233cce64ddefaf1c"
     ),
     "spec/design/compiled_value_ownership.md": (
         "4a6013c2dc5a074d19ae12696c109a35218facfdb423d29ff07cef79fe6689b9"
     ),
     "spec/design/dtype_semantics.md": (
-        "cbb57903a66d4b0cc3e016e2bb2b2c7fd34db445f1f9e54f7a23a168a17c8e0a"
+        "61092ac8978986d2819febf6add1cebc9f11f48a26e151d09c389646d89dc6bb"
     ),
     "spec/design/implicit_linearity.md": (
         "f03302f4b328841d79824f6326f1edf2e954a9b98c0118992d4a3a1f2dfb67cf"
@@ -472,13 +472,13 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/capability_table.md",
         "## Seed dispositions the table must ship with",
         "## New numeric ops before the table lands (added 2026-07-30)",
-        "8cd09119aff48d1427067e472868b63968237c213c477525cd56ef1ab680b8a2",
+        "1f30b0e2a015b226a6c2eb5b0a18d27a9ae0c027cef5378ed963811a8b2fbe7f",
     ),
     "Phase 4 handoff": (
         "spec/design/dtype_semantics.md",
         "## Phase 4 - the capability table becomes the permanent guard",
         "## I1. Interlock with loud unsupported ([#730])",
-        "1150f513d28fcc3aeb55ba9c1cac78bc1e8c6b130312ebf077ac96456eac230d",
+        "1b3c5caa7e56a57770842270a166fb648265595c8a1ff42143c5b060713091f9",
     ),
     "compiled stdlib consumer": (
         "spec/design/loud_unsupported.md",
