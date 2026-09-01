@@ -173,7 +173,7 @@ class ManifestContractTests(unittest.TestCase):
             with self.subTest(fixture=row.id):
                 self.assertTrue(row.test_census)
                 malformed = tuple(
-                    replace(candidate, test_census=())
+                    replace(candidate, test_receipt=())
                     if candidate.id == row.id
                     else candidate
                     for candidate in fixtures
@@ -182,6 +182,39 @@ class ManifestContractTests(unittest.TestCase):
                     oracle.OracleFailure, "frozen nonempty test census"
                 ):
                     oracle.validate_manifest(malformed, oracle.mutation_manifest())
+
+    def test_test_command_receipts_freeze_exact_execution_outcomes(self) -> None:
+        rows = tuple(
+            row
+            for row in oracle.fixture_manifest()
+            if row.action in {oracle.Action.COMMAND, oracle.Action.HIP_HARDWARE}
+        )
+        self.assertTrue(rows)
+        for row in rows:
+            with self.subTest(fixture=row.id):
+                self.assertEqual(
+                    row.test_census,
+                    tuple(receipt.name for receipt in row.test_receipt),
+                )
+                self.assertTrue(
+                    all(
+                        receipt.outcome
+                        in {oracle.TestOutcome.PASSED, oracle.TestOutcome.FAILED}
+                        for receipt in row.test_receipt
+                    )
+                )
+        failed = {
+            row.id
+            for row in rows
+            if any(
+                receipt.outcome is oracle.TestOutcome.FAILED
+                for receipt in row.test_receipt
+            )
+        }
+        self.assertEqual(
+            failed,
+            {"hip-caller-owned-reuse", "hip-caller-owned-view-reuse"},
+        )
 
     def test_self_test_census_matches_the_loaded_suite(self) -> None:
         fixture = next(
@@ -884,6 +917,152 @@ class ReceiptContractTests(unittest.TestCase):
                 with mock.patch.object(oracle, "_run", return_value=empty_list) as run:
                     detection = oracle._execute_command(context, rows[fixture_id])
                 self.assertEqual(run.call_count, 1)
+                self.assertIs(detection.detector, oracle.Detector.ZERO_VACUITY)
+
+    def test_listed_but_skipped_or_ignored_tests_fail_zero_vacuity(self) -> None:
+        rows = {row.id: row for row in oracle.fixture_manifest()}
+        cases = (
+            ("oracle-self-tests", "skipped 'mutant'"),
+            ("runtime-ledger-process-tests", "ignored"),
+            ("c-caller-owned-reuse", "ignored"),
+            ("hip-caller-bytes-unchanged-hardware", "ignored"),
+        )
+        context = mock.Mock(environment={})
+        for fixture_id, skipped_status in cases:
+            fixture = rows[fixture_id]
+            listed = oracle.subprocess.CompletedProcess(
+                args=("test-list",),
+                returncode=0,
+                stdout="".join(f"{name}: test\n" for name in fixture.test_census),
+                stderr="",
+            )
+            if fixture_id == "oracle-self-tests":
+                execution_lines = [
+                    f"{name.rsplit('.', 1)[-1]} (__main__.{name}) ... "
+                    f"{skipped_status if index == 0 else 'ok'}"
+                    for index, name in enumerate(fixture.test_census)
+                ]
+                execution_lines.append(
+                    f"Ran {len(fixture.test_census)} tests in 0.001s"
+                )
+            else:
+                execution_lines = [
+                    f"test {name} ... {skipped_status}"
+                    for name in fixture.test_census
+                ]
+                execution_lines.append(
+                    "test result: ok. 0 passed; 0 failed; "
+                    f"{len(fixture.test_census)} ignored;"
+                )
+            executed = oracle.subprocess.CompletedProcess(
+                args=("test-runner",),
+                returncode=0,
+                stdout="\n".join(execution_lines),
+                stderr="",
+            )
+            if fixture.action is oracle.Action.HIP_HARDWARE:
+                fixture = replace(
+                    fixture,
+                    command=tuple(
+                        item for item in fixture.command if item != "--ignored"
+                    ),
+                )
+            with self.subTest(fixture=fixture_id):
+                with mock.patch.object(
+                    oracle, "_run", side_effect=(listed, executed)
+                ) as run:
+                    detection = oracle._execute_command(context, fixture)
+                self.assertEqual(run.call_count, 2)
+                self.assertIs(detection.detector, oracle.Detector.ZERO_VACUITY)
+
+    def test_expected_failing_test_must_execute_and_fail(self) -> None:
+        fixture = next(
+            row
+            for row in oracle.fixture_manifest()
+            if row.id == "hip-caller-owned-reuse"
+        )
+        name = fixture.test_census[0]
+        listed = oracle.subprocess.CompletedProcess(
+            args=("test-list",),
+            returncode=0,
+            stdout=f"{name}: test\n",
+            stderr="",
+        )
+        executed = oracle.subprocess.CompletedProcess(
+            args=("test-runner",),
+            returncode=101,
+            stdout=(
+                f"test {name} ... FAILED\n"
+                "test result: FAILED. 0 passed; 1 failed; 0 ignored;\n"
+            ),
+            stderr="",
+        )
+        context = mock.Mock(environment={})
+        with mock.patch.object(oracle, "_run", side_effect=(listed, executed)):
+            detection = oracle._execute_command(context, fixture)
+        self.assertIs(detection.detector, oracle.Detector.SOURCE_CONTRACT)
+
+    def test_execution_receipt_rejects_missing_extra_and_wrong_outcomes(self) -> None:
+        rows = {row.id: row for row in oracle.fixture_manifest()}
+        runtime_names = rows["runtime-ledger-process-tests"].test_census
+        cases = (
+            (
+                "runtime-ledger-process-tests",
+                ("test result: ok. 0 passed; 0 failed; 0 ignored;",),
+                0,
+            ),
+            (
+                "runtime-ledger-process-tests",
+                tuple(
+                    f"test {name} ... ok"
+                    for name in runtime_names
+                )
+                + (
+                    "test undeclared_extra ... ok",
+                    "test result: ok. "
+                    f"{len(runtime_names) + 1} passed; 0 failed; 0 ignored;",
+                ),
+                0,
+            ),
+            (
+                "c-caller-owned-reuse",
+                (
+                    "test "
+                    f"{rows['c-caller-owned-reuse'].test_census[0]} ... FAILED",
+                    "test result: FAILED. 0 passed; 1 failed; 0 ignored;",
+                ),
+                101,
+            ),
+            (
+                "hip-caller-owned-reuse",
+                (
+                    "test "
+                    f"{rows['hip-caller-owned-reuse'].test_census[0]} ... ok",
+                    "test result: ok. 1 passed; 0 failed; 0 ignored;",
+                ),
+                0,
+            ),
+        )
+        context = mock.Mock(environment={})
+        for fixture_id, execution_lines, returncode in cases:
+            fixture = rows[fixture_id]
+            listed = oracle.subprocess.CompletedProcess(
+                args=("test-list",),
+                returncode=0,
+                stdout="".join(f"{name}: test\n" for name in fixture.test_census),
+                stderr="",
+            )
+            executed = oracle.subprocess.CompletedProcess(
+                args=("test-runner",),
+                returncode=returncode,
+                stdout="\n".join(execution_lines),
+                stderr="test result: FAILED" if returncode else "",
+            )
+            with self.subTest(fixture=fixture_id, lines=execution_lines):
+                with mock.patch.object(
+                    oracle, "_run", side_effect=(listed, executed)
+                ):
+                    detection = oracle._execute_command(context, fixture)
                 self.assertIs(detection.detector, oracle.Detector.ZERO_VACUITY)
 
     def test_ledger_receipt_count_drift_fails_closed(self) -> None:
