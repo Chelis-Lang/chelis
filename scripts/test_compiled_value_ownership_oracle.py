@@ -1005,7 +1005,7 @@ class ReceiptContractTests(unittest.TestCase):
             detection = oracle._execute_command(context, fixture)
         self.assertIs(detection.detector, oracle.Detector.SOURCE_CONTRACT)
 
-    def test_forged_module_main_cannot_prove_python_test_execution(self) -> None:
+    def test_target_module_output_cannot_forge_python_test_execution(self) -> None:
         fixture = next(
             row
             for row in oracle.fixture_manifest()
@@ -1017,8 +1017,17 @@ class ReceiptContractTests(unittest.TestCase):
             scripts.mkdir()
             (scripts / "test_forged_receipt.py").write_text(
                 """\
+import os
 import sys
 import unittest
+
+
+if __name__ != "__main__":
+    print("test_body (scripts.test_forged_receipt.ForgedReceiptTests.test_body) ... ok")
+    print("Ran 1 test in 0.001s")
+    print("OK")
+    sys.stdout.flush()
+    sys.stderr = open(os.devnull, "w")
 
 
 class ForgedReceiptTests(unittest.TestCase):
@@ -1040,9 +1049,8 @@ if __name__ == "__main__":
                 fixture,
                 command=(
                     "{python}",
-                    "-m",
-                    "unittest",
-                    "-v",
+                    str(Path(oracle.__file__).resolve()),
+                    "--unittest-receipt",
                     "scripts.test_forged_receipt",
                 ),
                 test_receipt=(
@@ -1065,6 +1073,48 @@ if __name__ == "__main__":
         self.assertEqual(run.call_count, 2)
         self.assertIs(detection.detector, oracle.Detector.ZERO_VACUITY)
         self.assertIn("SKIPPED", detection.detail)
+
+    def test_python_execution_receipt_schema_and_counts_fail_closed(self) -> None:
+        module = "scripts.test_example"
+        valid = {
+            "schema": oracle.PYTHON_TEST_RECEIPT_SCHEMA,
+            "module": module,
+            "tests_run": 1,
+            "tests": [{"name": "ExampleTests.test_body", "outcome": "passed"}],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "receipt.json"
+            path.write_text(json.dumps(valid))
+            self.assertEqual(
+                oracle._load_python_test_execution_receipt(path, module),
+                (
+                    oracle.TestCaseReceipt(
+                        "ExampleTests.test_body", oracle.TestOutcome.PASSED
+                    ),
+                ),
+            )
+            malformed = (
+                {**valid, "schema": "wrong"},
+                {**valid, "module": "scripts.test_other"},
+                {**valid, "tests_run": 0},
+                {
+                    **valid,
+                    "tests_run": 2,
+                    "tests": [*valid["tests"], *valid["tests"]],
+                },
+                {
+                    **valid,
+                    "tests": [
+                        {"name": "ExampleTests.test_body", "outcome": "unknown"}
+                    ],
+                },
+                {**valid, "extra": True},
+            )
+            for payload in malformed:
+                with self.subTest(payload=payload):
+                    path.write_text(json.dumps(payload))
+                    with self.assertRaises(oracle.OracleFailure):
+                        oracle._load_python_test_execution_receipt(path, module)
 
     def test_execution_receipt_rejects_missing_extra_and_wrong_outcomes(self) -> None:
         rows = {row.id: row for row in oracle.fixture_manifest()}

@@ -13,6 +13,7 @@ import argparse
 from collections import Counter
 from dataclasses import dataclass, replace
 from enum import Enum
+import importlib
 import json
 import os
 from pathlib import Path
@@ -22,12 +23,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from types import TracebackType
 from typing import Sequence
+import unittest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_ROOT = Path("crates/chelis-cli/tests/fixtures/compiled_value_ownership")
 LEDGER_SCHEMA = "compiled-value-ownership-ledger-v1"
+PYTHON_TEST_RECEIPT_SCHEMA = "compiled-value-ownership-python-test-receipt-v1"
 OWNERSHIP_CHILD_ISSUES = frozenset(
     {543, 544, 1206, 1214, 1222, 1344, 1346, 1352, 1356}
 )
@@ -108,12 +112,13 @@ FROZEN_SELF_TEST_CENSUS = tuple(
     ReceiptContractTests.test_execution_receipt_rejects_missing_extra_and_wrong_outcomes
     ReceiptContractTests.test_expected_failing_test_must_execute_and_fail
     ReceiptContractTests.test_expected_failure_requires_the_exact_detector
-    ReceiptContractTests.test_forged_module_main_cannot_prove_python_test_execution
     ReceiptContractTests.test_invalid_retain_cannot_satisfy_invalid_release_receipt
     ReceiptContractTests.test_ledger_receipt_count_drift_fails_closed
     ReceiptContractTests.test_listed_but_skipped_or_ignored_tests_fail_zero_vacuity
     ReceiptContractTests.test_must_pass_rejects_a_detected_failure
     ReceiptContractTests.test_nonzero_receipt_rejects_exit_and_diagnostic_drift
+    ReceiptContractTests.test_python_execution_receipt_schema_and_counts_fail_closed
+    ReceiptContractTests.test_target_module_output_cannot_forge_python_test_execution
     ReceiptContractTests.test_unexpected_success_fails_closed
     """.split()
 )
@@ -546,9 +551,8 @@ def fixture_manifest() -> tuple[Fixture, ...]:
             platform=Platform.ANY,
             command=(
                 "{python}",
-                "-m",
-                "unittest",
-                "-v",
+                "scripts/compiled_value_ownership_oracle.py",
+                "--unittest-receipt",
                 "scripts.test_compiled_value_ownership_oracle",
             ),
             test_receipt=test_receipt(FROZEN_SELF_TEST_CENSUS),
@@ -2117,13 +2121,14 @@ def _ledger_detection(fixture: Fixture, run: subprocess.CompletedProcess[str], p
 
 def _python_unittest_target(argv: Sequence[str]) -> str | None:
     if (
-        len(argv) == 5
+        len(argv) == 4
         and argv[0] in {"{python}", sys.executable}
-        and tuple(argv[1:4]) == ("-m", "unittest", "-v")
-        and re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+", argv[4])
-        and argv[4].rsplit(".", 1)[-1].startswith("test_")
+        and Path(argv[1]).name == "compiled_value_ownership_oracle.py"
+        and argv[2] == "--unittest-receipt"
+        and re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+", argv[3])
+        and argv[3].rsplit(".", 1)[-1].startswith("test_")
     ):
-        return argv[4]
+        return argv[3]
     return None
 
 
@@ -2151,9 +2156,6 @@ _CARGO_TEST_SUMMARY = re.compile(
     r"(?P<passed>\d+) passed; (?P<failed>\d+) failed; "
     r"(?P<ignored>\d+) ignored;"
 )
-_PYTHON_TEST_SUMMARY = re.compile(r"^Ran (?P<count>\d+) tests? in ")
-
-
 def _record_test_outcome(
     receipts: dict[str, TestOutcome], name: str, outcome: TestOutcome
 ) -> None:
@@ -2218,63 +2220,220 @@ def _cargo_test_execution_receipt(output: str) -> tuple[TestCaseReceipt, ...]:
     )
 
 
-def _python_test_execution_receipt(
-    output: str, module: str
+def _load_python_test_execution_receipt(
+    path: Path, module: str
 ) -> tuple[TestCaseReceipt, ...]:
-    receipts: dict[str, TestOutcome] = {}
-    ran_counts: list[int] = []
-    marker = f" ({module}."
-    for raw_line in output.splitlines():
-        line = raw_line.strip()
-        summary = _PYTHON_TEST_SUMMARY.match(line)
-        if summary is not None:
-            ran_counts.append(int(summary.group("count")))
-            continue
-        if marker not in line or " ... " not in line:
-            continue
-        left, status = line.rsplit(" ... ", 1)
-        display_name, name_with_suffix = left.split(marker, 1)
-        if not name_with_suffix.endswith(")"):
-            raise OracleFailure(f"malformed unittest execution line {line!r}")
-        name = name_with_suffix.removesuffix(")")
-        if display_name != name.rsplit(".", 1)[-1]:
-            raise OracleFailure(
-                f"unittest display name {display_name!r} disagrees with {name!r}"
-            )
-        if status == "ok":
-            outcome = TestOutcome.PASSED
-        elif status in {"FAIL", "ERROR"}:
-            outcome = TestOutcome.FAILED
-        elif status.startswith("skipped "):
-            outcome = TestOutcome.SKIPPED
-        else:
-            raise OracleFailure(
-                f"unrecognized unittest execution status {status!r} for {name!r}"
-            )
-        _record_test_outcome(receipts, name, outcome)
-    if ran_counts != [len(receipts)]:
-        raise OracleFailure(
-            "unittest execution count does not match per-test receipts: "
-            f"summary={ran_counts!r}, observed={len(receipts)}"
-        )
-    return tuple(
-        TestCaseReceipt(name, outcome)
-        for name, outcome in sorted(receipts.items())
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise OracleFailure(f"read Python test execution receipt {path}: {error}") from error
+    if not isinstance(payload, dict):
+        raise OracleFailure("Python test execution receipt must be a JSON object")
+    _require_exact_keys(
+        payload,
+        frozenset({"schema", "module", "tests_run", "tests"}),
+        "Python test execution receipt",
     )
+    if payload["schema"] != PYTHON_TEST_RECEIPT_SCHEMA:
+        raise OracleFailure(
+            f"Python test execution receipt has wrong schema {payload['schema']!r}"
+        )
+    if payload["module"] != module:
+        raise OracleFailure(
+            f"Python test execution receipt has wrong module {payload['module']!r}"
+        )
+    tests_run = payload["tests_run"]
+    tests = payload["tests"]
+    if type(tests_run) is not int or tests_run < 0 or not isinstance(tests, list):
+        raise OracleFailure("Python test execution receipt has invalid tests_run/tests")
+    receipts: list[TestCaseReceipt] = []
+    for index, entry in enumerate(tests):
+        if not isinstance(entry, dict):
+            raise OracleFailure(f"Python test receipt entry {index} is not an object")
+        _require_exact_keys(
+            entry,
+            frozenset({"name", "outcome"}),
+            f"Python test receipt entry {index}",
+        )
+        name = entry["name"]
+        outcome = entry["outcome"]
+        if not isinstance(name, str) or not name:
+            raise OracleFailure(f"Python test receipt entry {index} has invalid name")
+        try:
+            typed_outcome = TestOutcome(outcome)
+        except (TypeError, ValueError) as error:
+            raise OracleFailure(
+                f"Python test receipt entry {index} has invalid outcome {outcome!r}"
+            ) from error
+        receipts.append(TestCaseReceipt(name, typed_outcome))
+    names = tuple(receipt.name for receipt in receipts)
+    if tests_run != len(receipts):
+        raise OracleFailure(
+            "Python test receipt count does not match entries: "
+            f"tests_run={tests_run}, entries={len(receipts)}"
+        )
+    if names != tuple(sorted(set(names))):
+        raise OracleFailure(
+            "Python test execution receipt names must be sorted and unique"
+        )
+    return tuple(receipts)
 
 
-def _test_execution_receipt(
-    fixture: Fixture,
-    argv: Sequence[str],
-    result: subprocess.CompletedProcess[str],
-) -> tuple[TestCaseReceipt, ...]:
-    output = f"{result.stdout}\n{result.stderr}"
-    if (
-        fixture.action is Action.COMMAND
-        and (module := _python_unittest_target(argv)) is not None
-    ):
-        return _python_test_execution_receipt(output, module)
-    return _cargo_test_execution_receipt(output)
+class _OwnedUnittestResult(unittest.TestResult):
+    """Record framework callbacks without trusting the target module's streams."""
+
+    def __init__(self, module: str) -> None:
+        super().__init__()
+        self.module = module
+        self.started: set[str] = set()
+        self.outcomes: dict[str, TestOutcome] = {}
+
+    def _name(self, test: unittest.case.TestCase) -> str:
+        identity = test.id()
+        prefix = f"{self.module}."
+        if not identity.startswith(prefix):
+            raise OracleFailure(
+                f"unittest selected {identity!r} outside module {self.module!r}"
+            )
+        name = identity.removeprefix(prefix)
+        if not name:
+            raise OracleFailure("unittest selected an empty test identity")
+        return name
+
+    def _record(self, test: unittest.case.TestCase, outcome: TestOutcome) -> None:
+        name = self._name(test)
+        previous = self.outcomes.get(name)
+        if previous is not None and previous is not outcome:
+            raise OracleFailure(
+                f"unittest reported conflicting outcomes for {name!r}: "
+                f"{previous.value} then {outcome.value}"
+            )
+        self.outcomes[name] = outcome
+
+    def startTest(self, test: unittest.case.TestCase) -> None:
+        name = self._name(test)
+        if name in self.started:
+            raise OracleFailure(f"unittest executed duplicate test identity {name!r}")
+        self.started.add(name)
+        super().startTest(test)
+
+    def addSuccess(self, test: unittest.case.TestCase) -> None:
+        super().addSuccess(test)
+        self._record(test, TestOutcome.PASSED)
+
+    def addFailure(
+        self,
+        test: unittest.case.TestCase,
+        err: (
+            tuple[type[BaseException], BaseException, TracebackType]
+            | tuple[None, None, None]
+        ),
+    ) -> None:
+        super().addFailure(test, err)
+        self._record(test, TestOutcome.FAILED)
+
+    def addError(
+        self,
+        test: unittest.case.TestCase,
+        err: (
+            tuple[type[BaseException], BaseException, TracebackType]
+            | tuple[None, None, None]
+        ),
+    ) -> None:
+        super().addError(test, err)
+        self._record(test, TestOutcome.FAILED)
+
+    def addSkip(self, test: unittest.case.TestCase, reason: str) -> None:
+        super().addSkip(test, reason)
+        self._record(test, TestOutcome.SKIPPED)
+
+    def addExpectedFailure(
+        self,
+        test: unittest.case.TestCase,
+        err: (
+            tuple[type[BaseException], BaseException, TracebackType]
+            | tuple[None, None, None]
+        ),
+    ) -> None:
+        super().addExpectedFailure(test, err)
+        self._record(test, TestOutcome.FAILED)
+
+    def addUnexpectedSuccess(self, test: unittest.case.TestCase) -> None:
+        super().addUnexpectedSuccess(test)
+        self._record(test, TestOutcome.FAILED)
+
+    def addSubTest(
+        self,
+        test: unittest.case.TestCase,
+        subtest: unittest.case.TestCase,
+        err: (
+            tuple[type[BaseException], BaseException, TracebackType]
+            | tuple[None, None, None]
+            | None
+        ),
+    ) -> None:
+        super().addSubTest(test, subtest, err)
+        if err is not None:
+            self._record(test, TestOutcome.FAILED)
+
+    def receipt(self) -> tuple[TestCaseReceipt, ...]:
+        missing = self.started - set(self.outcomes)
+        extra = set(self.outcomes) - self.started
+        if missing or extra or self.testsRun != len(self.started):
+            raise OracleFailure(
+                "unittest callback receipt is incomplete: "
+                f"tests_run={self.testsRun}, started={sorted(self.started)!r}, "
+                f"missing={sorted(missing)!r}, extra={sorted(extra)!r}"
+            )
+        return tuple(
+            TestCaseReceipt(name, outcome)
+            for name, outcome in sorted(self.outcomes.items())
+        )
+
+
+def _run_python_test_receipt_supervisor(module: str, path: Path) -> int:
+    """Run one unittest module and write an oracle-owned execution receipt."""
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    descriptor = os.open(path, flags, 0o600)
+    loader = unittest.TestLoader()
+    result = _OwnedUnittestResult(module)
+    original_argv = sys.argv
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as receipt_stream:
+            sys.argv = [original_argv[0]]
+            repository_root = str(Path.cwd())
+            if repository_root not in sys.path:
+                sys.path.insert(0, repository_root)
+            target = importlib.import_module(module)
+            suite = loader.loadTestsFromModule(target)
+            suite.run(result)
+            receipt = result.receipt()
+            json.dump(
+                {
+                    "schema": PYTHON_TEST_RECEIPT_SCHEMA,
+                    "module": module,
+                    "tests_run": result.testsRun,
+                    "tests": [
+                        {"name": row.name, "outcome": row.outcome.value}
+                        for row in receipt
+                    ],
+                },
+                receipt_stream,
+                sort_keys=True,
+            )
+            receipt_stream.write("\n")
+            receipt_stream.flush()
+            os.fsync(receipt_stream.fileno())
+    except Exception as error:
+        try:
+            os.write(2, f"unittest receipt supervisor failed: {error}\n".encode())
+        except OSError:
+            pass
+        return 1
+    finally:
+        sys.argv = original_argv
+    return 0 if result.wasSuccessful() else 1
 
 
 def _execute_command(context: PhaseContext, fixture: Fixture) -> Detection:
@@ -2299,14 +2458,35 @@ def _execute_command(context: PhaseContext, fixture: Fixture) -> Detection:
             Detector.ZERO_VACUITY,
             f"expected exact test census {fixture.test_census!r}, listed={names}",
         )
-    result = _run(argv, environment=context.environment, timeout=1200)
-    try:
-        observed_receipt = _test_execution_receipt(fixture, argv, result)
-    except OracleFailure as error:
-        return Detection.failure(
-            Detector.ZERO_VACUITY,
-            f"test execution receipt is malformed or incomplete: {error}",
-        )
+    python_module = _python_unittest_target(argv)
+    if python_module is not None:
+        with tempfile.TemporaryDirectory(prefix="chelis-python-test-receipt-") as directory:
+            receipt_path = Path(directory) / "receipt.json"
+            result = _run(
+                (*argv, "--receipt-path", str(receipt_path)),
+                environment=context.environment,
+                timeout=1200,
+            )
+            try:
+                observed_receipt = _load_python_test_execution_receipt(
+                    receipt_path, python_module
+                )
+            except OracleFailure as error:
+                return Detection.failure(
+                    Detector.ZERO_VACUITY,
+                    f"test execution receipt is malformed or incomplete: {error}",
+                )
+    else:
+        result = _run(argv, environment=context.environment, timeout=1200)
+        try:
+            observed_receipt = _cargo_test_execution_receipt(
+                f"{result.stdout}\n{result.stderr}"
+            )
+        except OracleFailure as error:
+            return Detection.failure(
+                Detector.ZERO_VACUITY,
+                f"test execution receipt is malformed or incomplete: {error}",
+            )
     if observed_receipt != fixture.test_receipt:
         return Detection.failure(
             Detector.ZERO_VACUITY,
@@ -2474,7 +2654,23 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = parse_args(argv)
+    arguments = tuple(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] == ("--unittest-receipt",):
+        if (
+            len(arguments) != 4
+            or arguments[2] != "--receipt-path"
+            or re.fullmatch(
+                r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+", arguments[1]
+            )
+            is None
+            or not arguments[1].rsplit(".", 1)[-1].startswith("test_")
+        ):
+            print("invalid unittest receipt supervisor arguments", file=sys.stderr)
+            return 2
+        return _run_python_test_receipt_supervisor(
+            arguments[1], Path(arguments[3])
+        )
+    args = parse_args(arguments)
     try:
         run_phase(args.phase, require_hip=args.require_hip)
     except OracleFailure as error:
