@@ -1,7 +1,7 @@
 module Std.Contracts
 export (normal_cdf, normal_cdf_implementation_symbol, normal_cdf_range_contract, normal_cdf_reflection_contract, normal_cdf_monotonicity_contract, exp_positivity_contract, exp_monotonicity_contract, exp_zero_contract, log_monotonicity_contract, log_one_contract, standard_contract_tolerance, normal_cdf_contract_samples, normal_cdf_contract_seed)
-def abs_float[p_float](x: p_float) -> p_float = if lt(x, 0.0) then neg(x) else x
-def erf_approx[p_float](x: p_float) -> p_float = {
+def abs_float[p: Float](x: p) -> p = if lt(x, 0.0) then neg(x) else x
+def erf_approx[p: Float](x: p) -> p = {
   ax = abs_float(x)
   if lt(ax, 0.00001) then mul(x, 1.1283791670955126) else {
     t = div(1.0, add(1.0, mul(0.3275911, ax)))
@@ -10,7 +10,7 @@ def erf_approx[p_float](x: p_float) -> p_float = {
     if lt(x, 0.0) then neg(y) else y
   }
 }
-def normal_cdf[p_float](x: p_float) -> p_float = mul(0.5, sub(1.0, erf_approx(neg(mul(x, 0.7071067811865475)))))
+def normal_cdf[p: Float](x: p) -> p = mul(0.5, sub(1.0, erf_approx(neg(mul(x, 0.7071067811865475)))))
 def normal_cdf_implementation_symbol() -> string = "Std.Contracts.normal_cdf"
 def normal_cdf_range_contract() -> string = "std.normal_cdf.range"
 def normal_cdf_reflection_contract() -> string = "std.normal_cdf.reflection"

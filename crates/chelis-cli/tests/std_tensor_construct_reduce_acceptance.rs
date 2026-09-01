@@ -168,8 +168,9 @@ bad = arange(cast(0, int16), cast(4, int64))
 "#,
     );
 
-    // Repeated p_int positions must actualize to one dtype. chelis#1417 owns
-    // the separate defect that the authored p_int domain still admits floats.
+    // Repeated `Int`-bounded positions must actualize to one dtype. The
+    // separate defect that the domain admitted floats is chelis#1417, whose
+    // coverage lives in `issue_1417_stdlib_dtype_family_bounds`.
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")

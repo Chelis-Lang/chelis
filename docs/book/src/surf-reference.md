@@ -57,6 +57,14 @@ call site:
 def identity[a](x: tensor[a, f32]) -> tensor[a, f32] = x
 ```
 
+A binder may carry a dtype-family bound, written after the name. The families are `Float`,
+`Int`, and `Numeric`; a `sig` takes the same clause in the same position:
+
+```chelis-surf
+sig scale_ints[p: Int]: p -> p -> p
+def scale_ints(x, k) = mul(x, k)
+```
+
 Direct calls are flat: write `f(x, y)`. If an expression itself returns a
 function value, group that callee explicitly: `(make_adder(x))(y)`. The
 ungrouped `f(x)(y)` spelling is rejected because v0.18 treated it as an alias

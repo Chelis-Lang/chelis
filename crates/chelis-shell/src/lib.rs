@@ -395,11 +395,18 @@ mod tests {
     }
 
     #[test]
-    fn shell_encoding_has_an_explicit_v2_envelope() {
+    fn shell_encoding_has_an_explicit_v3_envelope() {
         let bytes = encode_shell(&fixture_shell()).expect("encode shell");
 
         assert_eq!(&bytes[..8], b"CHELCHB\0");
-        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 2);
+        assert_eq!(
+            u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            SHELL_FORMAT_VERSION
+        );
+        // v3 is the `TypeVariableDomain` widening for the
+        // `spec/04-type-system.md` §5.9 `Int` and `Numeric` families; a v2
+        // decoder cannot read a shell that carries one.
+        assert_eq!(SHELL_FORMAT_VERSION, 3);
     }
 
     #[test]
@@ -423,7 +430,7 @@ mod tests {
         let error = decode_shell(&bytes).expect_err("unknown CHB version must be rejected");
         assert_eq!(
             error.to_string(),
-            "invalid shell envelope: shell format version 99 is unsupported; expected 2"
+            "invalid shell envelope: shell format version 99 is unsupported; expected 3"
         );
     }
 

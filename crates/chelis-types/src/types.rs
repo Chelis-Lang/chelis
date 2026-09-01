@@ -46,6 +46,16 @@ impl TypeVarRestriction {
         }
     }
 
+    /// The family's membership, spelled for a diagnostic reader who has not
+    /// read §5.9.
+    pub fn membership_gloss(self) -> &'static str {
+        match self {
+            TypeVarRestriction::ActiveFloat => "the active float dtypes",
+            TypeVarRestriction::ActiveInt => "the active signed integer dtypes",
+            TypeVarRestriction::ActiveNumeric => "the active numeric dtypes",
+        }
+    }
+
     /// Whether `prim` is a member of this family.
     ///
     /// Membership follows §1.1's active set through [`Prim::is_float`] and

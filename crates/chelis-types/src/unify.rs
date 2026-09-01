@@ -2249,20 +2249,21 @@ fn bind_tvar(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeError> 
 /// already owns a diagnostic.
 fn ensure_tvar_restriction(restriction: TypeVarRestriction, ty: &Type) -> Result<(), TypeError> {
     let family = restriction.family_name();
+    let gloss = restriction.membership_gloss();
     match ty {
         Type::Var(_) | Type::Error(_) => Ok(()),
         Type::Prim(prim) if restriction.admits(*prim) => Ok(()),
         Type::Prim(prim) => Err(TypeError {
             kind: TypeErrorKind::PrecisionMismatch,
             message: format!(
-                "type variable bounded by dtype family `{family}` cannot be instantiated at `{}`",
+                "type variable bounded by dtype family `{family}` ({gloss}) cannot be instantiated at `{}`",
                 prim.name()
             ),
         }),
         other => Err(TypeError {
             kind: TypeErrorKind::PrecisionMismatch,
             message: format!(
-                "type variable bounded by dtype family `{family}` cannot be instantiated at `{other}`"
+                "type variable bounded by dtype family `{family}` ({gloss}) cannot be instantiated at `{other}`"
             ),
         }),
     }

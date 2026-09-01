@@ -62,6 +62,13 @@ binds them by unification, so one definition serves every concrete shape.
 def transpose[a, b](x: tensor[a, b, f32]) -> tensor[b, a, f32] = permute(x, 1, 0)
 ```
 
+A binder can also carry a dtype-family bound - `Float`, `Int`, or `Numeric` - which limits
+the dtypes it may be instantiated at:
+
+```chelis-surf
+def double_ints[p: Int](x: p) -> p = add(x, x)
+```
+
 ## Where to go next
 
 - Named dimensions, rank polymorphism, and the no-broadcasting rule:
