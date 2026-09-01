@@ -333,6 +333,98 @@ class HashOrderTokenTripwireTests(unittest.TestCase):
         )
         self.assertIn("src/generated/escape.rs", sources)
 
+    def test_scans_macro_path_from_outer_line_doc_literal(self) -> None:
+        sources = self.compiled_macro_path_sources(
+            cfg="outer_line_doc_literal",
+            source=(
+                "macro_rules! load_doc_path_module {\n"
+                "    ($pound:tt, #[doc = $target:literal]) => {\n"
+                "        $pound[path = $target]\n"
+                "        mod escaped;\n"
+                "    };\n"
+                "}\n"
+                "#[cfg(outer_line_doc_literal)]\n"
+                "load_doc_path_module!(\n"
+                "    #,\n"
+                "    ///generated/escape.rs\n"
+                ");\n"
+            ),
+        )
+        self.assertIn("src/generated/escape.rs", sources)
+
+    def test_scans_macro_path_from_inner_line_doc_literal(self) -> None:
+        sources = self.compiled_macro_path_sources(
+            cfg="inner_line_doc_literal",
+            source=(
+                "macro_rules! load_doc_path_module {\n"
+                "    ($pound:tt, #![doc = $target:literal]) => {\n"
+                "        $pound[path = $target]\n"
+                "        mod escaped;\n"
+                "    };\n"
+                "}\n"
+                "#[cfg(inner_line_doc_literal)]\n"
+                "load_doc_path_module!(\n"
+                "    #,\n"
+                "    //!generated/escape.rs\n"
+                ");\n"
+            ),
+        )
+        self.assertIn("src/generated/escape.rs", sources)
+
+    def test_scans_macro_path_from_outer_block_doc_literal(self) -> None:
+        sources = self.compiled_macro_path_sources(
+            cfg="outer_block_doc_literal",
+            source=(
+                "macro_rules! load_doc_path_module {\n"
+                "    ($pound:tt, #[doc = $target:literal]) => {\n"
+                "        $pound[path = $target]\n"
+                "        mod escaped;\n"
+                "    };\n"
+                "}\n"
+                "#[cfg(outer_block_doc_literal)]\n"
+                "load_doc_path_module!(#, /**generated/escape.rs*/);\n"
+            ),
+        )
+        self.assertIn("src/generated/escape.rs", sources)
+
+    def test_scans_macro_path_from_inner_block_doc_literal(self) -> None:
+        sources = self.compiled_macro_path_sources(
+            cfg="inner_block_doc_literal",
+            source=(
+                "macro_rules! load_doc_path_module {\n"
+                "    ($pound:tt, #![doc = $target:literal]) => {\n"
+                "        $pound[path = $target]\n"
+                "        mod escaped;\n"
+                "    };\n"
+                "}\n"
+                "#[cfg(inner_block_doc_literal)]\n"
+                "load_doc_path_module!(#, /*!generated/escape.rs*/);\n"
+            ),
+        )
+        self.assertIn("src/generated/escape.rs", sources)
+
+    def test_non_doc_line_comment_is_not_a_literal_source(self) -> None:
+        sources = self.compiled_macro_path_sources(
+            cfg="ordinary_line_comment",
+            source=(
+                "////generated/escape.rs\n"
+                "#[cfg(ordinary_line_comment)]\n"
+                "pub type Visible = u8;\n"
+            ),
+        )
+        self.assertNotIn("src/generated/escape.rs", sources)
+
+    def test_non_doc_block_comment_is_not_a_literal_source(self) -> None:
+        sources = self.compiled_macro_path_sources(
+            cfg="ordinary_block_comment",
+            source=(
+                "/***generated/escape.rs*/\n"
+                "#[cfg(ordinary_block_comment)]\n"
+                "pub type Visible = u8;\n"
+            ),
+        )
+        self.assertNotIn("src/generated/escape.rs", sources)
+
     def test_ordinary_missing_rs_literal_does_not_expand_source_set(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
@@ -448,6 +540,21 @@ class HashOrderTokenTripwireTests(unittest.TestCase):
 
 
 class HashOrderOracleRunnerTests(unittest.TestCase):
+    def test_authoritative_commands_include_production_source_byte_mutation(self) -> None:
+        command = (
+            "cargo",
+            "test",
+            "-p",
+            "chelis-cli",
+            "--test",
+            "stdlib_typecheck_cache_oracle",
+            "stale_stdlib_byte_mutation_misses_not_stale_hit",
+            "--",
+            "--exact",
+            "--nocapture",
+        )
+        self.assertEqual(ORACLE.COMMANDS.count(command), 1)
+
     def test_scan_only_prints_the_tripwire_marker(self) -> None:
         output = io.StringIO()
         with redirect_stdout(output):

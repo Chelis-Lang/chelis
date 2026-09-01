@@ -200,6 +200,18 @@ COMMANDS: tuple[tuple[str, ...], ...] = (
         "hash_order_cache_bytes",
         "--no-fail-fast",
     ),
+    (
+        "cargo",
+        "test",
+        "-p",
+        "chelis-cli",
+        "--test",
+        "stdlib_typecheck_cache_oracle",
+        "stale_stdlib_byte_mutation_misses_not_stale_hit",
+        "--",
+        "--exact",
+        "--nocapture",
+    ),
     (sys.executable, "scripts/hash_order_phase_a_oracle.py"),
     (
         "cargo",
@@ -394,30 +406,52 @@ def _normal_rust_string(
     )
 
 
+def _block_comment_end(path: str, text: str, index: int) -> int:
+    """Return the exclusive end of a nested Rust block comment."""
+
+    depth = 1
+    cursor = index + 2
+    while cursor < len(text):
+        if text.startswith("/*", cursor):
+            depth += 1
+            cursor += 2
+        elif text.startswith("*/", cursor):
+            depth -= 1
+            cursor += 2
+            if depth == 0:
+                return cursor
+        else:
+            cursor += 1
+    raise HashOrderDeterminismFailure(
+        f"unterminated Rust block comment at {path}:"
+        f"{text.count(chr(10), 0, index) + 1}"
+    )
+
+
 def _rust_utf8_string_literals(path: str, text: str) -> tuple[str, ...]:
-    """Extract decoded ordinary and raw UTF-8 string literal tokens."""
+    """Extract source and compiler-desugared UTF-8 string literal tokens."""
 
     literals: list[str] = []
     index = 0
-    block_depth = 0
     while index < len(text):
-        if block_depth:
-            if text.startswith("/*", index):
-                block_depth += 1
-                index += 2
-            elif text.startswith("*/", index):
-                block_depth -= 1
-                index += 2
-            else:
-                index += 1
-            continue
         if text.startswith("//", index):
             end = text.find("\n", index)
-            index = len(text) if end < 0 else end
+            end = len(text) if end < 0 else end
+            is_outer_doc = text.startswith("///", index) and not text.startswith(
+                "////", index
+            )
+            if is_outer_doc or text.startswith("//!", index):
+                literals.append(text[index + 3 : end])
+            index = end
             continue
         if text.startswith("/*", index):
-            block_depth = 1
-            index += 2
+            end = _block_comment_end(path, text, index)
+            is_outer_doc = text.startswith("/**", index) and not text.startswith(
+                "/***", index
+            )
+            if is_outer_doc or text.startswith("/*!", index):
+                literals.append(text[index + 3 : end - 2])
+            index = end
             continue
 
         char_end = _char_literal_end(text, index)
@@ -450,8 +484,6 @@ def _rust_utf8_string_literals(path: str, text: str) -> tuple[str, ...]:
             _, index = _normal_rust_string(path, text, index + 1)
             continue
         index += 1
-    if block_depth:
-        raise HashOrderDeterminismFailure(f"unterminated Rust block comment at {path}")
     return tuple(literals)
 
 

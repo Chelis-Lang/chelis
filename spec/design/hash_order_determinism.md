@@ -173,18 +173,27 @@ feature or a platform `cfg` is invisible to it, and such carriers exist today
 untracked, non-ignored local `.rs` file in the repository (`git ls-files`). It
 recursively loads every direct `#[path = "relative/file.rs"] mod` target even when
 that target is ignored. It also decodes every ordinary and raw UTF-8 Rust string
-literal ending in `.rs` and resolves it against every scanned source directory,
-recursing into each existing in-repository target. A declarative macro may split
-the `#`, attribute group, `path` name, and literal across metavariables, but it
-cannot invent the final string-literal token; this literal-reachability closure
-therefore scans the target without attempting to enumerate expansion spellings.
+literal ending in `.rs`. Rust's lexer desugars the four outer/inner line/block doc
+comment forms into `#[doc = "..."]` string literals before declarative macro
+matching, so the scanner mirrors that compiler step and includes their exact
+contents in the same provenance set. Each candidate is resolved against every
+scanned source directory, recursing into each existing in-repository target. A
+declarative macro may split the `#`, attribute group, `path` name, and literal
+across metavariables, but a path literal must originate in either an authored
+UTF-8 string token or the compiler's doc-comment desugaring. Compile-backed
+controls confirm that `concat!`, `env!`, `stringify!`, and macro-emitted
+`#[path = concat!(...)]` values are rejected by rustc. This complete literal-
+provenance closure therefore scans the target without enumerating expansion
+spellings.
 Missing ordinary fixture-name strings do not become inputs. An existing target
 outside the repository, an opaque direct path-bearing attribute, a missing direct
 target, and a direct target that escapes the repository fail closed. The existing
 ban on a contiguous interpolated attribute template remains defense in depth, not
 the source-closure mechanism. Compile-backed negatives cover direct attributes,
 contiguous interpolation, grouped `#$attribute`, split `$pound[path = ...]`, raw
-strings, and escaped string literals. The resulting source set is
+strings, escaped string literals, and all four doc-comment desugarings; ordinary
+four-slash line comments and triple-star block comments are negative controls that
+must not become literal sources. The resulting source set is
 a superset of every committed Cargo target of every kind, every build script, and
 every committed path outside `src/`, and is blind to the feature or `cfg` that gates
 a file, a target, or a function. It matches the source
@@ -306,7 +315,10 @@ The named test builds complete payloads through several filesystem insertion
 orders and serializes them in 24 fresh processes; the bytes and digests must match
 exactly. The stdlib cache key carries both canonical parsed declarations and the
 prepared graph's exact manifest/inventory/source-byte determinant, so a comment-only
-edit clean-misses even though the AST bytes do not change. After rebasing over the
+edit clean-misses even though the AST bytes do not change. The authoritative oracle
+runs the production CLI test that performs that source-only mutation; the synthetic
+24-process worker is supporting byte evidence and cannot substitute for production
+threading from `PreparedReefGraph` into the stdlib cache call. After rebasing over the
 independent nominal-kind formats, Phase B advances the compiled-context cache to
 V14, the library cache to V7, the stdlib cache to V11, and the prepared-graph cache
 to V5 so neither branch-specific predecessor can decode as current. At reviewed head
@@ -329,7 +341,10 @@ run in its named oracle. The fresh-process stability tests cover the [#1338] rep
 mirrored operand order, the aliased pair, and the three-way case of Phase A, and the
 existing byte-determinism regressions (`codegen_determinism.rs`,
 `rank_poly_tier3::form3_bias_broadcast_c_is_byte_deterministic`) stay present and
-green. Repeated fresh-process runs have a fixed budget of 24 and make no statistical
+green. The Phase B command registry also pins the exact production
+`stale_stdlib_byte_mutation_misses_not_stale_hit` test; it uses `cargo test --exact`
+because the repository's default nextest filter can select zero tests. Repeated
+fresh-process runs have a fixed budget of 24 and make no statistical
 confidence or false-pass claim.
 
 ## Part II: phases
@@ -365,10 +380,11 @@ bucket values, allocator-visible destruction negative control, collision-chain
 mutation tests, compile-fail spelling fixtures, and Serde tests; migration of
 production and test code off the std types, with the dependency edges and the
 dependency-guard constant; the tripwire script, its exact token-cardinality and
-recursive `#[path]` closure, build-script digest registry, generated-Rust inclusion
-ban, `unittest` twin, and gate wiring; and the C4 exact-byte tests with the cache
-format bumps, producer-registry bijection, production key preimages, exact build
-identity, and exact-source determinant they require.
+recursive `#[path]` and compiler-visible literal-provenance closure, build-script
+digest registry, generated-Rust inclusion ban, `unittest` twin, and gate wiring;
+and the C4 exact-byte tests plus the production source-only cache mutation with the
+cache format bumps, producer-registry bijection, production key preimages, exact
+build identity, and exact-source determinant they require.
 
 **Frozen at exit:** the wrapper's public API, the tripwire's token list, and the
 exact workspace build-script registry.
