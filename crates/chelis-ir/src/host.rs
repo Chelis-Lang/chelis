@@ -2176,14 +2176,34 @@ fn lower_host_program(
                 .as_ref()
                 .map(|ty| decode_host_type_or_raise(ty, &UnordMap::new()))
                 .filter(|ty| !ty.is_unresolved());
-            let ty = declared_ty.clone().unwrap_or_else(|| inferred_ty.clone());
+            // chelis#1137: movement-helper lowering may prove a different
+            // rank from the checker's provisional type (notably `expand`
+            // followed by `shrink`).  Retagging the helper call with that
+            // stale rank makes the emitted helper ABI disagree with the DAG
+            // it invokes.  A helper's actual root rank is the lowering
+            // authority; checked context may still sharpen precision and
+            // extents when the ranks agree.
+            let helper_rank_disagrees = matches!(value.kind, HostExprKind::TensorCall { .. })
+                && matches!(
+                    (&declared_ty, &inferred_ty),
+                    (
+                        Some(HostTypeTerm::Tensor(declared)),
+                        HostTypeTerm::Tensor(inferred)
+                    ) if declared.dims.len() != inferred.dims.len()
+                );
+            let ty = if helper_rank_disagrees {
+                inferred_ty.clone()
+            } else {
+                declared_ty.clone().unwrap_or_else(|| inferred_ty.clone())
+            };
             // When the declared type sharpens the inferred type (e.g.
             // declared f64, inferred f32), retag the outermost value
             // type so downstream host emit sees the right precision
             // for the typed to_tensor runtime call. This is a
             // structural retag; the type checker has already validated
             // that the literal assignment is sound.
-            if let Some(declared) = declared_ty.as_ref()
+            if !helper_rank_disagrees
+                && let Some(declared) = declared_ty.as_ref()
                 && declared != &inferred_ty
             {
                 value = force_host_expr_type(value, declared.clone());
@@ -3402,10 +3422,10 @@ fn finish_tensor_helper_call(
                 .unwrap_or_else(|| HostTypeTerm::Tensor(expected.clone()))
         })
         .collect();
-    let call_ty = if root_tys.len() > 1 {
-        HostTypeTerm::Tuple(root_tys)
-    } else {
-        HostTypeTerm::Tensor(expected.clone())
+    let call_ty = match root_tys.as_slice() {
+        [only] => only.clone(),
+        [] => HostTypeTerm::Tensor(expected.clone()),
+        _ => HostTypeTerm::Tuple(root_tys),
     };
     let args = tensor_helper_args(&inputs, scope);
     let (sparse_specialization, sparse_rejection) =
@@ -10329,6 +10349,37 @@ fn actualize_tensor_helper_types(
                         precision: node.output_type.precision,
                     })
                 }),
+            crate::dag::RiscOp::Shrink { bounds } => node
+                .inputs
+                .first()
+                .and_then(|id| inferred.get(id))
+                .filter(|input| input.dims.len() == bounds.len())
+                .and_then(|input| {
+                    let dims = bounds
+                        .iter()
+                        .zip(input.dims.iter())
+                        .map(|((start, end), input_dim)| match (start, end) {
+                            (crate::dag::RtDim::Lit(start), crate::dag::RtDim::Lit(end))
+                                if start <= end =>
+                            {
+                                Some(crate::dag::DimInfo::Lit(end - start))
+                            }
+                            (crate::dag::RtDim::Lit(0), crate::dag::RtDim::ToEnd) => {
+                                Some(input_dim.clone())
+                            }
+                            (crate::dag::RtDim::Node(_), crate::dag::RtDim::Node(_))
+                            | (crate::dag::RtDim::Node(_), crate::dag::RtDim::Lit(_))
+                            | (crate::dag::RtDim::Lit(_), crate::dag::RtDim::Node(_)) => {
+                                Some(crate::dag::DimInfo::Named("*".to_string(), None))
+                            }
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<_>>>()?;
+                    Some(TensorType {
+                        dims,
+                        precision: node.output_type.precision,
+                    })
+                }),
             _ => None,
         }
         .or_else(|| {
@@ -10389,7 +10440,10 @@ fn actualize_tensor_helper_types(
         let Some(actual) = inferred.get(&id) else {
             continue;
         };
-        if !synthetic_dims(&node.output_type) || node.output_type.dims.len() != actual.dims.len() {
+        let shrink_rank_repair = matches!(node.op, crate::dag::RiscOp::Shrink { .. });
+        if (!synthetic_dims(&node.output_type) && !shrink_rank_repair)
+            || (node.output_type.dims.len() != actual.dims.len() && !shrink_rank_repair)
+        {
             continue;
         }
         // Record which minted `dN` alias each output axis resolved to,
@@ -16080,6 +16134,108 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             },
             "user-facing symbolic sizes are not synthetic and must not \
              be rewritten"
+        );
+    }
+
+    #[test]
+    fn tensor_helper_actualization_repairs_shrink_rank_from_bounds() {
+        use crate::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
+
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load {
+                name: "expanded".into(),
+            },
+            vec![],
+            TensorType {
+                // The checked helper arrived with the stale pre-expand rank.
+                dims: vec![DimInfo::Lit(2)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let shrink = dag.add_node(
+            RiscOp::Shrink {
+                bounds: vec![
+                    (RtDim::Lit(0), RtDim::Lit(1)),
+                    (RtDim::Lit(0), RtDim::Lit(2)),
+                ],
+            },
+            vec![input],
+            TensorType {
+                dims: vec![],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(shrink);
+
+        let mut scope = UnordMap::new();
+        scope.insert(
+            "expanded".into(),
+            HostTypeTerm::Tensor(TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Lit(2)],
+                precision: Prim::F32,
+            }),
+        );
+
+        let actualized = actualize_tensor_helper_types(&dag, &scope);
+        assert_eq!(
+            actualized.get(shrink).expect("shrink node").output_type,
+            TensorType {
+                dims: vec![DimInfo::Lit(1), DimInfo::Lit(2)],
+                precision: Prim::F32,
+            },
+            "the shrink result rank and literal extents come from its actual input and bounds"
+        );
+    }
+
+    #[test]
+    fn tensor_helper_actualization_preserves_full_axis_shrink_extent() {
+        use crate::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
+
+        let batch = DimInfo::Named("batch".into(), None);
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![batch.clone()],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let shrink = dag.add_node(
+            RiscOp::Shrink {
+                bounds: vec![(RtDim::Lit(0), RtDim::ToEnd)],
+            },
+            vec![input],
+            TensorType {
+                dims: vec![DimInfo::Named("*".into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(shrink);
+
+        let mut scope = UnordMap::new();
+        scope.insert(
+            "x".into(),
+            HostTypeTerm::Tensor(TensorType {
+                dims: vec![batch.clone()],
+                precision: Prim::F32,
+            }),
+        );
+
+        let actualized = actualize_tensor_helper_types(&dag, &scope);
+        assert_eq!(
+            actualized
+                .get(shrink)
+                .expect("full-axis shrink")
+                .output_type
+                .dims,
+            vec![batch],
+            "the full-axis sentinel preserves the input axis identity"
         );
     }
 
