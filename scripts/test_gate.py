@@ -18,6 +18,7 @@ Four things are locked here:
   (d) no-ai-authorship patterns cover the current banned tool identities.
 """
 
+import hashlib
 import importlib.util
 import io
 import os
@@ -394,22 +395,31 @@ def _nix_workflow_events(workflow: str) -> dict[str, dict[str, str]]:
     return events
 
 
-def _nix_job_top_level_entries(block: str) -> dict[str, str]:
-    entries: dict[str, str] = {}
-    for line in block.splitlines()[1:]:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        indent = len(line) - len(line.lstrip(" "))
-        if indent != 4:
-            continue
-        key, value = _parse_simple_yaml_mapping_entry(
-            line, expected_indent=4
+_NIX_REVIEWED_JOBS_SHA256 = (
+    "18a1b945864eac9240519f7ecd847d11333e072bbd04e623c7f65771177ca338"
+)
+
+
+def _assert_nix_jobs_match_reviewed_recipe(workflow: str) -> None:
+    """Lock the complete native jobs while the temporary event policy is active.
+
+    YAML has enough scalar and expression spellings that a partial parser or a
+    banlist can accept a semantically gated job. The workflow's jobs are not
+    changing in this scheduling-only PR, so bind every byte from the one
+    top-level ``jobs:`` key onward instead. A future intentional recipe change
+    must replace this reviewed digest explicitly rather than inheriting a
+    permissive spelling gap.
+    """
+    marker = "jobs:\n"
+    if workflow.count(marker) != 1:
+        raise AssertionError("the Nix workflow must define one plain jobs map")
+    jobs = workflow[workflow.index(marker) :]
+    actual = hashlib.sha256(jobs.encode("utf-8")).hexdigest()
+    if actual != _NIX_REVIEWED_JOBS_SHA256:
+        raise AssertionError(
+            "the intentional-event-only Nix workflow jobs must match the "
+            f"reviewed native recipe: found SHA-256 {actual}"
         )
-        if key in entries:
-            raise AssertionError(f"duplicate Nix job key {key!r}")
-        entries[key] = value
-    return entries
 
 
 def _assert_nix_intentional_events_only(workflow: str) -> None:
@@ -424,48 +434,7 @@ def _assert_nix_intentional_events_only(workflow: str) -> None:
             f"releases: found {events!r}"
         )
 
-    blocks = _workflow_job_blocks(workflow)
-    expected_jobs = {"nix-linux-x86-64", "nix-darwin-arm64"}
-    if set(blocks) != expected_jobs:
-        raise AssertionError(
-            "the intentional-event-only Nix workflow must contain exactly its "
-            f"two native jobs: found {sorted(blocks)!r}"
-        )
-    expected_job_entries = {
-        "nix-linux-x86-64": {
-            "name": "Nix Packages (x86_64-linux)",
-            "runs-on": "ubuntu-latest",
-            "timeout-minutes": "120",
-            "env": "",
-            "defaults": "",
-            "steps": "",
-        },
-        "nix-darwin-arm64": {
-            "name": "Nix Packages (aarch64-darwin)",
-            "runs-on": "macos-latest",
-            "timeout-minutes": "120",
-            "env": "",
-            "defaults": "",
-            "steps": "",
-        },
-    }
-    for job in sorted(expected_jobs):
-        entries = _nix_job_top_level_entries(blocks[job])
-        if entries != expected_job_entries[job]:
-            raise AssertionError(
-                f"{job!r} must keep the exact ungated native-job shape on both "
-                f"configured events: found {entries!r}"
-            )
-        for line in blocks[job].splitlines():
-            code = re.sub(r"\s+#.*$", "", line)
-            event_context = re.search(
-                r"\bgithub\b|\bGITHUB_(?:EVENT|REF)", code
-            )
-            if event_context is not None:
-                raise AssertionError(
-                    f"{job!r} must not branch on event context "
-                    f"{event_context.group(0)!r}"
-                )
+    _assert_nix_jobs_match_reviewed_recipe(workflow)
 
 
 def _assert_runner_resource_bounds(workflow: str) -> None:
@@ -2959,7 +2928,7 @@ class NixPackagesWorkflowTests(unittest.TestCase):
             "    runs-on: macos-latest\n",
             1,
         )
-        with self.assertRaisesRegex(AssertionError, "both configured"):
+        with self.assertRaisesRegex(AssertionError, "reviewed native recipe"):
             _assert_nix_intentional_events_only(mutated)
 
     def test_policy_oracle_rejects_comment_and_job_gate_evasions(self):
@@ -2988,7 +2957,7 @@ class NixPackagesWorkflowTests(unittest.TestCase):
                     "    runs-on: ubuntu-latest\n",
                     1,
                 ),
-                "both configured",
+                "reviewed native recipe",
             ),
             "Darwin disabled": (
                 text.replace(
@@ -2996,7 +2965,7 @@ class NixPackagesWorkflowTests(unittest.TestCase):
                     "    if: false\n    runs-on: macos-latest\n",
                     1,
                 ),
-                "both configured",
+                "reviewed native recipe",
             ),
             "event-dependent empty matrix": (
                 text.replace(
@@ -3008,7 +2977,7 @@ class NixPackagesWorkflowTests(unittest.TestCase):
                     "    runs-on: ubuntu-latest\n",
                     1,
                 ),
-                "both configured",
+                "reviewed native recipe",
             ),
             "event-dependent runner": (
                 text.replace(
@@ -3017,7 +2986,7 @@ class NixPackagesWorkflowTests(unittest.TestCase):
                     "&& 'ubuntu-latest' || 'no-such-runner' }}\n",
                     1,
                 ),
-                "both configured",
+                "reviewed native recipe",
             ),
             "event-gated complete check step": (
                 text.replace(
@@ -3028,7 +2997,38 @@ class NixPackagesWorkflowTests(unittest.TestCase):
                     "        run: nix flake check --print-build-logs\n",
                     1,
                 ),
-                "must not branch on event context",
+                "reviewed native recipe",
+            ),
+            "escaped event-gated complete check step": (
+                text.replace(
+                    "      - name: Run the complete native flake check set\n"
+                    "        run: nix flake check --print-build-logs\n",
+                    "      - name: Run the complete native flake check set\n"
+                    "        run: nix flake check --print-build-logs\n"
+                    "        if: \"${{ gith\\u0075b.event_name == "
+                    "'workflow_dispatch' }}\"\n",
+                    1,
+                ),
+                "reviewed native recipe",
+            ),
+            "complete check allowed to fail": (
+                text.replace(
+                    "      - name: Run the complete native flake check set\n"
+                    "        run: nix flake check --print-build-logs\n",
+                    "      - name: Run the complete native flake check set\n"
+                    "        continue-on-error: true\n"
+                    "        run: nix flake check --print-build-logs\n",
+                    1,
+                ),
+                "reviewed native recipe",
+            ),
+            "sandbox false hidden by comment": (
+                text.replace(
+                    "        sandbox = true\n",
+                    "        sandbox = false # sandbox = true\n",
+                    1,
+                ),
+                "reviewed native recipe",
             ),
         }
         for name, (mutated, message) in mutations.items():
