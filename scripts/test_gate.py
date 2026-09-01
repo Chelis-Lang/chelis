@@ -2255,6 +2255,43 @@ class CiParityTests(unittest.TestCase):
             docs_block,
         )
 
+    def test_phase4b_freeze_oracle_runs_in_the_always_run_docs_job(self):
+        # chelis#729's Phase 4B freeze is enforced by document digests over
+        # spec/ and spec/design/. A docs-only pull request skips every heavy
+        # job, so the oracle has to live in an always-run job or the edits most
+        # likely to break the freeze are the ones nothing checks.
+        docs_block = _ci_job_block("docs")
+        command = (
+            "uv run --managed-python --python 3.11 --no-project python "
+            "scripts/dtype_phase4b_oracle.py"
+        )
+        _assert_executable_run_once(docs_block, command)
+        self.assertIn("uses: astral-sh/setup-uv@v8.1.0", docs_block)
+        self.assertLess(
+            docs_block.index(command),
+            docs_block.index("run: mdbook build docs/book"),
+            "the freeze oracle must fail before the slower mdBook build",
+        )
+        self.assertNotIn(
+            "dtype_phase4b_oracle.py",
+            _ci_job_block("changes"),
+            "the docs-only detector must not gate the freeze oracle",
+        )
+
+    def test_commented_phase4b_oracle_is_not_an_executable_step(self):
+        block = _ci_job_block("docs")
+        command = (
+            "uv run --managed-python --python 3.11 --no-project python "
+            "scripts/dtype_phase4b_oracle.py"
+        )
+        mutated = block.replace(
+            f"run: {command}",
+            f'# run: {command}\n        run: "true"',
+            1,
+        )
+        with self.assertRaises(AssertionError):
+            _assert_executable_run_once(mutated, command)
+
     def test_parallel_jobs_share_one_saved_rust_cache_namespace(self):
         _assert_shared_rust_cache_writer_contract(CI_YML.read_text())
         workspace_inputs = _rust_cache_inputs(

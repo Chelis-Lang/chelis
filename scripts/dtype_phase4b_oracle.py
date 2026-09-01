@@ -73,13 +73,13 @@ FROZEN_FILE_DIGESTS = {
         "0d0b5065f90ae704ecea26744208e76f1075907f8ea49279a1a958db6f1c14b3"
     ),
     "spec/design/capability_table.md": (
-        "ac8e3f8761f8470774e093ac4c15b0f35e547e84209659eae4f0eaf8667ccc62"
+        "b3e0d12edb097cb6a0decf9339488980dcaf46c42536a7cdd63429cee997ef2a"
     ),
     "spec/design/compiled_value_ownership.md": (
         "4a6013c2dc5a074d19ae12696c109a35218facfdb423d29ff07cef79fe6689b9"
     ),
     "spec/design/dtype_semantics.md": (
-        "2404679404fb438296707ea18873ded671b0ed5a920be5ad98b22c072e7d9d3f"
+        "cbb57903a66d4b0cc3e016e2bb2b2c7fd34db445f1f9e54f7a23a168a17c8e0a"
     ),
     "spec/design/implicit_linearity.md": (
         "f03302f4b328841d79824f6326f1edf2e954a9b98c0118992d4a3a1f2dfb67cf"
@@ -466,19 +466,19 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/capability_table.md",
         "## The two-table design",
         "## Seed dispositions the table must ship with",
-        "3bc6269be8aa287feed0d4d32531cda421baf90443e41e34a5642f87e2093cb2",
+        "e623262cd4cd37b6646c651fd0596435cf28f24423b8d9d755620d009520c09d",
     ),
     "capability seed dispositions": (
         "spec/design/capability_table.md",
         "## Seed dispositions the table must ship with",
         "## New numeric ops before the table lands (added 2026-07-30)",
-        "ebf86739fab54d066c78a2af6a0d71ee510ee747e5484667db7a4cdd8bc4be14",
+        "8cd09119aff48d1427067e472868b63968237c213c477525cd56ef1ab680b8a2",
     ),
     "Phase 4 handoff": (
         "spec/design/dtype_semantics.md",
         "## Phase 4 - the capability table becomes the permanent guard",
         "## I1. Interlock with loud unsupported ([#730])",
-        "a43f019ff6e3e0ff7e04bd12b4c4ee30b43f918dea8c5779bc2577221e25d840",
+        "1150f513d28fcc3aeb55ba9c1cac78bc1e8c6b130312ebf077ac96456eac230d",
     ),
     "compiled stdlib consumer": (
         "spec/design/loud_unsupported.md",
@@ -496,7 +496,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/remediation_roadmap.md",
         "| **v0.19.0 - grounded dtype storage break",
         "| **v0.20.0 - behavior-preserving permanent guards**",
-        "5916532d8cb8de3fbdcd1837702793e33a61e921d17bb0f31f4ecd90286eba1c",
+        "ea3f2741a9f9473d0d5e059b9d0c8bcb6454fe299734afe64ce2cfa5b9eb06eb",
     ),
     "status dtype row": (
         "docs/investigations/remediation_status_2026_08_04.md",

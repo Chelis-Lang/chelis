@@ -1463,6 +1463,15 @@ jobs:
       - name: Validate CI topology documentation
         run: uv run --managed-python --python 3.11 --no-project python -m unittest scripts.test_gate.CiParityTests.test_topology_docs_name_current_shard_owners
 
+      # chelis#729 Phase 4B froze the numeric atoms and the capability schema
+      # behind complete-file and region digests over spec/ and spec/design/.
+      # The oracle validates documents and runs no cargo command, and a
+      # docs-only pull request skips every heavy job, so this always-run job is
+      # the only placement that actually defends the freeze against the edits
+      # most likely to break it.
+      - name: Validate the chelis#729 Phase 4B freeze
+        run: uv run --managed-python --python 3.11 --no-project python scripts/dtype_phase4b_oracle.py
+
       - name: Install mdBook
         uses: taiki-e/install-action@v2
         with:
