@@ -684,6 +684,16 @@ device-to-host, and DLPack paths pass rank 0, 1, 8, and greater-than-8 cases,
 preserve `int64` values above `i32::MAX`, reject out-of-domain values before
 copy, and have no fixed array or narrow mirror left.
 
+**Also delivers:** the backend runtime headers' capacity-census leg. Phase 0
+inventories `chelis_hip_runtime.h` and `chelis_metal_runtime.h` as seams rather
+than as a census surface, because their bare `float *` device carrier has no
+citation or override path under [#1288]'s ratchet and would only produce
+blocking rows. Once this phase moves those headers onto the tagged carrier the
+leg becomes both possible and required, so add it here, with its own baseline
+and `coverage_manifest()` entry, reusing the census's existing `preprocess_root`
+enumerator. Phase 2 is not complete while a generated device header carries
+numeric surface no census enumerates.
+
 **Oracle:**
 
 ```sh
