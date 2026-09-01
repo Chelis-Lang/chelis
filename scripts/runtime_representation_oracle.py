@@ -52,7 +52,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "fc1d7f60e3cff535af43484f7ef6d340bf3891efa335a54925279d769d940c24"
+FREEZE_SHA256 = "6530e83a0da03f599178ddb1486bea0a97a7d5a1878635e2f46ee887dcea8d63"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -451,6 +451,11 @@ def _mutation_implementation_sha256(mutate: Callable[[str], str]) -> str:
             dependency = current.__globals__.get(name)
             if inspect.isfunction(dependency) and dependency.__module__ == current.__module__:
                 pending.append(dependency)
+            elif isinstance(dependency, (str, bytes, tuple, frozenset)):
+                # A witness body can live in a shared module constant.
+                # `_PROBE_DESCRIPTOR` is the body of two mutations, and without
+                # this the digest did not move when it was edited.
+                sources[f"const::{name}"] = repr(dependency)
     payload = "\n".join(f"{identity}\0{sources[identity]}" for identity in sorted(sources))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -816,6 +821,49 @@ def mutate_c_body_direct_data_access(source: str) -> str:
     )
 
 
+def mutate_c_extern_element_data(source: str) -> str:
+    """An exported C DATA declaration carrying an element pointer.
+
+    `AGENTS.md` names an exported C data declaration as numeric surface, and no
+    witness covered it: the only C prototype witness plants the one declarator
+    form that the paren-keyed naming rule could already see.
+    """
+
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_probe_table",
+        "extern double *runtime_representation_phase0_probe_table;",
+    )
+
+
+def mutate_c_non_descriptor_struct_field(source: str) -> str:
+    """An element pointer in a struct that is not a tensor descriptor.
+
+    These fell between the two C scanners: the token walk skips aggregate
+    bodies and the aggregate scanner used to name only descriptor fields.
+    """
+
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_probe_pair",
+        """typedef struct {
+    int64_t key;
+    float *weights;
+} runtime_representation_phase0_probe_pair;""",
+    )
+
+
+def mutate_rust_path_module(source: str) -> str:
+    """`#[path]` compiles a file the inventory roots do not reach."""
+
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_path_probe",
+        '#[path = "../runtime_representation_phase0_path_probe.rs"]\n'
+        "mod runtime_representation_phase0_path_probe;",
+    )
+
+
 def mutate_unregistered_subdirectory_source(_source: str) -> str:
     """A seam in a SUBDIRECTORY of an inventory root.
 
@@ -875,6 +923,22 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
             "direct-data-access",
             "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
             mutate_c_body_direct_data_access,
+        ),
+        _probe(
+            "raw-element-pointer",
+            "crates/chelis-runtime/include/chelis_runtime.h",
+            mutate_c_extern_element_data,
+        ),
+        _probe(
+            "raw-element-pointer",
+            "crates/chelis-runtime/include/chelis_runtime.h",
+            mutate_c_non_descriptor_struct_field,
+        ),
+        _probe(
+            "rust-path-module",
+            "crates/chelis-ir/src/dag.rs",
+            mutate_rust_path_module,
+            SOURCE_REJECTED_FAILURE,
         ),
         _probe(
             "unregistered-inventory-source",
@@ -967,8 +1031,14 @@ def _expect_mutation_rejected(probe: MutationProbe) -> None:
 
 
 def run_phase0_mutations() -> None:
-    for probe in phase0_mutation_probes():
+    probes = phase0_mutation_probes()
+    print(f"+ controlled mutations: {len(probes)}", flush=True)
+    for probe in probes:
         _expect_mutation_rejected(probe)
+        print(
+            f"  rejected [{probe.expected_failure.code}] {probe.witness_id}",
+            flush=True,
+        )
 
 
 def phase0_legs() -> tuple[OracleLeg, ...]:

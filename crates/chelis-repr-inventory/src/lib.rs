@@ -385,6 +385,8 @@ fn is_load_store_template(text: &str) -> bool {
 
 struct RustSeamScanner {
     class: SourceClass,
+    /// The capacity module owns [#888]'s unchecked products.
+    defines_capacity_keys: bool,
     owners: Vec<String>,
     rows: Vec<SeamRow>,
     error: Option<ScanError>,
@@ -400,6 +402,17 @@ impl RustSeamScanner {
     }
 
     fn push(&mut self, kind: &str, sample: impl AsRef<str>) {
+        if self.owners.is_empty() {
+            if self.error.is_none() {
+                self.error = Some(ScanError::new(format!(
+                    "a {kind} seam sits outside every declaration: `{}`. A placeholder \
+                     owner would absorb every later seam of that kind in this file, so \
+                     the scanner refuses to invent one",
+                    excerpt(sample.as_ref())
+                )));
+            }
+            return;
+        }
         let owner = self.owner();
         self.rows.push(SeamRow::new(kind, &owner, sample));
     }
@@ -473,7 +486,24 @@ impl RustSeamScanner {
 }
 
 impl<'ast> Visit<'ast> for RustSeamScanner {
-    fn visit_attribute(&mut self, _attribute: &'ast syn::Attribute) {}
+    fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
+        // `#[path = "..."]` reaches a file outside the inventory roots and
+        // cargo compiles it into the crate, so admitting it silently reopens
+        // the closed universe the same way `include!` would.
+        let names_a_path = attribute.path().is_ident("path")
+            || (attribute.path().is_ident("cfg_attr")
+                && attribute.to_token_stream().to_string().contains("path"));
+        if names_a_path {
+            let owner = self.owner();
+            if self.error.is_none() {
+                self.error = Some(ScanError::new(format!(
+                    "`#[path]` in `{owner}` compiles a file the inventory roots do not \
+                     reach: register the target in INVENTORY_SOURCES, or move it under a \
+                     root"
+                )));
+            }
+        }
+    }
 
     fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
         if is_exact_cfg_test_module(module) {
@@ -513,6 +543,21 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
         // definition does, and Phase 3 deletes it the same way.
         self.with_owner(item.sig.ident.to_string(), |scanner| {
             visit::visit_foreign_item_fn(scanner, item);
+        });
+    }
+
+    fn visit_item_trait(&mut self, item: &'ast syn::ItemTrait) {
+        self.with_owner(item.ident.to_string(), |scanner| {
+            visit::visit_item_trait(scanner, item);
+        });
+    }
+
+    fn visit_trait_item_fn(&mut self, item: &'ast syn::TraitItemFn) {
+        // A trait's PROVIDED method has a body like any other, and
+        // `TensorElement::data_ptr` is one of the accessors chelis#893 exists
+        // to seal. Without this it had no owner at all.
+        self.with_owner(item.sig.ident.to_string(), |scanner| {
+            visit::visit_trait_item_fn(scanner, item);
         });
     }
 
@@ -618,13 +663,11 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
     }
 
     fn visit_expr_binary(&mut self, binary: &'ast syn::ExprBinary) {
-        // [#888]'s mechanism is an unchecked or saturating product folded into
-        // a capacity key. Only the IR's key path is inventoried; ordinary
-        // arithmetic elsewhere is not a representation seam.
-        if matches!(self.class, SourceClass::Ir)
-            && matches!(binary.op, syn::BinOp::Mul(_))
-            && self.owner().contains("key")
-        {
+        // [#888]'s mechanism is an unchecked product folded into a capacity
+        // key. The two surviving bare products live in the module that defines
+        // `DimExpr`; gating on that file rather than on a substring of the
+        // enclosing function's name keeps the rule structural.
+        if self.defines_capacity_keys && matches!(binary.op, syn::BinOp::Mul(_)) {
             self.push(
                 "normalized-key-arithmetic",
                 binary.to_token_stream().to_string(),
@@ -680,6 +723,7 @@ pub fn scan_rust_source(path: &str, source: &str) -> Result<Vec<SeamRow>, ScanEr
         .map_err(|error| ScanError::new(format!("cannot parse Rust source `{path}`: {error}")))?;
     let mut scanner = RustSeamScanner {
         class,
+        defines_capacity_keys: path.ends_with("/dag.rs"),
         owners: Vec::new(),
         rows: Vec::new(),
         error: None,
@@ -725,6 +769,37 @@ fn is_unknown_c_type_word(word: &str, aliases: &BTreeMap<String, Vec<String>>) -
         || word.starts_with("__int")
 }
 
+/// Blank `#include`-family directive lines, preserving line structure.
+///
+/// A directive ends at a newline, which the token stream cannot see, so its
+/// tokens otherwise run into the next declaration and the `.` in a header path
+/// makes that declaration read as a member access. These three carry a path
+/// and nothing else, so removing them loses no seam; `#define` and `#if` are
+/// left alone because a macro body can carry one.
+fn blank_include_directives(source: &str) -> String {
+    source
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            let is_include = trimmed.strip_prefix('#').is_some_and(|rest| {
+                let rest = rest.trim_start();
+                rest.starts_with("include") || rest.starts_with("import")
+            });
+            if is_include {
+                String::new()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The frame an aggregate body opens. `c_aggregate_rows` owns that territory,
+/// because `typedef struct { ... } NAME;` only names itself after the body
+/// closes, which a forward token walk cannot know.
+const AGGREGATE_FRAME: &str = "<aggregate>";
+
 /// C keywords and operators that can precede a `(` without naming anything.
 /// Without this, a `for`, `while`, or `sizeof` becomes the owner of every row
 /// in the block it opens.
@@ -741,12 +816,13 @@ const C_NON_DECLARATOR_WORDS: &[&str] = &[
 /// is the reviewed owner of that question; it is not re-litigated here.
 pub fn scan_c_header(path: &str, source: &str) -> Result<Vec<SeamRow>, ScanError> {
     let aliases = BTreeMap::new();
-    let stripped = c_lexical::strip_c_comments(source);
+    let stripped = blank_include_directives(&c_lexical::strip_c_comments(source));
     let tokens = c_lexical::lex_c_tokens(&stripped);
     let mut rows = c_descriptor_rows(&stripped);
     let mut depth = 0usize;
     let mut enclosing = String::from("module");
-    let mut owners: Vec<String> = Vec::new();
+    let mut owners: Vec<(String, bool)> = Vec::new();
+    let mut in_function_body = false;
     let mut statement: Vec<String> = Vec::new();
     let mut candidate: Option<String> = None;
     let mut pending_block_owner: Option<String> = None;
@@ -782,21 +858,57 @@ pub fn scan_c_header(path: &str, source: &str) -> Result<Vec<SeamRow>, ScanError
                 // Only a DECLARATION's brace opens a new owner. A call whose
                 // argument is a block, `dispatch_once(&once, ^{ ... })`, would
                 // otherwise make the callee own every statement inside it.
-                let owner = pending_block_owner
-                    .take()
-                    .filter(|_| is_declaration_statement(&statement))
-                    .unwrap_or_else(|| enclosing.clone());
-                owners.push(std::mem::replace(&mut enclosing, owner));
+                // Only a DECLARATION's brace opens a new owner. A call whose
+                // argument is a block, `dispatch_once(&once, ^{ ... })`, would
+                // otherwise make the callee own every statement inside it.
+                let opens_aggregate = statement
+                    .iter()
+                    .any(|word| word == "struct" || word == "union" || word == "enum");
+                let definition = declarator_name(&statement)
+                    .filter(|_| pending_block_owner.is_some() && !opens_aggregate);
+                let owner = if opens_aggregate {
+                    AGGREGATE_FRAME.to_string()
+                } else {
+                    definition.clone().unwrap_or_else(|| enclosing.clone())
+                };
+                pending_block_owner = None;
+                owners.push((std::mem::replace(&mut enclosing, owner), in_function_body));
+                in_function_body = in_function_body || definition.is_some();
                 depth += 1;
-                flush_c_statement(&mut rows, &mut statement, &enclosing, &mut candidate, depth);
+                flush_c_statement(
+                    &mut rows,
+                    &mut statement,
+                    &enclosing,
+                    &mut candidate,
+                    in_function_body,
+                    path,
+                )?;
             }
             "}" => {
                 depth = depth.saturating_sub(1);
-                enclosing = owners.pop().unwrap_or_else(|| String::from("module"));
-                flush_c_statement(&mut rows, &mut statement, &enclosing, &mut candidate, depth);
+                let (previous, was_in_body) = owners
+                    .pop()
+                    .unwrap_or_else(|| (String::from("module"), false));
+                enclosing = previous;
+                in_function_body = was_in_body;
+                flush_c_statement(
+                    &mut rows,
+                    &mut statement,
+                    &enclosing,
+                    &mut candidate,
+                    in_function_body,
+                    path,
+                )?;
             }
             ";" => {
-                flush_c_statement(&mut rows, &mut statement, &enclosing, &mut candidate, depth);
+                flush_c_statement(
+                    &mut rows,
+                    &mut statement,
+                    &enclosing,
+                    &mut candidate,
+                    in_function_body,
+                    path,
+                )?;
                 pending_block_owner = None;
             }
             "#" | "%:" => {
@@ -804,16 +916,65 @@ pub fn scan_c_header(path: &str, source: &str) -> Result<Vec<SeamRow>, ScanError
                 // boundary the tokens of `#include <immintrin.h>` run into the
                 // declaration that follows it, and the stray `.` makes that
                 // declaration read as a member access rather than a prototype.
-                flush_c_statement(&mut rows, &mut statement, &enclosing, &mut candidate, depth);
+                flush_c_statement(
+                    &mut rows,
+                    &mut statement,
+                    &enclosing,
+                    &mut candidate,
+                    in_function_body,
+                    path,
+                )?;
                 pending_block_owner = None;
                 statement.push(token.clone());
             }
             _ => statement.push(token.clone()),
         }
     }
-    flush_c_statement(&mut rows, &mut statement, &enclosing, &mut candidate, depth);
+    flush_c_statement(
+        &mut rows,
+        &mut statement,
+        &enclosing,
+        &mut candidate,
+        in_function_body,
+        path,
+    )?;
     Ok(rows)
 }
+
+/// Does an element type in this statement actually GOVERN a pointer?
+///
+/// A whole-statement co-occurrence test ("some token is `*` and some token is
+/// an element type") calls `int64_t chelis_dict_len(const chelis_dict *dict)`
+/// a raw element pointer, because the star belongs to an opaque handle and the
+/// integer is a return width. The star has to follow the element type, allowing
+/// only qualifiers in between, which is the same shape the Rust side gets for
+/// free from `syn::TypePtr`.
+fn governs_a_pointer(words: &[String]) -> bool {
+    words.iter().enumerate().any(|(index, word)| {
+        if !(C_ELEMENT_TYPES.contains(&word.as_str()) || word == "int" || word == "long") {
+            return false;
+        }
+        words[index + 1..]
+            .iter()
+            .take_while(|next| QUALIFIER_WORDS.contains(&next.as_str()) || *next == "long")
+            .count()
+            .checked_add(index + 1)
+            .and_then(|star| words.get(star))
+            .is_some_and(|next| next == "*")
+    })
+}
+
+/// Qualifiers a declaration may place between its type and its star.
+const QUALIFIER_WORDS: &[&str] = &[
+    "__restrict",
+    "__restrict__",
+    "_Atomic",
+    "const",
+    "restrict",
+    "unsigned",
+    "signed",
+    "volatile",
+];
 
 /// Does this statement DECLARE something, rather than call or assign?
 ///
@@ -822,16 +983,49 @@ pub fn scan_c_header(path: &str, source: &str) -> Result<Vec<SeamRow>, ScanError
 /// is never the statement's first token, and no assignment or member access
 /// appears before its parameter list. `CHELIS_HIP_CHECK(...)` fails the first
 /// test and `t->size * chelis_gpu_dtype_size(...)` fails the second.
-fn is_declaration_statement(words: &[String]) -> bool {
-    let Some(open) = words.iter().position(|word| word == "(") else {
-        return false;
-    };
-    if open < 2 {
-        return false;
+fn declarator_name(words: &[String]) -> Option<String> {
+    // A declarator's name sits immediately before whatever follows it: a
+    // parameter list, an array extent, an initializer, or the end of the
+    // statement. Keying only on `(` saw prototypes and missed every other
+    // declaration form, which is how `extern double *table;` and
+    // `typedef float *(*hook)(int64_t);` reached a placeholder owner.
+    let end = words
+        .iter()
+        .position(|word| word == "(" || word == "[" || word == "=")
+        .unwrap_or(words.len());
+    if end < 2 {
+        return None;
     }
-    !words[..open]
+    if words[..end]
         .iter()
         .any(|word| word == "=" || word == "->" || word == ".")
+    {
+        return None;
+    }
+    // A function-pointer declarator wraps its name in parentheses, so the name
+    // follows the star INSIDE the group rather than preceding it:
+    // `typedef float *(*chelis_hook)(int64_t);`.
+    if words.get(end) == Some(&"(".to_string())
+        && words.get(end + 1) == Some(&"*".to_string())
+        && let Some(name) = words.get(end + 2)
+        && is_c_declarator_name(name)
+    {
+        return Some(name.clone());
+    }
+    let position = words[..end]
+        .iter()
+        .rposition(|word| is_c_declarator_name(word))?;
+    // Position separates a type from a declarator: a declared name is never
+    // the statement's first token, and what precedes it is its type, a star,
+    // or a qualifier.
+    let preceding = words.get(position.checked_sub(1)?)?;
+    let introduces = preceding == "*"
+        || QUALIFIER_WORDS.contains(&preceding.as_str())
+        || c_lexical::NUMERIC_C_TYPES.contains(&preceding.as_str())
+        || c_lexical::NON_NUMERIC_C_TYPE_WORDS.contains(&preceding.as_str())
+        || C_ELEMENT_TYPES.contains(&preceding.as_str())
+        || is_c_declarator_name(preceding);
+    introduces.then(|| words[position].clone())
 }
 
 /// A declarator name is an ordinary identifier, never a control-flow keyword
@@ -859,12 +1053,13 @@ fn flush_c_statement(
     statement: &mut Vec<String>,
     enclosing: &str,
     candidate: &mut Option<String>,
-    depth: usize,
-) {
+    in_function_body: bool,
+    path: &str,
+) -> Result<(), ScanError> {
     let words = std::mem::take(statement);
-    let declared = candidate.take();
-    if words.is_empty() {
-        return;
+    let _declared = candidate.take();
+    if words.is_empty() || enclosing == AGGREGATE_FRAME {
+        return Ok(());
     }
     // A DECLARATION names its own owner wherever it appears, including inside
     // a linkage block. Any other statement belongs to the frame that encloses
@@ -872,27 +1067,51 @@ fn flush_c_statement(
     // Without the distinction a called function is mistaken for a declared
     // one, and `CHELIS_HIP_CHECK(hipMemcpy(t->data, ...))` files its row under
     // `hipMemcpy`.
-    let owner = match declared {
-        Some(name) if is_declaration_statement(&words) => name,
-        _ => enclosing.to_string(),
-    };
-    let _ = depth;
     let text = words.join(" ");
-    let has_element = words
-        .iter()
-        .any(|word| C_ELEMENT_TYPES.contains(&word.as_str()) || word == "int" || word == "long");
-    if words.iter().any(|word| word == "*") && has_element {
-        rows.push(SeamRow::new("raw-element-pointer", &owner, &text));
+    let mut push = |kind: &str, owner: &str| rows.push(SeamRow::new(kind, owner, &text));
+    let kinds: Vec<&str> = [
+        governs_a_pointer(&words).then_some("raw-element-pointer"),
+        words
+            .windows(2)
+            .any(|pair| pair[1] == "data" && (pair[0] == "->" || pair[0] == "."))
+            .then_some("direct-data-access"),
+        words
+            .iter()
+            .any(|word| word == "sizeof")
+            .then_some("width-arithmetic"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if kinds.is_empty() {
+        return Ok(());
     }
-    if words
-        .windows(2)
-        .any(|pair| pair[1] == "data" && (pair[0] == "->" || pair[0] == "."))
-    {
-        rows.push(SeamRow::new("direct-data-access", &owner, &text));
+    // A seam has to name the declaration that carries it. A placeholder owner
+    // is a SINK: because identity is kind|path|owner, one such row absorbs
+    // every later seam of that kind in that file, and the freeze stops moving.
+    let declared = if in_function_body {
+        None
+    } else {
+        declarator_name(&words)
+    };
+    let owner = match declared {
+        Some(name) => name,
+        None if enclosing != "module" => enclosing.to_string(),
+        None => {
+            return Err(ScanError::new(format!(
+                "`{path}` carries a {} seam that names no declaration: `{}`. Give it a \
+                 declarator the scanner can attribute, or move it inside a declared \
+                 function; a placeholder owner would absorb every later seam of that \
+                 kind in this file",
+                kinds.join(" and "),
+                excerpt(&text)
+            )));
+        }
+    };
+    for kind in kinds {
+        push(kind, &owner);
     }
-    if words.iter().any(|word| word == "sizeof") {
-        rows.push(SeamRow::new("width-arithmetic", &owner, &text));
-    }
+    Ok(())
 }
 
 /// Descriptor structs in a C header: `typedef struct { ... } name;`.
@@ -924,6 +1143,21 @@ fn c_descriptor_rows(stripped: &str) -> Vec<SeamRow> {
             .iter()
             .filter_map(|declaration| c_field_name(declaration))
             .collect();
+        if !name.is_empty() {
+            for declaration in &declarations {
+                let Some(field) = c_field_name(declaration) else {
+                    continue;
+                };
+                let words: Vec<String> = c_lexical::lex_c_tokens(declaration);
+                if governs_a_pointer(&words) {
+                    rows.push(SeamRow::new(
+                        "raw-element-pointer",
+                        &format!("{name}::{field}"),
+                        declaration,
+                    ));
+                }
+            }
+        }
         if is_descriptor(&names) && !name.is_empty() {
             for declaration in &declarations {
                 let Some(field) = c_field_name(declaration) else {

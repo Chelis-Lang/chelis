@@ -540,3 +540,149 @@ fn a_module_level_item_owns_its_rows() {
         )]
     );
 }
+
+// ---------------------------------------------------------------------------
+// Regressions from the second red-team round. The theme is one structural
+// change per class rather than a case per shape: a placeholder owner is now
+// inexpressible, and an element type must GOVERN a pointer rather than merely
+// co-occur with one.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn every_c_declarator_form_names_its_own_owner() {
+    // Keying on `(` saw prototypes and missed every other declaration form, so
+    // struct fields, extern data, function-pointer typedefs and array
+    // declarators all fell through to a placeholder.
+    let cases = [
+        ("float *chelis_probe_plain(float *p);", "chelis_probe_plain"),
+        ("extern double *chelis_probe_table;", "chelis_probe_table"),
+        ("extern float *chelis_probe_slots[8];", "chelis_probe_slots"),
+        (
+            "typedef float *(*chelis_probe_hook)(int64_t bytes);",
+            "chelis_probe_hook",
+        ),
+    ];
+    for (source, expected) in cases {
+        let rows = scan_c_header(HEADER, source).expect("header must scan");
+        let owners: Vec<&str> = rows.iter().map(|row| row.owner.as_str()).collect();
+        assert!(owners.contains(&expected), "{source} -> {owners:?}");
+        assert!(!owners.contains(&"module"), "{source} -> {owners:?}");
+    }
+}
+
+#[test]
+fn a_non_descriptor_struct_field_is_still_a_carrier() {
+    let rows = scan_c_header(
+        HEADER,
+        "typedef struct { int64_t key; float *weights; } chelis_probe_pair;",
+    )
+    .expect("header must scan");
+    assert!(
+        rows.iter()
+            .any(|row| row.kind == "raw-element-pointer"
+                && row.owner == "chelis_probe_pair::weights"),
+        "{rows:?}"
+    );
+}
+
+#[test]
+fn an_unattributable_c_seam_fails_rather_than_taking_a_placeholder() {
+    // A placeholder owner is a SINK: identity is kind|path|owner, so one such
+    // row absorbs every later seam of that kind in the file and the freeze
+    // stops moving. Refusing to invent one closes the class.
+    let error = scan_c_header(HEADER, "float *;").expect_err("an unnamed carrier must fail");
+    assert!(
+        error.message.contains("names no declaration"),
+        "{}",
+        error.message
+    );
+    assert!(error.message.contains("absorb"), "{}", error.message);
+}
+
+#[test]
+fn an_element_type_must_govern_the_pointer_not_merely_co_occur() {
+    // `int64_t chelis_dict_len(const chelis_dict *dict)` is not a raw element
+    // pointer: the star belongs to an opaque handle and the integer is a
+    // return width. A whole-statement co-occurrence test called 41 of the 48
+    // declarations in chelis_runtime.h carriers.
+    let opaque = scan_c_header(
+        HEADER,
+        "int64_t chelis_probe_len(const chelis_probe_list *list);",
+    )
+    .expect("header must scan");
+    assert!(
+        !opaque.iter().any(|row| row.kind == "raw-element-pointer"),
+        "{opaque:?}"
+    );
+
+    let diagnostic = scan_c_header(
+        HEADER,
+        "static inline int64_t chelis_probe_cast(int64_t v, int bits, const char *msg);",
+    )
+    .expect("header must scan");
+    assert!(
+        !diagnostic
+            .iter()
+            .any(|row| row.kind == "raw-element-pointer"),
+        "a const char * diagnostic message is not an element carrier: {diagnostic:?}"
+    );
+
+    for real in [
+        "float *chelis_probe_a(float *p);",
+        "extern const int64_t *const chelis_probe_b;",
+        "void chelis_probe_c(int64_t *__restrict__ out);",
+    ] {
+        let rows = scan_c_header(HEADER, real).expect("header must scan");
+        assert!(
+            rows.iter().any(|row| row.kind == "raw-element-pointer"),
+            "missed a real carrier: {real}"
+        );
+    }
+}
+
+#[test]
+fn a_path_attribute_reopens_the_closed_universe_and_is_rejected() {
+    let error = scan_rust_source(RUNTIME, r#"#[path = "../probe.rs"] pub mod probe;"#)
+        .expect_err("#[path] compiles a file outside the roots and must fail closed");
+    assert!(error.message.contains("#[path]"), "{}", error.message);
+    assert!(
+        error.message.contains("INVENTORY_SOURCES"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_trait_provided_method_owns_its_rows() {
+    // `TensorElement::data_ptr` is one of the accessors chelis#893 exists to
+    // seal, and it had no owner at all until trait items were walked.
+    let rows = identities(
+        RUNTIME,
+        r#"
+        pub unsafe trait TensorElement {
+            unsafe fn data_ptr(t: *mut chelis_tensor) -> *mut Self {
+                unsafe { (*t).data as *mut Self }
+            }
+        }
+        "#,
+    );
+    let owners: Vec<&str> = rows.iter().map(|(_, owner)| owner.as_str()).collect();
+    assert!(
+        owners
+            .iter()
+            .all(|owner| owner.starts_with("TensorElement::data_ptr")),
+        "{rows:?}"
+    );
+    assert!(!owners.contains(&"module"), "{rows:?}");
+}
+
+#[test]
+fn a_rust_seam_outside_every_declaration_fails_closed() {
+    let error = scan_rust_source(
+        "crates/chelis-ir/src/dag.rs",
+        "const _: () = { let _ = 2usize * 3usize; };",
+    );
+    // A const item owns its rows, so this must NOT fail; the guard exists for
+    // a seam with no enclosing item at all.
+    assert!(error.is_ok(), "{error:?}");
+}
