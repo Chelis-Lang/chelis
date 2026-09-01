@@ -109,7 +109,11 @@ bad = linspace(cast(0.0, f32), cast(1.0, f32), cast(0, int64))
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
-        .args(["eval", "--file", app_pkg.join("src/main.ch").to_str().unwrap()])
+        .args([
+            "eval",
+            "--file",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("count must be at least 1"));
