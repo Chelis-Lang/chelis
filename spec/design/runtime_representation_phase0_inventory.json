@@ -2117,6 +2117,7 @@
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_runtime.h|owner=crates/chelis-runtime/include/chelis_runtime.h::chelis_int_limits(int, int64_t *, int64_t *)|signature=fc787dbf26db43ea5f91|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_runtime.h|owner=crates/chelis-runtime/include/chelis_runtime.h::chelis_numeric_trap(const char *)|signature=b19c4bfb15a9941b9752|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_runtime.h|owner=crates/chelis-runtime/include/chelis_runtime.h::chelis_scalar|signature=82eeddd4c53c8208e0a1|occurrence=1",
+    "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_runtime.h|owner=crates/chelis-runtime/include/chelis_runtime.h::chelis_string_data(int)|signature=8122625d697434f6959c|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_runtime.h|owner=crates/chelis-runtime/include/chelis_runtime.h::chelis_string_from_cstr(const char *)|signature=25abfefc2f4e538625a6|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_runtime.h|owner=crates/chelis-runtime/include/chelis_runtime.h::chelis_tensor|signature=2e93a7a09e1b1308233f|occurrence=1",
     "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_runtime.h|owner=crates/chelis-runtime/include/chelis_runtime.h::chelis_tensor|signature=a72179d7dc2350328286|occurrence=1",
@@ -2685,6 +2686,17 @@
           "implementation_sha256": "d6951af38142d62ecb4827a55882795430dd363948c29aae352a0419ce676ff5",
           "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
           "witness_id": "phase0.mutate_c_complete_declarator_shapes"
+        },
+        {
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
+          "expected_failure": {
+            "code": "inventory.unclassified",
+            "reason_prefix": "unclassified inventory hit"
+          },
+          "expected_kind": "raw-element-pointer",
+          "implementation_sha256": "ffd884365d5016bec680bddd8daa5f4eb9839c7fffedc35384fe430deaa900b6",
+          "path": "crates/chelis-runtime/include/chelis_simd.h",
+          "witness_id": "phase0.mutate_c_pointer_return"
         },
         {
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
@@ -11193,6 +11205,10 @@
     },
     {
       "deletion_phase": 3,
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_runtime.h|owner=crates/chelis-runtime/include/chelis_runtime.h::chelis_string_data(int)|signature=8122625d697434f6959c|occurrence=1"
+    },
+    {
+      "deletion_phase": 3,
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_runtime.h|owner=crates/chelis-runtime/include/chelis_runtime.h::chelis_string_from_cstr(const char *)|signature=25abfefc2f4e538625a6|occurrence=1"
     },
     {
@@ -12032,6 +12048,6 @@
       "identity": "kind=width-arithmetic|path=crates/chelis-vocab/src/lib.rs|owner=byte_width|signature=c5366b92e40f3eadb6cd|occurrence=1"
     }
   ],
-  "freeze_sha256": "bc5e37b2c97c676abe1dc448b63f5474619626b54a4e54136913c876d0c551ec",
+  "freeze_sha256": "6cf2f67ba6ee8008d0a188db8cbe33bdd98f7bc1129215092b8354cab49e9a0f",
   "schema_version": 3
 }

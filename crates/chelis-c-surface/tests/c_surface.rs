@@ -272,6 +272,19 @@ static float *first, *second;
 }
 
 #[test]
+fn numeric_pointer_return_declarators_get_an_identity() {
+    let rows = scan_c_source(
+        "extern float *runtime_representation_phase0_pointer_return(void);",
+        "fixture",
+    )
+    .expect("pointer-return declaration parses");
+    let raw = signatures(&rows, "raw-element-pointer");
+    assert_eq!(raw.len(), 1, "pointer return disappeared: {rows:#?}");
+    assert!(raw[0].contains("shape=return-pointer"), "{raw:#?}");
+    assert!(raw[0].contains("runtime_representation_phase0_pointer_return"));
+}
+
+#[test]
 fn active_preprocessor_branch_cannot_hide_a_cxx_rvalue_reference() {
     let rows = scan_c_source(
         r#"

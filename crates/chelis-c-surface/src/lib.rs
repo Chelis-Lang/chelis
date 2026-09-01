@@ -1888,6 +1888,35 @@ fn compiler_signature(
     signature
 }
 
+fn compiler_return_signature(
+    entity: Entity<'_>,
+    return_type: Type<'_>,
+    owner: &str,
+    source: &str,
+    authored_context: Option<&str>,
+) -> String {
+    let canonical_return = return_type.get_canonical_type();
+    let canonical_function = entity
+        .get_type()
+        .map(|ty| ty.get_canonical_type().get_display_name())
+        .unwrap_or_else(|| declaration_tokens(entity));
+    let name = entity
+        .get_name()
+        .unwrap_or_else(|| "<abstract>".to_string());
+    let mut signature = format!(
+        "shape=return-{};resolved={canonical_function};return={};authored={};name={name};declarator={};enclosing={owner}",
+        declaration_shape(return_type),
+        canonical_return.get_display_name(),
+        authored_type_identity(entity, return_type, source),
+        declarator_details(entity, source),
+    );
+    if let Some(context) = authored_context {
+        signature.push_str(";emitted=");
+        signature.push_str(&emitted_context_identity(context));
+    }
+    signature
+}
+
 fn emitted_context_identity(context: &str) -> String {
     let source_tokens = tokens(context);
     let mut output = Vec::new();
@@ -1958,6 +1987,16 @@ fn is_carrier_declaration(entity: Entity<'_>) -> bool {
     )
 }
 
+fn is_function_declaration(entity: Entity<'_>) -> bool {
+    matches!(
+        entity.get_kind(),
+        EntityKind::FunctionDecl
+            | EntityKind::FunctionTemplate
+            | EntityKind::Method
+            | EntityKind::ConversionFunction
+    )
+}
+
 fn is_pointer_cast(entity: Entity<'_>) -> bool {
     matches!(
         entity.get_kind(),
@@ -2002,6 +2041,24 @@ fn walk_compiler_ast(
             kind: "raw-element-pointer".to_string(),
             owner: owner.to_string(),
             signature: compiler_signature(entity, ty, owner, source, authored_context),
+        });
+    }
+
+    if in_main_file
+        && is_function_declaration(entity)
+        && let Some(return_type) = entity.get_result_type()
+        && type_is_numeric_carrier(entity, return_type, source)
+    {
+        rows.push(CarrierUse {
+            kind: "raw-element-pointer".to_string(),
+            owner: next_owner.clone(),
+            signature: compiler_return_signature(
+                entity,
+                return_type,
+                &next_owner,
+                source,
+                authored_context,
+            ),
         });
     }
 
