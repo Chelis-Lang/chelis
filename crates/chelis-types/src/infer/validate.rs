@@ -2567,6 +2567,9 @@ pub(super) fn derive_ir_builtin_output_type(
         // resolver must consume that registry directly: a second manual
         // allowlist omitted floor_div/mod/clamp/where/bitwise identities and
         // let inline or let-bound rank evidence disappear (chelis#668).
+        // `max_elem` and `min_elem` are direct Tier-1 identities; the same
+        // registry-owned path preserves their inferred shapes without
+        // restoring a second spelling list here.
         _ if crate::shape_class(func_name) == crate::ShapeClass::Identity => {
             derive_identity_shape_passthrough(list, type_env, static_env)
         }
