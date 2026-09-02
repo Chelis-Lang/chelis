@@ -581,7 +581,8 @@ fn a_stamp_rejection_points_at_the_offending_form_not_the_whole_input() {
 
     let span = error.errors[0].span.expect("stamp rejections carry a span");
     assert_eq!(
-        span.offset, expected,
+        span.offset(),
+        expected,
         "span must address the bare name: {}",
         error.errors[0].message
     );

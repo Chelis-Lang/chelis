@@ -476,7 +476,43 @@ const INPUT_AXIS_SLOT_WIRE_SURFACE: StaticSurfaceDescriptor = StaticSurfaceDescr
     "chelis_compiler_api::schema::WireRtDim::InputAxis.tensor: usize",
     &["numeric-field"],
 );
-const REGISTERED_WIRE_TRANSPORTS: &[StaticSurfaceDescriptor] = &[INPUT_AXIS_SLOT_WIRE_SURFACE];
+// chelis#1395: `DiagnosticSpan` is a `#[serde(tag = "span")]` carrier whose
+// variant tag declares what its integers mean -- `Range` measured an extent,
+// `Point` did not. That is the same structural recognition that admits
+// `WireRtDim::InputAxis.tensor` above: a plain `usize` carrying no dtype and
+// participating in no numeric operation, whose role is declared by the tag
+// rather than inferred by a reader.
+//
+// This class runs no automatic validation, so the claim is stated here to be
+// checked rather than assumed: these three rows are source-text coordinates,
+// not numeric data. If that reading is wrong, the registration is wrong.
+const DIAGNOSTIC_SPAN_RANGE_OFFSET_WIRE_SURFACE: StaticSurfaceDescriptor =
+    StaticSurfaceDescriptor::new(
+        WIRE_CENSUS_FAMILY,
+        "wire-schema-numeric-field",
+        "chelis_compiler_api::schema::DiagnosticSpan::Range.offset: usize",
+        &["numeric-field"],
+    );
+const DIAGNOSTIC_SPAN_RANGE_LEN_WIRE_SURFACE: StaticSurfaceDescriptor =
+    StaticSurfaceDescriptor::new(
+        WIRE_CENSUS_FAMILY,
+        "wire-schema-numeric-field",
+        "chelis_compiler_api::schema::DiagnosticSpan::Range.len: usize",
+        &["numeric-field"],
+    );
+const DIAGNOSTIC_SPAN_POINT_OFFSET_WIRE_SURFACE: StaticSurfaceDescriptor =
+    StaticSurfaceDescriptor::new(
+        WIRE_CENSUS_FAMILY,
+        "wire-schema-numeric-field",
+        "chelis_compiler_api::schema::DiagnosticSpan::Point.offset: usize",
+        &["numeric-field"],
+    );
+const REGISTERED_WIRE_TRANSPORTS: &[StaticSurfaceDescriptor] = &[
+    INPUT_AXIS_SLOT_WIRE_SURFACE,
+    DIAGNOSTIC_SPAN_RANGE_OFFSET_WIRE_SURFACE,
+    DIAGNOSTIC_SPAN_RANGE_LEN_WIRE_SURFACE,
+    DIAGNOSTIC_SPAN_POINT_OFFSET_WIRE_SURFACE,
+];
 const REGISTERED_WIRE_ROWS: &[NumericOperationRegistration] = &[
     NumericOperationRegistration {
         surface: COUNT_WIRE_SURFACE,

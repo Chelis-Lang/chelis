@@ -1170,7 +1170,20 @@ fn diagnostics_from_api(
         .map(|diagnostic| Diagnostic {
             range: diagnostic
                 .span
-                .map(|span| range_for_span(text, DeepSpan::new(span.offset, span.len)))
+                // chelis#1395: a `Point` carries no extent, and rendering it
+                // as a zero-width LSP range is a presentation choice, not a
+                // fabrication. [04-FIT-17] forbids the WIRE claiming a
+                // measured extent it never had; LSP's own convention is that
+                // a zero-width range is a caret position, which is exactly
+                // what "the producer knew where, not how wide" means to an
+                // editor. The document stays honest and the editor still
+                // points at the right character.
+                .map(|span| {
+                    range_for_span(
+                        text,
+                        DeepSpan::new(span.offset(), span.extent().unwrap_or(0)),
+                    )
+                })
                 .or(fallback)
                 .unwrap_or_else(|| full_document_range(text)),
             severity: Some(severity(diagnostic.severity)),
