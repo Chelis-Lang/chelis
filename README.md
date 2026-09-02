@@ -51,15 +51,139 @@ Packages](docs/book/src/reef.md)**.
 
 ## Prerequisites
 
-The rest of this README builds the Chelis compiler from a checkout.
+The rest of this README builds the Chelis compiler from a checkout. There are
+two ways to get the toolchain: the primary path below (rustup, a C toolchain,
+and uv-managed Python) and an optional Devenv shell, described at the end of
+this section.
 
-### Devenv development shell
+**Rust toolchain.** Install [rustup](https://rustup.rs) (the Rust toolchain
+installer) if you do not already have it:
 
-Devenv is optional for local work. Native Nix CI requires Devenv. The shell
-supplies pinned Rust, Python, C, and contributor tools.
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+The repo pins its toolchain in `rust-toolchain.toml` (stable, with rustfmt
+and clippy components); rustup installs all of it automatically on the first
+`cargo` invocation, so no `rustup default` or `rustup component add` step is
+needed.
+
+**cargo-nextest** (the test runner CI and `scripts/gate.py` use; plain
+`cargo` does not include it):
+
+```sh
+cargo install cargo-nextest --locked
+```
+
+**C toolchain** (for the C backend):
+```sh
+# Fedora / RHEL
+sudo dnf install gcc openblas-devel valgrind
+
+# Ubuntu / Debian
+sudo apt-get install gcc libopenblas-dev valgrind
+
+# macOS
+xcode-select --install
+```
+
+Required:
+- **Linux:** GCC + OpenBLAS for BLAS-backed matmul and OpenMP loop parallelism
+- **macOS Apple Silicon:** Apple clang + Accelerate (`vecLib`) are supported out of the box
+- **Homebrew GCC on macOS:** optional performance path when you want OpenMP-enabled CPU loops
+
+Optional on macOS:
+```sh
+brew install gcc
+```
+
+Optional:
+- **Valgrind:** memory leak tests on generated C
+
+### Python and the gate
+
+Chelis needs a uv-managed Python 3.11 for `scripts/gate.py`, every other script
+under `scripts/`, the chelis-tools CLI in `py/`, and the `chelis-python` PyO3
+link step. The project pins Python 3.11 (`py/pyproject.toml` requires
+`>=3.11`). Using the system Python is **not supported**: Apple's bundled Python
+reports a stale library path, and a Linux distribution Python can violate the
+version contract.
+
+Install [uv](https://docs.astral.sh/uv/) once, provision the interpreter, and
+create a `.venv` at the root of every checkout and every dedicated worktree.
+Never copy or symlink another checkout's `.venv`:
+
+```sh
+# Install uv once
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Start a new shell if the installer changed PATH, then verify the install
+uv --version
+
+# Install the project Python, then create this checkout's local venv
+uv python install 3.11
+uv venv --python 3.11
+```
+
+Three invocation forms follow from that setup, and the repository uses them
+consistently:
+
+- **Scripts:** `.venv/bin/python scripts/<name>.py`, for example
+  `.venv/bin/python scripts/regen_all.py --check`. Inside an activated Devenv
+  shell the equivalent is `python scripts/<name>.py`.
+- **The gate:** `python3 scripts/gate.py --fast`, `python3 scripts/gate.py
+  --local`, or `python3 scripts/gate.py --list`, in every environment.
+  `scripts/gate.py` is stdlib-only; when `python3` is not already a uv- or
+  Devenv-managed runtime it re-executes itself as
+  `uv run --managed-python --python 3.11 --no-project python scripts/gate.py`
+  and then exports its selected interpreter as `PYO3_PYTHON` to every child
+  command. It never requires a checkout-local `.venv`, and its `--fast` and
+  `--local` preflight warns when one is missing (create it with
+  `uv venv --python 3.11`), because direct cargo and nextest invocations
+  outside the gate fall back to it. Do not invoke the gate through
+  `.venv/bin/python`; the `uv run` form above is the gate's own fallback, not a
+  routine invocation.
+- **Direct cargo commands:** `.cargo/config.toml` defaults `PYO3_PYTHON` to
+  `.venv/bin/python`, so a checkout with the environment above builds as is. A
+  worktree without its own `.venv` points PyO3 at uv's managed interpreter
+  instead:
+
+  ```sh
+  PYO3_PYTHON="$(uv python find 3.11)" cargo build --workspace
+  PYO3_PYTHON="$(uv python find 3.11)" cargo nextest run -p chelis-compiler-api
+  ```
+
+  An explicit `PYO3_PYTHON` is authoritative. A missing configured path fails
+  with setup guidance instead of silently falling back.
+
+Install Python dependencies into the venv as needed:
+
+```sh
+uv pip install -e py            # chelis-tools (loc-report, skill-eval, ...)
+uv pip install -e bindings/python # chelis Python bindings (optional)
+```
+
+**Commit-message hook.** `.githooks/commit-msg` is the tracked commit-msg hook.
+It runs `scripts/check_commit_message.py` through Devenv, `.venv`, or a managed
+uv interpreter, in that order, and resolves its repository at run time, so one
+installed copy is correct from every worktree of a clone and on every branch.
+On the primary path, cargo-husky installs it: `cargo test` installs a POSIX
+wrapper that invokes the same checker, using the same uv fallback when a
+worktree has neither Devenv nor `.venv`. Both hooks reject AI tool authorship
+markers before Git creates a commit. All listed format and lint hooks remain
+disabled.
+
+### Devenv development shell (optional)
+
+Devenv is optional. It supplies pinned Rust, Python, C, and contributor tools in
+one shell, and native Nix CI requires it, but every command pays shell
+evaluation and activation unless it runs inside one persistent shell, which in
+practice makes it slower per command than the primary path above; an agent
+fleet should use the primary path. Nothing in this subsection is needed to
+build, test, or gate Chelis.
 
 The tracked environment supports `x86_64-linux` and Apple silicon macOS
-(`aarch64-darwin`). Other systems must use the manual setup below.
+(`aarch64-darwin`). Other systems use the primary path.
 
 These installation commands come from the
 [Devenv getting-started guide](https://devenv.sh/getting-started/).
@@ -140,9 +264,12 @@ Devenv files.
    cargo run -p chelis-cli --bin chelis -- --help
    ```
 
-5. Before a code push, run the local gate:
+5. Run the gates through `chelis-gate`, which forwards every argument to
+   `python3 scripts/gate.py`: `--fast` before every push, `--local` once per
+   pull request on the committed candidate:
 
    ```sh
+   chelis-gate --fast
    chelis-gate --local
    ```
 
@@ -219,8 +346,8 @@ of restoring pre-sanitization paths. The executable-cache regression first
 proves that upgrade miss with the managed schema-27 fixture, then proves that
 schema-28 clean checkouts restore exact path-clean executable/dSYM pairs.
 
-Devenv does not modify the repository-root `.venv`. The manual setup path below
-owns that environment outside Devenv.
+Devenv does not modify the repository-root `.venv`; the primary path above owns
+that environment outside Devenv.
 
 `devenv test` initializes the managed files and Python. Explicit task-graph
 edges keep Python-backed checks behind the virtual environment and compiler
@@ -247,17 +374,9 @@ The shell also supplies these platform commands:
 Each command forwards its arguments to the applicable Python file under
 `scripts/`.
 
-`.githooks/commit-msg` is the tracked commit-msg hook. It runs
-`scripts/check_commit_message.py` through Devenv, `.venv`, or a managed uv
-interpreter, in that order. Devenv copies it into the shared hooks directory on
-shell entry; the copy resolves its repository at run time, so one installed
-copy is correct from every worktree of a clone and on every branch.
-
-The manual setup retains cargo-husky as a fallback. `cargo test` installs a
-POSIX wrapper that invokes the same checker with `.venv/bin/python`.
-
-Both hooks reject AI tool authorship markers before Git creates a commit. All
-listed format and lint hooks remain disabled.
+Devenv copies the tracked `.githooks/commit-msg` hook into the shared hooks
+directory on shell entry; see the commit-message hook paragraph in the primary
+path above for what the hook runs.
 
 #### Native Nix CI
 
@@ -282,10 +401,6 @@ gh workflow run "Nix Packages" --ref <branch>
 ```
 
 When both native Nix jobs complete with all checks green, the gate passes.
-
-Devenv is not a product requirement.
-
-If you do not use Devenv locally, use the manual setup below.
 
 ### Nix source packages
 
@@ -360,115 +475,12 @@ devenv update
 .venv/bin/python scripts/test_devenv_version.py
 ```
 
-**Rust toolchain.** Install [rustup](https://rustup.rs) (the Rust toolchain
-installer) if you do not already have it:
-
-```sh
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-The repo pins its toolchain in `rust-toolchain.toml` (stable, with rustfmt
-and clippy components); rustup installs all of it automatically on the first
-`cargo` invocation, so no `rustup default` or `rustup component add` step is
-needed.
-
-**cargo-nextest** (the test runner CI and `scripts/gate.py` use; plain
-`cargo` does not include it):
-
-```sh
-cargo install cargo-nextest --locked
-```
-
-**C toolchain** (for the C backend):
-```sh
-# Fedora / RHEL
-sudo dnf install gcc openblas-devel valgrind
-
-# Ubuntu / Debian
-sudo apt-get install gcc libopenblas-dev valgrind
-
-# macOS
-xcode-select --install
-```
-
-Required:
-- **Linux:** GCC + OpenBLAS for BLAS-backed matmul and OpenMP loop parallelism
-- **macOS Apple Silicon:** Apple clang + Accelerate (`vecLib`) are supported out of the box
-- **Homebrew GCC on macOS:** optional performance path when you want OpenMP-enabled CPU loops
-
-Optional on macOS:
-```sh
-brew install gcc
-```
-
-Optional:
-- **Valgrind** — memory leak tests on generated C
-
-**Python via [uv](https://docs.astral.sh/uv/)** (for `scripts/gate.py`, the
-chelis-tools CLI in `py/`, and the `chelis-python` PyO3 link step):
-
-```sh
-# Install uv once
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Start a new shell if the installer changed PATH, then verify the install
-uv --version
-
-# Install the project Python and create the primary checkout's local venv
-uv python install 3.11
-uv venv --python 3.11
-```
-
-The project pins Python 3.11 (`py/pyproject.toml` requires `>=3.11`).
-Outside Devenv, use a uv-managed interpreter. `.cargo/config.toml` defaults
-direct Cargo commands to `.venv/bin/python`, so the primary checkout normally
-has the environment created above.
-
-Dedicated git worktrees do not need to copy or symlink that ignored `.venv`.
-For direct Cargo commands in a worktree, point PyO3 at uv's managed Python:
-
-```sh
-PYO3_PYTHON="$(uv python find 3.11)" cargo build --workspace
-PYO3_PYTHON="$(uv python find 3.11)" cargo nextest run -p chelis-compiler-api
-```
-
-An explicit `PYO3_PYTHON` is authoritative. A missing configured path fails
-with setup guidance instead of silently falling back. Creating a separate
-worktree-local environment with `uv venv --python 3.11` remains supported.
-
-Inside Devenv, use the activated environment at `.devenv/state/venv`.
-Devenv overrides `PYO3_PYTHON` with its managed interpreter.
-
-Using the system Python is **not supported**. Apple's bundled Python reports a stale library path, and Linux Python can violate the version contract.
-
-Install Python dependencies into the uv venv as needed:
-
-```sh
-uv pip install -e py            # chelis-tools (loc-report, skill-eval, ...)
-uv pip install -e bindings/python # chelis Python bindings (optional)
-```
-
-`scripts/gate.py` itself is stdlib-only. Launch it with `python3`; when that is
-not already a uv or Devenv runtime, it re-executes itself as:
-
-```sh
-uv run --managed-python --python 3.11 --no-project python scripts/gate.py
-```
-
-The gate then exports its selected interpreter as `PYO3_PYTHON` to every child
-command. It does not install project dependencies or require a checkout-local
-`.venv`. The cargo-husky commit-message hook uses the same uv fallback when a
-worktree has neither Devenv nor `.venv`.
-
 ## Build
 
-Outside Devenv, a managed Python is a hard prerequisite for `cargo build` on every platform.
-
-Inside Devenv, the activated `.devenv/state/venv` environment satisfies the same PyO3 requirement.
-
-`chelis-python` links against `libpython`. Run `uv venv --python 3.11`
-before a direct manual build if `.venv/` does not exist, or set
-`PYO3_PYTHON="$(uv python find 3.11)"` as shown above.
+`chelis-python` links against `libpython`, so a managed Python is a prerequisite
+for `cargo build` on every platform: see Python and the gate above for the
+`.venv` and `PYO3_PYTHON` forms. Inside Devenv the activated `.devenv/state/venv`
+environment satisfies the same requirement.
 
 ```sh
 cargo build --workspace
@@ -488,19 +500,33 @@ target/debug/chelis --help
 cargo run -p chelis-cli --bin chelis -- --help
 ```
 
-Before pushing, run the local pre-push gate (chelis#360). `scripts/gate.py`
-is the single source of truth for the per-PR gate; CI runs the same
-commands:
+`--fast` is the pre-push gate: fix-in-place, run before every push. `--local`
+(chelis#360) is the once-per-pull-request gate: run on the committed candidate
+immediately before marking the draft ready for review, after it is pushed and CI
+has started. `scripts/gate.py` is the single source of truth for the per-PR gate;
+CI runs the same commands:
 
 ```sh
-python3 scripts/gate.py --list  # auto-routes through uv when needed
-python3 scripts/gate.py --local
-chelis-gate --local             # active Devenv shell
+python3 scripts/gate.py --list  # re-executes through uv when needed
+python3 scripts/gate.py --fast  # before every push; fixes fmt and tier-0 regeneration in place
+python3 scripts/gate.py --local # once per PR, on the committed candidate
 ```
 
-`--local` runs workspace clippy, `cargo fmt --check`,
-`chelis lint --check .`, and per-crate nextest for the crates changed vs
-`origin/main`. The full workspace nextest stage is CI-owned: open a
+`--fast` regenerates the tier-0 artifacts (`scripts/regen_all.py --tier 0`) and
+runs `cargo fmt --all` in write mode, then `chelis lint --check .`,
+`cargo clippy -p <crate> --tests` for each changed crate, and one nextest run
+over the drift tripwires; it prints the files it changed and exits non-zero
+only when a check fails. `--local` runs two workspace clippy configurations,
+`cargo fmt --check`, `chelis lint --check .`, the regeneration and compile-fail
+guards, both oracles, and per-crate nextest for the crates changed vs
+`origin/main`; it takes an advisory workstation-wide lease on `gate.lock` under
+`$CHELIS_GATE_LEASE_DIR`, else `$XDG_CACHE_HOME/chelis`, else `~/.cache/chelis`,
+so two full gates in different worktrees do not run at once (`--no-wait`,
+`--lease-timeout SECONDS`, and `--no-lease` change that). Every run other than
+`--list` writes a JSON summary under `target/gate-reports/` and prints one
+summary line. Push before the review round; the round reviews the pushed
+head while CI runs, and CI is watched by one background waiter, never a
+polling loop. The full workspace nextest stage is CI-owned: open a
 draft PR early and let CI (macOS Smoke is the authoritative workspace
 oracle) run the full suite; see
 [`docs/local_macos_environment.md`](docs/local_macos_environment.md)

@@ -323,6 +323,33 @@ class MatrixCoverageTests(unittest.TestCase):
         self.assertEqual(set(gate_rows.values()), {CLOSURE.PER_PULL_REQUEST})
         self.assertIn("no-default-features", gate_rows)
 
+    def test_gate_rows_list_macos_exactly_when_local_runs_them(self) -> None:
+        # No continuous job runs Clippy on macOS, so a gate-owned row is
+        # linted there only by `gate.py --local` on a developer's Mac. The
+        # `hosts` tuple must therefore say macOS exactly for the rows the
+        # `--local` subset still runs; `--local` keeps two of the three so
+        # leg 3 passes on a fresh target, and the third is CI-only.
+        gate_spec = importlib.util.spec_from_file_location(
+            "gate_for_closure_hosts", SCRIPT.with_name("gate.py")
+        )
+        assert gate_spec is not None and gate_spec.loader is not None
+        gate = importlib.util.module_from_spec(gate_spec)
+        sys.modules[gate_spec.name] = gate
+        gate_spec.loader.exec_module(gate)
+        checked = 0
+        for run in CLOSURE.CLIPPY_MATRIX:
+            if run.owner != "scripts/gate.py":
+                continue
+            checked += 1
+            self.assertEqual(
+                "macos" in run.hosts,
+                list(run.command) in gate.LOCAL_STATIC_COMMANDS,
+                f"{run.label}: hosts {run.hosts} disagree with --local membership",
+            )
+        self.assertEqual(checked, 3)
+        by_label = {run.label: run for run in CLOSURE.CLIPPY_MATRIX}
+        self.assertEqual(by_label["no-default-features"].hosts, ("linux",))
+
     def test_rejects_a_run_its_owner_does_not_issue(self) -> None:
         run = CLOSURE.ClippyRun(
             label="unwired",

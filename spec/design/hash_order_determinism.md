@@ -276,8 +276,9 @@ The two residuals differ in that the feature one has a nightly `--all-features`
 backstop and this one has none at any cadence. Bringing it in requires a
 supported Windows host, not a further row.
 
-Separately, the three per-pull-request rows list macOS among their hosts, but
-no continuous job runs Clippy on macOS. The two macOS jobs in `ci.yml` are
+Separately, two of the three per-pull-request rows (`default-features` and
+`solver-free-features`) list macOS among their hosts, but no continuous job
+runs Clippy on macOS. The two macOS jobs in `ci.yml` are
 `macos-workspace-shard`, which inlines `cargo nextest run --workspace --profile
 ci-full` rather than calling the gate, and `smt-build-darwin-arm64`, a release
 build; no step of either runs Clippy, and neither requests the component.
@@ -285,11 +286,19 @@ No macOS job in another workflow runs Clippy either, and the only one of them
 on a push trigger is `build-cvc5.yml`'s `build-darwin-arm64`, which harvests a
 cvc5 artifact. Attribute-form
 `#[cfg(target_os = "macos")]` regions are therefore linted by `python3
-scripts/gate.py --local`, which `AGENTS.md` makes mandatory before a
-non-documentation push, and not by default CI. The `cfg!()` macro form is not
-in this residual: it compiles both arms on every host, which is what covers the
-link-flag and BLAS-provider selection in `chelis-backend-c/src/toolchain.rs`.
-Recording the attribute-form gap here is what the Manual Gates rule requires.
+scripts/gate.py --local`, which `AGENTS.md` makes mandatory once per pull
+request on the committed candidate, and not by default CI. The
+`no-default-features` row is Linux-only: `--local` dropped it and kept the
+other two because the closure check's source-reconciliation leg needs the
+solver-free row on a fresh target (`crates/chelis-prove/src/clarabel_sos.rs`
+is compiled per pull request by that row alone), while the no-default row
+compiles a strict subset of the default row. The residual that follows is
+narrow but real: an attribute-form `#[cfg(target_os = "macos")]` region that
+sits under `#[cfg(not(feature = ...))]` is linted on no host at any cadence.
+The `cfg!()` macro form is not in this residual: it compiles both arms on
+every host, which is what covers the link-flag and BLAS-provider selection in
+`chelis-backend-c/src/toolchain.rs`. Recording the attribute-form gap here is
+what the Manual Gates rule requires.
 
 **Residual: the feature dimension.** `z3`, `carcara`, and `arb` need external
 solver toolchains
