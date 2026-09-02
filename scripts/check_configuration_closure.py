@@ -65,6 +65,9 @@ class ClippyRun:
     #: when `--local` runs it: `no-default-features` is CI-only, because
     #: `--local` keeps only the two rows leg 3 needs on a fresh target
     #: (`scripts/test_check_configuration_closure.py` locks the pairing).
+    #: "linux" on that row means the hosted `lint-and-unit` job lints it on
+    #: Linux for every pull request; a developer running `--local` on Linux
+    #: skips it too and is covered by the same job.
     hosts: tuple[str, ...]
     cadence: str
 

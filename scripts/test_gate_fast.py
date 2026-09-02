@@ -307,6 +307,30 @@ class PreflightTests(unittest.TestCase):
                 )
         return code, environment, report, out.getvalue(), err.getvalue(), calls
 
+    def test_host_system_defaults_to_platform_and_is_resolved_at_call_time(self):
+        report = gate.GateReport(mode="local", started_at="now")
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(gate, "_git_facts", lambda: dict(CANNED_GIT_FACTS)), \
+                mock.patch.object(gate, "host_system", lambda: "Linux"), \
+                mock.patch.object(gate, "run_probe", lambda *a, **k: self.fail("probe ran")):
+            code, _env = gate.run_preflight(
+                mode="local", report=report, environ={"PATH": os.environ.get("PATH", "")},
+                executable=Path(sys.executable), repo_root=Path(tmp),
+                output_stream=io.StringIO(), error_stream=io.StringIO(),
+            )
+        self.assertIsNone(code)
+        self.assertEqual(report.preflight["probe"]["verdict"], "skipped")
+        self.assertEqual(gate.host_system(), gate.platform.system())
+
+    def test_host_facts_record_null_when_unavailable(self):
+        def broken_loadavg():
+            raise OSError("no load average here")
+
+        with mock.patch.object(gate.os, "getloadavg", broken_loadavg):
+            _code, _env, report, _out, _err, _calls = self._preflight(system="Linux")
+        self.assertIsNone(report.preflight["host"]["load_average_1m"])
+        self.assertEqual(report.preflight["host"]["system"], "Linux")
+
     def test_probe_exit_0_proceeds(self):
         code, environment, report, _out, err, calls = self._preflight()
         self.assertIsNone(code)
@@ -433,7 +457,10 @@ class PreflightTests(unittest.TestCase):
 
 
 class SummaryTests(unittest.TestCase):
-    def _run_main(self, argv, *, diff="", status="", returncodes=None, raise_on=None, extra_patches=()):
+    def _run_main(
+        self, argv, *, diff="", status="", returncodes=None, raise_on=None,
+        extra_patches=(), system="Darwin",
+    ):
         fake_popen, launched = _popen_stub(returncodes, raise_on=raise_on)
 
         def fake_git_output(args):
@@ -450,6 +477,7 @@ class SummaryTests(unittest.TestCase):
                 mock.patch.object(gate, "_git_output", fake_git_output),
                 mock.patch.object(gate, "_git_facts", lambda: dict(CANNED_GIT_FACTS)),
                 mock.patch.object(gate, "run_probe", _canned_probe),
+                mock.patch.object(gate, "host_system", lambda: system),
                 mock.patch.object(gate, "workspace_member_packages", lambda: dict(CANNED_MEMBERS)),
                 *extra_patches,
             ]
@@ -497,6 +525,27 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("gate --fast: changed crates vs origin/main: chelis-cli", out)
         self.assertTrue(summary["report_path"].endswith("-fast.json"))
         self.assertGreaterEqual(summary["seconds"], 0)
+        # `python` names the interpreter the children ran (the exported
+        # PYO3_PYTHON), which here is the gate's own executable.
+        self.assertEqual(summary["python"], sys.executable)
+        self.assertEqual(summary["runner_python"], sys.executable)
+        self.assertIsNone(summary["files_changed_note"])
+
+    def test_linux_summary_records_the_probe_as_skipped(self):
+        # The script-unit CI job runs these tests on Linux; the preflight must
+        # not depend on the host it happens to run on.
+        def must_not_run(*_a, **_k):
+            self.fail("the exec probe must not run off Darwin")
+
+        rc, summary, _launched, _out, err, _lease = self._run_main(
+            ["--fast"], system="Linux",
+            extra_patches=[mock.patch.object(gate, "run_probe", must_not_run)],
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(summary["preflight"]["probe"], {"verdict": "skipped", "reason": "not darwin"})
+        self.assertEqual(summary["preflight"]["host"]["system"], "Linux")
+        self.assertIn("load_average_1m", summary["preflight"]["host"])
+        self.assertNotIn("preflight stop", err)
 
     def test_std_path_change_appends_the_std_legs(self):
         rc, summary, launched, out, _err, _lease = self._run_main(
@@ -620,6 +669,22 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("changed 3 file(s) in place", out)
         self.assertIn("  a.rs", out)
 
+    def test_git_failure_after_the_run_records_null_changed_files_not_an_error(self):
+        snapshots = [{"a.rs": "h1"}]
+
+        def hashes(*_a, **_k):
+            if snapshots:
+                return snapshots.pop()
+            raise subprocess.CalledProcessError(128, ["git", "status"], stderr="fatal: index locked")
+
+        with mock.patch.object(gate, "_porcelain_hashes", hashes):
+            rc, summary, _launched, _out, err, _lease = self._run_main(["--fast"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(summary["termination"], "pass")
+        self.assertIsNone(summary["files_changed_by_run"])
+        self.assertIn("index locked", summary["files_changed_note"])
+        self.assertIn("gate --fast: warning: git status failed after the run", err)
+
     def test_porcelain_hashes_see_content_not_status(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -654,6 +719,10 @@ class SummaryTests(unittest.TestCase):
         line = gate.human_summary(report, None, REPO_ROOT)
         self.assertIn("FAIL (stage 3: cargo clippy -p x --tests -- -D warnings; exit code: 101)", line)
         self.assertNotIn("report:", line)
+
+        unknown = gate.GateReport(mode="fast", started_at="now")
+        unknown.files_changed_by_run = None
+        self.assertIn("changed: unknown (git status failed after the run)", gate.human_summary(unknown, None, REPO_ROOT))
 
         local = gate.GateReport(mode="local", started_at="now")
         local.termination = "lease-timeout"
@@ -793,6 +862,110 @@ class LeaseTests(unittest.TestCase):
         text = out.getvalue()
         self.assertEqual(text.count("waiting for the gate lease"), 1)
         self.assertGreaterEqual(text.count("still waiting"), 2)
+
+    def test_lease_timeout_is_honoured_to_the_second_not_the_poll(self):
+        # `--lease-timeout 3` must exit after 3 s of waiting, not after the
+        # next 10 s poll boundary: the sleep is clamped to the remaining time.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / gate.LEASE_FILE_NAME
+            holder = self._lease(path)
+            holder.acquire()
+            try:
+                now = [0.0]
+                sleeps: list[float] = []
+
+                def fake_sleep(seconds):
+                    sleeps.append(seconds)
+                    now[0] += seconds
+
+                waiter = self._lease(
+                    path, wait=True, timeout=3.0, sleep=fake_sleep,
+                    clock=lambda: now[0], poll_seconds=10,
+                )
+                with self.assertRaises(gate.LeaseHeld) as raised:
+                    waiter.acquire()
+                self.assertEqual(sum(sleeps), 3.0, sleeps)
+                self.assertEqual(sleeps, [3.0])
+                self.assertEqual(raised.exception.waited, 3.0)
+            finally:
+                holder.release()
+
+    def test_lease_timeout_longer_than_a_poll_still_polls_then_clamps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / gate.LEASE_FILE_NAME
+            holder = self._lease(path)
+            holder.acquire()
+            try:
+                now = [0.0]
+                sleeps: list[float] = []
+
+                def fake_sleep(seconds):
+                    sleeps.append(seconds)
+                    now[0] += seconds
+
+                waiter = self._lease(
+                    path, wait=True, timeout=25.0, sleep=fake_sleep,
+                    clock=lambda: now[0], poll_seconds=10,
+                )
+                with self.assertRaises(gate.LeaseHeld):
+                    waiter.acquire()
+                self.assertEqual(sleeps, [10.0, 10.0, 5.0])
+                self.assertEqual(now[0], 25.0)
+            finally:
+                holder.release()
+
+    def test_peek_takes_a_shared_lock_never_an_exclusive_one(self):
+        operations: list[int] = []
+        real_flock = gate.fcntl.flock
+
+        def recording_flock(fd, operation):
+            operations.append(operation)
+            return real_flock(fd, operation)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / gate.LEASE_FILE_NAME
+            path.write_text("")
+            with mock.patch.object(gate.fcntl, "flock", recording_flock):
+                self.assertIsNone(gate.GateLease.peek(path))
+        self.assertEqual(
+            operations,
+            [gate.fcntl.LOCK_SH | gate.fcntl.LOCK_NB, gate.fcntl.LOCK_UN],
+        )
+
+    def test_acquire_retries_once_before_announcing_an_unknown_holder(self):
+        # A holder between its flock and its sidecar write, or a --fast peek
+        # holding LOCK_SH for microseconds, blocks the first attempt with no
+        # readable sidecar. One short retry must settle it silently.
+        attempts = iter([False, True])
+        out = io.StringIO()
+        sleeps: list[float] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / gate.LEASE_FILE_NAME
+            lease = self._lease(path, wait=True, output=out, sleep=sleeps.append)
+            with mock.patch.object(
+                gate.GateLease, "_try_flock", staticmethod(lambda fd, operation=gate.fcntl.LOCK_EX: next(attempts))
+            ):
+                lease.acquire()
+            lease.release()
+        self.assertEqual(sleeps, [gate.TRANSIENT_RETRY_SECONDS])
+        self.assertEqual(out.getvalue(), "")
+
+    def test_sidecar_write_failure_releases_the_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / gate.LEASE_FILE_NAME
+            # A directory where the sidecar must go makes the O_EXCL create fail.
+            path.with_name("gate.lock.json").mkdir()
+            lease = self._lease(path)
+            with self.assertRaises(OSError):
+                lease.acquire()
+            self.assertFalse(lease.held)
+            self.assertIsNone(lease._fd)
+            # Nobody holds the flock afterwards.
+            self.assertIsNone(gate.GateLease.peek(path))
+            other = self._lease(path)
+            with self.assertRaises(OSError):
+                other.acquire()  # same directory obstacle, but no lock held
+            self.assertIsNone(gate.GateLease.peek(path))
 
     def test_timeout_exits_with_lease_held(self):
         with tempfile.TemporaryDirectory() as tmp:

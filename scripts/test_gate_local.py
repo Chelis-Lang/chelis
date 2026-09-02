@@ -13,7 +13,7 @@ What is locked here:
   (b) paths outside every workspace member map to no crate, and an
       empty diff yields the explicit "no crate changes detected"
       message instead of silently running nothing;
-  (c) the `--local` command list is exactly the static pre-push subset
+  (c) the `--local` command list is exactly the static once-per-pull-request subset
       (two of the three workspace clippy configurations, fmt --check,
       chelis lint --check ., the guards and oracles) plus one
       `cargo nextest run -p <crate>` per changed crate -- no workspace
@@ -205,7 +205,7 @@ class LocalCommandListTests(unittest.TestCase):
         # clarabel_sos.rs), while the --no-default-features row compiles a
         # strict subset of the default row and is CI-owned through
         # `gate.py lint-and-unit`.
-        # Assert the exact list so no pre-push stage disappears silently.
+        # Assert the exact list so no `--local` stage disappears silently.
         rendered = [gate.render(c) for c in gate.local_command_list([])]
         self.assertEqual(
             rendered,

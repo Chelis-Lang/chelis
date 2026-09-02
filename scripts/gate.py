@@ -24,10 +24,10 @@ Usage (an unmanaged launcher is automatically re-executed through uv):
     python3 scripts/gate.py integration --support-only
     python3 scripts/gate.py --list     # print the canonical full list,
                                        # annotated fast/local/CI-owned
-    python3 scripts/gate.py --fast     # inner-loop pass: fix in place, then
+    python3 scripts/gate.py --fast     # the pre-push gate: fix in place, then
                                        # lint, per-crate clippy, tripwires
-    python3 scripts/gate.py --local    # run the developer pre-push subset,
-                                       # once per PR on the committed candidate
+    python3 scripts/gate.py --local    # the once-per-pull-request gate, on the
+                                       # committed candidate before ready-for-review
 
 Local/CI stage split (chelis#360): the full developer gate runs
 `cargo nextest run --workspace --no-fail-fast` with the default profile, while the CI
@@ -36,21 +36,23 @@ to the required dtype oracle. The workspace execution stays out of `--local` --
 macOS Smoke is the authoritative
 workspace oracle, and on the macOS workstation the mass first-exec
 burst it triggers can wedge assessment entirely (see
-docs/local_macos_environment.md). `--local` is the once-per-PR
-checkpoint on the committed candidate: two workspace clippy configurations
+docs/local_macos_environment.md). `--local` is the once-per-pull-request
+gate, run on the committed candidate immediately before ready-for-review, after
+the draft is pushed and CI has started: two workspace clippy configurations
 (compile-only, no mass exec), fmt, `chelis lint`, the regeneration and
 compile-fail guards, both oracles, plus `cargo nextest run -p <crate>
 --no-fail-fast` for each crate changed vs `origin/main` (committed diff plus
 uncommitted work). The derived crate list is always printed so nothing is
 silently skipped.
 
-`--fast` is the inner-loop pass to run before every push. It fixes in place
+`--fast` is the pre-push gate, run before every push. It fixes in place
 (`regen_all.py --tier 0`, plus `--tier 1` when a chelis-std path changed, then
 `cargo fmt --all`), then runs `chelis lint --check .`, `cargo clippy -p <crate>
 --tests -- -D warnings` for each changed crate, one nextest run over the drift
 tripwires, and, when a chelis-std path changed, the bundle's self-consistency
-test. Every writer runs before every check. It exits non-zero
-only for a lint, clippy, tripwire, or unfixable regeneration failure, and it
+test. Every writer runs before every check. It exits non-zero for any failing
+stage (fmt, regeneration, lint, per-crate clippy, the tripwire run, or the
+std-bundle self-test), never for a file it fixed, and it
 prints every file the run changed (content hashes of the porcelain set before
 and after, so a file that was already dirty and that fmt changed further is
 still reported). It never runs the workspace clippy rows, the chelis#908
@@ -65,9 +67,9 @@ Why `--local` runs two of the three Clippy configurations
 that compiles it, so on a fresh target one configuration followed by the closure
 check fails. The `--no-default-features` row compiles a strict subset of the
 default row (no whole file is gated on `cfg(not(feature = ...))`), so dropping
-it from `--local` loses only local pre-push linting of the
+it from `--local` loses only the developer-side linting of the
 `#[cfg(not(feature = "chelis-prove"))]` regions, which `gate.py lint-and-unit`
-still lints on every pull request. `--list` marks that row `ci-owned`.
+still lints on Linux for every pull request. `--list` marks that row `ci-owned`.
 
 Preflight, lease, and run summary
 ---------------------------------
@@ -75,12 +77,16 @@ Preflight, lease, and run summary
 command: the environment checks in `gate_environment` (exit 2 on failure), the
 git facts for the summary (never fatal), a warning when the worktree has no
 `.venv/bin/python` (the gate exports `PYO3_PYTHON`, so only direct cargo and
-nextest runs outside the gate need it), and, on macOS, the first-exec probe
-`scripts/preflight_exec_probe.py` as a subprocess: exit 1 (wedged) stops the
-gate with exit 3, exit 2 and 3 warn and proceed. CI stage runs skip all of it.
+nextest runs outside the gate need it), and, on macOS only, the first-exec
+probe `scripts/preflight_exec_probe.py` as a subprocess: exit 1 (wedged) stops
+the gate with exit 3, exit 2 and 3 warn and proceed. On Linux the probe is
+skipped and the summary records `{"verdict": "skipped", "reason": "not
+darwin"}`; every other preflight, lease, and summary behavior is the same on
+both platforms. CI stage runs skip all of it.
 
 `--local` and the bare full gate then take an advisory workstation-wide lease,
-`fcntl.flock` on `~/.cache/chelis/gate.lock` (or `$CHELIS_GATE_LEASE_DIR`),
+`fcntl.flock` on `gate.lock` under `$CHELIS_GATE_LEASE_DIR`, else
+`$XDG_CACHE_HOME/chelis`, else `~/.cache/chelis`,
 held for the whole run so two cold full gates in different worktrees cannot
 starve each other. The default is to wait indefinitely, polling every 10 s with
 a heartbeat naming the holder every 60 s; `--no-wait` and `--lease-timeout
@@ -147,7 +153,7 @@ that is not an executable file is a loud failure, never a silent fall back
 to a build, and an explicit setting from the caller is never replaced. That
 is the same discipline applied to an explicit `PYO3_PYTHON`, timing
 included -- `gate_environment` validates an explicit handoff, so a bad one
-aborts before the first command rather than after the whole pre-push subset
+aborts before the first command rather than after the whole `--local` subset
 has run.
 
 Present-but-empty is a failure on both sides, not an off switch. Reading
@@ -350,7 +356,7 @@ CHECKPOINT_COMPILE_FAIL: list[str] = [
 ]
 # chelis#1338 Phase A: the deferred stores expose only canonical operations.
 # The out-of-workspace fixture deliberately attempts raw map iteration and
-# must stay rejected in both hosted lint-and-unit and the local pre-push set.
+# must stay rejected in both hosted lint-and-unit and the `--local` set.
 HASH_ORDER_COMPILE_FAIL: list[str] = [
     MANAGED_PYTHON,
     "scripts/check_hash_order_compile_fail.py",
@@ -376,7 +382,7 @@ CONFIGURATION_CLOSURE: list[str] = [
 # `compiler_pipeline_oracle.py`, so a forbidden dependency, a false no_std
 # claim, or a broken facade compile-fail boundary passed hosted CI green. The
 # dependency guard (one `cargo metadata`) and the documentation guard (pure
-# Python) are cheap enough for the local pre-push subset; the pipeline-artifact
+# Python) are cheap enough for the `--local` subset; the pipeline-artifact
 # compile-fail fixture builds an out-of-workspace crate, so it stays in the
 # per-PR gate stage (CI + full gate) alongside the checkpoint fixture.
 PIPELINE_CORE_DEPENDENCY_GUARD: list[str] = [
@@ -488,7 +494,7 @@ HASH_PARTITION_RE = re.compile(
     r"^hash:(?P<shard>[1-9][0-9]*)/(?P<count>[1-9][0-9]*)$"
 )
 
-# The static `--local` pre-push subset (chelis#360). Deliberately
+# The static `--local` once-per-pull-request subset (chelis#360). Deliberately
 # excludes BUILD_WORKSPACE (clippy already compiles everything; no mass
 # first-exec burst) and NEXTEST_WORKSPACE (CI-owned; macOS Smoke is the
 # authoritative workspace oracle). `--local` appends a dynamic
@@ -502,10 +508,11 @@ HASH_PARTITION_RE = re.compile(
 # by CLIPPY_SOLVER_FREE_FEATURES, so that row must stay or `--local` fails on
 # every fresh worktree. CLIPPY_NO_DEFAULT_FEATURES compiles a strict subset of
 # CLIPPY_WORKSPACE (no whole file is gated on `cfg(not(feature = ...))`), so
-# dropping it here loses only the local pre-push lint of the 25
+# dropping it here loses only the developer-side lint of the 25
 # `#[cfg(not(feature = "chelis-prove"))]` regions, which `lint-and-unit` still
-# lints in CI. It stays in STAGES so `--list` keeps publishing it (`ci-owned`)
-# and `check_configuration_closure.py` still finds its owner.
+# lints on Linux in CI for every pull request, whichever platform the
+# developer runs `--local` on. It stays in STAGES so `--list` keeps publishing
+# it (`ci-owned`) and `check_configuration_closure.py` still finds its owner.
 LOCAL_STATIC_COMMANDS: list[list[str]] = [
     CLIPPY_WORKSPACE,
     CLIPPY_SOLVER_FREE_FEATURES,
@@ -604,6 +611,7 @@ LEASE_DIR_ENV = "CHELIS_GATE_LEASE_DIR"
 LEASE_FILE_NAME = "gate.lock"
 LEASE_POLL_SECONDS = 10.0
 LEASE_HEARTBEAT_SECONDS = 60.0
+TRANSIENT_RETRY_SECONDS = 0.1
 PROBE_TIMEOUT_SECONDS = 180.0
 PROBE_RUNBOOK = "docs/local_macos_environment.md"
 SUMMARY_SCHEMA_VERSION = 1
@@ -925,8 +933,8 @@ def render(command: list[str]) -> str:
 
 def list_annotation(command: list[str]) -> str:
     """The `--list` annotation for a canonical command: whether the
-    `--fast` pass and the `--local` pre-push subset include it, only
-    `--local` does, or CI owns it."""
+    `--fast` pre-push gate and the `--local` once-per-pull-request subset
+    include it, only `--local` does, or CI owns it."""
     if command in FAST_STATIC_COMMANDS and command in LOCAL_STATIC_COMMANDS:
         return FAST_ANNOTATION
     if command in LOCAL_STATIC_COMMANDS:
@@ -1014,8 +1022,8 @@ def changed_crates(
 
 
 def local_command_list(crates: list[str]) -> list[list[str]]:
-    """The `--local` pre-push command list: the static subset plus one
-    `cargo nextest run -p <crate> --no-fail-fast` per changed crate."""
+    """The `--local` once-per-pull-request command list: the static subset
+    plus one `cargo nextest run -p <crate> --no-fail-fast` per changed crate."""
     commands = list(LOCAL_STATIC_COMMANDS)
     for crate in crates:
         commands.append(
@@ -1161,7 +1169,9 @@ class GateReport:
         self.preflight: dict = {}
         self.lease: dict = {}
         self.git: dict = {}
-        self.files_changed_by_run: list[str] = []
+        self.files_changed_by_run: list[str] | None = []
+        self.files_changed_note: str | None = None
+        self.selected_python: str | None = None
         self.started_monotonic = time.monotonic()
 
     def first_failing_stage(self) -> dict | None:
@@ -1209,7 +1219,10 @@ def summary_payload(
         "termination": report.termination,
         "exit_code": report.exit_code,
         "worktree": str(repo_root),
-        "python": sys.executable,
+        # `python` is the interpreter every child ran (the normalized
+        # PYO3_PYTHON); `runner_python` is the one that ran the gate itself.
+        "python": report.selected_python,
+        "runner_python": sys.executable,
         "git": report.git,
         "preflight": report.preflight,
         "lease": report.lease,
@@ -1225,6 +1238,7 @@ def summary_payload(
         ],
         "first_failing_stage": report.first_failing_stage(),
         "files_changed_by_run": report.files_changed_by_run,
+        "files_changed_note": report.files_changed_note,
         "report_path": report_path,
     }
 
@@ -1284,7 +1298,9 @@ def human_summary(
     ]
     if report.mode == "fast":
         changed = report.files_changed_by_run
-        if changed:
+        if changed is None:
+            parts.append("changed: unknown (git status failed after the run)")
+        elif changed:
             shown = ", ".join(changed[:5])
             if len(changed) > 5:
                 shown += f", and {len(changed) - 5} more"
@@ -1301,6 +1317,12 @@ def human_summary(
 
 
 # --- preflight ---------------------------------------------------------------
+
+
+def host_system() -> str:
+    """The platform the preflight branches on, resolved at call time so tests
+    (and the Linux script-unit CI job) can steer it."""
+    return platform.system()
 
 
 def run_probe(
@@ -1352,7 +1374,7 @@ def run_preflight(
     environ: dict[str, str],
     executable: Path,
     repo_root: Path = REPO_ROOT,
-    system=platform.system,
+    system=None,
     probe=None,
     output_stream=None,
     error_stream=None,
@@ -1372,6 +1394,7 @@ def run_preflight(
         print(f"gate: environment setup failed: {exc}", file=error)
         report.termination = "environment"
         return EXIT_ENVIRONMENT, None
+    report.selected_python = environment["PYO3_PYTHON"]
 
     report.git.update(_git_facts())
 
@@ -1387,7 +1410,8 @@ def run_preflight(
             file=error,
         )
 
-    if system() == "Darwin":
+    current_system = (host_system if system is None else system)()
+    if current_system == "Darwin":
         result = (run_probe if probe is None else probe)(executable, repo_root)
         report.preflight["probe"] = {
             key: result.get(key) for key in ("verdict", "exit_code", "output")
@@ -1423,9 +1447,18 @@ def run_preflight(
                 file=error,
             )
     else:
+        # The first-exec wedge is a macOS assessment behavior (chelis#356);
+        # Linux has no equivalent, so the probe is skipped and the summary
+        # says why rather than leaving the key absent.
         report.preflight["probe"] = {"verdict": "skipped", "reason": "not darwin"}
 
-    host: dict = {"platform": platform.platform(), "cpu_count": os.cpu_count()}
+    # Every host fact is best effort: a missing value records null.
+    host: dict = {"system": current_system}
+    try:
+        host["platform"] = platform.platform()
+    except Exception:  # noqa: BLE001 - platform probing must never fail the gate
+        host["platform"] = None
+    host["cpu_count"] = os.cpu_count()
     try:
         host["load_average_1m"] = round(os.getloadavg()[0], 2)
     except (OSError, AttributeError):
@@ -1517,9 +1550,9 @@ class GateLease:
         return data if isinstance(data, dict) else None
 
     @staticmethod
-    def _try_flock(fd: int) -> bool:
+    def _try_flock(fd: int, operation: int = fcntl.LOCK_EX) -> bool:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, operation | fcntl.LOCK_NB)
         except OSError as exc:
             if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
                 return False
@@ -1529,12 +1562,15 @@ class GateLease:
     @classmethod
     def peek(cls, path: Path) -> dict | None:
         """Who holds the lease right now, without taking it: None when free,
-        the sidecar (or an empty dict for an unreadable one) when held."""
+        the sidecar (or an empty dict for an unreadable one) when held. The
+        probe is a shared lock, so it never excludes anyone; an exclusive
+        acquirer that lands in the same microseconds simply retries (see
+        `acquire`)."""
         if not path.is_file():
             return None
-        fd = os.open(path, os.O_RDWR)
+        fd = os.open(path, os.O_RDONLY)
         try:
-            if cls._try_flock(fd):
+            if cls._try_flock(fd, fcntl.LOCK_SH):
                 fcntl.flock(fd, fcntl.LOCK_UN)
                 return None
             return cls.current_holder(path) or {}
@@ -1547,10 +1583,19 @@ class GateLease:
         started = self._clock()
         last_heartbeat = started
         announced = False
+        transient_retry = True
         while not self._try_flock(self._fd):
             holder = self.current_holder(self.path)
             if holder:
                 self.holder_seen = holder
+            elif transient_retry:
+                # No sidecar yet: either a holder is between its flock and
+                # its sidecar write, or a `--fast` peek holds a shared lock
+                # for a few microseconds. One short retry settles both
+                # before this run announces an unknown holder.
+                transient_retry = False
+                self._sleep(TRANSIENT_RETRY_SECONDS)
+                continue
             now = self._clock()
             waited = now - started
             expired = self.timeout is not None and waited >= self.timeout
@@ -1578,8 +1623,25 @@ class GateLease:
                     flush=True,
                 )
                 last_heartbeat = now
-            self._sleep(self.poll_seconds)
+            # Never sleep past the deadline: a bounded wait is honoured to
+            # the second, not to the next poll boundary.
+            pause = self.poll_seconds
+            if self.timeout is not None:
+                pause = max(0.0, min(pause, self.timeout - waited))
+            self._sleep(pause)
         self.wait_seconds = self._clock() - started
+        try:
+            self._write_sidecar()
+        except OSError:
+            # Holding the flock without a sidecar would let other gates wait
+            # on an anonymous holder while this run reports no lease at all.
+            # Release the lock and let the caller report the bypass truthfully.
+            os.close(self._fd)
+            self._fd = None
+            raise
+        self.held = True
+
+    def _write_sidecar(self) -> None:
         # We hold the lock, so any sidecar left behind is stale by definition.
         self.sidecar_path.unlink(missing_ok=True)
         descriptor = os.open(
@@ -1602,7 +1664,6 @@ class GateLease:
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        self.held = True
 
     def release(self) -> None:
         if self._fd is None:
@@ -1757,8 +1818,8 @@ def run_local(
     executable: Path,
     state: dict,
 ) -> int:
-    """Run the `--local` pre-push gate: preflight, lease, derive the changed
-    crates vs origin/main, then run the local command list."""
+    """Run the `--local` once-per-pull-request gate: preflight, lease, derive
+    the changed crates vs origin/main, then run the local command list."""
     code, environment = run_preflight(
         mode="local", report=report, environ=environ, executable=executable
     )
@@ -1790,7 +1851,7 @@ def run_fast(
     executable: Path,
     state: dict,
 ) -> int:
-    """Run the `--fast` inner-loop pass: preflight (holder note only), derive
+    """Run the `--fast` pre-push gate: preflight (holder note only), derive
     the changed crates and std paths, fix in place, then check. Exit is
     non-zero only when a stage fails."""
     code, environment = run_preflight(
@@ -1821,7 +1882,19 @@ def run_fast(
         executable=executable,
         report=report,
     )
-    after = _porcelain_hashes()
+    try:
+        after = _porcelain_hashes()
+    except (subprocess.CalledProcessError, OSError) as exc:
+        # The stages already ran and their verdict stands; only the
+        # changed-file report is lost, and the summary says so.
+        detail = getattr(exc, "stderr", None) or str(exc)
+        report.files_changed_by_run = None
+        report.files_changed_note = (
+            f"git status failed after the run ({str(detail).strip()}); "
+            "review `git status` by hand"
+        )
+        print(f"gate --fast: warning: {report.files_changed_note}", file=sys.stderr)
+        return code
     report.files_changed_by_run = files_changed_between(before, after)
     if report.files_changed_by_run:
         print(
@@ -1910,19 +1983,20 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--local",
         action="store_true",
         help=(
-            "Run the developer pre-push subset once per PR on the committed "
-            "candidate: two workspace clippy configurations, fmt --check, "
-            "chelis lint --check ., the regeneration and compile-fail guards, "
-            "both oracles, and cargo nextest run -p <crate> for each crate "
-            "changed vs origin/main. Takes the advisory gate lease. The "
-            "workspace nextest stage is CI-owned (chelis#360)."
+            "Run the once-per-pull-request gate on the committed candidate, "
+            "immediately before ready-for-review (chelis#360): two workspace "
+            "clippy configurations, fmt --check, chelis lint --check ., the "
+            "regeneration and compile-fail guards, both oracles, and cargo "
+            "nextest run -p <crate> for each crate changed vs origin/main. "
+            "Takes the advisory gate lease. The workspace nextest stage is "
+            "CI-owned."
         ),
     )
     p.add_argument(
         "--fast",
         action="store_true",
         help=(
-            "Run the inner-loop pass before every push: regen_all.py --tier 0 "
+            "Run the pre-push gate before every push: regen_all.py --tier 0 "
             "and cargo fmt --all fix in place, then chelis lint --check ., "
             "cargo clippy -p <crate> --tests per changed crate, and one nextest "
             "run over the drift tripwires. Prints the files it changed; never "
@@ -2209,6 +2283,8 @@ def run_commands(
         else failure_root
     )
     selected_python = Path(environment["PYO3_PYTHON"])
+    if report is not None:
+        report.selected_python = str(selected_python)
     total = len(commands)
     for index, template in enumerate(commands, start=1):
         command = materialize_command(template, selected_python)

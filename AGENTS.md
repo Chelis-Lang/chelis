@@ -575,10 +575,15 @@ uv from <https://docs.astral.sh/uv/getting-started/installation/>, verify it wit
 `py/pyproject.toml` pins `requires-python = ">=3.11"`. See [`README.md`](README.md) for
 the full setup.
 
-**Provisioning.** Create a checkout's environment once with `uv venv --python 3.11`, at
-the root of the primary checkout and at the root of every dedicated worktree. Never copy
-or symlink another checkout's `.venv`. Inside Devenv, the activated environment at
-`.devenv/state/venv` serves the same purpose and needs no separate step.
+**Primary path (uv).** Create a checkout's environment once with `uv venv --python 3.11`,
+at the root of the primary checkout and at the root of every dedicated worktree. Never
+copy or symlink another checkout's `.venv`. Three invocation forms follow, and this
+repository uses them consistently: every script is `.venv/bin/python scripts/<name>.py`;
+the gate is always `python3 scripts/gate.py --fast`, `--local`, or `--list`, never
+`.venv/bin/python scripts/gate.py`; and the
+`uv run --managed-python --python 3.11 --no-project python ...` form appears only where a
+document explains what the gate re-executes to, and as the fallback when no `.venv`
+exists, never as a routine invocation.
 
 **Resolution.** Rust test and gate code resolves an interpreter through
 `tests/support/managed_python.rs`: an explicit `PYO3_PYTHON` wins outright, and the
@@ -588,14 +593,22 @@ points `PYO3_PYTHON` at `.venv/bin/python`; Devenv overrides it with
 export `PYO3_PYTHON="$(uv python find 3.11)"`. An explicit `PYO3_PYTHON` is
 authoritative: an invalid path must fail loudly rather than fall back.
 
-**Invoking Python directly.** Outside Devenv use `.venv/bin/python` or
-`uv run --managed-python --python 3.11 --no-project python`; inside Devenv use the
-activated environment. `scripts/gate.py` is the one `python3` entry point that
-self-heals, re-executing through that uv command before running gate logic, so a bare
-`python3 scripts/gate.py` is always safe; it also sets `PYO3_PYTHON` to its uv-selected
-interpreter for every child command. Its `--fast` and `--local` preflight warns when the
-worktree has no `.venv/bin/python`; only direct cargo and nextest runs outside the gate
-need it, because they fall back to it when `PYO3_PYTHON` is unset.
+**The gate.** `scripts/gate.py` is stdlib-only and is the one `python3` entry point that
+self-heals: when its runtime is not already uv- or Devenv-managed it re-executes itself
+through the uv command above before running gate logic, so `python3 scripts/gate.py` is
+correct in every environment. It exports its selected interpreter as `PYO3_PYTHON` to
+every child command, never requires a checkout-local `.venv`, and its `--fast` and
+`--local` preflight warns when the worktree has no `.venv/bin/python` (create it with
+`uv venv --python 3.11`); only direct cargo and nextest runs outside the gate need it,
+because they fall back to it when `PYO3_PYTHON` is unset.
+
+**Alternative path (Devenv).** Inside an activated Devenv shell the environment at
+`.devenv/state/venv` serves the same purpose as `.venv` and needs no separate step: invoke
+scripts as `python scripts/<name>.py`, and `chelis-gate` forwards every argument to
+`python3 scripts/gate.py`. Devenv is optional and, because each command pays shell
+evaluation and activation unless it runs inside one persistent shell, slower per command
+than the primary path; agent fleets use the primary path. `README.md` holds the Devenv
+detail.
 
 **macOS:** Apple's bundled Python reports a stale `sysconfig.LIBDIR` path. Do not route
 PyO3 to it.
@@ -667,10 +680,11 @@ python3 scripts/gate.py --fast    # before every push: fixes in place, then chec
 python3 scripts/gate.py --local   # once per PR, on the committed candidate
 ```
 
-`scripts/gate.py` is the single source of truth for the per-PR gate. Agents run
-`--fast` before every push and `--local` once per pull request, on the committed
-candidate, immediately before ready-for-review; the bare full gate is CI-owned for
-routine PR validation. CI calls `python3 scripts/gate.py <stage>` for each split job.
+`scripts/gate.py` is the single source of truth for the per-PR gate. `--fast` is the
+pre-push gate: fix-in-place, run before every push. `--local` is the
+once-per-pull-request gate: run on the committed candidate immediately before
+ready-for-review, after the draft is pushed and CI has started. The bare full gate is
+CI-owned for routine PR validation. CI calls `python3 scripts/gate.py <stage>` for each split job.
 `scripts/test_gate.py` pins the complete ordered set of
 single-line `run:` commands permitted in those gate-owned jobs, so shell syntax
 cannot hide an unreviewed command. To see the canonical full list and the
@@ -767,9 +781,10 @@ gate inventory, stack-guard coverage), and, when a `packages/chelis-std/` or
 `crates/chelis-std-bundle/` path changed, `regen_all.py --tier 1` right after tier 0
 (so every check sees the regenerated bundle) and `cargo nextest run -p
 chelis-std-bundle --lib` after the tripwires. Every writer runs before every check. It
-exits non-zero only for a lint, clippy, tripwire, or unfixable regeneration failure;
-a regenerated `dist/` or `reef.lock` is reported as a changed file to commit, never
-as a failure. Changed files are reported from content
+exits non-zero for any failing stage (fmt, regeneration, lint, per-crate clippy, the
+tripwire run, or the std-bundle self-test) and never for a file it fixed; a regenerated
+`dist/` or `reef.lock` is reported as a changed file to commit, never as a failure.
+Changed files are reported from content
 hashes of the porcelain set before and after the run, so a file that was already dirty
 and that fmt changed further is still listed. It never runs a workspace clippy row,
 the chelis#908 oracle, or the runtime-representation oracle, and it never takes the
@@ -787,15 +802,18 @@ header, or the tree-sitter parsers.
 `--fast`, `--local`, and the bare full gate run a preflight before the first command:
 the environment checks (`PYO3_PYTHON`, `CARGO_TARGET_DIR` containment, an explicit
 oracle handoff; exit 2 on failure), the git facts for the run summary (never fatal), a
-warning when the worktree has no `.venv/bin/python`, and, on macOS,
+warning when the worktree has no `.venv/bin/python`, and, on macOS only,
 `scripts/preflight_exec_probe.py` as a subprocess: probe exit 0 proceeds, exit 1
 (wedged first exec) stops the gate with exit 3 and the termination class
-`preflight-stop`, exit 3 (slow) and exit 2 (could not run) warn and proceed. CI stage
-runs skip the preflight.
+`preflight-stop`, exit 3 (slow) and exit 2 (could not run) warn and proceed. On Linux
+the probe is skipped and the summary records why; the environment checks, the `.venv`
+warning, the lease, and the summary behave the same on both platforms. CI stage runs
+skip the preflight.
 
 `--local` and the bare full gate then take an advisory workstation-wide lease,
-`fcntl.flock` on `~/.cache/chelis/gate.lock` (or `$CHELIS_GATE_LEASE_DIR/gate.lock`),
-held for the whole run so two cold gates in different worktrees do not starve each
+`fcntl.flock` on `gate.lock` under `$CHELIS_GATE_LEASE_DIR`, else `$XDG_CACHE_HOME/chelis`,
+else `~/.cache/chelis`, held for the whole run so two cold gates in different worktrees do
+not starve each
 other. The default is to wait indefinitely, polling every 10 seconds with a heartbeat
 every 60 seconds that names the holder's pid, worktree, head, and start time.
 `--no-wait` exits 4 at once when the lease is held, `--lease-timeout SECONDS` caps the

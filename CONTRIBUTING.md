@@ -82,14 +82,20 @@ authorization for new phase-based names.
 ## Repo Gate (before every push)
 
 `scripts/gate.py` is the single source of truth for the per-PR
-developer-runnable gate; CI runs the same commands. Run the fast pass
-before every push, and the pre-push subset (chelis#360) once per pull
-request, on the committed candidate, before marking it ready for review:
+developer-runnable gate; CI runs the same commands. `--fast` is the pre-push
+gate: fix-in-place, run before every push. `--local` (chelis#360) is the
+once-per-pull-request gate: run on the committed candidate immediately before
+marking the draft ready for review, after it is pushed and CI has started:
 
 ```sh
-.venv/bin/python scripts/gate.py --fast
-.venv/bin/python scripts/gate.py --local
+python3 scripts/gate.py --fast
+python3 scripts/gate.py --local
 ```
+
+`scripts/gate.py` is stdlib-only and re-executes itself through uv when
+`python3` is not already a uv- or Devenv-managed runtime, so that form is
+correct in every environment; every other script is invoked as
+`.venv/bin/python scripts/<name>.py`.
 
 Push before requesting the red-team round; the review runs against the
 pushed head while CI runs on it. The full workspace test suite is
