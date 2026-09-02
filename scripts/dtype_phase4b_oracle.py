@@ -52,13 +52,13 @@ CONTRACT_FILES = (
 )
 FROZEN_FILE_DIGESTS = {
     "spec/02-surf-syntax.md": (
-        "5552e1e7d63da4ca59fc5f69e7555877474e50d92f616c05e989b172c5e63cbb"
+        "4e8612210c68001955a81a295ccdbf0f8492b8cbaff45bee81cf22cfd89fcd1b"
     ),
     "spec/03-deep-syntax.md": (
         "6f1c879bc89ab901fff658b63457a6846e5b6f8ab6ea4a17fd24ec6da0427bd2"
     ),
     "spec/04-type-system.md": (
-        "b8e504c9980b4ac1556fc918449ca2c636d28bfb3fd2b82bdcce083fb7b23a23"
+        "366f74fae9e33ce3012a622ac97f938d85db17b20a7d29d11efd1816b4ef4641"
     ),
     "spec/05-risc-primitives.md": (
         "e427fa744b313a3a8a7cad99e1ca92ed7df8e57db459bf53a499edb098dca86a"
@@ -79,7 +79,7 @@ FROZEN_FILE_DIGESTS = {
         "4a6013c2dc5a074d19ae12696c109a35218facfdb423d29ff07cef79fe6689b9"
     ),
     "spec/design/dtype_semantics.md": (
-        "a2499fba4dabba15a7019345642f98cb1a50ef6dd36edc9696afe628a3a8c146"
+        "d75ca4f8b520200d96971953606f4adacf723b4d84556d0e00998a6b70054ad3"
     ),
     "spec/design/implicit_linearity.md": (
         "f03302f4b328841d79824f6326f1edf2e954a9b98c0118992d4a3a1f2dfb67cf"
@@ -793,8 +793,12 @@ def validate_normative_contract(
                 "Surf dtype-family bound production",
             ),
             (
-                "A bound\nbelongs to one binder list per declaration",
+                "A bound belongs to one binder\nlist per declaration",
                 "Surf single bound binder list",
+            ),
+            (
+                "A listed name **that declares a\nbound** must occur in the declared type.",
+                "Surf occurrence rule is bounded-binder only",
             ),
         ),
         violations,
@@ -846,6 +850,11 @@ def validate_normative_contract(
                 "Unifying two bounded variables SHALL\n> yield the intersection "
                 "of their families.",
                 "dtype-family bound intersection",
+            ),
+            (
+                "an empty intersection SHALL be a `PrecisionMismatch` naming both\n"
+                "> families.",
+                "empty intersection names both families",
             ),
             (
                 "A binder that declares no bound\n> remains an unconstrained type "

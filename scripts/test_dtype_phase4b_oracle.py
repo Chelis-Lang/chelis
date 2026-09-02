@@ -3830,10 +3830,36 @@ class ContractValidationTests(unittest.TestCase):
     def test_a_bound_cannot_be_written_in_two_binder_lists(self) -> None:
         self.replace(
             Path("spec/02-surf-syntax.md"),
-            "A bound\nbelongs to one binder list per declaration",
-            "A bound\nmay be repeated in both binder lists when they agree",
+            "A bound belongs to one binder\nlist per declaration",
+            "A bound may be repeated in both binder\nlists when they agree",
         )
         self.assert_contract_fails("Surf single bound binder list")
+
+    def test_the_occurrence_rule_cannot_widen_past_bounded_binders(self) -> None:
+        # [04-DTYPE-2] makes only a BOUNDED binder owe an occurrence, and the
+        # checker agrees: `sig f[zz]: p -> p` checks clean. Asserting it for
+        # every listed name is normative prose broader than the decided rule.
+        self.replace(
+            Path("spec/02-surf-syntax.md"),
+            "A listed name **that declares a\nbound** must occur in the declared type.",
+            "A listed name must occur in the declared type.",
+        )
+        self.assert_contract_fails("Surf occurrence rule is bounded-binder only")
+
+    def test_the_two_bound_failures_cannot_claim_one_diagnostic_shape(
+        self,
+    ) -> None:
+        # An instantiation outside the bound names one family and the
+        # offending type; an empty intersection names two families and no
+        # offending type. One clause covering both over-promises the second.
+        self.replace(
+            Path("spec/04-type-system.md"),
+            "an empty intersection SHALL be a `PrecisionMismatch` naming both\n"
+            "> families.",
+            "an empty intersection SHALL name the required family and the\n"
+            "> offending type.",
+        )
+        self.assert_contract_fails("empty intersection names both families")
 
     def test_deep_carries_dtype_bounds_as_a_defined_metadata_key(self) -> None:
         self.replace(

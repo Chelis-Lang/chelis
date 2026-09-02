@@ -509,13 +509,16 @@ silent bound and a user type named `Float` is unaffected outside this
 position. A binder with no bound keeps its existing meaning: an
 unconstrained type variable, not a dtype.
 
-A `sig`'s `[..]` clause is **partial**. It declares bounds for the
-names it lists; every other name in the sig's type is implicitly
-quantified exactly as above, so dimension names and `..r` rank spreads
-need no entry. A listed name must occur in the declared type. A bound
-belongs to one binder list per declaration: when a standalone `sig`
-declares the name, the bound goes on the `sig`, and a bound in that
-`def`'s `[..]` clause is an error.
+A `sig`'s `[..]` clause is **partial**: every name it does not list
+stays implicitly quantified exactly as above, so dimension names and
+`..r` rank spreads need no entry. A name it does list is an
+authoritative binder, as in a `def`, so listing a multi-letter
+dimension name makes it a dimension *variable* where an unlisted one
+would be a concrete symbolic axis. A listed name **that declares a
+bound** must occur in the declared type. A bound belongs to one binder
+list per declaration: when a standalone `sig` declares the name, the
+bound goes on the `sig`, and a bound in that `def`'s `[..]` clause is
+an error.
 
 A bounded binder is a type binder only. Using one in a dimension slot
 or as a rank spread is an error, since a dtype family cannot name an

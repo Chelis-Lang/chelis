@@ -2033,9 +2033,10 @@ family. The reserved spellings of §1.1.1 belong to no family. `bool` and
 > variable the bounded variable is identified with, and generalization
 > re-quantifies it, so the bound survives aliases, wrappers, higher-order
 > values, imports, and recursive calls. Unifying two bounded variables SHALL
-> yield the intersection of their families. An instantiation outside the
-> bound, and an empty intersection, are each a `PrecisionMismatch` naming the
-> required family and the offending type. A binder that declares no bound
+> yield the intersection of their families. An instantiation outside the bound
+> SHALL be a `PrecisionMismatch` naming the required family and the offending
+> type; an empty intersection SHALL be a `PrecisionMismatch` naming both
+> families. A binder that declares no bound
 > remains an unconstrained type variable admitting every type, not only a
 > dtype. A bound naming anything but a family of this section, a bounded
 > binder used in a dimension slot or as a rank spread, and a bounded binder
