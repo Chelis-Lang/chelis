@@ -1277,13 +1277,19 @@ is written in that shape. What is not listed is absent, not qualified.
 
 #### The three results
 
-**R1. The checker derives a rank fact for a bounded set of operations, and
-rejects a positive-rank disagreement between two operands when it does.**
+**R1. Where the checker has derived a rank fact for BOTH operands of a
+`ShapeClass::Identity` call, a positive-rank disagreement is rejected.**
 
-The set is exactly `ShapeClass::Identity` plus the four operations named in
-`derive_ir_builtin_output_type`: `conv2d`, `stride`, `expand`, `softmax`. Where
-a fact is derived, two tensor operands of different positive rank produce a
-located `DimensionMismatch`, `check` exits nonzero, and `score < 1`. Rank-zero
+Two roles are distinct here. Facts are *derived* for `ShapeClass::Identity`
+plus the four operations named in `derive_ir_builtin_output_type`: `conv2d`,
+`stride`, `expand`, `softmax`. Facts are *acted on* only at a
+`ShapeClass::Identity` call site, gated in
+`validate_ir_builtin_symbolic_requirements`; the four named operations are
+derivation sources, not rejection sites. The check also needs facts for two
+operands: an argument with no fact is skipped, so one fact beside one factless
+operand raises nothing. Where both are present and the positive ranks differ,
+the result is a located `DimensionMismatch`, `check` exits nonzero, and
+`score < 1`. Rank-zero
 arguments remain subject to the builtin's ordinary scheme (including `clamp`'s
 explicit scalar-bound form); PP5 creates no scalar-broadcast permission.
 
@@ -1316,9 +1322,7 @@ checking rebound names".
 aborts before allocation or indexing.**
 
 This covers operations lowered through the tensor-DAG emitter
-(`chelis-backend-c/src/emit.rs`, `emit_elementwise_operand_guard`). Equal-rank
-runtime extents retain the existing all-axis guard, and fused nodes retain
-all-pairs comparison when their first external input is an internal scalar.
+(`chelis-backend-c/src/emit.rs`, `emit_elementwise_operand_guard`).
 
 *Evidence:* `chelis-backend-c`'s
 `direct_positive_rank_mismatch_traps_before_indexing`, which constructs a
@@ -1339,15 +1343,27 @@ takes R3 for a statement about generated C as a whole.
 
 #### What PP5 does not establish
 
-No test asserts that the checker rejects a rank disagreement arising from an
-operation outside R1's derived set, because it does not reject one. Confirmed
-escapes, each scoring 1 with an empty error list: shape-preserving operations
-that classify as `ShapeClass::Rewriting`, such as `cast`, `cast_trunc`,
-`normalize`, and `realize`; rank-changing `ShapeClass::NameTracked` reductions,
-such as `add(e, sum(e, 0i32))` and `add(e, mean(e, 0i32))`; and a rank reaching
-the operation through a user `def`. These are examples of the gap, not a
-partition of it. The general statement is R1's: outside the derived set, the
-checker has no rank fact and raises nothing.
+No test asserts that PP5's rank validator rejects a disagreement arising from
+an operation outside R1's derived set, because it does not reject one.
+
+This is a statement about PP5's validator, not about the checker as a whole.
+Ordinary inference still rejects what it can see: a declared-rank mismatch
+between a `sig` and its argument reports `tensor rank mismatch: 2 dims vs 1
+dims` at score 0.92, and mixing dtypes reports a precision mismatch. The
+escapes below are programs where inference unifies through a movement
+operation's wildcard, so no rank conflict reaches it, and PP5's validator has
+no fact to supply one.
+
+Constructing one therefore takes a movement-op result laundered through an
+operation the resolver does not classify. The direct form is caught:
+`add(x, cast(y, f32))` on a rank-1 and a rank-2 parameter reports a rank
+mismatch at 0.9586. `cast_trunc` needs both operands cast, because casting one
+leaves a precision mismatch to report at 0.9385. Confirmed escapes, each
+scoring 1 with an empty error list: `ShapeClass::Rewriting` operations such as
+`cast`, `cast_trunc`, `normalize`, and `realize`; rank-changing
+`ShapeClass::NameTracked` reductions such as `add(e, sum(e, 0i32))` and
+`add(e, mean(e, 0i32))`; and a rank reaching the operation through a user
+`def`. These are examples of the gap, not a partition of it.
 
 The gap is therefore not "shape-preserving operations are missing". The
 resolver derives rank for one central class plus four separately named
