@@ -82,14 +82,18 @@ authorization for new phase-based names.
 ## Repo Gate (before every push)
 
 `scripts/gate.py` is the single source of truth for the per-PR
-developer-runnable gate; CI runs the same commands. Run the pre-push
-subset (chelis#360) before opening or updating a PR:
+developer-runnable gate; CI runs the same commands. Run the fast pass
+before every push, and the pre-push subset (chelis#360) once per pull
+request, on the committed candidate, before marking it ready for review:
 
 ```sh
+.venv/bin/python scripts/gate.py --fast
 .venv/bin/python scripts/gate.py --local
 ```
 
-The full workspace test suite is CI-owned: open a draft PR early and
+Push before requesting the red-team round; the review runs against the
+pushed head while CI runs on it. The full workspace test suite is
+CI-owned: open a draft PR early and
 let CI (macOS Smoke is the authoritative workspace oracle) run it.
 See the README Prerequisites for the toolchain the gate needs (rustup,
 cargo-nextest, and the uv-managed Python venv).

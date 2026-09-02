@@ -140,9 +140,11 @@ Devenv files.
    cargo run -p chelis-cli --bin chelis -- --help
    ```
 
-5. Before a code push, run the local gate:
+5. Before every push run the fast gate; run the full local gate once per pull
+   request, on the committed candidate:
 
    ```sh
+   chelis-gate --fast
    chelis-gate --local
    ```
 
@@ -457,7 +459,9 @@ uv run --managed-python --python 3.11 --no-project python scripts/gate.py
 
 The gate then exports its selected interpreter as `PYO3_PYTHON` to every child
 command. It does not install project dependencies or require a checkout-local
-`.venv`. The cargo-husky commit-message hook uses the same uv fallback when a
+`.venv`. Its `--fast` and `--local` preflight warns when a worktree has no `.venv`,
+because direct cargo and nextest invocations outside the gate fall back to it. The
+cargo-husky commit-message hook uses the same uv fallback when a
 worktree has neither Devenv nor `.venv`.
 
 ## Build
@@ -488,19 +492,32 @@ target/debug/chelis --help
 cargo run -p chelis-cli --bin chelis -- --help
 ```
 
-Before pushing, run the local pre-push gate (chelis#360). `scripts/gate.py`
-is the single source of truth for the per-PR gate; CI runs the same
-commands:
+Before every push, run the fast gate; run the full local pre-push gate
+(chelis#360) once per pull request, on the committed candidate, immediately
+before marking it ready for review. `scripts/gate.py` is the single source of
+truth for the per-PR gate; CI runs the same commands:
 
 ```sh
 python3 scripts/gate.py --list  # auto-routes through uv when needed
-python3 scripts/gate.py --local
-chelis-gate --local             # active Devenv shell
+python3 scripts/gate.py --fast  # before every push; fixes fmt and tier-0 regeneration in place
+python3 scripts/gate.py --local # once per PR, on the committed candidate
+chelis-gate --local             # active Devenv shell; --fast works the same way
 ```
 
-`--local` runs workspace clippy, `cargo fmt --check`,
-`chelis lint --check .`, and per-crate nextest for the crates changed vs
-`origin/main`. The full workspace nextest stage is CI-owned: open a
+`--fast` regenerates the tier-0 artifacts (`scripts/regen_all.py --tier 0`) and
+runs `cargo fmt --all` in write mode, then `chelis lint --check .`,
+`cargo clippy -p <crate> --tests` for each changed crate, and one nextest run
+over the drift tripwires; it prints the files it changed and exits non-zero
+only when a check fails. `--local` runs two workspace clippy configurations,
+`cargo fmt --check`, `chelis lint --check .`, the regeneration and compile-fail
+guards, both oracles, and per-crate nextest for the crates changed vs
+`origin/main`; it takes an advisory workstation-wide lease
+(`~/.cache/chelis/gate.lock`) so two full gates in different worktrees do not
+run at once (`--no-wait`, `--lease-timeout SECONDS`, and `--no-lease` change
+that). Every run writes a JSON summary under `target/gate-reports/` and prints
+one summary line. Push before the review round; the round reviews the pushed
+head while CI runs, and CI is watched by one background waiter, never a
+polling loop. The full workspace nextest stage is CI-owned: open a
 draft PR early and let CI (macOS Smoke is the authoritative workspace
 oracle) run the full suite; see
 [`docs/local_macos_environment.md`](docs/local_macos_environment.md)

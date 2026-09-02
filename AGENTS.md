@@ -593,7 +593,9 @@ authoritative: an invalid path must fail loudly rather than fall back.
 activated environment. `scripts/gate.py` is the one `python3` entry point that
 self-heals, re-executing through that uv command before running gate logic, so a bare
 `python3 scripts/gate.py` is always safe; it also sets `PYO3_PYTHON` to its uv-selected
-interpreter for every child command.
+interpreter for every child command. Its `--fast` and `--local` preflight warns when the
+worktree has no `.venv/bin/python`; only direct cargo and nextest runs outside the gate
+need it, because they fall back to it when `PYO3_PYTHON` is unset.
 
 **macOS:** Apple's bundled Python reports a stale `sysconfig.LIBDIR` path. Do not route
 PyO3 to it.
@@ -658,21 +660,23 @@ the repository setting is ever restored.
 
 ## Build And Gate Commands
 
-Agent pre-push gate for non-documentation changes:
+Agent gates for non-documentation changes:
 
 ```sh
-python3 scripts/gate.py --local
+python3 scripts/gate.py --fast    # before every push: fixes in place, then checks
+python3 scripts/gate.py --local   # once per PR, on the committed candidate
 ```
 
-`scripts/gate.py` is the single source of truth for the per-PR
-gate. Agents run only the `--local` subset before pushing; the bare full gate is
-CI-owned for routine PR validation. CI calls `python3 scripts/gate.py <stage>`
-for each split job. `scripts/test_gate.py` pins the complete ordered set of
+`scripts/gate.py` is the single source of truth for the per-PR gate. Agents run
+`--fast` before every push and `--local` once per pull request, on the committed
+candidate, immediately before ready-for-review; the bare full gate is CI-owned for
+routine PR validation. CI calls `python3 scripts/gate.py <stage>` for each split job.
+`scripts/test_gate.py` pins the complete ordered set of
 single-line `run:` commands permitted in those gate-owned jobs, so shell syntax
 cannot hide an unreviewed command. To see the canonical full list and the
-local/CI ownership annotations:
+fast/local/CI ownership annotations:
 
-Before `--local` or another long local validation, fetch `origin/main` so the
+Before `--fast`, `--local`, or another long local validation, fetch `origin/main` so the
 changed-crate selection and inherited-failure comparison use current evidence. If the
 branch is materially behind, reconcile it deliberately before spending hours on a
 stale tree; do not rewrite shared history without the rebase review gate above. When an
@@ -681,22 +685,13 @@ diagnosing it as branch-owned.
 
 ```sh
 python3 scripts/gate.py --list
-# cargo clippy --workspace --all-targets -- -D warnings  # local + ci
-# cargo fmt --all -- --check  # local + ci
-# cargo run -p chelis-cli --bin chelis --quiet -- lint --check .  # local + ci
-# <managed-python> scripts/regenerate_chelis_std_bundle.py --debug --check  # local + ci
-# cargo test -p chelis-types --doc  # local + ci
-# cargo test -p chelis-compiler-api --doc  # local + ci
-# cargo test -p chelis-pipeline-core --doc  # local + ci
-# <managed-python> scripts/check_checkpoint_compile_fail.py  # local + ci
-# <managed-python> scripts/pipeline_core_dependency_guard.py  # local + ci
-# <managed-python> scripts/pipeline_core_documentation_guard.py  # local + ci
-# <managed-python> scripts/check_pipeline_core_compile_fail.py  # ci-owned
-# cargo nextest run --workspace --no-fail-fast  # full gate; CI coverage split
-# <managed-python> scripts/compiler_front_end_performance.py  # ci-owned
-# <managed-python> scripts/unrepresentable_domain_oracle.py  # local + ci
-# # --local also runs: cargo nextest run -p <crate> --no-fail-fast for each crate changed vs origin/main
 ```
+
+Each printed command carries one of four annotations: `fast + local + ci` (the lint
+row, which `--fast` and `--local` share), `local + ci`, `ci-owned`, and `full gate; CI
+coverage split` (the workspace nextest row). Two trailing `#` notes describe the
+dynamic stages: what `--fast` runs, and the per-crate nextest `--local` appends. The
+gate's own output is the only authoritative list; this file does not transcribe it.
 
 `python3` is only the gate bootstrap. An unmanaged invocation re-executes via
 `uv run --managed-python --python 3.11 --no-project`; an active Devenv or
@@ -739,35 +734,96 @@ completion oracle, and the tracker requires every fix in that class to run
 it in a continuous job. Acceptance is exit 0 with a final `ORACLE: PASS`
 line.
 
-`--local` (chelis#360) runs the developer pre-push subset: workspace clippy
-(`-D warnings`, compile-only), `cargo fmt --check`, `chelis lint
---check .`, the deterministic std-bundle regeneration check, all three
-explicit rustdoc commands, the checkpoint fixture, both pipeline-core
-guards, the chelis#908 unrepresentable-domain oracle, and
-`cargo nextest run -p <crate> --no-fail-fast` for each
-crate changed vs `origin/main` (committed diff plus uncommitted work;
-owning packages are resolved from each member's `Cargo.toml`, not the
-directory name). The derived crate list is always printed; "no crate
-changes detected" means the per-crate stage was skipped, not silently
-empty. The workspace nextest stage is CI-owned: run `--local` before
-pushing, open a draft PR early, and let CI (macOS Smoke is the
-authoritative workspace oracle) run the full suite. See
-[`docs/local_macos_environment.md`](docs/local_macos_environment.md)
-for why the workspace suite does not belong in the local loop on
-macOS.
+`--local` (chelis#360) is the once-per-PR gate on the committed candidate. It runs
+two of the three workspace clippy configurations (`-D warnings`, compile-only): the
+default row and the solver-free-features row. The `--no-default-features` row is
+CI-owned through `gate.py lint-and-unit`, because `check_configuration_closure.py`
+reconciles every repository `.rs` file against the dep-info in the worktree's target,
+`crates/chelis-prove/src/clarabel_sos.rs` is compiled per pull request only by the
+solver-free row, and the no-default row compiles a strict subset of the default row.
+It then runs `cargo fmt --check`, `chelis lint --check .`, the deterministic
+std-bundle regeneration check, all three explicit rustdoc commands, the checkpoint and
+hash-order compile-fail fixtures, the configuration-closure check, both pipeline-core
+guards, the chelis#908 unrepresentable-domain oracle, the runtime-representation
+Phase 0 oracle, and `cargo nextest run -p <crate> --no-fail-fast` for each crate
+changed vs `origin/main` (committed diff plus uncommitted work; owning packages are
+resolved from each member's `Cargo.toml`, not the directory name). The derived crate
+list is always printed; "no crate changes detected" means the per-crate stage was
+skipped, not silently empty. The workspace nextest stage is CI-owned: run `--fast`
+before every push, push before the review round so the reviewer and CI see the same
+head, run `--local` once on the committed candidate immediately before
+ready-for-review, and let CI (macOS Smoke is the authoritative workspace oracle) run
+the full suite. See [`docs/local_macos_environment.md`](docs/local_macos_environment.md)
+for why the workspace suite does not belong in the local loop on macOS.
+
+`--fast` is the inner-loop pass. It fixes in place and prints what it changed:
+`scripts/regen_all.py --tier 0` (the rejection registry, the embedded conformance
+skill assets, and the opaque-invariants corpus) and `cargo fmt --all`, then
+`chelis lint --check .`, `cargo clippy -p <crate> --tests -- -D warnings` for each
+changed crate, one `cargo nextest run` over the drift tripwires (atom partition,
+generated dtype header, compiler pins, opaque corpus, loud-unsupported, payload census,
+bundled std loader, conformance manifest, asset drift, skill-set uniformity, phase-3
+gate inventory, stack-guard coverage), and, when a `packages/chelis-std/` or
+`crates/chelis-std-bundle/` path changed, `regen_all.py --tier 1` right after tier 0
+(so every check sees the regenerated bundle) and `cargo nextest run -p
+chelis-std-bundle --lib` after the tripwires. Every writer runs before every check. It
+exits non-zero only for a lint, clippy, tripwire, or unfixable regeneration failure;
+a regenerated `dist/` or `reef.lock` is reported as a changed file to commit, never
+as a failure. Changed files are reported from content
+hashes of the porcelain set before and after the run, so a file that was already dirty
+and that fmt changed further is still listed. It never runs a workspace clippy row,
+the chelis#908 oracle, or the runtime-representation oracle, and it never takes the
+lease.
+
+`scripts/regen_all.py` is the regeneration entry point on its own as well. Default
+tiers 0 and 1 write (tier 1 is the std bundle and needs cargo); `--check` reports every
+stale artifact; `--full` adds tier 2, the capacity census and the
+runtime-representation inventory, and exits 2 naming the manual action when a census
+row lands with citation `TODO` or the regenerated inventory's digest differs from the
+reviewed `FREEZE_SHA256`. It never writes a frozen digest, the loud-unsupported
+`BASELINE`, a hand-maintained baseline, the sibling census JSON files, the dtype C
+header, or the tree-sitter parsers.
+
+`--fast`, `--local`, and the bare full gate run a preflight before the first command:
+the environment checks (`PYO3_PYTHON`, `CARGO_TARGET_DIR` containment, an explicit
+oracle handoff; exit 2 on failure), the git facts for the run summary (never fatal), a
+warning when the worktree has no `.venv/bin/python`, and, on macOS,
+`scripts/preflight_exec_probe.py` as a subprocess: probe exit 0 proceeds, exit 1
+(wedged first exec) stops the gate with exit 3 and the termination class
+`preflight-stop`, exit 3 (slow) and exit 2 (could not run) warn and proceed. CI stage
+runs skip the preflight.
+
+`--local` and the bare full gate then take an advisory workstation-wide lease,
+`fcntl.flock` on `~/.cache/chelis/gate.lock` (or `$CHELIS_GATE_LEASE_DIR/gate.lock`),
+held for the whole run so two cold gates in different worktrees do not starve each
+other. The default is to wait indefinitely, polling every 10 seconds with a heartbeat
+every 60 seconds that names the holder's pid, worktree, head, and start time.
+`--no-wait` exits 4 at once when the lease is held, `--lease-timeout SECONDS` caps the
+wait and exits 4 on expiry, and `--no-lease` bypasses it. `--fast` never takes the
+lease; it prints a note when a full gate holds it. The kernel releases the lock when
+the holder exits, SIGKILL included, so the sidecar naming the holder is descriptive,
+never authoritative.
 
 Every command's combined stdout and stderr streams live. On failure the gate
 retains the complete transcript under `target/gate-failures/`, replays the
 final 200 lines, and prints the stage/index, duration, exit code or signal,
 relevant environment, exact rerun command, and transcript path. Successful
-command transcripts are removed.
+command transcripts are removed. Every run other than `--list`, pass or fail, also
+writes `target/gate-reports/<utc-timestamp>-<pid>-<mode>.json` (or under
+`$CHELIS_GATE_REPORT_DIR`): the mode, git facts, preflight and lease records,
+per-stage seconds, the first failing stage, the termination class (`pass`,
+`stage-failure`, `signal`, `environment`, `preflight-stop`, `lease-timeout`,
+`user-cancel`, `internal-error`), and the files a `--fast` run changed; it then prints
+one summary line with the stage count, seconds, verdict, and report path. Record the
+`--local` run's seconds from that file in the pull request.
 
 The gate normalizes `CARGO_TARGET_DIR` to an absolute path inside the current
 worktree and rejects paths outside it. It also sets
 `CARGO_HUSKY_DONT_INSTALL_HOOKS=1` for child builds, preventing cargo-husky
 from mutating the clone's shared `.git/hooks` while sibling worktrees run.
 These controls isolate writable state; concurrent agents may still contend
-for CPU and make each other slower.
+for CPU and make each other slower. The advisory lease serializes `--local` and full
+runs across worktrees on one workstation; it never kills another process.
 
 Prose-only changes with no code, fixture, example, or structurally consumed Markdown
 are exempt from `--local`: run the focused documentation checks, push, and require green
