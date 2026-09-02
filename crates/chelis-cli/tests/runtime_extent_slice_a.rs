@@ -314,27 +314,44 @@ fn vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice() {
 
 #[test]
 fn vmap_rejects_element_derived_extent_at_public_checker() {
-    let source = "def g(x: tensor[n, f32]) -> tensor[m, f32] = {\n\
+    let named = "def g(x: tensor[n, f32]) -> tensor[m, f32] = {\n\
         \x20 end = cast(tensor_to_scalar(sum(x, cast(0, int32))), int64)\n\
         \x20 shrink(x, [[0i64, end]])\n\
         }\n\
         out = vmap(g)(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n";
-    let report = check(source);
-    let joined = errors(&report).join("\n");
-    assert!(
-        report["score"].as_f64().is_some_and(|score| score < 1.0),
-        "a public checker rejection must lower the fitness score: {report}"
-    );
-    for required in [
-        "batch_varying_extent",
-        "shrink",
-        "vmapped argument 'x'",
-        "shape() or a scalar argument",
+    let inline = "out = vmap(fn (x: tensor[3, f32]) -> {\n\
+        \x20 end = cast(tensor_to_scalar(sum(x, cast(0, int32))), int64)\n\
+        \x20 shrink(x, [[0i64, end]])\n\
+        })(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n";
+    let stored_inline = "out = {\n\
+        \x20 g = fn (x: tensor[3, f32]) -> {\n\
+        \x20   end = cast(tensor_to_scalar(sum(x, cast(0, int32))), int64)\n\
+        \x20   shrink(x, [[0i64, end]])\n\
+        \x20 }\n\
+        \x20 vmap(g)(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n\
+        }\n";
+    for (form, source) in [
+        ("named def", named),
+        ("inline fn", inline),
+        ("stored inline fn", stored_inline),
     ] {
+        let report = check(source);
+        let joined = errors(&report).join("\n");
         assert!(
-            joined.contains(required),
-            "missing {required:?} from the public diagnostic: {report}"
+            report["score"].as_f64().is_some_and(|score| score < 1.0),
+            "a public checker rejection must lower the fitness score for {form}: {report}"
         );
+        for required in [
+            "batch_varying_extent",
+            "shrink",
+            "vmapped argument 'x'",
+            "shape() or a scalar argument",
+        ] {
+            assert!(
+                joined.contains(required),
+                "missing {required:?} from the public diagnostic for {form}: {report}"
+            );
+        }
     }
 }
 
@@ -374,4 +391,47 @@ fn vmap_accepts_shape_and_shared_scalar_extent_sources() {
         "{scalar_report}"
     );
     assert!(errors(&scalar_report).is_empty(), "{scalar_report}");
+
+    let inline_shape_source = "out = vmap(fn (x: tensor[3, f32]) -> \
+        shrink(x, [[0i64, shape(x, 0)]]))(\
+        to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n";
+    let inline_shape_report = check(inline_shape_source);
+    assert_eq!(
+        inline_shape_report["score"].as_f64(),
+        Some(1.0),
+        "{inline_shape_report}"
+    );
+    assert!(
+        errors(&inline_shape_report).is_empty(),
+        "{inline_shape_report}"
+    );
+
+    let inline_scalar_source = "out = vmap(fn (x: tensor[3, f32], end: int64) -> \
+        shrink(x, [[0i64, end]]))(\
+        to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]), 2i64)\n";
+    let inline_scalar_report = check(inline_scalar_source);
+    assert_eq!(
+        inline_scalar_report["score"].as_f64(),
+        Some(1.0),
+        "{inline_scalar_report}"
+    );
+    assert!(
+        errors(&inline_scalar_report).is_empty(),
+        "{inline_scalar_report}"
+    );
+
+    let stored_shape_source = "out = {\n\
+        \x20 g = fn (x: tensor[3, f32]) -> shrink(x, [[0i64, shape(x, 0)]])\n\
+        \x20 vmap(g)(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n\
+        }\n";
+    let stored_shape_report = check(stored_shape_source);
+    assert_eq!(
+        stored_shape_report["score"].as_f64(),
+        Some(1.0),
+        "{stored_shape_report}"
+    );
+    assert!(
+        errors(&stored_shape_report).is_empty(),
+        "{stored_shape_report}"
+    );
 }

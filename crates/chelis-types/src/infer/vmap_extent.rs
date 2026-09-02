@@ -35,9 +35,6 @@ pub(super) fn validate_vmap_extent_dependencies(
     errors: &mut DiagnosticSink<'_>,
 ) {
     let defs = collect_functions(exprs, type_env);
-    if defs.is_empty() {
-        return;
-    }
     let summaries = summarize_functions(&defs);
     for expr in exprs {
         walk_vmap_sites(expr, &defs, &summaries, errors);
@@ -77,6 +74,35 @@ fn collect_functions(exprs: &[deep::Expr], type_env: &IrTypeEnv) -> BTreeMap<Str
         );
     }
     defs
+}
+
+fn inline_function(expr: &deep::Expr) -> Option<FunctionDef> {
+    let (DeepTag::Fn, _, kids) = stamped_parts(expr)? else {
+        return None;
+    };
+    let params_expr = kids.first()?;
+    let body = kids.get(1)?.clone();
+    let param_exprs = match params_expr {
+        deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => node.children_slice(),
+        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Params) => children(list),
+        deep::Expr::BareList(elements, _) => elements.as_slice(),
+        _ => return None,
+    };
+    let mut params = Vec::with_capacity(param_exprs.len());
+    let mut tensor_params = BTreeSet::new();
+    for param in param_exprs {
+        let (name, ty) = param_name_and_inline_type(param)?;
+        let index = params.len();
+        if ty.as_ref().is_some_and(type_expr_contains_tensor) {
+            tensor_params.insert(index);
+        }
+        params.push(name);
+    }
+    Some(FunctionDef {
+        params,
+        tensor_params,
+        body,
+    })
 }
 
 fn type_expr_contains_tensor(expr: &deep::Expr) -> bool {
@@ -297,8 +323,9 @@ fn walk_vmap_sites(
     stack_guard!("walk_vmap_extent_sites", expr);
     if let Some((tag, _, kids)) = stamped_parts(expr) {
         if tag == DeepTag::Vmap
-            && let Some(callee_name) = kids.first().and_then(transformed_callee_name)
-            && let (Some(def), Some(summary)) = (defs.get(callee_name), summaries.get(callee_name))
+            && let Some((def, summary)) = kids
+                .first()
+                .and_then(|callee| transformed_callee(callee, defs, summaries))
             && let Some((param_index, witness)) = summary
                 .movement_deps
                 .iter()
@@ -339,6 +366,17 @@ fn walk_vmap_sites(
             }
             errors.push(error);
         }
+
+        if tag == DeepTag::Let
+            && let Some(scoped_defs) = extend_function_scope(kids, defs)
+        {
+            let scoped_summaries = summarize_functions(&scoped_defs);
+            for child in kids {
+                walk_vmap_sites(child, &scoped_defs, &scoped_summaries, errors);
+            }
+            return;
+        }
+
         for child in kids {
             walk_vmap_sites(child, defs, summaries, errors);
         }
@@ -371,16 +409,78 @@ fn walk_vmap_sites(
     }
 }
 
-fn transformed_callee_name(expr: &deep::Expr) -> Option<&str> {
+fn extend_function_scope(
+    let_kids: &[deep::Expr],
+    defs: &BTreeMap<String, FunctionDef>,
+) -> Option<BTreeMap<String, FunctionDef>> {
+    let Some((DeepTag::Bind, _, binding_kids)) = let_kids.first().and_then(stamped_parts) else {
+        return None;
+    };
+    let (pairs, _) = binding_kids.as_chunks::<2>();
+    let mut scoped = None;
+    for pair in pairs {
+        let Some(name) = param_name_for_refs(&pair[0]) else {
+            continue;
+        };
+        let current = scoped.as_ref().unwrap_or(defs);
+        let replacement = transformed_function_def(&pair[1], current);
+        if replacement.is_none() && !current.contains_key(&name) {
+            continue;
+        }
+        let current = scoped.get_or_insert_with(|| defs.clone());
+        current.remove(&name);
+        if let Some(def) = replacement {
+            current.insert(name, def);
+        }
+    }
+    scoped
+}
+
+fn transformed_function_def(
+    expr: &deep::Expr,
+    defs: &BTreeMap<String, FunctionDef>,
+) -> Option<FunctionDef> {
+    stack_guard!("transformed_vmap_extent_function_def", expr, None);
     if let Some(name) = var_expr_name(expr) {
-        return Some(name);
+        return defs.get(name).cloned();
     }
     let (tag, _, kids) = stamped_parts(expr)?;
+    if tag == DeepTag::Fn {
+        return inline_function(expr);
+    }
     if matches!(
         tag,
         DeepTag::Grad | DeepTag::Jit | DeepTag::Realize | DeepTag::Copy
     ) {
-        return kids.first().and_then(transformed_callee_name);
+        return kids
+            .first()
+            .and_then(|callee| transformed_function_def(callee, defs));
+    }
+    None
+}
+
+fn transformed_callee(
+    expr: &deep::Expr,
+    defs: &BTreeMap<String, FunctionDef>,
+    summaries: &BTreeMap<String, FunctionSummary>,
+) -> Option<(FunctionDef, FunctionSummary)> {
+    stack_guard!("transformed_vmap_extent_callee", expr, None);
+    if let Some(name) = var_expr_name(expr) {
+        return Some((defs.get(name)?.clone(), summaries.get(name)?.clone()));
+    }
+    let (tag, _, kids) = stamped_parts(expr)?;
+    if tag == DeepTag::Fn {
+        let def = inline_function(expr)?;
+        let summary = summarize_function(&def, summaries);
+        return Some((def, summary));
+    }
+    if matches!(
+        tag,
+        DeepTag::Grad | DeepTag::Jit | DeepTag::Realize | DeepTag::Copy
+    ) {
+        return kids
+            .first()
+            .and_then(|callee| transformed_callee(callee, defs, summaries));
     }
     None
 }
