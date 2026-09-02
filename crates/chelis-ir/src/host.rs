@@ -10365,13 +10365,15 @@ fn actualize_tensor_helper_types(
                                 None,
                             ))
                         }
-                        // `ToEnd` is an `end`-only marker and `Sym` is a
-                        // `Reshape` target only; `verify` rejects both in a
-                        // `Shrink` bound ("only valid as an end", "only valid
-                        // as a reshape target").
+                        // `ToEnd` is an `end`-only marker; `Sym` is a
+                        // `Reshape` target only; and `InputAxis` belongs only
+                        // to `Expand`/`Reshape`. `verify` rejects all three
+                        // misplaced carriers in a `Shrink` bound.
                         (crate::dag::RtDim::ToEnd, _)
                         | (crate::dag::RtDim::Sym(_), _)
-                        | (_, crate::dag::RtDim::Sym(_)) => None,
+                        | (crate::dag::RtDim::InputAxis { .. }, _)
+                        | (_, crate::dag::RtDim::Sym(_))
+                        | (_, crate::dag::RtDim::InputAxis { .. }) => None,
                     })
                     .collect::<Option<Vec<_>>>()?
             }
@@ -10403,7 +10405,9 @@ fn actualize_tensor_helper_types(
                             reserve_runtime_dim_name(occupied_dim_names, "stride", node_id, axis),
                             None,
                         )),
-                        crate::dag::RtDim::ToEnd | crate::dag::RtDim::Sym(_) => None,
+                        crate::dag::RtDim::ToEnd
+                        | crate::dag::RtDim::Sym(_)
+                        | crate::dag::RtDim::InputAxis { .. } => None,
                     })
                     .collect::<Option<Vec<_>>>()?
             }
@@ -16574,6 +16578,83 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         );
     }
 
+    /// NEGATIVE PARITY: [05-MOV-1]'s owner matrix reserves `InputAxis` for
+    /// `expand` and `reshape`. Host helper actualization must therefore
+    /// decline it in either `shrink` bound and in a `stride`, preserving the
+    /// declared type until verification reports the malformed carrier.
+    #[test]
+    fn tensor_helper_actualization_declines_input_axis_for_shrink_and_stride() {
+        use crate::dag::{Dag, DimInfo, RiscOp, RtAxis, RtDim, TensorType};
+
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let declared = TensorType {
+            dims: vec![DimInfo::Named("*".into(), None)],
+            precision: Prim::F32,
+        };
+        let input_axis = || RtDim::InputAxis {
+            tensor: 1,
+            axis: RtAxis::Lit(0),
+        };
+        let malformed = [
+            dag.add_node(
+                RiscOp::Shrink {
+                    bounds: vec![(input_axis(), RtDim::Lit(2))],
+                },
+                vec![input, input],
+                declared.clone(),
+                None,
+            ),
+            dag.add_node(
+                RiscOp::Shrink {
+                    bounds: vec![(RtDim::Lit(0), input_axis())],
+                },
+                vec![input, input],
+                declared.clone(),
+                None,
+            ),
+            dag.add_node(
+                RiscOp::Stride {
+                    strides: vec![input_axis()],
+                },
+                vec![input, input],
+                declared.clone(),
+                None,
+            ),
+        ];
+        for node in malformed {
+            dag.add_root(node);
+        }
+
+        let scope = UnordMap::from([(
+            "x".into(),
+            HostTypeTerm::Tensor(TensorType {
+                dims: vec![DimInfo::Lit(4)],
+                precision: Prim::F32,
+            }),
+        )]);
+
+        let actualized = actualize_tensor_helper_types(&dag, &scope);
+        for node in malformed {
+            assert_eq!(
+                actualized
+                    .get(node)
+                    .expect("malformed movement node")
+                    .output_type,
+                declared,
+                "InputAxis outside expand/reshape must not be actualized"
+            );
+        }
+    }
+
     fn runtime_shrink_bound_nodes(
         dag: &mut crate::dag::Dag,
     ) -> (crate::dag::NodeId, crate::dag::NodeId) {
@@ -16660,7 +16741,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
     #[test]
     fn runtime_shrink_name_reserves_op_internal_symbols_in_both_node_orders() {
-        use crate::dag::{Dag, DimExpr, DimInfo, RiscOp, RtDim, TensorType};
+        use crate::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
 
         for internal_before_shrink in [false, true] {
             let mut dag = Dag::new();
@@ -16676,15 +16757,11 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             let (start, end) = runtime_shrink_bound_nodes(&mut dag);
             let expected_shrink_id = if internal_before_shrink { 4 } else { 3 };
             let base = format!("_rt_shrink_dim_{expected_shrink_id}_0");
-            let internal_size = DimExpr::Mul(
-                Box::new(DimExpr::Sym(base.clone())),
-                Box::new(DimExpr::Sym(format!("{base}_1"))),
-            );
+            let internal_shape = vec![RtDim::Sym(base.clone()), RtDim::Sym(format!("{base}_1"))];
             let add_internal_carrier = |dag: &mut Dag| {
                 dag.add_node(
-                    RiscOp::Expand {
-                        axis: 0,
-                        size: internal_size.clone(),
+                    RiscOp::Reshape {
+                        new_shape: internal_shape.clone(),
                     },
                     vec![input],
                     TensorType {
