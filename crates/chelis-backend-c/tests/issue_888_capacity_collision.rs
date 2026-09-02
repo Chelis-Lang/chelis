@@ -27,7 +27,7 @@
 //! `capacity_fits` and `logical_elements`, so the same defect exists on the
 //! HIP lane; Phase 1 must fix both.
 
-use std::collections::HashSet;
+use chelis_unord::UnordSet;
 
 use chelis_backend_c::memory::{MemoryPlan, NodeMemoryKind};
 use chelis_ir::dag::{Dag, DimExpr, DimExprKey, DimInfo, NodeId, RiscOp, TensorType};
@@ -112,7 +112,7 @@ fn chain_plan(
     let b = dag.add_node(RiscOp::Neg, vec![a], b_type, None);
     let c = dag.add_node(RiscOp::Neg, vec![b], c_type, None);
     dag.add_root(c);
-    let plan = MemoryPlan::build(&dag, &[c], &HashSet::new());
+    let plan = MemoryPlan::build(&dag, &[c], &UnordSet::new());
     (plan, a, b, c)
 }
 
