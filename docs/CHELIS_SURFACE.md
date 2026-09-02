@@ -292,6 +292,7 @@ The host lane is eager (no lazy list fusion).
 
 | Name | Signature | Notes |
 |---|---|---|
+| `list_dir` | `string -> List[string]` | Entry names, not paths. Ordered by the entry name's byte sequence, per [05-HOST-4]. |
 | `process_run` | `(cmd: string, args: List[string]) -> (int64, string, string)` | argv, no shell. **Eval/test-only** — C/HIP/Metal build reject it (chelis#267). |
 
 ### 3.6 Diagnostics & test — `Test` effect on asserts

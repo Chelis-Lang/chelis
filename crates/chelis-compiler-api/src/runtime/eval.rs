@@ -2208,15 +2208,24 @@ impl<'a> EvalContext<'a> {
                 let path = expect_string_arg(args, 0)?;
                 let entries = fs::read_dir(&path)
                     .map_err(|err| format!("list_dir failed for `{path}`: {err}"))?;
-                let mut out = Vec::new();
+                let mut names = Vec::new();
                 for entry in entries {
                     let entry =
                         entry.map_err(|err| format!("list_dir failed for `{path}`: {err}"))?;
-                    out.push(RuntimeValue::String(
-                        entry.file_name().to_string_lossy().into_owned(),
-                    ));
+                    names.push(entry.file_name());
                 }
-                Ok(RuntimeValue::List(out))
+                // [05-HOST-4]: order by the host's own name bytes, before the
+                // lossy conversion below. `to_string_lossy` maps every invalid
+                // UTF-8 sequence to U+FFFD, so two distinct names can collapse
+                // to one string; sorting after it would leave those tie-broken
+                // by directory order, which is the order the atom forbids.
+                names.sort_by(|a, b| a.as_encoded_bytes().cmp(b.as_encoded_bytes()));
+                Ok(RuntimeValue::List(
+                    names
+                        .into_iter()
+                        .map(|name| RuntimeValue::String(name.to_string_lossy().into_owned()))
+                        .collect(),
+                ))
             }
             "mmap_file" => {
                 let path = expect_string_arg(args, 0)?;

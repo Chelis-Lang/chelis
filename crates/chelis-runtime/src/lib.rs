@@ -4576,14 +4576,23 @@ pub unsafe extern "C" fn chelis_list_dir(path: chelis_string) -> *mut chelis_lis
     let path_text = string_value(path).value.clone();
     let iter = fs::read_dir(&path_text)
         .unwrap_or_else(|err| runtime_fail!("list_dir failed for `{path_text}`: {err}"));
-    let mut items = Vec::new();
+    let mut names = Vec::new();
     for entry in iter {
         let entry =
             entry.unwrap_or_else(|err| runtime_fail!("list_dir failed for `{path_text}`: {err}"));
-        items.push(chelis_value_from_string(new_runtime_string(
-            entry.file_name().to_string_lossy().into_owned(),
-        )));
+        names.push(entry.file_name());
     }
+    // [05-HOST-4]: order by the host's own name bytes, before the lossy
+    // conversion below, and identically to the evaluator lane. Sorting the
+    // converted strings instead would leave two names that both collapse to
+    // U+FFFD tie-broken by directory order.
+    names.sort_by(|a, b| a.as_encoded_bytes().cmp(b.as_encoded_bytes()));
+    let items = names
+        .into_iter()
+        .map(|name| {
+            chelis_value_from_string(new_runtime_string(name.to_string_lossy().into_owned()))
+        })
+        .collect();
     new_list(items, "chelis_list_dir")
 }
 

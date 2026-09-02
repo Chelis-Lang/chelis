@@ -485,7 +485,7 @@ Pragmatic surface. IO effect on everything.
 | `read_lines` | `String -> List[String]` | IO | Read file, split by newline |
 | `read_bytes` | `String -> List[Int]` | IO | Read raw bytes as integer list |
 | `file_exists` | `String -> Bool` | IO | Check file existence |
-| `list_dir` | `String -> List[String]` | IO | List directory contents |
+| `list_dir` | `String -> List[String]` | IO | List directory entry names, in [05-HOST-4] byte order |
 | `mmap_file` | `String -> MappedFile` | IO | Memory-map a file for zero-copy random access |
 | `mmap_read` | `(MappedFile, Int, Int) -> List[Int]` | Pure | Read bytes from offset+length after open |
 | `mmap_len` | `MappedFile -> Int` | Pure | File size in bytes |
