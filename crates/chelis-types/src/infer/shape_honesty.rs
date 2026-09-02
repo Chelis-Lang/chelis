@@ -32,7 +32,16 @@ impl ShapeTypeFact {
     }
 }
 
-pub(super) type ShapeTypeEnv = HashMap<String, ShapeTypeFact>;
+/// Name-keyed shape evidence for one validation scope.
+///
+/// Every access is a keyed lookup, insert, or whole-env clone: no caller
+/// iterates this environment, and none may start to. The facts here decide a
+/// checker verdict, so an iteration order that picked between two of them
+/// would be exactly the chelis#1341 class. `UnordMap` has no iteration exit
+/// that is not a written `to_sorted` claim of C3.1 authority, which a name
+/// keyed by an arbitrary source identifier cannot make; `BTreeMap` would
+/// leave `iter` and `keys` open to a later edit.
+pub(super) type ShapeTypeEnv = UnordMap<String, ShapeTypeFact>;
 
 pub(super) fn shape_type_env(type_env: &IrTypeEnv) -> ShapeTypeEnv {
     type_env
@@ -83,7 +92,7 @@ pub(super) fn validate_identity_builtin_rank_requirements(
     list: &deep::List,
     func_name: &str,
     type_env: &ShapeTypeEnv,
-    static_env: &HashMap<String, StaticValue>,
+    static_env: &UnordMap<String, StaticValue>,
     errors: &mut DiagnosticSink<'_>,
 ) {
     let mut expected_rank: Option<usize> = None;
@@ -123,7 +132,7 @@ pub(super) fn validate_identity_builtin_rank_requirements(
 pub(super) fn derive_movement_rank_output_type(
     list: &deep::List,
     type_env: &ShapeTypeEnv,
-    static_env: &HashMap<String, StaticValue>,
+    static_env: &UnordMap<String, StaticValue>,
     added_axes: usize,
 ) -> Option<ShapeTypeFact> {
     let input_rank = list
@@ -152,7 +161,7 @@ pub(super) fn arg_tensor_type_expr(
 pub(super) fn arg_tensor_rank(
     expr: &deep::Expr,
     type_env: &ShapeTypeEnv,
-    static_env: &HashMap<String, StaticValue>,
+    static_env: &UnordMap<String, StaticValue>,
 ) -> Option<usize> {
     let inner = peel_borrow(expr);
     // An inline identity application can carry a stamped wildcard tensor
