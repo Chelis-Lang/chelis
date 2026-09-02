@@ -526,7 +526,10 @@ GATE_WORKER_RUN_COMMANDS = {
         "python3 scripts/gate.py lint-and-unit",
     ),
     "workspace-tests-shard": (
-        "python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1",
+        # `clang` is the chelis#893 Phase 0 oracle's C/Objective-C front end
+        # and the census's `cc` is gcc here; the image ships clang, but the
+        # gate asserts it rather than assuming it.
+        "python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1",
         "python3 scripts/ci_setup_uv_python.py",
         "python3 scripts/gate.py integration --tests-only "
         "--partition hash:${{ matrix.shard }}/2",

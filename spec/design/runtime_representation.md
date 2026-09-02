@@ -494,16 +494,33 @@ and it reads the filesystem rather than the git index because cargo compiles
 what is on disk.
 
 Stating the claim over a *language* instead would not be dischargeable: a
-reviewer can always name one more construct, and the repository would be
-committed to modelling a C++ and Objective-C surface that no file in it uses.
-Stated over a file list it is decidable, and every source in it is read by a
-total parser for its own language: forty-eight Rust files with `syn`, and seven
-C headers with the numeric capacity census's own token vocabulary. A token walk
-suffices for the headers precisely because it reads type words, pointers, and
-`sizeof` rather than a grammar, which is why the Objective-C constructs in
-`chelis_metal_runtime.h` need no Objective-C parser. Sharing that vocabulary is
-deliberate; a second, independent C classifier beside the census would be a
-second authority for the same question, which B2 invariant 3 forbids.
+reviewer can always name one more construct. Stated over a file list it is
+decidable, and every source in it is read by a real parser for its own
+language: the Rust files with `syn`, and the C and Objective-C headers through
+clang's front end (`clang -fsyntax-only -Xclang -ast-dump=json`). A seam's
+owner is the declaration that encloses it, and producing that owner means
+parsing declarations; a token walk cannot do it, because C declaration form
+(tagged aggregates, unions, macro-typed declarators, multi-declarator lists,
+attributes, K&R definitions, keywords inside string literals) is a grammar,
+and each form a hand-written walk left unmodelled dropped a seam silently. The
+compiler supplies the declarations; the reader classifies their type spellings
+with the capacity census's closed type-word lists, so a C type word keeps one
+classification authority in the repository, and a spelling neither list names
+still fails the scan.
+
+The parse is host-independent by construction. Each header is read under a
+fixed target lane (C on `x86_64-unknown-linux-gnu`; `chelis_metal_runtime.h`
+as Objective-C on `x86_64-apple-macosx14.0`), with `-ffreestanding
+-nostdlibinc`, a committed stub SDK under `crates/chelis-repr-inventory/sdk-stubs/`
+standing in for libc, the HIP SDK, and the Apple frameworks, and a scrubbed
+environment, so Linux CI, macOS CI, Devenv, and a workstation see the same
+preprocessed text and produce the same rows. The stub SDK is deliberately
+minimal: a runtime header that starts using an SDK symbol the stub does not
+declare fails the scan until the stub declares it. `chelis_hip_runtime.h`'s only
+conditional beyond `__has_include` is `NDEBUG`; the lane parses the debug arm,
+which declares a strict superset of the release arm, and a scanner test proves
+that superset by execution. Cargo build scripts under the inventoried crates
+are roots too, since cargo compiles them like any other source.
 
 A row's identity is its kind, its path, and its owning declaration. Reformatting
 a literal inside a function does not move the freeze; adding a function, field,

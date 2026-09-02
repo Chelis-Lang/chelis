@@ -196,6 +196,7 @@ class MutationContractTests(unittest.TestCase):
                     "path",
                     "implementation_sha256",
                     "expected_failure",
+                    "expected_owners",
                     "command",
                 },
             )
@@ -287,8 +288,16 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("must equal", str(universe["closure_rule"]))
 
     def test_no_libclang_or_configuration_enumeration_remains(self) -> None:
+        # The front end is a `clang` subprocess reading one fixed configuration
+        # per header; a libclang binding or a preprocessor-configuration
+        # product is the earlier, undischargeable design and must not return.
         source = Path(oracle.__file__).read_text(encoding="utf-8").lower()
-        for banned in ("libclang", "clang", "preprocessor configuration", "cartesian"):
+        for banned in (
+            "libclang",
+            "clang.cindex",
+            "preprocessor configuration",
+            "cartesian",
+        ):
             self.assertNotIn(banned, source)
 
     def test_phase_index_names_the_authoritative_continuous_command(self) -> None:
@@ -317,7 +326,12 @@ class RedTeamRegressionTests(unittest.TestCase):
         # subdirectory, so the closure check could be evaded by placing a seam
         # one directory down.
         for root in oracle.INVENTORY_ROOTS:
-            self.assertIn("**", root, f"inventory root is not recursive: {root}")
+            # A root is recursive, or it names a crate's one build script
+            # exactly; a single-level directory glob is the evadable shape.
+            self.assertTrue(
+                "**" in root or root.endswith("/build.rs"),
+                f"inventory root is neither recursive nor a build script: {root}",
+            )
 
     def test_a_stale_active_debt_sample_fails(self) -> None:
         baseline = oracle.load_baseline()
@@ -327,13 +341,47 @@ class RedTeamRegressionTests(unittest.TestCase):
         with self.assertRaisesRegex(oracle.OracleFailure, "sample is stale"):
             oracle.validate_baseline(mutated, rows)
 
-    def test_the_c_token_walker_has_its_own_witnesses(self) -> None:
-        # The descriptor mutation is caught by an independent `typedef struct`
-        # scan and the unknown-spelling mutation fails before owner attribution
-        # runs, so neither proves the token walker works.
+    def test_the_c_front_end_has_witnesses_for_every_mis_modelled_form(self) -> None:
+        # Each of these is a declaration form that carried a seam past the
+        # hand-written token walk in one red-team round. The compiler-backed
+        # reader closes them by construction; the witnesses keep it that way.
         witnesses = {probe.witness_id for probe in oracle.phase0_mutation_probes()}
-        self.assertIn("phase0.mutate_c_public_element_pointer_export", witnesses)
-        self.assertIn("phase0.mutate_c_body_direct_data_access", witnesses)
+        for expected in (
+            "phase0.mutate_c_public_element_pointer_export",
+            "phase0.mutate_c_body_direct_data_access",
+            "phase0.mutate_c_extern_element_data",
+            "phase0.mutate_c_non_descriptor_struct_field",
+            "phase0.mutate_c_tagged_struct_field",
+            "phase0.mutate_c_union_field",
+            "phase0.mutate_c_macro_typed_carrier",
+            "phase0.mutate_c_multi_declarator_data",
+            "phase0.mutate_c_enum_width",
+            "phase0.mutate_objc_element_pointer_parameter",
+            "phase0.mutate_unknown_c_arithmetic_spelling",
+        ):
+            self.assertIn(expected, witnesses)
+
+    def test_a_multi_declarator_witness_demands_every_owner(self) -> None:
+        probes = {probe.witness_id: probe for probe in oracle.phase0_mutation_probes()}
+        pair = probes["phase0.mutate_c_multi_declarator_data"]
+        self.assertEqual(len(pair.expected_owners), 2)
+        manifest = {
+            entry["witness_id"]: entry
+            for entry in oracle.coverage_manifest()["source_inventory"]["mutations"]
+        }
+        self.assertEqual(
+            manifest["phase0.mutate_c_multi_declarator_data"]["expected_owners"],
+            list(pair.expected_owners),
+        )
+
+    def test_build_scripts_are_inside_the_universe(self) -> None:
+        # A build script is compiled by cargo like any other source, so a root
+        # that cannot see one is a closure hole.
+        self.assertIn("crates/chelis-backend-c/build.rs", oracle.INVENTORY_SOURCES)
+        self.assertTrue(
+            any(root.endswith("build.rs") for root in oracle.INVENTORY_ROOTS),
+            oracle.INVENTORY_ROOTS,
+        )
 
     def test_the_closure_check_has_a_subdirectory_witness(self) -> None:
         paths = {probe.path.as_posix() for probe in oracle.phase0_mutation_probes()}
@@ -346,5 +394,5 @@ class RedTeamRegressionTests(unittest.TestCase):
         rust = sum(1 for path in oracle.INVENTORY_SOURCES if path.endswith(".rs"))
         headers = len(oracle.INVENTORY_SOURCES) - rust
         source = Path(oracle.__file__).read_text(encoding="utf-8")
-        self.assertIn(f"Forty-eight are Rust and seven are C headers", source)
-        self.assertEqual((rust, headers), (48, 7))
+        self.assertIn("Forty-nine are Rust and seven are C or Objective-C headers", source)
+        self.assertEqual((rust, headers), (49, 7))

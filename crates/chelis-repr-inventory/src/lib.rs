@@ -6,21 +6,20 @@
 //! narrow metadata fields, backend element spellings, and load/store
 //! templates. This crate derives those rows and nothing else.
 //!
-//! # Why there is no C-family compiler front end here
+//! # One real parser per language
 //!
 //! The inventory's universe is a frozen list of repository files, not a
-//! language. Forty-eight of them are Rust and seven are C headers. The
-//! repository contains no `.m`, `.mm`, `.cu`, `.cuh`, `.hip`, or `.metal`
-//! source file at all, which is what makes the file list closed and small.
-//! `chelis_metal_runtime.h` does carry Objective-C constructs, and a token
-//! walk reads its declarations without needing to model that language: it
-//! looks for type words, pointers, and `sizeof`, not for message sends.
-//! Rust is read with `syn`, which is a total parser for the language, so a
-//! completeness claim over Rust is one that can actually be discharged. The
-//! four C headers are read with the same token vocabulary the numeric capacity
-//! census uses (`tests/support/c_lexical.rs`), because that instrument is
-//! already the reviewed authority for classifying a C type word and it keeps
-//! one classifier rather than two.
+//! language. Forty-nine of them are Rust, six are C headers, and one
+//! (`chelis_metal_runtime.h`) is Objective-C. Rust is read with `syn`, a
+//! total parser for the language. The headers are read through clang's front
+//! end by the [`c_ast`] module: the compiler supplies every declaration and
+//! its enclosing owner, so the declaration forms a hand-written token walk
+//! mis-modelled in turn (tagged aggregates, unions, macro-typed declarators,
+//! multi-declarator lists, attributes, K&R definitions, keywords inside string
+//! literals) are the compiler's problem rather than this crate's. What the
+//! crate keeps from the numeric capacity census is its closed type-word lists
+//! (`tests/support/c_lexical.rs`), so a C type word has one classification
+//! authority in the repository rather than two.
 //!
 //! A seam row is owned by its enclosing declaration, not by a source offset or
 //! a hash of the exact bytes: Phases 3 and 4 delete functions and call sites,
@@ -31,7 +30,7 @@
 #[path = "../../../tests/support/c_lexical.rs"]
 pub mod c_lexical;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fmt;
 
 use quote::ToTokens;
@@ -456,6 +455,18 @@ impl RustSeamScanner {
         }
     }
 
+    /// Visit each field under its own owner (`Type::field`, or the tuple
+    /// index), so two carrier fields of one aggregate are two identities.
+    fn visit_member_fields(&mut self, fields: &syn::Fields) {
+        for (index, field) in fields.iter().enumerate() {
+            let member = field
+                .ident
+                .as_ref()
+                .map_or_else(|| index.to_string(), ToString::to_string);
+            self.with_owner(member, |scanner| visit::visit_field(scanner, field));
+        }
+    }
+
     fn scan_descriptor_fields(&mut self, name: &str, fields: &syn::Fields) {
         let names = field_names(fields);
         if !is_descriptor(&names) || !self.class.mirrors_a_descriptor() {
@@ -581,7 +592,61 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
     fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
         self.scan_descriptor_fields(&item.ident.to_string(), &item.fields);
         self.with_owner(item.ident.to_string(), |scanner| {
-            visit::visit_item_struct(scanner, item);
+            for attribute in &item.attrs {
+                scanner.visit_attribute(attribute);
+            }
+            scanner.visit_generics(&item.generics);
+            scanner.visit_member_fields(&item.fields);
+        });
+    }
+
+    fn visit_item_union(&mut self, item: &'ast syn::ItemUnion) {
+        self.with_owner(item.ident.to_string(), |scanner| {
+            for attribute in &item.attrs {
+                scanner.visit_attribute(attribute);
+            }
+            scanner.visit_generics(&item.generics);
+            for (index, field) in item.fields.named.iter().enumerate() {
+                let member = field
+                    .ident
+                    .as_ref()
+                    .map_or_else(|| index.to_string(), ToString::to_string);
+                scanner.with_owner(member, |scanner| visit::visit_field(scanner, field));
+            }
+        });
+    }
+
+    fn visit_variant(&mut self, variant: &'ast syn::Variant) {
+        // Every variant owns its own row: two pointer-carrying variants of one
+        // enum are two identities, not one.
+        self.with_owner(variant.ident.to_string(), |scanner| {
+            for attribute in &variant.attrs {
+                scanner.visit_attribute(attribute);
+            }
+            scanner.visit_member_fields(&variant.fields);
+            if let Some((_, discriminant)) = &variant.discriminant {
+                scanner.visit_expr(discriminant);
+            }
+        });
+    }
+
+    fn visit_impl_item_const(&mut self, item: &'ast syn::ImplItemConst) {
+        self.with_owner(item.ident.to_string(), |scanner| {
+            visit::visit_impl_item_const(scanner, item);
+        });
+    }
+
+    fn visit_trait_item_const(&mut self, item: &'ast syn::TraitItemConst) {
+        self.with_owner(item.ident.to_string(), |scanner| {
+            visit::visit_trait_item_const(scanner, item);
+        });
+    }
+
+    fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
+        // `pub type ElemPtr = *mut f32;` hands out a carrier under its own
+        // name, so it owns the row rather than failing as unowned.
+        self.with_owner(item.ident.to_string(), |scanner| {
+            visit::visit_item_type(scanner, item);
         });
     }
 
@@ -680,6 +745,42 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
         self.scan_literal(&literal.value());
     }
 
+    fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
+        // A `macro_rules!` transcriber is code the macro emits at every
+        // expansion, so its seams are owned by the macro's name. Each arm is
+        // read after its metavariables are replaced with plain identifiers;
+        // one that still cannot be read and names a seam fails closed.
+        if !item.mac.path.is_ident("macro_rules") {
+            visit::visit_item_macro(self, item);
+            return;
+        }
+        let name = item
+            .ident
+            .as_ref()
+            .map_or_else(|| "macro_rules".to_string(), ToString::to_string);
+        let class = self.class;
+        self.with_owner(name.clone(), |scanner| {
+            for transcriber in macro_rules_transcribers(item.mac.tokens.clone()) {
+                let rewritten = demetavariable(transcriber);
+                if let Ok(statements) = syn::Block::parse_within.parse2(rewritten.clone()) {
+                    for statement in &statements {
+                        scanner.visit_stmt(statement);
+                    }
+                } else if let Some(word) = seam_word_in(class, rewritten.clone())
+                    && scanner.error.is_none()
+                {
+                    scanner.error = Some(ScanError::new(format!(
+                        "an arm of `macro_rules! {name}` cannot be read as statements \
+                         once its metavariables are substituted, and it mentions \
+                         `{word}`; the inventory cannot see through it, so spell the \
+                         seam outside the macro"
+                    )));
+                }
+                scanner.scan_token_stream_literals(rewritten);
+            }
+        });
+    }
+
     fn visit_macro(&mut self, macro_call: &'ast syn::Macro) {
         // `include!` splices a file cargo compiles into a registered source.
         // Admitting one silently would reopen the closed universe through the
@@ -697,16 +798,166 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
         }
         // A `format!`/`write!` template is emitted C text, so its literal is
         // the seam. Its arguments are ordinary expressions and must be walked
-        // as such; `syn` does not descend into macro tokens on its own.
-        let parser = Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
-        if let Ok(arguments) = parser.parse2(macro_call.tokens.clone()) {
+        // as such; `syn` does not descend into macro tokens on its own. The
+        // body is read as a comma list, then as statements (`vec![x; n]`),
+        // then as `matches!(expr, pat)`. A body none of those can read, and
+        // that mentions a seam word, fails rather than hiding the seam.
+        let tokens = macro_call.tokens.clone();
+        let comma_list = Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
+        if let Ok(arguments) = comma_list.parse2(tokens.clone()) {
             for argument in &arguments {
                 self.visit_expr(argument);
             }
+        } else if let Ok(statements) = syn::Block::parse_within.parse2(tokens.clone()) {
+            for statement in &statements {
+                self.visit_stmt(statement);
+            }
+        } else if let Ok(scrutinee) = parse_matches_body.parse2(tokens.clone()) {
+            self.visit_expr(&scrutinee);
+        } else if let Some(word) = seam_word_in(self.class, tokens.clone()) {
+            let owner = self.owner();
+            if self.error.is_none() {
+                self.error = Some(ScanError::new(format!(
+                    "the body of `{}!` in `{owner}` cannot be read as expressions, \
+                     statements, or a `matches!` form, and it mentions `{word}`; the \
+                     inventory cannot see through it, so spell the seam outside the macro",
+                    macro_call.path.to_token_stream()
+                )));
+            }
         }
-        self.scan_token_stream_literals(macro_call.tokens.clone());
+        self.scan_token_stream_literals(tokens);
         visit::visit_macro(self, macro_call);
     }
+}
+
+/// Read a `matches!(expr, pat)` or `matches!(expr, pat if guard)` body and
+/// return its scrutinee, the only expression a seam can sit in.
+fn parse_matches_body(input: syn::parse::ParseStream<'_>) -> syn::Result<syn::Expr> {
+    let scrutinee: syn::Expr = input.parse()?;
+    input.parse::<syn::Token![,]>()?;
+    syn::Pat::parse_multi_with_leading_vert(input)?;
+    if input.peek(syn::Token![if]) {
+        input.parse::<syn::Token![if]>()?;
+        input.parse::<syn::Expr>()?;
+    }
+    if input.peek(syn::Token![,]) {
+        input.parse::<syn::Token![,]>()?;
+    }
+    Ok(scrutinee)
+}
+
+/// The first identifier in a token tree that could name a seam under this
+/// source class's rules: a `data` access, a width selector, a capacity fold
+/// in the IR, a key consumer, or an element type behind a pointer star.
+fn seam_word_in(class: SourceClass, stream: proc_macro2::TokenStream) -> Option<String> {
+    let tokens: Vec<proc_macro2::TokenTree> = stream.into_iter().collect();
+    for (index, token) in tokens.iter().enumerate() {
+        match token {
+            proc_macro2::TokenTree::Group(group) => {
+                if let Some(word) = seam_word_in(class, group.stream()) {
+                    return Some(word);
+                }
+            }
+            proc_macro2::TokenTree::Ident(ident) => {
+                let word = ident.to_string();
+                let is_seam_word = word == "data"
+                    || word == "size_of"
+                    || word == "normalized_key"
+                    || WIDTH_SELECTORS.contains(&word.as_str())
+                    || (CAPACITY_FOLDS.contains(&word.as_str())
+                        && matches!(class, SourceClass::Ir));
+                if is_seam_word {
+                    return Some(word);
+                }
+                // `* mut f32` / `* const i64`: an element type governing a star.
+                let behind_a_star = index >= 2
+                    && RUST_ELEMENT_TYPES.contains(&word.as_str())
+                    && matches!(&tokens[index - 1], proc_macro2::TokenTree::Ident(qualifier)
+                        if qualifier == "mut" || qualifier == "const")
+                    && matches!(&tokens[index - 2], proc_macro2::TokenTree::Punct(star)
+                        if star.as_char() == '*');
+                if behind_a_star {
+                    return Some(format!("*{}", word));
+                }
+            }
+            proc_macro2::TokenTree::Literal(_) | proc_macro2::TokenTree::Punct(_) => {}
+        }
+    }
+    None
+}
+
+/// The transcriber token streams of a `macro_rules!` body: each arm is
+/// `(matcher) => { transcriber }`, separated by `;`.
+fn macro_rules_transcribers(body: proc_macro2::TokenStream) -> Vec<proc_macro2::TokenStream> {
+    let mut transcribers = Vec::new();
+    let mut tokens = body.into_iter().peekable();
+    while let Some(token) = tokens.next() {
+        let proc_macro2::TokenTree::Group(_) = token else {
+            continue;
+        };
+        // `=` `>` then the transcriber group.
+        let arrow = matches!(tokens.next(), Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == '=')
+            && matches!(tokens.next(), Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == '>');
+        if !arrow {
+            continue;
+        }
+        if let Some(proc_macro2::TokenTree::Group(transcriber)) = tokens.next() {
+            transcribers.push(transcriber.stream());
+        }
+        if matches!(tokens.peek(), Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == ';') {
+            tokens.next();
+        }
+    }
+    transcribers
+}
+
+/// Rewrite a transcriber so `syn` can read it: `$name` becomes the plain
+/// identifier `__mv_name`, and a `$( ... ) sep op` repetition becomes its
+/// body. The result is the code the macro would emit for one repetition,
+/// which is exactly the code a seam lives in.
+fn demetavariable(stream: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    let mut output = proc_macro2::TokenStream::new();
+    let mut tokens = stream.into_iter().peekable();
+    while let Some(token) = tokens.next() {
+        match token {
+            proc_macro2::TokenTree::Punct(punct) if punct.as_char() == '$' => match tokens.next() {
+                Some(proc_macro2::TokenTree::Ident(ident)) => {
+                    output.extend([proc_macro2::TokenTree::Ident(proc_macro2::Ident::new(
+                        &format!("__mv_{ident}"),
+                        ident.span(),
+                    ))]);
+                }
+                Some(proc_macro2::TokenTree::Group(group)) => {
+                    output.extend(demetavariable(group.stream()));
+                    // An optional separator, then the repetition operator.
+                    let is_operator =
+                        |p: &proc_macro2::Punct| matches!(p.as_char(), '*' | '+' | '?');
+                    if let Some(proc_macro2::TokenTree::Punct(next)) = tokens.peek()
+                        && !is_operator(next)
+                    {
+                        tokens.next();
+                    }
+                    if let Some(proc_macro2::TokenTree::Punct(next)) = tokens.peek()
+                        && is_operator(next)
+                    {
+                        tokens.next();
+                    }
+                }
+                Some(other) => {
+                    output.extend([proc_macro2::TokenTree::Punct(punct), other]);
+                }
+                None => output.extend([proc_macro2::TokenTree::Punct(punct)]),
+            },
+            proc_macro2::TokenTree::Group(group) => {
+                let mut rebuilt =
+                    proc_macro2::Group::new(group.delimiter(), demetavariable(group.stream()));
+                rebuilt.set_span(group.span());
+                output.extend([proc_macro2::TokenTree::Group(rebuilt)]);
+            }
+            other => output.extend([other]),
+        }
+    }
+    output
 }
 
 /// Derive every seam row in one Rust source file.
@@ -736,474 +987,8 @@ pub fn scan_rust_source(path: &str, source: &str) -> Result<Vec<SeamRow>, ScanEr
 }
 
 // ---------------------------------------------------------------------------
-// C headers
+// C and Objective-C headers
 // ---------------------------------------------------------------------------
 
-/// Is this token a C type word the census vocabulary does not know?
-///
-/// The classification rule is inverted for the same reason
-/// `spec/design/dtype_semantics.md` section C6 inverts it: an allowlist of
-/// arithmetic spellings can never be complete, so an unrecognized type word at
-/// a carrier position is a failure rather than a silently unflagged row.
-fn is_unknown_c_type_word(word: &str, aliases: &BTreeMap<String, Vec<String>>) -> bool {
-    if !word
-        .chars()
-        .next()
-        .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
-    {
-        return false;
-    }
-    if c_lexical::NUMERIC_C_TYPES.contains(&word)
-        || c_lexical::NON_NUMERIC_C_TYPE_WORDS.contains(&word)
-        || C_ELEMENT_TYPES.contains(&word)
-        || aliases.contains_key(word)
-    {
-        return false;
-    }
-    // Reserved arithmetic spellings that no vocabulary lists but that a
-    // compiler would accept as a dtype.
-    word.starts_with("_Float")
-        || word.starts_with("_Decimal")
-        || word.starts_with("__fp")
-        || word.starts_with("__bf")
-        || word.starts_with("__int")
-}
-
-/// Blank `#include`-family directive lines, preserving line structure.
-///
-/// A directive ends at a newline, which the token stream cannot see, so its
-/// tokens otherwise run into the next declaration and the `.` in a header path
-/// makes that declaration read as a member access. These three carry a path
-/// and nothing else, so removing them loses no seam; `#define` and `#if` are
-/// left alone because a macro body can carry one.
-fn blank_include_directives(source: &str) -> String {
-    source
-        .lines()
-        .map(|line| {
-            let trimmed = line.trim_start();
-            let is_include = trimmed.strip_prefix('#').is_some_and(|rest| {
-                let rest = rest.trim_start();
-                rest.starts_with("include") || rest.starts_with("import")
-            });
-            if is_include {
-                String::new()
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// The frame an aggregate body opens. `c_aggregate_rows` owns that territory,
-/// because `typedef struct { ... } NAME;` only names itself after the body
-/// closes, which a forward token walk cannot know.
-const AGGREGATE_FRAME: &str = "<aggregate>";
-
-/// C keywords and operators that can precede a `(` without naming anything.
-/// Without this, a `for`, `while`, or `sizeof` becomes the owner of every row
-/// in the block it opens.
-const C_NON_DECLARATOR_WORDS: &[&str] = &[
-    "case", "defined", "do", "else", "for", "if", "return", "sizeof", "switch", "while",
-];
-
-/// Derive seam rows from one plain C header.
-///
-/// The universe is four reviewed headers with no conditional ABI, so this
-/// walks the declaration token stream directly rather than enumerating
-/// preprocessor configurations. A header that grows a conditional declaration
-/// region is caught by the capacity census's context-invariance guard, which
-/// is the reviewed owner of that question; it is not re-litigated here.
-pub fn scan_c_header(path: &str, source: &str) -> Result<Vec<SeamRow>, ScanError> {
-    let aliases = BTreeMap::new();
-    let stripped = blank_include_directives(&c_lexical::strip_c_comments(source));
-    let tokens = c_lexical::lex_c_tokens(&stripped);
-    let mut rows = c_descriptor_rows(&stripped);
-    let mut depth = 0usize;
-    let mut enclosing = String::from("module");
-    let mut owners: Vec<(String, bool)> = Vec::new();
-    let mut in_function_body = false;
-    let mut statement: Vec<String> = Vec::new();
-    let mut candidate: Option<String> = None;
-    let mut pending_block_owner: Option<String> = None;
-
-    for (index, token) in tokens.iter().enumerate() {
-        if is_unknown_c_type_word(token, &aliases) {
-            return Err(ScanError::new(format!(
-                "`{path}` uses the unrecognized C type word `{token}` at a carrier position: \
-                 classify it in tests/support/c_lexical.rs rather than routing around it"
-            )));
-        }
-        match token.as_str() {
-            "(" => {
-                if let Some(previous) = index.checked_sub(1).and_then(|before| tokens.get(before))
-                    && is_c_declarator_name(previous)
-                {
-                    candidate = Some(previous.clone());
-                    pending_block_owner = Some(previous.clone());
-                }
-                // The parenthesis is part of the statement. Dropping it would
-                // leave `is_declaration_statement` with no parameter list to
-                // find, so every file-scope prototype would fall back to its
-                // enclosing frame.
-                statement.push(token.clone());
-            }
-            "{" => {
-                // Push a frame per brace, inheriting the enclosing owner when
-                // the brace opens no declaration. Resetting only at depth zero
-                // would let one file-scope wrapper, `extern "C" {`, own every
-                // declaration after it: the token before that brace is a
-                // string literal, not a declarator, so nothing would ever set
-                // an owner again.
-                // Only a DECLARATION's brace opens a new owner. A call whose
-                // argument is a block, `dispatch_once(&once, ^{ ... })`, would
-                // otherwise make the callee own every statement inside it.
-                // Only a DECLARATION's brace opens a new owner. A call whose
-                // argument is a block, `dispatch_once(&once, ^{ ... })`, would
-                // otherwise make the callee own every statement inside it.
-                let opens_aggregate = statement
-                    .iter()
-                    .any(|word| word == "struct" || word == "union" || word == "enum");
-                let definition = declarator_name(&statement)
-                    .filter(|_| pending_block_owner.is_some() && !opens_aggregate);
-                let owner = if opens_aggregate {
-                    AGGREGATE_FRAME.to_string()
-                } else {
-                    definition.clone().unwrap_or_else(|| enclosing.clone())
-                };
-                pending_block_owner = None;
-                owners.push((std::mem::replace(&mut enclosing, owner), in_function_body));
-                in_function_body = in_function_body || definition.is_some();
-                depth += 1;
-                flush_c_statement(
-                    &mut rows,
-                    &mut statement,
-                    &enclosing,
-                    &mut candidate,
-                    in_function_body,
-                    path,
-                )?;
-            }
-            "}" => {
-                depth = depth.saturating_sub(1);
-                let (previous, was_in_body) = owners
-                    .pop()
-                    .unwrap_or_else(|| (String::from("module"), false));
-                enclosing = previous;
-                in_function_body = was_in_body;
-                flush_c_statement(
-                    &mut rows,
-                    &mut statement,
-                    &enclosing,
-                    &mut candidate,
-                    in_function_body,
-                    path,
-                )?;
-            }
-            ";" => {
-                flush_c_statement(
-                    &mut rows,
-                    &mut statement,
-                    &enclosing,
-                    &mut candidate,
-                    in_function_body,
-                    path,
-                )?;
-                pending_block_owner = None;
-            }
-            "#" | "%:" => {
-                // A preprocessor directive is its own statement. Without this
-                // boundary the tokens of `#include <immintrin.h>` run into the
-                // declaration that follows it, and the stray `.` makes that
-                // declaration read as a member access rather than a prototype.
-                flush_c_statement(
-                    &mut rows,
-                    &mut statement,
-                    &enclosing,
-                    &mut candidate,
-                    in_function_body,
-                    path,
-                )?;
-                pending_block_owner = None;
-                statement.push(token.clone());
-            }
-            _ => statement.push(token.clone()),
-        }
-    }
-    flush_c_statement(
-        &mut rows,
-        &mut statement,
-        &enclosing,
-        &mut candidate,
-        in_function_body,
-        path,
-    )?;
-    Ok(rows)
-}
-
-/// Does an element type in this statement actually GOVERN a pointer?
-///
-/// A whole-statement co-occurrence test ("some token is `*` and some token is
-/// an element type") calls `int64_t chelis_dict_len(const chelis_dict *dict)`
-/// a raw element pointer, because the star belongs to an opaque handle and the
-/// integer is a return width. The star has to follow the element type, allowing
-/// only qualifiers in between, which is the same shape the Rust side gets for
-/// free from `syn::TypePtr`.
-fn governs_a_pointer(words: &[String]) -> bool {
-    words.iter().enumerate().any(|(index, word)| {
-        if !(C_ELEMENT_TYPES.contains(&word.as_str()) || word == "int" || word == "long") {
-            return false;
-        }
-        words[index + 1..]
-            .iter()
-            .take_while(|next| QUALIFIER_WORDS.contains(&next.as_str()) || *next == "long")
-            .count()
-            .checked_add(index + 1)
-            .and_then(|star| words.get(star))
-            .is_some_and(|next| next == "*")
-    })
-}
-
-/// Qualifiers a declaration may place between its type and its star.
-const QUALIFIER_WORDS: &[&str] = &[
-    "__restrict",
-    "__restrict__",
-    "_Atomic",
-    "const",
-    "restrict",
-    "unsigned",
-    "signed",
-    "volatile",
-];
-
-/// Does this statement DECLARE something, rather than call or assign?
-///
-/// The read is positional, the way the capacity census separates type words
-/// from declarator names: a declaration's name is preceded by its type, so it
-/// is never the statement's first token, and no assignment or member access
-/// appears before its parameter list. `CHELIS_HIP_CHECK(...)` fails the first
-/// test and `t->size * chelis_gpu_dtype_size(...)` fails the second.
-fn declarator_name(words: &[String]) -> Option<String> {
-    // A declarator's name sits immediately before whatever follows it: a
-    // parameter list, an array extent, an initializer, or the end of the
-    // statement. Keying only on `(` saw prototypes and missed every other
-    // declaration form, which is how `extern double *table;` and
-    // `typedef float *(*hook)(int64_t);` reached a placeholder owner.
-    let end = words
-        .iter()
-        .position(|word| word == "(" || word == "[" || word == "=")
-        .unwrap_or(words.len());
-    if end < 2 {
-        return None;
-    }
-    if words[..end]
-        .iter()
-        .any(|word| word == "=" || word == "->" || word == ".")
-    {
-        return None;
-    }
-    // A function-pointer declarator wraps its name in parentheses, so the name
-    // follows the star INSIDE the group rather than preceding it:
-    // `typedef float *(*chelis_hook)(int64_t);`.
-    if words.get(end) == Some(&"(".to_string())
-        && words.get(end + 1) == Some(&"*".to_string())
-        && let Some(name) = words.get(end + 2)
-        && is_c_declarator_name(name)
-    {
-        return Some(name.clone());
-    }
-    let position = words[..end]
-        .iter()
-        .rposition(|word| is_c_declarator_name(word))?;
-    // Position separates a type from a declarator: a declared name is never
-    // the statement's first token, and what precedes it is its type, a star,
-    // or a qualifier.
-    let preceding = words.get(position.checked_sub(1)?)?;
-    let introduces = preceding == "*"
-        || QUALIFIER_WORDS.contains(&preceding.as_str())
-        || c_lexical::NUMERIC_C_TYPES.contains(&preceding.as_str())
-        || c_lexical::NON_NUMERIC_C_TYPE_WORDS.contains(&preceding.as_str())
-        || C_ELEMENT_TYPES.contains(&preceding.as_str())
-        || is_c_declarator_name(preceding);
-    introduces.then(|| words[position].clone())
-}
-
-/// A declarator name is an ordinary identifier, never a control-flow keyword
-/// and never a type word.
-fn is_c_declarator_name(token: &str) -> bool {
-    !C_NON_DECLARATOR_WORDS.contains(&token)
-        && !c_lexical::NON_NUMERIC_C_TYPE_WORDS.contains(&token)
-        && !c_lexical::NUMERIC_C_TYPES.contains(&token)
-        && token
-            .chars()
-            .next()
-            .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
-        && token
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '_')
-}
-
-/// Emit the seam rows one C statement carries.
-///
-/// At file scope a prototype owns its own name; inside a function body the
-/// enclosing function owns every statement, which is the granularity Phase 3
-/// deletes at.
-fn flush_c_statement(
-    rows: &mut Vec<SeamRow>,
-    statement: &mut Vec<String>,
-    enclosing: &str,
-    candidate: &mut Option<String>,
-    in_function_body: bool,
-    path: &str,
-) -> Result<(), ScanError> {
-    let words = std::mem::take(statement);
-    let _declared = candidate.take();
-    if words.is_empty() || enclosing == AGGREGATE_FRAME {
-        return Ok(());
-    }
-    // A DECLARATION names its own owner wherever it appears, including inside
-    // a linkage block. Any other statement belongs to the frame that encloses
-    // it, which is what puts a function body's statements on that function.
-    // Without the distinction a called function is mistaken for a declared
-    // one, and `CHELIS_HIP_CHECK(hipMemcpy(t->data, ...))` files its row under
-    // `hipMemcpy`.
-    let text = words.join(" ");
-    let mut push = |kind: &str, owner: &str| rows.push(SeamRow::new(kind, owner, &text));
-    let kinds: Vec<&str> = [
-        governs_a_pointer(&words).then_some("raw-element-pointer"),
-        words
-            .windows(2)
-            .any(|pair| pair[1] == "data" && (pair[0] == "->" || pair[0] == "."))
-            .then_some("direct-data-access"),
-        words
-            .iter()
-            .any(|word| word == "sizeof")
-            .then_some("width-arithmetic"),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    if kinds.is_empty() {
-        return Ok(());
-    }
-    // A seam has to name the declaration that carries it. A placeholder owner
-    // is a SINK: because identity is kind|path|owner, one such row absorbs
-    // every later seam of that kind in that file, and the freeze stops moving.
-    let declared = if in_function_body {
-        None
-    } else {
-        declarator_name(&words)
-    };
-    let owner = match declared {
-        Some(name) => name,
-        None if enclosing != "module" => enclosing.to_string(),
-        None => {
-            return Err(ScanError::new(format!(
-                "`{path}` carries a {} seam that names no declaration: `{}`. Give it a \
-                 declarator the scanner can attribute, or move it inside a declared \
-                 function; a placeholder owner would absorb every later seam of that \
-                 kind in this file",
-                kinds.join(" and "),
-                excerpt(&text)
-            )));
-        }
-    };
-    for kind in kinds {
-        push(kind, &owner);
-    }
-    Ok(())
-}
-
-/// Descriptor structs in a C header: `typedef struct { ... } name;`.
-fn c_descriptor_rows(stripped: &str) -> Vec<SeamRow> {
-    let mut rows = Vec::new();
-    let mut rest = stripped;
-    while let Some(start) = rest.find("typedef struct") {
-        let after = &rest[start..];
-        let Some(open) = after.find('{') else { break };
-        let Some(close) = after.find('}') else { break };
-        if close < open {
-            rest = &after[close + 1..];
-            continue;
-        }
-        let body = &after[open + 1..close];
-        let tail = &after[close + 1..];
-        let name = tail
-            .split(';')
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        let declarations: Vec<String> = body
-            .split(';')
-            .map(|declaration| declaration.split_whitespace().collect::<Vec<_>>().join(" "))
-            .filter(|declaration| !declaration.is_empty())
-            .collect();
-        let names: BTreeSet<String> = declarations
-            .iter()
-            .filter_map(|declaration| c_field_name(declaration))
-            .collect();
-        if !name.is_empty() {
-            for declaration in &declarations {
-                let Some(field) = c_field_name(declaration) else {
-                    continue;
-                };
-                let words: Vec<String> = c_lexical::lex_c_tokens(declaration);
-                if governs_a_pointer(&words) {
-                    rows.push(SeamRow::new(
-                        "raw-element-pointer",
-                        &format!("{name}::{field}"),
-                        declaration,
-                    ));
-                }
-            }
-        }
-        if is_descriptor(&names) && !name.is_empty() {
-            for declaration in &declarations {
-                let Some(field) = c_field_name(declaration) else {
-                    rows.push(SeamRow::new("descriptor-field", &name, declaration));
-                    continue;
-                };
-                let name = format!("{name}::{field}");
-                rows.push(SeamRow::new("descriptor-field", &name, declaration));
-                let is_narrow = declaration
-                    .split_whitespace()
-                    .any(|word| word == "int" || word == "int32_t");
-                if NARROWABLE_FIELDS.contains(&field.as_str()) && is_narrow {
-                    rows.push(SeamRow::new("narrow-metadata", &name, declaration));
-                }
-                if let Some(extent) = c_fixed_extent(declaration) {
-                    rows.push(SeamRow::new(
-                        "fixed-rank-metadata",
-                        &name,
-                        format!("{declaration} (extent {extent})"),
-                    ));
-                }
-            }
-        }
-        rest = &after[close + 1..];
-    }
-    rows
-}
-
-fn c_field_name(declaration: &str) -> Option<String> {
-    let head = declaration.split('[').next()?;
-    let name = head
-        .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
-        .rfind(|word| !word.is_empty())?;
-    name.chars()
-        .next()
-        .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
-        .then(|| name.to_string())
-}
-
-fn c_fixed_extent(declaration: &str) -> Option<String> {
-    let open = declaration.find('[')?;
-    let close = declaration[open..].find(']')? + open;
-    let extent = declaration[open + 1..close].trim();
-    if extent.is_empty() {
-        return None;
-    }
-    let is_cap = extent.contains("MAX_DIM") || extent.parse::<u64>().is_ok_and(|value| value > 1);
-    is_cap.then(|| extent.to_string())
-}
+pub mod c_ast;
+pub use c_ast::{HeaderLane, lane_for, release_arm_rows, scan_c_header, scan_c_source};

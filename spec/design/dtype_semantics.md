@@ -819,10 +819,12 @@ Deliverables, with phase homes:
    `canonical_c_tokens`, `lex_c_tokens`, `resolve_words`, `classify`,
    `NUMERIC_C_TYPES`, and the closed `NON_NUMERIC_C_TYPE_WORDS`. They moved
    out of the tripwire body so the runtime-representation inventory
-   (chelis#893) could read its seven registered C headers with the SAME
-   classifier rather than standing up a second one; B2 invariant 3 of
-   `spec/design/runtime_representation.md` forbids a second authority for one
-   question. Two behaviors widened in that move and are locked by
+   (chelis#893) could classify the type spellings clang reports for its
+   registered headers with the SAME closed word lists and alias resolver
+   rather than standing up a second type-word authority; the inventory's
+   declaration enumerator is the compiler, while the census keeps its own
+   `cc -E` enumerator over the published headers. Two behaviors widened in
+   that move and are locked by
    `shared_capacity_census_primitives_keep_their_contract` and
    `comment_stripping_respects_string_and_character_literals`: the stripper now
    respects string, character, and C++ raw-string literals, so a comment

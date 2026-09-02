@@ -15,16 +15,21 @@ kernel behavior. It proves three things and nothing more:
 
 The inventory's completeness claim is over `INVENTORY_SOURCES`: an explicit,
 reviewed list of the repository files that can carry a representation seam.
-Forty-eight are Rust and seven are C headers. A completeness claim stated
-over a *language* instead cannot be discharged, because a reviewer can always
-name one more construct; stated over a file list it is decidable, and
-`_assert_source_list_current` proves the list still equals the tracked contents
-of its roots, so a new file fails until someone registers it.
+Forty-nine are Rust and seven are C or Objective-C headers. A completeness
+claim stated over a *language* instead cannot be discharged, because a reviewer
+can always name one more construct; stated over a file list it is decidable,
+and `_assert_source_list_current` proves the list still equals the tracked
+contents of its roots, so a new file fails until someone registers it.
 
-Rust is read with `syn`, a total parser for the language. The four C headers
-are read with the numeric capacity census's own token vocabulary
-(`tests/support/c_lexical.rs`), which keeps one C classifier in the repository
-rather than two.
+Every source is read by a real parser for its language. Rust is read with
+`syn`. The headers are read through clang's front end (`-fsyntax-only -Xclang
+-ast-dump=json`) under a fixed target triple, `-ffreestanding -nostdlibinc`, a
+committed stub SDK, and a scrubbed environment, so the parse is the same on
+every host and every SDK state; the reader classifies the compiler's type
+spellings with the capacity census's closed word lists
+(`tests/support/c_lexical.rs`), which keeps one type-word authority in the
+repository rather than two. The owner of a seam is the declaration the
+compiler says encloses it, so declaration FORM is never this script's problem.
 
 # Identity is the owning declaration
 
@@ -52,7 +57,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "6530e83a0da03f599178ddb1486bea0a97a7d5a1878635e2f46ee887dcea8d63"
+FREEZE_SHA256 = "698797cac2da1d28ea040f5d87b53145cfc88a2c3877c0032b615c44bf37118f"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -64,14 +69,22 @@ PHASE0_COMMAND = (
 INVENTORY_ROOTS = (
     "crates/chelis-runtime/src/**/*.rs",
     "crates/chelis-runtime/include/**/*.h",
+    "crates/chelis-runtime/build.rs",
     "crates/chelis-vocab/src/**/*.rs",
+    "crates/chelis-vocab/build.rs",
     "crates/chelis-ir/src/**/*.rs",
+    "crates/chelis-ir/build.rs",
     "crates/chelis-python/src/**/*.rs",
+    "crates/chelis-python/build.rs",
     "crates/chelis-backend-*/src/**/*.rs",
     "crates/chelis-backend-*/runtime/**/*.h",
+    # A build script is compiled by cargo like any other source and can carry
+    # a seam; a root that cannot see it is a closure hole.
+    "crates/chelis-backend-*/build.rs",
 )
 
 INVENTORY_SOURCES: tuple[str, ...] = (
+    "crates/chelis-backend-c/build.rs",
     "crates/chelis-backend-c/src/blas.rs",
     "crates/chelis-backend-c/src/emit.rs",
     "crates/chelis-backend-c/src/emitted_expr.rs",
@@ -214,6 +227,9 @@ class MutationProbe:
     path: Path
     mutate: Callable[[str], str]
     expected_failure: FailureExpectation = UNCLASSIFIED_FAILURE
+    # Owners the rejection must name, for a witness whose point is that one
+    # declaration yields several identities.
+    expected_owners: tuple[str, ...] = ()
 
 
 def _probe(
@@ -221,6 +237,7 @@ def _probe(
     path: str,
     mutate: Callable[[str], str],
     expected_failure: FailureExpectation = UNCLASSIFIED_FAILURE,
+    expected_owners: tuple[str, ...] = (),
 ) -> MutationProbe:
     return MutationProbe(
         witness_id=f"phase0.{mutate.__name__}",
@@ -228,6 +245,7 @@ def _probe(
         path=Path(path),
         mutate=mutate,
         expected_failure=expected_failure,
+        expected_owners=expected_owners,
     )
 
 
@@ -471,6 +489,7 @@ def mutation_manifest(probes: Sequence[MutationProbe]) -> list[dict[str, object]
                 "code": probe.expected_failure.code,
                 "reason_prefix": probe.expected_failure.reason_prefix,
             },
+            "expected_owners": list(probe.expected_owners),
             "command": PHASE0_COMMAND,
         }
         for probe in probes
@@ -483,8 +502,10 @@ def coverage_manifest(probes: Sequence[MutationProbe] | None = None) -> dict[str
         "source_inventory": {
             "artifact": "the frozen INVENTORY_SOURCES file list",
             "enumerator": (
-                "chelis-repr-inventory: syn for Rust, the capacity census token "
-                "vocabulary for plain C headers"
+                "chelis-repr-inventory: syn for Rust; clang's front end under fixed "
+                "target lanes, a committed stub SDK, and a scrubbed environment for C "
+                "and Objective-C headers, classified with the capacity census's closed "
+                "type-word lists"
             ),
             "universe": {
                 "registered_sources": len(INVENTORY_SOURCES),
@@ -636,6 +657,22 @@ def _append_probe(source: str, marker: str, snippet: str) -> str:
     if test_module in source:
         return source.replace(test_module, mutation + test_module, 1)
     return source + mutation
+
+
+def _insert_inside_include_guard(source: str, marker: str, snippet: str) -> str:
+    """Plant a C declaration before the include guard's closing `#endif`.
+
+    A declaration appended after the guard is repeated every time the header
+    is included, which for a header two others include is a redefinition
+    error rather than the seam under test.
+    """
+
+    if marker in source:
+        raise OracleFailure(f"{marker} mutation is already present")
+    guard_end = source.rstrip().rfind("#endif")
+    if guard_end < 0:
+        raise OracleFailure("include-guard mutation anchor drifted")
+    return source[:guard_end] + f"{snippet}\n\n" + source[guard_end:]
 
 
 _PROBE_DESCRIPTOR = """#[repr(C)]
@@ -793,10 +830,8 @@ def mutate_unknown_c_arithmetic_spelling(source: str) -> str:
 def mutate_c_public_element_pointer_export(source: str) -> str:
     """A new public `float *` export inside the header's linkage block.
 
-    This is the witness the C token walker previously lacked: the descriptor
-    mutation is caught by the independent `typedef struct` scan, and the
-    unknown-spelling mutation fails before owner attribution runs, so neither
-    proves this path works.
+    A prototype at file scope, so owner attribution rather than descriptor
+    scanning has to catch it.
     """
 
     anchor = "chelis_tensor *chelis_alloc("
@@ -839,8 +874,8 @@ def mutate_c_extern_element_data(source: str) -> str:
 def mutate_c_non_descriptor_struct_field(source: str) -> str:
     """An element pointer in a struct that is not a tensor descriptor.
 
-    These fell between the two C scanners: the token walk skips aggregate
-    bodies and the aggregate scanner used to name only descriptor fields.
+    A helper aggregate's field is a carrier even though the descriptor rules
+    do not apply to it.
     """
 
     return _append_probe(
@@ -850,6 +885,82 @@ def mutate_c_non_descriptor_struct_field(source: str) -> str:
     int64_t key;
     float *weights;
 } runtime_representation_phase0_probe_pair;""",
+    )
+
+
+def mutate_c_tagged_struct_field(source: str) -> str:
+    """A tagged `struct` with a separate typedef, the idiomatic public form.
+
+    The round-3 finding: a reader that only recognised `typedef struct { ... }`
+    let this form carry a `float *` past it without a row or an error.
+    """
+
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_probe_pool",
+        """struct runtime_representation_phase0_probe_pool {
+    float *slab;
+    int64_t n;
+};
+typedef struct runtime_representation_phase0_probe_pool runtime_representation_phase0_probe_pool;""",
+    )
+
+
+def mutate_c_union_field(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_probe_slot",
+        """union runtime_representation_phase0_probe_slot {
+    double *d;
+    int64_t i;
+};""",
+    )
+
+
+def mutate_c_macro_typed_carrier(source: str) -> str:
+    """A carrier whose element type only a preprocessor can see."""
+
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_probe_slab",
+        """#define RUNTIME_REPRESENTATION_PHASE0_PROBE_ELEM float
+RUNTIME_REPRESENTATION_PHASE0_PROBE_ELEM *runtime_representation_phase0_probe_slab(void);""",
+    )
+
+
+def mutate_c_multi_declarator_data(source: str) -> str:
+    """Two declarators in one declaration are two owners, not one."""
+
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_probe_pair_a",
+        "extern float *runtime_representation_phase0_probe_pair_a, "
+        "*runtime_representation_phase0_probe_pair_b;",
+    )
+
+
+def mutate_c_enum_width(source: str) -> str:
+    """A file-scope enum constant that computes a width owns that seam."""
+
+    return _insert_inside_include_guard(
+        source,
+        "RUNTIME_REPRESENTATION_PHASE0_PROBE_WIDTH",
+        "enum { RUNTIME_REPRESENTATION_PHASE0_PROBE_WIDTH = sizeof(float) };",
+    )
+
+
+def mutate_objc_element_pointer_parameter(source: str) -> str:
+    """An Objective-C header's C function carrying an element pointer."""
+
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_probe_fill",
+        """static inline void runtime_representation_phase0_probe_fill(
+    id<MTLBuffer> buffer, const float *values
+) {
+    (void)buffer;
+    (void)values;
+}""",
     )
 
 
@@ -933,6 +1044,45 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
             "raw-element-pointer",
             "crates/chelis-runtime/include/chelis_runtime.h",
             mutate_c_non_descriptor_struct_field,
+        ),
+        _probe(
+            "raw-element-pointer",
+            "crates/chelis-runtime/include/chelis_runtime.h",
+            mutate_c_tagged_struct_field,
+            expected_owners=("runtime_representation_phase0_probe_pool::slab",),
+        ),
+        _probe(
+            "raw-element-pointer",
+            "crates/chelis-runtime/include/chelis_runtime.h",
+            mutate_c_union_field,
+            expected_owners=("runtime_representation_phase0_probe_slot::d",),
+        ),
+        _probe(
+            "raw-element-pointer",
+            "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
+            mutate_c_macro_typed_carrier,
+            expected_owners=("runtime_representation_phase0_probe_slab",),
+        ),
+        _probe(
+            "raw-element-pointer",
+            "crates/chelis-runtime/include/chelis_runtime.h",
+            mutate_c_multi_declarator_data,
+            expected_owners=(
+                "runtime_representation_phase0_probe_pair_a",
+                "runtime_representation_phase0_probe_pair_b",
+            ),
+        ),
+        _probe(
+            "width-arithmetic",
+            "crates/chelis-runtime/include/chelis_runtime_dtype.h",
+            mutate_c_enum_width,
+            expected_owners=("RUNTIME_REPRESENTATION_PHASE0_PROBE_WIDTH",),
+        ),
+        _probe(
+            "raw-element-pointer",
+            "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
+            mutate_objc_element_pointer_parameter,
+            expected_owners=("runtime_representation_phase0_probe_fill",),
         ),
         _probe(
             "rust-path-module",
@@ -1025,6 +1175,16 @@ def _expect_mutation_rejected(probe: MutationProbe) -> None:
                 raise OracleFailure(
                     f"{probe.witness_id} failed without naming a {probe.expected_kind} "
                     f"row: {sorted(error.details)[:5]}"
+                ) from error
+            expected = {
+                f"kind={probe.expected_kind}|path={probe.path.as_posix()}|owner={owner}"
+                for owner in probe.expected_owners
+            }
+            missing = expected - set(error.details)
+            if missing:
+                raise OracleFailure(
+                    f"{probe.witness_id} failed without naming every expected owner: "
+                    f"{sorted(missing)}"
                 ) from error
         else:
             raise OracleFailure(f"{probe.witness_id} mutation was silently accepted")

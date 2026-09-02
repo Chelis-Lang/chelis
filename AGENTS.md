@@ -598,6 +598,11 @@ interpreter for every child command.
 **macOS:** Apple's bundled Python reports a stale `sysconfig.LIBDIR` path. Do not route
 PyO3 to it.
 
+**C front end.** The chelis#893 Phase 0 oracle and the `chelis-repr-inventory` tests read
+the registered C and Objective-C headers through a `clang` binary on PATH (any clang that
+prints `-ast-dump=json`), in addition to the `cc` the capacity census already requires;
+a missing `clang` fails the scan loudly rather than skipping it.
+
 ## Local Git Hook
 
 `.githooks/commit-msg` is the tracked commit-msg hook. It runs

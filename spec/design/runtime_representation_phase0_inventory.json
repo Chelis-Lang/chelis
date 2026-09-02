@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "6530e83a0da03f599178ddb1486bea0a97a7d5a1878635e2f46ee887dcea8d63",
+  "freeze_sha256": "698797cac2da1d28ea040f5d87b53145cfc88a2c3877c0032b615c44bf37118f",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -1327,15 +1327,23 @@
       "deletion_phase": 2
     },
     {
-      "identity": "kind=raw-element-pointer|path=crates/chelis-python/src/lib.rs|owner=ChelisGpuTensor",
+      "identity": "kind=raw-element-pointer|path=crates/chelis-python/src/lib.rs|owner=ChelisGpuTensor::data",
       "deletion_phase": 2
     },
     {
-      "identity": "kind=raw-element-pointer|path=crates/chelis-python/src/lib.rs|owner=ChelisTensor",
+      "identity": "kind=raw-element-pointer|path=crates/chelis-python/src/lib.rs|owner=ChelisTensor::shape",
       "deletion_phase": 2
     },
     {
-      "identity": "kind=raw-element-pointer|path=crates/chelis-python/src/lib.rs|owner=DLTensor",
+      "identity": "kind=raw-element-pointer|path=crates/chelis-python/src/lib.rs|owner=ChelisTensor::strides",
+      "deletion_phase": 2
+    },
+    {
+      "identity": "kind=raw-element-pointer|path=crates/chelis-python/src/lib.rs|owner=DLTensor::shape",
+      "deletion_phase": 2
+    },
+    {
+      "identity": "kind=raw-element-pointer|path=crates/chelis-python/src/lib.rs|owner=DLTensor::strides",
       "deletion_phase": 2
     },
     {
@@ -1407,7 +1415,7 @@
       "deletion_phase": 3
     },
     {
-      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/src/lib.rs|owner=chelis_dims",
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/src/lib.rs|owner=chelis_dims::0",
       "deletion_phase": 3
     },
     {
@@ -2110,59 +2118,59 @@
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_device_to_host",
-      "sample": "CHELIS_HIP_CHECK ( hipMemcpy ( dst -> data , src -> data , dst -> size * chelis_gpu_dtype_size ( ..."
+      "sample": "CHELIS_HIP_CHECK(hipMemcpy(dst->data, src->data, dst->size * chelis_gpu_dtype_size(src->dtype), h..."
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_alloc",
-      "sample": "CHELIS_HIP_CHECK ( hipMalloc ( & t -> data , t -> size * chelis_gpu_dtype_size ( dtype ) ) )"
+      "sample": "CHELIS_HIP_CHECK(hipMalloc(&t->data, t->size * chelis_gpu_dtype_size(dtype)))"
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_alloc_view",
-      "sample": "t -> data = device_data"
+      "sample": "t->data"
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_clone",
-      "sample": "CHELIS_HIP_CHECK ( hipMemcpy ( dst -> data , src -> data , src -> size * chelis_gpu_dtype_size ( ..."
+      "sample": "CHELIS_HIP_CHECK(hipMemcpy( dst->data, src->data, src->size * chelis_gpu_dtype_size(src->dtype), ..."
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_free",
-      "sample": "( void ) hipFree ( t -> data )"
+      "sample": "t->data"
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_bf16_gemm_f32_acc_row_major",
-      "sample": "CHELIS_HIPBLAS_CHECK ( hipblasGemmEx ( handle , HIPBLAS_OP_N , HIPBLAS_OP_N , n , m , k , & alpha..."
+      "sample": "CHELIS_HIPBLAS_CHECK(hipblasGemmEx( handle, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m, k, &alpha, b->data,..."
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_dgemm_batched_row_major",
-      "sample": "const double * a_base = ( const double * ) ( const void * ) a -> data"
+      "sample": "a->data"
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_dgemm_row_major",
-      "sample": "CHELIS_HIPBLAS_CHECK ( hipblasDgemm ( handle , HIPBLAS_OP_N , HIPBLAS_OP_N , n , m , k , & alpha ..."
+      "sample": "CHELIS_HIPBLAS_CHECK(hipblasDgemm( handle, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m, k, &alpha, (const do..."
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_dgemm_strided_batched_row_major",
-      "sample": "CHELIS_HIPBLAS_CHECK ( hipblasDgemmStridedBatched ( handle , HIPBLAS_OP_N , HIPBLAS_OP_N , n , m ..."
+      "sample": "CHELIS_HIPBLAS_CHECK(hipblasDgemmStridedBatched( handle, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m, k, &al..."
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_f16_gemm_f32_acc_row_major",
-      "sample": "CHELIS_HIPBLAS_CHECK ( hipblasGemmEx ( handle , HIPBLAS_OP_N , HIPBLAS_OP_N , n , m , k , & alpha..."
+      "sample": "CHELIS_HIPBLAS_CHECK(hipblasGemmEx( handle, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m, k, &alpha, b->data,..."
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_sgemm_batched_row_major",
-      "sample": "CHELIS_HIPBLAS_CHECK ( hipblasSgemm ( handle , HIPBLAS_OP_N , HIPBLAS_OP_N , n , m , k , & alpha ..."
+      "sample": "CHELIS_HIPBLAS_CHECK(hipblasSgemm( handle, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m, k, &alpha, b->data +..."
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_sgemm_row_major",
-      "sample": "CHELIS_HIPBLAS_CHECK ( hipblasSgemm ( handle , HIPBLAS_OP_N , HIPBLAS_OP_N , n , m , k , & alpha ..."
+      "sample": "CHELIS_HIPBLAS_CHECK(hipblasSgemm( handle, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m, k, &alpha, b->data, ..."
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_sgemm_strided_batched_row_major",
-      "sample": "CHELIS_HIPBLAS_CHECK ( hipblasSgemmStridedBatched ( handle , HIPBLAS_OP_N , HIPBLAS_OP_N , n , m ..."
+      "sample": "CHELIS_HIPBLAS_CHECK(hipblasSgemmStridedBatched( handle, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m, k, &al..."
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_host_to_device",
-      "sample": "CHELIS_HIP_CHECK ( hipMemcpy ( dst -> data , src -> data , dst -> size * chelis_gpu_dtype_size ( ..."
+      "sample": "CHELIS_HIP_CHECK(hipMemcpy(dst->data, src->data, dst->size * chelis_gpu_dtype_size(dst->dtype), h..."
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx::emit_literal_tensor",
@@ -2838,11 +2846,11 @@
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_alloc",
-      "sample": "static inline chelis_gpu_tensor * chelis_gpu_alloc ( int ndim , const int * shape , int dtype )"
+      "sample": "static inline chelis_gpu_tensor* chelis_gpu_alloc(int ndim, const int *shape, int dtype)"
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_alloc_view",
-      "sample": "static inline chelis_gpu_tensor * chelis_gpu_alloc_view ( int ndim , const int * shape , int dtyp..."
+      "sample": "static inline chelis_gpu_tensor* chelis_gpu_alloc_view( int ndim, const int *shape, int dtype, fl..."
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor::data",
@@ -2850,43 +2858,51 @@
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_dgemm_batched_row_major",
-      "sample": "const double * a_base = ( const double * ) ( const void * ) a -> data"
+      "sample": "const double *a_base = (const double *)(const void *)a->data"
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_dgemm_row_major",
-      "sample": "CHELIS_HIPBLAS_CHECK ( hipblasDgemm ( handle , HIPBLAS_OP_N , HIPBLAS_OP_N , n , m , k , & alpha ..."
+      "sample": "CHELIS_HIPBLAS_CHECK(hipblasDgemm( handle, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m, k, &alpha, (const do..."
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_dgemm_strided_batched_row_major",
-      "sample": "CHELIS_HIPBLAS_CHECK ( hipblasDgemmStridedBatched ( handle , HIPBLAS_OP_N , HIPBLAS_OP_N , n , m ..."
+      "sample": "CHELIS_HIPBLAS_CHECK(hipblasDgemmStridedBatched( handle, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m, k, &al..."
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=hipblasDgemm",
-      "sample": "extern hipblasStatus_t hipblasDgemm ( hipblasHandle_t handle , hipblasOperation_t transa , hipbla..."
+      "sample": "extern hipblasStatus_t hipblasDgemm( hipblasHandle_t handle, hipblasOperation_t transa, hipblasOp..."
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=hipblasDgemmStridedBatched",
-      "sample": "extern hipblasStatus_t hipblasDgemmStridedBatched ( hipblasHandle_t handle , hipblasOperation_t t..."
+      "sample": "extern hipblasStatus_t hipblasDgemmStridedBatched( hipblasHandle_t handle, hipblasOperation_t tra..."
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=hipblasSgemm",
-      "sample": "extern hipblasStatus_t hipblasSgemm ( hipblasHandle_t handle , hipblasOperation_t transa , hipbla..."
+      "sample": "extern hipblasStatus_t hipblasSgemm( hipblasHandle_t handle, hipblasOperation_t transa, hipblasOp..."
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=hipblasSgemmStridedBatched",
-      "sample": "extern hipblasStatus_t hipblasSgemmStridedBatched ( hipblasHandle_t handle , hipblasOperation_t t..."
+      "sample": "extern hipblasStatus_t hipblasSgemmStridedBatched( hipblasHandle_t handle, hipblasOperation_t tra..."
     },
     {
-      "identity": "kind=raw-element-pointer|path=crates/chelis-python/src/lib.rs|owner=ChelisGpuTensor",
-      "sample": "data : * mut f32"
+      "identity": "kind=raw-element-pointer|path=crates/chelis-python/src/lib.rs|owner=ChelisGpuTensor::data",
+      "sample": "* mut f32"
     },
     {
-      "identity": "kind=raw-element-pointer|path=crates/chelis-python/src/lib.rs|owner=ChelisTensor",
-      "sample": "shape : * const i64"
+      "identity": "kind=raw-element-pointer|path=crates/chelis-python/src/lib.rs|owner=ChelisTensor::shape",
+      "sample": "* const i64"
     },
     {
-      "identity": "kind=raw-element-pointer|path=crates/chelis-python/src/lib.rs|owner=DLTensor",
-      "sample": "shape : * mut i64"
+      "identity": "kind=raw-element-pointer|path=crates/chelis-python/src/lib.rs|owner=ChelisTensor::strides",
+      "sample": "* const i64"
+    },
+    {
+      "identity": "kind=raw-element-pointer|path=crates/chelis-python/src/lib.rs|owner=DLTensor::shape",
+      "sample": "* mut i64"
+    },
+    {
+      "identity": "kind=raw-element-pointer|path=crates/chelis-python/src/lib.rs|owner=DLTensor::strides",
+      "sample": "* mut i64"
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-python/src/lib.rs|owner=gpu_input_tensor",
@@ -2898,23 +2914,23 @@
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_alloc",
-      "sample": "# endif chelis_tensor * chelis_alloc ( int32_t rank , const int64_t * shape , chelis_dtype dtype )"
+      "sample": "chelis_tensor *chelis_alloc(int32_t rank, const int64_t *shape, chelis_dtype dtype)"
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_alloc_view",
-      "sample": "chelis_tensor * chelis_alloc_view ( int32_t rank , const int64_t * shape , chelis_dtype dtype , v..."
+      "sample": "chelis_tensor *chelis_alloc_view(int32_t rank, const int64_t *shape, chelis_dtype dtype, void *da..."
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_flat_to_indices",
-      "sample": "static inline void chelis_flat_to_indices ( int64_t flat , const int64_t * shape , int ndim , int..."
+      "sample": "static inline void chelis_flat_to_indices(int64_t flat, const int64_t *shape, int ndim, int64_t *..."
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_indices_to_flat",
-      "sample": "static inline int64_t chelis_indices_to_flat ( const int64_t * indices , const int64_t * strides ..."
+      "sample": "static inline int64_t chelis_indices_to_flat(const int64_t *indices, const int64_t *strides, int ..."
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_int_limits",
-      "sample": "static inline void chelis_int_limits ( int bits , int64_t * minimum , int64_t * maximum )"
+      "sample": "static inline void chelis_int_limits(int bits, int64_t *minimum, int64_t *maximum)"
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_tensor::shape",
@@ -2926,23 +2942,23 @@
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=chelis_argmax_f32",
-      "sample": "static inline int chelis_argmax_f32 ( const float * CHELIS_RESTRICT data , int n )"
+      "sample": "static inline int chelis_argmax_f32(const float * CHELIS_RESTRICT data, int n)"
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=chelis_argmin_f32",
-      "sample": "static inline int chelis_argmin_f32 ( const float * CHELIS_RESTRICT data , int n )"
+      "sample": "static inline int chelis_argmin_f32(const float * CHELIS_RESTRICT data, int n)"
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=chelis_max_f32",
-      "sample": "static inline float chelis_max_f32 ( const float * CHELIS_RESTRICT data , int n )"
+      "sample": "static inline float chelis_max_f32(const float * CHELIS_RESTRICT data, int n)"
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=chelis_min_f32",
-      "sample": "static inline float chelis_min_f32 ( const float * CHELIS_RESTRICT data , int n )"
+      "sample": "static inline float chelis_min_f32(const float * CHELIS_RESTRICT data, int n)"
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/include/chelis_simd.h|owner=chelis_sum_f32",
-      "sample": "# endif static inline float chelis_sum_f32 ( const float * CHELIS_RESTRICT data , int n )"
+      "sample": "static inline float chelis_sum_f32(const float * CHELIS_RESTRICT data, int n)"
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/src/lib.rs|owner=checked_tensor_metadata",
@@ -2957,8 +2973,8 @@
       "sample": "* const i64"
     },
     {
-      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/src/lib.rs|owner=chelis_dims",
-      "sample": "pub * const i64"
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/src/lib.rs|owner=chelis_dims::0",
+      "sample": "* const i64"
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/src/lib.rs|owner=chelis_dims::add",
@@ -3014,27 +3030,27 @@
     },
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_compile_kernel",
-      "sample": "snprintf ( wavefront_opt , sizeof ( wavefront_opt ) , \"-D__AMDGCN_WAVEFRONT_SIZE=%d\" , wavefront_..."
+      "sample": "sizeof(wavefront_opt)"
     },
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_finalize_kernel_launch",
-      "sample": "CHELIS_HIP_CHECK ( hipMemcpyDtoH ( & failure , symbol , sizeof ( failure ) ) )"
+      "sample": "CHELIS_HIP_CHECK(hipMemcpyDtoH(&failure, symbol, sizeof(failure)))"
     },
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_alloc",
-      "sample": "chelis_gpu_tensor * t = ( chelis_gpu_tensor * ) calloc ( 1 , sizeof ( chelis_gpu_tensor ) )"
+      "sample": "sizeof(chelis_gpu_tensor)"
     },
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_alloc_view",
-      "sample": "chelis_gpu_tensor * t = ( chelis_gpu_tensor * ) calloc ( 1 , sizeof ( chelis_gpu_tensor ) )"
+      "sample": "sizeof(chelis_gpu_tensor)"
     },
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_failure_symbol",
-      "sample": "if ( symbol_size < sizeof ( int ) )"
+      "sample": "sizeof(int)"
     },
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_prepare_kernel_launch",
-      "sample": "CHELIS_HIP_CHECK ( hipMemcpyHtoD ( symbol , & zero , sizeof ( zero ) ) )"
+      "sample": "CHELIS_HIP_CHECK(hipMemcpyHtoD(symbol, &zero, sizeof(zero)))"
     },
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-backend-hip/src/emit.rs|owner=HipEmitter::require_result_width_matches_operand",
@@ -3046,15 +3062,15 @@
     },
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-backend-metal/runtime/chelis_metal_runtime.h|owner=chelis_metal_mps_gemm_f16",
-      "sample": "MPSMatrixDescriptor * descA = [ MPSMatrixDescriptor matrixDescriptorWithRows : M columns : K rowB..."
+      "sample": "sizeof(uint16_t)"
     },
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-backend-metal/runtime/chelis_metal_runtime.h|owner=chelis_metal_mps_gemm_f32",
-      "sample": "MPSMatrixDescriptor * descA = [ MPSMatrixDescriptor matrixDescriptorWithRows : M columns : K rowB..."
+      "sample": "sizeof(float)"
     },
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-backend-metal/runtime/chelis_metal_runtime.h|owner=chelis_metal_require_bf16_capability",
-      "sample": "i < sizeof ( families ) / sizeof ( families [ 0 ] )"
+      "sample": "sizeof(families)"
     },
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::peak_device_bytes",
@@ -3062,27 +3078,27 @@
     },
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_bf16_to_f32",
-      "sample": "memcpy ( & out , & expanded , sizeof ( out ) )"
+      "sample": "sizeof(out)"
     },
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_f16_to_f32",
-      "sample": "memcpy ( & out , & out_bits , sizeof ( out ) )"
+      "sample": "sizeof(out)"
     },
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_f32_from_bits",
-      "sample": "memcpy ( & v , & bits , sizeof ( float ) )"
+      "sample": "sizeof(float)"
     },
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_f32_to_bf16",
-      "sample": "memcpy ( & bits , & v , sizeof ( bits ) )"
+      "sample": "sizeof(bits)"
     },
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_f32_to_f16",
-      "sample": "memcpy ( & bits , & v , sizeof ( bits ) )"
+      "sample": "sizeof(bits)"
     },
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_f64_from_bits",
-      "sample": "memcpy ( & v , & bits , sizeof ( double ) )"
+      "sample": "sizeof(double)"
     },
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-runtime/src/lib.rs|owner=tensor_elem_size",
@@ -3104,17 +3120,22 @@
   "coverage_manifest": {
     "source_inventory": {
       "artifact": "the frozen INVENTORY_SOURCES file list",
-      "enumerator": "chelis-repr-inventory: syn for Rust, the capacity census token vocabulary for plain C headers",
+      "enumerator": "chelis-repr-inventory: syn for Rust; clang's front end under fixed target lanes, a committed stub SDK, and a scrubbed environment for C and Objective-C headers, classified with the capacity census's closed type-word lists",
       "universe": {
-        "registered_sources": 55,
+        "registered_sources": 56,
         "roots": [
           "crates/chelis-runtime/src/**/*.rs",
           "crates/chelis-runtime/include/**/*.h",
+          "crates/chelis-runtime/build.rs",
           "crates/chelis-vocab/src/**/*.rs",
+          "crates/chelis-vocab/build.rs",
           "crates/chelis-ir/src/**/*.rs",
+          "crates/chelis-ir/build.rs",
           "crates/chelis-python/src/**/*.rs",
+          "crates/chelis-python/build.rs",
           "crates/chelis-backend-*/src/**/*.rs",
-          "crates/chelis-backend-*/runtime/**/*.h"
+          "crates/chelis-backend-*/runtime/**/*.h",
+          "crates/chelis-backend-*/build.rs"
         ],
         "closure_rule": "the registered list must equal its roots' tracked contents; a new file fails until it is registered"
       },
@@ -3131,6 +3152,7 @@
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
           },
+          "expected_owners": [],
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
         },
         {
@@ -3142,6 +3164,7 @@
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
           },
+          "expected_owners": [],
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
         },
         {
@@ -3153,6 +3176,7 @@
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
           },
+          "expected_owners": [],
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
         },
         {
@@ -3164,6 +3188,7 @@
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
           },
+          "expected_owners": [],
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
         },
         {
@@ -3175,6 +3200,7 @@
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
           },
+          "expected_owners": [],
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
         },
         {
@@ -3186,6 +3212,7 @@
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
           },
+          "expected_owners": [],
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
         },
         {
@@ -3197,6 +3224,7 @@
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
           },
+          "expected_owners": [],
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
         },
         {
@@ -3208,6 +3236,7 @@
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
           },
+          "expected_owners": [],
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
         },
         {
@@ -3219,6 +3248,7 @@
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
           },
+          "expected_owners": [],
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
         },
         {
@@ -3230,6 +3260,7 @@
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
           },
+          "expected_owners": [],
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
         },
         {
@@ -3241,6 +3272,7 @@
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
           },
+          "expected_owners": [],
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
         },
         {
@@ -3252,17 +3284,19 @@
             "code": "source.rejected",
             "reason_prefix": "fail-closed inventory scanner rejected"
           },
+          "expected_owners": [],
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
         },
         {
           "witness_id": "phase0.mutate_c_public_element_pointer_export",
           "expected_kind": "raw-element-pointer",
           "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "f87db404f7fe43605f4bea31f6afe0a28c8628ce0642a59ab58b7a9da98fc26e",
+          "implementation_sha256": "35b14726d39b3393d3f9d16eee596d60636ace8104672f9f678be77d7531444b",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
           },
+          "expected_owners": [],
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
         },
         {
@@ -3274,6 +3308,7 @@
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
           },
+          "expected_owners": [],
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
         },
         {
@@ -3285,17 +3320,104 @@
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
           },
+          "expected_owners": [],
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
         },
         {
           "witness_id": "phase0.mutate_c_non_descriptor_struct_field",
           "expected_kind": "raw-element-pointer",
           "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "6a8c064b163ebfa13630f367e40736ea934f6d66e21ce00e958be11372950958",
+          "implementation_sha256": "c8f3218d0584cb05027065aa074f4ac351c98dc4c93c24cde7dc019514595ad7",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
           },
+          "expected_owners": [],
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        },
+        {
+          "witness_id": "phase0.mutate_c_tagged_struct_field",
+          "expected_kind": "raw-element-pointer",
+          "path": "crates/chelis-runtime/include/chelis_runtime.h",
+          "implementation_sha256": "c95e7a83af05f5d73227a87ba1d19090b6dee0c5d4b1fd4ff5b2622e773285ec",
+          "expected_failure": {
+            "code": "inventory.unclassified",
+            "reason_prefix": "unclassified inventory hit"
+          },
+          "expected_owners": [
+            "runtime_representation_phase0_probe_pool::slab"
+          ],
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        },
+        {
+          "witness_id": "phase0.mutate_c_union_field",
+          "expected_kind": "raw-element-pointer",
+          "path": "crates/chelis-runtime/include/chelis_runtime.h",
+          "implementation_sha256": "9c84593bd48bb3f3c407517d79b11f8029fef749b594054dc9e5ce70eb44d62c",
+          "expected_failure": {
+            "code": "inventory.unclassified",
+            "reason_prefix": "unclassified inventory hit"
+          },
+          "expected_owners": [
+            "runtime_representation_phase0_probe_slot::d"
+          ],
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        },
+        {
+          "witness_id": "phase0.mutate_c_macro_typed_carrier",
+          "expected_kind": "raw-element-pointer",
+          "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
+          "implementation_sha256": "9b97563372d76a47b08262899d9bb90234e25a91b3dabe53916c1c7718bc582d",
+          "expected_failure": {
+            "code": "inventory.unclassified",
+            "reason_prefix": "unclassified inventory hit"
+          },
+          "expected_owners": [
+            "runtime_representation_phase0_probe_slab"
+          ],
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        },
+        {
+          "witness_id": "phase0.mutate_c_multi_declarator_data",
+          "expected_kind": "raw-element-pointer",
+          "path": "crates/chelis-runtime/include/chelis_runtime.h",
+          "implementation_sha256": "ecdd5bcd40d1ff0f8df7f6867222895a714cb5c3ab9037f6eeb5c9df56f56be9",
+          "expected_failure": {
+            "code": "inventory.unclassified",
+            "reason_prefix": "unclassified inventory hit"
+          },
+          "expected_owners": [
+            "runtime_representation_phase0_probe_pair_a",
+            "runtime_representation_phase0_probe_pair_b"
+          ],
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        },
+        {
+          "witness_id": "phase0.mutate_c_enum_width",
+          "expected_kind": "width-arithmetic",
+          "path": "crates/chelis-runtime/include/chelis_runtime_dtype.h",
+          "implementation_sha256": "0113416023e5f21c3eb72233a70c9d05aaec5dcf8216f69e3a1509ca78d554ee",
+          "expected_failure": {
+            "code": "inventory.unclassified",
+            "reason_prefix": "unclassified inventory hit"
+          },
+          "expected_owners": [
+            "RUNTIME_REPRESENTATION_PHASE0_PROBE_WIDTH"
+          ],
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        },
+        {
+          "witness_id": "phase0.mutate_objc_element_pointer_parameter",
+          "expected_kind": "raw-element-pointer",
+          "path": "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
+          "implementation_sha256": "b81cd9a85fc1d491177f2bd0facbfa6d5d94096f4378ca74e7ee0ecc82aabd22",
+          "expected_failure": {
+            "code": "inventory.unclassified",
+            "reason_prefix": "unclassified inventory hit"
+          },
+          "expected_owners": [
+            "runtime_representation_phase0_probe_fill"
+          ],
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
         },
         {
@@ -3307,6 +3429,7 @@
             "code": "source.rejected",
             "reason_prefix": "fail-closed inventory scanner rejected"
           },
+          "expected_owners": [],
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
         },
         {
@@ -3318,6 +3441,7 @@
             "code": "inventory.unregistered_source",
             "reason_prefix": "the frozen inventory source list is stale"
           },
+          "expected_owners": [],
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
         },
         {
@@ -3329,6 +3453,7 @@
             "code": "inventory.unregistered_source",
             "reason_prefix": "the frozen inventory source list is stale"
           },
+          "expected_owners": [],
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
         }
       ]
