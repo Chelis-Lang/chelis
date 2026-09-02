@@ -512,8 +512,9 @@ The parse is host-independent by construction. Each header is read under a
 fixed target lane (C on `x86_64-unknown-linux-gnu`; `chelis_metal_runtime.h`
 as Objective-C on `x86_64-apple-macosx14.0`), with `-ffreestanding
 -nostdlibinc`, a committed stub SDK under `crates/chelis-repr-inventory/sdk-stubs/`
-standing in for libc, the HIP SDK, the Apple frameworks, and the SIMD
-intrinsics headers, and a scrubbed environment, so Linux CI, macOS CI, Devenv,
+standing in for libc, the HIP SDK, hipBLAS, the BLAS headers, SLEEF, the
+Apple frameworks, and the SIMD intrinsics headers, and a scrubbed environment,
+so Linux CI, macOS CI, Devenv,
 and a workstation see the same preprocessed text and produce the same rows.
 The stub SDK is deliberately minimal: a runtime header that starts using an
 SDK symbol the stub does not declare fails the scan until the stub declares
@@ -521,9 +522,10 @@ it.
 
 A compiler reads one preprocessing configuration at a time, so a lane also
 names the closed set of configurations its headers are parsed under (the
-published headers scalar, with the AVX2 arm, and with the NEON arm; the HIP
-and Metal headers with and without `NDEBUG`), and a header's row set is the
-union over them. That set is checked rather than trusted: a marker planted at
+published headers scalar, with the AVX2 arm, with the NEON arm, with the Apple
+arms, with the SLEEF arm, and with the OpenBLAS arm; the HIP header with and
+without `NDEBUG` and with the hipBLAS header present; the Metal header with
+and without `NDEBUG`), and a header's row set is the union over them. That set is checked rather than trusted: a marker planted at
 the start of every conditional arm lets the preprocessor itself report which
 arms each configuration keeps, and an arm that carries code and that no
 configuration keeps fails the scan naming its directive. An arm carries code

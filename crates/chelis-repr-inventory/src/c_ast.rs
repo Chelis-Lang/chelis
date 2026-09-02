@@ -552,7 +552,9 @@ impl ConditionalArms {
                 .any(|word| starts_with_word(directive, word))
         };
         let is_conditional_alternative = |directive: &str| {
-            starts_with_word(directive, "elif") || starts_with_word(directive, "else")
+            ["elif", "elifdef", "elifndef", "else"]
+                .iter()
+                .any(|word| starts_with_word(directive, word))
         };
         let is_conditional_close = |directive: &str| starts_with_word(directive, "endif");
 
@@ -723,7 +725,12 @@ impl DeclaredNames {
                     .entry(owned)
                     .or_insert_with(|| name.to_string());
             }
-            if let Some(target) = desugared_type(node.get("type")) {
+            // The written target keeps the census's names (`uint8_t`) for one
+            // more step; the desugared one is what a typedef of a builtin
+            // resolves to.
+            if let Some(target) =
+                qual_type(node.get("type")).or_else(|| desugared_type(node.get("type")))
+            {
                 let words = c_lexical::lex_c_tokens(&strip_annotations(target));
                 if words.iter().any(|word| word != name) {
                     self.aliases.entry(name.to_string()).or_insert(words);
@@ -992,13 +999,30 @@ impl<'a> Reader<'a> {
             || self.names.words.contains(word)
     }
 
-    /// Does a type govern an element pointer, as written or once every
-    /// typedef alias is resolved?
+    /// Does a type govern an element pointer at any step of typedef
+    /// resolution? `int8_t *` names an element as written and only `signed
+    /// char *` once fully resolved; `byte_t *` (a typedef of `uint8_t`) names
+    /// one only after the first step; `elem_t *` only after the last. Every
+    /// step is read, so the written names the census lists are never lost to
+    /// the canonical `char` spellings that name no element.
     fn governs_element_pointer(&self, type_object: Option<&Value>) -> bool {
         [qual_type(type_object), desugared_type(type_object)]
             .into_iter()
             .flatten()
-            .any(|spelling| governs_a_pointer(&self.resolved_words(spelling)))
+            .any(|spelling| {
+                let mut words = c_lexical::lex_c_tokens(&strip_annotations(spelling));
+                for _ in 0..8 {
+                    if governs_a_pointer(&words) {
+                        return true;
+                    }
+                    let next = resolve_one_step(&words, &self.names.aliases);
+                    if next == words {
+                        break;
+                    }
+                    words = next;
+                }
+                false
+            })
     }
 
     /// A declaration whose own source spells `sizeof` (an array bound or a
@@ -1453,6 +1477,19 @@ impl<'a> Reader<'a> {
             self.visit_nested(child);
         }
     }
+}
+
+/// One typedef-resolution step: every word that names an alias is replaced
+/// by the alias's own words, once.
+fn resolve_one_step(words: &[String], aliases: &BTreeMap<String, Vec<String>>) -> Vec<String> {
+    let mut output = Vec::with_capacity(words.len());
+    for word in words {
+        match aliases.get(word) {
+            Some(target) => output.extend(target.iter().cloned()),
+            None => output.push(word.clone()),
+        }
+    }
+    output
 }
 
 /// Every field name an aggregate declares, including those of anonymous

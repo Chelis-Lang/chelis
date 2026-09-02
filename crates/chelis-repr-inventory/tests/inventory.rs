@@ -1494,3 +1494,62 @@ fn offsetof_and_va_list_scan_as_expected() {
         "{rows:?}"
     );
 }
+
+#[test]
+fn eight_bit_element_pointers_are_carriers_as_written() {
+    // `int8_t` and `uint8_t` resolve to `signed char` and `unsigned char`,
+    // which name no element; the written spelling does, and it is read first.
+    let rows = c_owners(
+        r#"
+        #include <stdint.h>
+        int8_t *chelis_probe_i8(void);
+        typedef struct { uint8_t *bytes; int64_t n; } chelis_probe_u8s;
+        void chelis_probe_take_i8(int8_t *p, int64_t n);
+        typedef uint8_t chelis_probe_byte;
+        chelis_probe_byte *chelis_probe_bytes(void);
+        char *chelis_probe_text(void);
+        "#,
+    );
+    for owner in [
+        "chelis_probe_i8",
+        "chelis_probe_u8s::bytes",
+        "chelis_probe_take_i8",
+        "chelis_probe_bytes",
+    ] {
+        assert!(
+            rows.contains(&("raw-element-pointer".to_string(), owner.to_string())),
+            "{owner}: {rows:?}"
+        );
+    }
+    assert!(
+        !rows.contains(&(
+            "raw-element-pointer".to_string(),
+            "chelis_probe_text".to_string()
+        )),
+        "a char pointer is text, not an element carrier: {rows:?}"
+    );
+}
+
+#[test]
+fn elifdef_and_elifndef_open_arms() {
+    let error = scan_c_header(
+        HEADER,
+        "#ifdef __GNUC__\nstatic const int chelis_probe_live = 1;\n#elifdef CHELIS_PROBE_NEVER\nfloat *chelis_probe_elifdef(void);\n#endif\n",
+    )
+    .expect_err("a dead #elifdef arm with a carrier must fail closed");
+    assert!(
+        error.message.contains("elifdef CHELIS_PROBE_NEVER"),
+        "{}",
+        error.message
+    );
+    let rows = c_owners(
+        "#ifdef CHELIS_PROBE_NEVER\n#define CHELIS_PROBE_FLAG\n#elifndef CHELIS_PROBE_NEVER2\nfloat *chelis_probe_elifndef(void);\n#endif\n",
+    );
+    assert!(
+        rows.contains(&(
+            "raw-element-pointer".to_string(),
+            "chelis_probe_elifndef".to_string()
+        )),
+        "{rows:?}"
+    );
+}

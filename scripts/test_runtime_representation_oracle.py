@@ -368,6 +368,8 @@ class RedTeamRegressionTests(unittest.TestCase):
             "phase0.mutate_objc_block_parameter",
             "phase0.mutate_c_sizeof_in_array_bound",
             "phase0.mutate_rust_cast_turbofish",
+            "phase0.mutate_c_int8_element_pointer",
+            "phase0.mutate_c_elifdef_arm",
         ):
             self.assertIn(expected, witnesses)
 

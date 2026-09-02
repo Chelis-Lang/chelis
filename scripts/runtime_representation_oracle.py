@@ -62,7 +62,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "86d1ea9cd3e17cec15950697119db0c3c992cf28f645dbeea37dde9364c9d789"
+FREEZE_SHA256 = "b53e082760a698d8893d99deebc3840cafd4ac29f16cce19be5c7765556cdbb6"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -1102,6 +1102,31 @@ fn runtime_representation_phase0_turbofish(bytes: *mut u8) -> usize {
     )
 
 
+def mutate_c_int8_element_pointer(source: str) -> str:
+    """An 8-bit element pointer, whose typedef resolves to a `char` spelling
+    that names no element; the written spelling has to be read first."""
+
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_probe_i8",
+        "extern int8_t *runtime_representation_phase0_probe_i8;",
+    )
+
+
+def mutate_c_elifdef_arm(source: str) -> str:
+    """A carrier behind a C23 `#elifdef` no configuration selects."""
+
+    return _insert_inside_include_guard(
+        source,
+        "RUNTIME_REPRESENTATION_PHASE0_PROBE_ELIF",
+        """#ifdef __GNUC__
+static const int runtime_representation_phase0_probe_live = 1;
+#elifdef RUNTIME_REPRESENTATION_PHASE0_PROBE_ELIF
+extern float *runtime_representation_phase0_probe_elifdef;
+#endif""",
+    )
+
+
 def mutate_rust_path_module(source: str) -> str:
     """`#[path]` compiles a file the inventory roots do not reach."""
 
@@ -1281,6 +1306,18 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
             "crates/chelis-runtime/src/format_shortest.rs",
             mutate_rust_cast_turbofish,
             expected_owners=("runtime_representation_phase0_turbofish",),
+        ),
+        _probe(
+            "raw-element-pointer",
+            "crates/chelis-runtime/include/chelis_runtime.h",
+            mutate_c_int8_element_pointer,
+            expected_owners=("runtime_representation_phase0_probe_i8",),
+        ),
+        _probe(
+            "undeclared-conditional",
+            "crates/chelis-runtime/include/chelis_runtime.h",
+            mutate_c_elifdef_arm,
+            SOURCE_REJECTED_FAILURE,
         ),
         _probe(
             "rust-path-module",
