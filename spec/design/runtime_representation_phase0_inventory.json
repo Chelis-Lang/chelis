@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "b53e082760a698d8893d99deebc3840cafd4ac29f16cce19be5c7765556cdbb6",
+  "freeze_sha256": "9558d37c7aac50373ea7f653d0138b98de2737e930b4becc37f82ab1da5dd989",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -863,6 +863,10 @@
       "deletion_phase": 2
     },
     {
+      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::bound_c_expr",
+      "deletion_phase": 4
+    },
+    {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_binary",
       "deletion_phase": 4
     },
@@ -1236,10 +1240,6 @@
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx::fold_shape_derived_static_size",
-      "deletion_phase": 1
-    },
-    {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx::fold_static_size",
       "deletion_phase": 1
     },
     {
@@ -2425,6 +2425,10 @@
       "sample": "reserved: [u8 ; 2] (extent 2)"
     },
     {
+      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::bound_c_expr",
+      "sample": "((int64_t*)t{n}->data)[0]"
+    },
+    {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_binary",
       "sample": "for (int64_t i = 0; i < t{id}->size; i++) {{"
     },
@@ -2799,10 +2803,6 @@
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx::fold_shape_derived_static_size",
       "sample": "self . fold_shape_derived_static_size (& operands [0]) ? . checked_mul (self . fold_shape_derived..."
-    },
-    {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx::fold_static_size",
-      "sample": "self . fold_static_size (& operands [0]) ? . checked_mul (self . fold_static_size (& operands [1]..."
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx::gather_values_rank",
