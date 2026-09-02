@@ -49,8 +49,9 @@ not drift.
 - Execute tests and commands; do not treat source inspection as sufficient proof.
 - For this repository, a red-team round is a fresh local subagent reviewing from an
   inline brief. Verifying a fix is not a round: the reviewer that reported the finding
-  checks the repair. A main-thread validation pass is neither, and a phase or pull
-  request is red-teamed only when the subagent actually ran the validation work.
+  checks the repair. A main-thread validation pass is neither, except the rerun of a
+  departed reviewer's exact reproduction, and a phase or pull request is red-teamed only
+  when the subagent actually ran the validation work.
 
 ### Required Red-Team Behaviors
 
@@ -67,15 +68,16 @@ not drift.
 ### Fresh-Context Enforcement
 
 - A pull request gets at most two fresh rounds by default; a third needs the user's
-  explicit approval. A prose-only pull request, design documents included, gets one.
-  Rounds run from any platform count, and the pull request's round record is the
-  counter. Verification does not count against the cap; the end-of-pull-request round
-  does.
+  explicit approval. A prose-only pull request, design documents included, gets one,
+  and a second needs the same approval. Rounds run from any platform count, and the
+  pull request's round record is the counter. Verification does not count against the
+  cap; the end-of-pull-request round does.
 - A confirmed in-scope P0 or P1 does not by itself earn a fresh round. The reviewer that
   reported it stays alive and verifies the fix: it holds the context, and verification
   is a few turns. A fresh round is owed only when the fix introduces a new mechanism or
   touches files the standing reviewer did not read, or once at the end of a long pull
-  request before ready-for-review. A one-word or one-line repair never earns one.
+  request before ready-for-review. A one-word or one-line repair inside the files the
+  reviewer read never earns one.
 - Every round runs from an inline brief in the shape the `redteam-exec` skill carries:
   exact head, changed files, the pull request's in-scope claims, the worktree and target
   it may use and whether that target is free, the deadline (15 minutes unless the brief
@@ -123,7 +125,10 @@ not drift.
   reviewer that reported it verifies the fix. Repeat fix and verification until that
   reviewer reports no in-scope P0 or P1;
   [Fresh-Context Enforcement](#fresh-context-enforcement) names the cases that owe a
-  fresh round instead.
+  fresh round instead. When that reviewer is no longer available, the orchestrator reruns
+  its exact reproduction against the fixed head and records the result as "reviewer
+  unavailable"; that record closes the finding, and the end-of-pull-request round, when
+  one is owed, re-checks it.
 - Absent an in-scope P0 or P1 finding, scale rounds to the change. Minor updates, bug
   fixes, and textual changes do not inherently merit another round. A rebase whose
   overlap with your work is significant, either in changed lines or in semantics, may

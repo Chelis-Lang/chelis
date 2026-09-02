@@ -8,7 +8,8 @@ round.
 
 1. Confirm the head is committed and pushed and that CI is running on it. Count the
    fresh rounds this pull request has had: the default cap is two, one for a prose-only
-   pull request, and a third needs the user's explicit approval before you continue.
+   pull request, and a round past the cap needs the user's explicit approval before you
+   continue.
 2. Inventory subagent handles created in your own current session. Stop or interrupt
    and retire only stale or failed handles that will not be used again. A standing
    reviewer awaiting a fix is neither; do not disturb it or another developer's handles.
@@ -34,9 +35,12 @@ round.
    owes a fresh round, not a verification.
 3. Send the verification brief from the skill to the standing reviewer's handle and
    wait for closed or not closed. Record the result under the same round in the pull
-   request.
-4. When two consecutive rounds report the same finding class, stop patching witnesses
-   and change the representation, the oracle, the claim, or the brief.
+   request. If the reviewer is gone, rerun its exact reproduction yourself and record
+   the result as "reviewer unavailable"; the end-of-pull-request round re-checks it when
+   one is owed.
+4. When two consecutive rounds report the same finding class, or replace a repaired
+   finding with a different class, stop patching witnesses and change the
+   representation, the oracle, the claim, or the brief.
 
 Do **not** fall back to main-thread validation and call it a red team. A round counts
 only when the fresh-context local subagent actually ran the validation work and

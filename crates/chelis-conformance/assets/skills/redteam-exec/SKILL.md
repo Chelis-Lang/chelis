@@ -17,12 +17,13 @@ validation pass, or verification of a fix that a red team reported.
 2. A confirmed in-scope P0 or P1 goes back to the reviewer that reported it. A fresh
    round is owed only when the fix introduces a new mechanism or touches files the
    standing reviewer did not read, or once at the end of a long pull request before
-   ready-for-review. A one-word or one-line repair never earns a fresh round.
+   ready-for-review. A one-word or one-line repair inside the files the reviewer read
+   never earns a fresh round.
 3. A pull request gets at most two fresh rounds by default; a third needs the user's
-   explicit approval. A prose-only pull request, design documents included, gets one.
-   Rounds run from any platform count, and the pull request's round record is the
-   counter. Verification does not count against the cap; the end-of-pull-request round
-   does.
+   explicit approval. A prose-only pull request, design documents included, gets one,
+   and a second needs the same approval. Rounds run from any platform count, and the
+   pull request's round record is the counter. Verification does not count against the
+   cap; the end-of-pull-request round does.
 4. Every round is time-boxed. The default is 15 minutes; the brief states the deadline,
    and the reviewer reports what it has when the deadline arrives.
 5. The head under review is pushed before the round starts, so CI runs on it while the
@@ -34,7 +35,7 @@ validation pass, or verification of a fix that a red team reported.
 ## Execution Order: New Round
 
 1. Confirm the candidate is committed and pushed, and count this pull request's fresh
-   rounds against the cap. Stop and ask before a third.
+   rounds against the cap. Stop and ask before a round past the cap.
 2. Inventory subagent handles created in your own current session. Stop or interrupt
    and retire only stale or failed handles that will not be used again. A standing
    reviewer awaiting a fix is neither; leave it and every other developer's handles
