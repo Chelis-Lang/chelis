@@ -3817,6 +3817,133 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("captured extrema tie rule")
 
+    def test_dtype_family_bound_production_is_a_closed_three_name_set(
+        self,
+    ) -> None:
+        self.replace(
+            Path("spec/02-surf-syntax.md"),
+            "DtypeFamily   <- 'Float' / 'Int' / 'Numeric'",
+            "DtypeFamily   <- TypeName",
+        )
+        self.assert_contract_fails("Surf dtype-family bound production")
+
+    def test_a_bound_cannot_be_written_in_two_binder_lists(self) -> None:
+        self.replace(
+            Path("spec/02-surf-syntax.md"),
+            "A bound belongs to one binder\nlist per declaration",
+            "A bound may be repeated in both binder\nlists when they agree",
+        )
+        self.assert_contract_fails("Surf single bound binder list")
+
+    def test_the_occurrence_rule_cannot_widen_past_bounded_binders(self) -> None:
+        # [04-DTYPE-2] makes only a BOUNDED binder owe an occurrence, and the
+        # checker agrees: `sig f[zz]: p -> p` checks clean. Asserting it for
+        # every listed name is normative prose broader than the decided rule.
+        self.replace(
+            Path("spec/02-surf-syntax.md"),
+            "A listed name **that declares a\nbound** must occur in the declared type.",
+            "A listed name must occur in the declared type.",
+        )
+        self.assert_contract_fails("Surf occurrence rule is bounded-binder only")
+
+    def test_the_two_bound_failures_cannot_claim_one_diagnostic_shape(
+        self,
+    ) -> None:
+        # An instantiation outside the bound names one family and the
+        # offending type; an empty intersection names two families and no
+        # offending type. One clause covering both over-promises the second.
+        self.replace(
+            Path("spec/04-type-system.md"),
+            "an empty intersection SHALL be a `PrecisionMismatch` naming both\n"
+            "> families.",
+            "an empty intersection SHALL name the required family and the\n"
+            "> offending type.",
+        )
+        self.assert_contract_fails("empty intersection names both families")
+
+    def test_deep_carries_dtype_bounds_as_a_defined_metadata_key(self) -> None:
+        self.replace(
+            Path("spec/03-deep-syntax.md"),
+            "| `dtype_bounds` | metadata map | Dtype-family bounds on a "
+            "`defsig`'s binders; see §2.2 |",
+            "| `dtype_bounds` | string | Producer-specific bound provenance |",
+        )
+        self.assert_contract_fails("Deep dtype-family bound metadata key")
+
+    def test_bounded_variables_unify_by_intersection_not_equality(self) -> None:
+        self.replace(
+            Path("spec/04-type-system.md"),
+            "Unifying two bounded variables SHALL\n> yield the intersection "
+            "of their families.",
+            "Unifying two bounded variables SHALL\n> require identical families.",
+        )
+        self.assert_contract_fails("dtype-family bound intersection")
+
+    def test_an_unbounded_binder_is_not_narrowed_to_a_dtype(self) -> None:
+        self.replace(
+            Path("spec/04-type-system.md"),
+            "A binder that declares no bound\n> remains an unconstrained type "
+            "variable admitting every type, not only a\n> dtype.",
+            "A binder that declares no bound\n> ranges over every active dtype.",
+        )
+        self.assert_contract_fails(
+            "unbounded binder stays a general type variable"
+        )
+
+    def test_deep_grammar_must_derive_a_map_valued_metadata_key(self) -> None:
+        # The chapter's own PEG has to derive the Deep the language emits.
+        # `chelis validate --deep` is the second implementation of exactly
+        # this production, and it rejected every migrated stdlib module while
+        # `MetaValue` had no nested-`Meta` alternative.
+        self.replace(
+            Path("spec/03-deep-syntax.md"),
+            "MetaValue   \u2190 Meta / Node / Literal / Identifier / TypeName",
+            "MetaValue   \u2190 Node / Literal / Identifier / TypeName",
+        )
+        self.assert_contract_fails(
+            "Deep grammar derives a map-valued metadata key"
+        )
+
+    def test_deep_grammar_must_derive_the_declared_metadata_key_charset(
+        self,
+    ) -> None:
+        # §1.1 declares `[A-Za-z_][A-Za-z0-9_]*`; the pre-#1417 §7 production
+        # was `[a-z]+`, which derives neither `dtype_bounds` nor the four
+        # underscored keys already shipping.
+        self.replace(
+            Path("spec/03-deep-syntax.md"),
+            "MetaKey     \u2190 [A-Za-z_] [A-Za-z0-9_]*",
+            "MetaKey     \u2190 [a-z]+",
+        )
+        self.assert_contract_fails(
+            "Deep grammar derives the declared metadata key charset"
+        )
+
+    def test_stdlib_bound_obligation_cannot_cite_the_operation_class_table(
+        self,
+    ) -> None:
+        # §5.4's rows are operation classes, not signatures. Citing it would
+        # make `arange`'s `Int` bound optional and `assert_close`'s `Float`
+        # bound wrong, contradicting [05-OP-35].
+        self.replace(
+            Path("spec/04-type-system.md"),
+            "A public stdlib signature whose `[05-OP-35]` registry domain is "
+            "exactly one of\nthese families declares that family as a bound.",
+            "A public stdlib signature whose §5.4 row admits exactly one "
+            "family declares\nthat family as a bound.",
+        )
+        self.assert_contract_fails(
+            "stdlib bound obligation cites the registry domain"
+        )
+
+    def test_numeric_family_is_the_union_of_float_and_int(self) -> None:
+        self.replace(
+            Path("spec/04-type-system.md"),
+            "| `Numeric` | the union of `Float` and `Int` |",
+            "| `Numeric` | every active float dtype of §1.1 |",
+        )
+        self.assert_contract_fails("dtype-family membership table")
+
 
 class RunnerTests(unittest.TestCase):
     @mock.patch.object(oracle.subprocess, "run")

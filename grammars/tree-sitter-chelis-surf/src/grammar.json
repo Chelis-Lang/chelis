@@ -746,6 +746,22 @@
           }
         },
         {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "FIELD",
+              "name": "quantifiers",
+              "content": {
+                "type": "SYMBOL",
+                "name": "type_binders"
+              }
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
           "type": "STRING",
           "value": ":"
         },
@@ -1022,7 +1038,7 @@
               "name": "quantifiers",
               "content": {
                 "type": "SYMBOL",
-                "name": "dimension_parameters"
+                "name": "type_binders"
               }
             },
             {
@@ -1134,7 +1150,7 @@
         }
       ]
     },
-    "dimension_parameters": {
+    "type_binders": {
       "type": "SEQ",
       "members": [
         {
@@ -1146,7 +1162,7 @@
           "members": [
             {
               "type": "SYMBOL",
-              "name": "identifier"
+              "name": "type_binder"
             },
             {
               "type": "REPEAT",
@@ -1159,7 +1175,7 @@
                   },
                   {
                     "type": "SYMBOL",
-                    "name": "identifier"
+                    "name": "type_binder"
                   }
                 ]
               }
@@ -1181,6 +1197,61 @@
         {
           "type": "STRING",
           "value": "]"
+        }
+      ]
+    },
+    "type_binder": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "FIELD",
+          "name": "name",
+          "content": {
+            "type": "SYMBOL",
+            "name": "identifier"
+          }
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "STRING",
+                  "value": ":"
+                },
+                {
+                  "type": "FIELD",
+                  "name": "bound",
+                  "content": {
+                    "type": "SYMBOL",
+                    "name": "dtype_family"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        }
+      ]
+    },
+    "dtype_family": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "Float"
+        },
+        {
+          "type": "STRING",
+          "value": "Int"
+        },
+        {
+          "type": "STRING",
+          "value": "Numeric"
         }
       ]
     },

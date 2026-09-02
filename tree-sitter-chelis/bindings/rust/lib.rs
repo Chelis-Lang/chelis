@@ -106,8 +106,30 @@ mod tests {
             "@property contracted forall():\n  true\n  with contract = \"std.identity\"\n",
             "result = seed\n  |> f\n  |> g\n  |> h\n",
             "result = {\n  x =\n    seed\n    |> f\n    |> g\n    |> h\n  x\n}\n",
+            // spec/02 §P4c dtype-family bounds (chelis#1417), on both
+            // declaration forms and at every family.
+            "sig arange[p: Int]: p -> p -> tensor[n, p]\n",
+            "sig linspace[p: Float]: p -> p -> int64 -> tensor[n, p]\n",
+            "sig total[p: Numeric]: p -> p -> p\n",
+            "def only_ints[p: Int](x: p) -> p = x\n",
+            "def scale[n, p: Float](x: tensor[n, p]) -> tensor[n, p] = x\n",
+            "def unbounded[a](x: a) -> a = x\n",
         ] {
             assert_surf_parser_parity(source, true);
+        }
+    }
+
+    /// Both parsers reject the same non-family bound spellings, so an ADT
+    /// name in the bound position cannot become a silent bound in an editor.
+    #[test]
+    fn surf_dtype_family_bounds_reject_the_same_spellings_in_both_parsers() {
+        for source in [
+            "sig f[p: Tensor]: p -> p\n",
+            "sig f[p: float]: p -> p\n",
+            "sig f[p: f32]: p -> p\n",
+            "def f[p: ](x: p) -> p = x\n",
+        ] {
+            assert_surf_parser_parity(source, false);
         }
     }
 

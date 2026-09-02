@@ -78,6 +78,28 @@ A wildcard dimension `*` marks a size that is not statically known, for example 
 produced by a `concat` whose length depends on runtime data. It unifies with anything but
 is never generalized. Add an explicit annotation to restore named checking.
 
+### Dtype-family bounds
+
+A binder in the `[...]` clause may name one dtype family, which restricts every dtype it
+can be instantiated at. The families are `Float` (the four active floats), `Int` (the four
+active signed integers), and `Numeric` (their union). `bool` and `string` belong to no
+family.
+
+```chelis-surf-fragment
+sig arange[p: Int]: p -> p -> tensor[n, p]
+sig linspace[p: Float]: p -> p -> int64 -> tensor[n, p]
+```
+
+Calling `arange` at `f32`, or `linspace` at `int32`, is a `PrecisionMismatch` naming the
+required family. The bound is part of the function's type, not a check on the callee name,
+so it survives aliases, wrappers, higher-order values, and imports. Two bounded variables
+that unify keep the intersection of their families; `Float` and `Int` share nothing, so
+identifying one with the other is an error.
+
+A binder with no bound is still an ordinary type variable that admits any type, not only a
+dtype. A bound goes on the declaration's `sig` when it has one, and on its `def` otherwise
+- never on both.
+
 ### Rank polymorphism
 
 A rank variable `..r` is a name-preserving spread over a run of dimensions, so one

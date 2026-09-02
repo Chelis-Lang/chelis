@@ -52,13 +52,13 @@ CONTRACT_FILES = (
 )
 FROZEN_FILE_DIGESTS = {
     "spec/02-surf-syntax.md": (
-        "7eb644de9c58a57400f588c0f411123096013448e8f6f6e088fb1972d14f9b48"
+        "4e8612210c68001955a81a295ccdbf0f8492b8cbaff45bee81cf22cfd89fcd1b"
     ),
     "spec/03-deep-syntax.md": (
-        "efb29e77a338c94bb6c6c6b9adc6c4bb236f5d78c0c329f3775a0b48b8640348"
+        "6f1c879bc89ab901fff658b63457a6846e5b6f8ab6ea4a17fd24ec6da0427bd2"
     ),
     "spec/04-type-system.md": (
-        "21b3b2f3c8aafc52c975e86e1bf573a327f33e1be845f9093382fd61c45b3045"
+        "366f74fae9e33ce3012a622ac97f938d85db17b20a7d29d11efd1816b4ef4641"
     ),
     "spec/05-risc-primitives.md": (
         "e427fa744b313a3a8a7cad99e1ca92ed7df8e57db459bf53a499edb098dca86a"
@@ -79,7 +79,7 @@ FROZEN_FILE_DIGESTS = {
         "4a6013c2dc5a074d19ae12696c109a35218facfdb423d29ff07cef79fe6689b9"
     ),
     "spec/design/dtype_semantics.md": (
-        "61092ac8978986d2819febf6add1cebc9f11f48a26e151d09c389646d89dc6bb"
+        "d75ca4f8b520200d96971953606f4adacf723b4d84556d0e00998a6b70054ad3"
     ),
     "spec/design/implicit_linearity.md": (
         "f03302f4b328841d79824f6326f1edf2e954a9b98c0118992d4a3a1f2dfb67cf"
@@ -496,7 +496,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/remediation_roadmap.md",
         "| **v0.19.0 - grounded dtype storage break",
         "| **v0.20.0 - behavior-preserving permanent guards**",
-        "ea3f2741a9f9473d0d5e059b9d0c8bcb6454fe299734afe64ce2cfa5b9eb06eb",
+        "ec37b8cab3f013cdc17f9c792291922b0bfbdebf5b2fa48a44bb8ba2aad2f516",
     ),
     "status dtype row": (
         "docs/investigations/remediation_status_2026_08_04.md",
@@ -788,6 +788,18 @@ def validate_normative_contract(
                 "`count`\nlowers once with its complete named-axis vector",
                 "Surf count multi-axis lowering",
             ),
+            (
+                "DtypeFamily   <- 'Float' / 'Int' / 'Numeric'",
+                "Surf dtype-family bound production",
+            ),
+            (
+                "A bound belongs to one binder\nlist per declaration",
+                "Surf single bound binder list",
+            ),
+            (
+                "A listed name **that declares a\nbound** must occur in the declared type.",
+                "Surf occurrence rule is bounded-binder only",
+            ),
         ),
         violations,
     )
@@ -799,6 +811,19 @@ def validate_normative_contract(
                 "Deep literal exclusion",
             ),
             ("**Reduce:** `sum`, `count`, `max_reduce`", "Deep count builtin"),
+            (
+                "| `dtype_bounds` | metadata map | Dtype-family bounds on a "
+                "`defsig`'s binders; see §2.2 |",
+                "Deep dtype-family bound metadata key",
+            ),
+            (
+                "MetaKey     \u2190 [A-Za-z_] [A-Za-z0-9_]*",
+                "Deep grammar derives the declared metadata key charset",
+            ),
+            (
+                "MetaValue   \u2190 Meta / Node / Literal / Identifier / TypeName",
+                "Deep grammar derives a map-valued metadata key",
+            ),
         ),
         violations,
     )
@@ -820,6 +845,30 @@ def validate_normative_contract(
                 "Lexical scope\nexit is the fallback only when no earlier valid "
                 "terminal point can be proved",
                 "linearity scope-exit fallback",
+            ),
+            (
+                "Unifying two bounded variables SHALL\n> yield the intersection "
+                "of their families.",
+                "dtype-family bound intersection",
+            ),
+            (
+                "an empty intersection SHALL be a `PrecisionMismatch` naming both\n"
+                "> families.",
+                "empty intersection names both families",
+            ),
+            (
+                "A binder that declares no bound\n> remains an unconstrained type "
+                "variable admitting every type, not only a\n> dtype.",
+                "unbounded binder stays a general type variable",
+            ),
+            (
+                "| `Numeric` | the union of `Float` and `Int` |",
+                "dtype-family membership table",
+            ),
+            (
+                "A public stdlib signature whose `[05-OP-35]` registry domain "
+                "is exactly one of\nthese families declares that family as a bound.",
+                "stdlib bound obligation cites the registry domain",
             ),
         ),
         violations,

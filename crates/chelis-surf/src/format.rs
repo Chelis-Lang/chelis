@@ -291,18 +291,14 @@ fn format_decl_with_internal_comments(decl: &Decl, comments: &[Comment]) -> Stri
     match decl {
         Decl::FunDef {
             name,
-            dim_params,
+            type_binders,
             params,
             ret_ty,
             effects,
             body: Expr::Block(bindings, body, _),
             ..
         } => {
-            let dims = if dim_params.is_empty() {
-                String::new()
-            } else {
-                format!("[{}]", dim_params.join(", "))
-            };
+            let dims = format_type_binders(type_binders);
             let params = params
                 .iter()
                 .map(format_param)
@@ -392,10 +388,15 @@ fn format_decl(decl: &Decl) -> String {
             ImportKind::Names(names) => format!("import {module} ({})", names.join(", ")),
         },
         Decl::Sig {
-            name, ty, effects, ..
+            name,
+            type_binders,
+            ty,
+            effects,
+            ..
         } => {
             let effects = format_effects(effects.as_deref());
-            format!("sig {name}: {}{effects}", format_type(ty))
+            let binders = format_type_binders(type_binders);
+            format!("sig {name}{binders}: {}{effects}", format_type(ty))
         }
         Decl::Dim { names, .. } => format!("dim {}", names.join(", ")),
         Decl::TypeDef {
@@ -444,18 +445,14 @@ fn format_decl(decl: &Decl) -> String {
         }
         Decl::FunDef {
             name,
-            dim_params,
+            type_binders,
             params,
             ret_ty,
             effects,
             body,
             ..
         } => {
-            let dims = if dim_params.is_empty() {
-                String::new()
-            } else {
-                format!("[{}]", dim_params.join(", "))
-            };
+            let dims = format_type_binders(type_binders);
             let params = params
                 .iter()
                 .map(format_param)
@@ -597,6 +594,23 @@ fn format_variant(variant: &Variant) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+    }
+}
+
+/// Canonical spelling of a declaration's `[..]` binder list: authored order,
+/// `name` or `name: Family` per entry (`spec/02-surf-syntax.md` §P4c).
+fn format_type_binders(binders: &[TypeBinder]) -> String {
+    if binders.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "[{}]",
+            binders
+                .iter()
+                .map(TypeBinder::render)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     }
 }
 

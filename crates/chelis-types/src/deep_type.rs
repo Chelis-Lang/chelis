@@ -15,7 +15,8 @@ use crate::adt::AdtRegistry;
 use crate::errors::{CheckError, CheckErrorKind, ErrorWitness, report_witness};
 use crate::session::DiagnosticSink;
 use crate::types::{
-    Dim, DimVar, NominalArg, NominalParamKind, Prim, RankVar, TensorPrec, Type, TypeVar, VarGen,
+    Dim, DimVar, NominalArg, NominalParamKind, Prim, RankVar, TensorPrec, Type, TypeVar,
+    TypeVarRestriction, VarGen,
 };
 
 /// A type that crossed the Deep syntax boundary without a silent fallback.
@@ -199,6 +200,14 @@ pub(crate) struct DeepTypeResolver<'resolver, 'session, 'binders> {
     type_vars: UnordMap<String, TypeVar>,
     dim_vars: UnordMap<String, DimVar>,
     rank_vars: UnordMap<String, RankVar>,
+    /// Declared dtype-family bounds, keyed by binder name
+    /// (`spec/04-type-system.md` §5.9 [04-DTYPE-2]). Empty for every
+    /// declaration that declares no bound.
+    dtype_bounds: UnordMap<String, TypeVarRestriction>,
+    /// Bounds actually attached to a resolved variable, in first-occurrence
+    /// order. The caller installs them on the substitution so generalization
+    /// re-quantifies them onto the declaration's scheme.
+    installed_bounds: Vec<(TypeVar, TypeVarRestriction)>,
     owner_location: Option<TypeDiagnosticLocation>,
     resolution_location: Option<TypeDiagnosticLocation>,
     current_location: Option<TypeDiagnosticLocation>,
@@ -221,6 +230,8 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             type_vars: UnordMap::new(),
             dim_vars: UnordMap::new(),
             rank_vars: UnordMap::new(),
+            dtype_bounds: UnordMap::new(),
+            installed_bounds: Vec::new(),
             owner_location: None,
             resolution_location: None,
             current_location: None,
@@ -251,6 +262,47 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             }
         }
         resolver
+    }
+
+    /// Declare dtype-family bounds for this scope's binders
+    /// (`spec/04-type-system.md` §5.9).
+    pub(crate) fn with_dtype_bounds(
+        mut self,
+        bounds: UnordMap<String, TypeVarRestriction>,
+    ) -> Self {
+        self.dtype_bounds = bounds;
+        self
+    }
+
+    /// The bounds attached to resolved variables, after checking that every
+    /// declared bound actually reached a binder.
+    ///
+    /// [04-DTYPE-2] makes an unused bound a declaration error rather than a
+    /// no-op: a bound naming a binder the type never mentions is a typo whose
+    /// silent acceptance would leave the intended variable unconstrained,
+    /// which is the exact failure this rule exists to prevent.
+    pub(crate) fn finish_dtype_bounds(
+        &mut self,
+    ) -> Result<Vec<(TypeVar, TypeVarRestriction)>, ErrorWitness> {
+        let unused: Vec<&String> = self
+            .dtype_bounds
+            .to_sorted()
+            .into_iter()
+            .map(|(name, _)| name)
+            .filter(|name| !self.type_vars.contains_key(name.as_str()))
+            .collect();
+        if let Some(name) = unused.first().map(|name| (*name).clone()) {
+            let family = self
+                .dtype_bounds
+                .get(&name)
+                .expect("the unused name came from this map")
+                .family_name();
+            return Err(self.type_error(format!(
+                "binder `{name}` is bounded by dtype family `{family}` but does not occur in {}",
+                self.use_site.label()
+            )));
+        }
+        Ok(std::mem::take(&mut self.installed_bounds))
     }
 
     /// Provide the source construct that owns this resolver use site. The
@@ -581,10 +633,22 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         if !self.allows_name(name) {
             return Err(self.unbound("type", name));
         }
-        Ok(*self
+        let variable = *self
             .type_vars
             .entry(name.to_string())
-            .or_insert_with(|| self.vg.fresh_tvar()))
+            .or_insert_with(|| self.vg.fresh_tvar());
+        // [04-DTYPE-2]: the bound belongs to the binder, so it is recorded on
+        // first occurrence and every later occurrence of the same name reuses
+        // the same bounded variable.
+        if let Some(restriction) = self.dtype_bounds.get(name).copied()
+            && !self
+                .installed_bounds
+                .iter()
+                .any(|(bound, _)| *bound == variable)
+        {
+            self.installed_bounds.push((variable, restriction));
+        }
+        Ok(variable)
     }
 
     fn resolve_dim_var(&mut self, name: &str) -> Result<DimVar, ErrorWitness> {
@@ -603,6 +667,9 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 "nominal parameter `{name}` has Type kind and cannot be used in a dimension slot in {}",
                 self.use_site.label()
             )));
+        }
+        if self.dtype_bounds.contains_key(name) {
+            return Err(self.bounded_binder_misuse(name, "a dimension slot"));
         }
         if !self.allows_name(name) {
             return Err(self.unbound("dimension", name));
@@ -628,6 +695,9 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 "nominal parameter `{name}` cannot be used as a rank spread in {}; nominal parameters have only Type or Dimension kind",
                 self.use_site.label()
             )));
+        }
+        if self.dtype_bounds.contains_key(name) {
+            return Err(self.bounded_binder_misuse(name, "a rank spread"));
         }
         if !self.allows_name(name) {
             return Err(self.unbound("rank", name));
@@ -731,6 +801,19 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
                 children.len()
             )))
         }
+    }
+
+    /// A dtype family names a set of element types, so a bounded binder can
+    /// never stand for an extent or a run of extents ([04-DTYPE-2]).
+    fn bounded_binder_misuse(&mut self, name: &str, position: &str) -> ErrorWitness {
+        let family = self
+            .dtype_bounds
+            .get(name)
+            .map_or("a dtype family", |restriction| restriction.family_name());
+        self.type_error(format!(
+            "binder `{name}` is bounded by dtype family `{family}` and cannot be used as {position} in {}",
+            self.use_site.label()
+        ))
     }
 
     fn unbound(&mut self, kind: &str, name: &str) -> ErrorWitness {

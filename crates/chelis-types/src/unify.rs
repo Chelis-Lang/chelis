@@ -768,21 +768,29 @@ impl Subst {
             .insert(v, ty);
     }
 
-    /// Install a semantic domain on an unresolved inference variable.
-    /// Currently domains have one member, so merging is idempotent. Keeping
-    /// the operation explicit makes incompatible future domains fail at the
-    /// unification seam rather than silently choosing one.
-    pub(crate) fn install_tvar_restriction(&self, v: TypeVar, restriction: TypeVarRestriction) {
+    /// Attach a semantic domain to an unresolved inference variable,
+    /// narrowing to the intersection with any domain it already carries.
+    ///
+    /// `spec/04-type-system.md` [04-DTYPE-2]: identifying two bounded
+    /// variables yields the intersection of their families, and an empty
+    /// intersection is a `PrecisionMismatch`. Narrowing here rather than
+    /// overwriting is what keeps a `Numeric` alias from widening a `Float`
+    /// variable back out to every numeric dtype.
+    pub(crate) fn narrow_tvar_restriction(
+        &self,
+        v: TypeVar,
+        restriction: TypeVarRestriction,
+    ) -> Result<(), TypeError> {
         let mut restrictions = self
             .tvar_restrictions
             .lock()
             .expect("subst.tvar_restrictions poisoned");
-        if let Some(existing) = restrictions.insert(v, restriction) {
-            assert_eq!(
-                existing, restriction,
-                "incompatible type-variable restrictions require an explicit merge rule"
-            );
-        }
+        let narrowed = match restrictions.get(&v).copied() {
+            Some(existing) => merge_tvar_restrictions(existing, restriction)?,
+            None => restriction,
+        };
+        restrictions.insert(v, narrowed);
+        Ok(())
     }
 
     /// Restriction currently attached to an unresolved variable, if any.
@@ -1592,11 +1600,11 @@ impl Subst {
 
         let mut restrictions = self.tvar_restrictions_snapshot();
         for (var, incoming) in other.tvar_restrictions_snapshot().into_sorted() {
-            if let Some(existing) = restrictions.get(&var).copied() {
-                merge_tvar_restrictions(existing, incoming)?;
-            } else {
-                restrictions.insert(var, incoming);
-            }
+            let narrowed = match restrictions.get(&var).copied() {
+                Some(existing) => merge_tvar_restrictions(existing, incoming)?,
+                None => incoming,
+            };
+            restrictions.insert(var, narrowed);
         }
 
         trial
@@ -1608,11 +1616,7 @@ impl Subst {
             let resolved = trial.resolve_tvar(source);
             ensure_tvar_restriction(restriction, &resolved)?;
             if let Type::Var(target) = resolved {
-                if let Some(existing) = trial.tvar_restriction(target) {
-                    merge_tvar_restrictions(existing, restriction)?;
-                } else {
-                    trial.install_tvar_restriction(target, restriction);
-                }
+                trial.narrow_tvar_restriction(target, restriction)?;
             }
         }
 
@@ -1656,11 +1660,7 @@ impl Subst {
                 };
                 ensure_tvar_restriction(restriction, target)?;
                 if let Type::Var(target) = target {
-                    if let Some(existing) = self.tvar_restriction(*target) {
-                        merge_tvar_restrictions(existing, restriction)?;
-                    } else {
-                        self.install_tvar_restriction(*target, restriction);
-                    }
+                    self.narrow_tvar_restriction(*target, restriction)?;
                 }
                 Ok(())
             }
@@ -1797,20 +1797,25 @@ impl Subst {
     }
 }
 
+/// Combine the bounds of two variables being identified.
+///
+/// [04-DTYPE-2] makes this the family intersection rather than equality: a
+/// `Numeric`-bounded variable may legitimately be identified with a `Float`
+/// one, and the result admits only floats. Only `Float` against `Int` is
+/// empty, and an empty intersection is a `PrecisionMismatch` naming both
+/// families.
 fn merge_tvar_restrictions(
     existing: TypeVarRestriction,
     incoming: TypeVarRestriction,
 ) -> Result<TypeVarRestriction, TypeError> {
-    if existing == incoming {
-        Ok(existing)
-    } else {
-        Err(TypeError {
-            kind: TypeErrorKind::TypeMismatch,
-            message: format!(
-                "incompatible type-variable restrictions during substitution composition: {existing:?} vs {incoming:?}"
-            ),
-        })
-    }
+    existing.intersect(incoming).ok_or_else(|| TypeError {
+        kind: TypeErrorKind::PrecisionMismatch,
+        message: format!(
+            "dtype families `{}` and `{}` share no active dtype, so the type variables they bound cannot be the same type",
+            existing.family_name(),
+            incoming.family_name()
+        ),
+    })
 }
 
 impl DeferredExpandConstraint {
@@ -2168,7 +2173,13 @@ fn bind_tvar(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeError> 
         Type::Var(target) => subst.tvar_restriction(*target),
         _ => None,
     };
-    let merged_restriction = source_restriction.or(target_restriction);
+    // Both endpoints keep their bound: the identified variable admits only
+    // the dtypes both families admit ([04-DTYPE-2]). `.or()` would silently
+    // discard the narrower of the two.
+    let merged_restriction = match (source_restriction, target_restriction) {
+        (Some(source), Some(target)) => Some(merge_tvar_restrictions(source, target)?),
+        (found, None) | (None, found) => found,
+    };
     if let Some(restriction) = source_restriction {
         ensure_tvar_restriction(restriction, ty)?;
     }
@@ -2226,26 +2237,33 @@ fn bind_tvar(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeError> 
     subst.record_validated_type_binding(v, ty.clone());
     subst.remove_tvar_restriction(v);
     if let (Some(restriction), Type::Var(target)) = (merged_restriction, ty) {
-        subst.install_tvar_restriction(*target, restriction);
+        subst.narrow_tvar_restriction(*target, restriction)?;
     }
     Ok(())
 }
 
+/// Check one instantiation of a bounded type variable ([04-DTYPE-2]).
+///
+/// An unresolved variable and a witnessed error both pass: the first is
+/// narrowed instead by [`Subst::narrow_tvar_restriction`], and the second
+/// already owns a diagnostic.
 fn ensure_tvar_restriction(restriction: TypeVarRestriction, ty: &Type) -> Result<(), TypeError> {
-    match (restriction, ty) {
-        (TypeVarRestriction::ActiveFloat, Type::Prim(prim)) if prim.is_float() => Ok(()),
-        (TypeVarRestriction::ActiveFloat, Type::Var(_) | Type::Error(_)) => Ok(()),
-        (TypeVarRestriction::ActiveFloat, Type::Prim(prim)) => Err(TypeError {
+    let family = restriction.family_name();
+    let gloss = restriction.membership_gloss();
+    match ty {
+        Type::Var(_) | Type::Error(_) => Ok(()),
+        Type::Prim(prim) if restriction.admits(*prim) => Ok(()),
+        Type::Prim(prim) => Err(TypeError {
             kind: TypeErrorKind::PrecisionMismatch,
             message: format!(
-                "type variable restricted to an active float dtype cannot be instantiated at `{}`",
+                "type variable bounded by dtype family `{family}` ({gloss}) cannot be instantiated at `{}`",
                 prim.name()
             ),
         }),
-        (TypeVarRestriction::ActiveFloat, other) => Err(TypeError {
+        other => Err(TypeError {
             kind: TypeErrorKind::PrecisionMismatch,
             message: format!(
-                "type variable restricted to an active float dtype cannot be instantiated at `{other}`"
+                "type variable bounded by dtype family `{family}` ({gloss}) cannot be instantiated at `{other}`"
             ),
         }),
     }
@@ -2811,6 +2829,71 @@ mod tests {
         );
     }
 
+    /// chelis#1417: identifying a `Numeric`-bounded variable with a
+    /// `Float`-bounded one keeps the INTERSECTION, in both orders.
+    ///
+    /// This is the direction test, not the conflict test. The two acceptance
+    /// tests that exercise narrowing through a program detect
+    /// `merge_tvar_restrictions` returning `Err`, so a reversion that merely
+    /// widens survives them; this one asserts the surviving family IS `Float`
+    /// and that `int32` is consequently rejected.
+    ///
+    /// It does not isolate either mechanism, and measurement rather than
+    /// reasoning says so. `bind_tvar`'s `merged_restriction` and
+    /// `narrow_tvar_restriction` each independently suffice to produce the
+    /// narrowing, so reverting either ALONE leaves this green (and leaves all
+    /// 1460 crate tests green); only reverting BOTH reds it. Neither is dead
+    /// code — both sit on live paths — but neither is individually necessary
+    /// for this behavior, so no single test can discriminate them. Five
+    /// program shapes, including the reversed order, were tried and none
+    /// discriminates either.
+    #[test]
+    fn identifying_a_numeric_variable_with_a_float_one_keeps_float() {
+        for numeric_first in [true, false] {
+            let mut vg = var_gen();
+            let mut subst = Subst::new();
+            let numeric = vg.fresh_tvar();
+            let float = vg.fresh_tvar();
+            subst
+                .narrow_tvar_restriction(numeric, TypeVarRestriction::ActiveNumeric)
+                .expect("fresh variable takes a bound");
+            subst
+                .narrow_tvar_restriction(float, TypeVarRestriction::ActiveFloat)
+                .expect("fresh variable takes a bound");
+
+            let (left, right) = if numeric_first {
+                (numeric, float)
+            } else {
+                (float, numeric)
+            };
+            unify(&Type::Var(left), &Type::Var(right), &mut subst)
+                .expect("Float is a subset of Numeric, so the two are compatible");
+
+            // Whichever variable survives the binding must admit floats only.
+            let surviving = match subst.resolve_tvar(left) {
+                Type::Var(v) => v,
+                other => panic!("expected a variable, got {other}"),
+            };
+            assert_eq!(
+                subst.tvar_restriction(surviving),
+                Some(TypeVarRestriction::ActiveFloat),
+                "identifying Numeric with Float must narrow to Float, not keep \
+                 Numeric (numeric_first = {numeric_first})"
+            );
+
+            // And the narrowing is observable: int32 is in Numeric but not in
+            // Float, so it must now be rejected.
+            let error = unify(&Type::Var(surviving), &Type::Prim(Prim::Int32), &mut subst)
+                .expect_err("a narrowed variable must reject a non-float dtype");
+            assert!(
+                matches!(error.kind, TypeErrorKind::PrecisionMismatch)
+                    && error.message.contains("Float"),
+                "expected a Float PrecisionMismatch, got: {}",
+                error.message
+            );
+        }
+    }
+
     #[test]
     fn active_float_restrictions_propagate_through_aliases_and_generalization() {
         let mut vg = var_gen();
@@ -2818,7 +2901,9 @@ mod tests {
         let boundary = subst.enter_level(&vg);
         let restricted = vg.fresh_tvar();
         let alias = vg.fresh_tvar();
-        subst.install_tvar_restriction(restricted, TypeVarRestriction::ActiveFloat);
+        subst
+            .narrow_tvar_restriction(restricted, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
         unify(&Type::Var(restricted), &Type::Var(alias), &mut subst)
             .expect("restriction must flow through an ordinary type-variable alias");
         subst.leave_level(boundary, &vg);
@@ -2851,11 +2936,19 @@ mod tests {
         let other_var = TypeVar(80_002);
         let shared_var = TypeVar(80_003);
         let mut receiver = Subst::new();
-        receiver.install_tvar_restriction(receiver_var, TypeVarRestriction::ActiveFloat);
-        receiver.install_tvar_restriction(shared_var, TypeVarRestriction::ActiveFloat);
+        receiver
+            .narrow_tvar_restriction(receiver_var, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+        receiver
+            .narrow_tvar_restriction(shared_var, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
         let other = Subst::new();
-        other.install_tvar_restriction(other_var, TypeVarRestriction::ActiveFloat);
-        other.install_tvar_restriction(shared_var, TypeVarRestriction::ActiveFloat);
+        other
+            .narrow_tvar_restriction(other_var, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+        other
+            .narrow_tvar_restriction(shared_var, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
 
         receiver
             .compose(&other)
@@ -2884,7 +2977,9 @@ mod tests {
         let middle = TypeVar(80_005);
         let terminal = TypeVar(80_006);
         let mut receiver = Subst::new();
-        receiver.install_tvar_restriction(source, TypeVarRestriction::ActiveFloat);
+        receiver
+            .narrow_tvar_restriction(source, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
         receiver
             .insert_type(source, Type::Var(middle))
             .expect("restricted source aliases an unresolved variable");
@@ -2913,7 +3008,9 @@ mod tests {
     fn compose_rejects_forbidden_bindings_transactionally_in_either_operand() {
         let restricted_in_receiver = TypeVar(80_007);
         let mut receiver = Subst::new();
-        receiver.install_tvar_restriction(restricted_in_receiver, TypeVarRestriction::ActiveFloat);
+        receiver
+            .narrow_tvar_restriction(restricted_in_receiver, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
         let mut other = Subst::new();
         other
             .insert_type(restricted_in_receiver, Type::Prim(Prim::Int64))
@@ -2938,7 +3035,9 @@ mod tests {
             .insert_type(restricted_in_other, Type::Prim(Prim::Int16))
             .expect("the receiver does not yet know the restriction");
         let other = Subst::new();
-        other.install_tvar_restriction(restricted_in_other, TypeVarRestriction::ActiveFloat);
+        other
+            .narrow_tvar_restriction(restricted_in_other, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
         let receiver_types_before = receiver.types_snapshot();
         let receiver_restrictions_before = receiver.tvar_restrictions_snapshot();
 
@@ -2958,7 +3057,9 @@ mod tests {
     fn direct_type_insertion_cannot_bypass_active_float_restrictions() {
         let restricted = TypeVar(80_009);
         let mut subst = Subst::new();
-        subst.install_tvar_restriction(restricted, TypeVarRestriction::ActiveFloat);
+        subst
+            .narrow_tvar_restriction(restricted, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
 
         let error = subst
             .insert_type(restricted, Type::Prim(Prim::Int32))
@@ -2980,7 +3081,9 @@ mod tests {
         let restricted = TypeVar(80_010);
         let alias = TypeVar(80_011);
         let mut subst = Subst::new();
-        subst.install_tvar_restriction(restricted, TypeVarRestriction::ActiveFloat);
+        subst
+            .narrow_tvar_restriction(restricted, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
 
         subst
             .insert_type(restricted, Type::Var(alias))
@@ -3003,7 +3106,9 @@ mod tests {
         let inferred_precision = TypeVar(80_012);
         let declared_precision = TypeVar(80_013);
         let mut subst = Subst::new();
-        subst.install_tvar_restriction(inferred_precision, TypeVarRestriction::ActiveFloat);
+        subst
+            .narrow_tvar_restriction(inferred_precision, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
         let inferred_tensor = Type::Tensor(vec![Dim::Lit(2)], TensorPrec::Var(inferred_precision));
         let declared_tensor = Type::Tensor(vec![Dim::Lit(2)], TensorPrec::Var(declared_precision));
         let inferred = Type::Fn(
@@ -3040,8 +3145,12 @@ mod tests {
         let second_source = TypeVar(80_015);
         let first_target = TypeVar(80_016);
         let mut subst = Subst::new();
-        subst.install_tvar_restriction(first_source, TypeVarRestriction::ActiveFloat);
-        subst.install_tvar_restriction(second_source, TypeVarRestriction::ActiveFloat);
+        subst
+            .narrow_tvar_restriction(first_source, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
+        subst
+            .narrow_tvar_restriction(second_source, TypeVarRestriction::ActiveFloat)
+            .expect("an unbounded variable accepts any single dtype family");
         let inferred = Type::Tuple(vec![Type::Var(first_source), Type::Var(second_source)]);
         let declared = Type::Tuple(vec![Type::Var(first_target), Type::Prim(Prim::Int32)]);
         let restrictions_before = subst.tvar_restrictions_snapshot();

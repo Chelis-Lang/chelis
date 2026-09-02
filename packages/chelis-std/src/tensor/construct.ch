@@ -1,23 +1,23 @@
 module Std.Tensor.Construct
 export (linspace, arange, stack, squeeze, unsqueeze)
-sig linspace: p_float -> p_float -> int64 -> tensor[n, p_float]
+sig linspace[p: Float]: p -> p -> int64 -> tensor[n, p]
 def linspace(start, stop, count) =
   if lte(count, cast(0, int64)) then fail("linspace: count must be at least 1") else if eq(count, cast(1, int64)) then to_tensor([start]) else {
     empty = drop([start], cast(1, int64))
     to_tensor(linspace_values(start, stop, count, cast(0, int64), empty))
   }
-def linspace_values[p_float](start: p_float, stop: p_float, count: int64, idx: int64, out: List[p_float]) -> List[p_float] =
+def linspace_values[p: Float](start: p, stop: p, count: int64, idx: int64, out: List[p]) -> List[p] =
   if gte(idx, count) then out else {
-    weight = div(cast(idx, p_float), cast(sub(count, cast(1, int64)), p_float))
+    weight = div(cast(idx, p), cast(sub(count, cast(1, int64)), p))
     value = if eq(idx, cast(0, int64)) then start else if eq(idx, sub(count, cast(1, int64))) then stop else add(start, mul(sub(stop, start), weight))
     linspace_values(start, stop, count, add(idx, cast(1, int64)), append(out, value))
   }
-sig arange: p_int -> p_int -> tensor[n, p_int]
+sig arange[p: Int]: p -> p -> tensor[n, p]
 def arange(start, stop) = {
   empty = drop([start], cast(1, int64))
   to_tensor(arange_values(start, stop, empty))
 }
-def arange_values[p_int](current: p_int, stop: p_int, out: List[p_int]) -> List[p_int] = if gte(current, stop) then out else arange_values(add(current, cast(1, p_int)), stop, append(out, current))
+def arange_values[p: Int](current: p, stop: p, out: List[p]) -> List[p] = if gte(current, stop) then out else arange_values(add(current, cast(1, p)), stop, append(out, current))
 sig stack: List[tensor[..pre, ..post, p]] -> int32 -> tensor[..pre, rows, ..post, p]
 def stack(xs, axis) = concat(map(fn (x) -> unsqueeze(x, axis), xs), axis)
 sig squeeze: &tensor[..pre, 1, ..post, p] -> int32 -> tensor[..pre, ..post, p]

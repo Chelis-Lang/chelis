@@ -338,7 +338,9 @@ impl Env {
                     .iter()
                     .find(|(restricted, _)| *restricted == tv)
             {
-                inference_subst.install_tvar_restriction(fresh_var, *restriction);
+                inference_subst
+                    .narrow_tvar_restriction(fresh_var, *restriction)
+                    .expect("a fresh instantiation variable carries no prior dtype bound");
             }
             mapping.push((tv, fresh));
         }

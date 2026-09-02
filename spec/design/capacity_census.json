@@ -883,7 +883,7 @@
     },
     {
       "kind": "std-def-numeric",
-      "id": "contracts::normal_cdf: (t-fn {} (t-var {} p_float) (t-var {} p_float))",
+      "id": "contracts::normal_cdf: [p: Float] (t-fn {} (t-var {} p) (t-var {} p))",
       "flags": []
     },
     {
@@ -1006,32 +1006,32 @@
     },
     {
       "kind": "std-def-numeric",
-      "id": "init/kaiming::kaiming_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+      "id": "init/kaiming::kaiming_normal: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
       "flags": []
     },
     {
       "kind": "std-def-numeric",
-      "id": "init/kaiming::kaiming_uniform: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+      "id": "init/kaiming::kaiming_uniform: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
       "flags": []
     },
     {
       "kind": "std-def-numeric",
-      "id": "init/random::normal_like: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+      "id": "init/random::normal_like: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
       "flags": []
     },
     {
       "kind": "std-def-numeric",
-      "id": "init/xavierext::trunc_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-var {} p_float) (t-var {} p_float) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+      "id": "init/xavierext::trunc_normal: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
       "flags": []
     },
     {
       "kind": "std-def-numeric",
-      "id": "init/xavierext::xavier_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+      "id": "init/xavierext::xavier_normal: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
       "flags": []
     },
     {
       "kind": "std-def-numeric",
-      "id": "init/xavierext::xavier_uniform: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+      "id": "init/xavierext::xavier_uniform: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
       "flags": []
     },
     {
@@ -1153,34 +1153,34 @@
     },
     {
       "kind": "std-def-numeric",
-      "id": "scalar::abs: (t-fn {} (t-var {} p_numeric) (t-var {} p_numeric))",
+      "id": "scalar::abs: [p: Numeric] (t-fn {} (t-var {} p) (t-var {} p))",
       "flags": []
     },
     {
       "kind": "std-def-numeric",
-      "id": "scalar::max: (t-fn {} (t-var {} p_numeric) (t-var {} p_numeric) (t-var {} p_numeric))",
+      "id": "scalar::max: [p: Numeric] (t-fn {} (t-var {} p) (t-var {} p) (t-var {} p))",
       "flags": []
     },
     {
       "kind": "std-def-numeric",
-      "id": "scalar::min: (t-fn {} (t-var {} p_numeric) (t-var {} p_numeric) (t-var {} p_numeric))",
+      "id": "scalar::min: [p: Numeric] (t-fn {} (t-var {} p) (t-var {} p) (t-var {} p))",
       "flags": []
     },
     {
       "kind": "std-def-numeric",
-      "id": "sort::sort: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_numeric))) (t-prim {} int32) (t-tuple {} (t-tensor {} (d-rank {} r) (t-var {} p_numeric)) (t-tensor {} (d-rank {} r) (t-prim {} int64))))",
+      "id": "sort::sort: [p: Numeric] (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-prim {} int32) (t-tuple {} (t-tensor {} (d-rank {} r) (t-var {} p)) (t-tensor {} (d-rank {} r) (t-prim {} int64))))",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "std-def-numeric",
-      "id": "tensor/construct::arange: (t-fn {} (t-var {} p_int) (t-var {} p_int) (t-tensor {} (d-var {} n) (t-var {} p_int)))",
+      "id": "tensor/construct::arange: [p: Int] (t-fn {} (t-var {} p) (t-var {} p) (t-tensor {} (d-var {} n) (t-var {} p)))",
       "flags": []
     },
     {
       "kind": "std-def-numeric",
-      "id": "tensor/construct::linspace: (t-fn {} (t-var {} p_float) (t-var {} p_float) (t-prim {} int64) (t-tensor {} (d-var {} n) (t-var {} p_float)))",
+      "id": "tensor/construct::linspace: [p: Float] (t-fn {} (t-var {} p) (t-var {} p) (t-prim {} int64) (t-tensor {} (d-var {} n) (t-var {} p)))",
       "flags": [
         "numeric-op"
       ]
@@ -1215,12 +1215,12 @@
     },
     {
       "kind": "std-def-numeric",
-      "id": "test::assert_close: (t-fn {eff: (effects {} test)} (t-var {} p_float) (t-var {} p_float) (t-var {} p_float) (t-prim {} string) (t-unit {}))",
+      "id": "test::assert_close: [p: Float] (t-fn {eff: (effects {} test)} (t-var {} p) (t-var {} p) (t-var {} p) (t-prim {} string) (t-unit {}))",
       "flags": []
     },
     {
       "kind": "std-def-numeric",
-      "id": "test::assert_close_tensor: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-prim {} string) (t-unit {}))",
+      "id": "test::assert_close_tensor: [p: Float] (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-prim {} string) (t-unit {}))",
       "flags": []
     },
     {

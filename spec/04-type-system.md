@@ -2008,6 +2008,56 @@ calls and to a polymorphic call's instantiation. An inadmissible
 instantiation is a `PrecisionMismatch` at the call site with a citation to
 the governing section.
 
+### 5.9 Dtype-Family Bounds
+
+A declaration's type-binder list may constrain a binder to one **dtype
+family**: a named subset of the active primitive set of §1.1. There are three
+families.
+
+| family | members |
+|---|---|
+| `Float` | every active float dtype of §1.1 |
+| `Int` | every active signed integer dtype of §1.1 |
+| `Numeric` | the union of `Float` and `Int` |
+
+Membership follows §1.1's active set rather than an enumeration repeated here,
+so a dtype §1.1 admits into a family is admitted by every bound naming that
+family. The reserved spellings of §1.1.1 belong to no family. `bool` and
+`string` belong to no family.
+
+> **[04-DTYPE-2]** A type binder that declares a dtype-family bound SHALL
+> occupy type positions only and SHALL be instantiated only at an active
+> primitive of §1.1 belonging to that family. The bound is part of the
+> declaration's scheme rather than a property of one call: instantiation
+> installs it on each fresh variable, unification propagates it through every
+> variable the bounded variable is identified with, and generalization
+> re-quantifies it, so the bound survives aliases, wrappers, higher-order
+> values, imports, and recursive calls. Unifying two bounded variables SHALL
+> yield the intersection of their families. An instantiation outside the bound
+> SHALL be a `PrecisionMismatch` naming the required family and the offending
+> type; an empty intersection SHALL be a `PrecisionMismatch` naming both
+> families. A binder that declares no bound
+> remains an unconstrained type variable admitting every type, not only a
+> dtype. A bound naming anything but a family of this section, a bounded
+> binder used in a dimension slot or as a rank spread, and a bounded binder
+> that does not occur in the type it is declared for are each declaration
+> errors.
+
+A declaration's bounds live in exactly one binder list. When a standalone
+signature declares a name, that signature's binder list carries the bounds for
+that declaration, and a bound written in the same declaration's `def` binder
+list is a declaration error. A `def` with no standalone signature carries its
+bounds in its own binder list.
+
+A public stdlib signature whose `[05-OP-35]` registry domain is exactly one of
+these families declares that family as a bound. That registry writes its domains
+as the signature-table metavariables `p_float`, `p_int`, and `p_numeric`, and
+each denotes the family of the same name; a signature whose domain is some other
+set, such as every active tensor element dtype, declares no bound.
+
+The surface spelling of a binder list is `spec/02-surf-syntax.md` §P4b and of
+a bound is its §P4c; the Deep encoding is `spec/03-deep-syntax.md` §1.1.
+
 ---
 
 ## 6. Fitness Scoring

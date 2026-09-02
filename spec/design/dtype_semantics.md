@@ -1344,6 +1344,77 @@ count to the eighty-four the `[05-OP-35]` registry and the census already
 carry, and settles the `capability_table.md` seed row that still cited the
 closed [#691] as an `Unimplemented` owner.
 
+[#1417] adds `spec/04-type-system.md` §5.9 and its [04-DTYPE-2] atom, which
+give the language an explicit dtype-family bound on a declaration's type
+binders, plus the `spec/02-surf-syntax.md` §P4c surface spelling (a `sig` gains
+the same binder list a `def` already has) and the `spec/03-deep-syntax.md`
+`dtype_bounds` metadata key that carries it. The stdlib signatures for `arange`
+and `linspace` spelled [05-OP-35]'s `p_int` and `p_float` metavariables as
+ordinary unconstrained binders, so each accepted the opposite family; the
+families are now expressible and those signatures declare them. This
+deliberately moves the complete-file digests for `spec/02-surf-syntax.md`,
+`spec/03-deep-syntax.md`, `spec/04-type-system.md`, and this document, and adds
+one atom to the generated rejection registry. It authors no `[05-OP]` atom and
+moves no `[05-OP]`, `[04-NUM]`, or region digest: [05-OP-35]'s metavariables
+already denoted these domains, and §5.9 names the families they denote rather
+than restating them. The `[05-OP-35]` registry is unchanged for the same
+reason: `(p_float)->p_float` is that chapter's notation for a domain, not the
+stdlib's binder spelling. It changes no Table-A/Table-B cell and no §C1
+semantics row.
+
+It does change two frozen surfaces. The §C3 shell wire schema gains two
+`TypeVariableDomain` families, so `SHELL_FORMAT_VERSION` moves 2 -> 3 with the
+encoder, decoder, and regenerated bundle artifacts in the same change set. The
+§C6 census changes in the way the ratchet prescribes for a renamed identity.
+Every stdlib signature that declared its domain through a `p_float`-style
+binder NAME now declares it as a bound, so fifteen `std-def-numeric` rows are
+removed and fifteen successors are registered; each successor carries the
+bound in its identity (`contracts::normal_cdf: [p: Float] (t-fn {} ...)`) and
+keeps its exact `[05-OP-35]` registration. The census's numeric-capacity rule
+is widened, never weakened: a declared bound is now capacity on its own, and
+the `p_float | p_int | p_numeric | q | Q` name list stays as a conservative
+backstop, so an unbounded metavariable spelling is still enumerated. Without
+that widening the rename would have silently dropped four signatures with no
+tensor type - `scalar::abs/max/min` and `contracts::normal_cdf` - out of the
+numeric surface entirely. Three controls defend it: a bounded signature with
+no other numeric spelling enumerates, the same signature without a bound does
+not, and two signatures differing only in family have distinct identities.
+
+The first review round found two further corrections, both narrowing. The
+chapter's own §7 PEG did not derive the Deep this change emits: `MetaValue` had
+no nested-`Meta` alternative and `MetaKey` admitted no underscore, so
+`{dtype_bounds: {p: int}}` was underivable on both counts, and
+`chelis validate --deep` - the second implementation of that grammar, in
+`crates/chelis-validate/src/deep.pest` - rejected every migrated stdlib module.
+Both productions are corrected to §1.1's declared charset and to admit a
+nested map, the validator's `meta_value` and `meta_key` gain the same two
+allowances, and its Surf grammar gains the binder list so the new syntax is
+not carried by that validator's "grammar rejects, parser accepts" rescue. The
+`MetaKey` correction is not new latitude: §1.1 has always declared the key
+charset as `[A-Za-z_][A-Za-z0-9_]*`, and `chelis_role`, `surf_path`, and
+`property_quantifiers` already relied on it while §7 derived none of them. Separately, §5.9's stdlib obligation cited §5.4, whose rows are
+operation classes rather than signatures; it now cites the `[05-OP-35]`
+registry domain, which is the authority its next sentence already named and the
+one that actually derives every declared bound. This moves the v0.19.0
+`roadmap ownership` region digest as well, because that row now names both of
+this change's shell-visible breaks.
+
+The second review round, and an audit of every normative sentence this change
+adds to the three chapters, found three more places where the new prose was
+broader than the decided rule. §P4c required every listed name to occur in its
+declared type, where [04-DTYPE-2] and the checker require it only of a bounded
+one - `sig f[zz]: p -> p` checks clean. §P4c also implied that listing an
+unbounded name does nothing, when a listed multi-letter dimension name resolves
+to a dimension variable where an unlisted one is a concrete symbolic axis.
+[04-DTYPE-2] promised that both bound failures name "the required family and
+the offending type", but an empty intersection names two families and no
+offending type. All three are narrowed to what the rule decides and the
+implementation enforces, and each gains an anchor and a mutation test rather
+than resting on a file digest.
+
+Required-literal anchors with matching mutation tests defend the new normative
+rules; connective prose rests on the file digests.
+
 ## B2. Invariants that hold across every boundary
 
 1. **Controls never move.** Every green control in the audit test files

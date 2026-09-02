@@ -3,7 +3,7 @@
 //! Every Deep node is a 3-tuple: (tag {} children...)
 //! where {} is an inline metadata map.
 
-use chelis_deep::DeepTag;
+use chelis_deep::{DTYPE_BOUNDS_KEY, DeepTag, DtypeFamily, encode_dtype_bounds};
 use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::Span;
@@ -320,6 +320,30 @@ fn internal_node(tag: &str, children: Vec<deep::Expr>) -> deep::Expr {
     let mut elements = vec![sym(tag), meta_empty()];
     elements.extend(children);
     deep::Expr::List(deep::List { elements }, sp())
+}
+
+/// Attach `dtype_bounds` metadata for every bounded binder in `binders`
+/// (`spec/03-deep-syntax.md` §1.1). A list with no bound leaves the node
+/// untouched, so canonical Deep for an unbounded declaration is unchanged.
+fn with_dtype_bounds(expr: deep::Expr, binders: &[TypeBinder]) -> deep::Expr {
+    let bounds: Vec<(String, DtypeFamily)> = binders
+        .iter()
+        .filter_map(|binder| binder.bound.map(|family| (binder.name.clone(), family)))
+        .collect();
+    if bounds.is_empty() {
+        return expr;
+    }
+    let deep::Expr::Node(mut node, span) = expr else {
+        panic!("dtype bounds attach to a stamped declaration node");
+    };
+    let mut meta = node.meta().clone();
+    meta.entries.push((
+        DTYPE_BOUNDS_KEY.to_string(),
+        encode_dtype_bounds(&bounds, sp()),
+    ));
+    node.try_replace_meta(meta)
+        .expect("dtype-bound metadata preserves the stamped Node invariant");
+    deep::Expr::Node(node, span)
 }
 
 /// Build a stamped Deep node with custom metadata. The `meta` argument
@@ -1013,13 +1037,13 @@ impl DesugarCtx {
         match decl {
             Decl::FunDef {
                 name,
-                dim_params,
+                type_binders,
                 params,
                 ret_ty,
                 effects,
                 body,
                 ..
-            } => self.desugar_fun_def(name, dim_params, params, ret_ty, effects, body),
+            } => self.desugar_fun_def(name, type_binders, params, ret_ty, effects, body),
 
             Decl::Property {
                 name,
@@ -1101,7 +1125,11 @@ impl DesugarCtx {
             }
 
             Decl::Sig {
-                name, ty, effects, ..
+                name,
+                type_binders,
+                ty,
+                effects,
+                ..
             } => {
                 // chelis#285: the synthesized `defsig` that used to carry a
                 // same-named `def`'s `! { ... }` clause is suppressed when this
@@ -1114,16 +1142,27 @@ impl DesugarCtx {
                 let effects = effects
                     .clone()
                     .or_else(|| self.def_effects.get(name).cloned());
-                vec![node(
-                    DeepTag::Defsig,
-                    vec![
-                        sym(name),
-                        // WS-A5: standalone sigs use the contextual rule so a
-                        // lowercase non-primitive name in the precision slot
-                        // becomes a quantified type variable per
-                        // spec/04-type-system.md §5.8.
-                        apply_effect_metadata(desugar_sig_type(ty, &UnordSet::new()), &effects),
-                    ],
+                // §P4c: the sig's `[..]` list is partial. Its names are
+                // authoritative, unkinded binders exactly as a def's are, and
+                // every other free name in the type stays implicitly
+                // quantified by WS-A5's contextual rule.
+                let declared: UnordSet<String> = type_binders
+                    .iter()
+                    .map(|binder| binder.name.clone())
+                    .collect();
+                vec![with_dtype_bounds(
+                    node(
+                        DeepTag::Defsig,
+                        vec![
+                            sym(name),
+                            // WS-A5: standalone sigs use the contextual rule so a
+                            // lowercase non-primitive name in the precision slot
+                            // becomes a quantified type variable per
+                            // spec/04-type-system.md §5.8.
+                            apply_effect_metadata(desugar_sig_type(ty, &declared), &effects),
+                        ],
+                    ),
+                    type_binders,
                 )]
             }
 
@@ -1192,15 +1231,19 @@ impl DesugarCtx {
     fn desugar_fun_def(
         &self,
         name: &str,
-        dim_params: &[String],
+        type_binders: &[TypeBinder],
         params: &[Param],
         ret_ty: &Option<TypeExpr>,
         effects: &Option<Vec<EffectExpr>>,
         body: &Expr,
     ) -> Vec<deep::Expr> {
-        // Function-level dim params are polymorphic d-vars, NOT module-level defdim.
+        // Function-level binders are polymorphic d-vars, NOT module-level defdim.
         // Build a set so desugar_type_with_scope treats them as d-var.
-        let dim_set: UnordSet<String> = dim_params.iter().cloned().collect();
+        let dim_set: UnordSet<String> = type_binders
+            .iter()
+            .map(|binder| binder.name.clone())
+            .collect();
+        let declares_bound = type_binders.iter().any(|binder| binder.bound.is_some());
 
         // WS-A6 (spec/02-surf-syntax.md §P4b): when a def declares an
         // explicit quantifier list `def f[..](...)`, names in that list
@@ -1210,7 +1253,7 @@ impl DesugarCtx {
         // as a dim-var when it appears in a dim slot — the
         // dim/precision distinction is determined by position inside
         // the tensor type, not by per-name kind tracking. When
-        // `dim_params` is empty, the WS-A5 implicit collection on the
+        // `type_binders` is empty, the WS-A5 implicit collection on the
         // synthesized sig is preserved and parameter annotations keep
         // their pre-WS-A6 behavior (an unbound precision name surfaces
         // a diagnostic via `validate_tensor_precisions_in_program`).
@@ -1234,6 +1277,15 @@ impl DesugarCtx {
         };
         let fn_node = node(DeepTag::Fn, vec![params_node, desugared_body]);
         let def_node = node(DeepTag::Def, vec![sym(name), fn_node]);
+        // A standalone `sig` owns this declaration's binders, so its `def`
+        // may not also bound them (`spec/04-type-system.md` §5.9). Carry the
+        // authored bound onto the `def` node so the checker rejects it by
+        // name instead of the desugarer silently discarding it.
+        let def_node = if declares_bound && self.explicit_sig_names.contains(name) {
+            with_dtype_bounds(def_node, type_binders)
+        } else {
+            def_node
+        };
 
         // chelis#285: when an explicit standalone `sig` already declares this
         // name, the signature synthesized below from inline annotations is
@@ -1242,7 +1294,14 @@ impl DesugarCtx {
         // defsig binding) would overwrite the concrete explicit sig, dropping
         // the body-vs-signature contract on those positions. Suppress it and
         // let the explicit sig drive body validation.
-        if (params.iter().any(|p| p.ty.is_some()) || ret_ty.is_some() || effects.is_some())
+        // A declared bound forces the synthesized signature even when nothing
+        // else would: the bound has no other carrier, and a `defsig` whose
+        // positions are all wildcards still reports a bound naming a binder
+        // the declaration never uses.
+        if (params.iter().any(|p| p.ty.is_some())
+            || ret_ty.is_some()
+            || effects.is_some()
+            || declares_bound)
             && !self.explicit_sig_names.contains(name)
         {
             // Tvar set for the synthesized sig:
@@ -1257,8 +1316,8 @@ impl DesugarCtx {
             //   to the WS-A5 implicit collection over typed params and
             //   the return type (spec/04-type-system.md §5.8) so a
             //   bare `def f(x: tensor[3, p])` continues to work.
-            let tvar_set: UnordSet<String> = if !dim_params.is_empty() {
-                dim_params.iter().cloned().collect()
+            let tvar_set: UnordSet<String> = if !type_binders.is_empty() {
+                dim_set.clone()
             } else {
                 let mut acc: UnordSet<String> = UnordSet::new();
                 for p in params {
@@ -1282,12 +1341,15 @@ impl DesugarCtx {
                 Some(ty) => desugar_type_with_scope(ty, &dim_set, &tvar_set),
                 None => node(DeepTag::TVar, vec![sym("_")]),
             });
-            let sig = node(
-                DeepTag::Defsig,
-                vec![
-                    sym(name),
-                    apply_effect_metadata(node(DeepTag::TFn, type_parts), effects),
-                ],
+            let sig = with_dtype_bounds(
+                node(
+                    DeepTag::Defsig,
+                    vec![
+                        sym(name),
+                        apply_effect_metadata(node(DeepTag::TFn, type_parts), effects),
+                    ],
+                ),
+                type_binders,
             );
             vec![sig, def_node]
         } else {
@@ -2467,10 +2529,16 @@ fn collect_sig_type_vars(ty: &TypeExpr, out: &mut UnordSet<String>) {
 /// implicitly quantified type variables, and to `(t-prim {} <name>)`
 /// when it is a primitive. Outside a sig the same desugar is invoked
 /// with an empty quantifier set, so only primitive names are accepted.
-fn desugar_sig_type(ty: &TypeExpr, dim_vars: &UnordSet<String>) -> deep::Expr {
+fn desugar_sig_type(ty: &TypeExpr, declared: &UnordSet<String>) -> deep::Expr {
     let mut tvars = UnordSet::new();
     collect_sig_type_vars(ty, &mut tvars);
-    desugar_type_with_scope(ty, dim_vars, &tvars)
+    // §P4c: a name the sig explicitly lists is a binder whatever its case, so
+    // a listed `P` is a type variable rather than a rigid ADT — the same
+    // override a def's `[..]` clause already applies.
+    for name in declared.to_sorted() {
+        tvars.insert(name.clone());
+    }
+    desugar_type_with_scope(ty, declared, &tvars)
 }
 
 /// Desugar a type with declared dimension parameters and a set of
@@ -3050,7 +3118,7 @@ mod tests {
     fn test_fun_def() {
         let decl = Decl::FunDef {
             name: "f".to_string(),
-            dim_params: vec![],
+            type_binders: vec![],
             params: vec![param("x", None)],
             ret_ty: None,
             effects: None,
@@ -3069,7 +3137,7 @@ mod tests {
         // def f(x: f32): f32 = x
         let decl = Decl::FunDef {
             name: "f".to_string(),
-            dim_params: vec![],
+            type_binders: vec![],
             params: vec![param("x", Some(named_ty("f32")))],
             ret_ty: Some(named_ty("f32")),
             effects: None,
@@ -3096,7 +3164,10 @@ mod tests {
         // batch and hidden should be d-var (polymorphic), NOT d-name
         let decl = Decl::FunDef {
             name: "transpose".to_string(),
-            dim_params: vec!["batch".to_string(), "hidden".to_string()],
+            type_binders: vec![
+                TypeBinder::unbounded("batch"),
+                TypeBinder::unbounded("hidden"),
+            ],
             params: vec![param(
                 "x",
                 Some(TypeExpr::Tensor(
@@ -3153,7 +3224,7 @@ mod tests {
         // ) -> tensor[n, f32] = add(x, f(x, inner_p))
         let decl = Decl::FunDef {
             name: "apply_resid".to_string(),
-            dim_params: vec!["n".to_string(), "P".to_string()],
+            type_binders: vec![TypeBinder::unbounded("n"), TypeBinder::unbounded("P")],
             params: vec![
                 param(
                     "x",
@@ -3228,7 +3299,7 @@ mod tests {
         // def run[n](x: tensor[n, f32], a: Activation) -> tensor[n, f32] = x
         let decl = Decl::FunDef {
             name: "run".to_string(),
-            dim_params: vec!["n".to_string()],
+            type_binders: vec![TypeBinder::unbounded("n")],
             params: vec![
                 param(
                     "x",

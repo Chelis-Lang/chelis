@@ -3,7 +3,7 @@ export (assert_true, assert_false, assert_eq, assert_close, assert_close_tensor,
 def assert_true(cond: bool, label: string) -> unit ! { Test } = test_assert(cond, label)
 def assert_false(cond: bool, label: string) -> unit ! { Test } = test_assert(not(cond), label)
 def assert_eq[q](actual: q, expected: q, label: string) -> unit ! { Test } = test_assert_eq(actual, expected, label)
-def assert_close[p_float](actual: p_float, expected: p_float, tol: p_float, label: string) -> unit ! { Test } = {
+def assert_close[p: Float](actual: p, expected: p, tol: p, label: string) -> unit ! { Test } = {
   zero = sub(tol, tol)
   tol_nan = neq(tol, tol)
   tol_negative = gt(zero, tol)
@@ -17,7 +17,7 @@ def assert_close[p_float](actual: p_float, expected: p_float, tol: p_float, labe
     test_assert(ok, string_concat("assert_close (", string_concat(label, string_concat("): expected ", string_concat(to_string(expected), string_concat(", got ", string_concat(to_string(actual), string_concat(", tol ", to_string(tol)))))))))
   }
 }
-def assert_close_tensor[p_float](actual: &tensor[..r, p_float], expected: &tensor[..r, p_float], tol: p_float, label: string) -> unit ! { Test } = test_assert_close_tensor(actual, expected, tol, label)
+def assert_close_tensor[p: Float](actual: &tensor[..r, p], expected: &tensor[..r, p], tol: p, label: string) -> unit ! { Test } = test_assert_close_tensor(actual, expected, tol, label)
 def assert_eq_tensor[p](actual: &tensor[..r, p], expected: &tensor[..r, p], label: string) -> unit ! { Test } = test_assert_eq_tensor(actual, expected, label)
 def assert_shape[p](t: &tensor[..r, p], expected: List[int64], label: string) -> unit ! { Test } = {
   actual_rank = cast(rank(t), int64)

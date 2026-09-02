@@ -14,6 +14,7 @@ pub(crate) const REGISTERED_SPEC_ATOMS: &[&str] = &[
     "[04-ADT-3]",
     "[04-ADT-4]",
     "[04-DTYPE-1]",
+    "[04-DTYPE-2]",
     "[04-EFF-1]",
     "[04-FIT-1]",
     "[04-FIT-2]",

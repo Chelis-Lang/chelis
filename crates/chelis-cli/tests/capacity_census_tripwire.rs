@@ -32,7 +32,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use chelis_deep::tag::DeepTag;
-use chelis_deep::{Atom, Expr, List};
+use chelis_deep::{Atom, DtypeFamily, Expr, List};
 use chelis_types::types::Prim;
 use serde::{Deserialize, Serialize};
 
@@ -1401,7 +1401,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "contracts::normal_cdf: (t-fn {} (t-var {} p_float) (t-var {} p_float))",
+        "contracts::normal_cdf: [p: Float] (t-fn {} (t-var {} p) (t-var {} p))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -1548,42 +1548,42 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "init/kaiming::kaiming_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+        "init/kaiming::kaiming_normal: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "init/kaiming::kaiming_uniform: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+        "init/kaiming::kaiming_uniform: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "init/random::normal_like: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+        "init/random::normal_like: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "init/xavierext::trunc_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-var {} p_float) (t-var {} p_float) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+        "init/xavierext::trunc_normal: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "init/xavierext::xavier_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+        "init/xavierext::xavier_normal: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "init/xavierext::xavier_uniform: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+        "init/xavierext::xavier_uniform: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -1737,42 +1737,42 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "scalar::abs: (t-fn {} (t-var {} p_numeric) (t-var {} p_numeric))",
+        "scalar::abs: [p: Numeric] (t-fn {} (t-var {} p) (t-var {} p))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "scalar::max: (t-fn {} (t-var {} p_numeric) (t-var {} p_numeric) (t-var {} p_numeric))",
+        "scalar::max: [p: Numeric] (t-fn {} (t-var {} p) (t-var {} p) (t-var {} p))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "scalar::min: (t-fn {} (t-var {} p_numeric) (t-var {} p_numeric) (t-var {} p_numeric))",
+        "scalar::min: [p: Numeric] (t-fn {} (t-var {} p) (t-var {} p) (t-var {} p))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "sort::sort: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_numeric))) (t-prim {} int32) (t-tuple {} (t-tensor {} (d-rank {} r) (t-var {} p_numeric)) (t-tensor {} (d-rank {} r) (t-prim {} int64))))",
+        "sort::sort: [p: Numeric] (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-prim {} int32) (t-tuple {} (t-tensor {} (d-rank {} r) (t-var {} p)) (t-tensor {} (d-rank {} r) (t-prim {} int64))))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "tensor/construct::arange: (t-fn {} (t-var {} p_int) (t-var {} p_int) (t-tensor {} (d-var {} n) (t-var {} p_int)))",
+        "tensor/construct::arange: [p: Int] (t-fn {} (t-var {} p) (t-var {} p) (t-tensor {} (d-var {} n) (t-var {} p)))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "tensor/construct::linspace: (t-fn {} (t-var {} p_float) (t-var {} p_float) (t-prim {} int64) (t-tensor {} (d-var {} n) (t-var {} p_float)))",
+        "tensor/construct::linspace: [p: Float] (t-fn {} (t-var {} p) (t-var {} p) (t-prim {} int64) (t-tensor {} (d-var {} n) (t-var {} p)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -1807,14 +1807,14 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "test::assert_close: (t-fn {eff: (effects {} test)} (t-var {} p_float) (t-var {} p_float) (t-var {} p_float) (t-prim {} string) (t-unit {}))",
+        "test::assert_close: [p: Float] (t-fn {eff: (effects {} test)} (t-var {} p) (t-var {} p) (t-var {} p) (t-prim {} string) (t-unit {}))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "test::assert_close_tensor: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-prim {} string) (t-unit {}))",
+        "test::assert_close_tensor: [p: Float] (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-prim {} string) (t-unit {}))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -4063,6 +4063,25 @@ fn symbol(expr: &Expr) -> Option<&str> {
     }
 }
 
+/// The identity prefix for a declaration's dtype-family bounds.
+///
+/// Two signatures that differ only in their bounds are different numeric
+/// surface, so the bound belongs in the row identity. Empty for a
+/// declaration with no bound, which keeps every pre-existing row byte-stable.
+fn render_declared_bounds(bounds: &[(String, DtypeFamily)]) -> String {
+    if bounds.is_empty() {
+        return String::new();
+    }
+    format!(
+        "[{}] ",
+        bounds
+            .iter()
+            .map(|(binder, family)| format!("{binder}: {}", family.surf_name()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
 fn scan_exported_numeric_defs(
     list: &List,
     file_label: &str,
@@ -4076,6 +4095,13 @@ fn scan_exported_numeric_defs(
     let mut exports = BTreeSet::new();
     let mut value_definitions = BTreeSet::new();
     let mut signatures: BTreeMap<String, &Expr> = BTreeMap::new();
+    // `spec/04-type-system.md` §5.9: a declared dtype-family bound is a
+    // binder's dtype domain, so it is both numeric capacity and part of the
+    // row identity. Before bounds existed the domain lived in the binder's
+    // NAME (`p_float`); reading it from the declaration instead is structural
+    // rather than a spelling heuristic, and the name list below stays as a
+    // conservative backstop for an unbounded metavariable spelling.
+    let mut declared_bounds: BTreeMap<String, Vec<(String, DtypeFamily)>> = BTreeMap::new();
     for declaration in declarations.clone() {
         let Expr::List(declaration, _) = declaration else {
             continue;
@@ -4102,6 +4128,20 @@ fn scan_exported_numeric_defs(
                     declaration.elements.get(3),
                 ) {
                     signatures.insert(name.to_string(), signature);
+                    if let Some(Expr::Map(meta, _)) = declaration.elements.get(1) {
+                        let bounds = chelis_deep::decode_dtype_bounds(meta).unwrap_or_else(|e| {
+                            panic!(
+                                "{}MALFORMED DTYPE-FAMILY BOUND on `{file_label}::{name}`: {e}. \
+                                 A bound the census cannot decode is public numeric surface it \
+                                 cannot see.{}",
+                                teaching_header(),
+                                teaching_footer()
+                            )
+                        });
+                        if !bounds.is_empty() {
+                            declared_bounds.insert(name.to_string(), bounds);
+                        }
+                    }
                 }
             }
             _ => {}
@@ -4131,7 +4171,15 @@ fn scan_exported_numeric_defs(
             );
             continue;
         };
+        let bounds = declared_bounds.get(&name).map(Vec::as_slice).unwrap_or(&[]);
         let mut reachable_prims = BTreeSet::new();
+        // A bounded binder ranges over that family's active dtypes, so it is
+        // capacity exactly as the metavariable spellings below are. Like
+        // them it stays out of `untagged_prims`: the domain is declared, not
+        // a bare-float seam.
+        for (binder, family) in bounds {
+            reachable_prims.insert(format!("dtype-bound:{binder}:{}", family.surf_name()));
+        }
         collect_numeric_tprims_with_adts(signature, adt_prims, &mut reachable_prims);
         if reachable_prims.is_empty() {
             continue;
@@ -4141,7 +4189,8 @@ fn scan_exported_numeric_defs(
         rows.push(Row {
             kind: "std-def-numeric".to_string(),
             id: format!(
-                "{file_label}::{name}: {}",
+                "{file_label}::{name}: {}{}",
+                render_declared_bounds(bounds),
                 chelis_deep::printer::print_expr_flat(signature)
             ),
             flags: numeric_carrier_flags(&untagged_prims),
@@ -6966,6 +7015,85 @@ fn a_declared_stdlib_signature_enumerates_and_a_type_export_does_not() {
         type_only.is_empty(),
         "a dtype-free type export is not a signature-less def: {type_only:?}"
     );
+}
+
+/// chelis#1417 positive control: a `spec/04-type-system.md` §5.9 dtype-family
+/// bound IS numeric capacity. The signature below writes no concrete dtype
+/// and no metavariable spelling, so before bounds existed the domain lived
+/// only in the binder's NAME. Deleting the bound-seeding loop in
+/// `scan_exported_numeric_defs` turns this RED: the row vanishes and a
+/// public numeric definition becomes invisible to the census.
+#[test]
+fn a_declared_dtype_family_bound_is_numeric_capacity() {
+    for (family, expected) in [
+        ("Float", "[p: Float]"),
+        ("Int", "[p: Int]"),
+        ("Numeric", "[p: Numeric]"),
+    ] {
+        let rows = planted_stdlib_rows(
+            "planted",
+            &format!(
+                "module Std.Planted\n\
+                 export (planted_pick)\n\
+                 sig planted_pick[p: {family}]: p -> p -> p\n\
+                 def planted_pick(a, b) = a\n"
+            ),
+        );
+        let row = rows
+            .iter()
+            .find(|row| row.kind == "std-def-numeric")
+            .unwrap_or_else(|| panic!("a `{family}`-bounded signature must enumerate: {rows:?}"));
+        assert!(
+            row.id.contains(expected),
+            "the bound is part of the row identity, not just its capacity: {row:?}"
+        );
+        assert!(
+            row.flags.is_empty(),
+            "a declared domain is not a bare-numeric seam: {row:?}"
+        );
+    }
+}
+
+/// The negative half of the control: the same signature with the bound
+/// removed carries no numeric capacity at all, so the bound is what makes
+/// the row visible rather than some other spelling in the shape.
+#[test]
+fn the_same_signature_without_a_bound_is_not_numeric_capacity() {
+    let rows = planted_stdlib_rows(
+        "planted",
+        "module Std.Planted\n\
+         export (planted_pick)\n\
+         sig planted_pick: p -> p -> p\n\
+         def planted_pick(a, b) = a\n",
+    );
+    assert!(
+        rows.iter().all(|row| row.kind != "std-def-numeric"),
+        "an unbounded binder ranges over every type, not a dtype family: {rows:?}"
+    );
+}
+
+/// Two signatures that differ only in their declared family are different
+/// numeric surface. Dropping the bound from the identity string collapses
+/// them into one row and lets a family change land uncited.
+#[test]
+fn signatures_differing_only_by_family_have_distinct_identities() {
+    let identity = |family: &str| {
+        planted_stdlib_rows(
+            "planted",
+            &format!(
+                "module Std.Planted\n\
+                 export (planted_pick)\n\
+                 sig planted_pick[p: {family}]: p -> p -> p\n\
+                 def planted_pick(a, b) = a\n"
+            ),
+        )
+        .into_iter()
+        .find(|row| row.kind == "std-def-numeric")
+        .expect("bounded signature enumerates")
+        .id
+    };
+    assert_ne!(identity("Float"), identity("Int"));
+    assert_ne!(identity("Int"), identity("Numeric"));
 }
 
 /// N4, the missing control for the newest commit's claim. The macro-taint

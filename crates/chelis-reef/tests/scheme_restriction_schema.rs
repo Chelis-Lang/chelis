@@ -36,10 +36,12 @@ module_prefix = "Restriction"
     write(
         &root.join("src/main.ch"),
         r#"module Restriction.Main
-export (restricted_close, unrestricted_identity, integer_identity)
+export (restricted_close, unrestricted_identity, integer_identity, int_bounded, numeric_bounded)
 def restricted_close[p_float](actual: &tensor[n, p_float], expected: &tensor[n, p_float], tolerance: p_float) -> unit ! { Test } = test_assert_close_tensor(actual, expected, tolerance, "restricted")
 def unrestricted_identity[p](value: &tensor[n, p]) -> &tensor[n, p] = value
 def integer_identity(value: int32) -> int32 = value
+def int_bounded[q: Int](value: q) -> q = value
+def numeric_bounded[q: Numeric](value: q) -> q = value
 "#,
     );
     (directory, root)
@@ -59,6 +61,12 @@ fn expected_active_float() -> Value {
     serde_json::json!([{"variable": "t0", "domain": "active_float"}])
 }
 
+/// An authored `spec/04-type-system.md` §5.9 bound reaches the published
+/// package surface as its own domain, not as the one pre-existing domain.
+fn expected_domain(domain: &str) -> Value {
+    serde_json::json!([{"variable": "t0", "domain": domain}])
+}
+
 #[test]
 fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
     let (_directory, root) = package_fixture();
@@ -70,6 +78,16 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
         exported(&schema_json, "restricted_close", "functions")["type_variable_restrictions"],
         expected_active_float()
     );
+    for (name, domain) in [
+        ("int_bounded", "active_int"),
+        ("numeric_bounded", "active_numeric"),
+    ] {
+        assert_eq!(
+            exported(&schema_json, name, "functions")["type_variable_restrictions"],
+            expected_domain(domain),
+            "{name} must publish its authored dtype-family bound"
+        );
+    }
     for name in ["unrestricted_identity", "integer_identity"] {
         assert_eq!(
             exported(&schema_json, name, "functions")["type_variable_restrictions"],
@@ -92,11 +110,21 @@ fn public_schema_and_decoded_chb_preserve_exact_scheme_restrictions() {
     let shell = read_shell(&artifacts.shell_path).expect("CHB must decode");
     let shell_json = serde_json::to_value(shell).expect("CHB model must serialize");
 
-    assert_eq!(shell_json["format_version"], 2);
+    assert_eq!(shell_json["format_version"], 3);
     assert_eq!(
         exported(&shell_json, "restricted_close", "exports")["type_variable_restrictions"],
         expected_active_float()
     );
+    for (name, domain) in [
+        ("int_bounded", "active_int"),
+        ("numeric_bounded", "active_numeric"),
+    ] {
+        assert_eq!(
+            exported(&shell_json, name, "exports")["type_variable_restrictions"],
+            expected_domain(domain),
+            "{name} must round-trip its bound through the published CHB"
+        );
+    }
     for name in ["unrestricted_identity", "integer_identity"] {
         assert_eq!(
             exported(&shell_json, name, "exports")["type_variable_restrictions"],
