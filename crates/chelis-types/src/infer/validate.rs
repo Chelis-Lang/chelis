@@ -1444,76 +1444,13 @@ pub(super) fn validate_ir_expr(
                                 errors,
                             );
                             scoped_static_env.insert(name.to_string(), value);
-                            // If the RHS is a shape-sensitive IR builtin
-                            // whose output type is derivable from its args,
-                            // register the derived type so downstream uses
-                            // of `name` resolve correctly.
-                            let derived = derive_ir_builtin_output_type(
+                            record_let_binding_shape_fact(
+                                name,
                                 value_expr,
-                                &scoped_type_env,
+                                &mut scoped_type_env,
                                 &scoped_static_env,
+                                failed_let_names,
                             );
-                            match derived {
-                                Some(ty) => {
-                                    scoped_type_env.insert(name.to_string(), ty);
-                                }
-                                None => {
-                                    // Drop any fact this name carried from
-                                    // an outer `def` or an earlier binding.
-                                    // `IrTypeEnv` holds only top-level defs,
-                                    // so an entry standing here describes a
-                                    // DIFFERENT binding than the one being
-                                    // introduced; leaving it in place lets a
-                                    // rebinding inherit the previous rank and
-                                    // makes the identity-rank validator
-                                    // reject a valid program (chelis#668
-                                    // round-6 F1).
-                                    scoped_type_env.remove(name);
-                                    // Mark as failed-derivation when the
-                                    // RHS is structurally a recognized
-                                    // shape-sensitive form (a known
-                                    // shape-sensitive builtin or a
-                                    // unary/binary passthrough wrapper
-                                    // around one, recursively) but its
-                                    // output type could not be derived.
-                                    // This catches `y = conv2d(bad)`
-                                    // and the R3 F-A passthrough cases
-                                    // like `y = relu(conv2d(bad))`.
-                                    //
-                                    // RT-205 round-4 / issue #212: the
-                                    // previous guard checked
-                                    // `errors.len() > errs_before` to
-                                    // detect an errored RHS, which fails
-                                    // for chains of length 3+ because
-                                    // cascade suppression already
-                                    // silences the level-2 RHS's
-                                    // diagnostic, so the level-2 name is
-                                    // never marked and the level-3 RHS
-                                    // re-emits a phantom error. The
-                                    // structural check
-                                    // `let_rhs_is_recognized_shape_sensitive`
-                                    // does not depend on diagnostic
-                                    // count and propagates the failed
-                                    // marker unboundedly down the chain.
-                                    //
-                                    // The recognition is intentionally
-                                    // narrow: a clean RHS that is not
-                                    // a recognized shape-sensitive form
-                                    // (e.g. a user-defined fn call) still
-                                    // does NOT cause suppression
-                                    // downstream, so legitimate
-                                    // "really wrong arg" cases still
-                                    // surface their own diagnostic.
-                                    if let deep::Expr::List(_, _) = value_expr
-                                        && let_rhs_is_recognized_shape_sensitive(
-                                            value_expr,
-                                            &scoped_static_env,
-                                        )
-                                    {
-                                        failed_let_names.insert(name.to_string());
-                                    }
-                                }
-                            }
                         }
                         index += 2;
                     }

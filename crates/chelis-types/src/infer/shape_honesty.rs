@@ -256,3 +256,81 @@ pub(super) fn type_expr_is_ir_concrete(expr: &deep::Expr) -> bool {
             .unwrap_or(false),
     }
 }
+
+/// Record what the validator can prove about one `let` binding's shape.
+///
+/// Splitting this out of the `Let` arm keeps shape-fact bookkeeping in the
+/// module that owns `ShapeTypeFact`, and keeps `validate.rs` inside the
+/// `source_arch` line budget that told us to divide by responsibility rather
+/// than trim.
+pub(super) fn record_let_binding_shape_fact(
+    name: &str,
+    value_expr: &deep::Expr,
+    type_env: &mut ShapeTypeEnv,
+    static_env: &UnordMap<String, StaticValue>,
+    failed_let_names: &mut UnordSet<String>,
+) {
+    // If the RHS is a shape-sensitive IR builtin
+    // whose output type is derivable from its args,
+    // register the derived type so downstream uses
+    // of `name` resolve correctly.
+    let derived = derive_ir_builtin_output_type(value_expr, type_env, static_env);
+    match derived {
+        Some(ty) => {
+            type_env.insert(name.to_string(), ty);
+        }
+        None => {
+            // Drop any fact this name carried from
+            // an outer `def` or an earlier binding.
+            // `IrTypeEnv` holds only top-level defs,
+            // so an entry standing here describes a
+            // DIFFERENT binding than the one being
+            // introduced; leaving it in place lets a
+            // rebinding inherit the previous rank and
+            // makes the identity-rank validator
+            // reject a valid program (chelis#668
+            // round-6 F1).
+            type_env.remove(name);
+            // Mark as failed-derivation when the
+            // RHS is structurally a recognized
+            // shape-sensitive form (a known
+            // shape-sensitive builtin or a
+            // unary/binary passthrough wrapper
+            // around one, recursively) but its
+            // output type could not be derived.
+            // This catches `y = conv2d(bad)`
+            // and the R3 F-A passthrough cases
+            // like `y = relu(conv2d(bad))`.
+            //
+            // RT-205 round-4 / issue #212: the
+            // previous guard checked
+            // `errors.len() > errs_before` to
+            // detect an errored RHS, which fails
+            // for chains of length 3+ because
+            // cascade suppression already
+            // silences the level-2 RHS's
+            // diagnostic, so the level-2 name is
+            // never marked and the level-3 RHS
+            // re-emits a phantom error. The
+            // structural check
+            // `let_rhs_is_recognized_shape_sensitive`
+            // does not depend on diagnostic
+            // count and propagates the failed
+            // marker unboundedly down the chain.
+            //
+            // The recognition is intentionally
+            // narrow: a clean RHS that is not
+            // a recognized shape-sensitive form
+            // (e.g. a user-defined fn call) still
+            // does NOT cause suppression
+            // downstream, so legitimate
+            // "really wrong arg" cases still
+            // surface their own diagnostic.
+            if let deep::Expr::List(_, _) = value_expr
+                && let_rhs_is_recognized_shape_sensitive(value_expr, static_env)
+            {
+                failed_let_names.insert(name.to_string());
+            }
+        }
+    }
+}
