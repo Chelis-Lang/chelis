@@ -50,14 +50,22 @@ class _Recorder:
     requested directory so the custom check has something to compare.
     """
 
-    def __init__(self, returncodes: dict[str, int] | None = None, corpus: Path | None = None):
+    def __init__(
+        self,
+        returncodes: dict[str, int] | None = None,
+        corpus: Path | None = None,
+        missing_programs: tuple[str, ...] = (),
+    ):
         self.returncodes = returncodes or {}
         self.corpus = corpus
+        self.missing_programs = missing_programs
         self.calls: list[tuple[list[str], dict[str, str]]] = []
 
     def __call__(self, argv, *, cwd=None, env=None, check=False, **_kwargs):
         argv = list(argv)
         self.calls.append((argv, dict(env or {})))
+        if argv[0] in self.missing_programs:
+            raise FileNotFoundError(2, "No such file or directory", argv[0])
         rendered = " ".join(argv)
         if "--out-dir" in argv and self.corpus is not None:
             target = Path(argv[argv.index("--out-dir") + 1])
@@ -105,14 +113,16 @@ def _fake_repo(tmp: Path, *, todo_rows: int = 0, freeze_sha: str = GOOD_SHA) -> 
     return tmp
 
 
-def _run(argv, *, repo_root: Path, recorder: _Recorder) -> tuple[int, str]:
+def _run(
+    argv, *, repo_root: Path, recorder: _Recorder, environ: dict[str, str] | None = None
+) -> tuple[int, str]:
     out = io.StringIO()
     code = regen_all.main(
         argv,
         repo_root=repo_root,
         python=PYTHON,
         runner=recorder,
-        environ={"PATH": "/usr/bin"},
+        environ={"PATH": "/usr/bin"} if environ is None else environ,
         out=out,
     )
     return code, out.getvalue()
@@ -286,6 +296,41 @@ class CensusEnvTests(unittest.TestCase):
             if "capacity_census_tripwire" not in argv:
                 self.assertNotIn(regen_all.CENSUS_WRITE_ENV, env)
 
+    def test_check_mode_child_env_never_carries_a_leg_env_key(self):
+        # An ambient leftover from a manual census write must not turn the
+        # check-mode tripwire into a writer that then compares against what
+        # it just wrote.
+        ambient = {"PATH": "/usr/bin", regen_all.CENSUS_WRITE_ENV: "1", "KEEP": "yes"}
+        with tempfile.TemporaryDirectory() as td:
+            root = _fake_repo(Path(td))
+            checker = _Recorder(corpus=root / regen_all.OPAQUE_CORPUS_DIR)
+            code, _out = _run(["--check", "--full"], repo_root=root, recorder=checker, environ=ambient)
+        self.assertEqual(code, 0)
+        self.assertGreaterEqual(len(checker.calls), 8)
+        for argv, env in checker.calls:
+            self.assertNotIn(regen_all.CENSUS_WRITE_ENV, env, argv)
+            self.assertEqual(env.get("KEEP"), "yes")
+
+    def test_write_mode_scrubs_the_seam_from_every_leg_but_its_owner(self):
+        ambient = {"PATH": "/usr/bin", regen_all.CENSUS_WRITE_ENV: "1"}
+        with tempfile.TemporaryDirectory() as td:
+            root = _fake_repo(Path(td))
+            writer = _Recorder()
+            code, _out = _run(["--full"], repo_root=root, recorder=writer, environ=ambient)
+        self.assertEqual(code, 0)
+        carriers = [
+            argv for argv, env in writer.calls if regen_all.CENSUS_WRITE_ENV in env
+        ]
+        self.assertEqual(len(carriers), 1)
+        self.assertIn("capacity_census_tripwire", carriers[0])
+        self.assertNotIn("--check", carriers[0])
+
+    def test_scrub_environment_is_keyed_on_every_leg_declaration(self):
+        keys = regen_all.leg_env_keys(regen_all.regen_legs(PYTHON))
+        self.assertEqual(keys, frozenset({regen_all.CENSUS_WRITE_ENV}))
+        scrubbed = regen_all.scrub_environment({"A": "1", regen_all.CENSUS_WRITE_ENV: "1"}, keys)
+        self.assertEqual(scrubbed, {"A": "1"})
+
     def test_write_env_is_printed_on_the_leg_line(self):
         with tempfile.TemporaryDirectory() as td:
             root = _fake_repo(Path(td))
@@ -366,6 +411,80 @@ class ManualActionTests(unittest.TestCase):
         self.assertIn(regen_all.CENSUS_SIBLINGS_MANUAL, output)
         self.assertTrue(
             output.rstrip().endswith("REGEN ALL: MANUAL ACTION REQUIRED (census-siblings)"),
+            output,
+        )
+
+
+class LaunchFailureTests(unittest.TestCase):
+    """A program that cannot be launched never escapes as a traceback: the
+    run still ends in one of the four `REGEN ALL:` lines."""
+
+    def test_missing_cargo_in_write_mode_fails_the_leg_with_the_final_line(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = _fake_repo(Path(td))
+            recorder = _Recorder(missing_programs=("cargo",))
+            code, output = _run(["--full", "--tier", "2"], repo_root=root, recorder=recorder)
+        self.assertEqual(code, 1)
+        self.assertIn("failed: could not launch cargo", output)
+        self.assertTrue(
+            output.rstrip().endswith(
+                f"REGEN ALL: FAIL (capacity-census, exit {regen_all.LAUNCH_FAILURE_EXIT})"
+            ),
+            output,
+        )
+        # Write mode stops at the first failure.
+        self.assertEqual(len(recorder.calls), 1)
+
+    def test_missing_cargo_in_check_mode_is_stale_with_the_launch_reason(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = _fake_repo(Path(td))
+            recorder = _Recorder(
+                missing_programs=("cargo",), corpus=root / regen_all.OPAQUE_CORPUS_DIR
+            )
+            code, output = _run(["--check", "--full"], repo_root=root, recorder=recorder)
+        self.assertEqual(code, 1)
+        self.assertIn("stale: could not launch cargo", output)
+        # Every selected leg still ran: the Python legs passed, the three
+        # cargo legs are stale for the launch reason.
+        self.assertTrue(
+            output.rstrip().endswith(
+                "REGEN ALL: STALE (capacity-census, dtype-c-header, census-siblings)"
+            ),
+            output,
+        )
+
+    def test_missing_interpreter_for_the_corpus_check_is_stale_not_a_traceback(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = _fake_repo(Path(td))
+            recorder = _Recorder(missing_programs=(PYTHON,))
+            code, output = _run(["--check", "--tier", "0"], repo_root=root, recorder=recorder)
+        self.assertEqual(code, 1)
+        self.assertIn(f"could not launch {PYTHON}", output)
+        self.assertTrue(
+            output.rstrip().endswith(
+                "REGEN ALL: STALE (rejection-registry, conformance-assets, opaque-corpus)"
+            ),
+            output,
+        )
+
+    def test_check_only_leg_launch_failure_in_write_mode_is_failed_not_manual(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = _fake_repo(Path(td))
+            recorder = _Recorder(returncodes={}, missing_programs=())
+            # Only the check-only legs use cargo once the two writers are
+            # stubbed as present: make cargo vanish for them alone.
+            def runner(argv, *, cwd=None, env=None, check=False, **_kw):
+                recorder.calls.append((list(argv), dict(env or {})))
+                if "runtime_dtype_generated_header" in argv:
+                    raise PermissionError(13, "Permission denied", argv[0])
+                return subprocess.CompletedProcess(list(argv), 0)
+            code, output = _run(["--full", "--tier", "2"], repo_root=root, recorder=runner)
+        self.assertEqual(code, 1)
+        self.assertNotIn("manual:", output)
+        self.assertTrue(
+            output.rstrip().endswith(
+                f"REGEN ALL: FAIL (dtype-c-header, exit {regen_all.LAUNCH_FAILURE_EXIT})"
+            ),
             output,
         )
 

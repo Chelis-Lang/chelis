@@ -33,7 +33,13 @@ Tiers, in dependency order
 
 Write mode stops at the first leg that fails or demands a manual action,
 because later tiers consume earlier outputs. `--check` runs every selected leg
-and reports all stale ones. The final line is exactly one of:
+and reports all stale ones. A program that cannot be launched (no `cargo` on
+PATH, say) is a failed leg in write mode and a stale leg with the launch error
+as its reason in check mode; it never escapes as a traceback. Every leg's
+writer environment variable (today only `CHELIS_CAPACITY_CENSUS_WRITE`) is
+removed from the child environment before any leg runs and set again only on
+the one write command that declares it, so an ambient leftover cannot turn a
+checker into a writer. The final line is exactly one of:
 
     REGEN ALL: PASS                              exit 0
     REGEN ALL: STALE (<leg names>)               exit 1  (--check only)
@@ -418,12 +424,14 @@ def check_opaque_corpus(
 ) -> list[str]:
     corpus = repo_root / OPAQUE_CORPUS_DIR
     with tempfile.TemporaryDirectory(prefix="chelis-regen-corpus-") as scratch:
-        completed = runner(
+        completed = launch(
+            runner,
             [python, OPAQUE_CORPUS_GENERATOR, "--out-dir", scratch],
             cwd=repo_root,
             env=environ,
-            check=False,
         )
+        if _launch_error(completed) is not None:
+            return [_launch_error(completed)]
         if completed.returncode != 0:
             return [f"generate_corpus.py exited {completed.returncode}"]
         return compare_corpus_trees(corpus, Path(scratch))
@@ -435,6 +443,36 @@ CUSTOM_CHECKS: dict[str, Callable[[Path, str, object, dict[str, str]], list[str]
 
 
 # --- the runner --------------------------------------------------------------
+
+
+LAUNCH_FAILURE_EXIT = 127
+
+
+def leg_env_keys(legs: tuple[RegenLeg, ...]) -> frozenset[str]:
+    """Every writer seam any leg declares, selected or not."""
+    return frozenset(name for leg in legs for name, _value in leg.env)
+
+
+def scrub_environment(environ: dict[str, str], keys: frozenset[str]) -> dict[str, str]:
+    """The child environment with every leg writer seam removed. `--check`
+    children get exactly this; a write command gets it plus its own `env`."""
+    return {name: value for name, value in environ.items() if name not in keys}
+
+
+def launch(runner, argv: list[str], *, cwd: Path, env: dict[str, str]):
+    """Run one leg command; a launch failure (missing program, permission)
+    becomes a CompletedProcess with exit 127 and the error text, so every
+    path still reaches the final `REGEN ALL:` line."""
+    try:
+        return runner(argv, cwd=cwd, env=env, check=False)
+    except OSError as exc:
+        completed = subprocess.CompletedProcess(argv, LAUNCH_FAILURE_EXIT)
+        completed.launch_error = f"could not launch {argv[0]}: {exc}"
+        return completed
+
+
+def _launch_error(completed) -> str | None:
+    return getattr(completed, "launch_error", None)
 
 
 def _render(leg: RegenLeg, argv: tuple[str, ...], with_env: bool) -> str:
@@ -471,7 +509,10 @@ def run_leg(
             return LegResult(leg, "ok")
         assert leg.check_argv is not None
         print(f"{header}: {_render(leg, leg.check_argv, False)}", file=out, flush=True)
-        completed = runner(list(leg.check_argv), cwd=repo_root, env=environ, check=False)
+        completed = launch(runner, list(leg.check_argv), cwd=repo_root, env=environ)
+        if _launch_error(completed) is not None:
+            print(f"  stale: {_launch_error(completed)}", file=out, flush=True)
+            return LegResult(leg, "stale", completed.returncode, _launch_error(completed))
         if completed.returncode != 0:
             detail = leg.manual_after
             if detail is not None:
@@ -488,16 +529,24 @@ def run_leg(
             file=out,
             flush=True,
         )
-        completed = runner(list(leg.check_argv), cwd=repo_root, env=environ, check=False)
+        completed = launch(runner, list(leg.check_argv), cwd=repo_root, env=environ)
+        if _launch_error(completed) is not None:
+            print(f"  failed: {_launch_error(completed)}", file=out, flush=True)
+            return LegResult(leg, "failed", completed.returncode, _launch_error(completed))
         if completed.returncode != 0:
             print(f"  manual: {leg.manual_after}", file=out, flush=True)
             return LegResult(leg, "manual", completed.returncode, leg.manual_after)
         return LegResult(leg, "ok")
 
     print(f"{header}: {_render(leg, leg.write_argv, True)}", file=out, flush=True)
+    # `environ` arrives scrubbed of every leg's writer seam; only this leg's
+    # own declaration is set, on this one command.
     leg_environ = dict(environ)
     leg_environ.update(dict(leg.env))
-    completed = runner(list(leg.write_argv), cwd=repo_root, env=leg_environ, check=False)
+    completed = launch(runner, list(leg.write_argv), cwd=repo_root, env=leg_environ)
+    if _launch_error(completed) is not None:
+        print(f"  failed: {_launch_error(completed)}", file=out, flush=True)
+        return LegResult(leg, "failed", completed.returncode, _launch_error(completed))
     if completed.returncode != 0:
         return LegResult(leg, "failed", completed.returncode)
     if leg.after_write is not None:
@@ -576,9 +625,15 @@ def main(
     stream = sys.stdout if out is None else out
     interpreter = sys.executable if python is None else python
     run = subprocess.run if runner is None else runner
-    child_environ = dict(os.environ if environ is None else environ)
+    all_legs = regen_legs(interpreter)
+    # Scrub every writer seam any leg declares, whether or not that leg is
+    # selected: an ambient CHELIS_CAPACITY_CENSUS_WRITE=1 must not make the
+    # census checker write and then compare against what it just wrote.
+    child_environ = scrub_environment(
+        dict(os.environ if environ is None else environ), leg_env_keys(all_legs)
+    )
 
-    legs = select_legs(regen_legs(interpreter), args.tiers)
+    legs = select_legs(all_legs, args.tiers)
     mode = "check" if args.check else "write"
     print(
         f"regen_all: {mode} mode, tiers {', '.join(str(t) for t in args.tiers)}, "
