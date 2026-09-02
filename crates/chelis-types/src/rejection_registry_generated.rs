@@ -58,6 +58,7 @@ pub(crate) const REGISTERED_SPEC_ATOMS: &[&str] = &[
     "[05-HOST-1]",
     "[05-HOST-2]",
     "[05-HOST-3]",
+    "[05-HOST-4]",
     "[05-MOV-1]",
     "[05-OBS-10]",
     "[05-OBS-11]",

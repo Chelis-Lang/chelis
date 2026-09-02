@@ -61,7 +61,7 @@ FROZEN_FILE_DIGESTS = {
         "366f74fae9e33ce3012a622ac97f938d85db17b20a7d29d11efd1816b4ef4641"
     ),
     "spec/05-risc-primitives.md": (
-        "e427fa744b313a3a8a7cad99e1ca92ed7df8e57db459bf53a499edb098dca86a"
+        "cc2814ddf033786c160fce9369053e38f09c3337166249eec5d93040f8e10271"
     ),
     "spec/06-transformations.md": (
         "30a78217103d0a57d63b9e1a3d927d2e1079affa4d1d0641ef36a9afff34e25a"
