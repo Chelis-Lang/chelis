@@ -1,7 +1,8 @@
 # Checker Totality: every construct is checked or loudly rejected
 
-**Status:** Phases 0-3 and PP1-PP4 are delivered. PP5 is in delivery under
-[#668]. PR [#1406] delivered the
+**Status:** Phases 0-3 and PP1-PP4 are delivered. PP5 is partially delivered
+under [#668]: its generated-C half is closed and its checker half covers only
+the derivable subset described below. PR [#1406] delivered the
 separately owned [#1247] kinded nominal-application residue; it is not another
 phase. Phase 3 first shipped
 `DeepTag` as derive-on-demand dispatch and was red-teamed in that form
@@ -1260,13 +1261,12 @@ command above remains the standing completion oracle after delivery;
 supporting unit coverage pins every isolated-entry declaration namespace and
 fail-closed synthetic identity in addition to the two checker edges above.
 
-### PP5. Elementwise rank honesty at the checker boundary ([#668])
+### PP5. Elementwise rank honesty ([#668], partial)
 
 `spec/04-type-system.md` §4.1-§4.3 and
 `spec/05-risc-primitives.md` §1.2/§2.1 already decide the language
 rule: elementwise tensor operands have identical dimension lists, and a rank
-change must be explicit. PP5 adds no semantic rule. It closes one checker
-path that could report perfect success while violating that rule.
+change must be explicit. PP5 adds no semantic rule.
 
 Before PP5, a rank-preserving `stride` result and a rank-increasing `expand`
 result could flow into `add` under movement-operation wildcard unification.
@@ -1274,17 +1274,23 @@ The later validator did not recover the function parameter's declared rank
 because Surf owns it on the standalone `defsig`, not the unannotated Deep
 `params` node. It also derived no rank fact for those movement let-bindings.
 The call therefore reached `chelis check` with `score == 1` and an empty error
-list. The C backend's existing elementwise guard compared extents only when
-the runtime ranks were already equal, so the same positive-rank mismatch
+list, and the C backend's existing elementwise guard compared extents only
+when the runtime ranks were already equal, so the same positive-rank mismatch
 bypassed the guard and reached indexing.
 
-PP5 closes the class at two boundaries:
+**What PP5 delivers.**
 
-1. The validator collects each check unit's declared signatures explicitly
+1. Generated C compares every positive-rank input pair and aborts on unequal
+   ranks before allocation or indexing. Equal-rank runtime extents retain the
+   existing all-axis guard, and fused nodes retain all-pairs comparison when
+   their first external input is an internal scalar. This closes the
+   silent-wrong-answer half of [#668]: a positive-rank mismatch no longer
+   reaches indexing, whatever the checker concluded.
+2. The validator collects each check unit's declared signatures explicitly
    and binds their parameter types only inside the matching function. This is
    unit-local data, never global ambient signature state.
-2. `stride` and `expand` let-bindings preserve only the rank the validator can
-   prove in a private Rust `ShapeTypeFact::RankOnly` carrier. Rank facts have
+3. `stride` and `expand` let-bindings preserve only the rank the validator can
+   prove, in a private Rust `ShapeTypeFact::RankOnly` carrier. Rank facts have
    no Deep-syntax representation: an authored dimension name can never alias
    validator state. Exact-shape validators consume only the enum's `Exact`
    variant, so the checker neither copies nor invents runtime extents and a
@@ -1292,19 +1298,32 @@ PP5 closes the class at two boundaries:
    The carrier accepts exact facts only from checker-owned lexical bindings;
    raw `type` metadata on any runtime expression is source syntax, not
    validator evidence, and cannot override either an exact or rank-only
-   binding.
-3. Every builtin classified centrally as `ShapeClass::Identity` enters one
+   binding. Rebinding a name to a value whose shape is not derivable clears
+   that name's prior fact rather than inheriting it.
+4. Every builtin classified centrally as `ShapeClass::Identity` enters one
    rank validator. Two tensor operands with different positive ranks produce
    a located `DimensionMismatch`, make `check` exit nonzero, and force
    `score < 1`. Rank-zero arguments remain subject to the builtin's ordinary
    scheme (including `clamp`'s explicit scalar-bound form); PP5 does not
    create a scalar-broadcast permission.
-4. Generated C compares every positive-rank input pair and aborts on unequal
-   ranks before allocation or indexing. Equal-rank runtime extents retain the
-   existing all-axis guard, and fused nodes retain all-pairs comparison when
-   their first external input is an internal scalar.
 
-The authoritative PP5 completion oracle is:
+**What PP5 does not deliver.** The checker half is partial, and the shortfall
+is structural rather than a list of missed names. The rank resolver recognizes
+`ShapeClass::Identity` plus four separately named operations. `Identity` is
+the *elementwise* family, while the property this validator needs is
+*shape-preserving*; the two are not the same set. `softmax` is
+shape-preserving and not elementwise, which is why it needed naming at all,
+and `cast`, `cast_trunc`, `normalize`, and `realize` are shape-preserving but
+classify as `Rewriting`. A rank arriving through one of those, or through a
+user `def`, still reaches `chelis check` with `score == 1` and an empty error
+list. Only the generated-C guard rejects those programs today.
+
+Closing that gap requires deciding a shape-preserving classification and
+driving the resolver from it totally, with no separately named operations.
+That is follow-up work owned by [#668], not part of PP5; adding further names
+to the resolver would rebuild the enumeration this slice was meant to remove.
+
+The acceptance oracle for what PP5 delivers is:
 
 ```sh
 cargo nextest run -p chelis-cli --test issue_668_elementwise_rank_honesty --no-fail-fast
@@ -1313,16 +1332,17 @@ cargo nextest run -p chelis-cli --test issue_668_elementwise_rank_honesty --no-f
 Its negative program combines rank-1 `stride` and rank-2 `expand` results and
 requires a located dimension diagnostic plus dishonest-fitness prevention.
 Its equal-rank control must continue to exit successfully with score 1 and an
-empty error list. The same negative joins the permanent #731 fitness-honesty
-corpus. `chelis-backend-c`'s
+empty error list, as must its rebinding control. The same negative joins the
+permanent #731 fitness-honesty corpus. `chelis-backend-c`'s
 `direct_positive_rank_mismatch_traps_before_indexing` compile/run test is the
-supporting defense-in-depth oracle; it does not replace the public checker
-oracle.
+oracle for the generated-C half. Neither oracle covers the shape-preserving
+operations named above; no test asserts that the checker rejects them, because
+it does not.
 
-PP5 owns #668's checker-totality mechanism and the same instance's defensive
-C guard. It does not absorb unrelated lowering substitutions from [#730] or
-general movement-shape derivation beyond the two rank facts the reproducer
-requires.
+PP5 owns the defensive C guard for #668's instance and the derivable subset of
+its checker mechanism. It does not absorb unrelated lowering substitutions
+from [#730], general movement-shape derivation beyond the two rank facts the
+reproducer requires, or the shape-preserving classification named above.
 
 ### Later residue: kinded nominal applications ([#1247], with [#1258])
 
@@ -1499,7 +1519,7 @@ pass-set/forward-reference decision, [#874]/[#887]'s tag-keyed vacuity, or
 | PP2 | [#1147] and the future supply of registered builtins with no inference disposition |
 | PP3 | [#1209]/[#1211]/[#1212]'s name-keyed binding-identity channel |
 | PP4 | [#1264] and [#1261]'s raw-flat-test-scope residue; exact module scope in every checker/test entry |
-| PP5 | [#668]; every centrally classified identity builtin rejects provable positive-rank disagreement before a perfect checker verdict, with a defensive generated-C guard |
+| PP5 (partial) | [#668]; generated C rejects every positive-rank operand disagreement before indexing, and centrally classified identity builtins reject the derivable subset before a perfect checker verdict. Shape-preserving operations outside `ShapeClass::Identity` still reach a perfect verdict; that residual stays with [#668] |
 | [#1247] residue | integer nominal arguments are kind-checked and concrete dimensions constrain every checker/test/compiler lane; [#1258] round trips the same representation |
 | [#1125] nominal-rank ingress residual | ordinary `.dp` ingress, `surf`, and `validate --deep` reject `d-rank` in nominal argument slots while preserving legal dimension arguments and tensor rank spreads; the broader reader-audit/lint issue remains open |
 
@@ -1529,9 +1549,11 @@ continuous-oracle guarantees. PP4 additionally makes module scope exact at
 both package and batched-test boundaries: a foreign terminal-name match is
 never a binding, and the fitness report cannot describe an unresolved value or
 constructor as fully resolved. PP5 preserves declared parameter ranks and
-rank-only movement facts through the validator, so a provable elementwise
-rank mismatch cannot receive a perfect checker verdict or reach generated-C
-indexing unchecked.
+rank-only movement facts through the validator, so an elementwise rank
+mismatch the resolver can derive does not receive a perfect checker verdict,
+and no positive-rank mismatch reaches generated-C indexing unchecked. A
+mismatch arriving through a shape-preserving operation the resolver does not
+classify is still caught only in generated C; see PP5.
 The separately owned [#1247] residue applies the same honesty rule to
 nominal arguments: integer syntax is either an exact checked dimension or a
 kind error, never an inference wildcard, and every downstream checker/test
