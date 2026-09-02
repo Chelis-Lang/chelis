@@ -137,14 +137,19 @@ charset checker was added: that would be a second source of truth for
 
 - `scripts/gate.py` is the single source of truth for the per-PR
   developer-runnable gate. It defines the command list once, split by
-  CI stage (`lint-and-unit`, `integration`), with the union as the
-  full gate. Two `workspace-tests-shard` workers invoke disjoint partitions
-  of the integration test command, and shard 2 invokes the support-only slice
-  exactly once. The stable `Workspace Tests (Linux)` context aggregates the
-  shards, and `Integration Tests (Linux)` aggregates it with the parallel
-  Phase 0-3 oracles. A stage name runs one subset; `--list`
-  prints the canonical full list and `--local` derives per-crate tests from
-  the diff against `origin/main`.
+  CI stage (`lint-and-unit`, `integration`, `runtime-representation`), with
+  the union as the full gate.
+  Two `workspace-tests-shard` workers invoke disjoint partitions of the
+  integration test command, and shard 2 invokes the support-only slice
+  exactly once. The `runtime-representation` stage is
+  the chelis#893 Phase 0 oracle alone: its release-profile reproducers and
+  serial mutation re-scans cost about eleven hosted minutes, so the
+  `runtime-representation-phase0-oracle` job runs it on a runner of its own
+  rather than doubling a workspace shard. The stable `Workspace Tests
+  (Linux)` context aggregates the shards, and `Integration Tests (Linux)`
+  aggregates it with the parallel phase oracles. A stage name runs one
+  subset; `--list` prints the canonical full list and `--local` derives
+  per-crate tests from the diff against `origin/main`.
 - `python3 scripts/gate.py ...` is a bootstrap command, not permission to use
   the system interpreter for gate logic. Unless it is already running in
   Devenv, a uv-created venv, or `uv run`, the script re-executes itself as
@@ -163,8 +168,11 @@ charset checker was added: that would be a second source of truth for
 - Every nextest profile sets `fail-fast = false`, and gate-owned nextest
   commands also pass `--no-fail-fast` explicitly. A failing assertion does
   not cancel later tests that may reveal independent failures.
-- The canonical full list:
+- The canonical full list (`python3 scripts/gate.py --list` is authoritative;
+  the two feature-matrix clippy commands are abbreviated here):
   - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo clippy --workspace --all-targets --features <solver-free features> -- -D warnings`
+  - `cargo clippy --workspace --all-targets --no-default-features -- -D warnings`
   - `cargo fmt --all -- --check`
   - `cargo run -p chelis-cli --bin chelis --quiet -- lint --check .`
   - `<managed-python> scripts/regenerate_chelis_std_bundle.py --debug --check`
@@ -172,12 +180,16 @@ charset checker was added: that would be a second source of truth for
   - `cargo test -p chelis-compiler-api --doc`
   - `cargo test -p chelis-pipeline-core --doc`
   - `<managed-python> scripts/check_checkpoint_compile_fail.py`
+  - `<managed-python> scripts/check_hash_order_compile_fail.py`
+  - `<managed-python> scripts/check_hash_order_phase_b_compile_fail.py`
+  - `<managed-python> scripts/check_configuration_closure.py`
   - `<managed-python> scripts/pipeline_core_dependency_guard.py`
   - `<managed-python> scripts/pipeline_core_documentation_guard.py`
   - `<managed-python> scripts/check_pipeline_core_compile_fail.py`
   - `cargo nextest run --workspace --no-fail-fast`
   - `<managed-python> scripts/compiler_front_end_performance.py`
   - `<managed-python> scripts/unrepresentable_domain_oracle.py`
+  - `<managed-python> scripts/runtime_representation_oracle.py --phase 0`
 - CI substitutes `cargo nextest run --workspace --profile ci
   --no-fail-fast` for the workspace-nextest command and delegates the excluded
   capacity-census binaries to the required
@@ -210,9 +222,9 @@ charset checker was added: that would be a second source of truth for
   `PYO3_PYTHON` propagation, success cleanup, and complete failed-command
   diagnostics are covered by `scripts/test_gate_diagnostics.py`.
 
-A `run: |` multi-line block in either gate job is outside the exact scalar
-contract; `test_no_multiline_run_in_gate_jobs` also names that prohibition
-directly.
+A `run: |` multi-line block in any gate-owned worker is outside the exact
+scalar contract; `test_no_multiline_run_in_gate_jobs` also names that
+prohibition directly.
 
 ## Ordering
 

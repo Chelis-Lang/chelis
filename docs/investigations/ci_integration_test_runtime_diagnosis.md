@@ -213,3 +213,49 @@ non-ignored tests: 2,215, 2,191, 2,146, and 2,158 in shards 1 through 4,
 respectively, with zero overlap, zero missing tests, and zero extras. That
 proves the selection split, not the hosted duration. A hosted exact-head
 sample remains required to establish the actual critical path.
+
+## 2026-09-02 workspace shard critical path
+
+After the 08-29 sharding the Linux workspace shards became the per-PR long
+pole, and two additions to them account for the difference between the
+15-minute unsharded job and the 27-minute shard 2 measured on 2026-09-02.
+The evidence is 1,000 pull-request runs (08-02 to 09-02) and 268 push runs
+(07-15 to 09-02) with per-step timings sampled weekly; pull-request and push
+durations agree within 0.3 minutes, and median queue time is under 0.5
+minutes in every week, so neither branch-scoped caching nor runner
+concurrency is a cause. The repository is private, so `ubuntu-latest` is a
+2-vCPU runner: measured nextest parallelism is exactly 2.0, and every Linux
+build job compiles all 557 test binaries because rust-cache stores only
+dependency artifacts (4m15s to 4m45s per job).
+
+- The chelis#893 Phase 0 oracle joined `gate.py integration` on 09-02, which
+  shard 2 runs as `--support-only`. On push run `33653771041` the support step
+  took 13.0 minutes instead of 2.1 and the shard took 25.9 minutes instead of
+  14.4: 37 controlled mutations re-scanned the seam inventory serially at
+  about 8.5 s each, three release-profile `cargo nextest run --release` legs
+  compiled chelis-ir, chelis-backend-c, chelis-backend-hip, and chelis-runtime
+  for 4.8 minutes (release artifacts are never in the `linux-workspace`
+  cache, whose writer builds only the test profile), and the census tripwire
+  rebuilt chelis-cli for 47 s under `-p` feature unification. The oracle is
+  now the `runtime-representation` gate stage, run by the
+  `runtime-representation-phase0-oracle` job on its own runner, so the shard
+  returns to its partition wall and the oracle keeps its own failure boundary.
+- `ProfilePartitionTests` gained a listing of the explicit generalization
+  lane on 08-29. That listing passes `--features
+  chelis-types/generalize-sweep-oracle`, a different compiled configuration
+  from the shard's default build, so the `Verify nextest profile coverage`
+  step on shard 1 recompiled the workspace a second time: 0.4 minutes before
+  08-29, 4.2 to 4.8 minutes on every run after, for a 17.2-minute shard 1
+  (p90 18.9). The generalization-lane assertions now form
+  `GeneralizationPartitionTests` and run on generalization shard 1, where that
+  feature build is already warm; the default-configuration set math stays on
+  workspace shard 1.
+
+Test growth is the background trend: integration test files under
+`crates/*/tests/` went from 340 on 07-15 to 560 on 09-02, and the unsharded
+Workspace Tests job rose from 13.0 minutes (week 32) to 15 to 16 minutes
+(weeks 33 to 35). Sharding halved test execution to about 7 minutes per shard,
+but each shard still pays about 6.5 minutes of setup and full compile, which
+is why the shards only reached about 13 minutes before the two additions
+above landed on them. Compile time on 2 vCPUs, paid by nine Linux jobs per
+run, is the remaining structural cost.

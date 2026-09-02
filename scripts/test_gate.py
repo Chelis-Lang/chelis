@@ -516,7 +516,7 @@ def _assert_cvc5_closure_cache(workflow: str) -> None:
             )
 
 
-# Every single-line command allowed in the two gate-owned workers. Comparing
+# Every single-line command allowed in the three gate-owned workers. Comparing
 # complete scalars is intentionally stricter than recognizing Cargo through
 # Bash syntax: an added command of any kind requires an explicit review here.
 GATE_WORKER_RUN_COMMANDS = {
@@ -537,11 +537,21 @@ GATE_WORKER_RUN_COMMANDS = {
         ".venv/bin/python -m unittest "
         "scripts.test_nextest_profile_partition.ProfilePartitionTests",
     ),
+    # Rule-id: GATE-STAGE-RUNTIME-REPRESENTATION -- chelis#893 Phase 0's oracle
+    # is its own gate stage because its release-profile reproducers and serial
+    # mutation re-scans cost about eleven hosted minutes, which doubled the
+    # workspace shard that used to carry it. The job restores the read-only
+    # workspace cache and needs `clang` for the C/Objective-C header lanes.
+    "runtime-representation-phase0-oracle": (
+        "python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1",
+        "python3 scripts/ci_setup_uv_python.py",
+        "python3 scripts/gate.py runtime-representation",
+    ),
 }
 
 
 # CI jobs that are deliberately NOT part of the per-PR developer gate.
-# `gate.py` only owns the two workers above; every other job is listed by name
+# `gate.py` only owns the three workers above; every other job is listed by name
 # so a new job cannot silently escape a scope decision.
 NON_GATE_JOBS = {
     # CI-owned Python unit coverage; it runs no canonical gate stage.
@@ -917,10 +927,17 @@ class ListOutputTests(unittest.TestCase):
         command = (
             "<managed-python> scripts/runtime_representation_oracle.py --phase 0"
         )
-        self.assertIn(
+        # The oracle is a stage of its own so hosted CI can give it a runner of
+        # its own; it must not also ride on the integration support slice.
+        self.assertEqual(
+            [gate.render(entry) for entry in gate.STAGES["runtime-representation"]],
+            [command],
+        )
+        self.assertNotIn(
             command,
             [gate.render(entry) for entry in gate.STAGES["integration"]],
         )
+        self.assertEqual(gate.STAGE_ORDER[-1], "runtime-representation")
         self.assertIn(
             command,
             [gate.render(entry) for entry in gate.LOCAL_STATIC_COMMANDS],
@@ -1905,9 +1922,10 @@ class CiParityTests(unittest.TestCase):
                 ),
             )
         # Positive parity: the workflow text must actually call
-        # gate.py for both stages. The workspace test shards select only the
+        # gate.py for every stage. The workspace test shards select only the
         # partitioned nextest command; shard 2 selects the remaining
-        # integration oracles exactly once after its test partition.
+        # integration oracles exactly once after its test partition; the
+        # runtime-representation stage has a worker of its own.
         text = CI_YML.read_text()
         self.assertIn("scripts/gate.py lint-and-unit", text)
         self.assertIn(
@@ -1916,6 +1934,7 @@ class CiParityTests(unittest.TestCase):
             text,
         )
         self.assertIn("scripts/gate.py integration --support-only", text)
+        self.assertIn("scripts/gate.py runtime-representation", text)
 
     def test_python_binding_ingress_suite_is_continuous(self):
         text = CI_YML.read_text()
@@ -1969,7 +1988,8 @@ class CiParityTests(unittest.TestCase):
         self.assertIn(
             "needs: [changes, workspace-tests, dtype-phase3-oracle, "
             "faithful-observation-phase2-oracle, "
-            "compiled-value-ownership-phase0-oracle, generalize-sweep-oracle]",
+            "compiled-value-ownership-phase0-oracle, "
+            "runtime-representation-phase0-oracle, generalize-sweep-oracle]",
             aggregate_block,
         )
         self.assertIn("always()", aggregate_block)
@@ -2030,6 +2050,41 @@ class CiParityTests(unittest.TestCase):
         self.assertIn(
             "compiled-value-ownership-phase0-oracle=${{ "
             "needs.compiled-value-ownership-phase0-oracle.result }}",
+            aggregate_block,
+        )
+
+    def test_runtime_representation_phase0_oracle_is_a_dedicated_gate_job(self):
+        workspace_block = _ci_job_block("workspace-tests-shard")
+        ownership_block = _ci_job_block("compiled-value-ownership-phase0-oracle")
+        oracle_block = _ci_job_block("runtime-representation-phase0-oracle")
+        aggregate_block = _ci_job_block("integration")
+        command = "python3 scripts/gate.py runtime-representation"
+
+        self.assertIn(
+            "name: Runtime Representation Phase 0 Oracle",
+            oracle_block,
+        )
+        self.assertIn("needs: [changes]", oracle_block)
+        self.assertIn("contents: read", oracle_block)
+        self.assertIn("dtolnay/rust-toolchain@stable", oracle_block)
+        self.assertIn("python3 scripts/ci_setup_uv_python.py", oracle_block)
+        self.assertIn("taiki-e/install-action@nextest", oracle_block)
+        # The oracle's C/Objective-C header lanes parse through clang.
+        self.assertIn(
+            "python3 scripts/ci_apt_get.py gcc clang libopenblas-dev "
+            "libasan8 libubsan1",
+            oracle_block,
+        )
+        _assert_read_only_workspace_cache(oracle_block)
+        _assert_executable_run_once(oracle_block, command)
+        # The stage runs in exactly one job: not on the workspace shards, whose
+        # support slice it left, and not folded into another oracle's job.
+        self.assertNotIn(command, workspace_block)
+        self.assertNotIn(command, ownership_block)
+        self.assertNotIn("runtime_representation_oracle.py", workspace_block)
+        self.assertIn(
+            "runtime-representation-phase0-oracle=${{ "
+            "needs.runtime-representation-phase0-oracle.result }}",
             aggregate_block,
         )
 
@@ -2445,6 +2500,7 @@ class CiParityTests(unittest.TestCase):
             "dtype-phase3-oracle",
             "faithful-observation-phase2-oracle",
             "compiled-value-ownership-phase0-oracle",
+            "runtime-representation-phase0-oracle",
             "generalize-sweep-oracle-shard",
         )
         self.assertEqual(workspace_inputs.get("shared-key"), "linux-workspace")
@@ -2735,10 +2791,26 @@ class CiParityTests(unittest.TestCase):
 
     def test_profile_partition_set_math_runs_continuously(self):
         workspace_block = _ci_job_block("workspace-tests-shard")
-        _assert_executable_run_once(
-            workspace_block,
+        generalization_block = _ci_job_block("generalize-sweep-oracle-shard")
+        default_census = (
             ".venv/bin/python -m unittest "
-            "scripts.test_nextest_profile_partition.ProfilePartitionTests",
+            "scripts.test_nextest_profile_partition.ProfilePartitionTests"
+        )
+        generalization_census = (
+            ".venv/bin/python -m unittest "
+            "scripts.test_nextest_profile_partition.GeneralizationPartitionTests"
+        )
+        _assert_executable_run_once(workspace_block, default_census)
+        _assert_executable_run_once(generalization_block, generalization_census)
+        # Each census lists the configuration its job has already compiled.
+        # Listing the feature-enabled generalization lane on the workspace
+        # shard recompiled the workspace a second time (4.4 hosted minutes).
+        self.assertNotIn("GeneralizationPartitionTests", workspace_block)
+        self.assertNotIn("ProfilePartitionTests", generalization_block)
+        self.assertIn(
+            "- name: Verify generalization lane selection\n"
+            "        if: matrix.shard == 1",
+            generalization_block,
         )
 
     def test_quoted_oracle_name_is_not_an_executable_oracle_step(self):
@@ -3068,7 +3140,7 @@ class CiParityTests(unittest.TestCase):
         # Multi-line shell bodies are deliberately outside the exact scalar
         # contract for gate-owned workers.
         invocations = _parse_ci_run_commands()
-        for job in ("lint-rust", "workspace-tests-shard"):
+        for job in GATE_WORKER_RUN_COMMANDS:
             self.assertNotIn(
                 "<multiline-run-block>",
                 invocations.get(job, []),
@@ -3699,6 +3771,7 @@ class DocsOnlySkipTests(unittest.TestCase):
         "dtype-phase3-oracle",
         "faithful-observation-phase2-oracle",
         "compiled-value-ownership-phase0-oracle",
+        "runtime-representation-phase0-oracle",
         "generalize-sweep-oracle-shard",
         "macos-workspace-shard",
         "backend-sanitizers",
@@ -3794,7 +3867,8 @@ class DocsOnlySkipTests(unittest.TestCase):
             integration.get("needs"),
             "[changes, workspace-tests, dtype-phase3-oracle, "
             "faithful-observation-phase2-oracle, "
-            "compiled-value-ownership-phase0-oracle, generalize-sweep-oracle]",
+            "compiled-value-ownership-phase0-oracle, "
+            "runtime-representation-phase0-oracle, generalize-sweep-oracle]",
         )
         cond = integration.get("if", "")
         self.assertIn("always()", cond)
@@ -3807,6 +3881,10 @@ class DocsOnlySkipTests(unittest.TestCase):
         self.assertIn("needs.faithful-observation-phase2-oracle.result", block)
         self.assertIn(
             "needs.compiled-value-ownership-phase0-oracle.result",
+            block,
+        )
+        self.assertIn(
+            "needs.runtime-representation-phase0-oracle.result",
             block,
         )
         self.assertIn("needs.generalize-sweep-oracle.result", block)

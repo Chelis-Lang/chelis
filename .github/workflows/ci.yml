@@ -734,8 +734,11 @@ jobs:
         run: python3 scripts/gate.py integration --support-only
 
       # This structural oracle needs cargo-nextest. Execute it exactly once on
-      # shard 1, balancing its hosted 21-second cost against shard 2's
-      # exact-once integration support subset.
+      # shard 1, balancing its hosted cost against shard 2's exact-once
+      # integration support subset. It lists only the default feature
+      # configuration this shard has already built; the generalization lane's
+      # feature-enabled listing runs on generalization shard 1 for the same
+      # reason.
       - name: Verify nextest profile coverage
         if: matrix.shard == 1
         run: .venv/bin/python -m unittest scripts.test_nextest_profile_partition.ProfilePartitionTests
@@ -988,6 +991,58 @@ jobs:
       - name: Compiled value ownership Phase 0 oracle
         run: .venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 0
 
+  # chelis#893 Phase 0's authoritative oracle is the `runtime-representation`
+  # gate stage. It runs release-profile reproducers whose artifacts are never
+  # in the shared cache plus 37 serial controlled mutations, about eleven
+  # hosted minutes: measured on push run 33653771041 it took workspace shard
+  # 2's support step from 2.1 to 13.0 minutes and the shard from 14.4 to 25.9.
+  # Like the other phase oracles it therefore gets its own runner and its own
+  # failure boundary, aggregated under the required Integration Tests (Linux)
+  # context. `clang` is the oracle's C/Objective-C front end.
+  runtime-representation-phase0-oracle:
+    name: Runtime Representation Phase 0 Oracle
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [changes]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
+
+      - name: Install C dependencies
+        run: python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
+          # Restore the workspace cache; matrix shard 1 of workspace-tests-shard
+          # remains the single writer for this namespace.
+          save-if: false
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      # The stage is defined once in scripts/gate.py; scripts/test_gate.py
+      # pins this job's run commands like the other gate-owned workers.
+      - name: Gate (runtime representation stage)
+        run: python3 scripts/gate.py runtime-representation
+
   # chelis#1207's authoritative parity corpus compares every production
   # level-based generalization with the retained reference sweep and bypasses
   # nextest's default filter so no discovered non-ignored test is omitted.
@@ -1049,6 +1104,15 @@ jobs:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
         run: cargo nextest run --workspace --profile ci-full --ignore-default-filter --features chelis-types/generalize-sweep-oracle --no-fail-fast -E 'not (binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) | (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)))' --partition hash:${{ matrix.shard }}/4
 
+      # The generalization-lane selection census lists this exact feature
+      # configuration, which is warm only here. On workspace shard 1 the same
+      # listing recompiled the workspace under a second feature set and cost
+      # 4.4 minutes per run; here it is one `cargo nextest list` on the build
+      # the oracle step just produced. Shard 1 runs it once.
+      - name: Verify generalization lane selection
+        if: matrix.shard == 1
+        run: .venv/bin/python -m unittest scripts.test_nextest_profile_partition.GeneralizationPartitionTests
+
       - name: Validate and report test timing
         run: >-
           .venv/bin/python scripts/test_timing_check.py
@@ -1085,13 +1149,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    needs: [changes, workspace-tests, dtype-phase3-oracle, faithful-observation-phase2-oracle, compiled-value-ownership-phase0-oracle, generalize-sweep-oracle]
+    needs: [changes, workspace-tests, dtype-phase3-oracle, faithful-observation-phase2-oracle, compiled-value-ownership-phase0-oracle, runtime-representation-phase0-oracle, generalize-sweep-oracle]
     if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     steps:
       - uses: actions/checkout@v6
 
       - name: Require all integration legs
-        run: python3 scripts/ci_require_success.py workspace-tests=${{ needs.workspace-tests.result }} dtype-phase3-oracle=${{ needs.dtype-phase3-oracle.result }} faithful-observation-phase2-oracle=${{ needs.faithful-observation-phase2-oracle.result }} compiled-value-ownership-phase0-oracle=${{ needs.compiled-value-ownership-phase0-oracle.result }} generalize-sweep-oracle=${{ needs.generalize-sweep-oracle.result }}
+        run: python3 scripts/ci_require_success.py workspace-tests=${{ needs.workspace-tests.result }} dtype-phase3-oracle=${{ needs.dtype-phase3-oracle.result }} faithful-observation-phase2-oracle=${{ needs.faithful-observation-phase2-oracle.result }} compiled-value-ownership-phase0-oracle=${{ needs.compiled-value-ownership-phase0-oracle.result }} runtime-representation-phase0-oracle=${{ needs.runtime-representation-phase0-oracle.result }} generalize-sweep-oracle=${{ needs.generalize-sweep-oracle.result }}
 
   # NOTE: the LOC report moved to its own weekly workflow
   # (.github/workflows/loc-report.yml) so it no longer commits a bot
