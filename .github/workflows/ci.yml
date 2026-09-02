@@ -1454,14 +1454,14 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       # Full history: the Phase 4B acknowledgement gate diffs every frozen
-      # contract file against the MERGE BASE with the base branch, so a change
-      # that landed on `main` after this branch forked is never charged to this
-      # branch. A shallow checkout does not fail here, which is why the depth
-      # matters: `git merge-base` succeeds against a grafted `origin/main` and
-      # returns HEAD, and the unconditional step below then reports zero
-      # changed files with a real contract change in the tree. The enforcing
-      # step names an explicit base SHA and so fails loudly instead, but the
-      # depth is what makes both steps read the same history.
+      # contract file against `git merge-base origin/main HEAD`. The default
+      # shallow checkout gives neither a usable `origin/main` nor enough
+      # history behind it, and what it does give varies with the clone shape:
+      # measured, `--depth 1 --no-single-branch` makes `git merge-base` exit 1
+      # with no output, and `--depth 1 --branch <topic>` leaves `origin/main`
+      # absent entirely. The gate fails loudly on both, so a shallow checkout
+      # turns this job red rather than quiet, but the depth is what makes it
+      # green for the right reason.
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -1498,14 +1498,21 @@ jobs:
       # The enforcing half. On a pull request every changed frozen contract
       # file must be named by a `Frozen-contract-change:` line in the body.
       # The body is untrusted text written by the PR author, so it is passed
-      # through the environment and never interpolated into a shell command;
-      # BASE is a SHA from the event payload.
+      # through the environment and never interpolated into a shell command.
+      #
+      # The base is the default `origin/main`, deliberately, not
+      # `github.event.pull_request.base.sha`. The checkout is `refs/pull/N/merge`,
+      # so HEAD is GitHub's test-merge commit and `git merge-base origin/main HEAD`
+      # is that commit's first parent: exactly the base the merge was built on.
+      # The payload SHA is only the base tip at event-creation time, so if `main`
+      # advances and GitHub regenerates the merge ref before the checkout, the
+      # payload SHA lags and main's changes get charged to this branch. The merge
+      # base cannot lag that way, and both steps then read one baseline.
       - name: Require frozen contract acknowledgements
         if: github.event_name == 'pull_request'
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
-          BASE: ${{ github.event.pull_request.base.sha }}
-        run: uv run --managed-python --python 3.11 --no-project python scripts/dtype_phase4b_oracle.py --require-acknowledgement --acknowledgements-env PR_BODY --base "$BASE"
+        run: uv run --managed-python --python 3.11 --no-project python scripts/dtype_phase4b_oracle.py --require-acknowledgement --acknowledgements-env PR_BODY
 
       - name: Install mdBook
         uses: taiki-e/install-action@v2

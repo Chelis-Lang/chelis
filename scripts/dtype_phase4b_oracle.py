@@ -28,10 +28,18 @@ line in the pull request body::
 one line per changed file. The grammar is exact and case-sensitive: no leading
 whitespace, exactly one space after the colon, a repo-relative POSIX path with
 no glob metacharacter and no ``.``/``..`` segment, and nothing after the path.
-Lines inside fenced code blocks are ignored, so a body may quote the grammar.
 An unacknowledged change and an acknowledgement naming a file that did not
 change are both failures: a stale acknowledgement is how a reviewer stops
 reading them.
+
+Lines inside fenced code blocks are ignored so a body can quote the grammar.
+That exemption is pragmatic, not a CommonMark implementation: it tracks the
+opening run's character and length, and it can still disagree with GitHub's
+renderer in both directions (an HTML comment hides a line from a reader but not
+from this parser; an indented fence hides it from this parser but not always
+from a reader). The disagreement costs reviewer visibility, never soundness: no
+shape of it admits an unacknowledged change, because a line the parser does not
+read is a file that goes unacknowledged and fails.
 
 ``--require-acknowledgement`` is the enforcing mode and is what CI runs on a
 pull request. Without it the oracle reports the changed contract files and the
@@ -852,17 +860,20 @@ def validate_frozen_contract_changes(
 
     try:
         merge_base = resolve_merge_base(root, base)
+        changed = changed_contract_files(root, merge_base, contract_files)
     except OracleError as error:
+        # Advisory mode reports and continues so the atom and region digests
+        # still run on a checkout whose git state this leg cannot read. The
+        # enforcing mode re-raises: a check that did not run is never a pass.
         if require_acknowledgement:
             raise
         return [
             f"frozen contract acknowledgement: {error}",
             "frozen contract acknowledgement: change detection skipped "
             "(advisory mode); CI runs --require-acknowledgement and will fail "
-            "on an unresolvable base",
+            "on an unreadable base",
         ]
 
-    changed = changed_contract_files(root, merge_base, contract_files)
     changed_set = set(changed)
     known = set(contract_files)
 

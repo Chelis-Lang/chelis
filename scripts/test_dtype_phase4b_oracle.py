@@ -4208,6 +4208,37 @@ class AcknowledgementGrammarTests(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("unclosed", errors[0])
 
+    def test_an_unclosed_fence_errors_even_beside_a_valid_line(self) -> None:
+        # Round 2 RT2-5. Reporting the unclosed fence only when nothing parsed
+        # survived the round-1 suite: an author who acknowledges one file and
+        # then opens a fence loses every line after it with no diagnostic.
+        paths, errors = self.parse(
+            "Frozen-contract-change: spec/11-ffi.md\n"
+            "```\n"
+            "Frozen-contract-change: spec/10-serialization.md\n"
+        )
+        self.assertEqual(paths, ["spec/11-ffi.md"])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("unclosed", errors[0])
+
+    def test_trailing_whitespace_after_the_path_is_accepted(self) -> None:
+        # Round 2 RT2-5. `raw.rstrip()` is the reason, and it was untested in
+        # either direction, so replacing it with `rstrip("\n")` survived.
+        paths, errors = self.parse(
+            "Frozen-contract-change: spec/11-ffi.md   \t\n"
+        )
+        self.assertEqual(paths, ["spec/11-ffi.md"])
+        self.assertEqual(errors, [])
+
+    def test_lone_carriage_returns_still_separate_lines(self) -> None:
+        # Round 2 RT2-5. Dropping the lone-CR normalization survived, because
+        # every other test used LF or CRLF.
+        paths, errors = self.parse(
+            "Body.\rFrozen-contract-change: spec/11-ffi.md\rMore.\r"
+        )
+        self.assertEqual(paths, ["spec/11-ffi.md"])
+        self.assertEqual(errors, [])
+
     def test_a_closed_fence_reports_no_unclosed_error(self) -> None:
         paths, errors = self.parse("```\nquoted\n```\n")
         self.assertEqual((paths, errors), ([], []))
@@ -4467,6 +4498,36 @@ class FrozenContractChangeTests(unittest.TestCase):
             self.assert_fails(
                 "is not a git work tree", root=Path(plain)
             )
+
+    def test_an_unreadable_tree_reports_and_exits_zero_in_advisory_mode(
+        self,
+    ) -> None:
+        # Round 2 RT2-4. The unreadable-blob repair made `changed_contract_files`
+        # raise, and advisory mode caught `OracleError` only around the merge
+        # base, so a degraded object store aborted the run before the atom and
+        # region digests. Advisory mode reports and continues.
+        real_git = oracle._git
+
+        def failing_listing(root: Path, *args: str):
+            if args and args[0] == "ls-tree":
+                return subprocess.CompletedProcess(
+                    args, 128, b"", b"fatal: not a tree object"
+                )
+            return real_git(root, *args)
+
+        with mock.patch.object(oracle, "_git", failing_listing):
+            report = self.check(require_acknowledgement=False)
+            self.assertTrue(
+                any("cannot list frozen contract files" in line for line in report),
+                report,
+            )
+            self.assertTrue(
+                any("change detection skipped" in line for line in report), report
+            )
+            with self.assertRaisesRegex(
+                oracle.OracleError, "cannot list frozen contract files"
+            ):
+                self.check(require_acknowledgement=True)
 
     def test_a_missing_merge_base_reports_and_exits_zero_in_advisory_mode(
         self,

@@ -2389,7 +2389,7 @@ class CiParityTests(unittest.TestCase):
         command = (
             "uv run --managed-python --python 3.11 --no-project python "
             "scripts/dtype_phase4b_oracle.py --require-acknowledgement "
-            "--acknowledgements-env PR_BODY --base \"$BASE\""
+            "--acknowledgements-env PR_BODY"
         )
         _assert_executable_run_once(docs_block, command)
         step = _ci_step_block(docs_block, "Require frozen contract acknowledgements")
@@ -2402,7 +2402,12 @@ class CiParityTests(unittest.TestCase):
         # The body is attacker-controlled text. It reaches the oracle through
         # the environment, so it is never interpolated into a shell command.
         self.assertIn("PR_BODY: ${{ github.event.pull_request.body }}", step)
-        self.assertIn("BASE: ${{ github.event.pull_request.base.sha }}", step)
+        # The base stays the default `origin/main`, which on a merge-ref
+        # checkout resolves to the merge commit's first parent. The payload's
+        # `base.sha` is the base tip at event time and lags when `main` moves
+        # before the checkout, which would charge main's changes to this branch.
+        self.assertNotIn("base.sha", step)
+        self.assertNotIn("--base", step)
         # A step-level `continue-on-error: true` would leave the command pin
         # above matching while the gate stopped gating.
         self.assertNotIn("continue-on-error", step)
