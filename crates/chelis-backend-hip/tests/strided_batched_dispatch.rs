@@ -358,7 +358,7 @@ fn broadcasted_rhs_leading_axis_falls_back_to_helper_loop() {
     let b = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(3),
+            size: chelis_ir::dag::RtDim::Lit(3),
         },
         vec![base_b],
         t(Prim::F32, vec![3, 5, 6]),
@@ -408,7 +408,7 @@ fn both_sides_broadcasted_leading_axis_falls_back_to_helper_loop() {
     let a = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(3),
+            size: chelis_ir::dag::RtDim::Lit(3),
         },
         vec![base_a],
         t(Prim::F32, vec![3, 4, 5]),
@@ -425,7 +425,7 @@ fn both_sides_broadcasted_leading_axis_falls_back_to_helper_loop() {
     let b = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(3),
+            size: chelis_ir::dag::RtDim::Lit(3),
         },
         vec![base_b],
         t(Prim::F32, vec![3, 5, 6]),
@@ -560,7 +560,7 @@ fn perf_f1_broadcasted_leading_axis_uses_helper_loop_fallback() {
     let a = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(3),
+            size: chelis_ir::dag::RtDim::Lit(3),
         },
         vec![base_a],
         t(Prim::F32, vec![3, 4, 5]),

@@ -3048,7 +3048,7 @@ fn lower_host_function(
     // the enclosing `def`'s type child, but they must not re-lower the same
     // checked function under fresh inference variables: that loses symbolic
     // dimension provenance and can turn a valid tensor helper into a false
-    // Form-3 materialization rejection.
+    // sourceless runtime-extent materialization rejection.
     let (param_tys, ret_ty) = declared_fn_type_expr
         .as_ref()
         .and_then(|ty| parse_expanded_fn_type_expr(program, ty))
@@ -10365,13 +10365,15 @@ fn actualize_tensor_helper_types(
                                 None,
                             ))
                         }
-                        // `ToEnd` is an `end`-only marker and `Sym` is a
-                        // `Reshape` target only; `verify` rejects both in a
-                        // `Shrink` bound ("only valid as an end", "only valid
-                        // as a reshape target").
+                        // `ToEnd` is an `end`-only marker; `Sym` is a
+                        // `Reshape` target only; and `InputAxis` belongs only
+                        // to `Expand`/`Reshape`. `verify` rejects all three
+                        // misplaced carriers in a `Shrink` bound.
                         (crate::dag::RtDim::ToEnd, _)
                         | (crate::dag::RtDim::Sym(_), _)
-                        | (_, crate::dag::RtDim::Sym(_)) => None,
+                        | (crate::dag::RtDim::InputAxis { .. }, _)
+                        | (_, crate::dag::RtDim::Sym(_))
+                        | (_, crate::dag::RtDim::InputAxis { .. }) => None,
                     })
                     .collect::<Option<Vec<_>>>()?
             }
@@ -10403,7 +10405,9 @@ fn actualize_tensor_helper_types(
                             reserve_runtime_dim_name(occupied_dim_names, "stride", node_id, axis),
                             None,
                         )),
-                        crate::dag::RtDim::ToEnd | crate::dag::RtDim::Sym(_) => None,
+                        crate::dag::RtDim::ToEnd
+                        | crate::dag::RtDim::Sym(_)
+                        | crate::dag::RtDim::InputAxis { .. } => None,
                     })
                     .collect::<Option<Vec<_>>>()?
             }
@@ -10570,13 +10574,20 @@ fn actualize_tensor_helper_types(
                         return None;
                     }
                     let inserted = match size {
-                        crate::dag::DimExpr::Concrete(value) => crate::dag::DimInfo::Lit(*value),
-                        crate::dag::DimExpr::Sym(name) => {
-                            crate::dag::DimInfo::Named(name.clone(), None)
+                        crate::dag::RtDim::Lit(value) => crate::dag::DimInfo::Lit(*value),
+                        crate::dag::RtDim::InputAxis {
+                            tensor,
+                            axis: crate::dag::RtAxis::Lit(source_axis),
+                        } => {
+                            let source_id = *node.inputs.get(*tensor)?;
+                            let source = inferred.get(&source_id)?;
+                            let source_axis = usize::try_from(*source_axis).ok()?;
+                            source.dims.get(source_axis)?.clone()
                         }
-                        crate::dag::DimExpr::Mul(_, _) | crate::dag::DimExpr::Div(_, _) => {
-                            return None;
+                        crate::dag::RtDim::Node(_) | crate::dag::RtDim::Sym(_) => {
+                            node.output_type.dims.get(*axis)?.clone()
                         }
+                        crate::dag::RtDim::ToEnd => return None,
                     };
                     dims.insert(*axis, inserted);
                     Some(TensorType {
@@ -10603,14 +10614,17 @@ fn actualize_tensor_helper_types(
                     }
                     actual
                 }),
-            _ => None,
-        }
-        .or_else(|| {
-            node.reusable_input
+            // A reusable input is a storage hint, so it may supply a shape
+            // only when this pass has no operation-specific rule. Keep this
+            // fallback inside the unhandled arm: `None` from any explicit
+            // rule is a deliberate decline for malformed or unavailable
+            // shape evidence and must preserve `node.output_type`.
+            _ => node
+                .reusable_input
                 .and_then(|id| inferred.get(&id))
                 .filter(|input| input.dims.len() == node.output_type.dims.len())
-                .map(|input| precision_like(input, node.output_type.precision))
-        });
+                .map(|input| precision_like(input, node.output_type.precision)),
+        };
         if let Some(actual) = actual {
             inferred.insert(node.id, actual);
         }
@@ -16131,7 +16145,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
     #[test]
     fn tensor_helper_actualization_merges_matmul_synthetic_expand_dims() {
-        use crate::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
+        use crate::dag::{Dag, DimInfo, RiscOp, RtAxis, RtDim, TensorType};
 
         let batch = DimInfo::Named("batch".into(), None);
         let in_dim = DimInfo::Named("in_dim".into(), None);
@@ -16160,9 +16174,12 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         let expanded_x = dag.add_node(
             RiscOp::Expand {
                 axis: 2,
-                size: DimExpr::Sym("d420".into()),
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(1),
+                },
             },
-            vec![x],
+            vec![x, w],
             TensorType {
                 dims: vec![batch.clone(), in_dim.clone(), d420.clone()],
                 precision: Prim::F32,
@@ -16172,9 +16189,12 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         let expanded_w = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: DimExpr::Sym("d417".into()),
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
             },
-            vec![w],
+            vec![w, x],
             TensorType {
                 dims: vec![d417, in_dim.clone(), out_dim.clone()],
                 precision: Prim::F32,
@@ -16231,21 +16251,12 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         }
     }
 
-    /// chelis#345 (op-internal half): actualization rewrote OUTPUT
-    /// types via `replace_node` but left `node.op` untouched, so an
-    /// `Expand { size: Sym("dN") }` kept the stale checker-minted name
-    /// after its output dim had been rewritten to the user-facing
-    /// symbol. The Bucket 4d sweep in `dag.rs::symbolic_occurrences`
-    /// panics on exactly that mixed state (no Load declares `dN`), and
-    /// before the fix the `grad(residual, wrt=theta)` host-wrapper
-    /// canary in `chelis-cli/tests/cli.rs`
-    /// (`build_c_tensor_grad_lm_style_mixed_scalar_tensor_args_builds`)
-    /// tripped it. Pin that op-internal fields are renamed in lockstep
-    /// with output dims — and, negative parity, that user-facing
-    /// (non-`dN`) sizes are left alone.
+    /// Actualization may rewrite a checker-minted output dimension, but the
+    /// structural InputAxis carrier continues to reference the same tensor
+    /// input slot and axis.
     #[test]
-    fn tensor_helper_actualization_rewrites_op_internal_expand_sizes() {
-        use crate::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
+    fn tensor_helper_actualization_preserves_structural_expand_size() {
+        use crate::dag::{Dag, DimInfo, RiscOp, RtAxis, RtDim, TensorType};
 
         let n = DimInfo::Named("n".into(), None);
         let d47 = DimInfo::Named("d47".into(), None);
@@ -16271,14 +16282,16 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             },
             None,
         );
-        // The Sum adjoint's expand-back: size and output dim both carry
-        // the minted alias.
+        // The Sum adjoint's expand-back reads the original tensor shape.
         let expanded_g = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: DimExpr::Sym("d47".into()),
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
             },
-            vec![g],
+            vec![g, x],
             TensorType {
                 dims: vec![d47.clone()],
                 precision: Prim::F32,
@@ -16316,23 +16329,24 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             expand.op,
             RiscOp::Expand {
                 axis: 0,
-                size: DimExpr::Sym("n".into()),
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
             },
-            "op-internal Expand size must be renamed in lockstep with \
-             the output dim (chelis#345); a stale `d47` is an undeclared \
-             identifier downstream"
+            "actualization must preserve the structural witness slot"
         );
-        // The whole helper must satisfy the Bucket 4d guard: no
-        // symbolic reference (output OR op-internal) without a
-        // declaring Load.
-        let _ = crate::dag::symbolic_occurrences(&actualized);
+        let errors = crate::verify::verify(&actualized);
+        assert!(
+            errors.is_empty(),
+            "actualized helper must verify: {errors:?}"
+        );
     }
 
-    /// Negative parity for the rename: user-facing (non-minted) Expand
-    /// sizes must survive actualization untouched.
+    /// Negative parity: an already user-facing witness remains unchanged.
     #[test]
-    fn tensor_helper_actualization_leaves_user_facing_expand_sizes_alone() {
-        use crate::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
+    fn tensor_helper_actualization_leaves_user_facing_input_axis_alone() {
+        use crate::dag::{Dag, DimInfo, RiscOp, RtAxis, RtDim, TensorType};
 
         let batch = DimInfo::Named("batch".into(), None);
         let mut dag = Dag::new();
@@ -16345,21 +16359,24 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             },
             None,
         );
-        let expanded = dag.add_node(
-            RiscOp::Expand {
-                axis: 0,
-                size: DimExpr::Sym("batch".into()),
-            },
-            vec![g],
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
             TensorType {
                 dims: vec![batch.clone()],
                 precision: Prim::F32,
             },
             None,
         );
-        let x = dag.add_node(
-            RiscOp::Load { name: "x".into() },
-            vec![],
+        let expanded = dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
+            },
+            vec![g, x],
             TensorType {
                 dims: vec![batch.clone()],
                 precision: Prim::F32,
@@ -16392,10 +16409,12 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             expand.op,
             RiscOp::Expand {
                 axis: 0,
-                size: DimExpr::Sym("batch".into()),
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
             },
-            "user-facing symbolic sizes are not synthetic and must not \
-             be rewritten"
+            "user-facing structural sizes must not be rewritten"
         );
     }
 
@@ -16562,6 +16581,87 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         );
     }
 
+    /// NEGATIVE PARITY: [05-MOV-1]'s owner matrix reserves `InputAxis` for
+    /// `expand` and `reshape`. Host helper actualization must therefore
+    /// decline it in either `shrink` bound and in a `stride`, preserving the
+    /// declared type until verification reports the malformed carrier.
+    #[test]
+    fn tensor_helper_actualization_declines_input_axis_for_shrink_and_stride() {
+        use crate::dag::{Dag, DimInfo, RiscOp, RtAxis, RtDim, TensorType};
+
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named("actual_input".into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let declared = TensorType {
+            dims: vec![DimInfo::Named("d47".into(), None)],
+            precision: Prim::F32,
+        };
+        let input_axis = || RtDim::InputAxis {
+            tensor: 1,
+            axis: RtAxis::Lit(0),
+        };
+        let malformed = [
+            dag.add_node(
+                RiscOp::Shrink {
+                    bounds: vec![(input_axis(), RtDim::Lit(2))],
+                },
+                vec![input, input],
+                declared.clone(),
+                None,
+            ),
+            dag.add_node(
+                RiscOp::Shrink {
+                    bounds: vec![(RtDim::Lit(0), input_axis())],
+                },
+                vec![input, input],
+                declared.clone(),
+                None,
+            ),
+            dag.add_node(
+                RiscOp::Stride {
+                    strides: vec![input_axis()],
+                },
+                vec![input, input],
+                declared.clone(),
+                None,
+            ),
+        ];
+        for node in malformed {
+            // `reusable_input` is a storage-reuse hint, not shape authority.
+            // Exercise the generic fallback explicitly: a declined malformed
+            // movement carrier must not inherit its reusable buffer's shape.
+            dag.set_reusable_input(node, input);
+            dag.add_root(node);
+        }
+
+        let scope = UnordMap::from([(
+            "x".into(),
+            HostTypeTerm::Tensor(TensorType {
+                dims: vec![DimInfo::Named("actual_input".into(), None)],
+                precision: Prim::F32,
+            }),
+        )]);
+
+        let actualized = actualize_tensor_helper_types(&dag, &scope);
+        for node in malformed {
+            assert_eq!(
+                actualized
+                    .get(node)
+                    .expect("malformed movement node")
+                    .output_type,
+                declared,
+                "InputAxis outside expand/reshape must not be actualized"
+            );
+        }
+    }
+
     fn runtime_shrink_bound_nodes(
         dag: &mut crate::dag::Dag,
     ) -> (crate::dag::NodeId, crate::dag::NodeId) {
@@ -16648,7 +16748,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
     #[test]
     fn runtime_shrink_name_reserves_op_internal_symbols_in_both_node_orders() {
-        use crate::dag::{Dag, DimExpr, DimInfo, RiscOp, RtDim, TensorType};
+        use crate::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
 
         for internal_before_shrink in [false, true] {
             let mut dag = Dag::new();
@@ -16664,15 +16764,11 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             let (start, end) = runtime_shrink_bound_nodes(&mut dag);
             let expected_shrink_id = if internal_before_shrink { 4 } else { 3 };
             let base = format!("_rt_shrink_dim_{expected_shrink_id}_0");
-            let internal_size = DimExpr::Mul(
-                Box::new(DimExpr::Sym(base.clone())),
-                Box::new(DimExpr::Sym(format!("{base}_1"))),
-            );
+            let internal_shape = vec![RtDim::Sym(base.clone()), RtDim::Sym(format!("{base}_1"))];
             let add_internal_carrier = |dag: &mut Dag| {
                 dag.add_node(
-                    RiscOp::Expand {
-                        axis: 0,
-                        size: internal_size.clone(),
+                    RiscOp::Reshape {
+                        new_shape: internal_shape.clone(),
                     },
                     vec![input],
                     TensorType {

@@ -13,6 +13,7 @@ pub(super) fn validate_ir_program(
 ) {
     detect_top_level_binding_cycles(exprs, errors);
     detect_trivial_non_terminating_fns(exprs, errors);
+    validate_vmap_extent_dependencies(exprs, type_env, errors);
     let mut static_env = UnordMap::new();
     let shape_env = shape_type_env(type_env);
     let declared_signatures = collect_declared_sig_metadata(top_level_decl_items(exprs));

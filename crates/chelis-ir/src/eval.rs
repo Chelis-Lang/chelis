@@ -1225,8 +1225,8 @@ fn one_hot(indices: &TensorValue, vocab: usize, prim: Prim) -> Result<TensorValu
 
 /// chelis#616: resolve a movement [`RtDim`] to a concrete extent at eval time.
 /// `Lit` is itself; `ToEnd` is the axis's input extent; `Node(i)` reads the
-/// rank-0 integer value at `node.inputs[i]` (loud on a missing / non-integral /
-/// negative source).
+/// rank-0 integer value at `node.inputs[i]`; and `InputAxis` reads an explicit
+/// tensor input's shape metadata.
 fn resolve_eval_bound(
     bound: &RtDim,
     node: &DagNode,
@@ -1249,15 +1249,55 @@ fn resolve_eval_bound(
                     node.id.0
                 ));
             }
-            let raw = src.element_f64_lossy(0);
-            if raw < 0.0 || raw.fract() != 0.0 || raw > usize::MAX as f64 {
+            let raw = src.storage().scalar_at(0).as_i64_exact().ok_or_else(|| {
+                format!(
+                    "movement bound at node {}: bound-source input slot {i} must be int64",
+                    node.id.0
+                )
+            })?;
+            if raw < 0 {
                 return Err(format!(
                     "movement bound at node {}: bound-source (slot {i}) must be a non-negative \
                      integer, got {raw}",
                     node.id.0
                 ));
             }
-            Ok(raw as usize)
+            usize::try_from(raw).map_err(|_| {
+                format!(
+                    "movement bound at node {}: bound-source (slot {i}) exceeds host extent capacity: {raw}",
+                    node.id.0
+                )
+            })
+        }
+        RtDim::InputAxis {
+            tensor,
+            axis: crate::dag::RtAxis::Lit(axis),
+        } => {
+            let source_id = node.inputs.get(*tensor).ok_or_else(|| {
+                format!(
+                    "movement bound at node {}: missing InputAxis tensor slot {tensor}",
+                    node.id.0
+                )
+            })?;
+            let source = values.get(source_id).ok_or_else(|| {
+                format!(
+                    "movement bound at node {}: missing value for InputAxis tensor slot {tensor}",
+                    node.id.0
+                )
+            })?;
+            let axis = usize::try_from(*axis).map_err(|_| {
+                format!(
+                    "movement bound at node {}: InputAxis axis {axis} was not normalized",
+                    node.id.0
+                )
+            })?;
+            source.shape.get(axis).copied().ok_or_else(|| {
+                format!(
+                    "movement bound at node {}: InputAxis axis {axis} out of bounds for rank {} tensor in slot {tensor}",
+                    node.id.0,
+                    source.shape.len()
+                )
+            })
         }
         // `Sym` is legal only in a `Reshape` target and is rewritten to
         // `Lit` by `bind_symbolic_dims` before evaluation; a movement bound
@@ -1736,7 +1776,6 @@ fn required_symbolic_dims(dag: &Dag, live: Option<&[bool]>) -> UnordSet<String> 
             }
         }
         match &node.op {
-            RiscOp::Expand { size, .. } => collect_dim_expr_symbols(size, &mut symbols),
             RiscOp::Reshape { new_shape } => {
                 for dim in new_shape {
                     if let RtDim::Sym(name) = dim {
@@ -2209,6 +2248,7 @@ where
                         // chelis#616: a runtime target extent reads its rank-0
                         // integer scalar exactly like a movement bound.
                         RtDim::Node(_) => resolve_eval_bound(dim, node, &values, 0),
+                        RtDim::InputAxis { .. } => resolve_eval_bound(dim, node, &values, 0),
                         // chelis#616: an op-declared symbol resolves from the
                         // mid-evaluation bindings.
                         RtDim::Sym(name) => runtime_dims.get(name).copied().ok_or_else(|| {
@@ -2238,37 +2278,39 @@ where
             }
             RiscOp::Permute { axes } => permute(&values[&node.inputs[0]], axes),
             RiscOp::Expand { axis, size } => {
-                // chelis#616: a symbolic size surviving `bind_symbolic_dims`
-                // is an op-declared runtime dim (resolved from the
-                // mid-evaluation bindings) or a wildcard whose extent comes
-                // from the node's shape-dep value (the `lower_if` mask
-                // expansion over a wildcard-typed branch). Loud when neither
-                // resolves.
-                let dep_shape = node
-                    .shape_deps
-                    .iter()
-                    .find_map(|dep| values.get(dep).map(|v| v.shape.clone()));
-                let size_value = match size.evaluate(&runtime_dims) {
-                    Ok(value) => value,
-                    Err(e) => dep_shape
-                        .as_ref()
-                        .and_then(|shape| shape.get(*axis).copied())
-                        .ok_or_else(|| format!("expand at node {}: {e}", node.id.0))?,
-                };
-                let out_shape = match concrete_shape_with(&node.output_type, &runtime_dims) {
-                    Ok(shape) => shape,
-                    // The mask chain expands one axis at a time, so an
-                    // intermediate step's shape is a PREFIX of the branch
-                    // value's shape.
-                    Err(e) => {
-                        let out_rank = node.output_type.dims.len();
-                        dep_shape
-                            .filter(|shape| shape.len() >= out_rank)
-                            .map(|shape| shape[..out_rank].to_vec())
-                            .ok_or_else(|| format!("expand at node {}: {e}", node.id.0))?
+                let input = &values[&node.inputs[0]];
+                let size_value = resolve_eval_bound(size, node, &values, 0)?;
+                let mut out_shape = input.shape.clone();
+                if node.output_type.dims.len() == input.shape.len() + 1 {
+                    if *axis > out_shape.len() {
+                        return Err(format!(
+                            "expand at node {}: axis {} out of bounds for rank {} tensor",
+                            node.id.0,
+                            axis,
+                            input.shape.len()
+                        ));
                     }
-                };
-                expand(&values[&node.inputs[0]], *axis, size_value, out_shape)
+                    out_shape.insert(*axis, size_value);
+                } else if node.output_type.dims.len() == input.shape.len() {
+                    let target = out_shape.get_mut(*axis).ok_or_else(|| {
+                        format!(
+                            "expand at node {}: axis {} out of bounds for rank {} tensor",
+                            node.id.0,
+                            axis,
+                            input.shape.len()
+                        )
+                    })?;
+                    *target = size_value;
+                } else {
+                    return Err(format!(
+                        "expand at node {}: output rank {} must equal input rank {} or {}",
+                        node.id.0,
+                        node.output_type.dims.len(),
+                        input.shape.len(),
+                        input.shape.len() + 1
+                    ));
+                }
+                expand(input, *axis, size_value, out_shape)
             }
             RiscOp::OneHot { vocab } => one_hot(&values[&node.inputs[0]], *vocab, out_prim)?,
             RiscOp::Pad { padding, fill } => {
@@ -3335,7 +3377,7 @@ mod tests {
         let y = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: crate::dag::DimExpr::Concrete(4),
+                size: crate::dag::RtDim::Lit(4),
             },
             vec![x],
             out_ty,
@@ -3451,21 +3493,16 @@ mod tests {
         assert_eq!(values[&live].to_f64_lossy_vec(), vec![3.0, 4.0]);
     }
 
-    /// chelis#351: a Load can be DEAD under the roots' live mask while a
-    /// live node still needs a symbolic dim that only that Load
-    /// declares (`vmap(grad(f))` where the gradient is constant in the
-    /// input: the backward DAG never consumes `x`, but its
-    /// `Expand { size: Sym(n) }` must bind `n` from `x`'s shape).
-    /// The occurrence input is resolved despite the mask, and the dim
-    /// binds from its shape.
+    /// A shape-only `InputAxis` edge is an ordinary live dependency even
+    /// when the tensor's elements are otherwise unused.
     #[test]
-    fn eval_root_scoped_strict_resolves_dead_load_for_symbolic_dim() {
+    fn eval_root_scoped_strict_resolves_shape_only_input_axis() {
         let mut dag = Dag::new();
         let sym_ty = TensorType {
             dims: vec![DimInfo::Named("n".to_string(), None)],
             precision: Prim::F32,
         };
-        let _x = dag.add_node(
+        let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
             vec![],
             sym_ty.clone(),
@@ -3480,9 +3517,12 @@ mod tests {
         let ones = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: crate::dag::DimExpr::Sym("n".to_string()),
+                size: crate::dag::RtDim::InputAxis {
+                    tensor: 1,
+                    axis: crate::dag::RtAxis::Lit(0),
+                },
             },
-            vec![one],
+            vec![one, x],
             sym_ty,
             None,
         );
@@ -3495,23 +3535,20 @@ mod tests {
         assert_eq!(
             vals[&ones],
             TensorValue::from_vec(vec![3], vec![1.0, 1.0, 1.0]),
-            "`n` must bind to 3 from the dead `x` Load's runtime shape"
+            "InputAxis must read 3 from the explicit `x` shape-only input"
         );
     }
 
-    /// Negative parity for the dead-load resolution above: when the
-    /// declaring occurrence input is genuinely unavailable, the failure
-    /// is the dim-targeted inference error — never a silent default
-    /// shape and never the bare strict-load error (the Load is dead, so
-    /// strict mode has no claim on it).
+    /// Negative parity: an unavailable structural witness is a missing live
+    /// input, never a guessed extent.
     #[test]
-    fn eval_root_scoped_strict_missing_dead_symbolic_load_is_dim_error() {
+    fn eval_root_scoped_strict_missing_input_axis_witness_is_input_error() {
         let mut dag = Dag::new();
         let sym_ty = TensorType {
             dims: vec![DimInfo::Named("n".to_string(), None)],
             precision: Prim::F32,
         };
-        let _x = dag.add_node(
+        let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
             vec![],
             sym_ty.clone(),
@@ -3526,22 +3563,25 @@ mod tests {
         let ones = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: crate::dag::DimExpr::Sym("n".to_string()),
+                size: crate::dag::RtDim::InputAxis {
+                    tensor: 1,
+                    axis: crate::dag::RtAxis::Lit(0),
+                },
             },
-            vec![one],
+            vec![one, x],
             sym_ty,
             None,
         );
 
         let err = eval_tensor_roots_with_strict(&dag, &[ones], |_| None).unwrap_err();
         assert!(
-            err.contains("missing required input `x` for symbolic dimension `n`"),
-            "expected the dim-targeted inference error, got: {err}"
+            err.contains("missing required input `x`"),
+            "expected the structural input error, got: {err}"
         );
     }
 
     #[test]
-    fn eval_root_scoped_rejects_ambiguous_dead_shape_sources() {
+    fn eval_root_scoped_input_axis_selects_one_exact_shape_source() {
         let mut dag = Dag::new();
         let sym_ty = TensorType {
             dims: vec![DimInfo::Named("k".to_string(), None)],
@@ -3553,7 +3593,7 @@ mod tests {
             sym_ty.clone(),
             None,
         );
-        let _required = dag.add_node(
+        let required = dag.add_node(
             RiscOp::Load { name: "x".into() },
             vec![],
             sym_ty.clone(),
@@ -3568,24 +3608,27 @@ mod tests {
         let ones = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: crate::dag::DimExpr::Sym("k".to_string()),
+                size: crate::dag::RtDim::InputAxis {
+                    tensor: 1,
+                    axis: crate::dag::RtAxis::Lit(0),
+                },
             },
-            vec![one],
+            vec![one, required],
             sym_ty,
             None,
         );
 
-        for supplied in ["a", "x"] {
-            let err = eval_tensor_roots_with_strict(&dag, &[ones], |name| {
-                (name == supplied).then(|| TensorValue::from_vec(vec![2], vec![3.0, 4.0]))
-            })
-            .unwrap_err();
-            assert!(
-                err.contains("ambiguous dead-load sources")
-                    && err.contains("live symbolic dimension `k`"),
-                "supplying {supplied} must not resolve an ambiguous shape source: {err}"
-            );
-        }
+        let values = eval_tensor_roots_with_strict(&dag, &[ones], |name| {
+            (name == "x").then(|| TensorValue::from_vec(vec![2], vec![3.0, 4.0]))
+        })
+        .expect("the exact x witness must resolve without consulting same-named a");
+        assert_eq!(values[&ones].shape, vec![2]);
+
+        let err = eval_tensor_roots_with_strict(&dag, &[ones], |name| {
+            (name == "a").then(|| TensorValue::from_vec(vec![2], vec![3.0, 4.0]))
+        })
+        .unwrap_err();
+        assert!(err.contains("missing required input `x`"), "{err}");
     }
 
     #[test]
@@ -3598,8 +3641,7 @@ mod tests {
             ],
             precision: Prim::F32,
         };
-        let _shape_source =
-            dag.add_node(RiscOp::Load { name: "x".into() }, vec![], square_ty, None);
+        let shape_source = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], square_ty, None);
         let one = dag.add_node(
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
@@ -3613,9 +3655,12 @@ mod tests {
         let ones = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: crate::dag::DimExpr::Sym("n".to_string()),
+                size: crate::dag::RtDim::InputAxis {
+                    tensor: 1,
+                    axis: crate::dag::RtAxis::Lit(1),
+                },
             },
-            vec![one],
+            vec![one, shape_source],
             vector_ty,
             None,
         );
@@ -3623,7 +3668,7 @@ mod tests {
         let values = eval_tensor_roots_with_strict(&dag, &[ones], |name| {
             (name == "x").then(|| TensorValue::from_vec(vec![2, 2], vec![0.0; 4]))
         })
-        .expect("one dead source may declare the same symbolic extent on multiple axes");
+        .expect("one explicit source may expose the same extent on multiple axes");
         assert_eq!(
             values[&ones],
             TensorValue::from_vec(vec![2], vec![1.0, 1.0])

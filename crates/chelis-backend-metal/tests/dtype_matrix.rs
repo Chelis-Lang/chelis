@@ -30,7 +30,7 @@
 
 use chelis_backend_metal::codegen_metal;
 use chelis_backend_metal::dtype;
-use chelis_ir::dag::{Dag, DagNode, DimExpr, DimInfo, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DagNode, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
 
 fn vec_prec(n: usize, p: Prim) -> TensorType {
@@ -137,7 +137,7 @@ fn build_matmul_dag(prec: Prim) -> Dag {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(n),
+            size: chelis_ir::dag::RtDim::Lit(n),
         },
         vec![a],
         cube(m, k, n),
@@ -146,7 +146,7 @@ fn build_matmul_dag(prec: Prim) -> Dag {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(m),
+            size: chelis_ir::dag::RtDim::Lit(m),
         },
         vec![b],
         cube(m, k, n),

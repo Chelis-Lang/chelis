@@ -3,7 +3,7 @@
 //! These verify the fusion pass produces correct DAGs and that fused evaluation
 //! matches unfused evaluation via the IR evaluator.
 
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtDim, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_types::types::Prim;
 use chelis_unord::UnordMap;
@@ -293,7 +293,7 @@ fn f6_movement_ops_pass_through() {
     let x = load(&mut dag, "x", vec_f32(6));
     let reshaped = dag.add_node(
         RiscOp::Reshape {
-            new_shape: vec![RtDim::Lit(2), RtDim::Lit(3)],
+            new_shape: vec![chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(3)],
         },
         vec![x],
         mat_f32(2, 3),

@@ -175,7 +175,7 @@ pub(super) fn infer_expand_app(
     // chelis#397/#469: classify the size slot by PROVENANCE, following
     // `let`/`cast`/arithmetic to a tensor shape source. The positive-rank
     // path would otherwise stamp a sourceless runtime scalar as a `Dim::Name`,
-    // type-check clean, and then die at build/eval with the §4.7.2 Form-3
+    // type-check clean, and then die at build/eval with the §4.7.2
     // sourceless-size rejection (chelis#469: "no tensor in scope carries it").
     // Rejecting it at CHECK keeps check↔build↔eval in sync (a check-clean
     // program must build); a literal/static/shape-sourced size is materializable

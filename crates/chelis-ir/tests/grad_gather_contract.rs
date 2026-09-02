@@ -29,7 +29,7 @@
 
 use chelis_unord::UnordMap;
 
-use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, RtDim, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
 use chelis_ir::grad::grad_dag_checked;
 use chelis_types::types::Prim;
@@ -75,8 +75,8 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
         RiscOp::zero_pad(
             Prim::F32,
             vec![
-                (RtDim::Lit(0), RtDim::Lit(0)),
-                (RtDim::Lit(0), RtDim::Lit(1)),
+                (chelis_ir::dag::RtDim::Lit(0), chelis_ir::dag::RtDim::Lit(0)),
+                (chelis_ir::dag::RtDim::Lit(0), chelis_ir::dag::RtDim::Lit(1)),
             ],
         ),
         vec![oh_col],
@@ -88,7 +88,7 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
     let oh_exp = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(2),
+            size: chelis_ir::dag::RtDim::Lit(2),
         },
         vec![one_hot],
         t(vec![3, 2, 2]),
@@ -99,7 +99,7 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
     let table_exp = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(3),
+            size: chelis_ir::dag::RtDim::Lit(3),
         },
         vec![table],
         t(vec![3, 2, 2]),

@@ -24,6 +24,10 @@ fn metal_bound_to_usize(b: &RtDim) -> usize {
             "Metal backend reached a symbolic movement bound `{name}`; verify rejects \
              symbolic dims outside reshape targets (chelis#616)"
         ),
+        RtDim::InputAxis { .. } => panic!(
+            "Metal backend reached InputAxis on a movement owner; IR verification only admits \
+             InputAxis for Expand and Reshape"
+        ),
     }
 }
 

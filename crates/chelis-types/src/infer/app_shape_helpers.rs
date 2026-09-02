@@ -202,7 +202,7 @@ pub(super) enum SizeClass {
     Unknown,
 }
 
-/// The §4.7.2 Form-3 sourceless-size diagnostic (chelis#469), emitted by
+/// The §4.7.2 sourceless-size diagnostic (chelis#469), emitted by
 /// `check_expand_signature` when an `expand` size resolves to `Sourceless`.
 /// Factored out so the diagnostic text has a single source of truth.
 /// `size_expr` is the size sub-expression (used only to name a symbolic
@@ -216,17 +216,15 @@ pub(super) fn sourceless_expand_size_error(size_expr: Option<&deep::Expr>) -> Ch
         CheckErrorKind::DimensionMismatch,
         format!(
             "`expand` size resolves to {described}, but no tensor in scope carries \
-             it: a \u{00a7}4.7.2 Form-3 runtime size must be a literal/`cast(N, \
-             int32)`, an in-scope tensor dimension, or a `shape(tensor, axis)` read \
-             (followed through `let`, `cast`, and integer arithmetic). A bare \
-             runtime scalar (e.g. an `int32`/`int64` parameter) has no shape source \
-             the backend can emit, so the extent cannot be materialized. Tracked by \
+             it. Runtime extents use exact `int64`; source the value from an in-scope \
+             tensor dimension or a `shape(tensor, int32-axis)` read. A bare runtime \
+             scalar has no shape identity to attach to the result yet. Tracked by \
              Chelis-Lang/chelis#469 (spec/04-type-system.md \u{00a7}4.7.2)"
         ),
         vec![
-            "Source the extent from a tensor in scope: read it with \
-             `shape(x, cast(axis, int32))` (the `bias_broadcast` form), bind that \
-             read to a `let` and pass it, or use a literal/`cast(N, int32)` size."
+            "Source the extent from a tensor in scope with \
+             `shape(x, cast(axis, int32))`, bind that read to a `let`, or use an \
+             exact `int64` literal extent."
                 .to_string(),
         ],
     )
@@ -242,12 +240,12 @@ pub(super) fn sourceless_expand_size_error(size_expr: Option<&deep::Expr>) -> Ch
 /// the check-time accept set matches what the backends can materialize.
 pub(super) fn classify_expand_size(expr: &deep::Expr, env: &Env) -> SizeClass {
     stack_guard!("classify_expand_size", expr, SizeClass::Unknown);
-    // A statically-extractable literal/`cast(N,_)` size is always Static.
-    if extract_int_for_dim(expr).is_some() {
+    // The checker and lowerer share one checked static folder.
+    if fold_static_int_expr(expr, |name| env.static_size_value(name)).is_some() {
         return SizeClass::Static;
     }
     // An inline `shape(t, axis)` read (possibly `cast`-wrapped) of an
-    // in-scope tensor is the canonical Form-3 shape source (`bias_broadcast`).
+    // in-scope tensor is the canonical shape source (`bias_broadcast`).
     if let Some(operand) = shape_read_operand(expr) {
         return if shape_operand_is_in_scope_tensor(operand, env) {
             SizeClass::ShapeSourced

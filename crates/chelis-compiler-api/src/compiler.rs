@@ -41,9 +41,9 @@ use crate::schema::{
     WireDeepExpr, WireDeepExprKind, WireDimExpr, WireDimInfo, WireExtremaKind, WireExtremaOperand,
     WireFusedInput, WireFusedStep, WireFusedStepOp, WireImportKind, WireLetBinding, WireLetPattern,
     WireLiteral, WireMatchArm, WireMetaEntry, WireParam, WirePattern, WirePropertyOption,
-    WireRecordExprField, WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireRtDim,
-    WireSurfDecl, WireSurfExpr, WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp,
-    WireVariant, WireVariantFields,
+    WireRecordExprField, WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireRtAxis,
+    WireRtDim, WireSurfDecl, WireSurfExpr, WireSurfTypeExpr, WireTensorType, WireTypeInvariant,
+    WireUnaryOp, WireVariant, WireVariantFields,
 };
 use crate::schema::{stage_error, stage_error_with_span, unsupported_stage_error};
 
@@ -4258,6 +4258,20 @@ pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), Compil
             ));
         }
 
+        if matches!(&node.op, RiscOp::Expand { size, .. } if size.node_input().is_some()) {
+            return Err(unsupported_gate_error(
+                format!(
+                    "runtime (node-valued) `expand` extent at lowered node {}",
+                    node.id.0
+                ),
+                "metal",
+                chelis_types::unimplemented_rejection!(
+                    1383,
+                    "the Metal device scalar path for runtime expand extents is not implemented; use `--target c`"
+                ),
+            ));
+        }
+
         let node_valued = match &node.op {
             RiscOp::Shrink { bounds } => bounds.iter().any(pair_has_node_bound),
             RiscOp::Pad { padding, .. } => padding.iter().any(pair_has_node_bound),
@@ -4324,7 +4338,7 @@ mod metal_runtime_dim_reject_tests {
     use super::reject_unsupported_metal_ops;
     use chelis_ir::dag::{
         Dag, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep, FusedStepOp, NodeId,
-        RiscOp, RtDim, TensorType,
+        RiscOp, RtAxis, RtDim, TensorType,
     };
     use chelis_types::types::Prim;
 
@@ -4346,7 +4360,7 @@ mod metal_runtime_dim_reject_tests {
         let m = dag.add_node(
             RiscOp::Load { name: "m".into() },
             vec![],
-            ty(&[], Prim::Int32),
+            ty(&[], Prim::Int64),
             None,
         );
         (dag, x, m)
@@ -4414,6 +4428,65 @@ mod metal_runtime_dim_reject_tests {
             None,
         );
         reject_unsupported_metal_ops(&dag).expect("literal bounds must pass the Metal seam");
+    }
+
+    #[test]
+    fn metal_seam_accepts_input_axis_expand_extent() {
+        let mut dag = Dag::new();
+        let value = dag.add_node(
+            RiscOp::Load {
+                name: "value".into(),
+            },
+            vec![],
+            ty(&[], Prim::F32),
+            None,
+        );
+        let witness = dag.add_node(
+            RiscOp::Load {
+                name: "witness".into(),
+            },
+            vec![],
+            ty(&[4], Prim::F32),
+            None,
+        );
+        dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
+            },
+            vec![value, witness],
+            ty(&[4], Prim::F32),
+            None,
+        );
+
+        reject_unsupported_metal_ops(&dag)
+            .expect("InputAxis is a metadata read admitted by the Metal capability seam");
+    }
+
+    #[test]
+    fn metal_seam_rejects_node_valued_expand_with_issue_1383_receipt() {
+        let (mut dag, x, size) = dag_with_scalar();
+        dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::Node(1),
+            },
+            vec![x, size],
+            ty(&[4, 4], Prim::F32),
+            None,
+        );
+
+        let error = reject_unsupported_metal_ops(&dag)
+            .expect_err("Metal must reject a device scalar expand extent");
+        let message = &error.errors[0].message;
+        assert!(message.contains("unimplemented chelis#1383:"), "{message}");
+        assert_eq!(
+            error.errors[0].kind(),
+            chelis_vocab::DiagnosticKind::UnsupportedFeature
+        );
     }
 
     #[test]
@@ -4660,6 +4733,19 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                     chelis_types::deliberate_rejection!(
                         "[05-SHAPE-1]",
                         "runtime shape-value reads are intentionally excluded from the HIP device lane; use the C target"
+                    ),
+                ));
+            }
+            RiscOp::Expand { size, .. } if size.node_input().is_some() => {
+                return Err(unsupported_gate_error(
+                    format!(
+                        "runtime (node-valued) `expand` extent at lowered node {}",
+                        node.id.0
+                    ),
+                    "hip",
+                    chelis_types::unimplemented_rejection!(
+                        1298,
+                        "the HIP device scalar path for runtime movement bounds is not implemented; use `--target c`"
                     ),
                 ));
             }
@@ -5749,6 +5835,13 @@ fn wire_bound(b: &RtDim) -> WireRtDim {
         RtDim::ToEnd => WireRtDim::ToEnd,
         RtDim::Node(i) => WireRtDim::Node { input: *i },
         RtDim::Sym(name) => WireRtDim::Sym { name: name.clone() },
+        RtDim::InputAxis {
+            tensor,
+            axis: chelis_ir::dag::RtAxis::Lit(axis),
+        } => WireRtDim::InputAxis {
+            tensor: *tensor,
+            axis: WireRtAxis::Lit { value: *axis },
+        },
     }
 }
 
@@ -5839,7 +5932,7 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
         RiscOp::Permute { axes } => WireRiscOp::Permute { axes: axes.clone() },
         RiscOp::Expand { axis, size } => WireRiscOp::Expand {
             axis: *axis,
-            size: size.to_string(),
+            size: wire_bound(size),
         },
         RiscOp::OneHot { vocab } => WireRiscOp::OneHot { vocab: *vocab },
         RiscOp::Pad { padding, fill } => WireRiscOp::Pad {
@@ -6308,6 +6401,81 @@ mod tests {
             message.contains("count") && message.contains("--target c"),
             "{message}"
         );
+        assert_eq!(
+            error.errors[0].kind(),
+            chelis_vocab::DiagnosticKind::UnsupportedFeature
+        );
+    }
+
+    #[test]
+    fn hip_seam_accepts_input_axis_expand_extent() {
+        let mut dag = Dag::new();
+        let value = dag.add_node(
+            RiscOp::Load {
+                name: "value".into(),
+            },
+            vec![],
+            tensor_type(vec![], chelis_types::types::Prim::F32),
+            None,
+        );
+        let witness = dag.add_node(
+            RiscOp::Load {
+                name: "witness".into(),
+            },
+            vec![],
+            tensor_type(vec![4], chelis_types::types::Prim::F32),
+            None,
+        );
+        dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: chelis_ir::dag::RtAxis::Lit(0),
+                },
+            },
+            vec![value, witness],
+            tensor_type(vec![4], chelis_types::types::Prim::F32),
+            None,
+        );
+
+        reject_unsupported_hip_ops(&dag)
+            .expect("InputAxis is a metadata read implemented by HIP expand codegen");
+    }
+
+    #[test]
+    fn hip_seam_rejects_node_valued_expand_with_issue_1298_receipt() {
+        let mut dag = Dag::new();
+        let value = dag.add_node(
+            RiscOp::Load {
+                name: "value".into(),
+            },
+            vec![],
+            tensor_type(vec![], chelis_types::types::Prim::F32),
+            None,
+        );
+        let size = dag.add_node(
+            RiscOp::Load {
+                name: "size".into(),
+            },
+            vec![],
+            tensor_type(vec![], chelis_types::types::Prim::Int64),
+            None,
+        );
+        dag.add_node(
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::Node(1),
+            },
+            vec![value, size],
+            tensor_type(vec![4], chelis_types::types::Prim::F32),
+            None,
+        );
+
+        let error = reject_unsupported_hip_ops(&dag)
+            .expect_err("HIP must reject a device scalar expand extent");
+        let message = &error.errors[0].message;
+        assert!(message.contains("unimplemented chelis#1298:"), "{message}");
         assert_eq!(
             error.errors[0].kind(),
             chelis_vocab::DiagnosticKind::UnsupportedFeature

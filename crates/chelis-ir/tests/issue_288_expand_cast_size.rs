@@ -19,7 +19,7 @@
 //! `expand` node carries the requested size and that the full
 //! constant-broadcast idiom lowers to a verify-clean DAG.
 
-use chelis_ir::dag::{DimExpr, DimInfo, RiscOp};
+use chelis_ir::dag::{DimInfo, RiscOp};
 use chelis_ir::lower::lower_program;
 use chelis_ir::verify;
 use chelis_types::check_ir_program;
@@ -72,7 +72,7 @@ def run(x) = mul(x, expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cas
     assert_eq!(expand.0, 0, "expand axis must be the cast-wrapped 0");
     assert_eq!(
         expand.1,
-        DimExpr::Concrete(2),
+        chelis_ir::dag::RtDim::Lit(2),
         "expand size must be the cast-wrapped 2, not the default 1",
     );
     assert_eq!(
@@ -102,7 +102,7 @@ def run(x) = mul(x, expand(scalar_to_tensor(cast(2.5, f32)), 0, 2i64))
     });
     assert_eq!(
         size,
-        Some(DimExpr::Concrete(2)),
+        Some(chelis_ir::dag::RtDim::Lit(2)),
         "plain size 2 must still extract"
     );
 }

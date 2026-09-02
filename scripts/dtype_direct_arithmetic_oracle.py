@@ -110,10 +110,10 @@ def source_contracts() -> tuple[SourceContract, ...]:
             ),
         ),
         SourceContract(
-            "WireDag v6 identities",
+            "current WireDag identities",
             "crates/chelis-compiler-api/src/schema.rs",
             (
-                "pub const WIRE_DAG_SCHEMA_VERSION: u32 = 6;",
+                "pub const WIRE_DAG_SCHEMA_VERSION: u32 = 7;",
                 "pub enum WireFusedStepOp {\n    Add,\n    Sub,",
                 "MaxElem,\n    MinElem,\n    ExtremaAdjoint {",
                 'r#"{\"kind\":\"extrema_adjoint\",\"extrema\":\"max\",\"operand\":\"left\"}"#',
@@ -337,7 +337,7 @@ def oracle_legs(python: str) -> tuple[OracleLeg, ...]:
             ),
         ),
         OracleLeg(
-            "exact WireDag v6 decoder contract",
+            "exact current WireDag decoder contract",
             (
                 "cargo",
                 "nextest",

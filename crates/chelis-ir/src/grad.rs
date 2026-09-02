@@ -7,7 +7,7 @@ use chelis_unord::UnordMap;
 use std::fmt;
 
 use crate::dag::{
-    Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, NodeId, RiscOp, RtDim, TensorType,
+    Dag, DagNode, DimInfo, ExtremaKind, ExtremaOperand, NodeId, RiscOp, RtDim, TensorType,
 };
 use crate::tier2;
 use chelis_types::types::Prim;
@@ -643,7 +643,7 @@ fn prune_to_requested_outputs(
             for &input in &dag.nodes()[i].inputs {
                 live[input.0] = true;
             }
-            // chelis#384/#397/#616: a shape-only dep (a Form-3 `expand`
+            // chelis#384/#397/#616: a shape-only dep (an `expand` shape
             // source or a runtime-dim declarer) keeps its source alive; the
             // consumer needs the extent even though it never reads the value.
             for &dep in &dag.nodes()[i].shape_deps {
@@ -677,7 +677,7 @@ fn prune_to_requested_outputs(
             {
                 new_node.merged_spans = node.merged_spans.clone();
             }
-            // chelis#384/#397: preserve (remapped) Form-3 `expand` shape-deps.
+            // chelis#384/#397: preserve (remapped) shape-derived `expand` deps.
             if !node.shape_deps.is_empty() {
                 let mapped: Vec<NodeId> = node
                     .shape_deps
@@ -1028,7 +1028,10 @@ fn compute_adjoints(
             // spec rule "gradient precision = operand precision".
             let x = node.inputs[0];
             let input_ty = forward.get(x).unwrap().output_type.clone();
-            let original_size = DimExpr::from(&input_ty.dims[*axis]);
+            let original_size = RtDim::InputAxis {
+                tensor: 1,
+                axis: crate::dag::RtAxis::Lit(i32::try_from(*axis).expect("rank fits int32")),
+            };
             let g_node = dag
                 .get(g)
                 .expect("upstream adjoint must exist in the AD DAG");
@@ -1053,16 +1056,10 @@ fn compute_adjoints(
                     axis: *axis,
                     size: original_size.clone(),
                 },
-                vec![g_for_expand],
+                vec![g_for_expand, x],
                 input_ty,
                 None,
             );
-            // chelis#616: the expand restores the forward input's shape; a
-            // non-concrete size (a runtime or wildcard axis) resolves at
-            // eval time from the input's actual value via this shape-dep.
-            if original_size.as_concrete().is_none() {
-                dag.add_shape_dep(dx, x);
-            }
             Some(vec![(x, dx)])
         }
         RiscOp::MaxReduce { axis } => {
@@ -1071,7 +1068,10 @@ fn compute_adjoints(
             // dx = mul(expand(g, axis, size), mask)
             let x = node.inputs[0];
             let input_ty = forward.get(x).unwrap().output_type.clone();
-            let original_size = DimExpr::from(&input_ty.dims[*axis]);
+            let original_size = RtDim::InputAxis {
+                tensor: 1,
+                axis: crate::dag::RtAxis::Lit(i32::try_from(*axis).expect("rank fits int32")),
+            };
 
             // Expand forward max_reduce node back to input shape.
             let expanded_max = dag.add_node(
@@ -1079,7 +1079,7 @@ fn compute_adjoints(
                     axis: *axis,
                     size: original_size.clone(),
                 },
-                vec![node.id],
+                vec![node.id, x],
                 input_ty.clone(),
                 None,
             );
@@ -1090,7 +1090,7 @@ fn compute_adjoints(
                     axis: *axis,
                     size: original_size,
                 },
-                vec![g],
+                vec![g, x],
                 input_ty.clone(),
                 None,
             );
@@ -1117,14 +1117,17 @@ fn compute_adjoints(
             // harder. Spec §3j-pre: ship the rule explicitly.
             let x = node.inputs[0];
             let input_ty = forward.get(x).unwrap().output_type.clone();
-            let original_size = DimExpr::from(&input_ty.dims[*axis]);
+            let original_size = RtDim::InputAxis {
+                tensor: 1,
+                axis: crate::dag::RtAxis::Lit(i32::try_from(*axis).expect("rank fits int32")),
+            };
 
             let expanded_min = dag.add_node(
                 RiscOp::Expand {
                     axis: *axis,
                     size: original_size.clone(),
                 },
-                vec![node.id],
+                vec![node.id, x],
                 input_ty.clone(),
                 None,
             );
@@ -1133,7 +1136,7 @@ fn compute_adjoints(
                     axis: *axis,
                     size: original_size,
                 },
-                vec![g],
+                vec![g, x],
                 input_ty.clone(),
                 None,
             );
@@ -1175,7 +1178,10 @@ fn compute_adjoints(
                 ),
             };
             let rank = input_ty.dims.len();
-            let original_size = DimExpr::from(&input_ty.dims[*axis]);
+            let original_size = RtDim::InputAxis {
+                tensor: 1,
+                axis: crate::dag::RtAxis::Lit(i32::try_from(*axis).expect("rank fits int32")),
+            };
 
             // Build slice types: same as input_ty but with axis dim = 1.
             let mut slice_dims = input_ty.dims.clone();
@@ -1285,7 +1291,7 @@ fn compute_adjoints(
                     axis: *axis,
                     size: original_size,
                 },
-                vec![g],
+                vec![g, x],
                 input_ty.clone(),
                 None,
             );
@@ -2074,13 +2080,12 @@ fn scalar_int(precision: Prim) -> TensorType {
 }
 
 /// chelis#616: a fresh `Shape(x, axis)` read — the runtime extent of `x`
-/// along `axis` as a rank-0 int32 scalar (mirrors the Surf `shape()`
-/// lowering's precision pin).
+/// along `axis` as a rank-0 exact int64 scalar ([05-DIM-2]).
 fn shape_scalar(dag: &mut Dag, x: NodeId, axis: usize) -> NodeId {
     dag.add_node(
         RiscOp::Shape { axis },
         vec![x],
-        scalar_int(Prim::Int32),
+        scalar_int(Prim::Int64),
         None,
     )
 }
@@ -3036,7 +3041,7 @@ mod tests {
         let expanded = dag.add_node(
             RiscOp::Expand {
                 axis: 0,
-                size: crate::dag::DimExpr::Concrete(2),
+                size: crate::dag::RtDim::Lit(2),
             },
             vec![x],
             mat23_ty.clone(),

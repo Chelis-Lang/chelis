@@ -4,7 +4,9 @@
 //! a GPU or HIP runtime. They run in default CI.
 
 use chelis_backend_hip::codegen_hip;
-use chelis_ir::dag::{Dag, DimInfo, ExtremaKind, ExtremaOperand, RiscOp, RtDim, TensorType};
+use chelis_ir::dag::{
+    Dag, DimInfo, ExtremaKind, ExtremaOperand, RiscOp, RtAxis, RtDim, TensorType,
+};
 use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
 use std::env;
@@ -578,7 +580,7 @@ fn s5_reshape_no_kernel_launch() {
     );
     let r = dag.add_node(
         RiscOp::Reshape {
-            new_shape: vec![RtDim::Lit(6)],
+            new_shape: vec![chelis_ir::dag::RtDim::Lit(6)],
         },
         vec![x],
         vec_f32(6),
@@ -628,7 +630,7 @@ fn s5_expand_no_kernel_launch() {
     let e = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![x],
         mat_f32(4, 3),
@@ -643,12 +645,61 @@ fn s5_expand_no_kernel_launch() {
 }
 
 #[test]
+fn s5_input_axis_expand_reads_witness_metadata() {
+    let mut dag = Dag::new();
+    let value = dag.add_node(
+        RiscOp::Load {
+            name: "value".into(),
+        },
+        vec![],
+        scalar_f32(),
+        None,
+    );
+    let witness_ty = TensorType {
+        dims: vec![DimInfo::Named("n".into(), None)],
+        precision: Prim::F32,
+    };
+    let witness = dag.add_node(
+        RiscOp::Load {
+            name: "witness".into(),
+        },
+        vec![],
+        witness_ty.clone(),
+        None,
+    );
+    let expanded = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+        },
+        vec![value, witness],
+        witness_ty,
+        None,
+    );
+    dag.add_root(expanded);
+
+    let result = codegen_hip(&dag, "test_input_axis_expand").unwrap();
+    assert!(
+        result.c_source.contains("inputs[1]->shape[0]"),
+        "InputAxis extent must be sourced from the witness metadata: {}",
+        result.c_source
+    );
+    assert!(
+        result.c_source.contains("chelis_gpu_alloc_view"),
+        "InputAxis expand remains a metadata-only view"
+    );
+}
+
+#[test]
 fn s5_realize_materializes_with_kernel_not_view() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
     let s = dag.add_node(
         RiscOp::Stride {
-            strides: vec![RtDim::Lit(2)],
+            strides: vec![chelis_ir::dag::RtDim::Lit(2)],
         },
         vec![x],
         vec_f32(3),
@@ -1377,7 +1428,7 @@ fn s15_matmul_emits_hipblas_and_link_flag() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         tensor3_f32(2, 3, 4),
@@ -1386,7 +1437,7 @@ fn s15_matmul_emits_hipblas_and_link_flag() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::DimExpr::Concrete(2),
+            size: chelis_ir::dag::RtDim::Lit(2),
         },
         vec![b],
         tensor3_f32(2, 3, 4),
@@ -1682,7 +1733,7 @@ fn s15_batched_matmul_noncontiguous_batch_layout_uses_helper_loop_fallback() {
     let a = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::DimExpr::Concrete(3),
+            size: chelis_ir::dag::RtDim::Lit(3),
         },
         vec![base_a],
         tensor3_f32(3, 4, 5),
@@ -1747,7 +1798,7 @@ fn s15_noncontiguous_matmul_falls_back_to_generic_reduction() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: chelis_ir::dag::DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         tensor3_f32(2, 3, 4),
@@ -1756,7 +1807,7 @@ fn s15_noncontiguous_matmul_falls_back_to_generic_reduction() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: chelis_ir::dag::DimExpr::Concrete(2),
+            size: chelis_ir::dag::RtDim::Lit(2),
         },
         vec![b],
         tensor3_f32(2, 3, 4),
@@ -2115,7 +2166,10 @@ fn s8a_pad_emits_kernel_and_launch_not_view() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
     let p = dag.add_node(
-        RiscOp::zero_pad(Prim::F32, vec![(RtDim::Lit(1), RtDim::Lit(1))]),
+        RiscOp::zero_pad(
+            Prim::F32,
+            vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(1))],
+        ),
         vec![x],
         vec_f32(6),
         None,
@@ -2146,7 +2200,7 @@ fn s8a_shrink_emits_kernel_and_launch_not_view() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
     let s = dag.add_node(
         RiscOp::Shrink {
-            bounds: vec![(RtDim::Lit(1), RtDim::Lit(5))],
+            bounds: vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(5))],
         },
         vec![x],
         vec_f32(4),
@@ -2179,7 +2233,10 @@ fn s8a_pad_f64_uses_dtype_suffix() {
         None,
     );
     let p = dag.add_node(
-        RiscOp::zero_pad(Prim::F64, vec![(RtDim::Lit(1), RtDim::Lit(1))]),
+        RiscOp::zero_pad(
+            Prim::F64,
+            vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(1))],
+        ),
         vec![x],
         TensorType {
             dims: vec![DimInfo::Lit(6)],
@@ -2207,7 +2264,7 @@ fn s8a_shrink_i32_uses_dtype_suffix() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_i32(6), None);
     let s = dag.add_node(
         RiscOp::Shrink {
-            bounds: vec![(RtDim::Lit(1), RtDim::Lit(5))],
+            bounds: vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(5))],
         },
         vec![x],
         vec_i32(4),

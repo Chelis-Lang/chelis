@@ -2584,7 +2584,13 @@ pub(super) fn infer_top_level(
         // re-bind to a sourceless RHS does not inherit an earlier entry.
         match classify_expand_size(&kids[1], env) {
             SizeClass::Static => {
-                env.mark_size_provenance(&name, crate::env::SizeProvenance::Static);
+                if let Some(value) =
+                    fold_static_int_expr(&kids[1], |bound| env.static_size_value(bound))
+                {
+                    env.mark_static_size_value(&name, value);
+                } else {
+                    env.mark_size_provenance(&name, crate::env::SizeProvenance::Static);
+                }
             }
             SizeClass::ShapeSourced => {
                 env.mark_size_provenance(&name, crate::env::SizeProvenance::ShapeSourced);

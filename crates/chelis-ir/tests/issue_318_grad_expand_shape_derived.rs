@@ -59,7 +59,7 @@
 //! ranks (`[]` and `[1]`). Both reviewers confirmed the adjoint is
 //! correct and unchanged; this is the regression lock for that property.
 
-use chelis_ir::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtAxis, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_ir::grad::{AdError, grad_dag_checked};
 use chelis_types::types::Prim;
@@ -126,9 +126,9 @@ enum Extent {
 /// shape.
 fn build_forward(extent: Extent, source_shape: &[usize]) -> (Dag, NodeId, NodeId) {
     let mut dag = Dag::new();
-    let (vec_ty, size) = match extent {
-        Extent::Literal => (vec_lit_f32(2), DimExpr::Concrete(2)),
-        Extent::ShapeDerived => (vec_sym_f32("n"), DimExpr::Sym("n".to_string())),
+    let vec_ty = match extent {
+        Extent::Literal => vec_lit_f32(2),
+        Extent::ShapeDerived => vec_sym_f32("n"),
     };
     let source_ty = TensorType {
         dims: source_shape.iter().map(|&d| DimInfo::Lit(d)).collect(),
@@ -151,17 +151,27 @@ fn build_forward(extent: Extent, source_shape: &[usize]) -> (Dag, NodeId, NodeId
         None,
     );
 
-    // expand(c, axis=0, size) -> vector type (symbolic for shape-derived).
-    let k = dag.add_node(
-        RiscOp::Expand { axis: 0, size },
-        vec![c],
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
         vec_ty.clone(),
         None,
     );
 
-    let x = dag.add_node(
-        RiscOp::Load { name: "x".into() },
-        vec![],
+    // expand(c, axis=0, size) -> vector type (symbolic for shape-derived).
+    let (size, inputs) = match extent {
+        Extent::Literal => (chelis_ir::dag::RtDim::Lit(2), vec![c]),
+        Extent::ShapeDerived => (
+            chelis_ir::dag::RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+            vec![c, x],
+        ),
+    };
+    let k = dag.add_node(
+        RiscOp::Expand { axis: 0, size },
+        inputs,
         vec_ty.clone(),
         None,
     );

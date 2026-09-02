@@ -61,13 +61,13 @@ FROZEN_FILE_DIGESTS = {
         "cb8d029c61822460e25516c84a7c9c133d10339a6a96fb23d7aac2ebf4abbba6"
     ),
     "spec/05-risc-primitives.md": (
-        "cc2814ddf033786c160fce9369053e38f09c3337166249eec5d93040f8e10271"
+        "170b2a8e4c229f3a93fadd1436ff8897912f036524db607f0b48671acbccd9e0"
     ),
     "spec/06-transformations.md": (
         "30a78217103d0a57d63b9e1a3d927d2e1079affa4d1d0641ef36a9afff34e25a"
     ),
     "spec/10-serialization.md": (
-        "58f707d4e155d098962db224317061684b2c026816cab234ba026d560510a6da"
+        "55be75d37cf4f29b9958baf584273111fb05e8268d008e818a99e00cca155ce1"
     ),
     "spec/11-ffi.md": (
         "0d0b5065f90ae704ecea26744208e76f1075907f8ea49279a1a958db6f1c14b3"
@@ -79,7 +79,7 @@ FROZEN_FILE_DIGESTS = {
         "209f1cac065d0c9ff4e644723d3455fa52c061e8470a32c8514da5b373830c9c"
     ),
     "spec/design/dtype_semantics.md": (
-        "aa66287ddcee9cd4139cf6611b277cb1b73a627a01f6ae9e242221633eb7b1b1"
+        "9d1e860666e1f737cfef18cdb687c85f58f596344814546210d4078d12a92665"
     ),
     "spec/design/implicit_linearity.md": (
         "f03302f4b328841d79824f6326f1edf2e954a9b98c0118992d4a3a1f2dfb67cf"
@@ -894,8 +894,8 @@ def validate_normative_contract(
     require_all(
         spec10,
         (
-            ("Schema version 6 is explicitly\npresent", "wire v6 presence"),
-            ("the only accepted version", "wire v6 exactness"),
+            ("Schema version 7 is explicitly\npresent", "wire v7 presence"),
+            ("the only accepted version", "wire current-version exactness"),
             ("There is no versionless default", "wire versionless rejection"),
             ("versionless default, legacy migration", "wire migration rejection"),
             ("WireRiscOp::Count { axes }", "wire count variant"),

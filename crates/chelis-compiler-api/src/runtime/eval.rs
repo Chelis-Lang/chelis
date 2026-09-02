@@ -4,6 +4,7 @@ use std::fs;
 
 use chelis_deep::ast::{Atom, Expr, List};
 use chelis_deep::{Span, decode_effect_kind};
+use chelis_ir::dag::DimInfo;
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::tier2;
 use chelis_types::{
@@ -1140,6 +1141,43 @@ impl<'a> EvalContext<'a> {
                 self.bindings = env;
                 self.precision_bindings = precision_env;
                 let value = (|| {
+                    // A dimension variable declared by a tensor parameter is
+                    // also an exact runtime int64 value in the callee frame.
+                    // Recover it from the actual tensor shape before the
+                    // arguments are moved into their ordinary bindings. This
+                    // makes `expand(b, 0, k)` consume the same witnessed
+                    // extent as compiled lowering instead of looking up an
+                    // unbound textual runtime name (chelis#1382).
+                    let mut dimension_bindings: UnordMap<String, usize> = UnordMap::new();
+                    for (declared, arg) in param_types.iter().zip(args.iter()) {
+                        let (Some(declared), RuntimeValue::Tensor(tensor)) = (declared, arg) else {
+                            continue;
+                        };
+                        let Ok(actualized) = declared_tensor_type_for_shape(
+                            declared,
+                            &tensor.value.shape,
+                            tensor.precision,
+                            true,
+                        ) else {
+                            // Rank-polymorphic declarations are handled by
+                            // their existing routed path; they do not expose
+                            // an unambiguous fixed-axis witness here.
+                            continue;
+                        };
+                        for dim in actualized.dims {
+                            let DimInfo::Named(name, Some(size)) = dim else {
+                                continue;
+                            };
+                            match dimension_bindings.insert(name.clone(), size) {
+                                Some(previous) if previous != size => {
+                                    return Err(format!(
+                                        "dimension binder `{name}` has inconsistent runtime witnesses: {previous} and {size}"
+                                    ));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     let caller_precisions = saved_precisions.clone();
                     let mut call_precisions = UnordMap::new();
                     for (declared, actual) in param_types.iter().zip(arg_type_exprs) {
@@ -1165,6 +1203,13 @@ impl<'a> EvalContext<'a> {
                     // callee-owned binders shadow a same-spelled lexical
                     // binding instead of conflicting with it.
                     self.precision_bindings.merge(call_precisions);
+                    // Dimension-name order is canonical for extending the callee frame.
+                    for (name, size) in dimension_bindings.into_sorted() {
+                        let size = i64::try_from(size).map_err(|_| {
+                            format!("dimension binder `{name}` exceeds the exact int64 range")
+                        })?;
+                        self.bindings.insert(name, RuntimeValue::int64(size));
+                    }
                     for (index, (param, arg)) in params.into_iter().zip(args).enumerate() {
                         let declared = param_types
                             .get(index)
@@ -2682,8 +2727,8 @@ impl<'a> EvalContext<'a> {
                 if axis < 0 {
                     return Err(format!("expand requires non-negative axis, got {axis}"));
                 }
-                if count <= 0 {
-                    return Err(format!("expand requires positive count, got {count}"));
+                if count < 0 {
+                    return Err(format!("expand requires non-negative extent, got {count}"));
                 }
                 tensor_expand_host(&tensor, axis as usize, count as usize).map(RuntimeValue::Tensor)
             }

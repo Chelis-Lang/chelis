@@ -28,16 +28,16 @@
 
 use crate::tier_b::{SmtProperty, TierBResult};
 
-/// A content-addressed back-reference to a serialized exact-version `WireDag` v6 artifact.
+/// A content-addressed back-reference to a serialized exact-version `WireDag` artifact.
 ///
 /// This is the artifact an out-of-tree consumer resolves: it parses the
-/// serialized `WireDag` JSON bytes, requires exact schema version 6,
+/// serialized `WireDag` JSON bytes, requires the exact current schema version,
 /// computes a sha256 over those bytes, and selects the output of interest by
 /// `root_index`. Older and future versions are rejected before op decoding;
 /// there is no compatibility reader. The handle addresses that artifact by:
 ///
 /// - [`dag_hash`](Self::dag_hash): the lowercase-hex sha256 of the serialized
-///   exact-version `WireDag` v6 bytes. A consumer recomputes the same digest over the bytes
+///   exact-version `WireDag` bytes. A consumer recomputes the same digest over the bytes
 ///   it received and compares for byte-identity; lowercase hex round-trips
 ///   cleanly through JSON and is cheap to compare.
 /// - [`root_index`](Self::root_index): which `WireDag.roots` entry this goal's
@@ -690,7 +690,7 @@ mod tests {
     #[test]
     fn ir_handle_from_wire_dag_carries_hash_and_root_index() {
         // The WI-3 producer surface: a content hash (lowercase-hex sha256 of
-        // the serialized exact-version WireDag v6 bytes) plus the root index the goal's
+        // the serialized exact-version WireDag bytes) plus the root index the goal's
         // output selects. The handle holds only the hash + index -- never a
         // Dag or WireDag value.
         let hash = "a".repeat(64);

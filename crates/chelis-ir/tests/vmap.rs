@@ -1,4 +1,4 @@
-use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_ir::vmap::vectorize_axis0;
 use chelis_types::check_ir_program;
@@ -122,7 +122,7 @@ fn vmap_batched_matmul_stays_in_expand_mul_sum_form() {
     let a_exp = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(4),
+            size: chelis_ir::dag::RtDim::Lit(4),
         },
         vec![a],
         TensorType {
@@ -134,7 +134,7 @@ fn vmap_batched_matmul_stays_in_expand_mul_sum_form() {
     let b_exp = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(2),
+            size: chelis_ir::dag::RtDim::Lit(2),
         },
         vec![b],
         TensorType {

@@ -28,6 +28,10 @@ fn hip_bound_to_usize(b: &RtDim) -> usize {
             "HIP backend reached a symbolic movement bound `{name}`; verify rejects \
              symbolic dims outside reshape targets (chelis#616)"
         ),
+        RtDim::InputAxis { .. } => panic!(
+            "HIP backend reached InputAxis on an owner other than Expand or Reshape; IR \
+             verification must reject that owner before codegen"
+        ),
     }
 }
 
@@ -3110,7 +3114,7 @@ impl HipEmitter {
         &mut self,
         id: usize,
         axis: usize,
-        _size: &DimExpr,
+        _size: &RtDim,
         inputs: &[NodeId],
         ty: &TensorType,
     ) {

@@ -1,7 +1,9 @@
 # Runtime Extents: one resolver for non-literal tensor extents
 
-**Status:** PROPOSED. No slice is implemented. Tracking issue: [#1277].
-Code evidence in this document was rechecked on `main` at `53607a64`;
+**Status:** IN PROGRESS. Slice A is implemented in the current review change;
+Slices B and C remain proposed. Tracking issue: [#1277].
+The Slice A implementation is based on `main` at `0d6673a5`; earlier code
+evidence in this document was rechecked on `main` at `53607a64`;
 function and type names are the durable anchors and line numbers are a
 convenience of that commit.
 **Owning specs:** `spec/04-type-system.md` §4.7 (admissibility, identity,
@@ -152,7 +154,11 @@ through a typed implementation receipt, to exact execution.
    (`verify.rs:518-522`, `verify.rs:1471-1479`), runs only in tests and at
    the end of `grad_dag` (`grad.rs:562`), so on
    the build and eval paths a vmapped `shape()` bound silently reads the
-   batch extent and both lanes agree on the wrong result ([#1378]). The checker
+   batch extent and both lanes agree on the wrong result ([#1378]). [#1397]
+   currently masks that issue's public end-to-end witness by dropping a
+   wildcard-returning root; Slice A still owns the vmap mechanism, while
+   Slice B owns the declared-extent erasure and the separately tracked root
+   boundary remains outside Slice A. The checker
    rejects a zero size (`infer/app_tensor.rs:985-996` and `1184-1193`)
    although `spec/04` §4.7.2 prohibits only a negative one.
 
@@ -170,9 +176,10 @@ Three structural facts explain why fixing instances has not closed the class:
   call site and "ICE" at another.
 - **The checker-to-backend channel is one `Dim::Name` in annotated type
   metadata.** The classifier's verdict is never serialized. The early
-  return in `check_expand_signature` is the [#609] hole (it skips
-  validating a declared rank, so a wrong-rank ascription is accepted and
-  eval silently returns a contradicting rank). The [#597] family is
+  return in `check_expand_signature` was the [#609] hole (it skipped
+  validating a declared rank, so a wrong-rank ascription was accepted and
+  eval silently returned a contradicting rank). Slice A removes that return.
+  The [#597] family is
   lowering's, not the checker's: `fallback_expand_type`
   (`lower.rs:9139-9147`, `5413-5428`) discards the checker's stamped type
   for every `Concrete` or `Sym` size and always inserts an axis, so
@@ -537,7 +544,8 @@ fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource>;
   `op_declared_output_axes`, or a search for a `Load` carrying the same
   string. Stamped names group; sources locate; the reshape-only `Sym`
   target binds to its class's canonical value as it does today. This closes
-  [#665] and the kept-axis residue of [#592].
+  [#665]. The former [#592] path closes in Slice A when `Expand.size` gains
+  its typed `RtDim` carrier.
 - **C4.5 Sources are derived after the last rewrite.** `output_axis_sources`
   is neither stored in the DAG nor serialized nor carried across transforms;
   it is computed from the DAG that Eval or a backend actually consumes, after
@@ -704,9 +712,11 @@ so the two migrations use distinct successive versions and both trackers,
 `spec/10`, fixtures, hashes, and rejected-version controls update together;
 and the regenerated typed wire capacity census. The provenance walk and the
 lowerer's rejection sites keep their acceptance decisions (C2.7). Close
-[#1367], [#609], [#1378], [#1382], and [#592] if its reproducer is green
-once the size carrier lands; [#597] waits for Slice B's removal of the lowering
-override that inserts the extra axis. [#578] remains open; commits that
+[#1367], [#609], and [#1382], plus [#592] if its reproducer is green once the
+size carrier lands; [#597] waits for Slice B's removal of the lowering
+override that inserts the extra axis. Advance [#1378] as `Part of` until
+[#1397] no longer masks its public-path acceptance witness. [#578] remains
+open; commits that
 improve its mechanism use `Part of #578` until its complete
 rank-polymorphic acceptance reproducer is green under the owning
 rank-polymorphism work.
@@ -756,7 +766,9 @@ by the two derivations; then, in the same change, deletion of `SizeClass`,
 `sourceless_expand_size_error`, `Env::size_provenance`, and the lowerer's
 two rejection sites, and, once nothing reads it, of `shape_deps`. Close
 [#1266], [#569], [#597], [#665], [#1374], [#1375], [#1376], [#1377], [#1379],
-and any residue of [#592].
+and any residue of [#592]. [#1397]'s declared-result-dimension erasure closes
+here; its general wildcard-root boundary remains tracked by that issue and is
+not absorbed into this resolver.
 
 **Frozen at exit:** the `RuntimeDimClass` shape, canonical class and member
 order, the guard placement realization per lane, the `AxisSource` variant
@@ -819,8 +831,8 @@ class completion oracle and ends with `RUNTIME EXTENT ORACLE: PASS`.
   (`bcde1133`): its Phase A landed the source-ordinal stores C3's `Freeze`
   names and property 6's K-run rows, and its C2.3 records the enforcement
   residuals, neither of which reaches `chelis-types`.
-- **[#731]:** owns witnessed checker errors; remaining rejections and the
-  [#609] rank error use that channel.
+- **[#731]:** owns witnessed checker errors; remaining rejections use that
+  channel. Slice A routes the [#609] rank error through it and closes [#609].
 - **[#730]:** owns the typed `Unsupported` receipt used by C4's interim
   transition and by the GPU lanes' `Node` rows.
 - **[#1383] / Metal backend plan**
@@ -855,7 +867,7 @@ class completion oracle and ends with `RUNTIME EXTENT ORACLE: PASS`.
 | [#597] | positional same-rank replacement never executes: lowering always inserts | B |
 | [#609] | wrong-rank ascription is accepted | A |
 | [#665] | movement-op runtime wildcard is lost across Expand | B |
-| [#592] | grad-backward Expand size cannot be traced to a Load | A (size carrier); B for any kept-axis residue |
+| [#592] | grad-backward Expand size could not be traced to a Load; exact Eval/C reproducer is green | A (closed by the size carrier) |
 | [#1374] | cross-tensor read under a named claim is silently identified, no guard | B |
 | [#1375] | node-valued reshape target under a named claim executes unguarded | B |
 | [#1376] | same-tensor read on the set axis under a foreign claim, no guard | B |
@@ -863,6 +875,7 @@ class completion oracle and ends with `RUNTIME EXTENT ORACLE: PASS`.
 | [#1378] | vmap batches a `shape()` bound so it reads the batch extent | A |
 | [#1379] | arithmetic size under a named claim: eval unguarded, compiled lanes reject | B |
 | [#1382] | bare binder as an `expand` size: no witness in eval, compiled lanes ICE | A |
+| [#1397] | shape-derived bound erases a declared result; wildcard root masks #1378 | B (claim erasure); separately tracked root boundary |
 | [#1265] | comparison consumer never selects the deferred shape | C |
 | [#1338] | coupled defaults settle nondeterministically | C / [#1341] Phase A |
 | [#578] | mechanism evidence only; full rank-polymorphic repro stays open | external rank-polymorphism work |
@@ -1049,3 +1062,4 @@ decides the underlying rule, and what replaces it.
 [#1379]: https://github.com/Chelis-Lang/chelis/issues/1379
 [#1382]: https://github.com/Chelis-Lang/chelis/issues/1382
 [#1383]: https://github.com/Chelis-Lang/chelis/issues/1383
+[#1397]: https://github.com/Chelis-Lang/chelis/issues/1397

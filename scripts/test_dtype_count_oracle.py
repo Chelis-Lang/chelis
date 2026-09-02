@@ -20,7 +20,7 @@ class CommandManifestTests(unittest.TestCase):
             [
                 "checker axis and dtype contract",
                 "dedicated Count IR and evaluator",
-                "exact WireDag v6 and registered wire capacity",
+                "exact current WireDag and registered wire capacity",
                 "compiled C exact multi-axis and empty execution",
                 "loud HIP and Metal issue receipts",
                 "semantic registration and executable example parity",

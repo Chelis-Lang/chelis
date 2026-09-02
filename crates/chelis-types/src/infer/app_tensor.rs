@@ -921,10 +921,9 @@ pub(super) fn check_expand_signature(
         );
     }
 
-    // Uses `extract_int_for_dim` so `cast(N, int32)`-wrapped literal
-    // axis/size reach the non-negative-axis and positive-size checks at
-    // infer time (red team round 3 sibling sweep within the spec
-    // section 2.4 movement family).
+    // Uses `extract_int_for_dim` so a `cast(N, int32)`-wrapped literal axis
+    // reaches the non-negative-axis check. Extent folding has its own exact
+    // int64 path below.
     let axis = match arg_exprs.get(1).and_then(extract_int_for_dim) {
         Some(axis) if axis >= 0 => axis as usize,
         Some(axis) => {
@@ -952,7 +951,7 @@ pub(super) fn check_expand_signature(
                 CheckError::new(
                     CheckErrorKind::DimensionMismatch,
                     format!(
-                        "expand axis must be a compile-time constant for the output \
+                        "expand axis must be a compile-time constant of type int32 for the output \
                      shape to be inferable, got {}",
                         describe_axis_arg(arg_exprs.get(1)),
                     ),
@@ -983,14 +982,17 @@ pub(super) fn check_expand_signature(
             ),
         );
     }
-    let size = match arg_exprs.get(2).and_then(extract_int_for_dim) {
-        Some(size) if size > 0 => Dim::Lit(size),
+    let size = match arg_exprs
+        .get(2)
+        .and_then(|expr| fold_static_int_expr(expr, |name| env.static_size_value(name)))
+    {
+        Some(size) if size >= 0 => Dim::Lit(size),
         Some(size) => {
             return report(
                 errors,
                 CheckError::new(
                     CheckErrorKind::DimensionMismatch,
-                    format!("expand requires positive size, got {size}"),
+                    format!("expand requires non-negative size, got {size}"),
                     vec![],
                 ),
             );
@@ -1015,13 +1017,13 @@ pub(super) fn check_expand_signature(
             // by an in-scope tensor — stamps the named dim into the output so
             // declared results refer to it by name. Every other materializable
             // spelling (`shape(...)` reads, static arithmetic, `cast`-wrapped,
-            // and `let`-bound sizes — Form-3) defers the output dim slot to
+            // and `let`-bound sizes) defers the output dim slot to
             // the declared return-type / call-context via unification.
             match arg_exprs.get(2).and_then(symbolic_dim_ref_name) {
                 Some(name) if env.lookup(name).is_none() || env.tensor_carries_dim(name) => {
                     Dim::Name(name.to_string())
                 }
-                _ => return subst.apply(result_ty),
+                _ => Dim::Wildcard,
             }
         }
     };
@@ -1159,7 +1161,7 @@ pub(super) fn check_named_expand_signature(
         );
     }
 
-    // The named-insert size must be a positive compile-time literal (an
+    // The named-insert size must be a non-negative compile-time literal (an
     // `Ni64` literal or `cast(N, int64)`; extent-domain under [05-DIM-1]).
     // A symbolic-dim or runtime int64 size cannot
     // be stamped onto the inserted named dim at lowering: the eval lane has
@@ -1167,7 +1169,10 @@ pub(super) fn check_named_expand_signature(
     // symbol (silent shape-0 output) — both verified failure modes, so the
     // checker rejects the form outright rather than letting a check-clean
     // program break downstream (chelis#339).
-    let Some(size) = arg_exprs.get(2).and_then(extract_int_for_dim) else {
+    let Some(size) = arg_exprs
+        .get(2)
+        .and_then(|expr| fold_static_int_expr(expr, |_| None))
+    else {
         return report(
             errors,
             CheckError::new(
@@ -1183,12 +1188,12 @@ pub(super) fn check_named_expand_signature(
             ),
         );
     };
-    if size <= 0 {
+    if size < 0 {
         return report(
             errors,
             CheckError::new(
                 CheckErrorKind::DimensionMismatch,
-                format!("expand requires positive size, got {size}"),
+                format!("expand requires non-negative size, got {size}"),
                 vec![],
             ),
         );

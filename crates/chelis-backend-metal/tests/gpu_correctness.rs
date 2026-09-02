@@ -18,7 +18,7 @@
 //! the per-test relaxations.
 
 use chelis_backend_metal::codegen_metal;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_types::types::Prim;
 use chelis_unord::UnordMap;
@@ -555,7 +555,6 @@ fn m6_full_axis_min_reduction_matches_evaluator() {
 #[test]
 #[ignore]
 fn m6_tiled_matmul_matches_evaluator() {
-    use chelis_ir::dag::DimExpr;
     fn mat_f32(r: usize, c: usize) -> TensorType {
         TensorType {
             dims: vec![DimInfo::Lit(r), DimInfo::Lit(c)],
@@ -589,7 +588,7 @@ fn m6_tiled_matmul_matches_evaluator() {
     let ea = dag.add_node(
         RiscOp::Expand {
             axis: 2,
-            size: DimExpr::Concrete(n),
+            size: chelis_ir::dag::RtDim::Lit(n),
         },
         vec![a],
         tensor3_f32(m, k, n),
@@ -598,7 +597,7 @@ fn m6_tiled_matmul_matches_evaluator() {
     let eb = dag.add_node(
         RiscOp::Expand {
             axis: 0,
-            size: DimExpr::Concrete(m),
+            size: chelis_ir::dag::RtDim::Lit(m),
         },
         vec![b],
         tensor3_f32(m, k, n),
@@ -918,7 +917,10 @@ fn m6_pad_1d_zero_fill_matches_evaluator() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
     let p = dag.add_node(
-        RiscOp::zero_pad(Prim::F32, vec![(RtDim::Lit(1), RtDim::Lit(1))]),
+        RiscOp::zero_pad(
+            Prim::F32,
+            vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(1))],
+        ),
         vec![x],
         vec_f32(6),
         None,
@@ -937,7 +939,7 @@ fn m6_pad_1d_nonzero_fill_matches_evaluator() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
     let p = dag.add_node(
         RiscOp::pad(
-            vec![(RtDim::Lit(2), RtDim::Lit(1))],
+            vec![(chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(1))],
             chelis_types::scalar_from_f64("pad", Prim::F32, -7.5).unwrap(),
         ),
         vec![x],
@@ -965,8 +967,8 @@ fn m6_pad_2d_asymmetric_matches_evaluator() {
         RiscOp::zero_pad(
             Prim::F32,
             vec![
-                (RtDim::Lit(1), RtDim::Lit(0)),
-                (RtDim::Lit(0), RtDim::Lit(2)),
+                (chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(0)),
+                (chelis_ir::dag::RtDim::Lit(0), chelis_ir::dag::RtDim::Lit(2)),
             ],
         ),
         vec![x],
@@ -991,7 +993,7 @@ fn m6_shrink_1d_matches_evaluator() {
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
     let s = dag.add_node(
         RiscOp::Shrink {
-            bounds: vec![(RtDim::Lit(1), RtDim::Lit(5))],
+            bounds: vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(5))],
         },
         vec![x],
         vec_f32(4),
@@ -1017,8 +1019,8 @@ fn m6_shrink_2d_matches_evaluator() {
     let s = dag.add_node(
         RiscOp::Shrink {
             bounds: vec![
-                (RtDim::Lit(1), RtDim::Lit(3)),
-                (RtDim::Lit(0), RtDim::Lit(2)),
+                (chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(3)),
+                (chelis_ir::dag::RtDim::Lit(0), chelis_ir::dag::RtDim::Lit(2)),
             ],
         },
         vec![x],
@@ -1044,14 +1046,17 @@ fn m6_pad_then_shrink_roundtrip_matches_evaluator() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
     let p = dag.add_node(
-        RiscOp::zero_pad(Prim::F32, vec![(RtDim::Lit(2), RtDim::Lit(2))]),
+        RiscOp::zero_pad(
+            Prim::F32,
+            vec![(chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(2))],
+        ),
         vec![x],
         vec_f32(8),
         None,
     );
     let s = dag.add_node(
         RiscOp::Shrink {
-            bounds: vec![(RtDim::Lit(2), RtDim::Lit(6))],
+            bounds: vec![(chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(6))],
         },
         vec![p],
         vec_f32(4),

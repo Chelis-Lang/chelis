@@ -770,8 +770,9 @@ errors: a negative bound, a shrink range overshoot, a non-positive stride
 step, a negative reshape target extent, and a reshape target whose element
 product disagrees with the input all trap before allocation or access. The reshape numel
 guard fires for ANY reshape whose output or input extents are not all static
-literals — Sym-resolved targets and literal targets over runtime-sized inputs
-included, not only node-valued targets — and same-shape elementwise ops guard
+literals — named-dimension targets read as `InputAxis` and literal targets
+over runtime-sized inputs included, not only node-valued targets — and
+same-shape elementwise ops guard
 operand-shape agreement at equal rank whenever a non-static extent is
 involved (chelis#664; rank-0 scalar operands are the backend's broadcast
 idiom and are exempt). A dim whose extent
