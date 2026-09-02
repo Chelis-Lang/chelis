@@ -58,7 +58,7 @@ FROZEN_FILE_DIGESTS = {
         "efb29e77a338c94bb6c6c6b9adc6c4bb236f5d78c0c329f3775a0b48b8640348"
     ),
     "spec/04-type-system.md": (
-        "21b3b2f3c8aafc52c975e86e1bf573a327f33e1be845f9093382fd61c45b3045"
+        "2a5bb10f90c43f83484ce0fc81a63e5355cfca7e1625783b2a2842e174dc8a3a"
     ),
     "spec/05-risc-primitives.md": (
         "e427fa744b313a3a8a7cad99e1ca92ed7df8e57db459bf53a499edb098dca86a"
@@ -76,7 +76,7 @@ FROZEN_FILE_DIGESTS = {
         "b0de5579fa3b7c076ff5e809b2b6d8accf741d82305fe198233cce64ddefaf1c"
     ),
     "spec/design/compiled_value_ownership.md": (
-        "4a6013c2dc5a074d19ae12696c109a35218facfdb423d29ff07cef79fe6689b9"
+        "209f1cac065d0c9ff4e644723d3455fa52c061e8470a32c8514da5b373830c9c"
     ),
     "spec/design/dtype_semantics.md": (
         "61092ac8978986d2819febf6add1cebc9f11f48a26e151d09c389646d89dc6bb"

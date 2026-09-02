@@ -58,21 +58,11 @@ const MATCHING: &str = "(defsig {} k (t-prim {} f32))\n\n\
 
 const NO_DEFSIG: &str = "(def {} k (lit {type: (t-prim {} int32)} 1))\n";
 
-/// A `defsig`-less def (`use_base`) that FORWARD-references another `defsig`-less
-/// def (`base`) declared later. Resolving the forward reference is exactly the
-/// job of the body-stamp prebind the chelis#1124 fix leaves in place for
-/// `defsig`-less names: `base` is bound from its body type stamp before
-/// `use_base`'s body is inferred. If the fix's `defsig`-name skip ever stripped
-/// a `defsig`-less binding, `base` would be unbound and `use_base` would raise
-/// an UnboundVariable error, so this is the regression sentinel for the skip.
-///
-/// Unlike the other fixtures, this one is asserted against the IR ingress ONLY,
-/// not for `check_ir_program`/`check_typed_program` parity: the body-stamp
-/// prebind is a capability the IR ingress has and the typed ingress does not, so
-/// the typed ingress legitimately rejects this forward VALUE reference with
-/// UnboundVariable. That divergence is pre-existing and orthogonal to chelis#1124
-/// (which only concerns the def/defsig unification); the chelis#1124 fix must not
-/// disturb the prebind for `defsig`-less names, which is what this test locks.
+/// A `defsig`-less def (`use_base`) that forward-references another
+/// `defsig`-less def (`base`) declared later. chelis#1134 / [04-INF-4]
+/// requires both ingresses to reject it rather than letting serialized body
+/// metadata manufacture value scope. The authoritative parity coverage lives
+/// in `issue_1134_forward_reference_parity`.
 const DEFSIG_LESS_CROSS_REF: &str = "(def {} use_base (var {} base))\n\n\
                                      (def {} base (lit {type: (t-prim {} int32)} 7))\n";
 
@@ -138,21 +128,17 @@ fn ir_ingress_still_binds_defsig_less_def_from_body_stamp() {
     );
 }
 
-/// Over-rejection sentinel for the prebind's core job (chelis#1124 review
-/// condition 3): a `defsig`-less def that forward-references another
-/// `defsig`-less def must stay accepted by the IR ingress. The fix's
-/// `defsig`-name skip must NOT strip the body-stamp binding that a `defsig`-less
-/// forward reference depends on. Asserted on the IR ingress only — see the
-/// `DEFSIG_LESS_CROSS_REF` doc comment for why the typed ingress legitimately
-/// rejects this forward value reference.
+/// Cross-issue regression sentinel: chelis#1124's body-stamp prebind must not
+/// bypass chelis#1134's sequential top-level value scope.
 #[test]
-fn ir_ingress_resolves_defsig_less_forward_cross_reference() {
+fn both_ingresses_reject_defsig_less_forward_cross_reference() {
     let ir = ir_diagnostics(DEFSIG_LESS_CROSS_REF);
+    let typed = typed_diagnostics(DEFSIG_LESS_CROSS_REF);
 
+    assert_eq!(ir, typed, "chelis#1134 requires ingress parity");
     assert!(
-        ir.is_empty(),
-        "a defsig-less forward cross-reference must remain accepted by the IR \
-         ingress (the prebind binds the referenced def from its body stamp), \
-         got: {ir:?}"
+        ir.iter()
+            .any(|diagnostic| diagnostic.starts_with("UnboundVariable:")),
+        "a defsig-less forward cross-reference must reject at both ingresses: {ir:?}"
     );
 }

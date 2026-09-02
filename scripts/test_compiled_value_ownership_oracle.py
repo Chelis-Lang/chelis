@@ -359,18 +359,24 @@ class ManifestContractTests(unittest.TestCase):
         rows = [fixture for fixture in fixtures if fixture.issue == 1339]
         self.assertTrue(rows)
         self.assertTrue(all(row.external_prerequisite for row in rows))
+        self.assertTrue(all(row.polarity is oracle.Polarity.NEGATIVE for row in rows))
+        self.assertTrue(
+            all(row.detector is oracle.Detector.EXACT_REJECTION for row in rows)
+        )
+        self.assertTrue(all(isinstance(row.expected, oracle.MustPass) for row in rows))
+        self.assertTrue(all(row.action is oracle.Action.CHECK_REJECT for row in rows))
         self.assertNotIn(1339, oracle.OWNERSHIP_CHILD_ISSUES)
 
-    def test_forward_capture_freezes_the_complete_expected_output(self) -> None:
-        fixture = next(
-            row
-            for row in oracle.fixture_manifest()
-            if row.id == "forward-captured-list"
-        )
-        self.assertEqual(
-            fixture.expected_output,
-            "capture = [1, 2]\nlater = [1, 2]",
-        )
+    def test_forward_capture_prerequisite_freezes_both_annotated_shapes(self) -> None:
+        fixtures = {row.id: row for row in oracle.fixture_manifest()}
+        list_source = (
+            oracle.REPO_ROOT / fixtures["forward-captured-list"].source
+        ).read_text()
+        tensor_source = (
+            oracle.REPO_ROOT / fixtures["forward-captured-tensor"].source
+        ).read_text()
+        self.assertIn("later: List[int64]", list_source)
+        self.assertIn("later: tensor[2, f32]", tensor_source)
 
     def test_option_scalars_freeze_every_emitted_root(self) -> None:
         fixtures = {row.id: row for row in oracle.fixture_manifest()}
@@ -1217,25 +1223,21 @@ if __name__ == "__main__":
             oracle.classify_result(expected, oracle.Detection.success("clean"), "fixture")
 
     def test_nonzero_receipt_rejects_exit_and_diagnostic_drift(self) -> None:
-        tensor = next(
-            row
-            for row in oracle.fixture_manifest()
-            if row.id == "forward-captured-tensor"
-        )
-        self.assertIs(
-            oracle.detect_nonzero(tensor, -11, ""),
-            oracle.Detector.NONZERO_EXIT,
-        )
-        self.assertIs(
-            oracle.detect_nonzero(tensor, -6, ""),
-            oracle.Detector.MANIFEST,
-        )
-
         option = next(
             row
             for row in oracle.fixture_manifest()
             if row.id == "option-nested-string"
         )
+        signal = replace(option, expected_exit=-11, diagnostic_fragments=())
+        self.assertIs(
+            oracle.detect_nonzero(signal, -11, ""),
+            oracle.Detector.NONZERO_EXIT,
+        )
+        self.assertIs(
+            oracle.detect_nonzero(signal, -6, ""),
+            oracle.Detector.MANIFEST,
+        )
+
         expected_diagnostic = (
             "unsupported: unresolved host type `Option(String)` on boxing a "
             "resolved host value; no fallback representation is permitted"

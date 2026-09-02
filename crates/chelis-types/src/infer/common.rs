@@ -887,9 +887,54 @@ pub(super) enum DeclPhase {
     Rest,
 }
 
+pub(super) fn definition_owns_function_metadata_prebind(expr: &deep::Expr) -> bool {
+    let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
+        return false;
+    };
+    let Some(body) = kids.get(1) else {
+        return false;
+    };
+    tagged_children(body, DeepTag::Fn).is_some()
+}
+
+/// Record the [04-INF-4] source position of every top-level eager value, and
+/// the outer binding each one shadows.
+///
+/// This runs before any signature is collected, so `env.lookup` still sees the
+/// pre-existing import or stacked-library binding rather than this unit's
+/// own. The ordinal is the value's `def`, never a separated sibling `defsig`:
+/// a signature is metadata about a declaration, not the declaration itself,
+/// so it may not publish the value early. The first `def` of a duplicated
+/// name owns the position; the duplicate itself is already an error.
+fn note_eager_value_ordinals(items: &[(Option<String>, &deep::Expr)], env: &mut Env) {
+    env.reset_top_level_value_scope();
+    for (declaration_index, (_, expr)) in items.iter().enumerate() {
+        let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
+            continue;
+        };
+        if definition_owns_function_metadata_prebind(expr) {
+            continue;
+        }
+        let Some(name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        if env.top_level_value_ordinal(name).is_some() {
+            continue;
+        }
+        let shadowed = env.lookup(name).cloned();
+        env.note_top_level_value_ordinal(name.to_string(), declaration_index, shadowed);
+    }
+}
+
 /// Run the two-phase declaration collection over `items` (already flattened
 /// past `module` wrappers, each paired with its lexical module key):
 /// register all type aliases, then everything else.
+///
+/// Every declared signature stays in the global header environment, including
+/// an eager value's. [04-INF-4] scope is decided by
+/// [`Env::top_level_value_visibility`] at each reference, not by withholding
+/// or replaying bindings along the inference schedule: the schedule reorders
+/// function bodies, so a binding timeline cannot express source order.
 pub(super) fn collect_all_declarations(
     items: &[(Option<String>, &deep::Expr)],
     env: &mut Env,
@@ -906,6 +951,7 @@ pub(super) fn collect_all_declarations(
     report_duplicate_defsigs(&bare_items, errors);
     report_orphan_defsigs(items, errors);
     report_builtin_shadowing(&bare_items, errors);
+    note_eager_value_ordinals(items, env);
     let resolution_env = precollect_type_resolution_env(items, adt_reg);
     // Install the provisional self/forward header scope explicitly in this
     // per-check registry clone. Declaration bodies resolve against it, while

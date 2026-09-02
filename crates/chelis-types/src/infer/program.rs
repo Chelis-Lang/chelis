@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::context::LibraryProofId;
+use std::collections::BTreeSet;
 
 /// Transactional owner for one recursive SCC's inference level and temporary
 /// top-level bindings. It snapshots every member binding before provisional
@@ -253,6 +254,7 @@ pub(super) fn infer_program_with_product_in_session(
     // module-wrapped programs.
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
+    let external_input_types = collect_literal_external_input_types(&items);
     let metadata_prebound_names = UnordSet::new();
     product.function_inference_plan = FunctionInferencePlan::build(&items);
     let inference_groups = primary_inference_groups(&product.function_inference_plan, &items);
@@ -314,6 +316,18 @@ pub(super) fn infer_program_with_product_in_session(
                 crate::opacity::module_key_for_item(module.as_deref(), decl_name),
                 decl_name.map(str::to_string),
             );
+            env.set_current_declaration_ordinal(Some(declaration_index));
+            let external_input_failure = prebind_literal_external_input_for_declaration(
+                declaration_index,
+                expr,
+                &external_input_types,
+                &declared_signatures,
+                &mut env,
+                &mut vg,
+                &mut subst,
+                &adt_reg,
+                errors,
+            );
             if let Some(binding) = infer_top_level(
                 expr,
                 &mut env,
@@ -322,7 +336,7 @@ pub(super) fn infer_program_with_product_in_session(
                 &adt_reg,
                 errors,
                 &mut product,
-                None,
+                external_input_failure.as_ref(),
                 provisional_types.get(&declaration_index),
                 group.recursive,
                 &user_def_names,
@@ -371,6 +385,7 @@ pub(super) fn infer_program_with_product_in_session(
         }
     }
     crate::opacity::set_current_item(None, None);
+    env.set_current_declaration_ordinal(None);
 
     if cancelled() {
         errors.push(crate::cancel::cancellation_check_error());
@@ -1048,6 +1063,14 @@ pub(crate) fn check_typed_program_in_session(
     // located failure rather than a partially-annotated `Ok`.
     let stack_scope = StackExhaustionScope::enter();
     let product = infer_program_with_product_in_session(exprs, errors);
+    // [04-INF-4] makes eager value cycles an ingress-independent checker
+    // error. The serialized-IR ingress runs this detector from
+    // `validate_ir_program`; the stamped typed ingress reaches inference
+    // directly, so run the same detector here after normalizing the carrier.
+    // Keep it after inference to preserve the shared diagnostic order:
+    // body-inference errors first, then `CycleDetected`.
+    let normalized = normalize_nodes_to_lists(exprs);
+    detect_top_level_binding_cycles(&normalized, errors);
     let stats = product.stats();
     if errors.is_empty() {
         let annotated_exprs = annotate_ir_program(exprs, &product, errors);
@@ -1188,15 +1211,20 @@ pub(super) fn infer_ir_program_with_state(
     // names intentionally retain last-declaration-wins semantics, while the
     // origin keeps an owning witness from leaking into an earlier body.
     let collected_ir_types = collect_ir_types_with_origins(items.iter().map(|(_, expr)| *expr));
+    let external_input_types = collect_literal_external_input_types(&items);
 
     // chelis#1124: names that carry an explicit `(defsig {} name ...)` in this
     // check unit already had their AUTHORITATIVE declared type bound into
     // `state.env` by `collect_all_declarations` above. The prebind below reads
     // each def's own BODY type stamp (via `collect_ir_types_with_origins`) and
     // rebinds the name to it — the mechanism that lets a `defsig`-less def be
-    // resolved by cross-references before its body is inferred. But letting a
-    // body stamp overwrite a defsig binding replaces the declared signature
-    // with the body's own type, so `infer_top_level`'s body-vs-defsig
+    // resolved by cross-references before its body is inferred. It may bind an
+    // eager value's name too: chelis#1134 scope is decided by
+    // `Env::top_level_value_visibility`, so a binding that exists early can no
+    // longer make a later value readable, and the two ingresses stay in
+    // agreement without this ingress withholding anything. Letting a body stamp
+    // overwrite a defsig binding replaces the declared signature with the
+    // body's own type, so `infer_top_level`'s body-vs-defsig
     // unification (which the IR ingress DOES run) then compares the body
     // against itself and silently accepts a `defsig`/body mismatch. The typed
     // ingress (`infer_program_with_product_in_session`) has no such rebind and
@@ -1210,7 +1238,6 @@ pub(super) fn infer_ir_program_with_state(
             _ => None,
         })
         .collect();
-
     let mut prebound_type_failures = UnordMap::new();
     for (name, ty_expr) in &collected_ir_types.type_env {
         let metadata_level = state.subst.enter_level(&state.var_gen);
@@ -1327,6 +1354,20 @@ pub(super) fn infer_ir_program_with_state(
                 crate::opacity::module_key_for_item(module.as_deref(), decl_name),
                 decl_name.map(str::to_string),
             );
+            state
+                .env
+                .set_current_declaration_ordinal(Some(declaration_index));
+            let external_input_failure = prebind_literal_external_input_for_declaration(
+                declaration_index,
+                expr,
+                &external_input_types,
+                &declared_signatures,
+                &mut state.env,
+                &mut state.var_gen,
+                &mut state.subst,
+                &state.adt_reg,
+                errors,
+            );
             if let Some(binding) = infer_top_level(
                 expr,
                 &mut state.env,
@@ -1335,7 +1376,9 @@ pub(super) fn infer_ir_program_with_state(
                 &state.adt_reg,
                 errors,
                 &mut product,
-                prebound_type_failures.get(&declaration_index),
+                external_input_failure
+                    .as_ref()
+                    .or_else(|| prebound_type_failures.get(&declaration_index)),
                 provisional_types.get(&declaration_index),
                 group.recursive,
                 &user_def_names,
@@ -1387,6 +1430,7 @@ pub(super) fn infer_ir_program_with_state(
         }
     }
     crate::opacity::set_current_item(None, None);
+    state.env.set_current_declaration_ordinal(None);
 
     if cancelled() {
         // Abandoned mid-schedule. The remaining declarations were never
@@ -1417,12 +1461,46 @@ pub(super) fn infer_ir_program_with_state(
     product
 }
 
+/// Eager (non-function) top-level value `def`s, as name -> flattened ordinal.
+/// The first `def` of a duplicated name owns the position, matching
+/// `Env::note_top_level_value_ordinal`; the duplicate is already an error.
+fn eager_value_definition_ordinals(
+    items: &[(Option<String>, &deep::Expr)],
+) -> UnordMap<String, usize> {
+    let mut ordinals = UnordMap::new();
+    for (index, (_, expr)) in items.iter().enumerate() {
+        let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
+            continue;
+        };
+        if definition_owns_function_metadata_prebind(expr) {
+            continue;
+        }
+        let Some(name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        ordinals.entry(name.to_string()).or_insert(index);
+    }
+    ordinals
+}
+
 /// Primary body-inference schedule. Function declarations inside a lexical
 /// module use the same dependency/SCC planner as signature inference, so a
 /// forward helper's body-derived scheme is available to its caller. Bare defs
 /// and every non-function declaration retain textual order. The returned
 /// values are original flattened ordinals: scheduling never changes diagnostic
 /// ownership, collected-type origins, or output order.
+///
+/// [04-INF-4] constrains that reordering. A module function may read a
+/// top-level eager value declared before it, and an unannotated value has no
+/// header anywhere, so its type exists only once its own `def` has been
+/// inferred. Hoisting the reader's body across that `def` would report a
+/// legal backward reference as unbound. The schedule therefore also carries a
+/// barrier edge from each eager value's `def` to every later module function
+/// that reads it.
+///
+/// This is availability, not visibility. Whether a name is in scope is decided
+/// by `Env::top_level_value_visibility` from source position alone, so no
+/// ordering this function produces can widen or narrow [04-INF-4] scope.
 pub(super) fn primary_inference_schedule(
     function_plan: &FunctionInferencePlan,
     items: &[(Option<String>, &deep::Expr)],
@@ -1448,18 +1526,80 @@ pub(super) fn primary_inference_schedule(
         .map(|member| member.item_index)
         .filter(|index| module_fn_indices.contains(index))
         .collect::<Vec<_>>();
-    let insertion = module_fn_indices
-        .to_sorted()
-        .first()
-        .map_or(0, |index| **index);
+    let others = (0..items.len())
+        .filter(|index| !module_fn_indices.contains(index))
+        .collect::<Vec<_>>();
+
+    // Precedence edges. Two chains fix the relative order inside each class:
+    // every non-module-function declaration keeps source order, and the
+    // module functions keep the planner's dependency order. The only edges
+    // between the classes run eager value -> later reading function, so the
+    // graph is acyclic by construction.
+    let mut predecessors_remaining = vec![0usize; items.len()];
+    let mut successors: UnordMap<usize, Vec<usize>> = UnordMap::new();
+    let mut add_edge = |from: usize, to: usize, remaining: &mut Vec<usize>| {
+        successors.entry(from).or_default().push(to);
+        remaining[to] += 1;
+    };
+    for pair in others.windows(2) {
+        add_edge(pair[0], pair[1], &mut predecessors_remaining);
+    }
+    for pair in ordered_module_fns.windows(2) {
+        add_edge(pair[0], pair[1], &mut predecessors_remaining);
+    }
+
+    let eager_value_ordinals = eager_value_definition_ordinals(items);
+    if !eager_value_ordinals.is_empty() {
+        let eager_names = eager_value_ordinals
+            .to_sorted()
+            .into_iter()
+            .map(|(name, _)| name.clone())
+            .collect::<UnordSet<_>>();
+        for function_index in &ordered_module_fns {
+            let mut referenced = UnordSet::new();
+            let mut bound = Vec::new();
+            collect_top_level_calls(
+                items[*function_index].1,
+                &eager_names,
+                &mut bound,
+                &mut referenced,
+            );
+            // `to_sorted` is the canonical exit, and the ordinals are sorted
+            // again below, so the edge set does not depend on traversal order.
+            let mut barriers = referenced
+                .to_sorted()
+                .into_iter()
+                .filter_map(|name| eager_value_ordinals.get(name).copied())
+                .filter(|value_index| value_index < function_index)
+                .collect::<Vec<_>>();
+            barriers.sort_unstable();
+            for value_index in barriers {
+                add_edge(value_index, *function_index, &mut predecessors_remaining);
+            }
+        }
+    }
+
+    // Kahn, released in source order so the schedule stays deterministic and
+    // stays as close to the source as the edges allow.
+    let mut ready = (0..items.len())
+        .filter(|index| predecessors_remaining[*index] == 0)
+        .collect::<BTreeSet<_>>();
     let mut schedule = Vec::with_capacity(items.len());
-    for index in 0..items.len() {
-        if index == insertion {
-            schedule.extend(ordered_module_fns.iter().copied());
+    while let Some(index) = ready.pop_first() {
+        schedule.push(index);
+        for successor in successors.get(&index).into_iter().flatten() {
+            predecessors_remaining[*successor] -= 1;
+            if predecessors_remaining[*successor] == 0 {
+                ready.insert(*successor);
+            }
         }
-        if !module_fn_indices.contains(&index) {
-            schedule.push(index);
-        }
+    }
+    if schedule.len() != items.len() {
+        // Unreachable with the edge set above, which has no path from a
+        // function back to a value. Emitting the remainder in source order
+        // keeps the pass total rather than silently dropping declarations.
+        let scheduled = schedule.iter().copied().collect::<UnordSet<_>>();
+        schedule.extend((0..items.len()).filter(|index| !scheduled.contains(index)));
     }
     schedule
 }
@@ -1576,6 +1716,68 @@ pub(super) type IrTypeEnv = BTreeMap<String, deep::Expr>;
 pub(super) struct CollectedIrTypes {
     type_env: IrTypeEnv,
     final_origin_by_name: UnordMap<String, usize>,
+}
+
+fn collect_literal_external_input_types(
+    items: &[(Option<String>, &deep::Expr)],
+) -> UnordMap<usize, deep::Expr> {
+    let collected = collect_ir_types_with_origins(items.iter().map(|(_, expr)| *expr));
+    collected
+        .type_env
+        .iter()
+        .filter_map(|(name, ty_expr)| {
+            let declaration_index = collected.final_origin_by_name[name];
+            let expr = items[declaration_index].1;
+            let (DeepTag::Def, _, kids) = stamped_parts(expr)? else {
+                return None;
+            };
+            let body = kids.get(1)?;
+            body_is_type_stamped_literal_self_ref(body, name)
+                .then(|| (declaration_index, ty_expr.clone()))
+        })
+        .collect()
+}
+
+/// [04-INF-4]'s typed literal self-reference declares an external input. Its
+/// own type must therefore be visible while that declaration is inferred,
+/// but never to an earlier declaration. Bind exactly the current ordinal just
+/// before its body check; ordinary values and future external inputs remain
+/// source-ordered at both checker ingresses.
+#[allow(clippy::too_many_arguments)]
+fn prebind_literal_external_input_for_declaration(
+    declaration_index: usize,
+    expr: &deep::Expr,
+    external_input_types: &UnordMap<usize, deep::Expr>,
+    declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+) -> Option<ErrorWitness> {
+    let ty_expr = external_input_types.get(&declaration_index)?;
+    let name = top_level_decl_name(expr)?;
+    if declared_signatures.contains_key(name) {
+        return None;
+    }
+    let metadata_level = subst.enter_level(vg);
+    let resolved = resolve_deep_type(
+        ty_expr,
+        vg,
+        adt_reg,
+        TypeUseSite::CompilerMetadata,
+        BinderMode::TrustedCompilerMetadata,
+        errors,
+    );
+    subst.leave_level(metadata_level, vg);
+    match resolved {
+        Ok(ty) => {
+            let scheme = env.generalize(&ty, subst);
+            env.bind(name.to_string(), scheme);
+            None
+        }
+        Err(witness) => Some(witness),
+    }
 }
 
 pub(super) fn build_ir_type_env(exprs: &[deep::Expr]) -> IrTypeEnv {
