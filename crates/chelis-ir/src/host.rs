@@ -10313,15 +10313,48 @@ fn actualize_tensor_helper_types(
                     .iter()
                     .zip(input.dims.iter())
                     .enumerate()
+                    // No wildcard, deliberately. A `None` from any axis
+                    // collapses the whole result and sends the caller back
+                    // to `node.output_type`, which is the stale checker
+                    // metadata chelis#1137 exists to stop trusting. A future
+                    // `RtDim` variant absorbed by a `_` arm would restore
+                    // that defect silently, with no conflict marker and no
+                    // failing test; with every pair named, it is an `E0004`
+                    // non-exhaustive-match build error instead. `Stride`
+                    // below is total for the same reason.
                     .map(|(axis, ((start, end), input_dim))| match (start, end) {
-                        (crate::dag::RtDim::Lit(start), crate::dag::RtDim::Lit(end))
-                            if start <= end =>
-                        {
-                            Some(crate::dag::DimInfo::Lit(end - start))
+                        // Both bounds static: the extent is their difference.
+                        // A `start > end` range is invalid and `verify`'s
+                        // "has invalid bounds" check rejects it; `checked_sub`
+                        // declines deliberately instead of wrapping.
+                        (crate::dag::RtDim::Lit(start), crate::dag::RtDim::Lit(end)) => {
+                            end.checked_sub(*start).map(crate::dag::DimInfo::Lit)
                         }
+                        // The `SHRINK_TO_END` full-axis sentinel: the slice is
+                        // the whole axis, so it keeps the input axis identity.
                         (crate::dag::RtDim::Lit(0), crate::dag::RtDim::ToEnd) => {
                             Some(input_dim.clone())
                         }
+                        // A sentinel under a nonzero or runtime start is
+                        // malformed, and two other production components
+                        // already reject it by name: `grad`'s Shrink adjoint
+                        // panics with "malformed ToEnd sentinel in shrink
+                        // adjoint" on a nonzero start, and `bind_symbolic_dims`
+                        // errors with "shrink-to-end sentinel with non-literal
+                        // start". `grad`'s committed
+                        // `shrink_adjoint_malformed_sentinel_fails_loud` is a
+                        // `#[should_panic]` control over exactly this shape.
+                        // Nothing builds one either: `lower::lower_one_bound`
+                        // yields only `Lit`/`Node`, so no Surf or Deep `shrink`
+                        // can spell `ToEnd`, and every production construction
+                        // of the sentinel (the Pad, ProdReduce, and Stride
+                        // adjoints in `grad`) pairs it with `Lit(0)`. Declining
+                        // here is consistency with a rule enforced elsewhere,
+                        // not a gap being papered over.
+                        (crate::dag::RtDim::Lit(_), crate::dag::RtDim::ToEnd)
+                        | (crate::dag::RtDim::Node(_), crate::dag::RtDim::ToEnd) => None,
+                        // At least one bound is only known at run time, so the
+                        // extent is an op-declared runtime dimension.
                         (crate::dag::RtDim::Node(_), crate::dag::RtDim::Node(_))
                         | (crate::dag::RtDim::Node(_), crate::dag::RtDim::Lit(_))
                         | (crate::dag::RtDim::Lit(_), crate::dag::RtDim::Node(_)) => {
@@ -10335,7 +10368,13 @@ fn actualize_tensor_helper_types(
                                 None,
                             ))
                         }
-                        _ => None,
+                        // `ToEnd` is an `end`-only marker and `Sym` is a
+                        // `Reshape` target only; `verify` rejects both in a
+                        // `Shrink` bound ("only valid as an end", "only valid
+                        // as a reshape target").
+                        (crate::dag::RtDim::ToEnd, _)
+                        | (crate::dag::RtDim::Sym(_), _)
+                        | (_, crate::dag::RtDim::Sym(_)) => None,
                     })
                     .collect::<Option<Vec<_>>>()?
             }
@@ -16424,6 +16463,67 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                 .dims,
             vec![batch],
             "the full-axis sentinel preserves the input axis identity"
+        );
+    }
+
+    /// NEGATIVE PARITY: a `ToEnd` sentinel under a nonzero start is malformed,
+    /// not a shape actualization may interpret.
+    ///
+    /// `grad`'s Shrink adjoint panics on this exact shape and
+    /// `shrink_adjoint_malformed_sentinel_fails_loud` is its `#[should_panic]`
+    /// control; `bind_symbolic_dims` rejects the non-literal-start form.
+    /// This is the third component's half of that rule. No producer builds
+    /// one - `lower::lower_one_bound` gives the front end only `Lit`/`Node`,
+    /// and every `grad` adjoint emitting the sentinel pairs it with `Lit(0)` -
+    /// so the DAG is hand-built, and the assertion is about disposition: the
+    /// exhaustive `Shrink` arm declines and leaves the node's declared type
+    /// alone. It must not forward the input axis identity the way the
+    /// well-formed `(0, ToEnd)` sentinel does, which would silently claim
+    /// extent 4 for a slice that starts at 1.
+    #[test]
+    fn tensor_helper_actualization_declines_a_nonzero_start_shrink_sentinel() {
+        use crate::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
+
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let declared = TensorType {
+            dims: vec![DimInfo::Named("*".into(), None)],
+            precision: Prim::F32,
+        };
+        let shrink = dag.add_node(
+            RiscOp::Shrink {
+                bounds: vec![(RtDim::Lit(1), RtDim::ToEnd)],
+            },
+            vec![input],
+            declared.clone(),
+            None,
+        );
+        dag.add_root(shrink);
+
+        let scope = UnordMap::from([(
+            "x".into(),
+            HostTypeTerm::Tensor(TensorType {
+                dims: vec![DimInfo::Lit(4)],
+                precision: Prim::F32,
+            }),
+        )]);
+
+        let actualized = actualize_tensor_helper_types(&dag, &scope);
+        assert_eq!(
+            actualized
+                .get(shrink)
+                .expect("malformed sentinel shrink")
+                .output_type,
+            declared,
+            "a malformed sentinel must not be given an extent by actualization"
         );
     }
 
