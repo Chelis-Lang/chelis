@@ -327,3 +327,69 @@ fn authored_deep_type_metadata_cannot_override_checker_owned_rank_facts() {
         );
     }
 }
+
+/// Rebinding a name to a value whose shape the validator cannot derive must
+/// clear the name's previous fact, not inherit it.
+///
+/// `IrTypeEnv` holds only top-level defs, so any entry standing under a
+/// let-bound name describes a different binding. Leaving it in place made a
+/// rebinding read the earlier binding's rank, and the identity-rank validator
+/// then rejected a valid program (chelis#668 round-6 F1). The rebound `a` here
+/// is rank-2 like `b`; before the repair the stale rank-1 fact from the dead
+/// first binding produced "got ranks 1 and 2".
+#[test]
+fn rebinding_to_a_nonderivable_value_drops_the_stale_rank_fact() {
+    let source = "module Repro.Rebind\n\
+                  def f(x: tensor[n, f32]) = {\n\
+                    a = stride(x, 2i64)\n\
+                    a = normalize(expand(x, 0i32, 2i64))\n\
+                    b = expand(x, 0i32, 2i64)\n\
+                    add(a, b)\n\
+                  }\n\
+                  out = f(to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]))\n";
+    let (status, report) = check(source);
+    assert!(
+        status.success(),
+        "a rebinding must not inherit the previous binding's rank: {report}"
+    );
+    assert_eq!(
+        report["score"], 1,
+        "a valid rebinding must score perfectly: {report}"
+    );
+    assert_eq!(
+        report["errors"],
+        serde_json::json!([]),
+        "perfect success must have no errors: {report}"
+    );
+}
+
+/// Negative parity for the repair above: clearing the stale fact must not
+/// become "stop checking rebound names". Here the rebound `a` IS derivable,
+/// at rank 1, and disagrees with the rank-2 `b`, so the mismatch must still
+/// be reported.
+#[test]
+fn rebinding_to_a_derivable_rank_still_rejects_a_genuine_mismatch() {
+    let source = "module Repro.RebindNegative\n\
+                  def f(x: tensor[n, f32]) = {\n\
+                    a = expand(x, 0i32, 2i64)\n\
+                    a = stride(x, 2i64)\n\
+                    b = expand(x, 0i32, 2i64)\n\
+                    add(a, b)\n\
+                  }\n\
+                  out = f(to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]))\n";
+    let (status, report) = check(source);
+    assert!(
+        !status.success(),
+        "a rebinding to a provably divergent rank must still fail: {report}"
+    );
+    assert!(
+        report["score"].as_f64().is_some_and(|score| score < 1.0),
+        "a genuine mismatch must not receive a perfect score: {report}"
+    );
+    assert!(
+        report["errors"].as_array().is_some_and(|errors| errors
+            .iter()
+            .any(|error| error["kind"] == "DimensionMismatch")),
+        "expected the checker-owned dimension mismatch: {report}"
+    );
+}

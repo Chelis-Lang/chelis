@@ -1458,6 +1458,17 @@ pub(super) fn validate_ir_expr(
                                     scoped_type_env.insert(name.to_string(), ty);
                                 }
                                 None => {
+                                    // Drop any fact this name carried from
+                                    // an outer `def` or an earlier binding.
+                                    // `IrTypeEnv` holds only top-level defs,
+                                    // so an entry standing here describes a
+                                    // DIFFERENT binding than the one being
+                                    // introduced; leaving it in place lets a
+                                    // rebinding inherit the previous rank and
+                                    // makes the identity-rank validator
+                                    // reject a valid program (chelis#668
+                                    // round-6 F1).
+                                    scoped_type_env.remove(name);
                                     // Mark as failed-derivation when the
                                     // RHS is structurally a recognized
                                     // shape-sensitive form (a known
