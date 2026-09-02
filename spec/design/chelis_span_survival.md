@@ -1,7 +1,9 @@
 # Chelis Span Survival: End-to-End Audit Chain
 
-**Status:** current shipped audit contract. S0-S6 are preserved below as the historical
-implementation plan and named-oracle record; the active contract is in §2.
+**Status:** S0-S6 are the shipped external-audit contract. S7 is the active
+source-identity correction owned by chelis#1172; until its oracle is green,
+Surf ranges survive as metadata but are not a source-qualified semantic
+identity.
 **Owners:** chelis-core (this repo). Octant ships span-attributed Deep upstream.
 **Companion specs:** `spec/03-deep-syntax.md` §1.1.1 (the `span` key + `span_*` namespace + synthesized markers); `spec/design/chelis_trust_stack.md` (audit story).
 
@@ -27,6 +29,13 @@ Deep `span` ID of the form `surf:<start>..<end>` onto the corresponding
 Deep node. Hand-constructed Surf nodes with the zero-length sentinel are
 treated as spanless, so synthesized-marker fallbacks remain limited to
 genuinely absent source ranges.
+
+That metadata path is an audit label, not a complete source-location model.
+The current desugarer constructs most Deep nodes with `Span::new(0, 0)`, and
+the checker/lowerer reuse map is keyed by the bare numeric offset. Two source
+units can therefore alias, while synthesized nodes can masquerade as source
+offset zero. Section 2.6 replaces those representations; no consumer may
+parse `surf:<start>..<end>` to reconstruct semantic identity after S7.
 
 ## 2. Contract
 
@@ -217,6 +226,368 @@ file through the Surf path, rename the extension or pipe through
 `chelis surf`. Conflicting cases (e.g., `--deep` with garbage in the file)
 produce the parse error from `chelis-deep`, not a silent fallback to Surf.
 
+### 2.6 Source-qualified identity (S7; chelis#1172)
+
+No numbered specification currently defines source-unit identity, qualified
+node identity, or its generated-source representation. This section records
+the implementation invariants that S7 must submit to the normative tier; it
+does not allocate wire spellings, digest byte layouts, or internal adapter and
+cache names. S7.0 separates two kinds of inventory instead of turning current
+implementation structure into timeless semantics:
+
+- `spec/03-deep-syntax.md` owns identity lifetime, derivation, equality,
+  provenance, and generated-source representation. Any pass/builder token
+  serialized into that public representation belongs in an identity-keyed
+  normative registry there.
+- Sealed implementation descriptors own private parser adapters, transformation
+  entry points, and source-bearing cache codecs. They are closed by Rust types
+  and exhaustive matches, not copied into a numbered-spec table or certified
+  by a hand-written list.
+
+The exact shared diagnostic/check-result contract remains owned by #886, as
+recorded by tracker #883. Its controlling amendment belongs in
+`spec/04-type-system.md` §6.4; `spec/09-tide.md` owns only Tide-specific
+HTTP/MCP/batch placement. #1172 supplies opaque typed identity values and
+referential-integrity rules but does not define their JSON placement.
+
+S7.0 is therefore a mandatory prerequisite. A separate numbered-spec change
+must establish the identity lifetime and derivation rules, any public token
+registry, the generated-source encoding, and the boundary with #886 before
+implementation or public output changes land. It does not promise executable
+bijection against APIs that have not yet acquired typed identity entry points.
+Because
+`spec/03-deep-syntax.md` is frozen by the numeric-remediation guard, that
+prerequisite must also follow the full freeze protocol named in S7.0.
+
+The source model has three independent concepts. They must not share one
+string or integer field:
+
+```rust
+pub struct SourceUnitId(private::Digest32);
+pub struct LocalNodeId(private::NonZeroLocal);
+pub struct NodeKey(private::ArenaIssuedKey);
+pub struct SourceSite(private::ValidatedSite);
+pub struct NodeOrigin(private::SealedOrigin);
+pub struct NodeRef(private::ArenaIssuedNodeRef);
+pub struct DiagnosticSourceRef(private::ValidatedDiagnosticRef);
+
+pub struct SourcedSurfProgram {
+    tree: surf::Program,
+    ledger: private::SurfSourceLedger,
+}
+
+pub struct SourcedDeepProgram {
+    tree: deep::Program,
+    ledger: private::DeepSourceLedger,
+}
+```
+
+The implementation preserves the dependency direction. A new dependency-leaf
+crate, `chelis-source`, owns the opaque identity/site types, typed paths, and
+`SourceInput<R>` without
+depending on either AST crate. `chelis-surf` owns `SourcedSurfProgram` and the
+generated Surf traversal. `chelis-deep` owns `SourcedDeepProgram` and the
+generated Deep traversal. The already downstream Surf desugarer may therefore
+consume the Surf carrier and construct the Deep carrier without making
+`chelis-deep` depend on `chelis-surf` or introducing a crate cycle. Checker,
+pipeline, and cache crates consume the Deep carrier downstream of both.
+
+These are opaque values with read-only accessors. They have no public field,
+constructor, unchecked `Deserialize`, or `From` path from their component
+parts. Only a `SourceArena` can issue a key and seal its origin into a
+`NodeRef`; only a parser-owned source context can issue a `SourceSite` before a
+node exists. A raw decoded tree is `UntrustedSurf` or `UntrustedDeep`, never a
+sourced program. Promotion validates both of the following in one boundary
+operation:
+
+- every structural node occurrence has exactly one ledger row and every row
+  resolves to exactly one occurrence;
+- every identity-bearing Deep row has one unique key whose embedded unit
+  belongs to the issuing arena; Surf rows bind canonical Surf paths to exact
+  parser-issued sites and do not fabricate semantic `NodeKey`s before
+  desugaring.
+
+`SourcedSurfProgram` and `SourcedDeepProgram` expose no mutable raw tree that
+could bypass those checks. Syntax consumers such as formatting and LSP indexing
+receive a read-only `SourcedSurfProgram`; semantic consumers receive a
+`SourcedDeepProgram`. Surf desugaring consumes the former and, through the
+registered `SurfDesugar` transform, returns the latter while deriving the
+Deep ledger from the Surf path-to-site ledger and the Deep output. The Surf
+ledger therefore preserves source structure without inventing a checker/
+lowering identity early; the Deep ledger is the first carrier of `NodeRef` and
+`NodeKey`. Cloning a whole immutable artifact preserves the same tree-plus-ledger
+identity; cloning or splicing a
+subtree into a new occurrence is available only through a registered
+transformation builder, which remints output keys and records contributors.
+The migration removes `Clone`/`Deserialize` from identity-bearing node carriers
+even if raw AST values retain them inside untrusted or pre-seal modules.
+
+The Surf tree is syntax-faithful: the parser does not expand sugar into hidden
+lambdas, parameters, variables, or other helpers. Bare `realize`, bare `copy`,
+and one-argument pipe `cast` are represented by explicit closed
+`SurfSugarKind` variants carrying their exact token sites; the same rule covers
+any later sugar. Parsed ordinary nodes require a private grammar-production
+witness for their spelling (`fn` for a lambda, a binding token for a variable,
+and so on), so a sugar action cannot manufacture an ordinary parsed node by
+copying the sugar token's site. `TransformContext<SurfDesugar>` is the only
+owner of sugar expansion. It converts the explicit sugar occurrence into Deep
+helpers with `NodeOrigin::Synthesized` and the sugar site as contributor, while
+an explicitly written lambda/parameter/variable remains `Parsed`. Adding a
+Surf sugar variant makes the generated traversal and exhaustive desugar match
+fail to compile until both attribution polarities are supplied. Whether a
+sugar spelling survives formatting is a `spec/02-surf-syntax.md` §0.1
+question rather than an implementation detail, because the formatter and LSP
+read the variant and §0.1 owns the bidirectional contract; S7.0's
+numbered-spec scope therefore includes that preservation rule, while the
+`SurfSugarKind` variant set itself stays implementation-internal.
+
+- `SourceUnitId` identifies one immutable input snapshot, not a logical module
+  across edits. Its normative derivation binds a versioned domain, the exact
+  source bytes, and a typed logical-input identity supplied by the registered
+  ingress edge. Re-parsing unchanged bytes at the same logical identity
+  reproduces the unit; changing either input mints another unit; equal bytes in
+  two paths, request fields, or package modules remain distinct. Callers never
+  inject raw unit or digest bytes. A byte offset or display filename is not a
+  unit ID.
+- `NodeKey` is the source-qualified semantic identity used by checker and
+  lowering maps. Its representation is structurally
+  `(SourceUnitId, NonZeroU64)`, so two arenas that both allocate local key `1`
+  cannot collide. The parser/desugarer allocates every Deep node a nonzero
+  local identity in canonical construction order. It is never derived from a
+  byte offset, an external span string, or structural equality. Construction
+  is private to `SourceArena`; a producer cannot restart a counter for an
+  existing unit.
+- "Structural occurrence" is defined by a versioned, generated
+  `IdentityStructure` traversal over every Surf and Deep declaration,
+  expression, pattern, type, effect, tagged/meta key and value atom, and
+  compiler-authored wrapper/helper that can carry or be referenced by
+  provenance. Its path is a typed sequence, never a debug/display string:
+  `TopLevel(index, variant)`, `Field(owner_variant, field_tag)`,
+  `Sequence(index)`, `MapKey(canonical_bytes)`, `MapValue(canonical_bytes)`,
+  and `Variant(variant_tag)`. Top-level and sequence order are source/AST
+  order; unordered maps are traversed by canonical key bytes and reject
+  duplicate canonical keys. Scalar payload bytes participate in the owning
+  node's semantic encoding; key/value atoms that can carry metadata or
+  provenance receive their own path step and ledger row. Exhaustive generated
+  matches make a new AST variant or structural field a compile failure until
+  its traversal is declared. The grammar version is bound into source-unit,
+  transformation, and builder derivations.
+- Transitional Deep carriers are not silently normalized during promotion.
+  A legacy `meta["span"]`, structural source site, and external audit ID may
+  coexist only under an explicit versioned migration that proves their roles
+  do not conflict and then emits one canonical occurrence graph. An unknown
+  carrier, a conflicting legacy/structural range, or a path that the current
+  grammar cannot represent is rejected before identity or cached facts are
+  exposed.
+- A later pass creates one deterministic synthesized arena for each distinct
+  semantic output. The identity input includes a versioned domain, a pass ID
+  from the closed pass registry, its schema version, a complete canonical
+  encoding of every invocation option that can affect output, the semantic
+  input/contributors, and the semantic output. Omitting pass configuration or
+  identifying an invocation only by its input is forbidden: two different
+  outputs must not alias. Private pass adapters compute the identity inputs;
+  callers cannot inject a pass string, digest, contributor list, or local
+  counter. Multi-unit helpers belong to a fresh synthesized unit and retain
+  their actual contributor sites in `NodeOrigin::Synthesized`.
+- Programmatic source-less construction follows the same rule. Its qualified
+  unit binds a builder ID from the closed builder registry, builder schema and
+  complete configuration, and the semantic output. Private builders attach
+  keys in canonical traversal order after constructing that output. There is
+  no process-global counter, zero unit, free-form builder namespace, or public
+  raw-digest escape hatch. Nodes carry `NodeOrigin::Unavailable`.
+- `SourceSite` is a human location. `Span` remains a byte range in exactly one
+  identified source unit; it is not meaningful without that unit.
+- `external_span_id` is the existing opaque producer audit label from Deep
+  metadata. Chelis preserves it byte-for-byte but never parses it into a
+  source range or uses it as a map key. A Deep textual parser range and an
+  Octant/other-producer ID can coexist and remain distinguishable.
+- `NodeOrigin::Unavailable` is an honest absence state for hand-constructed
+  API inputs. It never renders as offset zero. Once a parsed source unit has
+  entered the compiler, later passes may produce only `Parsed` or
+  `Synthesized`; dropping to `Unavailable` is an invariant failure.
+- `NodeRef` is the provenance carrier of an AST/IR node. A diagnostic uses
+  `DiagnosticSourceRef` instead: lexer and parser errors may carry an exact
+  `SourceSite` before any node exists, while a node-backed diagnostic may
+  additionally carry its `NodeRef`. If both exist, `site` is the exact blame
+  range and need not equal the node's wider parsed origin. No diagnostic
+  fabricates a `NodeKey` merely to report a source range.
+
+`NodeKey` and provenance are compiler identity, not language semantics.
+`Expr::PartialEq`, canonical Deep printing, parse/reprint comparison, and the
+semantic `expanded_deep_digest` exclude them. That exclusion never weakens a
+cache carrying source sites or node-keyed facts. The Surf-to-Deep transform
+consumes the validated Surf path/site ledger as its input, but never
+reinterprets a Surf row as a pre-existing semantic key: a syntax-only Surf
+carrier cannot expose node-keyed facts.
+
+Caches are handled by three rules rather than by a provenance digest scheme.
+The affected artifacts live in the invoking user's own cache directory
+(`stdlib_cache::cache_dir_for` resolves `CHELIS_REEF_HOME`, `XDG_CACHE_HOME`,
+then `$HOME/.cache/chelis`), which is not a trust boundary: whoever can rewrite
+a cache there can rewrite the installed toolchain beside it. The rules
+therefore defend against staleness and cross-unit aliasing, which is the
+defect, not against a local attacker who can already replace the compiler.
+
+- S7 bumps the format version of every then-live cache that can retain a
+  source declaration or a node-keyed fact, so no pre-S7 artifact decodes into
+  the qualified representation. Cache version numbers copied into this design
+  would be stale by the time S7 lands; the inventory is taken then.
+- `LinearityInfo::merged_with` rejects on any qualified-key disagreement
+  instead of letting the library half win. Distinct source units are disjoint
+  by construction, so two conflicting facts under one qualified key are
+  corruption, not a precedence question.
+- A decoded fact whose source unit does not match the source digest the
+  current build computed for that unit is rejected before the fact is
+  exposed.
+
+#### Attribution rules
+
+Surf AST nodes retain the parser's exact `SourceSite` through desugaring.
+Every source-spelled Deep operation receives that site. Compiler-authored
+tag/name/meta atoms and structural wrappers receive a distinct `NodeKey` and
+`Synthesized { pass: SurfDesugar, contributors: [...] }`; they do not inherit
+a fake textual range. A 1-to-N expansion cites the originating Surf site on
+every product. An N-to-1 collapse carries the lexicographically sorted,
+deduplicated union of contributor sites. A declaration-created helper cites
+the whole declaration plus the exact body/parameter sites that determine it.
+
+Later lowering and transformation passes apply the same rule already used by
+`span_id`/`merged_spans`: a region-corresponding node retains `Parsed`, while
+a new helper is `Synthesized` with every source contributor. Missing
+provenance is not repaired with an enclosing range, offset zero, or a parsed
+external ID.
+
+#### Consumer rules
+
+`CheckError`, lowering diagnostics, and compiler-api diagnostics carry the
+typed `DiagnosticSourceRef`; AST, IR, and cached linearity records carry
+`NodeRef`/`NodeKey`. These types preserve source unit, blame range, node key,
+origin, contributor sites, and external audit ID as distinct values. Human
+rendering may abbreviate them, but cannot invent a node for a parse error or a
+range for `Unavailable`/`Synthesized`.
+
+#886 owns the exact machine-readable envelope: top-level versus per-result
+source tables, batch behavior, diagnostic field placement, literal unions,
+`WireDeepExpr`/`WireDagNode` placement, null-versus-omission, and unknown-field
+policy. S7.0 records the boundary and the identity value encodings needed by
+that contract. #1172 implementation tests prove referential integrity and
+source separation through typed values; byte-for-byte JSON fixtures land with
+#886's controlling wire change, not from this design paragraph.
+
+`LinearityInfo` is keyed by `NodeKey`, replacing
+`HashMap<usize, usize>`. `mark_reusable_input` records the checked app node's
+qualified key and lowering queries that same qualified key. Merging separately
+checked programs is a validated identity join, not an unconditional disjoint
+union. Distinct source units remain disjoint even when their byte offsets or
+local counters match. The same qualified key from two independently loaded
+copies of one immutable artifact is coalesced only when its source unit,
+structural path, origin, and
+node-keyed fact are identical; any disagreement is corruption and rejects the
+composition. A diamond dependency therefore carries one validated copy of its
+shared unit and facts. If a composition intentionally materializes the same
+source subtree at two distinct output occurrences, it must use the registered
+composition transform, remint both output keys, and retain the original sites
+as contributors. It may not duplicate a key or choose a library-half-wins
+policy.
+
+Generated source keeps an opaque external audit ID separate from structural
+source identity. S7.0 defines a versioned, comment-safe encoding whose tokens
+come only from the normative public-token registry or sealed typed values;
+display paths and caller-provided strings never enter it unchecked.
+
+#### Sealed implementation closure and public tokens
+
+S7 does not discover source-bearing code by names, request-field reflection, or
+AST heuristics. It replaces each open construction path with one of four sealed
+typed edges:
+
+- `SourceInput<R>` binds exact bytes to a typed logical-input role `R` and is
+  the only argument accepted by public Surf/Deep parsing. Surf success returns
+  `SourcedSurfProgram`; direct Deep success returns `SourcedDeepProgram`;
+  parser failure returns a validated `SourceSite` without a fabricated node.
+  `SourceInput` has no public/default constructor and cannot derive logical
+  identity from source bytes alone. A sealed adapter-owned
+  `IngressContext<R>` constructs it from the exact bytes plus the typed file,
+  request-field, batch-element, buffer-version, or package-member identity
+  supplied by that adapter. Parser modules hold no ingress authority: the raw
+  lexer/parser core is a private child module, so no other crate can call it
+  with bare `&str`/`&[u8]` or mint a default identity.
+- `TransformContext<P>` exists only for a sealed registered pass `P`. Its
+  private builder binds the pass schema, complete output-affecting
+  configuration, semantic input/contributors, semantic output, and canonical
+  node-assignment ledger before it can return a sourced output. In particular,
+  `TransformContext<SurfDesugar>` is the only Surf-to-Deep edge: it consumes a
+  `SourcedSurfProgram`, exhaustively maps Surf paths/sites to Deep output paths,
+  and returns `SourcedDeepProgram`.
+- `SourceLessContext<B>` does the same for a sealed registered builder `B`.
+- `SourceAwareCache<C>` is the only codec admitted for an artifact containing
+  a sourced program, `NodeKey`, `NodeRef`, or a node-keyed fact. The sealed
+  cache kind `C` owns its format version and applies the three cache rules
+  above before returning a value.
+
+Closed enums/exhaustive dispatch own the implementation sets for roles,
+external ingress kinds, passes, builders, and caches. Adding a variant without
+its schema,
+configuration encoder, identity builder, and both test polarities is a compile
+failure. A hand-edited manifest cannot bless a row, and S7.0 does not copy
+those private rows into the normative spec. Only a stable token that appears
+in generated source or another #1172-owned public representation receives a
+normative registry row in `spec/03-deep-syntax.md`; #886 separately owns tokens
+and placements in its machine-wire contract.
+
+The adoption covers compiler-api request fields, direct public pipeline
+helpers including `run_source`/`prepare_source`, prove helpers and MCP
+`chelis_prove`, HTTP/MCP/batch request fields, CLI files/stdin/imports, LSP
+buffers, Reef package composition, parser entry points, tree decode/composition,
+and source-bearing caches. Every source field receives a typed logical identity
+distinct from its display label. Multi-buffer requests keep every field
+distinct, batch identities bind the element and field, and no public adapter
+can recover a raw parser or construct a sourced tree from `Vec<Expr>`.
+
+External reachability is explicit rather than inferred from Rust visibility.
+One private sealed `ExternalSourceIngress` registry owns every source-processing
+entry: exported Rust functions, CLI commands, PyO3 functions/methods, HTTP
+routes, MCP tools, LSP buffers, Reef composition, C/other FFI, and batch/edit
+request fields. Each row binds an `ExternalIngressKind`, typed request/input
+role, logical-instance derivation, and generated framework wrapper. The wrapper
+receives a `RegisteredIngress<E>` capability and is the only code outside
+`chelis-source` that can obtain `IngressContext<R>`. Raw handler functions,
+manual `wrap_pyfunction!`, manual router/tool registration, and handwritten
+CLI dispatch cannot mint that capability. Existing private PyO3 functions and
+private Axum/MCP handlers migrate through the registry in Slice 1e; Rust
+`pub`/private visibility does not affect whether they are external roots. A new
+external framework kind adds a closed `ExternalIngressKind` variant, generator
+arm, and positive/negative mutation in the same change, or cannot receive an
+ingress capability.
+
+The registry is small enough to enumerate directly rather than to derive: the
+external surface it covers is the 4 `#[pyfunction]`s, 2 `#[pymethods]` blocks,
+and 19 Axum `.route(` registrations that exist today, plus the CLI, LSP, Reef,
+and FFI entries, in the low tens of rows. Closure is therefore proved by the
+registry itself plus compile-fail tests, not by a derived whole-workspace
+census:
+
+- every framework registration is generated from exactly one registry row, so
+  a hand-written `wrap_pyfunction!`, `post(handler)`, or MCP tool registration
+  never obtains `IngressContext<R>`;
+- compile-fail tests reject a raw-text parser entry point, an unregistered
+  pass, builder, or cache, and public construction or recombination of
+  identity parts.
+
+Thus `fn parse(&str) -> Vec<surf::Decl>`,
+`fn parse(&str) -> SourcedSurfProgram`, a `#[pyfunction]` over `&str`,
+an Axum handler registered with `post(handler)`, and a CLI branch that
+passes raw text to the parser all fail for distinct executable reasons.
+
+Runtime mutation controls reject duplicate keys, a key moved to another
+structural occurrence, a forged or swapped origin or contributor set, and a
+cache whose source or format version disagrees with the current build.
+
+No fallback reparses `surf:<start>..<end>`, uses `Expr::span().offset` as an
+identity, or treats `Span::new(0, 0)` as both a real location and a missing
+sentinel. Those representations are deleted from semantic consumers when S7
+lands.
+
 ## 3. Phasing
 
 Each phase has one named acceptance oracle. A phase is not done until the
@@ -350,6 +721,187 @@ range, and (d) the emitted C compiles via gcc.
 bar as S5: span-survival is a customer-visible audit promise; any
 gap between sidecar and emitted C breaks the trust stack.
 
+### S7 — Source-qualified node identity (chelis#1172)
+
+S7 is delivered test-first in four dependency-ordered landing slices. Slice 1
+is not a single merge: it is divided into five separately reviewable change
+sets, 1a through 1e, and slices 2 and 3 depend only on 1e.
+
+0. Submit §2.6's invariants as a separately reviewed numbered-spec amendment.
+   `spec/03-deep-syntax.md` owns identity lifetime, equality, derivation,
+   external-ID separation, generated-source encoding, and versioning. The
+   change adds an identity-keyed normative registry only for stable
+   pass/builder tokens that #1172 serializes into generated source. Private
+   ingress, pass, builder, and cache inventories remain implementation-owned
+   sealed types, not timeless spec rows. `spec/02-surf-syntax.md` §0.1 owns
+   the one Surf-surface decision in §2.6: whether bare `realize`, bare
+   `copy`, and one-argument pipe `cast` survive formatting rather than being
+   rewritten into their expansions. #886 must separately amend
+   `spec/04-type-system.md` §6.4 with the shared check-result/diagnostic wire
+   and `spec/09-tide.md` with Tide-specific HTTP/MCP/batch placement before
+   source-bearing public output lands; this design does not pre-allocate them.
+   The normative change runs
+   `.venv/bin/python scripts/generate_rejection_registries.py --write` and
+   commits the generated registry. Because `spec/03-deep-syntax.md` is a
+   frozen Phase 4B input, the same change amends
+   `spec/design/dtype_semantics.md` and tracker #729, deliberately updates
+   the full-file digest, and runs
+   `.venv/bin/python scripts/dtype_phase4b_oracle.py` to the exact final line
+   `DTYPE PHASE 4B ORACLE: PASS`. Until this slice lands, the remaining
+   bullets are proposed implementation work and no source-identity wire or
+   generated-comment promise is in force.
+1. Land the identity foundation in five change sets. Each merges on its own
+   and leaves the workspace green; only 1e changes an externally visible
+   signature.
+
+   a. Add the dependency-leaf `chelis-source` crate for opaque
+      `SourceUnitId`, `LocalNodeId`, `NodeKey`, `SourceSite`, `NodeOrigin`,
+      `NodeRef`, `DiagnosticSourceRef`, and the sealed
+      role/external-ingress/pass/builder/cache descriptors, with the failing
+      source-identity tests and the construction-privacy compile-fail
+      controls. Nothing outside the new crate changes.
+   b. Add the generated `IdentityStructure` traversal and typed path grammar
+      over the existing Surf and Deep ASTs, plus the ledger-bijection oracle.
+      Still no signature change: the traversal is exercised by its own tests
+      before any carrier consumes it.
+   c. Preserve parser sugar as explicit `SurfSugarKind` variants and move
+      bare `realize`, bare `copy`, and one-argument pipe `cast` expansion out
+      of the parser into desugaring, with formatter and LSP round-trip tests.
+      This change set is self-contained and depends on neither 1a nor 1b.
+   d. Add `SourcedSurfProgram` in `chelis-surf`, `SourcedDeepProgram` in
+      `chelis-deep` (neither AST crate depends on the other in the wrong
+      direction), `SourceInput<R>`, the sealed external-ingress registry, and
+      sourced parse entry points *beside* the existing raw ones. Migrate the
+      internal consumers: formatting and LSP indexing take
+      `SourcedSurfProgram`, `TransformContext<SurfDesugar>` becomes the sole
+      edge to `SourcedDeepProgram`, and checking and lowering take the Deep
+      carrier. Source-less construction requires `SourceLessContext<B>`;
+      subtree clone/splice requires `TransformContext<P>` and remints keys.
+      The raw entry points still exist here, so no external caller breaks.
+   e. Migrate every Rust/CLI/PyO3/HTTP/MCP/LSP/Reef/FFI adapter onto
+      `SourceInput<R>` or a registry-generated typed request wrapper, then
+      delete the raw entry points 1d left standing. This is the only change
+      set that breaks a public signature, and it is a deletion rather than a
+      rewrite because every consumer already moved. The end state is the
+      contract §2.6 states: no Rust-public or framework-registered parser
+      accepts raw text or returns an identity-free parsed tree. Lock exact
+      nested ranges, the attribution table, duplicate/recombined-key
+      rejection, same-unit composition, and unchanged-rebuild determinism.
+2. Replace diagnostic scalar offsets/IDs and `LinearityInfo`'s bare-offset
+   key with typed `DiagnosticSourceRef`/qualified `NodeKey`, and serialize
+   the canonical node-assignment ledger. Convert every capable cache to
+   `SourceAwareCache<C>`, bump its then-live format, and lock
+   immediate-predecessor, duplicate/recombined-key, source-unit-mismatch, and
+   merge-disagreement rejection before facts are exposed. Delete every
+   semantic call to `parse_span_offset` and every source-unit merge policy
+   based on numeric offset precedence.
+3. Thread the same carrier through lowering, IR, host IR, every synthesizing
+   transformation, and generated-source emission. Every new artifact is
+   returned only by `TransformContext<P>` or `SourceLessContext<B>` after the
+   output ledger is sealed. Checked-program and dependency
+   composition deduplicates identical same-unit facts, rejects disagreement,
+   and uses a registered reminting transform whenever the same input is
+   materialized twice. Keep opaque external audit IDs separate from textual
+   source ranges and synthesized provenance. #1172 exposes typed identity
+   values to #886; the exact compiler-api/CLI/Tide/MCP/batch envelope and
+   byte-for-byte fixtures land only under #886's controlling §04/§09 wire
+   changes.
+
+Each slice includes positive/negative parity. Required counterexamples are:
+
+- two nested expressions on one line retain their exact distinct ranges;
+- two source units with the same local offsets retain distinct node keys,
+  diagnostics, and reusable-input facts after composition;
+- reparsing the same logical file after a one-byte edit mints a new unit and
+  rejects a serialized reusable-input record from the prior snapshot, while
+  an unchanged reparse keeps deterministic keys;
+- rebuilding a synthesized or unavailable tree with the same pass/builder
+  schema, complete invocation configuration, and semantic output reproduces
+  its unit and keys, while changing an output-affecting option or semantic
+  output produces a distinct unit and no reusable-fact alias;
+- public code cannot construct a `NodeKey`, `NodeOrigin`, `NodeRef`, or sourced
+  tree from fields, raw digest bytes, deserialization, or a cloned/spliced raw
+  subtree; registered reminting is the only admitted new-occurrence path;
+- promotion and composition reject a duplicate key, a legitimate key paired
+  with another origin, a parsed node relabelled synthesized/unavailable,
+  forged synthesized contributors, and a ledger row with no exact structural
+  occurrence;
+- the canonical path traversal covers top-level reordering, nested sequence
+  indices, every Surf/Deep variant, structural atoms/helpers, and metadata keys
+  and values; adding an AST field without a generated traversal arm fails to
+  compile, while an unknown or conflicting transitional Deep carrier fails
+  promotion rather than normalizing silently;
+- Surf parsing returns `SourcedSurfProgram`; formatting and LSP indexing retain
+  that carrier; only `TransformContext<SurfDesugar>` produces
+  `SourcedDeepProgram`; checking/lowering reject raw Surf/Deep AST values; the
+  Surf ledger-bijection oracle proves every path has a site and no pre-desugar
+  `NodeKey`, while the Deep oracle proves every identity-bearing path has
+  exactly one key/origin row;
+- bare `realize`, bare `copy`, and one-argument pipe `cast` remain explicit
+  `SurfSugarKind` occurrences through parsing/formatting/LSP; their generated
+  Deep lambdas/parameters/variables are `Synthesized` with the sugar site as
+  contributor, while source-written explicit-lambda twins remain `Parsed`;
+- a Surf or Deep parse error before AST construction carries a qualified
+  source range and no node key;
+- every sealed `SourceInput<R>` role has a successful parse and parse-before-
+  node failure; multi-buffer and batch fields remain distinct; and mutations
+  adding a raw-input Rust-public parser, a `#[pyfunction]`, an Axum
+  handler, an MCP callback, a CLI branch, or an FFI wrapper outside the
+  registry are rejected for both text and byte carriers;
+- parser-only, parsed-node, synthesized-node, and unavailable-node diagnostics
+  preserve the typed identity distinctions through the compiler API and
+  resolve every referenced unit; #886 separately locks their exact JSON
+  placement and literal encoding;
+- an offset-zero parsed token remains a real `Parsed` site, while a helper
+  node is explicitly `Synthesized` and missing provenance is
+  `Unavailable`—the three states never compare or render alike;
+- an opaque external span ID that looks numeric is never interpreted as a
+  text range;
+- compiled-context, library, stdlib, and prepared-Reef-graph caches reject
+  their immediate predecessor version and any stale source table before
+  exposing a declaration, diagnostic, or reusable-input fact;
+- a decoded node-keyed fact whose source unit disagrees with the source digest
+  the current build computed for that unit is rejected before the fact is
+  exposed;
+- loading the same unchanged artifact through two sides of a diamond
+  dependency coalesces identical units and node-keyed facts; disagreeing facts
+  reject rather than letting one half win, while intentionally materializing
+  the same input twice requires a composition transform that remints output
+  keys;
+- every sealed pass/builder changes identity when an output-affecting
+  invocation option changes; adding a pass, builder, input role, external
+  ingress kind, or cache without its required trait members, generator, or
+  exhaustive dispatch is a compile failure;
+- deleting a source qualifier, restoring `HashMap<usize, usize>`, or replacing
+  synthesized origin with `Span::new(0, 0)` makes the suite red.
+
+**Authoritative oracle:**
+
+```sh
+cargo nextest run -p chelis-cli --test issue_1172_source_identity --no-fail-fast
+```
+
+The named suite exercises Surf parse → Deep desugar → check/linearity →
+lowering → diagnostic and generated-source output for every counterexample
+above and invokes the construction-privacy, ledger-bijection, sealed-edge, and
+cache-freshness mutation oracles, including the generated path traversal.
+#886's §04/§09 wire suite is an
+explicit integration prerequisite for source-bearing machine output but does
+not replace #1172's identity oracle. Supporting crate tests do not replace
+this end-to-end oracle.
+
+🔴 **Red-team gate after S7.** A fresh local subagent executes the oracle,
+  plants the qualified-key, changed-snapshot, fabricated-parser-node,
+  duplicate/recombined-key, same-unit-diamond, parser-sugar-twin,
+  raw-API-export, and Surf-carrier-bypass regressions named
+  above, and tries to bypass every sealed ingress/input/pass/builder/cache edge
+  with an unqualified source path or unbound output-affecting option.
+S7 is not complete while any entry point can construct a parsed program
+without a source unit, any externally registered root bypasses the typed
+registry, any public value can recombine identity components, any cache can
+expose a stale node-keyed fact, any Surf consumer
+must discard its sourced carrier, or any semantic map remains offset-keyed.
+
 ## 4. Canary verification
 
 Post-S5, the audit chain is exercised end-to-end:
@@ -379,10 +931,21 @@ metadata-preserving path for producer-supplied Deep metadata beyond parser
 byte ranges); runtime trace tooling; Octant-side
 changes; span survival through external compilation/linking (DWARF,
 post-roadmap); span performance optimization until profiling shows cost.
+S7 does not define an IDE synchronization protocol or path-canonicalization
+policy outside the compiler ingestion boundary. It does require each adapter
+to supply the stable logical identity and exact bytes from which the private
+`SourceUnitId` constructor derives an immutable snapshot identity.
 
 ## 6. Backward compatibility
 
-Existing programs without span metadata compile and run unchanged. All span
-fields are optional; missing metadata is the normal case for hand-written
-Chelis. Workspace test suite is the regression backstop; any test that
-wasn't red before this work and is red after is a regression.
+Existing source programs compile and run unchanged. S7 intentionally changes
+compiler-internal and compiler-api location carriers: a parsed program has a
+source-qualified identity even when it has no external `span` metadata, while
+a hand-constructed tree must state that its origin is unavailable or
+synthesized. That second half is a break for `chelis-compiler-api` callers who
+today build a `Vec<Expr>` and check it, and it is proposed rather than in
+force: like the rest of §2.6 it depends on S7.0, the numbered-spec amendment,
+and this design does not decide it. No compatibility adapter may recreate
+identity from a bare offset. The workspace gate plus the S7 oracle are the
+regression backstop; any test that was not red before this work and is red
+after is a regression.
