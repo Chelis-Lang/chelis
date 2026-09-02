@@ -90,7 +90,7 @@ FROZEN_SELF_TEST_CENSUS = tuple(
     ManifestContractTests.test_every_test_command_has_a_frozen_nonempty_census
     ManifestContractTests.test_expected_failures_name_a_future_green_phase
     ManifestContractTests.test_external_prerequisite_is_not_an_ownership_child
-    ManifestContractTests.test_forward_capture_freezes_the_complete_expected_output
+    ManifestContractTests.test_forward_capture_prerequisite_freezes_both_annotated_shapes
     ManifestContractTests.test_frozen_fixture_child_and_mutation_universes_are_literal
     ManifestContractTests.test_host_nonzero_expected_failures_freeze_exact_receipts
     ManifestContractTests.test_launch_selector_is_the_exact_frozen_subset
@@ -1016,27 +1016,23 @@ def fixture_manifest() -> tuple[Fixture, ...]:
             _fixture(
                 "forward-captured-list",
                 1339,
-                Polarity.POSITIVE,
-                Detector.OUTPUT_MISMATCH,
-                xfail(1339, Detector.OUTPUT_MISMATCH),
-                Action.BUILD_RUN,
+                Polarity.NEGATIVE,
+                Detector.EXACT_REJECTION,
+                MustPass(),
+                Action.CHECK_REJECT,
                 "issue_1339_list_forward_capture.ch",
-                green_by=4,
                 launch=True,
                 external_prerequisite=True,
-                expected_output="capture = [1, 2]\nlater = [1, 2]",
             ),
             _fixture(
                 "forward-captured-tensor",
                 1339,
-                Polarity.POSITIVE,
-                Detector.NONZERO_EXIT,
-                xfail(1339, Detector.NONZERO_EXIT),
-                Action.BUILD_RUN,
+                Polarity.NEGATIVE,
+                Detector.EXACT_REJECTION,
+                MustPass(),
+                Action.CHECK_REJECT,
                 "issue_1339_tensor_forward_capture.ch",
-                green_by=4,
                 external_prerequisite=True,
-                expected_exit=-11,
             ),
             _fixture(
                 "unannotated-forward-capture-control",
@@ -1476,6 +1472,15 @@ def validate_manifest(
             raise OracleFailure(f"{fixture.id}: launch membership exceeds the frozen subset")
         if fixture.external_prerequisite != (fixture.issue == 1339):
             raise OracleFailure(f"{fixture.id}: external prerequisite classification is inconsistent")
+        if fixture.issue == 1339 and (
+            fixture.polarity is not Polarity.NEGATIVE
+            or fixture.detector is not Detector.EXACT_REJECTION
+            or not isinstance(fixture.expected, MustPass)
+            or fixture.action is not Action.CHECK_REJECT
+        ):
+            raise OracleFailure(
+                f"{fixture.id}: #1339 prerequisite must freeze exact source-order rejection"
+            )
     for issue in FROZEN_OWNERSHIP_CHILD_ISSUES:
         issue_rows = [fixture for fixture in fixtures if fixture.issue == issue]
         polarities = {fixture.polarity for fixture in issue_rows}
@@ -2529,7 +2534,7 @@ def execute_fixture(context: PhaseContext, fixture: Fixture) -> Detection:
         )
         diagnostic = f"{result.stdout}\n{result.stderr}".lower()
         if result.returncode != 0 and "unbound variable" in diagnostic:
-            return Detection.success("unannotated forward capture rejects as unbound")
+            return Detection.success("forward capture rejects as unbound")
         return Detection.failure(
             Detector.EXACT_REJECTION,
             f"expected exact unbound-variable rejection, exit={result.returncode}",

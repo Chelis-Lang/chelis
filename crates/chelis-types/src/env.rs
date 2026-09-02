@@ -156,6 +156,39 @@ pub struct Env {
     /// as `size_provenance`; check-time-only, dropped from serialization.
     #[serde(skip)]
     list_literal_lens: UnordMap<String, usize>,
+    /// chelis#1134 / [04-INF-4]: flattened declaration index of every
+    /// top-level eager (non-function) value in the unit being checked.
+    ///
+    /// Visibility of such a value is a function of its source position, and
+    /// of nothing else. Binding presence cannot express that rule: the body
+    /// inference schedule reorders function declarations, so "is it bound
+    /// yet" and "is it declared yet" are different questions. This map
+    /// answers the second one for [`Self::top_level_value_visibility`], which
+    /// is the only authority on eager-value scope.
+    #[serde(skip)]
+    top_level_value_ordinals: UnordMap<String, usize>,
+    /// The binding an eager top-level value shadows, when its name was
+    /// already bound by an import or a stacked library phase. Before that
+    /// value's own declaration the outer binding is still the one in scope,
+    /// so lookup falls back here rather than reporting the name unbound.
+    #[serde(skip)]
+    shadowed_prior_bindings: UnordMap<String, Scheme>,
+    /// Flattened declaration index currently being inferred. Set by the
+    /// driver loop at each scheduled declaration and inherited by every
+    /// lexical clone, so nested scopes compare against the declaration that
+    /// owns them rather than against the schedule's position.
+    #[serde(skip)]
+    current_declaration_ordinal: Option<usize>,
+}
+
+/// Result of the [04-INF-4] eager-value scope test. See
+/// [`Env::top_level_value_visibility`].
+pub(crate) enum TopLevelValueVisibility<'a> {
+    /// The name is in scope here, or the rule does not govern it.
+    Visible,
+    /// The name belongs to a top-level eager value declared after the
+    /// declaration being inferred, carrying the outer binding it shadows.
+    NotYetDeclared { shadowed: Option<&'a Scheme> },
 }
 
 /// An instantiated scheme body, paired with the original-to-fresh renaming of
@@ -313,6 +346,70 @@ impl Env {
     /// Whether an ordinary lexical binding owns `name` in this environment.
     pub(crate) fn is_lexically_bound(&self, name: &str) -> bool {
         self.lexical_bindings.contains(name)
+    }
+
+    /// Drop the [04-INF-4] scope state of a previous check unit.
+    ///
+    /// Source position is a property of one unit's declaration list. A
+    /// stacked library or context phase reuses the same environment, and its
+    /// values are ordinary imported bindings from the next unit's point of
+    /// view, so their positions must not survive into it.
+    pub(crate) fn reset_top_level_value_scope(&mut self) {
+        self.top_level_value_ordinals.clear();
+        self.shadowed_prior_bindings.clear();
+        self.current_declaration_ordinal = None;
+    }
+
+    /// Record the source position of one top-level eager value, and the
+    /// binding it shadows if the name was already in scope.
+    pub(crate) fn note_top_level_value_ordinal(
+        &mut self,
+        name: String,
+        ordinal: usize,
+        shadowed: Option<Scheme>,
+    ) {
+        if let Some(prior) = shadowed {
+            self.shadowed_prior_bindings.insert(name.clone(), prior);
+        }
+        self.top_level_value_ordinals.insert(name, ordinal);
+    }
+
+    /// The recorded source position of a top-level eager value, if any.
+    pub(crate) fn top_level_value_ordinal(&self, name: &str) -> Option<usize> {
+        self.top_level_value_ordinals.get(name).copied()
+    }
+
+    /// Point the environment at the declaration whose body is being inferred.
+    pub(crate) fn set_current_declaration_ordinal(&mut self, ordinal: Option<usize>) {
+        self.current_declaration_ordinal = ordinal;
+    }
+
+    /// [04-INF-4]: whether `name` resolves to a top-level eager value that is
+    /// already declared at the current declaration.
+    ///
+    /// `Visible` covers every name this rule does not govern: a lexical
+    /// binding that shadows the value, an imported or library name, a
+    /// function, and a value declared earlier. A value's own declaration sees
+    /// itself, which is what makes the explicitly typed external input
+    /// (`x: T = x`) legal without any prebinding. A later value is
+    /// `NotYetDeclared`, carrying the outer binding it shadows when there is
+    /// one so the caller can resolve against the still-current outer scope.
+    pub(crate) fn top_level_value_visibility(&self, name: &str) -> TopLevelValueVisibility<'_> {
+        if self.lexical_bindings.contains(name) {
+            return TopLevelValueVisibility::Visible;
+        }
+        let (Some(declared_at), Some(current)) = (
+            self.top_level_value_ordinals.get(name),
+            self.current_declaration_ordinal,
+        ) else {
+            return TopLevelValueVisibility::Visible;
+        };
+        if *declared_at <= current {
+            return TopLevelValueVisibility::Visible;
+        }
+        TopLevelValueVisibility::NotYetDeclared {
+            shadowed: self.shadowed_prior_bindings.get(name),
+        }
     }
 
     /// Remove a temporary inference binding before generalizing an SCC.

@@ -464,6 +464,17 @@ and the non-launch child rows exactly as [#1362] does. The implementation phases
 may be structural prerequisites for those rows without making every issue they
 also serve a launch blocker.
 
+[#1339]'s **direct** forward capture, where a compiled function names the later
+value itself, is now an exact checker rejection rather than a compiled expected
+failure: both annotated heap-capture shapes and the unannotated control report
+an unbound forward value before build, following [04-INF-4]'s source-order
+decision. Those three rows leave no emitted ownership behavior for the
+ownership phases to repair. [#1339]'s **indirect** shape does: when an earlier
+value's initializer calls a function that reads a later-assigned value, every
+reference obeys [04-INF-4] and the emitted `main` still assigns in source
+order, so the compiled read of an unassigned global survives. It is unchanged
+by that decision, is not an ownership defect, and remains owned by [#1339].
+
 The final invocation is:
 
 ```text
@@ -504,8 +515,11 @@ The complete run covers:
    view, or intermediate alias;
 8. clean normal teardown with zero live allocations and no invalid release;
 9. the existing [#1222] and [#1344] regressions; and
-10. [#1339]'s initialization-order regression as a separately classified Tier
-   1 prerequisite, not as a member of this ownership class.
+10. [#1339]'s annotated list/tensor forward captures and unannotated control as
+    exact source-order rejections, a separately classified Tier 1 prerequisite
+    rather than a member of this ownership class. Its indirect
+    initializer-through-a-call shape is not covered by those rows and is not
+    an ownership defect.
 
 Required mutations include:
 
@@ -604,7 +618,8 @@ existing [#1222]/[#1344] regressions, and the open issue reproducers.
 - an explicit external-prerequisite row for [#1339].
 
 The current failing children are represented as typed expected failures. Closed
-[#1222] and [#1344] are green controls. No production ownership code changes.
+[#1222] and [#1344] are green controls, and [#1339]'s external-prerequisite rows
+are green exact checker rejections. No production ownership code changes.
 
 **Not this phase:** refcounts, ABI changes, ownership IR, release scheduling,
 backend reuse fixes, or the general closure ABI owned by [#879].
@@ -790,9 +805,12 @@ exit zero and final line `COMPILED VALUE OWNERSHIP ORACLE: PASS`.
 - **[#763]/[#1351]:** lane-check may provide reusable compile/run machinery,
   but lane agreement cannot prove ownership balance or shared-lane defects. The
   ownership suite remains independently callable and spec-derived.
-- **[#1339]:** initialization order is a distinct Tier 1 class. Its regression
-  runs beside the ownership suite so the launch gate is complete, but it is not
-  parented here and does not change this issue map.
+- **[#1339]:** initialization order is a distinct Tier 1 class. Its annotated
+  list/tensor captures and unannotated control must reject as unbound before
+  backend emission; its indirect initializer-through-a-call shape stays open
+  under that issue. Those regressions run beside the ownership suite so the
+  launch gate is complete, but the issue is not parented here and does not
+  change this issue map.
 - **[#729]:** numeric representation and operation semantics remain controlling.
   The target opaque tagged carrier changes the C construction boundary without
   changing any per-dtype value rule. The Phase 1 entry amendment and

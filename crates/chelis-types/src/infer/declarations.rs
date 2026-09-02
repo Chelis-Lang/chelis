@@ -1800,12 +1800,60 @@ pub(super) fn is_bound_name(name: &str, bound: &[UnordSet<String>]) -> bool {
     bound.iter().rev().any(|scope| scope.contains(name))
 }
 
+/// Check whether a def body carries its own explicit type stamp and is a
+/// literal self-reference, as produced by `x = (x : T)`. A declaration-level
+/// `x: T = x` is recognized separately by the cycle detector because Surf
+/// represents its type as a sibling `defsig`, not as body metadata.
+pub(super) fn body_is_type_stamped_literal_self_ref(body: &deep::Expr, name: &str) -> bool {
+    if expr_type_expr(body, &IrTypeEnv::new()).is_none() {
+        return false;
+    }
+    body_is_literal_self_ref_shape(body, name)
+}
+
+/// Check the literal self-reference shape independently of its explicit type
+/// owner. Callers must first prove either a body type stamp or the matching
+/// declaration signature; bare `x = x` must never earn this carve-out.
+pub(super) fn body_is_literal_self_ref_shape(body: &deep::Expr, name: &str) -> bool {
+    let mut current = body;
+    loop {
+        match current {
+            deep::Expr::MetaExpr(meta, _) => current = &meta.expr,
+            deep::Expr::Node(node, _) => {
+                return node.tag() == DeepTag::Var
+                    && node.children_slice().first().and_then(symbol_name) == Some(name);
+            }
+            deep::Expr::List(list, _) => {
+                // Type ascription desugars into a `(cast ... )`-like node
+                // in Deep: `(x : T)` keeps `x` as the first child. When
+                // the underlying is a var with the self name, treat it as
+                // the Nautilus pattern. These legacy spellings are outside
+                // the closed vocabulary, so they stay symbol-headed and are
+                // recognized at the raw-string boundary.
+                if matches!(list.unknown_tag_symbol(), Some("ascribe" | ":")) {
+                    match children(list).first() {
+                        Some(inner) => current = inner,
+                        None => return false,
+                    }
+                    continue;
+                }
+                match get_tag(list) {
+                    Some(DeepTag::Var) => {
+                        return children(list).first().and_then(symbol_name) == Some(name);
+                    }
+                    _ => return false,
+                }
+            }
+            _ => return false,
+        }
+    }
+}
+
 /// Detect cycles among top-level `def` bindings.
 ///
-/// The Nautilus external-input pattern `x = (x : tensor[...])` is permitted —
-/// a self-loop (the def body references the same name it is binding, with no
-/// intermediate hops) is treated as a declaration of an external input, not as
-/// a cycle. Any cycle of length >= 2 (e.g. `a -> b -> a`, `a -> b -> c -> a`)
+/// An explicitly typed external-input pattern (`x: T = x` or `x = (x : T)`)
+/// is permitted: its literal self-loop declares an input rather than reading
+/// an eager value. An untyped `x = x`, or any cycle with an intermediate hop,
 /// is a real binding cycle and is reported as a `CycleDetected` error.
 pub(super) fn detect_top_level_binding_cycles(
     exprs: &[deep::Expr],
@@ -1814,18 +1862,23 @@ pub(super) fn detect_top_level_binding_cycles(
     let mut def_names: Vec<String> = Vec::new();
     let mut def_name_set: UnordSet<String> = UnordSet::new();
     let mut def_bodies: UnordMap<String, &deep::Expr> = UnordMap::new();
+    let mut declared_signature_names: UnordSet<String> = UnordSet::new();
     // Descend through `(module {} name ...)` wrappers so this check works
     // on idiomatic Surf sources (every `.ch` file starts with `module X`,
     // which desugars to a single top-level `module` list wrapping every
     // declaration). Without this, the cycle check is a no-op in practice.
     for expr in top_level_decl_items(exprs) {
-        if let deep::Expr::List(list, _) = expr
-            && get_tag(list) == Some(DeepTag::Def)
-        {
-            let kids = children(list);
-            let Some(name) = kids.first().and_then(symbol_name) else {
-                continue;
-            };
+        let Some((tag, _, kids)) = stamped_parts(expr) else {
+            continue;
+        };
+        let Some(name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        if tag == DeepTag::Defsig {
+            declared_signature_names.insert(name.to_string());
+            continue;
+        }
+        if tag == DeepTag::Def {
             let Some(body) = kids.get(1) else { continue };
             if !def_name_set.contains(name) {
                 def_name_set.insert(name.to_string());
@@ -1899,7 +1952,11 @@ pub(super) fn detect_top_level_binding_cycles(
     let mut call_edges: UnordMap<String, Vec<String>> = UnordMap::new();
     for name in &def_names {
         let body = def_bodies.get(name).copied();
-        let is_nautilus_literal_self = body.is_some_and(|b| body_is_literal_self_ref(b, name));
+        let is_explicit_external_input = body.is_some_and(|body| {
+            body_is_type_stamped_literal_self_ref(body, name)
+                || (declared_signature_names.contains(name)
+                    && body_is_literal_self_ref_shape(body, name))
+        });
         let body_is_fn = matches!(
             body,
             Some(deep::Expr::List(list, _)) if get_tag(list) == Some(DeepTag::Fn)
@@ -1923,7 +1980,7 @@ pub(super) fn detect_top_level_binding_cycles(
             .into_sorted()
             .into_iter()
             .filter(|r| {
-                if r == name && is_nautilus_literal_self {
+                if r == name && is_explicit_external_input {
                     return false;
                 }
                 def_name_set.contains(r)

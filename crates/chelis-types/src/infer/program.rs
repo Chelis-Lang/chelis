@@ -253,6 +253,7 @@ pub(super) fn infer_program_with_product_in_session(
     // module-wrapped programs.
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
+    let external_input_types = collect_literal_external_input_types(&items);
     let metadata_prebound_names = UnordSet::new();
     product.function_inference_plan = FunctionInferencePlan::build(&items);
     let inference_groups = primary_inference_groups(&product.function_inference_plan, &items);
@@ -314,6 +315,18 @@ pub(super) fn infer_program_with_product_in_session(
                 crate::opacity::module_key_for_item(module.as_deref(), decl_name),
                 decl_name.map(str::to_string),
             );
+            env.set_current_declaration_ordinal(Some(declaration_index));
+            let external_input_failure = prebind_literal_external_input_for_declaration(
+                declaration_index,
+                expr,
+                &external_input_types,
+                &declared_signatures,
+                &mut env,
+                &mut vg,
+                &mut subst,
+                &adt_reg,
+                errors,
+            );
             if let Some(binding) = infer_top_level(
                 expr,
                 &mut env,
@@ -322,7 +335,7 @@ pub(super) fn infer_program_with_product_in_session(
                 &adt_reg,
                 errors,
                 &mut product,
-                None,
+                external_input_failure.as_ref(),
                 provisional_types.get(&declaration_index),
                 group.recursive,
                 &user_def_names,
@@ -371,6 +384,7 @@ pub(super) fn infer_program_with_product_in_session(
         }
     }
     crate::opacity::set_current_item(None, None);
+    env.set_current_declaration_ordinal(None);
 
     if cancelled() {
         errors.push(crate::cancel::cancellation_check_error());
@@ -1048,6 +1062,14 @@ pub(crate) fn check_typed_program_in_session(
     // located failure rather than a partially-annotated `Ok`.
     let stack_scope = StackExhaustionScope::enter();
     let product = infer_program_with_product_in_session(exprs, errors);
+    // [04-INF-4] makes eager value cycles an ingress-independent checker
+    // error. The serialized-IR ingress runs this detector from
+    // `validate_ir_program`; the stamped typed ingress reaches inference
+    // directly, so run the same detector here after normalizing the carrier.
+    // Keep it after inference to preserve the shared diagnostic order:
+    // body-inference errors first, then `CycleDetected`.
+    let normalized = normalize_nodes_to_lists(exprs);
+    detect_top_level_binding_cycles(&normalized, errors);
     let stats = product.stats();
     if errors.is_empty() {
         let annotated_exprs = annotate_ir_program(exprs, &product, errors);
@@ -1188,15 +1210,20 @@ pub(super) fn infer_ir_program_with_state(
     // names intentionally retain last-declaration-wins semantics, while the
     // origin keeps an owning witness from leaking into an earlier body.
     let collected_ir_types = collect_ir_types_with_origins(items.iter().map(|(_, expr)| *expr));
+    let external_input_types = collect_literal_external_input_types(&items);
 
     // chelis#1124: names that carry an explicit `(defsig {} name ...)` in this
     // check unit already had their AUTHORITATIVE declared type bound into
     // `state.env` by `collect_all_declarations` above. The prebind below reads
     // each def's own BODY type stamp (via `collect_ir_types_with_origins`) and
     // rebinds the name to it — the mechanism that lets a `defsig`-less def be
-    // resolved by cross-references before its body is inferred. But letting a
-    // body stamp overwrite a defsig binding replaces the declared signature
-    // with the body's own type, so `infer_top_level`'s body-vs-defsig
+    // resolved by cross-references before its body is inferred. It may bind an
+    // eager value's name too: chelis#1134 scope is decided by
+    // `Env::top_level_value_visibility`, so a binding that exists early can no
+    // longer make a later value readable, and the two ingresses stay in
+    // agreement without this ingress withholding anything. Letting a body stamp
+    // overwrite a defsig binding replaces the declared signature with the
+    // body's own type, so `infer_top_level`'s body-vs-defsig
     // unification (which the IR ingress DOES run) then compares the body
     // against itself and silently accepts a `defsig`/body mismatch. The typed
     // ingress (`infer_program_with_product_in_session`) has no such rebind and
@@ -1327,6 +1354,20 @@ pub(super) fn infer_ir_program_with_state(
                 crate::opacity::module_key_for_item(module.as_deref(), decl_name),
                 decl_name.map(str::to_string),
             );
+            state
+                .env
+                .set_current_declaration_ordinal(Some(declaration_index));
+            let external_input_failure = prebind_literal_external_input_for_declaration(
+                declaration_index,
+                expr,
+                &external_input_types,
+                &declared_signatures,
+                &mut state.env,
+                &mut state.var_gen,
+                &mut state.subst,
+                &state.adt_reg,
+                errors,
+            );
             if let Some(binding) = infer_top_level(
                 expr,
                 &mut state.env,
@@ -1335,7 +1376,9 @@ pub(super) fn infer_ir_program_with_state(
                 &state.adt_reg,
                 errors,
                 &mut product,
-                prebound_type_failures.get(&declaration_index),
+                external_input_failure
+                    .as_ref()
+                    .or_else(|| prebound_type_failures.get(&declaration_index)),
                 provisional_types.get(&declaration_index),
                 group.recursive,
                 &user_def_names,
@@ -1387,6 +1430,7 @@ pub(super) fn infer_ir_program_with_state(
         }
     }
     crate::opacity::set_current_item(None, None);
+    state.env.set_current_declaration_ordinal(None);
 
     if cancelled() {
         // Abandoned mid-schedule. The remaining declarations were never
@@ -1576,6 +1620,68 @@ pub(super) type IrTypeEnv = BTreeMap<String, deep::Expr>;
 pub(super) struct CollectedIrTypes {
     type_env: IrTypeEnv,
     final_origin_by_name: UnordMap<String, usize>,
+}
+
+fn collect_literal_external_input_types(
+    items: &[(Option<String>, &deep::Expr)],
+) -> UnordMap<usize, deep::Expr> {
+    let collected = collect_ir_types_with_origins(items.iter().map(|(_, expr)| *expr));
+    collected
+        .type_env
+        .iter()
+        .filter_map(|(name, ty_expr)| {
+            let declaration_index = collected.final_origin_by_name[name];
+            let expr = items[declaration_index].1;
+            let (DeepTag::Def, _, kids) = stamped_parts(expr)? else {
+                return None;
+            };
+            let body = kids.get(1)?;
+            body_is_type_stamped_literal_self_ref(body, name)
+                .then(|| (declaration_index, ty_expr.clone()))
+        })
+        .collect()
+}
+
+/// [04-INF-4]'s typed literal self-reference declares an external input. Its
+/// own type must therefore be visible while that declaration is inferred,
+/// but never to an earlier declaration. Bind exactly the current ordinal just
+/// before its body check; ordinary values and future external inputs remain
+/// source-ordered at both checker ingresses.
+#[allow(clippy::too_many_arguments)]
+fn prebind_literal_external_input_for_declaration(
+    declaration_index: usize,
+    expr: &deep::Expr,
+    external_input_types: &UnordMap<usize, deep::Expr>,
+    declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+) -> Option<ErrorWitness> {
+    let ty_expr = external_input_types.get(&declaration_index)?;
+    let name = top_level_decl_name(expr)?;
+    if declared_signatures.contains_key(name) {
+        return None;
+    }
+    let metadata_level = subst.enter_level(vg);
+    let resolved = resolve_deep_type(
+        ty_expr,
+        vg,
+        adt_reg,
+        TypeUseSite::CompilerMetadata,
+        BinderMode::TrustedCompilerMetadata,
+        errors,
+    );
+    subst.leave_level(metadata_level, vg);
+    match resolved {
+        Ok(ty) => {
+            let scheme = env.generalize(&ty, subst);
+            env.bind(name.to_string(), scheme);
+            None
+        }
+        Err(witness) => Some(witness),
+    }
 }
 
 pub(super) fn build_ir_type_env(exprs: &[deep::Expr]) -> IrTypeEnv {
