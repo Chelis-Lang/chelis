@@ -15,8 +15,8 @@
 //!   the hoist order once components are collapsed, so every program without
 //!   a barrier keeps the exact order it had before chelis#1134;
 //! - I4: when the reference graph has a cycle, the schedule is still total
-//!   and every call edge is respected, so module functions stay in the
-//!   planner's order even while a genuine binding cycle is being broken.
+//!   and every call edge is respected, so a callee is still inferred before
+//!   its caller while a genuine binding cycle is being broken.
 //!
 //! The reference graph is derived from the generator's own declaration of
 //! what each named item references and which recursive component it belongs
@@ -107,6 +107,9 @@ struct Measured {
     plan: FunctionInferencePlan,
     flat: Vec<FlatItem>,
     module_fn_indices: BTreeSet<usize>,
+    /// Names that carry a `defsig` item, whether authored or synthesized
+    /// from a parameter or result annotation.
+    signed: BTreeSet<String>,
 }
 
 fn measure(program: &Program) -> Measured {
@@ -115,6 +118,14 @@ fn measure(program: &Program) -> Measured {
         .unwrap_or_else(|error| panic!("generated Surf must parse: {error:?}\n{source}"));
     let exprs = chelis_surf::desugar::desugar_program(&declarations);
     let items = top_level_decl_items_with_modules(&exprs);
+    let signed = items
+        .iter()
+        .filter_map(|(_, expr)| match stamped_parts(expr) {
+            Some((DeepTag::Defsig, _, kids)) => kids.first().and_then(symbol_name),
+            _ => None,
+        })
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
     let flat = items
         .iter()
         .map(|(_, expr)| {
@@ -146,6 +157,7 @@ fn measure(program: &Program) -> Measured {
         plan,
         flat,
         module_fn_indices,
+        signed,
     }
 }
 
@@ -232,7 +244,12 @@ fn reference(program: &Program, measured: &Measured) -> Reference {
             {
                 if reader_is_module_fn {
                     edges.insert((vertex[function], vertex[index]), EdgeKind::Call);
-                } else if floor.is_some_and(|floor| index >= floor) {
+                } else if floor.is_some_and(|floor| index >= floor)
+                    && !measured.signed.contains(*name)
+                {
+                    // A signed function's header is global; only a
+                    // `defsig`-less function's scheme has to be inferred
+                    // before a reader can use it.
                     edges.insert((vertex[function], vertex[index]), EdgeKind::Mirror);
                 }
             }
@@ -750,7 +767,7 @@ fn a_textual_chain_would_close_a_cycle_this_graph_does_not_have() {
             function("anchor", "def anchor() -> int32 = 1", &[]),
             value("first", "first = reads()", &["reads"]),
             value("second", "second = 7", &[]),
-            function("reads", "def reads() -> int32 = second", &["second"]),
+            function("reads", "def reads() = second", &["second"]),
         ],
     );
     let measured = measure(&program);
@@ -762,10 +779,63 @@ fn a_textual_chain_would_close_a_cycle_this_graph_does_not_have() {
 }
 
 #[test]
-fn a_genuine_binding_cycle_stays_total_in_planner_order() {
-    // `F1_three.ch` and `C1_mirror_cycle.ch`: real reference cycles, which
-    // `detect_top_level_binding_cycles` reports. The schedule must still
-    // emit every item once and keep callees before callers.
+fn a_value_naming_a_signed_function_that_reads_it_back_does_not_stall() {
+    // Round 10 F1: `carried` names `f` without applying it, and `f` reads
+    // `carried`. `f` carries a signature, so `carried`'s initializer needs
+    // only `f`'s header, which is global; an unconditional mirror edge
+    // `f -> carried` closed a two-cycle with the read edge `carried -> f`
+    // and the stall released `f` before `carried`. Only the `defsig`-less
+    // `wrap` earns a mirror edge, so the graph is acyclic.
+    let programs = [
+        named(
+            true,
+            vec![
+                function("anchor", "def anchor() -> int32 = 1", &[]),
+                value("carried", "carried = wrap(f)", &["wrap", "f"]),
+                function("wrap", "def wrap(g) = g", &[]),
+                function(
+                    "f",
+                    "def f(n: int32) -> int32 = if (n <= 0) then 0 else carried((n - 1))",
+                    &["carried"],
+                ),
+            ],
+        ),
+        named(
+            true,
+            vec![
+                function("anchor", "def anchor() -> int32 = 1", &[]),
+                value(
+                    "carried",
+                    "carried = pick(fn (x: int32) -> f(x))",
+                    &["pick", "f"],
+                ),
+                function("pick", "def pick(g) = 5", &[]),
+                function(
+                    "f",
+                    "def f(n: int32) -> int32 = add(n, carried)",
+                    &["carried"],
+                ),
+            ],
+        ),
+    ];
+    for program in &programs {
+        let measured = measure(program);
+        let reference = reference(program, &measured);
+        assert!(is_acyclic(&reference), "{}", program.source());
+        assert!(violations(program).is_empty(), "{}", program.source());
+        assert_before(program, &measured, "carried", "f");
+    }
+    let escape = &programs[0];
+    let measured = measure(escape);
+    assert_before(escape, &measured, "wrap", "carried");
+}
+
+#[test]
+fn a_genuine_binding_cycle_stays_total_with_callees_first() {
+    // `F1_three.ch`: `carried` reads the `defsig`-less `caller`, which needs
+    // `helper`, which reads `carried`. A real reference cycle, which
+    // `detect_top_level_binding_cycles` reports; the schedule must still emit
+    // every item once and keep the callee before its caller.
     let three = named(
         true,
         vec![
@@ -774,6 +844,17 @@ fn a_genuine_binding_cycle_stays_total_in_planner_order() {
             function("helper", "def helper(x) = carried", &["carried"]),
         ],
     );
+    let measured = measure(&three);
+    let three_reference = reference(&three, &measured);
+    assert!(!is_acyclic(&three_reference), "{}", three.source());
+    assert!(violations(&three).is_empty(), "{}", three.source());
+    assert_eq!(measured.schedule.len(), measured.flat.len());
+    assert_before(&three, &measured, "helper", "caller");
+
+    // `C1_mirror_cycle.ch`: the same runtime cycle through a SIGNED pair.
+    // `carried`'s initializer needs only `ping`'s header, so the reference
+    // graph is acyclic and the schedule never stalls; the cycle detector,
+    // not the schedule, owns the rejection.
     let mirror = named(
         true,
         vec![
@@ -792,15 +873,11 @@ fn a_genuine_binding_cycle_stays_total_in_planner_order() {
             ),
         ],
     );
-    for program in [&three, &mirror] {
-        let measured = measure(program);
-        let reference = reference(program, &measured);
-        assert!(!is_acyclic(&reference), "{}", program.source());
-        assert!(violations(program).is_empty(), "{}", program.source());
-        assert_eq!(measured.schedule.len(), measured.flat.len());
-    }
-    let measured = measure(&three);
-    assert_before(&three, &measured, "helper", "caller");
+    let measured = measure(&mirror);
+    let mirror_reference = reference(&mirror, &measured);
+    assert!(is_acyclic(&mirror_reference), "{}", mirror.source());
+    assert!(violations(&mirror).is_empty(), "{}", mirror.source());
+    assert_before(&mirror, &measured, "carried", "pong");
 }
 
 #[test]

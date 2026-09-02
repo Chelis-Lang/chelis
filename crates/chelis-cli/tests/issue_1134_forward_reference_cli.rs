@@ -288,6 +288,23 @@ fn check_accepts_a_backward_value_read_across_a_hoisted_module_function() {
     );
 }
 
+/// A header-less value naming a signed function that reads the value back
+/// (round 10). The initializer needs only the function's declared header, so
+/// nothing about the function has to be inferred first; a schedule that
+/// orders the function after the value anyway stalls and rejects this.
+#[test]
+fn check_accepts_a_value_that_names_a_signed_function_reading_it_back() {
+    assert_clean_report(
+        "mirror_escape",
+        "ch",
+        "module MirrorEscape\n\n\
+         def anchor() -> int32 = 1\n\n\
+         carried = wrap(f)\n\n\
+         def wrap(g) = g\n\n\
+         def f(n: int32) -> int32 = if (n <= 0) then 0 else carried((n - 1))\n",
+    );
+}
+
 /// The public-surface half of the recursive-component ordering matrix.
 ///
 /// A mutually recursive pair is inferred as one unit, so the schedule moves

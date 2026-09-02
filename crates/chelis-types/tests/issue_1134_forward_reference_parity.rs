@@ -138,6 +138,45 @@ fn a_malformed_external_input_type_reports_identically_at_both_ingresses() {
     }
 }
 
+/// A header-less value that names a signed function which reads the value
+/// back. Every reference is legal and there is no initialization cycle: the
+/// value's initializer needs only the function's declared header, which is
+/// global. Round 10 found the schedule stalling on this shape because the
+/// mirror edge was unconditional; with a body stamp on the value (the
+/// serialized-IR spelling) the stall was an ingress split.
+#[test]
+fn a_value_naming_a_signed_function_that_reads_it_back_accepts_at_both_ingresses() {
+    let escape = surf_program(
+        "module MirrorEscape\n\n\
+         def anchor() -> int32 = 1\n\n\
+         carried = wrap(f)\n\n\
+         def wrap(g) = g\n\n\
+         def f(n: int32) -> int32 = if (n <= 0) then 0 else carried((n - 1))\n",
+    );
+    assert_accepts_at_both_ingresses(&escape, "value naming a signed reader");
+    let lambda = surf_program(
+        "module PickEscape\n\n\
+         def anchor() -> int32 = 1\n\n\
+         carried = pick(fn (x: int32) -> f(x))\n\n\
+         def pick(g) = 5\n\n\
+         def f(n: int32) -> int32 = add(n, carried)\n",
+    );
+    assert_accepts_at_both_ingresses(&lambda, "lambda naming a signed reader");
+    let stamped = deep_file_program(
+        "(module {} MirrorEscapeStamped\n  \
+           (defsig {} anchor (t-fn {} (t-prim {} int32)))\n  \
+           (def {} anchor (fn {} (params {}) (lit {type: (t-prim {} int32)} 1)))\n  \
+           (def {} carried (app {type: (t-fn {} (t-prim {} int32) (t-prim {} int32))} (var {} wrap) (var {} f)))\n  \
+           (def {} wrap (fn {} (params {} g) (var {} g)))\n  \
+           (defsig {} f (t-fn {} (t-prim {} int32) (t-prim {} int32)))\n  \
+           (def {} f (fn {} (params {} (n {type: (t-prim {} int32)}))\n    \
+             (if {} (app {} (var {} lte) (var {} n) (lit {type: (t-prim {} int32)} 0))\n      \
+               (lit {type: (t-prim {} int32)} 0)\n      \
+               (app {} (var {} carried) (app {} (var {} sub) (var {} n) (lit {type: (t-prim {} int32)} 1)))))))\n",
+    );
+    assert_accepts_at_both_ingresses(&stamped, "stamped value naming a signed reader");
+}
+
 #[test]
 fn a_later_external_input_is_not_visible_to_an_earlier_declaration() {
     for (label, source) in [

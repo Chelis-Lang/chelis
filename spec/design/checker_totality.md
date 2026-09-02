@@ -1561,10 +1561,16 @@ The edges, all "referenced before referencer", are:
   dependency. A forward value reference produces no edge, because the scope
   rule leaves it unbound;
 - **mirror**: an item at or after the earliest module-function ordinal after
-  every module function it reads. That reproduces exactly what the blunt hoist
-  supplied implicitly, bounded to the same region, so function visibility,
-  which [04-INF-2]/[04-INF-3] own, is neither narrowed nor widened. Bare
-  functions keep textual availability and earn no call or mirror edge.
+  every module function it reads whose scheme exists only once its body is
+  inferred, that is, one without a declared signature. A declared signature
+  is already in the global header environment, so a reader of a signed
+  function needs nothing scheduled first, and an edge there would close a
+  cycle on a legal program: a value that names a signed function which reads
+  the value back (round 10's finding). Bounded to the hoist's region, the
+  mirror reproduces exactly what the blunt hoist supplied implicitly, so
+  function visibility, which [04-INF-2]/[04-INF-3] own, is neither narrowed
+  nor widened. Bare functions keep textual availability and earn no call or
+  mirror edge.
 
 Nothing else orders the graph. In particular there is no textual chain over
 the non-function items and no chain over the planner order. Four earlier
@@ -1576,15 +1582,17 @@ break then released a function out of planner order (round 8's `D4_min`).
 With reference edges only, a cycle in the graph is a reference cycle through
 an eager value, which `detect_top_level_binding_cycles` already reports as
 `CycleDetected` at every ingress; the schedule stays total by releasing the
-hoist-order-least remaining vertex, which for module functions is the
-planner's order.
+hoist-order-least remaining vertex, so a callee is still inferred before its
+caller.
 
 Two properties follow and are the reason this design is trusted where the
 chained ones were not. First, the hoist order is itself a linear extension of
 every edge except a barrier into a hoisted function, so Kahn's algorithm with
-the hoist order as its priority returns the hoist order byte for byte on every
-program that carries no such barrier: a program the blunt hoist scheduled
-correctly is scheduled identically, and only programs it mis-scheduled change.
+the hoist order as its priority returns the hoist order on every program that
+carries no such barrier, up to the contiguity of a contracted recursive
+component, which is invisible past `primary_inference_groups`: a program the
+blunt hoist scheduled correctly is grouped identically, and only programs it
+mis-scheduled change.
 Second, because every edge is a reference, the stall path is reachable only
 from a program the cycle detector rejects, so no accepted program depends on
 how a stall is broken.
@@ -1602,14 +1610,15 @@ permutation with every component contiguous; that every declared edge is
 respected when the declared graph is acyclic; that the schedule equals the
 hoist order whenever the hoist order already respects every edge; and that a
 cyclic program still schedules every item once with callees before callers.
-Named regressions carry the shapes rounds 5 through 8 found: the hoisted
+Named regressions carry the shapes rounds 5 through 10 found: the hoisted
 reader, the straddled recursive component wrapped, bare and mixed, the value
-that reads a `defsig`-less caller, the planner-order break, and the program a
-textual chain would have stalled. Each of the mutations that reproduces one of
-the four abandoned repairs reddens it: restoring the blunt hoist, dropping the
-contraction, dropping the read edge, dropping the mirror, reinstating either
-chain, releasing a stall by lowest ordinal, and restoring the identity
-short-circuit for bare units.
+that reads a `defsig`-less caller, the planner-order break, the program a
+textual chain would have stalled, and the value that names a signed function
+reading it back. Each of the mutations that reproduces one of the abandoned
+repairs reddens it: restoring the blunt hoist, dropping the contraction,
+dropping the read edge, dropping the mirror, making the mirror unconditional,
+reinstating either chain, releasing a stall by lowest ordinal, and restoring
+the identity short-circuit for bare units.
 
 The verdict oracle for the atom is:
 
