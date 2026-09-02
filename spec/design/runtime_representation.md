@@ -526,14 +526,20 @@ and Metal headers with and without `NDEBUG`), and a header's row set is the
 union over them. That set is checked rather than trusted: a marker planted at
 the start of every conditional arm lets the preprocessor itself report which
 arms each configuration keeps, and an arm that carries code and that no
-configuration keeps fails the scan naming its directive. An arm holding only
-other directives or a linkage-specification brace needs no configuration. Two
-more rules close the universe: an include that resolves to anything but the
-header itself, the stub SDK, the compiler's own headers, or the published
-include directory fails the scan, and the type-word rule applies in a cast,
-compound literal, or `sizeof` operand exactly as in a declaration. Cargo build
-scripts under the inventoried crates are roots too, since cargo compiles them
-like any other source.
+configuration keeps fails the scan naming its directive. An arm carries code
+when it holds a declaration, a quoted `#include` (a repository file), or a
+`#define` with a body; an angle `#include` (an SDK or compiler header the
+universe supplies), an include guard's bodiless `#define`, an `#error`, a
+`#pragma`, and a linkage-specification brace carry none and need no
+configuration. Two more
+rules close the universe: an include that resolves, canonically, to anything
+but the header itself, the stub SDK, the compiler's own headers, or the
+published include directory fails the scan, and the type-word rule applies to
+a block parameter and in a cast, compound literal, or `sizeof` operand exactly
+as in a declaration. A `sizeof` in an array bound or bit-field width is a
+width seam of the declaration that spells it. Cargo build scripts under the
+inventoried crates are roots too, since cargo compiles them like any other
+source.
 
 A row's identity is its kind, its path, and its owning declaration. Reformatting
 a literal inside a function does not move the freeze; adding a function, field,

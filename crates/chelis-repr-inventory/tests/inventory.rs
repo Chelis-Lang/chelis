@@ -1059,6 +1059,26 @@ fn an_include_outside_the_universe_fails_closed() {
     assert!(
         scan_c_header(HEADER, "#include \"chelis_runtime_dtype.h\"\n#include <stdint.h>\nextern float *chelis_probe_ok(void);\n").is_ok()
     );
+    // The round-5 shape: a relative spelling through the published include
+    // directory resolves, canonically, to a sibling crate's `src/`.
+    let relative =
+        "#include \"../src/chelis_probe_side_rel.h\"\nextern float *chelis_probe_own(void);\n";
+    let side = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../chelis-runtime/src/chelis_probe_side_rel.h");
+    std::fs::write(&side, "extern float *chelis_probe_side_rel(void);\n").expect("write side file");
+    let result = scan_c_header(HEADER, relative);
+    std::fs::remove_file(&side).expect("remove side file");
+    let error = result.expect_err("a `..` include escaping the include directory must fail");
+    assert!(
+        error.message.contains("outside the inventory universe"),
+        "{}",
+        error.message
+    );
+    // A tracked C header outside every root, reached the same way.
+    let tracked =
+        "#include \"../../../grammars/tree-sitter-chelis-surf/src/tree_sitter/parser.h\"\n";
+    let error = scan_c_header(HEADER, tracked).expect_err("a tracked out-of-root header must fail");
+    assert!(error.message.contains("parser.h"), "{}", error.message);
 }
 
 #[test]
@@ -1332,6 +1352,144 @@ fn an_impl_associated_type_and_a_foreign_static_own_their_rows() {
         rows.contains(&(
             "raw-element-pointer".to_string(),
             "CHELIS_PROBE_BUF".to_string()
+        )),
+        "{rows:?}"
+    );
+}
+
+#[test]
+fn a_turbofish_cast_or_pointer_constructor_is_a_carrier() {
+    // `p.cast::<f32>()` is the idiomatic pointer cast and spells its target
+    // only in the turbofish; std pointer constructors do the same.
+    let rows = identities(
+        RUNTIME,
+        r#"
+        use std::ptr::NonNull;
+        pub fn a(p: *mut u8) -> usize { p.cast::<f32>() as usize }
+        pub fn b(p: *mut u8) -> usize { NonNull::<i64>::new(p.cast()).map_or(0, |q| q.as_ptr() as usize) }
+        pub fn c(p: *const u8, n: usize) -> usize { std::ptr::slice_from_raw_parts::<f64>(p.cast(), n) as *const f64 as usize }
+        pub fn d(p: *mut u8) -> usize { p.cast::<u8>() as usize }
+        "#,
+    );
+    for owner in ["a", "b", "c"] {
+        assert!(
+            rows.contains(&("raw-element-pointer".to_string(), owner.to_string())),
+            "{owner}: {rows:?}"
+        );
+    }
+    assert!(
+        !rows.contains(&("raw-element-pointer".to_string(), "d".to_string())),
+        "a byte cast is not an element pointer: {rows:?}"
+    );
+}
+
+#[test]
+fn an_include_or_a_define_with_a_body_makes_an_arm_carry_code() {
+    // A dead arm holding an `#include` or a `#define` with a body carries
+    // code by reference; a bodiless `#define`, an `#error`, and a `#pragma`
+    // do not.
+    for (source, needle) in [
+        (
+            "#ifdef CHELIS_PROBE_NEVER\n#include \"chelis_runtime_dtype.h\"\n#endif\n",
+            "CHELIS_PROBE_NEVER",
+        ),
+        (
+            "#ifdef CHELIS_PROBE_NEVER\n#define CHELIS_PROBE_DECL float *chelis_probe_decl(void);\n#else\n#define CHELIS_PROBE_DECL\n#endif\nCHELIS_PROBE_DECL\n",
+            "CHELIS_PROBE_NEVER",
+        ),
+    ] {
+        let error =
+            scan_c_header(HEADER, source).expect_err("an unparsed include or define must fail");
+        assert!(error.message.contains(needle), "{}", error.message);
+    }
+    assert!(
+        scan_c_header(
+            HEADER,
+            "#ifdef CHELIS_PROBE_NEVER\n#define CHELIS_PROBE_FLAG\n#error \"never\"\n#pragma once\n#endif\nextern float *chelis_probe_ok(void);\n",
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn a_block_literal_parameter_is_a_carrier_and_is_classified() {
+    let rows = scan_c_source(
+        METAL_HEADER,
+        r#"
+        #include <Foundation/Foundation.h>
+        static inline id chelis_probe_block(void) { return ^(float *q) { q[0] = 0.0f; }; }
+        "#,
+        OBJECTIVE_C_LANE,
+    )
+    .expect("must scan");
+    assert!(
+        rows.iter()
+            .any(|row| row.kind == "raw-element-pointer" && row.owner == "chelis_probe_block"),
+        "{rows:?}"
+    );
+    let error = scan_c_source(
+        METAL_HEADER,
+        "#include <Foundation/Foundation.h>\nstatic inline id chelis_probe_block(void) { return ^(_Float16 *q) { (void)q; }; }\n",
+        OBJECTIVE_C_LANE,
+    )
+    .expect_err("an unclassified block parameter spelling must fail closed");
+    assert!(error.message.contains("_Float16"), "{}", error.message);
+}
+
+#[test]
+fn a_sizeof_in_an_array_bound_or_bit_field_is_a_width_seam() {
+    let rows = c_owners(
+        r#"
+        static unsigned char chelis_probe_scratch[sizeof(double) * 4];
+        typedef struct { unsigned char buf[sizeof(float)]; } chelis_probe_arr;
+        static inline void chelis_probe_local(void) { unsigned char buf[sizeof(float)]; (void)buf; }
+        struct chelis_probe_bits { int bits : sizeof(float); };
+        void chelis_probe_param(unsigned char buf[sizeof(float)]);
+        "#,
+    );
+    for owner in [
+        "chelis_probe_scratch",
+        "chelis_probe_arr::buf",
+        "chelis_probe_local",
+        "chelis_probe_bits::bits",
+        "chelis_probe_param",
+    ] {
+        assert!(
+            rows.contains(&("width-arithmetic".to_string(), owner.to_string())),
+            "{owner}: {rows:?}"
+        );
+    }
+}
+
+#[test]
+fn a_string_literal_cannot_spoof_the_arm_marker() {
+    let error = scan_c_header(
+        HEADER,
+        "static inline const char *chelis_probe_spoof(void) { return \"#pragma chelis_inventory_arm(1)\"; }\n#ifdef CHELIS_PROBE_NEVER\nextern float *chelis_probe_spoofed(void);\n#endif\n",
+    )
+    .expect_err("a spoofed marker must not mark a dead arm live");
+    assert!(
+        error.message.contains("CHELIS_PROBE_NEVER"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn offsetof_and_va_list_scan_as_expected() {
+    let rows = c_owners(
+        r#"
+        #include <stddef.h>
+        #include <stdint.h>
+        typedef struct { void *data; uint8_t dtype; int64_t size; int32_t rank; const int64_t *shape; const int64_t *strides; } chelis_probe_t;
+        static inline size_t chelis_probe_off(void) { return __builtin_offsetof(chelis_probe_t, data); }
+        static inline void chelis_probe_va(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n); __builtin_va_end(ap); }
+        "#,
+    );
+    assert!(
+        rows.contains(&(
+            "direct-data-access".to_string(),
+            "chelis_probe_off".to_string()
         )),
         "{rows:?}"
     );

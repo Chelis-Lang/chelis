@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "37ebd59b76d8f0def9f54ca11e3e1169368df43de4101a3c5a30671186f6ccc5",
+  "freeze_sha256": "86d1ea9cd3e17cec15950697119db0c3c992cf28f645dbeea37dde9364c9d789",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -1468,6 +1468,10 @@
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/src/lib.rs|owner=tensor_elem_to_string",
+      "deletion_phase": 3
+    },
+    {
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/src/lib.rs|owner=write_scalar_bits",
       "deletion_phase": 3
     },
     {
@@ -3029,6 +3033,10 @@
       "sample": "(* t) . data as * const u16"
     },
     {
+      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/src/lib.rs|owner=write_scalar_bits",
+      "sample": "data . cast :: < u64 > ()"
+    },
+    {
       "identity": "kind=width-arithmetic|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_compile_kernel",
       "sample": "sizeof(wavefront_opt)"
     },
@@ -3038,11 +3046,11 @@
     },
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_alloc",
-      "sample": "sizeof(chelis_gpu_tensor)"
+      "sample": "chelis_gpu_tensor *t = (chelis_gpu_tensor*)calloc(1, sizeof(chelis_gpu_tensor))"
     },
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_alloc_view",
-      "sample": "sizeof(chelis_gpu_tensor)"
+      "sample": "chelis_gpu_tensor *t = (chelis_gpu_tensor*)calloc(1, sizeof(chelis_gpu_tensor))"
     },
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_failure_symbol",
@@ -3483,6 +3491,72 @@
           },
           "expected_owners": [
             "runtime_representation_phase0_probe_rows"
+          ],
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        },
+        {
+          "witness_id": "phase0.mutate_c_include_outside_universe",
+          "expected_kind": "include-outside-universe",
+          "path": "crates/chelis-runtime/include/chelis_runtime.h",
+          "implementation_sha256": "47366f3cb6ed8a7e4ef9a171ad5cab57f8cfb4ac1dd902bf1be90b0e026b43fe",
+          "expected_failure": {
+            "code": "source.rejected",
+            "reason_prefix": "fail-closed inventory scanner rejected"
+          },
+          "expected_owners": [],
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        },
+        {
+          "witness_id": "phase0.mutate_c_include_in_dead_arm",
+          "expected_kind": "undeclared-conditional",
+          "path": "crates/chelis-runtime/include/chelis_runtime.h",
+          "implementation_sha256": "5d33bb0a7db370c16c2bde57a325b796079e362ad2d9128a5eb80c768e37387c",
+          "expected_failure": {
+            "code": "source.rejected",
+            "reason_prefix": "fail-closed inventory scanner rejected"
+          },
+          "expected_owners": [],
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        },
+        {
+          "witness_id": "phase0.mutate_objc_block_parameter",
+          "expected_kind": "raw-element-pointer",
+          "path": "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
+          "implementation_sha256": "918a13029005cd66a2c7bdd93a01610279532203ffb52e0c0622e0f7576c9868",
+          "expected_failure": {
+            "code": "inventory.unclassified",
+            "reason_prefix": "unclassified inventory hit"
+          },
+          "expected_owners": [
+            "runtime_representation_phase0_probe_block"
+          ],
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        },
+        {
+          "witness_id": "phase0.mutate_c_sizeof_in_array_bound",
+          "expected_kind": "width-arithmetic",
+          "path": "crates/chelis-runtime/include/chelis_runtime.h",
+          "implementation_sha256": "4ca847b36f57af09c8dc3fcbb1fe59a7c5453b9d8f701fd13f2377a130352fc7",
+          "expected_failure": {
+            "code": "inventory.unclassified",
+            "reason_prefix": "unclassified inventory hit"
+          },
+          "expected_owners": [
+            "runtime_representation_phase0_probe_scratch"
+          ],
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        },
+        {
+          "witness_id": "phase0.mutate_rust_cast_turbofish",
+          "expected_kind": "raw-element-pointer",
+          "path": "crates/chelis-runtime/src/format_shortest.rs",
+          "implementation_sha256": "a08615b7a560c8ce5e1bbc910c5f2cafaa83b7df6e47784ad9534b696e838bba",
+          "expected_failure": {
+            "code": "inventory.unclassified",
+            "reason_prefix": "unclassified inventory hit"
+          },
+          "expected_owners": [
+            "runtime_representation_phase0_turbofish"
           ],
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
         },

@@ -13,13 +13,14 @@
 //!
 //! Every header is parsed under a fixed target triple with `-ffreestanding
 //! -nostdlibinc` and a committed stub SDK (`sdk-stubs/`) in place of libc, the
-//! HIP SDK, the Apple frameworks, and the SIMD intrinsics headers, and clang
-//! runs with a scrubbed environment. Linux CI, macOS CI, Devenv, and a
-//! workstation therefore see the same preprocessed text and produce the same
-//! rows, and the dumps stay small. The stub SDK is deliberately minimal: a
-//! runtime header that starts using an SDK symbol the stub does not declare
-//! fails the scan until the stub declares it, the same fail-closed discipline
-//! the capacity census applies to an unknown type word.
+//! HIP SDK, hipBLAS, the BLAS headers, SLEEF, the Apple frameworks, and the
+//! SIMD intrinsics headers, and clang runs with a scrubbed environment. Linux
+//! CI, macOS CI, Devenv, and a workstation therefore see the same
+//! preprocessed text and produce the same rows, and the dumps stay small. The
+//! stub SDK is deliberately minimal: a runtime header that starts using an
+//! SDK symbol the stub does not declare fails the scan until the stub declares
+//! it, the same fail-closed discipline the capacity census applies to an
+//! unknown type word.
 //!
 //! # Configurations and conditional arms
 //!
@@ -30,23 +31,26 @@
 //! header that carries code must be parsed by at least one configuration, or
 //! the scan fails naming the directive. The check asks the preprocessor
 //! itself which arms are live, through a marker pragma planted at the start
-//! of every arm, so no directive grammar is modelled here. An arm whose only
-//! content is other directives, or a linkage-specification brace, needs no
-//! configuration.
+//! of every arm, so no directive grammar is modelled here. An arm carries
+//! code when it holds a token outside a linkage-specification brace, a quoted
+//! `#include` (a repository file), or a `#define` with a body; an angle
+//! `#include` (an SDK or compiler header the universe supplies), an include
+//! guard's bodiless `#define`, an `#error`, and a `#pragma` carry none.
 //!
 //! # What fails closed
 //!
 //! - `clang` missing, or any diagnostic error, is a `ScanError` carrying the
 //!   compiler's own message.
 //! - A conditional arm with code that no declared configuration parses.
-//! - An `#include` that resolves outside the universe: anything but the
-//!   staged copy, the stub SDK, the compiler's own resource headers, and the
-//!   published include directory (whose every header is registered).
+//! - An `#include` that resolves, after canonicalization, outside the
+//!   universe: anything but the staged copy, the stub SDK, the compiler's own
+//!   resource headers, and the published include directory (whose every
+//!   header is registered).
 //! - A declaration kind this reader does not model, so a new form cannot be
 //!   dropped silently.
 //! - A type spelt with a word no vocabulary classifies (`_Float16`, `__bf16`,
-//!   `__int128`, ...), in declaration position or in a cast, compound
-//!   literal, or `sizeof` operand.
+//!   `__int128`, ...), in declaration position, in a block parameter, or in
+//!   a cast, compound literal, or `sizeof` operand.
 //! - A seam that no named declaration encloses; a placeholder owner would be a
 //!   sink that absorbs every later seam of its kind.
 //! - A node missing the JSON fields the reader depends on, so a clang JSON
@@ -68,6 +72,9 @@ pub struct Configuration {
     pub name: &'static str,
     /// Preprocessor flags that select the configuration.
     pub flags: &'static [&'static str],
+    /// A subdirectory of the stub SDK added to the system include path, for
+    /// an arm selected by `__has_include`.
+    pub extra_include: Option<&'static str>,
 }
 
 /// The front-end lane a registered header is read through: one language and
@@ -85,10 +92,12 @@ pub struct HeaderLane {
     pub configurations: &'static [Configuration],
 }
 
-/// The published headers: plain C, read scalar, then with the AVX2 arm and
-/// the NEON arm of `chelis_simd.h` selected. The SIMD macros are defined
-/// directly because the stub intrinsics headers carry no target-feature
-/// requirements, so no second target triple is needed.
+/// The published headers: plain C, read scalar, with the AVX2 and NEON arms
+/// of `chelis_simd.h`, with the Apple arms of `chelis_blas.h` and
+/// `chelis_math.h`, with the SLEEF arm of `chelis_math.h`, and with the
+/// OpenBLAS arm of `chelis_blas.h`. The arch macros are defined directly
+/// because the stub intrinsics headers carry no target-feature requirements,
+/// so one target triple serves every configuration.
 pub const PUBLIC_C_LANE: HeaderLane = HeaderLane {
     language: "c",
     target: "x86_64-unknown-linux-gnu",
@@ -97,20 +106,39 @@ pub const PUBLIC_C_LANE: HeaderLane = HeaderLane {
         Configuration {
             name: "scalar",
             flags: &[],
+            extra_include: Some("blas-cblas"),
         },
         Configuration {
             name: "avx2",
             flags: &["-D__AVX2__=1"],
+            extra_include: Some("blas-cblas"),
         },
         Configuration {
             name: "neon",
             flags: &["-D__ARM_NEON=1"],
+            extra_include: Some("blas-cblas"),
+        },
+        Configuration {
+            name: "apple",
+            flags: &["-D__APPLE__=1"],
+            extra_include: Some("blas-cblas"),
+        },
+        Configuration {
+            name: "sleef",
+            flags: &["-D__AVX2__=1", "-DCHELIS_HAS_SLEEF=1"],
+            extra_include: Some("blas-cblas"),
+        },
+        Configuration {
+            name: "openblas",
+            flags: &[],
+            extra_include: Some("blas-openblas"),
         },
     ],
 };
 
 /// The HIP support header: a host-side driver-API file with no device
-/// syntax, whose only conditional beyond `__has_include` is `NDEBUG`.
+/// syntax, read with and without `NDEBUG` and with the hipBLAS header
+/// present and absent.
 pub const HIP_LANE: HeaderLane = HeaderLane {
     language: "c",
     target: "x86_64-unknown-linux-gnu",
@@ -119,10 +147,17 @@ pub const HIP_LANE: HeaderLane = HeaderLane {
         Configuration {
             name: "debug",
             flags: &[],
+            extra_include: None,
         },
         Configuration {
             name: "release",
             flags: &["-DNDEBUG"],
+            extra_include: None,
+        },
+        Configuration {
+            name: "hipblas",
+            flags: &[],
+            extra_include: Some("hipblas-present"),
         },
     ],
 };
@@ -137,10 +172,12 @@ pub const OBJECTIVE_C_LANE: HeaderLane = HeaderLane {
         Configuration {
             name: "debug",
             flags: &[],
+            extra_include: None,
         },
         Configuration {
             name: "release",
             flags: &["-DNDEBUG"],
+            extra_include: None,
         },
     ],
 };
@@ -181,15 +218,18 @@ const QUALIFIER_WORDS: &[&str] = &[
 /// Objective-C spellings a declared type may contain that no C list names.
 const OBJECTIVE_C_TYPE_WORDS: &[&str] = &["BOOL", "Class", "SEL", "id", "instancetype"];
 
-/// Type operators that may appear inside a spelling and name no type of
-/// their own.
+/// Type operators and compiler-provided spellings that may appear inside a
+/// type and name no arithmetic type of their own.
 const TYPE_OPERATOR_WORDS: &[&str] = &[
+    "__builtin_va_list",
     "__typeof",
     "__typeof__",
     "__typeof_unqual",
     "__typeof_unqual__",
+    "__va_list_tag",
     "typeof",
     "typeof_unqual",
+    "va_list",
 ];
 
 /// Element words the pointer rule accepts in a canonical (desugared) spelling
@@ -237,7 +277,11 @@ fn clang_command(
         .env("PATH", path)
         .args(["-w", "-fno-color-diagnostics"])
         .args(["-x", lane.language, "-target", lane.target])
-        .args(["-ffreestanding", "-nostdlibinc"])
+        .args(["-ffreestanding", "-nostdlibinc"]);
+    if let Some(extra) = configuration.extra_include {
+        command.arg("-isystem").arg(stubs.join(extra));
+    }
+    command
         .arg("-isystem")
         .arg(stubs)
         .arg("-I")
@@ -266,7 +310,7 @@ fn run_clang(mut command: Command, what: &str) -> Result<Vec<u8>, ScanError> {
 
 /// The compiler's own header directory, so `stdint.h` and friends are
 /// recognised as inside the universe.
-fn resource_dir() -> Result<String, ScanError> {
+fn resource_dir() -> Result<PathBuf, ScanError> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let mut command = Command::new("clang");
     command
@@ -281,7 +325,18 @@ fn resource_dir() -> Result<String, ScanError> {
              compiler's own headers from an include outside the universe",
         ));
     }
-    Ok(dir)
+    Ok(PathBuf::from(dir))
+}
+
+/// The identity of a path on disk: canonical, so `..` and symlinks cannot
+/// spell a file outside a directory as if it were inside it.
+fn canonical(path: &Path) -> Result<PathBuf, ScanError> {
+    std::fs::canonicalize(path).map_err(|error| {
+        ScanError::new(format!(
+            "cannot resolve `{}` to a canonical path: {error}",
+            path.display()
+        ))
+    })
 }
 
 /// Run clang over one staged file under one configuration and return its
@@ -314,7 +369,8 @@ fn dump_ast(
 }
 
 /// The arm ids the preprocessor keeps under one configuration, read back
-/// from the marker pragmas the staged copy plants.
+/// from the marker pragmas the staged copy plants. Only a pragma line
+/// counts: a string literal spelling the marker is not a directive.
 fn live_arms(
     lane: HeaderLane,
     configuration: Configuration,
@@ -333,18 +389,14 @@ fn live_arms(
         ),
     )?;
     let text = String::from_utf8_lossy(&stdout);
-    let prefix = format!("{ARM_MARKER}(");
+    let prefix = format!("#pragma {ARM_MARKER}(");
     let mut live = BTreeSet::new();
     for line in text.lines() {
-        let mut rest = line;
-        while let Some(start) = rest.find(&prefix) {
-            let after = &rest[start + prefix.len()..];
-            if let Some(close) = after.find(')')
-                && let Ok(id) = after[..close].trim().parse::<usize>()
-            {
-                live.insert(id);
-            }
-            rest = after;
+        if let Some(after) = line.trim_start().strip_prefix(&prefix)
+            && let Some(close) = after.find(')')
+            && let Ok(id) = after[..close].trim().parse::<usize>()
+        {
+            live.insert(id);
         }
     }
     Ok(live)
@@ -383,11 +435,11 @@ pub fn scan_c_source(
     let marked_file = scratch.path().join(format!("staged-arms-{file_name}"));
     std::fs::write(&marked_file, &arms.marked_source)
         .map_err(|error| ScanError::new(format!("cannot stage `{path}`: {error}")))?;
-    let allowed_prefixes = vec![
-        file.to_string_lossy().to_string(),
-        stubs.to_string_lossy().to_string(),
-        include.to_string_lossy().to_string(),
-        resource,
+    let universe = vec![
+        canonical(&file)?,
+        canonical(&stubs)?,
+        canonical(&include)?,
+        canonical(&resource)?,
     ];
 
     let mut rows = Vec::new();
@@ -408,7 +460,7 @@ pub fn scan_c_source(
             path,
             source,
             file: file.to_string_lossy().to_string(),
-            allowed_prefixes: &allowed_prefixes,
+            universe: &universe,
             current_file: None,
             names,
             owners: Vec::new(),
@@ -494,13 +546,6 @@ impl ConditionalArms {
             logical.push((start, index, text));
             index += 1;
         }
-        let directive_of = |text: &str| -> Option<String> {
-            let trimmed = text.trim_start();
-            let rest = trimmed
-                .strip_prefix('#')
-                .or_else(|| trimmed.strip_prefix("%:"))?;
-            Some(rest.trim_start().to_string())
-        };
         let is_conditional_open = |directive: &str| {
             ["if", "ifdef", "ifndef"]
                 .iter()
@@ -551,31 +596,23 @@ impl ConditionalArms {
                 spans[previous].1 = logical_index;
             }
         }
-        // Pass two: an arm carries code when any non-directive logical line in
-        // its span has tokens beyond a linkage brace.
+        // Pass two: an arm carries code when any logical line in its span
+        // does. A non-directive line carries code when it has tokens beyond a
+        // linkage brace; an `#include` carries whatever it includes; a
+        // `#define` carries its body. An include guard's bodiless `#define`,
+        // an `#error`, and a `#pragma` carry nothing.
         for (id, (start, end)) in spans.iter().enumerate() {
-            let has_code = logical[*start..*end].iter().any(|(_, _, text)| {
-                if directive_of(text).is_some() {
-                    return false;
-                }
-                let tokens = c_lexical::lex_c_tokens(text);
-                !tokens.is_empty()
-                    && !tokens
-                        .iter()
-                        .all(|token| LINKAGE_TOKENS.contains(&token.as_str()))
-            });
-            arms[id].has_code = has_code;
+            arms[id].has_code = logical[*start..*end]
+                .iter()
+                .any(|(_, _, text)| logical_line_carries_code(text));
         }
         // Pass three: plant a marker after every arm-opening directive.
         let mut marked = String::with_capacity(source.len() + arms.len() * 40);
-        let mut physical_index = 0;
         for (logical_index, (first, last, _)) in logical.iter().enumerate() {
-            debug_assert_eq!(physical_index, *first);
             for line in &original[*first..=*last] {
                 marked.push_str(line);
                 marked.push('\n');
             }
-            physical_index = last + 1;
             if let Some(id) = open_arm_by_logical.get(&logical_index) {
                 marked.push_str(&format!("#pragma {ARM_MARKER}({id})\n"));
             }
@@ -583,6 +620,60 @@ impl ConditionalArms {
         Self {
             arms,
             marked_source: marked,
+        }
+    }
+}
+
+/// The directive text after `#`, when a logical line is a directive.
+fn directive_of(text: &str) -> Option<String> {
+    let trimmed = text.trim_start();
+    let rest = trimmed
+        .strip_prefix('#')
+        .or_else(|| trimmed.strip_prefix("%:"))?;
+    Some(rest.trim_start().to_string())
+}
+
+/// Does a logical line carry code a configuration has to parse?
+fn logical_line_carries_code(text: &str) -> bool {
+    match directive_of(text) {
+        None => {
+            let tokens = c_lexical::lex_c_tokens(text);
+            !tokens.is_empty()
+                && !tokens
+                    .iter()
+                    .all(|token| LINKAGE_TOKENS.contains(&token.as_str()))
+        }
+        Some(directive) => {
+            if let Some(rest) = ["include", "import", "include_next"]
+                .iter()
+                .find_map(|word| {
+                    starts_with_word(&directive, word).then(|| &directive[word.len()..])
+                })
+            {
+                // A quoted include names a repository file, which may carry
+                // seams no configuration would see. An angle include names an
+                // SDK or compiler header the universe supplies, and when it is
+                // live the canonical universe check governs where it resolves.
+                return rest.trim_start().starts_with('"');
+            }
+            if let Some(rest) = directive.strip_prefix("define")
+                && !rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+            {
+                // `#define NAME` alone is an include guard or a feature flag;
+                // `#define NAME body` and `#define NAME(args) body` carry the
+                // body.
+                let tokens = c_lexical::lex_c_tokens(rest);
+                let mut rest_tokens = tokens.iter().skip(1).peekable();
+                if rest_tokens.peek().map(|token| token.as_str()) == Some("(") {
+                    for token in rest_tokens.by_ref() {
+                        if token == ")" {
+                            break;
+                        }
+                    }
+                }
+                return rest_tokens.next().is_some();
+            }
+            false
         }
     }
 }
@@ -709,9 +800,10 @@ struct Reader<'a> {
     source: &'a str,
     /// The staged file's path as clang prints it.
     file: String,
-    /// Path prefixes a declaration may come from: the staged copy, the stub
-    /// SDK, the published include directory, and the compiler's own headers.
-    allowed_prefixes: &'a [String],
+    /// Canonical directories a declaration may come from: the staged copy,
+    /// the stub SDK, the published include directory, and the compiler's own
+    /// headers.
+    universe: &'a [PathBuf],
     current_file: Option<String>,
     names: DeclaredNames,
     owners: Vec<String>,
@@ -866,8 +958,8 @@ impl<'a> Reader<'a> {
     }
 
     /// Reject a type spelt with a word no vocabulary classifies, wherever the
-    /// spelling appears: a declaration, a cast, a compound literal, or a
-    /// `sizeof` operand.
+    /// spelling appears: a declaration, a block parameter, a cast, a compound
+    /// literal, or a `sizeof` operand.
     fn check_type_words(&mut self, type_object: Option<&Value>, what: &str) {
         let Some(spelling) = desugared_type(type_object) else {
             return;
@@ -909,6 +1001,18 @@ impl<'a> Reader<'a> {
             .any(|spelling| governs_a_pointer(&self.resolved_words(spelling)))
     }
 
+    /// A declaration whose own source spells `sizeof` (an array bound or a
+    /// bit-field width) computes a width where no statement can see it.
+    fn push_declared_width(&mut self, sample: Option<&String>) {
+        if let Some(sample) = sample
+            && c_lexical::lex_c_tokens(sample)
+                .iter()
+                .any(|token| token == "sizeof")
+        {
+            self.push("width-arithmetic", Some(sample.clone()), sample);
+        }
+    }
+
     fn visit_translation_unit(&mut self, node: &Value) {
         let kind = field_str(node, "kind").unwrap_or_default();
         if kind != "TranslationUnitDecl" {
@@ -943,24 +1047,43 @@ impl<'a> Reader<'a> {
             // but anything else reached through an include is a file the
             // universe does not contain. Their children still advance the
             // dumper's file state, which the reader must follow.
-            if let Some(file) = self.current_file.clone()
-                && !self
-                    .allowed_prefixes
-                    .iter()
-                    .any(|prefix| file.starts_with(prefix.as_str()))
-            {
-                self.fail(format!(
-                    "`{}` includes `{file}`, which is outside the inventory universe (the \
-                     header itself, the stub SDK, the compiler's own headers, and the \
-                     published include directory); register the file under an inventory \
-                     root, or move the declarations it carries",
-                    self.path
-                ));
+            if let Some(file) = self.current_file.clone() {
+                self.check_universe(&file);
             }
             self.skip_subtree(node);
             return;
         }
         self.visit_declaration(node, kind, begin, end);
+    }
+
+    /// A declaration's file must resolve, canonically, inside the universe;
+    /// a spelling through `..` or a symlink does not change where a file is.
+    fn check_universe(&mut self, file: &str) {
+        let resolved = match std::fs::canonicalize(file) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                self.fail(format!(
+                    "`{}` includes `{file}`, which cannot be resolved to a canonical path: \
+                     {error}",
+                    self.path
+                ));
+                return;
+            }
+        };
+        if !self
+            .universe
+            .iter()
+            .any(|prefix| resolved.starts_with(prefix))
+        {
+            self.fail(format!(
+                "`{}` includes `{file}` (canonically `{}`), which is outside the inventory \
+                 universe (the header itself, the stub SDK, the compiler's own headers, and \
+                 the published include directory); register the file under an inventory \
+                 root, or move the declarations it carries",
+                self.path,
+                resolved.display()
+            ));
+        }
     }
 
     /// Walk a subtree only to thread the dumper's file state through it.
@@ -1028,6 +1151,7 @@ impl<'a> Reader<'a> {
                     if governs {
                         reader.push("raw-element-pointer", sample.clone(), &name);
                     }
+                    reader.push_declared_width(sample.as_ref());
                     for child in children(node) {
                         reader.visit_nested(child);
                     }
@@ -1042,6 +1166,7 @@ impl<'a> Reader<'a> {
                     if governs {
                         reader.push("raw-element-pointer", sample.clone(), &name);
                     }
+                    reader.push_declared_width(sample.as_ref());
                     // A typedef's owned anonymous aggregate is visited through
                     // the RecordDecl that precedes it; its type nodes carry
                     // no seams of their own.
@@ -1061,11 +1186,25 @@ impl<'a> Reader<'a> {
                 });
             }
             "ObjCIvarDecl" | "ObjCPropertyDecl" => self.visit_field(node, begin, end),
+            "BlockDecl" => {
+                // A block literal's parameters are carriers exactly as a
+                // function's are, and the enclosing declaration's type does
+                // not reveal them when the block is handed to an `id`.
+                for child in children(node) {
+                    let child_kind = field_str(child, "kind").unwrap_or_default();
+                    let (_, child_begin, child_end) = self.locate(child);
+                    if child_kind == "ParmVarDecl" {
+                        self.visit_parameter(child, "a block parameter");
+                    } else {
+                        self.visit_declaration(child, child_kind, child_begin, child_end);
+                    }
+                }
+            }
             "ObjCTypeParamDecl" | "EmptyDecl" | "IndirectFieldDecl" | "ImplicitParamDecl"
-            | "LabelDecl" | "BlockDecl" | "ParmVarDecl" => {
+            | "LabelDecl" | "ParmVarDecl" => {
                 // `IndirectFieldDecl` mirrors an anonymous member's fields the
                 // reader already visited inside the anonymous aggregate;
-                // parameters are read with their function.
+                // parameters are read with their function or block.
                 for child in children(node) {
                     self.visit_nested(child);
                 }
@@ -1079,6 +1218,21 @@ impl<'a> Reader<'a> {
                 ));
             }
             _ => self.visit_expression(node, kind, begin, end),
+        }
+    }
+
+    /// A function, method, or block parameter: classified, and a carrier
+    /// row for the enclosing owner when it governs an element pointer.
+    fn visit_parameter(&mut self, node: &Value, what: &str) {
+        let parameter = field_str(node, "name").unwrap_or_default().to_string();
+        self.check_type_words(node.get("type"), &format!("{what} `{parameter}`"));
+        if self.governs_element_pointer(node.get("type")) {
+            let spelling = qual_type(node.get("type")).unwrap_or_default().to_string();
+            let fallback = format!("{spelling} {parameter}");
+            self.push("raw-element-pointer", None, &fallback);
+        }
+        for child in children(node) {
+            self.visit_nested(child);
         }
     }
 
@@ -1188,6 +1342,7 @@ impl<'a> Reader<'a> {
         if governs {
             self.push("raw-element-pointer", Some(rendered.clone()), &rendered);
         }
+        self.push_declared_width(Some(&rendered));
         if descriptor {
             self.push("descriptor-field", Some(rendered.clone()), &rendered);
             if narrow {
@@ -1197,6 +1352,10 @@ impl<'a> Reader<'a> {
                 let sample = format!("{rendered} (extent {extent})");
                 self.push("fixed-rank-metadata", Some(sample.clone()), &sample);
             }
+        }
+        // A bit-field width or an array bound in the field's own type.
+        for child in children(node) {
+            self.visit_nested(child);
         }
         self.owners.pop();
     }
@@ -1225,26 +1384,17 @@ impl<'a> Reader<'a> {
         };
         self.check_type_words(type_object, &what);
         let sample = self.declaration_sample(begin);
-        let mut governs = self.governs_element_pointer(type_object);
-        if is_method {
-            governs = governs
-                || children(node)
-                    .filter(|child| field_str(child, "kind") == Some("ParmVarDecl"))
-                    .any(|parameter| self.governs_element_pointer(parameter.get("type")));
-        }
+        let governs = self.governs_element_pointer(type_object);
         self.with_owner(name.clone(), true, |reader| {
             if governs {
                 reader.push("raw-element-pointer", sample.clone(), &name);
             }
+            reader.push_declared_width(sample.as_ref());
             for child in children(node) {
                 let kind = field_str(child, "kind").unwrap_or_default();
                 let (_, begin, end) = reader.locate(child);
                 if kind == "ParmVarDecl" {
-                    let parameter = field_str(child, "name").unwrap_or_default().to_string();
-                    reader.check_type_words(child.get("type"), &format!("parameter `{parameter}`"));
-                    for grandchild in children(child) {
-                        reader.visit_nested(grandchild);
-                    }
+                    reader.visit_parameter(child, "parameter");
                 } else {
                     reader.visit_declaration(child, kind, begin, end);
                 }
@@ -1252,7 +1402,7 @@ impl<'a> Reader<'a> {
         });
     }
 
-    /// Statements, expressions, types, and attributes: only three expression
+    /// Statements, expressions, types, and attributes: only a few expression
     /// forms are seams, and everything else is walked for what it encloses.
     /// A type spelt in expression position is classified like a declared one.
     fn visit_expression(
@@ -1266,6 +1416,18 @@ impl<'a> Reader<'a> {
             "MemberExpr" if field_str(node, "name") == Some("data") => {
                 let sample = self.expression_sample(begin, end);
                 self.push("direct-data-access", sample, "->data");
+            }
+            "OffsetOfExpr" => {
+                // `__builtin_offsetof(chelis_tensor, data)` names the field by
+                // path; the layout computed from it is a use of the field.
+                let sample = self.expression_sample(begin, end);
+                if sample.as_deref().is_some_and(|text| {
+                    c_lexical::lex_c_tokens(text)
+                        .iter()
+                        .any(|token| token == "data")
+                }) {
+                    self.push("direct-data-access", sample, "offsetof(.., data)");
+                }
             }
             "UnaryExprOrTypeTraitExpr" => {
                 self.check_type_words(node.get("argType"), "a sizeof operand");

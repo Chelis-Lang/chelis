@@ -363,6 +363,11 @@ class RedTeamRegressionTests(unittest.TestCase):
             "phase0.mutate_objc_method_carrier",
             "phase0.mutate_c_unclassified_cast_spelling",
             "phase0.mutate_c_pointer_to_element_array",
+            "phase0.mutate_c_include_outside_universe",
+            "phase0.mutate_c_include_in_dead_arm",
+            "phase0.mutate_objc_block_parameter",
+            "phase0.mutate_c_sizeof_in_array_bound",
+            "phase0.mutate_rust_cast_turbofish",
         ):
             self.assertIn(expected, witnesses)
 

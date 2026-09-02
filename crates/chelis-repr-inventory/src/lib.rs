@@ -89,6 +89,10 @@ const RUST_ELEMENT_TYPES: &[&str] = &[
     "c_long",
     "c_longlong",
     "c_short",
+    "c_uint",
+    "c_ulong",
+    "c_ulonglong",
+    "c_ushort",
     "f16",
     "f32",
     "f64",
@@ -328,10 +332,30 @@ fn is_raw_element_pointer(ty: &syn::Type) -> bool {
     }
 }
 
-/// The `T` of a `NonNull<T>` spelling, by any path.
+/// Std pointer wrappers whose one type argument is the pointee.
+const POINTER_WRAPPERS: &[&str] = &["AtomicPtr", "NonNull"];
+
+/// Std pointer constructors whose turbofish names the pointee, so
+/// `NonNull::<f32>::new(..)` or `slice_from_raw_parts::<f32>(..)` hands out an
+/// element pointer without a type position ever spelling it.
+const POINTER_CONSTRUCTORS: &[&str] = &[
+    "AtomicPtr",
+    "NonNull",
+    "dangling",
+    "from_raw_parts",
+    "from_raw_parts_mut",
+    "null",
+    "null_mut",
+    "slice_from_raw_parts",
+    "slice_from_raw_parts_mut",
+    "without_provenance",
+    "without_provenance_mut",
+];
+
+/// The `T` of a `NonNull<T>` or `AtomicPtr<T>` spelling, by any path.
 fn non_null_pointee(path: &syn::TypePath) -> Option<&syn::Type> {
     let segment = path.path.segments.last()?;
-    if segment.ident != "NonNull" {
+    if !POINTER_WRAPPERS.contains(&segment.ident.to_string().as_str()) {
         return None;
     }
     let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
@@ -757,8 +781,34 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
         visit::visit_expr_cast(self, cast);
     }
 
+    fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+        // `NonNull::<f32>::new(p)`, `slice_from_raw_parts::<f32>(p, n)`: a
+        // pointer constructor instantiated at an element type in expression
+        // position, where no type position spells the pointee.
+        let names_a_constructor = path
+            .path
+            .segments
+            .iter()
+            .any(|segment| POINTER_CONSTRUCTORS.contains(&segment.ident.to_string().as_str()));
+        if names_a_constructor && path_generics_name_an_element(&path.path) {
+            self.push("raw-element-pointer", path.to_token_stream().to_string());
+        }
+        visit::visit_expr_path(self, path);
+    }
+
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
         let method = call.method.to_string();
+        // `p.cast::<f32>()` is the idiomatic pointer cast; the target type
+        // lives only in the turbofish.
+        if matches!(method.as_str(), "cast" | "cast_mut" | "cast_const")
+            && call.turbofish.as_ref().is_some_and(|turbofish| {
+                turbofish.args.iter().any(|argument| {
+                    matches!(argument, syn::GenericArgument::Type(ty) if is_rust_element_type(ty))
+                })
+            })
+        {
+            self.push("raw-element-pointer", call.to_token_stream().to_string());
+        }
         // The saturating folds [#888] names, plus every consumer that compares
         // the resulting key. Phase 1's exit requires each reuse consumer to
         // move to the exact key, so a consumer outside the IR is equally a
@@ -902,6 +952,18 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
         self.scan_token_stream_literals(tokens);
         visit::visit_macro(self, macro_call);
     }
+}
+
+/// Does any segment of this path carry a turbofish naming an element type?
+fn path_generics_name_an_element(path: &syn::Path) -> bool {
+    path.segments.iter().any(|segment| {
+        match &segment.arguments {
+        syn::PathArguments::AngleBracketed(arguments) => arguments.args.iter().any(|argument| {
+            matches!(argument, syn::GenericArgument::Type(ty) if is_rust_element_type(ty))
+        }),
+        _ => false,
+    }
+    })
 }
 
 /// Read a `matches!(expr, pat)` or `matches!(expr, pat if guard)` body and

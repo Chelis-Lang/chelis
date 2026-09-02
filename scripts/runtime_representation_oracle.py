@@ -27,9 +27,10 @@ Every source is read by a real parser for its language. Rust is read with
 committed stub SDK, and a scrubbed environment, so the parse is the same on
 every host and every SDK state. Each header's lane names the closed set of
 configurations it is parsed under and the row set is their union; an arm with
-code that no configuration parses, an include reaching outside the universe,
-and a type word no vocabulary classifies (in a declaration or an expression)
-all fail the scan. The reader classifies the compiler's type spellings with
+code (a declaration, a quoted include, or a define with a body) that no
+configuration parses, an include resolving canonically outside the universe,
+and a type word no vocabulary classifies (in a declaration, a block parameter,
+or an expression) all fail the scan. The reader classifies the compiler's type spellings with
 the capacity census's closed word lists (`tests/support/c_lexical.rs`), which
 keeps one type-word authority in the repository rather than two. The owner of
 a seam is the declaration the compiler says encloses it, so declaration FORM
@@ -61,7 +62,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "37ebd59b76d8f0def9f54ca11e3e1169368df43de4101a3c5a30671186f6ccc5"
+FREEZE_SHA256 = "86d1ea9cd3e17cec15950697119db0c3c992cf28f645dbeea37dde9364c9d789"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -1037,6 +1038,70 @@ def mutate_c_pointer_to_element_array(source: str) -> str:
     )
 
 
+def mutate_c_include_outside_universe(source: str) -> str:
+    """An include that resolves, through `..`, to a tracked C header no
+    inventory root reaches. Round 5 showed a prefix test on the spelt path
+    let this through; the universe is a canonical-path test now."""
+
+    return _insert_inside_include_guard(
+        source,
+        "tree_sitter/parser.h",
+        '#include "../../../grammars/tree-sitter-chelis-surf/src/tree_sitter/parser.h"',
+    )
+
+
+def mutate_c_include_in_dead_arm(source: str) -> str:
+    """An include behind a conditional no configuration selects.
+
+    An arm that only includes carries whatever it includes, so it needs a
+    configuration exactly as an arm with a declaration does.
+    """
+
+    return _insert_inside_include_guard(
+        source,
+        "RUNTIME_REPRESENTATION_PHASE0_PROBE_DEAD",
+        """#ifdef RUNTIME_REPRESENTATION_PHASE0_PROBE_DEAD
+#include "chelis_runtime_dtype.h"
+#endif""",
+    )
+
+
+def mutate_objc_block_parameter(source: str) -> str:
+    """A block literal whose parameter is an element pointer, handed to an
+    `id`, so no enclosing declaration's type reveals it."""
+
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_probe_block",
+        """static inline id runtime_representation_phase0_probe_block(void) {
+    return ^(float *q) { q[0] = 0.0f; };
+}""",
+    )
+
+
+def mutate_c_sizeof_in_array_bound(source: str) -> str:
+    """A width computed in a declared type rather than in a statement."""
+
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_probe_scratch",
+        "static unsigned char runtime_representation_phase0_probe_scratch[sizeof(double) * 4];",
+    )
+
+
+def mutate_rust_cast_turbofish(source: str) -> str:
+    """`p.cast::<f32>()` names the element type only in the turbofish."""
+
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_turbofish",
+        """#[allow(dead_code)]
+fn runtime_representation_phase0_turbofish(bytes: *mut u8) -> usize {
+    bytes.cast::<f32>() as usize
+}""",
+    )
+
+
 def mutate_rust_path_module(source: str) -> str:
     """`#[path]` compiles a file the inventory roots do not reach."""
 
@@ -1186,6 +1251,36 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
             "crates/chelis-runtime/include/chelis_runtime.h",
             mutate_c_pointer_to_element_array,
             expected_owners=("runtime_representation_phase0_probe_rows",),
+        ),
+        _probe(
+            "include-outside-universe",
+            "crates/chelis-runtime/include/chelis_runtime.h",
+            mutate_c_include_outside_universe,
+            SOURCE_REJECTED_FAILURE,
+        ),
+        _probe(
+            "undeclared-conditional",
+            "crates/chelis-runtime/include/chelis_runtime.h",
+            mutate_c_include_in_dead_arm,
+            SOURCE_REJECTED_FAILURE,
+        ),
+        _probe(
+            "raw-element-pointer",
+            "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
+            mutate_objc_block_parameter,
+            expected_owners=("runtime_representation_phase0_probe_block",),
+        ),
+        _probe(
+            "width-arithmetic",
+            "crates/chelis-runtime/include/chelis_runtime.h",
+            mutate_c_sizeof_in_array_bound,
+            expected_owners=("runtime_representation_phase0_probe_scratch",),
+        ),
+        _probe(
+            "raw-element-pointer",
+            "crates/chelis-runtime/src/format_shortest.rs",
+            mutate_rust_cast_turbofish,
+            expected_owners=("runtime_representation_phase0_turbofish",),
         ),
         _probe(
             "rust-path-module",
