@@ -2,7 +2,7 @@ module Std.Tensor.Construct
 export (linspace, arange, stack, squeeze, unsqueeze)
 sig linspace: p_float -> p_float -> int64 -> tensor[n, p_float]
 def linspace(start, stop, count) =
-  if lte(count, cast(1, int64)) then to_tensor([start]) else {
+  if lte(count, cast(0, int64)) then fail("linspace: count must be at least 1") else if eq(count, cast(1, int64)) then to_tensor([start]) else {
     empty = drop([start], cast(1, int64))
     to_tensor(linspace_values(start, stop, count, cast(0, int64), empty))
   }
