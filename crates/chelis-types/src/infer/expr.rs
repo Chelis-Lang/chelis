@@ -738,8 +738,13 @@ pub(super) fn infer_handle_effect(
             // Open question 1 (decided 2026-07-17): the seed is semantically
             // int64, and a seed written as an integer LITERAL must carry the
             // `i64` suffix (the reject-diagnostic half chelis#771 left to Phase
-            // 1). A negative int64 literal is additionally rejected: the RNG
-            // lanes cannot honor it today (chelis#731 red team F2).
+            // 1). A negative int64 literal is additionally rejected. That is a
+            // deliberate narrowing of the accepted FRONT-END surface, held until
+            // chelis#735 authors the `with seed` contract, and not a lane
+            // limitation: both the DAG lowering (`extract_u64_value`,
+            // chelis#794) and the evaluator reinterpret a signed int64 seed as
+            // its uint64 two's-complement bits per [05-RNG-1] (chelis#731 red
+            // team F2).
             match seed_literal_form(handler) {
                 SeedLiteralForm::Unsuffixed => {
                     errors.push(CheckError::new(
@@ -758,11 +763,12 @@ pub(super) fn infer_handle_effect(
                 SeedLiteralForm::NegativeInt64 => {
                     errors.push(CheckError::new(
                         CheckErrorKind::TypeMismatch,
-                        "`with seed(...)` requires a non-negative seed literal; the RNG \
-                         lanes cannot honor a negative seed today (the DAG lowering folds \
-                         it to seed 0, so distinct-stream determinism ([05-RNG-1]) would \
-                         fail for a negative seed vs 0). Negative-seed semantics are \
-                         chelis#735's territory (spec/design/checker_totality.md §C1.5)"
+                        "`with seed(...)` requires a non-negative seed literal. This \
+                         is a deliberate narrowing of the accepted front-end surface, \
+                         held until chelis#735 authors the `with seed` contract, not a \
+                         lane limitation: the DAG and eval lowerings both reinterpret a \
+                         signed int64 seed as its uint64 two's-complement bits per \
+                         [05-RNG-1] (spec/design/checker_totality.md §C1.5)"
                             .to_string(),
                         vec![
                             "Use a non-negative int64-suffixed seed, e.g. \
@@ -815,11 +821,14 @@ pub(super) enum SeedLiteralForm {
     /// An unsuffixed integer literal (a bare `Atom::Int`, or `(lit {type:
     /// int32} N)`). The seed is semantically int64, so this is a type error.
     Unsuffixed,
-    /// An int64-suffixed but NEGATIVE literal (`(lit {type: int64} -N)`). The
-    /// RNG lanes cannot honor a negative seed today (the DAG lane's
-    /// `extract_usize_value` rejects it and silently falls back to seed 0), so
-    /// distinct-stream determinism ([05-RNG-1]) would fail for `-1` vs `0`.
-    /// Rejected until chelis#735 authors negative-seed semantics.
+    /// An int64-suffixed but NEGATIVE literal (`(lit {type: int64} -N)`).
+    /// [05-RNG-1] already fixes its meaning: reinterpret the signed int64 seed
+    /// as its uint64 two's-complement bits. The DAG lane does that in
+    /// `extract_u64_value` (chelis#794, which replaced the old
+    /// `extract_usize_value` fold to seed 0) and the evaluator already did.
+    /// The rejection here is therefore a deliberate narrowing of the
+    /// accepted front-end surface, held until chelis#735 authors the
+    /// `with seed` contract, not a lane limitation.
     NegativeInt64,
     /// A valid non-negative int64-suffixed literal (`Ni64` desugars to
     /// `(lit {type: (t-prim {} int64)} N)`, N >= 0). Accepted.
