@@ -247,7 +247,13 @@ fn eager_top_level_value_cycle_rejects_as_cycle_at_both_ingresses() {
 }
 
 #[test]
-fn diagnostics_remain_in_source_order_when_a_value_mentions_a_later_value() {
+fn value_only_diagnostics_remain_in_source_order_without_reaching_the_scheduler() {
+    // This program has no function def, so `primary_inference_schedule` takes
+    // its identity short circuit and neither the barrier nor the recursive
+    // contraction runs. That is deliberate: it isolates the value path. The
+    // companion below covers the scheduler, and does NOT assert source order,
+    // because a reordered component genuinely moves its own diagnostics and
+    // never had that property on `main` either.
     let program = deep_program(
         "(def {} first\n\
            (let {}\n\
@@ -618,4 +624,149 @@ fn recursive_component_ordering_matrix_matches_04_inf_4_at_both_ingresses() {
         }
     }
     report(failures, rows);
+}
+
+// ---------------------------------------------------------------------------
+// Function-visibility non-regression matrix
+//
+// [04-INF-4] governs eager values. It says nothing about when a `defsig`-less
+// FUNCTION's inferred scheme becomes available, which [04-INF-2]/[04-INF-3]
+// and the planner own. This change must therefore leave that axis exactly
+// where it was, and it very nearly did not: replacing the old blunt hoist
+// (every module function spliced at the earliest module-function ordinal) with
+// a dependency order silently dropped the guarantee the hoist supplied, that a
+// later declaration can always resolve a module function. The rows below pin
+// the behavior in both directions, so a future ordering change cannot widen it
+// either.
+//
+// Expected verdicts are derived, not measured: a module-wrapped unit resolves a
+// function from any declaration at or after the first function, because that is
+// where the planner's region begins; a bare unit has no planner and resolves
+// only backwards.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FnDepItem {
+    /// `defsig`-less leaf whose scheme exists only after its body is inferred.
+    Helper,
+    /// `defsig`-less function that calls `Helper`.
+    Caller,
+    /// An eager value that reads `Caller`, i.e. a non-function declaration
+    /// depending on a function's inferred scheme.
+    Consumer,
+}
+
+fn fn_dep_layouts() -> Vec<Vec<FnDepItem>> {
+    use FnDepItem::{Caller, Consumer, Helper};
+    vec![
+        vec![Helper, Caller, Consumer],
+        vec![Helper, Consumer, Caller],
+        vec![Caller, Helper, Consumer],
+        vec![Caller, Consumer, Helper],
+        vec![Consumer, Helper, Caller],
+        vec![Consumer, Caller, Helper],
+    ]
+}
+
+fn fn_dep_layout_accepts(layout: &[FnDepItem], wrapped: bool) -> bool {
+    let position = |wanted: FnDepItem| {
+        layout
+            .iter()
+            .position(|item| *item == wanted)
+            .expect("every layout carries every item")
+    };
+    let helper = position(FnDepItem::Helper);
+    let caller = position(FnDepItem::Caller);
+    let consumer = position(FnDepItem::Consumer);
+    if wrapped {
+        // The planner orders functions by dependency, so `caller` always sees
+        // `helper`; a reader resolves once the planner's region has begun.
+        consumer > helper.min(caller)
+    } else {
+        // No module key, no planner: both edges are plain backward references.
+        helper < caller && caller < consumer
+    }
+}
+
+fn fn_dep_source(layout: &[FnDepItem], wrapped: bool) -> String {
+    let mut source = String::new();
+    if wrapped {
+        source.push_str("module FnDepMatrix\n\n");
+    }
+    for item in layout {
+        let declaration = match item {
+            FnDepItem::Helper => "def helper(x) = x",
+            FnDepItem::Caller => "def caller(n) = helper(n)",
+            FnDepItem::Consumer => "consumer = caller(1)",
+        };
+        source.push_str(declaration);
+        source.push_str("\n\n");
+    }
+    source
+}
+
+#[test]
+fn function_visibility_matrix_is_unchanged_by_eager_value_scope() {
+    let mut failures = Vec::new();
+    let mut rows = 0;
+    for layout in fn_dep_layouts() {
+        for wrapped in [true, false] {
+            rows += 1;
+            let source = fn_dep_source(&layout, wrapped);
+            let label = format!("fn-dep layout={layout:?} wrapped={wrapped}\n{source}");
+            let program = surf_program(&source);
+            if let Some(failure) =
+                ordering_row_failure(&program, fn_dep_layout_accepts(&layout, wrapped), &label)
+            {
+                failures.push(failure);
+            }
+        }
+    }
+    report(failures, rows);
+}
+
+/// An eager value whose initializer reaches, through a call, a value declared
+/// after it. Every reference obeys [04-INF-4] and [04-INF-2], so the schedule's
+/// value barrier and its function mirror point both ways and the dependency
+/// graph is genuinely cyclic. The scheduler must stay total and deterministic
+/// there rather than dropping declarations or overflowing its predecessor
+/// counts; the compiled read of a not-yet-assigned global in this shape is
+/// chelis#1339's indirect residue and is owned there, not here.
+#[test]
+fn an_initialization_cycle_leaves_the_schedule_total_at_both_ingresses() {
+    let program = surf_program(
+        "module InitializationCycle\n\n\
+         def ping(n: int32) -> int32 = if (n <= 0) then 0 else pong((n - 1))\n\n\
+         carried = ping(1)\n\n\
+         def pong(n: int32) -> int32 = if (n <= 0) then carried else ping((n - 1))\n",
+    );
+    // The cycle detector owns the verdict; this test owns the property that the
+    // scheduler reaches it at all, identically at both ingresses.
+    assert_rejects_identically(&program, "CycleDetected", "initialization cycle");
+}
+
+/// The scheduler-reaching companion. A recursive component straddling an eager
+/// value is contracted and moved, so this cannot assert source order; what it
+/// asserts is the property this change does claim, that both ingresses agree on
+/// the exact ordered diagnostic sequence however the schedule moved the bodies.
+#[test]
+fn scheduled_component_diagnostics_agree_between_ingresses() {
+    let program = surf_program(
+        "module ScheduledComponentDiagnostics\n\n\
+         def ping(n: int32) -> int32 = if (n <= 0) then missing_ping else pong((n - 1))\n\n\
+         carried = 7\n\n\
+         def pong(n: int32) -> int32 = if (n <= 0) then carried else missing_pong(n)\n\n\
+         trailing = missing_trailing\n",
+    );
+    let (ir, typed) = diagnostics(&program);
+    assert_eq!(
+        ir, typed,
+        "a contracted component must not split the two ingresses"
+    );
+    for name in ["missing_ping", "missing_pong", "missing_trailing"] {
+        assert!(
+            ir.iter().any(|(_, message)| message.contains(name)),
+            "{name} diagnostic must survive scheduling: {ir:#?}"
+        );
+    }
 }

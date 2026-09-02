@@ -1632,6 +1632,55 @@ pub(super) fn primary_inference_schedule(
         }
     }
 
+    // The mirror of the barrier, and the property `main`'s blunt hoist supplied
+    // for free. `main` spliced every module function at the earliest
+    // module-function ordinal, so a later declaration could always resolve a
+    // module function's inferred scheme. A dependency order has to say that
+    // explicitly: a declaration reading a module function is scheduled after
+    // it, or a `defsig`-less helper is unbound at a reader the planner
+    // happened to release first.
+    let module_fn_names = module_fn_indices
+        .to_sorted()
+        .into_iter()
+        .filter_map(|index| top_level_decl_name(items[*index].1).map(str::to_string))
+        .collect::<UnordSet<_>>();
+    if !module_fn_names.is_empty() {
+        let module_fn_index_by_name = module_fn_indices
+            .to_sorted()
+            .into_iter()
+            .filter_map(|index| {
+                top_level_decl_name(items[*index].1).map(|name| (name.to_string(), *index))
+            })
+            .collect::<UnordMap<_, _>>();
+        // Reproduce that guarantee exactly, and no wider. `main`'s splice sat
+        // at the earliest module-function ordinal, so a declaration BEFORE
+        // that point never saw a module function either. Widening acceptance
+        // there would be a function-visibility change, which is [04-INF-2] and
+        // [04-INF-3]'s subject and not this change's.
+        let hoist_floor = module_fn_indices
+            .to_sorted()
+            .into_iter()
+            .next()
+            .copied()
+            .unwrap_or(0);
+        for (reader_index, (_, reader)) in items.iter().enumerate().skip(hoist_floor) {
+            let mut referenced = UnordSet::new();
+            let mut bound = Vec::new();
+            collect_top_level_calls(reader, &module_fn_names, &mut bound, &mut referenced);
+            let mut sources = referenced
+                .to_sorted()
+                .into_iter()
+                .filter_map(|name| module_fn_index_by_name.get(name).copied())
+                .map(vertex)
+                .collect::<Vec<_>>();
+            sources.sort_unstable();
+            sources.dedup();
+            for source in sources {
+                add_edge(source, vertex(reader_index), &mut predecessors_remaining);
+            }
+        }
+    }
+
     // Kahn, released in source order so the schedule stays deterministic and
     // stays as close to the source as the edges allow.
     let all_vertices = (0..items.len())
@@ -1649,24 +1698,51 @@ pub(super) fn primary_inference_schedule(
             .cloned()
             .unwrap_or_else(|| vec![vertex_index])
     };
-    while let Some(vertex_index) = ready.pop_first() {
-        schedule.extend(expand(vertex_index));
-        for successor in successors.get(&vertex_index).into_iter().flatten() {
-            let remaining = predecessors_remaining
-                .get_mut(successor)
-                .expect("every successor was counted when its edge was added");
-            *remaining -= 1;
-            if *remaining == 0 {
-                ready.insert(*successor);
+    let mut emitted = UnordSet::new();
+    let mut remaining_vertices = all_vertices.iter().copied().collect::<BTreeSet<_>>();
+    loop {
+        while let Some(vertex_index) = ready.pop_first() {
+            if !emitted.insert(vertex_index) {
+                continue;
+            }
+            remaining_vertices.remove(&vertex_index);
+            schedule.extend(expand(vertex_index));
+            for successor in successors.get(&vertex_index).into_iter().flatten() {
+                if emitted.contains(successor) {
+                    // Released early to break a cycle below; its remaining
+                    // predecessors are still arriving and no longer gate it.
+                    continue;
+                }
+                let remaining = predecessors_remaining
+                    .get_mut(successor)
+                    .expect("every successor was counted when its edge was added");
+                *remaining = remaining.saturating_sub(1);
+                if *remaining == 0 {
+                    ready.insert(*successor);
+                }
             }
         }
-    }
-    if schedule.len() != items.len() {
-        // Unreachable with the edge set above, which has no path from a
-        // function back to a value. Emitting the remainder in source order
-        // keeps the pass total rather than silently dropping declarations.
-        let scheduled = schedule.iter().copied().collect::<UnordSet<_>>();
-        schedule.extend((0..items.len()).filter(|index| !scheduled.contains(index)));
+        if remaining_vertices.is_empty() {
+            break;
+        }
+        // A stall means a genuine initialization cycle: some eager value's
+        // initializer reaches, through a call, a value declared after it. The
+        // barrier and its mirror then point both ways. Every reference in such
+        // a program is legal under [04-INF-4], so this pass must not reject
+        // it; the compiled read of a not-yet-assigned global is chelis#1339's
+        // indirect shape and is owned there. Break the cycle the way `main`'s
+        // hoist did, functions before everything else, so the accepted
+        // behavior is unchanged.
+        let next = remaining_vertices
+            .iter()
+            .copied()
+            .find(|index| module_fn_indices.contains(index))
+            .or_else(|| remaining_vertices.iter().copied().next())
+            .expect("remaining_vertices is non-empty");
+        // Release it without zeroing its counter: the edges still pointing at
+        // it will arrive later and must not underflow it, and the `emitted`
+        // guards above make the count irrelevant once it is scheduled.
+        ready.insert(next);
     }
     schedule
 }

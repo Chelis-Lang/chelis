@@ -1422,9 +1422,30 @@ chain together, and the vertex carries the union of its members' barriers. Two
 consequences are worth stating because they are not obvious. A recursive
 component may be inferred later than its first member's source position, which
 is the one case where a declaration outside the module-function planner does
-not retain textual inference order. And the contraction is what keeps the graph
-acyclic: a member left in the textual chain would be reachable from a value
-that the same component must follow.
+not retain textual inference order; that moves the component's own diagnostics
+with it, and no version of this code, before or after, ordered a moved
+component's diagnostics by source position. And the contraction is what keeps
+the graph acyclic: a member left in the textual chain would be reachable from a
+value that the same component must follow. Emitting the component at its last
+member's slot instead was measured to be indistinguishable on every axis
+available, so contraction is chosen for the cleaner invariant and the legible
+acyclicity argument, not because the alternative breaks a diagnostic-order
+contract that neither design provides.
+
+The dependency the barrier records has a mirror the earlier blunt hoist
+supplied implicitly. Splicing every module function at the earliest
+module-function ordinal meant a declaration at or after that point could always
+resolve a module function's inferred scheme. A dependency order has to say that
+explicitly, so a declaration reading a module function is scheduled after it,
+bounded to the same region the hoist covered so that function visibility, which
+[04-INF-2] and [04-INF-3] own, is neither narrowed nor widened.
+
+The two directions can genuinely conflict: an eager value whose initializer
+reaches a later-declared value through a call makes the barrier and its mirror
+point both ways. Every reference in such a program is legal, so the schedule
+must stay total rather than reject it; it breaks the cycle the way the hoist
+did, functions first, leaving the accepted behavior unchanged. The compiled
+read of a not-yet-assigned global in that shape is [#1339]'s indirect residue.
 
 The authoritative oracle for this residual is:
 
