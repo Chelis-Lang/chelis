@@ -1244,6 +1244,7 @@ fn eval_surf_sample(
         if let Some((binding_name, tensor)) = &value.tensor_binding {
             source_decls.push(Decl::Sig {
                 name: binding_name.clone(),
+                type_binders: Vec::new(),
                 ty: property
                     .params
                     .iter()
