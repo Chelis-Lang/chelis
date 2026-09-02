@@ -38,6 +38,14 @@ OWNERSHIP_CHILD_ISSUES = frozenset(
 FROZEN_OWNERSHIP_CHILD_ISSUES = frozenset(
     {543, 544, 1206, 1214, 1222, 1344, 1346, 1352, 1356}
 )
+# chelis#1339's DIRECT forward captures, where a compiled function names the
+# later value itself, are exact checker rejections under [04-INF-4]. Only these
+# two rows are frozen to that shape: the issue's indirect shape (an earlier
+# value's initializer calling a function that reads a later-assigned value)
+# is a compiled wrong answer and must remain representable as a positive row.
+FROZEN_DIRECT_FORWARD_CAPTURE_IDS = frozenset(
+    {"forward-captured-list", "forward-captured-tensor"}
+)
 FROZEN_FIXTURE_IDS = frozenset(
     """
     oracle-self-tests runtime-ledger-process-tests
@@ -84,6 +92,7 @@ FROZEN_SELF_TEST_CENSUS = tuple(
     ManifestContractTests.test_child_counterpart_identities_are_frozen
     ManifestContractTests.test_closed_children_are_green_controls
     ManifestContractTests.test_closure_phases_require_explicit_hip_hardware
+    ManifestContractTests.test_direct_forward_capture_freeze_rejects_a_positive_direct_row
     ManifestContractTests.test_every_child_has_positive_and_negative_parity
     ManifestContractTests.test_every_fixture_source_exists
     ManifestContractTests.test_every_ledger_executable_freezes_exact_stdout
@@ -1472,14 +1481,15 @@ def validate_manifest(
             raise OracleFailure(f"{fixture.id}: launch membership exceeds the frozen subset")
         if fixture.external_prerequisite != (fixture.issue == 1339):
             raise OracleFailure(f"{fixture.id}: external prerequisite classification is inconsistent")
-        if fixture.issue == 1339 and (
+        if fixture.id in FROZEN_DIRECT_FORWARD_CAPTURE_IDS and (
             fixture.polarity is not Polarity.NEGATIVE
             or fixture.detector is not Detector.EXACT_REJECTION
             or not isinstance(fixture.expected, MustPass)
             or fixture.action is not Action.CHECK_REJECT
         ):
             raise OracleFailure(
-                f"{fixture.id}: #1339 prerequisite must freeze exact source-order rejection"
+                f"{fixture.id}: #1339 direct forward capture must freeze exact "
+                "source-order rejection"
             )
     for issue in FROZEN_OWNERSHIP_CHILD_ISSUES:
         issue_rows = [fixture for fixture in fixtures if fixture.issue == issue]

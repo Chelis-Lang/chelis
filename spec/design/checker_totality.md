@@ -1495,11 +1495,12 @@ vacuity, or [#1076]/[#672]'s compiler-provided-name precedence work.
 stamped typed and serialized-IR checker ingresses reject a reference to a
 later top-level value as `UnboundVariable`; body-type metadata is evidence
 about a declaration, not permission to manufacture earlier scope. Backward
-value references remain legal, and an explicitly typed self-reference used
-for an external input receives declaration-local type availability before its
-binding becomes ordinary scope for later declarations. Bare `x = x` remains
-an eager cycle. Existing function inference and recursive SCC behavior remains
-owned by [04-INF-2]/[04-INF-3]. Local `let` scope is likewise sequential.
+value references resolve, from a value initializer and from a function body
+alike, and an explicitly typed self-reference used for an external input
+receives declaration-local type availability before its binding becomes
+ordinary scope for later declarations. Bare `x = x` remains an eager cycle.
+Existing function inference and recursive SCC behavior remains owned by
+[04-INF-2]/[04-INF-3]. Local `let` scope is sequential per spec/03 §6.2.
 
 This narrower decision is required by the executable compiler boundary. A
 general value dependency schedule would make [#1339]'s release-blocking
@@ -1510,8 +1511,10 @@ where a compiled function names the later value itself, rejects before any
 backend artifact exists. It does not close the indirect form, in which an
 earlier value's initializer calls a function that reads a later-assigned
 value; every reference there obeys [04-INF-4] and the emitted `main` still
-assigns in source order. That remainder stays with [#1339]. This residual adds
-no dependency-ordered global initialization and does not absorb the
+assigns in source order. That remainder stays with [#1339], and the ownership
+oracle freezes only the two direct rows to the rejection shape so the
+indirect shape stays representable as a positive row. This residual adds no
+dependency-ordered global initialization and does not absorb the
 compiled-value ownership class.
 
 #### The invariant this rule rests on
@@ -1531,88 +1534,110 @@ the scope question from recorded declaration positions alone, so no schedule
 can widen or narrow it, and every top-level signature stays in the global
 header environment where the ingresses already agree about it.
 `primary_inference_schedule` answers the availability question: it may reorder
-module function bodies, but it carries a barrier edge from each eager value's
-`def` to every later function that reads it, because an unannotated value has
-no header anywhere and its type exists only once its own `def` has been
-inferred. Without that edge a reordered reader reports a legal backward
-reference as unbound, and the two ingresses diverge again, since only the
-serialized-IR ingress prebinds body-type stamps.
+module function bodies, but it must infer an eager value before any function
+that legally reads it, because an unannotated value has no header anywhere and
+its type exists only once its own `def` has been inferred. Without that, a
+reordered reader reports a legal backward reference as unbound, and the two
+ingresses diverge, since only the serialized-IR ingress prebinds body-type
+stamps.
 
-The unit that barrier orders is the inference component, not the declaration.
-A recursive component is inferred as one group, emitted at whichever member the
-schedule reaches first, so a barrier that one member earns has to constrain
-every member. The schedule therefore contracts each recursive component to a
-single vertex: its members leave both the textual chain and the module-function
-chain together, and the vertex carries the union of its members' barriers. Two
-consequences are worth stating because they are not obvious. A recursive
-component may be inferred later than its first member's source position, which
-is the one case where a declaration outside the module-function planner does
-not retain textual inference order; that moves the component's own diagnostics
-with it, and no version of this code, before or after, ordered a moved
-component's diagnostics by source position. And the contraction is what keeps
-the graph acyclic: a member left in the textual chain would be reachable from a
-value that the same component must follow. Emitting the component at its last
-member's slot instead was measured to be indistinguishable on every axis
-available, so contraction is chosen for the cleaner invariant and the legible
-acyclicity argument, not because the alternative breaks a diagnostic-order
-contract that neither design provides.
+#### The schedule
 
-The dependency the barrier records has a mirror the earlier blunt hoist
-supplied implicitly. Splicing every module function at the earliest
-module-function ordinal meant a declaration at or after that point could always
-resolve a module function's inferred scheme. A dependency order has to say that
-explicitly, so a declaration reading a module function is scheduled after it,
-bounded to the same region the hoist covered so that function visibility, which
-[04-INF-2] and [04-INF-3] own, is neither narrowed nor widened.
+The schedule is the hoist-order-least linear extension of a precedence graph
+whose every edge is a real reference in the program. The hoist order is the
+total order the schedule used before this residual: every module function
+spliced at the earliest module-function ordinal in the planner's callee-first
+order, everything else textual. The graph's vertices are the items, with each
+recursive component contracted to one vertex because
+`primary_inference_groups` infers a component as one unit at the first member
+the schedule reaches, so an edge one member earns has to constrain them all.
+The edges, all "referenced before referencer", are:
 
-The two directions can genuinely conflict: an eager value whose initializer
-reaches a later-declared value through a call makes the barrier and its mirror
-point both ways. Every reference in such a program is legal, so the schedule
-must stay total rather than reject it; it breaks the cycle the way the hoist
-did, functions first, leaving the accepted behavior unchanged. The compiled
-read of a not-yet-assigned global in that shape is [#1339]'s indirect residue.
+- **call**: a module function after every module function it calls, the
+  planner's own callee-first order;
+- **read**: an item after every eager value it reads that is declared before
+  it. For a module function this is the barrier that keeps the hoist from
+  carrying it across the value; for a value it is the ordinary value
+  dependency. A forward value reference produces no edge, because the scope
+  rule leaves it unbound;
+- **mirror**: an item at or after the earliest module-function ordinal after
+  every module function it reads. That reproduces exactly what the blunt hoist
+  supplied implicitly, bounded to the same region, so function visibility,
+  which [04-INF-2]/[04-INF-3] own, is neither narrowed nor widened. Bare
+  functions keep textual availability and earn no call or mirror edge.
 
-The authoritative oracle for this residual is:
+Nothing else orders the graph. In particular there is no textual chain over
+the non-function items and no chain over the planner order. Four earlier
+repairs of this residual carried both chains, and every one of them was found
+by a reviewer constructing a layout the verdict matrices could not express:
+the chains are not dependencies, so they closed cycles on legal programs
+(round 8's `C2_stall_no_cycle`), which made a cycle break a live path, and the
+break then released a function out of planner order (round 8's `D4_min`).
+With reference edges only, a cycle in the graph is a reference cycle through
+an eager value, which `detect_top_level_binding_cycles` already reports as
+`CycleDetected` at every ingress; the schedule stays total by releasing the
+hoist-order-least remaining vertex, which for module functions is the
+planner's order.
+
+Two properties follow and are the reason this design is trusted where the
+chained ones were not. First, the hoist order is itself a linear extension of
+every edge except a barrier into a hoisted function, so Kahn's algorithm with
+the hoist order as its priority returns the hoist order byte for byte on every
+program that carries no such barrier: a program the blunt hoist scheduled
+correctly is scheduled identically, and only programs it mis-scheduled change.
+Second, because every edge is a reference, the stall path is reachable only
+from a program the cycle detector rejects, so no accepted program depends on
+how a stall is broken.
+
+The authoritative oracle for the schedule asserts these invariants directly on
+the returned order, not on accept/reject verdicts:
+
+```sh
+cargo nextest run -p chelis-types --lib infer::tests::schedule_invariants
+```
+
+For generated programs whose reference structure is declared by the generator
+rather than recovered by the collectors, it checks that the schedule is a
+permutation with every component contiguous; that every declared edge is
+respected when the declared graph is acyclic; that the schedule equals the
+hoist order whenever the hoist order already respects every edge; and that a
+cyclic program still schedules every item once with callees before callers.
+Named regressions carry the shapes rounds 5 through 8 found: the hoisted
+reader, the straddled recursive component wrapped, bare and mixed, the value
+that reads a `defsig`-less caller, the planner-order break, and the program a
+textual chain would have stalled. Each of the mutations that reproduces one of
+the four abandoned repairs reddens it: restoring the blunt hoist, dropping the
+contraction, dropping the read edge, dropping the mirror, reinstating either
+chain, releasing a stall by lowest ordinal, and restoring the identity
+short-circuit for bare units.
+
+The verdict oracle for the atom is:
 
 ```sh
 cargo nextest run -p chelis-types --test issue_1134_forward_reference_parity --no-fail-fast
 ```
 
-Its core is a pair of generated ordering matrices rather than a list of
+Its core is a set of generated ordering matrices rather than a list of
 examples. A hand-written case fixes one declaration layout, and layout is
 precisely what this rule interacts with, so the matrices enumerate layouts
-instead.
-
-The first enumerates every ordering of an anchor function, the eager value,
-and a reader; a function reader and a value reader; the annotated,
+instead. The first enumerates every ordering of an anchor function, the eager
+value, and a reader; a function reader and a value reader; the annotated,
 unannotated, adjacent-`defsig` and separated-`defsig` spellings; and both
-module-wrapped and bare declarations, which matter because bare declarations
-carry no module key and never reach the module-function planner at all.
-
-The second enumerates the recursive-component interaction the first cannot
-reach: its only function-shaped items never call each other, so no row builds a
-multi-member component and the whole-component emission path is never taken. It
-orders a mutually recursive pair around the value they straddle, in both a
-type-stamped spelling (`carried = 7`, whose stamp the serialized-IR prebind can
-read, so a lost barrier shows up as an ingress divergence) and a header-less
-one (`carried = seed()`, where the same loss shows up as an over-rejection at
-both ingresses), wrapped and bare.
-
-Each row's expected verdict is derived from [04-INF-4], not written down per
-case, and both ingresses must produce identical ordered diagnostics.
-
-The rows the schedule residual reaches are named by a predicate rather than
-deleted, and they are a ratchet rather than a mute: a residual row must still
-FAIL, so the set cannot grow silently and it shrinks visibly the moment the
-schedule stops reordering across a value. `issue_1134_forward_reference_cli`
-carries the same discipline at the public surface. The named regressions beside it pin the
-external-input spellings, bare-self rejection, sequential-`let` shadowing,
-source-ordered diagnostics, missing names, local forward references, and eager
-value cycles. `issue_1134_forward_reference_cli` carries the interleaved cases
-at the public `chelis check` surface, and the existing signature-inference and
-chelis#1124 suites are supporting regressions. This slice does not absorb
-[#1125]'s reader audit, [#874]/[#887]'s tag-keyed vacuity, or
-[#1076]/[#672]'s independently owned name-precedence work.
+module-wrapped and bare declarations. The second enumerates the
+recursive-component interaction the first cannot reach: it orders a mutually
+recursive pair around the value they straddle, in a type-stamped spelling and
+a header-less one, wrapped and bare. The third pins function visibility in
+both directions against the blunt hoist's region. Each row's expected verdict
+is derived from [04-INF-4], every row must pass, and both ingresses must
+produce identical ordered diagnostics. The named regressions beside them pin
+the external-input spellings, a malformed external-input type, bare-self
+rejection, sequential-`let` shadowing, source-ordered value-only diagnostics,
+missing names, local forward references, and eager value cycles.
+`issue_1134_forward_reference_cli` carries the interleaved and straddled cases
+at the public `chelis check`, `eval`, and `build` surfaces, and the existing
+signature-inference and chelis#1124 suites are supporting regressions. This
+slice does not absorb [#1125]'s reader audit, [#874]/[#887]'s tag-keyed
+vacuity, or [#1076]/[#672]'s independently owned name-precedence work.
 
 ### Adjacent ledger rows delivered with the class change
 
@@ -1692,7 +1717,7 @@ chelis#1124 suites are supporting regressions. This slice does not absorb
 | PP5 (partial) | [#668]; the checker derives a rank fact for `ShapeClass::Identity` plus `conv2d`/`stride`/`expand`/`softmax` and rejects a positive-rank disagreement where it has one, on unforgeable rank-only facts; the tensor-DAG C emitter aborts on a positive-rank operand disagreement. No claim is made for operations outside that set or for the host-value emitter; see PP5 |
 | [#1247] residue | integer nominal arguments are kind-checked and concrete dimensions constrain every checker/test/compiler lane; [#1258] round trips the same representation |
 | [#1125] nominal-rank ingress residual | ordinary `.dp` ingress, `surf`, and `validate --deep` reject `d-rank` in nominal argument slots while preserving legal dimension arguments and tensor rank spreads; the broader reader-audit/lint issue remains open |
-| [#1134] forward-reference residual | both checker ingresses reject eager forward values, accept backward values and declaration-local explicitly typed external inputs, retain sequential local scope, and reject bare self-reference/eager value cycles identically |
+| [#1134] forward-reference residual | both checker ingresses reject eager forward values, accept backward values from value initializers and from function bodies wherever the schedule places them, accept declaration-local explicitly typed external inputs, retain sequential local scope, and reject bare self-reference/eager value cycles identically; the schedule's order invariants are asserted directly |
 
 ## Decisions and remaining questions
 
@@ -1706,7 +1731,7 @@ chelis#1124 suites are supporting regressions. This slice does not absorb
 | 6 | whether two closures may each consume one underlying value through two user-visible names (`y = x`, one capture per name), or capture forwards through the alias chain generally | DECIDED 2026-08-21: preserved and made normative. A capture consumes the binding it names; distinct user-visible bindings of one value are distinct for capture; only a destructured component (or an alias of one) forwards to its carrier. Nautilus `lu_solve` and coral depend on the spelling; the reviewer guidance on [#1209] was to specify the choice explicitly and keep any tightening separate | [04-LIN-2] + PP3 |
 | 7 | whether one linked module's uniquely matching terminal name or one batched test file's declaration can confer unimported scope on another file | DECIDED 2026-08-31: no. Value lookup is exact-only after reef rewriting; batch entries are independently module-rewritten before combination; terminal matching is diagnostic-only | spec/02 P2 + [04-FIT-2] + PP4 |
 | 8 | whether an unannotated nominal parameter is a type, a dimension, or contextually reinterpreted per application | DECIDED 2026-08-31: one checker-owned header kind is fixed before body resolution. Dimension-only evidence selects `Dimension`; mixed use rejects; unused defaults to `Type`; transitive nominal uses propagate by least fixed point | [04-ADT-3]/[04-ADT-4] + [#1247] residue |
-| 9 | whether a top-level eager value may refer to a later value, and whether the two checker ingresses may differ | DECIDED 2026-09-01: no. Both ingresses reject a later eager value as unbound; serialized body metadata cannot create scope. Scope is read from declaration position, never from a binding timeline the inference schedule advances, and the schedule is in turn barred from hoisting a function body across an eager value it reads. Only an explicitly typed self-reference receives a declaration-local external-input type; bare self-reference remains an eager cycle. Function inference groups remain separately governed by [04-INF-2]/[04-INF-3] | [04-INF-4] + [#1134] residue |
+| 9 | whether a top-level eager value may refer to a later value, and whether the two checker ingresses may differ | DECIDED 2026-09-01: no. Both ingresses reject a later eager value as unbound; serialized body metadata cannot create scope. Scope is read from declaration position, never from a binding timeline the inference schedule advances, and the schedule infers an eager value before any function that legally reads it, using only reference edges over the hoist order so a program without such a read keeps its previous order exactly. Only an explicitly typed self-reference receives a declaration-local external-input type; bare self-reference remains an eager cycle. Function inference groups remain separately governed by [04-INF-2]/[04-INF-3] | [04-INF-4] + [#1134] residue |
 
 ## Contract summary
 

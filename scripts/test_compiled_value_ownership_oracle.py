@@ -359,13 +359,36 @@ class ManifestContractTests(unittest.TestCase):
         rows = [fixture for fixture in fixtures if fixture.issue == 1339]
         self.assertTrue(rows)
         self.assertTrue(all(row.external_prerequisite for row in rows))
-        self.assertTrue(all(row.polarity is oracle.Polarity.NEGATIVE for row in rows))
-        self.assertTrue(
-            all(row.detector is oracle.Detector.EXACT_REJECTION for row in rows)
+        direct = [
+            row for row in rows if row.id in oracle.FROZEN_DIRECT_FORWARD_CAPTURE_IDS
+        ]
+        self.assertEqual(
+            {row.id for row in direct}, set(oracle.FROZEN_DIRECT_FORWARD_CAPTURE_IDS)
         )
-        self.assertTrue(all(isinstance(row.expected, oracle.MustPass) for row in rows))
-        self.assertTrue(all(row.action is oracle.Action.CHECK_REJECT for row in rows))
+        self.assertTrue(all(row.polarity is oracle.Polarity.NEGATIVE for row in direct))
+        self.assertTrue(
+            all(row.detector is oracle.Detector.EXACT_REJECTION for row in direct)
+        )
+        self.assertTrue(all(isinstance(row.expected, oracle.MustPass) for row in direct))
+        self.assertTrue(all(row.action is oracle.Action.CHECK_REJECT for row in direct))
         self.assertNotIn(1339, oracle.OWNERSHIP_CHILD_ISSUES)
+
+    def test_direct_forward_capture_freeze_rejects_a_positive_direct_row(self) -> None:
+        fixtures = list(oracle.fixture_manifest())
+        index = next(
+            position
+            for position, row in enumerate(fixtures)
+            if row.id == "forward-captured-list"
+        )
+        fixtures[index] = replace(
+            fixtures[index],
+            polarity=oracle.Polarity.POSITIVE,
+            detector=oracle.Detector.OUTPUT_MISMATCH,
+            action=oracle.Action.BUILD_RUN,
+            expected_output="capture = [1, 2]\nlater = [1, 2]",
+        )
+        with self.assertRaises(oracle.OracleFailure):
+            oracle.validate_manifest(tuple(fixtures), oracle.mutation_manifest())
 
     def test_forward_capture_prerequisite_freezes_both_annotated_shapes(self) -> None:
         fixtures = {row.id: row for row in oracle.fixture_manifest()}

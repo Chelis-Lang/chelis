@@ -226,12 +226,13 @@ fn eval_and_build_reject_a_later_external_input_before_lowering() {
 /// The public-surface half of the [04-INF-4] ordering matrix.
 ///
 /// A module whose first declaration is a function makes the body-inference
-/// planner hoist every module function toward that ordinal. A later function
+/// schedule hoist every module function toward that ordinal. A later function
 /// then reads a value declared between them, which is a backward reference the
-/// atom requires to resolve. `chelis check` is the surface a user meets, so it
-/// carries the same interleaving cases as the library oracle: both value
-/// spellings, and the forward control that must still reject with the reader
-/// sitting in the same hoisted position.
+/// atom requires to resolve, so the schedule must defer that reader past the
+/// value. `chelis check` is the surface a user meets, so it carries the same
+/// interleaving cases as the library oracle: both value spellings, the
+/// header-less spelling, and the forward control that must still reject with
+/// the reader sitting in the same hoisted position.
 #[test]
 fn check_accepts_a_backward_value_read_across_a_hoisted_module_function() {
     assert_clean_report(
@@ -248,6 +249,15 @@ fn check_accepts_a_backward_value_read_across_a_hoisted_module_function() {
         "module InterleavedBackwardUnannotated\n\n\
          def anchor() -> int32 = 1\n\n\
          carried = 7\n\n\
+         def reader() -> int32 = carried\n",
+    );
+    assert_clean_report(
+        "interleaved_backward_computed",
+        "ch",
+        "module InterleavedBackwardComputed\n\n\
+         def seed() -> int32 = 3\n\n\
+         def anchor() -> int32 = 1\n\n\
+         carried = seed()\n\n\
          def reader() -> int32 = carried\n",
     );
     assert_clean_report(
@@ -280,11 +290,11 @@ fn check_accepts_a_backward_value_read_across_a_hoisted_module_function() {
 
 /// The public-surface half of the recursive-component ordering matrix.
 ///
-/// A mutually recursive pair is inferred as one unit at whichever member the
-/// schedule reaches first, so a value the pair straddles may not be inferred
-/// yet. The serialized-IR ingress that `chelis check` runs papers over that
-/// whenever it can read the value's type off the value's own body, which is why
-/// the stamped spelling passes here and the header-less one does not.
+/// A mutually recursive pair is inferred as one unit, so the schedule moves
+/// the whole component past a value one member reads. The stamped spelling
+/// would pass at `chelis check` even without that, because the serialized-IR
+/// ingress can read the value's type off the value's own body; the header-less
+/// spelling below is the one that proves the component moved.
 #[test]
 fn check_accepts_a_stamped_backward_value_read_by_a_recursive_component() {
     assert_clean_report(
@@ -315,22 +325,12 @@ fn check_accepts_a_stamped_backward_value_read_by_a_recursive_component() {
     );
 }
 
-/// Schedule residual, recorded rather than repaired: [04-INF-4] requires these
-/// to pass and they do not.
-///
-/// `primary_inference_schedule` hoists every module function to the earliest
-/// module-function ordinal and `primary_inference_groups` emits a recursive
-/// component at its first member, so `pong`'s body is inferred before
-/// `carried`. With no header anywhere on `carried`, no ingress can supply its
-/// type. The reordering predates this change and reproduces identically on
-/// `main`; it stays part of chelis#1134.
-///
-/// A ratchet, not a mute: these must still FAIL, so the residual cannot grow
-/// silently and shrinks visibly when the schedule stops reordering across a
-/// value.
+/// A header-less value read by a recursive component. No ingress can read
+/// `carried`'s type off a header, so this passes only if the schedule really
+/// infers the value before the whole component, wrapped and bare alike.
 #[test]
-fn a_header_less_value_read_by_a_recursive_component_is_a_known_schedule_residual() {
-    assert_failed_report(
+fn check_accepts_a_header_less_value_read_by_a_recursive_component() {
+    assert_clean_report(
         "scc_straddle_computed_wrapped",
         "ch",
         "module SccStraddleComputedWrapped\n\n\
@@ -338,15 +338,13 @@ fn a_header_less_value_read_by_a_recursive_component_is_a_known_schedule_residua
          def ping(n: int32) -> int32 = if (n <= 0) then 0 else pong((n - 1))\n\n\
          carried = seed()\n\n\
          def pong(n: int32) -> int32 = if (n <= 0) then carried else ping((n - 1))\n",
-        "UnboundVariable",
     );
-    assert_failed_report(
+    assert_clean_report(
         "scc_straddle_computed_bare",
         "ch",
         "def seed() -> int32 = 3\n\n\
          def ping(n: int32) -> int32 = if (n <= 0) then 0 else pong((n - 1))\n\n\
          carried = seed()\n\n\
          def pong(n: int32) -> int32 = if (n <= 0) then carried else ping((n - 1))\n",
-        "UnboundVariable",
     );
 }

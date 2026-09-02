@@ -1824,12 +1824,12 @@ pub(super) fn body_is_literal_self_ref_shape(body: &deep::Expr, name: &str) -> b
                     && node.children_slice().first().and_then(symbol_name) == Some(name);
             }
             deep::Expr::List(list, _) => {
-                // Type ascription desugars into a `(cast ... )`-like node
-                // in Deep: `(x : T)` keeps `x` as the first child. When
-                // the underlying is a var with the self name, treat it as
-                // the Nautilus pattern. These legacy spellings are outside
-                // the closed vocabulary, so they stay symbol-headed and are
-                // recognized at the raw-string boundary.
+                // Surf `x = (x : T)` desugars to a `var` node carrying `type`
+                // metadata, which the arms above and below recognize. A
+                // symbol-headed `(ascribe x T)` / `(: x T)` list is a legacy
+                // hand-written Deep spelling outside the closed vocabulary;
+                // it is still unwrapped here so a `defsig`-backed self
+                // reference in that form keeps its external-input reading.
                 if matches!(list.unknown_tag_symbol(), Some("ascribe" | ":")) {
                     match children(list).first() {
                         Some(inner) => current = inner,

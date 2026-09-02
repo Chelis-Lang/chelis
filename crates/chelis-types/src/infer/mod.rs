@@ -11,7 +11,7 @@ pub use stack::{
 };
 
 use chelis_unord::{UnordMap, UnordSet};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use chelis_deep::ast as deep;
 use chelis_deep::{DeepTag, Span, decode_effect_kind};

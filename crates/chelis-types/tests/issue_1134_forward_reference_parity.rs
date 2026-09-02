@@ -116,6 +116,28 @@ fn type_stamped_deep_self_reference_is_an_explicit_external_input() {
     assert_accepts_at_both_ingresses(&program, "typed Deep external input");
 }
 
+/// An external input whose declared type does not resolve must report the
+/// same diagnostics at both ingresses. The serialized-IR ingress resolves the
+/// body stamp in its prebind pass and must not resolve it a second time when
+/// the declaration's own external-input binding is installed.
+#[test]
+fn a_malformed_external_input_type_reports_identically_at_both_ingresses() {
+    for (label, source) in [
+        ("ascribed", "x = (x : Unknown)\n"),
+        ("declaration-typed", "x: Unknown = x\n"),
+    ] {
+        let program = surf_program(source);
+        let (ir, typed) = diagnostics(&program);
+        assert_eq!(ir, typed, "{label}: ingress diagnostics diverged");
+        assert!(!ir.is_empty(), "{label}: an unknown type must be rejected");
+        assert_eq!(
+            ir.len(),
+            ir.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            "{label}: a diagnostic must be reported once: {ir:#?}"
+        );
+    }
+}
+
 #[test]
 fn a_later_external_input_is_not_visible_to_an_earlier_declaration() {
     for (label, source) in [
@@ -248,12 +270,12 @@ fn eager_top_level_value_cycle_rejects_as_cycle_at_both_ingresses() {
 
 #[test]
 fn value_only_diagnostics_remain_in_source_order_without_reaching_the_scheduler() {
-    // This program has no function def, so `primary_inference_schedule` takes
-    // its identity short circuit and neither the barrier nor the recursive
-    // contraction runs. That is deliberate: it isolates the value path. The
-    // companion below covers the scheduler, and does NOT assert source order,
-    // because a reordered component genuinely moves its own diagnostics and
-    // never had that property on `main` either.
+    // This program has no function def, so the schedule has no module
+    // function to move and no reference edge to honor: it is the identity map.
+    // That is deliberate: it isolates the value path. A program that reaches
+    // the scheduler is NOT held to source-ordered diagnostics, because a moved
+    // function or component genuinely moves its own diagnostics, and no
+    // version of the checker ever ordered those by source position.
     let program = deep_program(
         "(def {} first\n\
            (let {}\n\
@@ -284,19 +306,25 @@ fn value_only_diagnostics_remain_in_source_order_without_reaching_the_scheduler(
 // ---------------------------------------------------------------------------
 // [04-INF-4] generated ordering matrix
 //
-// This is the authoritative oracle for the atom. The named regressions above
-// each pin one spelling; they cannot pin the interaction between declaration
-// ORDER and the body-inference schedule, which is where every repair of this
-// rule has failed. `primary_inference_schedule` reorders module functions, so
-// a program's verdict depends on the layout as much as on the spelling, and a
-// hand-written case only ever samples one layout. The matrix enumerates the
-// layouts instead and derives each expected verdict from the atom: a
-// top-level eager value is visible from its own `def` onward and nowhere
-// earlier, at both ingresses, identically.
+// This is the verdict oracle for the atom. The named regressions above each
+// pin one spelling; they cannot pin the interaction between declaration ORDER
+// and the body-inference schedule. `primary_inference_schedule` reorders
+// module functions by dependency, so a program's verdict depends on the
+// layout as much as on the spelling, and a hand-written case only ever
+// samples one layout. The matrix enumerates the layouts instead and derives
+// each expected verdict from the atom: a top-level eager value is visible
+// from its own `def` onward and nowhere earlier, at both ingresses,
+// identically.
+//
+// A verdict matrix cannot see the emitted ORDER itself, which is where every
+// schedule defect has lived. The order invariants are asserted directly on
+// the schedule by `crates/chelis-types/src/infer/tests/schedule_invariants.rs`;
+// this matrix pins that the resulting verdicts are the atom's.
 //
 // The `wrapped` axis matters and is easy to lose. Bare declarations carry no
-// lexical module key, so `module_fn_indices` is empty and the schedule is the
-// identity map: an unwrapped program cannot reach the reordering at all.
+// lexical module key, so no function is hoisted and only a recursive
+// component straddling a value can move: an unwrapped program reaches the
+// schedule only through that path.
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -346,19 +374,6 @@ fn layouts() -> Vec<Vec<Item>> {
         vec![Item::Value, Item::Reader],
         vec![Item::Reader, Item::Value],
     ]
-}
-
-/// Whether the schedule's hoist carries the reader back over the value.
-///
-/// Every module function is spliced at the earliest module-function ordinal, so
-/// a function reader is inferred there regardless of its own position. It
-/// therefore misses any value declared after that point.
-fn value_is_hoisted_over(layout: &[Item]) -> bool {
-    let first_function = layout
-        .iter()
-        .position(|item| *item == Item::Anchor || *item == Item::Reader);
-    let value = layout.iter().position(|item| *item == Item::Value);
-    matches!((first_function, value), (Some(f), Some(v)) if v > f)
 }
 
 /// [04-INF-4]: the reader resolves exactly when the value's `def` precedes it.
@@ -439,35 +454,6 @@ fn deep_source(
     }
 }
 
-/// Rows that [04-INF-4] requires to pass and that the shipped body-inference
-/// schedule cannot deliver.
-///
-/// `primary_inference_schedule` hoists every module function to the earliest
-/// module-function ordinal, and `primary_inference_groups` emits a recursive
-/// component at its first member, so a function body can be inferred before an
-/// eager value it legally reads. The value's type does not exist yet, and the
-/// two ingresses then disagree whenever the serialized-IR body-stamp prebind
-/// can supply one and the typed ingress cannot. That reordering predates this
-/// change, reproduces identically on `main`, and is not repaired here; it
-/// remains part of chelis#1134.
-///
-/// This is a ratchet, not a mute. A row named here must still FAIL, so the set
-/// cannot grow silently, and it shrinks visibly the moment the schedule stops
-/// reordering across a value.
-fn residual_row_failure(
-    program: &[chelis_deep::Expr],
-    accepts: bool,
-    label: &str,
-) -> Option<String> {
-    if ordering_row_failure(program, accepts, label).is_none() {
-        return Some(format!(
-            "{label}: listed as a schedule residual but now satisfies \
-             [04-INF-4]. Remove it from the residual predicate."
-        ));
-    }
-    None
-}
-
 /// Check one generated program and report the disagreement, if any.
 fn ordering_row_failure(
     program: &[chelis_deep::Expr],
@@ -515,17 +501,7 @@ fn surf_ordering_matrix_matches_04_inf_4_at_both_ingresses() {
                     );
                     let program = surf_program(&source);
                     let accepts = layout_accepts(&layout);
-                    let residual = wrapped
-                        && reader == ReaderKind::Function
-                        && spelling == SurfSpelling::Unannotated
-                        && accepts
-                        && value_is_hoisted_over(&layout);
-                    let outcome = if residual {
-                        residual_row_failure(&program, accepts, &label)
-                    } else {
-                        ordering_row_failure(&program, accepts, &label)
-                    };
-                    if let Some(failure) = outcome {
+                    if let Some(failure) = ordering_row_failure(&program, accepts, &label) {
                         failures.push(failure);
                     }
                 }
@@ -555,17 +531,7 @@ fn deep_ordering_matrix_matches_04_inf_4_at_both_ingresses() {
                     );
                     let program = deep_file_program(&source);
                     let accepts = layout_accepts(&layout);
-                    let residual = wrapped
-                        && reader == ReaderKind::Function
-                        && spelling == DeepSpelling::BodyStampOnly
-                        && accepts
-                        && value_is_hoisted_over(&layout);
-                    let outcome = if residual {
-                        residual_row_failure(&program, accepts, &label)
-                    } else {
-                        ordering_row_failure(&program, accepts, &label)
-                    };
-                    if let Some(failure) = outcome {
+                    if let Some(failure) = ordering_row_failure(&program, accepts, &label) {
                         failures.push(failure);
                     }
                 }
@@ -581,16 +547,16 @@ fn deep_ordering_matrix_matches_04_inf_4_at_both_ingresses() {
 // The matrix above cannot reach this interaction. Its only function-shaped
 // items never call each other, so `FunctionInferencePlan` never builds a
 // multi-member recursive component and `primary_inference_groups`'
-// whole-component emission path is never taken. That path is where the
-// schedule's value barrier can be lost: a component is emitted at whichever
-// member the schedule reaches first, so a barrier one member earns has to
-// constrain every member.
+// whole-component emission path is never taken. A component is inferred as
+// one unit at the first member the schedule reaches, so the schedule
+// contracts it to one vertex and an edge that one member earns constrains
+// every member. This matrix pins the verdicts that contraction produces.
 //
 // The value spelling matters here too. `carried = 7` desugars to a
 // type-stamped literal, which the serialized-IR body-stamp prebind can read,
-// so losing the barrier shows up as an ingress DIVERGENCE. `carried = seed()`
-// has no header of any kind, so the same loss shows up as an over-rejection
-// at both ingresses. Both spellings are enumerated.
+// so a lost edge shows up as an ingress DIVERGENCE. `carried = seed()` has no
+// header of any kind, so the same loss shows up as an over-rejection at both
+// ingresses. Both spellings are enumerated.
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -676,27 +642,7 @@ fn recursive_component_ordering_matrix_matches_04_inf_4_at_both_ingresses() {
                 );
                 let program = surf_program(&source);
                 let accepts = recursive_layout_accepts(&layout);
-                // `seed` leads every recursive row, so the wrapped hoist point
-                // is ordinal zero and every accepting wrapped row is carried
-                // over its value. A bare row has no hoist, but
-                // `primary_inference_groups` still emits the component at its
-                // first member, so it is residual whenever `ping` precedes the
-                // value.
-                let ping = layout
-                    .iter()
-                    .position(|item| *item == RecursiveItem::Ping)
-                    .expect("every layout carries ping");
-                let value = layout
-                    .iter()
-                    .position(|item| *item == RecursiveItem::Value)
-                    .expect("every layout carries the value");
-                let residual = accepts && (wrapped || ping < value);
-                let outcome = if residual {
-                    residual_row_failure(&program, accepts, &label)
-                } else {
-                    ordering_row_failure(&program, accepts, &label)
-                };
-                if let Some(failure) = outcome {
+                if let Some(failure) = ordering_row_failure(&program, accepts, &label) {
                     failures.push(failure);
                 }
             }
@@ -711,12 +657,13 @@ fn recursive_component_ordering_matrix_matches_04_inf_4_at_both_ingresses() {
 // [04-INF-4] governs eager values. It says nothing about when a `defsig`-less
 // FUNCTION's inferred scheme becomes available, which [04-INF-2]/[04-INF-3]
 // and the planner own. This change must therefore leave that axis exactly
-// where it was, and it very nearly did not: replacing the old blunt hoist
+// where it was, and an earlier attempt did not: replacing the hoist order
 // (every module function spliced at the earliest module-function ordinal) with
-// a dependency order silently dropped the guarantee the hoist supplied, that a
-// later declaration can always resolve a module function. The rows below pin
-// the behavior in both directions, so a future ordering change cannot widen it
-// either.
+// a bare dependency order silently dropped the guarantee the hoist supplied,
+// that a later declaration can always resolve a module function. The schedule
+// now keeps the hoist order as its priority and adds only reference edges, so
+// these rows hold by construction; they stay as the pin in both directions, so
+// a future ordering change cannot widen the axis either.
 //
 // Expected verdicts are derived, not measured: a module-wrapped unit resolves a
 // function from any declaration at or after the first function, because that is
