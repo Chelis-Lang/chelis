@@ -4463,22 +4463,20 @@ fn extract_type_checked_literal(expr: &Expr) -> Option<chelis_types::ScalarValue
 /// type metadata must agree before a wrapper can consume the value, while a
 /// successful explicit cast establishes its target dtype per [04-NUM-14].
 fn extract_type_checked_scalar(expr: &Expr) -> Option<chelis_types::ScalarValue> {
-    use chelis_types::{scalar_from_f64, scalar_from_i64};
-
-    let scalar_from_atom = |atom: &Atom, prim: Prim| match (atom, prim) {
-        (Atom::Int(value), prim) if prim.is_integer() => scalar_from_i64("lit", prim, *value).ok(),
-        (Atom::Float(value), prim) if prim.is_float() => scalar_from_f64("lit", prim, *value).ok(),
-        (Atom::Bool(value), Prim::Bool) => {
-            scalar_from_i64("lit", Prim::Bool, i64::from(*value)).ok()
-        }
-        _ => None,
-    };
-
     match expr {
-        Expr::Atom(atom @ Atom::Int(_), _) => scalar_from_atom(atom, Prim::Int64),
-        Expr::Atom(atom @ Atom::Float(_), _) => scalar_from_atom(atom, Prim::F64),
-        Expr::Atom(atom @ Atom::Bool(_), _) => scalar_from_atom(atom, Prim::Bool),
-        Expr::Atom(Atom::Str(_) | Atom::Name(_) | Atom::Tag(_), _) => None,
+        // A BARE atom carries no type metadata, so there is nothing for the
+        // payload to agree with and this fold declines it. Stamping one here
+        // would invent a dtype the source never wrote, in two ways that both
+        // matter. It would widen the fold's accept set past the checker's,
+        // which classifies a bare integer atom as an UNSUFFIXED seed literal
+        // and rejects it (`chelis_types::infer::expr::seed_literal_form`); and
+        // any stamp it picked would contradict spec/04-type-system.md §5.3,
+        // where an integer literal defaults to `int32` and a float literal to
+        // `f32` rather than to the int64/f64 a seed wants. So
+        // `extract_type_checked_literal` stays the fold's ONLY literal
+        // ingress, as its doc says, and a bare atom reaches the caller's loud
+        // rejection instead of a guessed value (chelis#794).
+        Expr::Atom(_, _) => None,
         Expr::List(_, _) | Expr::Node(_, _) => {
             let (tag, _, kids) = stamped_parts(expr)?;
             match tag {
@@ -15862,6 +15860,41 @@ mod tests {
                 ctx.extract_u64_value(&expr),
                 None,
                 "payload/type disagreement must not become a seed: {source}"
+            );
+        }
+    }
+
+    /// Negative parity for the typed fold's literal ingress: a BARE atom
+    /// carries no type metadata, so `extract_type_checked_scalar` declines it
+    /// rather than stamping a dtype the source never wrote. The
+    /// `(cast {} 42 (t-prim {} int64))` case is the one that used to fold: the
+    /// outer cast supplied the declared int64 while the bare `42` was silently
+    /// given `Prim::Int64`, which both widened this fold past the checker (a
+    /// bare atom is an UNSUFFIXED seed literal it rejects) and contradicted
+    /// spec/04-type-system.md §5.3's int32/f32 literal defaults. The stamped
+    /// `(lit {type: (t-prim {} int32)} 7)` control in
+    /// `issue_794_signed_int64_seed_boundaries_and_exact_cast_stay_admitted`
+    /// is the positive parity: an explicit stamp still folds.
+    #[test]
+    fn issue_794_bare_atom_seed_payload_requires_an_explicit_stamp() {
+        let cases = [
+            "42",
+            "(cast {} 42 (t-prim {} int64))",
+            "(cast {} 42.0 (t-prim {} int64))",
+            "(cast {} true (t-prim {} int64))",
+            "(app {type: (t-prim {} int64)} (var {} neg) 1)",
+            "(cast {} (cast {} 42 (t-prim {} int32)) (t-prim {} int64))",
+        ];
+        let ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+        for source in cases {
+            let expr = chelis_deep::parser::parse_str(source)
+                .unwrap_or_else(|error| panic!("parse unstamped seed {source}: {error}"))
+                .pop()
+                .expect("one unstamped seed");
+            assert_eq!(
+                ctx.extract_u64_value(&expr),
+                None,
+                "an unstamped literal payload must not become a seed: {source}"
             );
         }
     }
