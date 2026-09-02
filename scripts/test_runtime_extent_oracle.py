@@ -112,6 +112,30 @@ class RuntimeExtentOracleTests(unittest.TestCase):
                 (ORACLE.TestTarget("empty", ("true",)),),
             )
 
+    def test_host_actualization_owner_matrix_is_in_the_automatic_gate(self) -> None:
+        targets = {target.id: target for target in ORACLE.automatic_targets("python")}
+        target = targets["host_actualization"]
+        self.assertEqual(
+            target.argv,
+            (
+                "cargo",
+                "test",
+                "-p",
+                "chelis-ir",
+                "--lib",
+                "host::tests::tensor_helper_actualization_declines_input_axis_for_shrink_and_stride",
+                "--",
+                "--exact",
+                "--nocapture",
+            ),
+        )
+        self.assertEqual(
+            target.expected_tests,
+            (
+                "host::tests::tensor_helper_actualization_declines_input_axis_for_shrink_and_stride",
+            ),
+        )
+
     def test_validate_runs_every_target_and_prints_exact_head_digest(self) -> None:
         targets = ORACLE.automatic_targets("python")
         by_argv = {target.argv: target for target in targets}

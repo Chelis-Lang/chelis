@@ -328,6 +328,23 @@ def automatic_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
             ),
         ),
         TestTarget(
+            "host_actualization",
+            (
+                "cargo",
+                "test",
+                "-p",
+                "chelis-ir",
+                "--lib",
+                "host::tests::tensor_helper_actualization_declines_input_axis_for_shrink_and_stride",
+                "--",
+                "--exact",
+                "--nocapture",
+            ),
+            (
+                "host::tests::tensor_helper_actualization_declines_input_axis_for_shrink_and_stride",
+            ),
+        ),
+        TestTarget(
             "cli",
             ("cargo", "test", "-p", "chelis-cli", "--test", "runtime_extent_slice_a", "--", "--nocapture"),
             (
