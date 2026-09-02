@@ -6,12 +6,56 @@ Acceptance is exit 0 with the final line ``DTYPE PHASE 4B ORACLE: PASS``.
 Usage:
 
     .venv/bin/python scripts/dtype_phase4b_oracle.py
+
+The freeze has three legs. Narrow ``FROZEN_ATOM_DIGESTS`` and
+``FROZEN_REGION_DIGESTS`` pin the exact text of individual normative atoms and
+delimited contract regions. The third leg is the additive-contradiction gate:
+a region digest cannot defend its own boundaries, so contradictory prose can be
+inserted immediately before a region's start or after its end, and prose can be
+appended to a contract file that carries no region at all. That leg is an
+explicit per-file acknowledgement, not a whole-file digest.
+
+Acknowledgement gate
+--------------------
+
+For every path in ``CONTRACT_FILES`` the oracle compares the working-tree bytes
+against the bytes at the merge base with the base branch. Any contract file
+whose content differs must be acknowledged by name. The acknowledgement is a
+line in the pull request body::
+
+    Frozen-contract-change: spec/04-type-system.md
+
+one line per changed file. The grammar is exact and case-sensitive: no leading
+whitespace, exactly one space after the colon, a repo-relative POSIX path with
+no glob metacharacter and no ``.``/``..`` segment, and nothing after the path.
+Lines inside fenced code blocks are ignored, so a body may quote the grammar.
+An unacknowledged change and an acknowledgement naming a file that did not
+change are both failures: a stale acknowledgement is how a reviewer stops
+reading them.
+
+``--require-acknowledgement`` is the enforcing mode and is what CI runs on a
+pull request. Without it the oracle reports the changed contract files and the
+exact lines the body must carry, then exits 0, so a local run is a checklist
+rather than a gate. An unresolvable merge base fails the enforcing mode loudly;
+it can never be read as "nothing changed".
+
+This replaces a table of whole-file SHA-256 digests. That table made two pull
+requests that edited *different* contract files conflict on adjacent lines of
+one Python dict, and two that edited the *same* file conflict on one line whose
+correct post-rebase value is the digest of the merged text, so the conflict was
+unresolvable by picking a side. The acknowledgement lives in the pull request
+body, which no other pull request shares. Deliberateness is preserved: naming a
+frozen contract file in the body is the same review-visible act that moving a
+digest was, and it still owes the owning spec/design update, every consuming
+contract, and an adversarial mutation.
 """
 
 from __future__ import annotations
 
+import argparse
 from collections import Counter
 import hashlib
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -50,74 +94,6 @@ CONTRACT_FILES = (
     "spec/registry/stdlib_adt_identities.md",
     "spec/registry/stdlib_numeric_manifest.md",
 )
-FROZEN_FILE_DIGESTS = {
-    "spec/02-surf-syntax.md": (
-        "366aed4c2ecaf5b9e1ea7386b1e708e38dcb81ea73f0b20afcc391ed33bb5de6"
-    ),
-    "spec/03-deep-syntax.md": (
-        "6f1c879bc89ab901fff658b63457a6846e5b6f8ab6ea4a17fd24ec6da0427bd2"
-    ),
-    "spec/04-type-system.md": (
-        "cb8d029c61822460e25516c84a7c9c133d10339a6a96fb23d7aac2ebf4abbba6"
-    ),
-    "spec/05-risc-primitives.md": (
-        "170b2a8e4c229f3a93fadd1436ff8897912f036524db607f0b48671acbccd9e0"
-    ),
-    "spec/06-transformations.md": (
-        "30a78217103d0a57d63b9e1a3d927d2e1079affa4d1d0641ef36a9afff34e25a"
-    ),
-    "spec/10-serialization.md": (
-        "55be75d37cf4f29b9958baf584273111fb05e8268d008e818a99e00cca155ce1"
-    ),
-    "spec/11-ffi.md": (
-        "0d0b5065f90ae704ecea26744208e76f1075907f8ea49279a1a958db6f1c14b3"
-    ),
-    "spec/design/capability_table.md": (
-        "b0de5579fa3b7c076ff5e809b2b6d8accf741d82305fe198233cce64ddefaf1c"
-    ),
-    "spec/design/compiled_value_ownership.md": (
-        "209f1cac065d0c9ff4e644723d3455fa52c061e8470a32c8514da5b373830c9c"
-    ),
-    "spec/design/dtype_semantics.md": (
-        "359a1374b536490592f0587dc9511a66ec4c49bdb16e0618e6eb7097e56c8b9c"
-    ),
-    "spec/design/implicit_linearity.md": (
-        "f03302f4b328841d79824f6326f1edf2e954a9b98c0118992d4a3a1f2dfb67cf"
-    ),
-    "spec/design/loud_unsupported.md": (
-        "6c8c5dec977fb044ced99da0f424a2c3782cca404e7884239cd044567c551f71"
-    ),
-    "spec/design/spec_provenance.md": (
-        "6e206f634ce6062d56701f0dea0bf57bcbdca4fbf630a6c12264a904f14ea426"
-    ),
-    "openspec/specs/risc-primitives/spec.md": (
-        "875f1094b4fba6842f90fc96c17aa37c6c2be7a5a40957b0140a10992be601a6"
-    ),
-    "openspec/specs/serialization/spec.md": (
-        "ef0139de7e1da5ec986ec5ec4bfb12710a5cee8e77e9c91840d478404907b5ed"
-    ),
-    "openspec/specs/transformations/spec.md": (
-        "a927fa0540c9bbb03a24fb752838409980af83d918f8f6bc8498b32ea7ab0e6f"
-    ),
-    "openspec/specs/type-system/spec.md": (
-        "135fd5d18b3bbbffa851720973984e3b61ed18ee0b83fa8884eb7e728b38c811"
-    ),
-    "spec/registry/c_scalar_carrier.md": (
-        "2e7b6a27b84e8c71d179b0ee10cd6c44651c4fcf66bb13dd56f0476245ffd22e"
-    ),
-    "spec/registry/c_container_boundary.md": (
-        "4a462ef8b452b5d744e8f8207d69cffd10512cd178c759a6c112f2600a6e56f5"
-    ),
-    "spec/registry/c_tensor_runtime.md": (
-        "cc57955f030ad18616333d6e1048e8607e54e9fd9c907bcd0698e6345b621f15"
-    ),
-    "spec/registry/stdlib_adt_identities.md": (
-        "59c8654819ffd315028f68a91e049a5f603464f4511ae604c3634e79f8667ce5"
-    ),
-    "spec/registry/stdlib_numeric_manifest.md": (
-        "2d6286daca1e7b16b79fcc863190d030c1291d54236b13f64a0a065090f22438"
-    ),
-}
 OP_ATOM = re.compile(r"^> \*\*\[05-OP-(\d+)\]\*\*", re.MULTILINE)
 ATOM_START = re.compile(
     r"^> \*\*\[(\d{2}-[A-Z]+-\d+)\]\*\*", re.MULTILINE
@@ -478,7 +454,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/dtype_semantics.md",
         "## Phase 4 - the capability table becomes the permanent guard",
         "## I1. Interlock with loud unsupported ([#730])",
-        "1b3c5caa7e56a57770842270a166fb648265595c8a1ff42143c5b060713091f9",
+        "73778d2eb3ecb139573116b2c0df81617a76da52513f8d7e253002922f8b3023",
     ),
     "compiled stdlib consumer": (
         "spec/design/loud_unsupported.md",
@@ -670,24 +646,221 @@ def frozen_region(text: str, start: str, end: str, label: str) -> str:
     return text[start_index:end_index]
 
 
+# --------------------------------------------------------------------------
+# Frozen-contract acknowledgement gate (the additive-contradiction leg)
+# --------------------------------------------------------------------------
+
+ACKNOWLEDGEMENT_KEY = "Frozen-contract-change:"
+DEFAULT_BASE_REF = "origin/main"
+
+# The exact accepted line. No leading whitespace, exactly one space after the
+# colon, and nothing after the path.
+ACKNOWLEDGEMENT_LINE = re.compile(
+    r"^Frozen-contract-change: (?P<path>[^\s]+)$"
+)
+# A line that is trying to be an acknowledgement and failing. Leading
+# whitespace, a Markdown list bullet, a blockquote marker, or any casing of the
+# key all land here so the author is told the canonical spelling instead of
+# silently losing the acknowledgement.
+ACKNOWLEDGEMENT_NEAR_MISS = re.compile(
+    r"^[\s>]*(?:[-*+]\s+)?frozen[-_ ]?contract[-_ ]?change\s*:",
+    re.IGNORECASE,
+)
+FENCE_LINE = re.compile(r"^\s*(?:`{3,}|~{3,})")
+# A repo-relative POSIX path. The character class excludes every glob
+# metacharacter, the backslash, and whitespace; the segment rule excludes an
+# absolute path, an empty segment, and `.`/`..`.
+ACKNOWLEDGEMENT_PATH = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
+
+
+def parse_acknowledgements(body: str) -> tuple[list[str], list[str]]:
+    """Return ``(paths, errors)`` parsed from an acknowledgement document.
+
+    ``body`` is normally a pull request body. Lines inside fenced code blocks
+    are ignored so a body can quote the grammar without acknowledging anything.
+    """
+
+    paths: list[str] = []
+    errors: list[str] = []
+    fenced = False
+    for raw in body.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = raw.rstrip()
+        if FENCE_LINE.match(line):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        match = ACKNOWLEDGEMENT_LINE.match(line)
+        if match is None:
+            if ACKNOWLEDGEMENT_NEAR_MISS.match(line):
+                errors.append(
+                    f"malformed frozen contract acknowledgement {line!r}: the "
+                    f"only accepted form is '{ACKNOWLEDGEMENT_KEY} <repo-relative "
+                    "path>' at the start of a line, outside a code fence"
+                )
+            continue
+        candidate = match.group("path")
+        if not ACKNOWLEDGEMENT_PATH.match(candidate) or any(
+            segment in {".", ".."} for segment in candidate.split("/")
+        ):
+            errors.append(
+                f"malformed frozen contract acknowledgement path {candidate!r}: "
+                "expected a repo-relative POSIX path with no glob, no absolute "
+                "root, and no '.' or '..' segment"
+            )
+            continue
+        paths.append(candidate)
+    return paths, errors
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        ("git", "-C", str(root), *args),
+        capture_output=True,
+        check=False,
+    )
+
+
+def resolve_merge_base(root: Path, base: str) -> str:
+    """Return the merge-base commit of ``base`` and ``HEAD``.
+
+    Raises ``OracleError`` when it cannot be determined. There is no "assume
+    unchanged" path: a base this function cannot resolve is a check that did
+    not run.
+    """
+
+    inside = _git(root, "rev-parse", "--is-inside-work-tree")
+    if inside.returncode != 0 or inside.stdout.strip() != b"true":
+        raise OracleError(
+            f"cannot determine the frozen contract merge base: {root} is not a "
+            "git work tree"
+        )
+    merge_base = _git(root, "merge-base", base, "HEAD")
+    if merge_base.returncode != 0:
+        detail = merge_base.stderr.decode("utf-8", "replace").strip()
+        raise OracleError(
+            f"cannot determine the frozen contract merge base with {base!r}"
+            + (f": {detail}" if detail else "")
+            + "; fetch the base branch or pass --base <ref>"
+        )
+    return merge_base.stdout.decode("utf-8").strip()
+
+
+def changed_contract_files(
+    root: Path, merge_base: str, contract_files: tuple[str, ...] = CONTRACT_FILES
+) -> list[str]:
+    """Return the contract files whose bytes differ from ``merge_base``."""
+
+    changed: list[str] = []
+    for relative in contract_files:
+        blob = _git(root, "show", f"{merge_base}:{relative}")
+        baseline = blob.stdout if blob.returncode == 0 else None
+        path = root / relative
+        try:
+            current: bytes | None = path.read_bytes()
+        except OSError:
+            current = None
+        if baseline != current:
+            changed.append(relative)
+    return changed
+
+
+def validate_frozen_contract_changes(
+    root: Path = REPO_ROOT,
+    base: str = DEFAULT_BASE_REF,
+    acknowledgements: tuple[str, ...] = (),
+    body: str | None = None,
+    require_acknowledgement: bool = False,
+    contract_files: tuple[str, ...] = CONTRACT_FILES,
+) -> list[str]:
+    """Check that every changed contract file is acknowledged by name.
+
+    Returns the report lines. In ``require_acknowledgement`` mode any violation
+    raises ``OracleError``; otherwise the report is advisory and the caller
+    continues.
+    """
+
+    violations: list[str] = []
+    acknowledged: list[str] = list(acknowledgements)
+    if body is not None:
+        parsed, errors = parse_acknowledgements(body)
+        acknowledged.extend(parsed)
+        violations.extend(errors)
+
+    duplicates = sorted(
+        {path for path, count in Counter(acknowledged).items() if count > 1}
+    )
+    for path in duplicates:
+        violations.append(
+            f"duplicate frozen contract acknowledgement for {path}: acknowledge "
+            "each changed contract file exactly once"
+        )
+
+    try:
+        merge_base = resolve_merge_base(root, base)
+    except OracleError as error:
+        if require_acknowledgement:
+            raise
+        return [
+            f"frozen contract acknowledgement: {error}",
+            "frozen contract acknowledgement: change detection skipped "
+            "(advisory mode); CI runs --require-acknowledgement and will fail "
+            "on an unresolvable base",
+        ]
+
+    changed = changed_contract_files(root, merge_base, contract_files)
+    changed_set = set(changed)
+    known = set(contract_files)
+
+    for path in sorted(set(acknowledged)):
+        if path not in known:
+            violations.append(
+                f"frozen contract acknowledgement names {path}, which is not a "
+                "frozen contract file"
+            )
+        elif path not in changed_set:
+            violations.append(
+                f"stale frozen contract acknowledgement for {path}: it is "
+                f"unchanged against {base} ({merge_base[:12]}); remove the "
+                f"'{ACKNOWLEDGEMENT_KEY} {path}' line"
+            )
+
+    acknowledged_set = set(acknowledged)
+    for path in changed:
+        if path not in acknowledged_set:
+            violations.append(
+                f"unacknowledged frozen contract change: {path} differs from "
+                f"{base} ({merge_base[:12]}); add the line "
+                f"'{ACKNOWLEDGEMENT_KEY} {path}' to the pull request body, and "
+                "with it the owning spec/design update, every consuming "
+                "contract, and an adversarial mutation"
+            )
+
+    if violations and require_acknowledgement:
+        raise OracleError("; ".join(violations))
+
+    report = [
+        f"frozen contract acknowledgement: base {base} ({merge_base[:12]}), "
+        f"{len(changed)} of {len(contract_files)} contract files changed"
+    ]
+    for path in changed:
+        marker = "ok " if path in acknowledged_set else "NEEDS"
+        report.append(f"  {marker} {ACKNOWLEDGEMENT_KEY} {path}")
+    report.extend(f"  ISSUE {violation}" for violation in violations)
+    return report
+
+
 def validate_frozen_contract(
     docs: dict[str, str], violations: list[str]
 ) -> None:
-    # A region digest cannot defend its own boundaries: contradictory prose can
-    # otherwise be inserted immediately before its start or after its end. The
-    # file snapshot is therefore the additive-contradiction gate. Narrower
-    # atom and region digests remain below to identify the owning contract when
-    # an existing clause changes. Moving a file digest is a semantic freeze
-    # change and owes the same spec, consumer, and adversarial-test review as a
-    # region-digest change.
-    for relative, expected in FROZEN_FILE_DIGESTS.items():
-        actual = frozen_digest(docs[relative])
-        if actual != expected:
-            violations.append(
-                f"frozen contract file {relative} digest mismatch: "
-                f"expected {expected}, got {actual}"
-            )
-
+    # These digests identify the owning contract when an existing clause
+    # changes. They cannot defend their own boundaries: contradictory prose
+    # inserted immediately before a region's start or after its end leaves
+    # every digest here intact. The additive-contradiction gate is the
+    # per-file acknowledgement in `validate_frozen_contract_changes`, which
+    # sees any byte that moved in any CONTRACT_FILES path. Moving a digest
+    # below is a semantic freeze change and owes the owning spec/design
+    # update, every consuming contract, and an adversarial mutation.
     for atom, expected in FROZEN_ATOM_DIGESTS.items():
         relative = (
             "spec/04-type-system.md" if atom.startswith("04-") else "spec/05-risc-primitives.md"
@@ -2724,6 +2897,22 @@ def validate_schema_and_consumers(
             ),
             (PASS_LINE, "Phase 4B oracle success line"),
             (
+                "The additive-contradiction leg is an acknowledgement, not a "
+                "whole-file digest.",
+                "Phase 4B acknowledgement gate replaces whole-file digests",
+            ),
+            (
+                "requires each changed file to be named in the pull request "
+                "body",
+                "Phase 4B acknowledgement is per changed file",
+            ),
+            (
+                "An unacknowledged\nchange and an acknowledgement naming an "
+                "unchanged file both fail\n`--require-acknowledgement`, which "
+                "is the mode CI runs on a pull request.",
+                "Phase 4B acknowledgement enforcing mode",
+            ),
+            (
                 ".venv/bin/python scripts/dtype_count_oracle.py",
                 "Count child oracle command",
             ),
@@ -3149,6 +3338,12 @@ def validate_contract(root: Path = REPO_ROOT) -> None:
 
 
 def run_oracle(python: str = sys.executable, root: Path = REPO_ROOT) -> None:
+    """Run the content leg: the normative, schema, and digest contracts.
+
+    `main` runs the acknowledgement leg before this one, so the success line is
+    never reached with an unacknowledged frozen contract change.
+    """
+
     try:
         validate_contract(root)
         subprocess.run(
@@ -3166,5 +3361,112 @@ def run_oracle(python: str = sys.executable, root: Path = REPO_ROOT) -> None:
     print(PASS_LINE)
 
 
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "chelis#729 Phase 4B freeze oracle. Validates the normative "
+            "contract and checks that every changed frozen contract file is "
+            "acknowledged by name."
+        )
+    )
+    parser.add_argument(
+        "--base",
+        default=DEFAULT_BASE_REF,
+        help=(
+            "base ref for the frozen contract diff (default: "
+            f"{DEFAULT_BASE_REF}). The comparison point is the merge base of "
+            "this ref and HEAD, so a change already on the base branch is "
+            "never reported as this branch's."
+        ),
+    )
+    parser.add_argument(
+        "--acknowledge",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help=(
+            "acknowledge one changed contract file by repo-relative path; "
+            "repeatable. The local equivalent of a pull request body line."
+        ),
+    )
+    parser.add_argument(
+        "--acknowledgements-file",
+        metavar="FILE",
+        help=(
+            "read acknowledgement lines from FILE (a saved pull request body). "
+            f"'-' reads stdin. Each line is '{ACKNOWLEDGEMENT_KEY} <path>'."
+        ),
+    )
+    parser.add_argument(
+        "--acknowledgements-env",
+        metavar="NAME",
+        help=(
+            "read acknowledgement lines from the environment variable NAME. "
+            "CI uses this so an untrusted pull request body never reaches a "
+            "shell command line."
+        ),
+    )
+    parser.add_argument(
+        "--require-acknowledgement",
+        action="store_true",
+        help=(
+            "fail on an unacknowledged contract change, a stale or malformed "
+            "acknowledgement, or an unresolvable merge base. CI passes this on "
+            "pull request events; without it the acknowledgement leg reports "
+            "and exits 0."
+        ),
+    )
+    return parser
+
+
+def acknowledgement_body(args: argparse.Namespace) -> str | None:
+    """Return the acknowledgement document named by the parsed arguments."""
+
+    sources = [args.acknowledgements_file, args.acknowledgements_env]
+    if all(source is None for source in sources):
+        return None
+    if all(source is not None for source in sources):
+        raise SystemExit(
+            "DTYPE PHASE 4B ORACLE: FAIL: pass at most one of "
+            "--acknowledgements-file and --acknowledgements-env"
+        )
+    if args.acknowledgements_env is not None:
+        name = args.acknowledgements_env
+        if name not in os.environ:
+            raise SystemExit(
+                "DTYPE PHASE 4B ORACLE: FAIL: acknowledgement environment "
+                f"variable {name} is not set"
+            )
+        return os.environ[name]
+    if args.acknowledgements_file == "-":
+        return sys.stdin.read()
+    try:
+        return Path(args.acknowledgements_file).read_text(encoding="utf-8")
+    except OSError as error:
+        raise SystemExit(
+            "DTYPE PHASE 4B ORACLE: FAIL: cannot read acknowledgements file "
+            f"{args.acknowledgements_file}: {error}"
+        ) from error
+
+
+def main(argv: list[str] | None = None, root: Path = REPO_ROOT) -> None:
+    args = build_parser().parse_args(argv)
+    body = acknowledgement_body(args)
+    try:
+        report = validate_frozen_contract_changes(
+            root=root,
+            base=args.base,
+            acknowledgements=tuple(args.acknowledge),
+            body=body,
+            require_acknowledgement=args.require_acknowledgement,
+        )
+    except OracleError as error:
+        raise SystemExit(f"DTYPE PHASE 4B ORACLE: FAIL: {error}") from error
+    for line in report:
+        print(line)
+    sys.stdout.flush()
+    run_oracle(sys.executable, root)
+
+
 if __name__ == "__main__":
-    run_oracle()
+    main()

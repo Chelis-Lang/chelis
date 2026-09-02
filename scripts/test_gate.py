@@ -2379,6 +2379,41 @@ class CiParityTests(unittest.TestCase):
             f"the freeze step must run unconditionally; found {conditioned}",
         )
 
+    def test_phase4b_acknowledgement_gate_is_enforced_on_pull_requests(self):
+        # The whole-file digest table used to be the additive-contradiction
+        # gate, and it was checked on every event. Its replacement needs a pull
+        # request body, so the enforcing run is a separate step gated on the
+        # event -- never on `docs_only`, which is the evasion the unconditional
+        # step above exists to prevent.
+        docs_block = _ci_job_block("docs")
+        command = (
+            "uv run --managed-python --python 3.11 --no-project python "
+            "scripts/dtype_phase4b_oracle.py --require-acknowledgement "
+            "--acknowledgements-env PR_BODY --base \"$BASE\""
+        )
+        _assert_executable_run_once(docs_block, command)
+        step = _ci_step_block(docs_block, "Require frozen contract acknowledgements")
+        conditions = [
+            line.split("if:", 1)[1].strip()
+            for line in step.splitlines()
+            if re.match(r"^\s+if:", line)
+        ]
+        self.assertEqual(conditions, ["github.event_name == 'pull_request'"])
+        # The body is attacker-controlled text. It reaches the oracle through
+        # the environment, so it is never interpolated into a shell command.
+        self.assertIn("PR_BODY: ${{ github.event.pull_request.body }}", step)
+        self.assertIn("BASE: ${{ github.event.pull_request.base.sha }}", step)
+        self.assertNotIn("${{ github.event.pull_request.body }}", step.split("run:")[-1])
+
+    def test_docs_checkout_is_deep_enough_for_the_merge_base(self):
+        # The acknowledgement gate diffs against the merge base with the base
+        # branch. A shallow checkout cannot compute one, and the gate fails
+        # loudly rather than passing, so the depth is part of the wiring.
+        docs_block = _ci_job_block("docs")
+        checkout = docs_block[: docs_block.index("- name: Free disk space")]
+        self.assertIn("uses: actions/checkout@v6", checkout)
+        self.assertIn("fetch-depth: 0", checkout)
+
     def test_commented_phase4b_oracle_is_not_an_executable_step(self):
         block = _ci_job_block("docs")
         command = (
