@@ -1407,11 +1407,24 @@ can widen or narrow it, and every top-level signature stays in the global
 header environment where the ingresses already agree about it.
 `primary_inference_schedule` answers the availability question: it may reorder
 module function bodies, but it carries a barrier edge from each eager value's
-`def` to every later module function that reads it, because an unannotated
-value has no header anywhere and its type exists only once its own `def` has
-been inferred. Without that edge a hoisted reader reports a legal backward
+`def` to every later function that reads it, because an unannotated value has
+no header anywhere and its type exists only once its own `def` has been
+inferred. Without that edge a reordered reader reports a legal backward
 reference as unbound, and the two ingresses diverge again, since only the
 serialized-IR ingress prebinds body-type stamps.
+
+The unit that barrier orders is the inference component, not the declaration.
+A recursive component is inferred as one group, emitted at whichever member the
+schedule reaches first, so a barrier that one member earns has to constrain
+every member. The schedule therefore contracts each recursive component to a
+single vertex: its members leave both the textual chain and the module-function
+chain together, and the vertex carries the union of its members' barriers. Two
+consequences are worth stating because they are not obvious. A recursive
+component may be inferred later than its first member's source position, which
+is the one case where a declaration outside the module-function planner does
+not retain textual inference order. And the contraction is what keeps the graph
+acyclic: a member left in the textual chain would be reachable from a value
+that the same component must follow.
 
 The authoritative oracle for this residual is:
 
@@ -1419,16 +1432,28 @@ The authoritative oracle for this residual is:
 cargo nextest run -p chelis-types --test issue_1134_forward_reference_parity --no-fail-fast
 ```
 
-Its core is a generated ordering matrix rather than a list of examples. A
-hand-written case fixes one declaration layout, and layout is precisely what
-this rule interacts with, so the matrix enumerates layouts instead: every
-ordering of an anchor function, the eager value, and a reader; a function
-reader and a value reader; the annotated, unannotated, adjacent-`defsig` and
-separated-`defsig` spellings; and both module-wrapped and bare declarations,
-which matter because bare declarations carry no module key and never reach the
-function planner at all. Each row's expected verdict is derived from
-[04-INF-4], not written down per case, and both ingresses must produce
-identical ordered diagnostics. The named regressions beside it pin the
+Its core is a pair of generated ordering matrices rather than a list of
+examples. A hand-written case fixes one declaration layout, and layout is
+precisely what this rule interacts with, so the matrices enumerate layouts
+instead.
+
+The first enumerates every ordering of an anchor function, the eager value,
+and a reader; a function reader and a value reader; the annotated,
+unannotated, adjacent-`defsig` and separated-`defsig` spellings; and both
+module-wrapped and bare declarations, which matter because bare declarations
+carry no module key and never reach the module-function planner at all.
+
+The second enumerates the recursive-component interaction the first cannot
+reach: its only function-shaped items never call each other, so no row builds a
+multi-member component and the whole-component emission path is never taken. It
+orders a mutually recursive pair around the value they straddle, in both a
+type-stamped spelling (`carried = 7`, whose stamp the serialized-IR prebind can
+read, so a lost barrier shows up as an ingress divergence) and a header-less
+one (`carried = seed()`, where the same loss shows up as an over-rejection at
+both ingresses), wrapped and bare.
+
+Each row's expected verdict is derived from [04-INF-4], not written down per
+case, and both ingresses must produce identical ordered diagnostics. The named regressions beside it pin the
 external-input spellings, bare-self rejection, sequential-`let` shadowing,
 source-ordered diagnostics, missing names, local forward references, and eager
 value cycles. `issue_1134_forward_reference_cli` carries the interleaved cases

@@ -128,6 +128,43 @@ fn ir_ingress_still_binds_defsig_less_def_from_body_stamp() {
     );
 }
 
+/// A `defsig`-less def (`caller`) that forward-references another
+/// `defsig`-less FUNCTION (`helper`) declared later, where `helper`'s body
+/// carries its own type stamp.
+///
+/// This is chelis#1124's over-rejection sentinel. Resolving the reference is
+/// exactly the job of the body-stamp prebind the chelis#1124 fix leaves in
+/// place for `defsig`-less names: `helper` is bound from its body stamp before
+/// `caller`'s body is inferred, and if the fix's `defsig`-name skip ever
+/// stripped a `defsig`-less binding, `helper` would be unbound.
+///
+/// It reads a FUNCTION deliberately. [04-INF-4] governs non-function `def`s
+/// only, so the equivalent value shape below is now a rejection at both
+/// ingresses and can no longer observe the prebind. Asserted against the IR
+/// ingress ONLY: the body-stamp prebind is a capability the IR ingress has and
+/// the typed ingress does not, and that difference is pre-existing and
+/// orthogonal to both issues.
+const DEFSIG_LESS_FORWARD_FN: &str = "(def {} caller (fn {} (params {}) (app {} (var {} helper))))\n\n\
+     (def {} helper (fn {type: (t-fn {} (t-prim {} int32))} (params {}) \
+     (lit {type: (t-prim {} int32)} 1)))\n";
+
+/// Over-rejection sentinel for the prebind's core job (chelis#1124 review
+/// condition 3): a `defsig`-less def that forward-references another
+/// `defsig`-less function must stay accepted by the IR ingress. The fix's
+/// `defsig`-name skip must NOT strip the body-stamp binding that reference
+/// depends on.
+#[test]
+fn ir_ingress_resolves_defsig_less_forward_function_reference() {
+    let ir = ir_diagnostics(DEFSIG_LESS_FORWARD_FN);
+
+    assert!(
+        ir.is_empty(),
+        "a defsig-less forward function reference must remain accepted by the \
+         IR ingress (the prebind binds the referenced def from its body stamp), \
+         got: {ir:?}"
+    );
+}
+
 /// Cross-issue regression sentinel: chelis#1124's body-stamp prebind must not
 /// bypass chelis#1134's sequential top-level value scope.
 #[test]

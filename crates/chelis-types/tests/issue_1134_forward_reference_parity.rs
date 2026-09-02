@@ -508,3 +508,114 @@ fn deep_ordering_matrix_matches_04_inf_4_at_both_ingresses() {
     }
     report(failures, rows);
 }
+
+// ---------------------------------------------------------------------------
+// [04-INF-4] recursive-component ordering matrix
+//
+// The matrix above cannot reach this interaction. Its only function-shaped
+// items never call each other, so `FunctionInferencePlan` never builds a
+// multi-member recursive component and `primary_inference_groups`'
+// whole-component emission path is never taken. That path is where the
+// schedule's value barrier can be lost: a component is emitted at whichever
+// member the schedule reaches first, so a barrier one member earns has to
+// constrain every member.
+//
+// The value spelling matters here too. `carried = 7` desugars to a
+// type-stamped literal, which the serialized-IR body-stamp prebind can read,
+// so losing the barrier shows up as an ingress DIVERGENCE. `carried = seed()`
+// has no header of any kind, so the same loss shows up as an over-rejection
+// at both ingresses. Both spellings are enumerated.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RecursiveItem {
+    /// The recursive peer that reads nothing.
+    Ping,
+    Value,
+    /// The recursive peer that reads the value.
+    Pong,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RecursiveValueSpelling {
+    /// Desugars to a type-stamped literal the IR prebind can read.
+    Stamped,
+    /// No header anywhere: the type exists only once its own `def` is inferred.
+    Computed,
+}
+
+fn recursive_layouts() -> Vec<Vec<RecursiveItem>> {
+    use RecursiveItem::{Ping, Pong, Value};
+    vec![
+        vec![Ping, Value, Pong],
+        vec![Ping, Pong, Value],
+        vec![Value, Ping, Pong],
+        vec![Value, Pong, Ping],
+        vec![Pong, Ping, Value],
+        vec![Pong, Value, Ping],
+    ]
+}
+
+/// [04-INF-4]: the reading peer resolves exactly when the value precedes it.
+fn recursive_layout_accepts(layout: &[RecursiveItem]) -> bool {
+    let position = |wanted: RecursiveItem| layout.iter().position(|item| *item == wanted);
+    position(RecursiveItem::Value) < position(RecursiveItem::Pong)
+}
+
+fn recursive_surf_source(
+    layout: &[RecursiveItem],
+    spelling: RecursiveValueSpelling,
+    wrapped: bool,
+) -> String {
+    let mut source = String::new();
+    if wrapped {
+        source.push_str("module RecursiveOrderingMatrix\n\n");
+    }
+    // `seed` leads in both spellings so the layouts stay comparable.
+    source.push_str("def seed() -> int32 = 3\n\n");
+    for item in layout {
+        let declaration = match item {
+            RecursiveItem::Ping => {
+                "def ping(n: int32) -> int32 = if (n <= 0) then 0 else pong((n - 1))".to_string()
+            }
+            RecursiveItem::Pong => {
+                "def pong(n: int32) -> int32 = if (n <= 0) then carried else ping((n - 1))"
+                    .to_string()
+            }
+            RecursiveItem::Value => match spelling {
+                RecursiveValueSpelling::Stamped => "carried = 7".to_string(),
+                RecursiveValueSpelling::Computed => "carried = seed()".to_string(),
+            },
+        };
+        source.push_str(&declaration);
+        source.push_str("\n\n");
+    }
+    source
+}
+
+#[test]
+fn recursive_component_ordering_matrix_matches_04_inf_4_at_both_ingresses() {
+    let mut failures = Vec::new();
+    let mut rows = 0;
+    for layout in recursive_layouts() {
+        for spelling in [
+            RecursiveValueSpelling::Stamped,
+            RecursiveValueSpelling::Computed,
+        ] {
+            for wrapped in [true, false] {
+                rows += 1;
+                let source = recursive_surf_source(&layout, spelling, wrapped);
+                let label = format!(
+                    "recursive layout={layout:?} spelling={spelling:?} wrapped={wrapped}\n{source}"
+                );
+                let program = surf_program(&source);
+                if let Some(failure) =
+                    ordering_row_failure(&program, recursive_layout_accepts(&layout), &label)
+                {
+                    failures.push(failure);
+                }
+            }
+        }
+    }
+    report(failures, rows);
+}

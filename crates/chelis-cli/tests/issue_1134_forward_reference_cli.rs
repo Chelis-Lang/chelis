@@ -277,3 +277,60 @@ fn check_accepts_a_backward_value_read_across_a_hoisted_module_function() {
         "UnboundVariable",
     );
 }
+
+/// The public-surface half of the recursive-component ordering matrix.
+///
+/// A mutually recursive pair is inferred as one unit, so the schedule has to
+/// place that unit after every eager value any member reads. When it does not,
+/// a value whose type can be read off its own body produces an ingress
+/// divergence (`chelis check`, on the serialized-IR ingress, accepts while the
+/// typed ingress rejects) and a value with no header at all produces an
+/// outright over-rejection. Both spellings are covered here, wrapped and bare,
+/// because a module-less file never reaches the module-function planner.
+#[test]
+fn check_accepts_a_backward_value_read_by_a_recursive_component() {
+    assert_clean_report(
+        "scc_straddle_stamped_wrapped",
+        "ch",
+        "module SccStraddleStampedWrapped\n\n\
+         def ping(n: int32) -> int32 = if (n <= 0) then 0 else pong((n - 1))\n\n\
+         carried = 7\n\n\
+         def pong(n: int32) -> int32 = if (n <= 0) then carried else ping((n - 1))\n",
+    );
+    assert_clean_report(
+        "scc_straddle_stamped_bare",
+        "ch",
+        "def ping(n: int32) -> int32 = if (n <= 0) then 0 else pong((n - 1))\n\n\
+         carried = 7\n\n\
+         def pong(n: int32) -> int32 = if (n <= 0) then carried else ping((n - 1))\n",
+    );
+    assert_clean_report(
+        "scc_straddle_computed_wrapped",
+        "ch",
+        "module SccStraddleComputedWrapped\n\n\
+         def seed() -> int32 = 3\n\n\
+         def ping(n: int32) -> int32 = if (n <= 0) then 0 else pong((n - 1))\n\n\
+         carried = seed()\n\n\
+         def pong(n: int32) -> int32 = if (n <= 0) then carried else ping((n - 1))\n",
+    );
+    assert_clean_report(
+        "scc_straddle_computed_bare",
+        "ch",
+        "def seed() -> int32 = 3\n\n\
+         def ping(n: int32) -> int32 = if (n <= 0) then 0 else pong((n - 1))\n\n\
+         carried = seed()\n\n\
+         def pong(n: int32) -> int32 = if (n <= 0) then carried else ping((n - 1))\n",
+    );
+    // The forward control must still reject with the reader inside the
+    // component, or the acceptance above proves only that the barrier was
+    // dropped.
+    assert_failed_report(
+        "scc_straddle_forward",
+        "ch",
+        "module SccStraddleForward\n\n\
+         def ping(n: int32) -> int32 = if (n <= 0) then 0 else pong((n - 1))\n\n\
+         def pong(n: int32) -> int32 = if (n <= 0) then carried else ping((n - 1))\n\n\
+         carried = 7\n",
+        "UnboundVariable",
+    );
+}

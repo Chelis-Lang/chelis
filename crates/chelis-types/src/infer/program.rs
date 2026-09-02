@@ -1485,18 +1485,25 @@ fn eager_value_definition_ordinals(
 
 /// Primary body-inference schedule. Function declarations inside a lexical
 /// module use the same dependency/SCC planner as signature inference, so a
-/// forward helper's body-derived scheme is available to its caller. Bare defs
-/// and every non-function declaration retain textual order. The returned
-/// values are original flattened ordinals: scheduling never changes diagnostic
-/// ownership, collected-type origins, or output order.
+/// forward helper's body-derived scheme is available to its caller. Every
+/// other declaration retains textual order. The returned values are original
+/// flattened ordinals: scheduling never changes diagnostic ownership,
+/// collected-type origins, or output order.
 ///
-/// [04-INF-4] constrains that reordering. A module function may read a
-/// top-level eager value declared before it, and an unannotated value has no
-/// header anywhere, so its type exists only once its own `def` has been
-/// inferred. Hoisting the reader's body across that `def` would report a
-/// legal backward reference as unbound. The schedule therefore also carries a
-/// barrier edge from each eager value's `def` to every later module function
-/// that reads it.
+/// [04-INF-4] constrains that reordering. A function may read a top-level
+/// eager value declared before it, and an unannotated value has no header
+/// anywhere, so its type exists only once its own `def` has been inferred.
+/// Scheduling the reader's body before that `def` would report a legal
+/// backward reference as unbound, so the graph carries a barrier edge from
+/// each eager value's `def` to every later function that reads it.
+///
+/// A recursive component is one vertex, not several.
+/// [`primary_inference_groups`] emits a whole component at whichever member
+/// the schedule reaches first, so a barrier that one member earns has to
+/// constrain every member, and a component's members leave the textual chain
+/// together. That is why a recursive component may be inferred later than its
+/// first member's source position: the unit it forms, not the member, is what
+/// the barrier orders.
 ///
 /// This is availability, not visibility. Whether a name is in scope is decided
 /// by `Env::top_level_value_visibility` from source position alone, so no
@@ -1517,9 +1524,34 @@ pub(super) fn primary_inference_schedule(
                 .map(|_| member.item_index)
         })
         .collect::<UnordSet<_>>();
-    if module_fn_indices.is_empty() {
+
+    // Contract every recursive component to a single vertex, named by its
+    // lowest member ordinal. Non-recursive declarations are their own vertex.
+    let mut vertex_members: UnordMap<usize, Vec<usize>> = UnordMap::new();
+    let mut vertex_of: UnordMap<usize, usize> = UnordMap::new();
+    for component in &function_plan.components {
+        if !component.recursive {
+            continue;
+        }
+        let mut members = component
+            .members
+            .iter()
+            .map(|member| member.item_index)
+            .collect::<Vec<_>>();
+        members.sort_unstable();
+        members.dedup();
+        let Some(representative) = members.first().copied() else {
+            continue;
+        };
+        for member in &members {
+            vertex_of.insert(*member, representative);
+        }
+        vertex_members.insert(representative, members);
+    }
+    if module_fn_indices.is_empty() && vertex_members.is_empty() {
         return (0..items.len()).collect();
     }
+    let vertex = |index: usize| vertex_of.get(&index).copied().unwrap_or(index);
 
     let ordered_module_fns = function_plan
         .ordered_members()
@@ -1527,24 +1559,31 @@ pub(super) fn primary_inference_schedule(
         .filter(|index| module_fn_indices.contains(index))
         .collect::<Vec<_>>();
     let others = (0..items.len())
-        .filter(|index| !module_fn_indices.contains(index))
+        .filter(|index| !module_fn_indices.contains(index) && !vertex_of.contains_key(index))
         .collect::<Vec<_>>();
 
     // Precedence edges. Two chains fix the relative order inside each class:
-    // every non-module-function declaration keeps source order, and the
-    // module functions keep the planner's dependency order. The only edges
-    // between the classes run eager value -> later reading function, so the
-    // graph is acyclic by construction.
-    let mut predecessors_remaining = vec![0usize; items.len()];
+    // every declaration outside the planner keeps source order, and the module
+    // functions keep the planner's dependency order. The only edges between
+    // the classes run eager value -> reading function, so the graph is acyclic
+    // by construction: nothing ever points from a function back to a value.
+    let mut predecessors_remaining: UnordMap<usize, usize> = UnordMap::new();
     let mut successors: UnordMap<usize, Vec<usize>> = UnordMap::new();
-    let mut add_edge = |from: usize, to: usize, remaining: &mut Vec<usize>| {
+    let mut add_edge = |from: usize, to: usize, remaining: &mut UnordMap<usize, usize>| {
+        if from == to {
+            return;
+        }
         successors.entry(from).or_default().push(to);
-        remaining[to] += 1;
+        *remaining.entry(to).or_default() += 1;
     };
     for pair in others.windows(2) {
         add_edge(pair[0], pair[1], &mut predecessors_remaining);
     }
-    for pair in ordered_module_fns.windows(2) {
+    let module_fn_vertices = ordered_module_fns
+        .iter()
+        .map(|index| vertex(*index))
+        .collect::<Vec<_>>();
+    for pair in module_fn_vertices.windows(2) {
         add_edge(pair[0], pair[1], &mut predecessors_remaining);
     }
 
@@ -1555,41 +1594,69 @@ pub(super) fn primary_inference_schedule(
             .into_iter()
             .map(|(name, _)| name.clone())
             .collect::<UnordSet<_>>();
-        for function_index in &ordered_module_fns {
+        let mut barriers_by_vertex: UnordMap<usize, Vec<usize>> = UnordMap::new();
+        for member in function_plan.ordered_members() {
+            let function_index = member.item_index;
             let mut referenced = UnordSet::new();
             let mut bound = Vec::new();
             collect_top_level_calls(
-                items[*function_index].1,
+                items[function_index].1,
                 &eager_names,
                 &mut bound,
                 &mut referenced,
             );
-            // `to_sorted` is the canonical exit, and the ordinals are sorted
+            // `to_sorted` is the canonical exit and the ordinals are sorted
             // again below, so the edge set does not depend on traversal order.
-            let mut barriers = referenced
+            // A value declared after this function is a forward reference the
+            // scope rule rejects; scheduling for it would be scheduling for an
+            // illegal program, so the filter stays per member even though the
+            // barriers are unioned per vertex.
+            let barriers = referenced
                 .to_sorted()
                 .into_iter()
                 .filter_map(|name| eager_value_ordinals.get(name).copied())
-                .filter(|value_index| value_index < function_index)
+                .filter(|value_index| *value_index < function_index)
                 .collect::<Vec<_>>();
+            barriers_by_vertex
+                .entry(vertex(function_index))
+                .or_default()
+                .extend(barriers);
+        }
+        for (vertex_index, barriers) in barriers_by_vertex.to_sorted() {
+            let mut barriers = barriers.clone();
             barriers.sort_unstable();
+            barriers.dedup();
             for value_index in barriers {
-                add_edge(value_index, *function_index, &mut predecessors_remaining);
+                add_edge(value_index, *vertex_index, &mut predecessors_remaining);
             }
         }
     }
 
     // Kahn, released in source order so the schedule stays deterministic and
     // stays as close to the source as the edges allow.
-    let mut ready = (0..items.len())
-        .filter(|index| predecessors_remaining[*index] == 0)
+    let all_vertices = (0..items.len())
+        .filter(|index| vertex(*index) == *index)
+        .collect::<Vec<_>>();
+    let mut ready = all_vertices
+        .iter()
+        .copied()
+        .filter(|index| predecessors_remaining.get(index).copied().unwrap_or(0) == 0)
         .collect::<BTreeSet<_>>();
     let mut schedule = Vec::with_capacity(items.len());
-    while let Some(index) = ready.pop_first() {
-        schedule.push(index);
-        for successor in successors.get(&index).into_iter().flatten() {
-            predecessors_remaining[*successor] -= 1;
-            if predecessors_remaining[*successor] == 0 {
+    let expand = |vertex_index: usize| -> Vec<usize> {
+        vertex_members
+            .get(&vertex_index)
+            .cloned()
+            .unwrap_or_else(|| vec![vertex_index])
+    };
+    while let Some(vertex_index) = ready.pop_first() {
+        schedule.extend(expand(vertex_index));
+        for successor in successors.get(&vertex_index).into_iter().flatten() {
+            let remaining = predecessors_remaining
+                .get_mut(successor)
+                .expect("every successor was counted when its edge was added");
+            *remaining -= 1;
+            if *remaining == 0 {
                 ready.insert(*successor);
             }
         }
