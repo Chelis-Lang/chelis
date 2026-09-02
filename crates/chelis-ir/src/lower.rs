@@ -15746,7 +15746,7 @@ mod tests {
         .pop()
         .expect("one expression");
         let outcome = catch_lowering(move || {
-            let mut ctx = LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
+            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
             ctx.random_seed = Some(7);
             let _ = ctx.lower_expr(&expr);
             ctx.dag
@@ -15782,7 +15782,7 @@ mod tests {
         .pop()
         .expect("one expression");
         let outcome = catch_lowering(move || {
-            let mut ctx = LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
+            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
             let _ = ctx.lower_expr(&expr);
             ctx.dag
         });
@@ -15820,7 +15820,7 @@ mod tests {
                 7,
             ),
         ];
-        let ctx = LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
+        let ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
         for (source, expected) in cases {
             let expr = chelis_deep::parser::parse_str(source)
                 .unwrap_or_else(|error| panic!("parse seed control {source}: {error}"))
@@ -15852,7 +15852,7 @@ mod tests {
             "(cast {} (cast {} (lit {type: (t-prim {} int32)} 7) \
                  (t-prim {} string)) (t-prim {} int64))",
         ];
-        let ctx = LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
+        let ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
         for source in cases {
             let expr = chelis_deep::parser::parse_str(source)
                 .unwrap_or_else(|error| panic!("parse forged seed {source}: {error}"))
@@ -15889,7 +15889,7 @@ mod tests {
                 .expect("one handled-random expression");
             let outcome = catch_lowering(move || {
                 let mut ctx =
-                    LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
+                    LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
                 ctx.random_seed = Some(7);
                 let _ = ctx.lower_expr(&expr);
             });
@@ -15924,7 +15924,7 @@ mod tests {
         .pop()
         .expect("one expression");
         let outcome = catch_lowering(move || {
-            let mut ctx = LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
+            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
             ctx.random_seed = Some(7);
             let _ = ctx.lower_expr(&expr);
         });
@@ -15956,7 +15956,7 @@ mod tests {
         .pop()
         .expect("one expression");
         let outcome = catch_lowering(move || {
-            let mut ctx = LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
+            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
             ctx.random_seed = Some(7);
             let _ = ctx.lower_expr(&expr);
         });
@@ -15988,7 +15988,7 @@ mod tests {
         .pop()
         .expect("one expression");
         let outcome = catch_lowering(move || {
-            let mut ctx = LowerCtx::new(HashMap::new(), HashMap::new(), LinearityInfo::default());
+            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
             ctx.random_seed = Some(7);
             let _ = ctx.lower_expr(&expr);
         });
