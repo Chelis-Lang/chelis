@@ -13,7 +13,14 @@ impl TempDir {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("chelis-exact-tagged-abi-{nonce}"));
+        // The process id, not the clock alone: `cargo nextest` gives every
+        // test its own process, and two spawned back to back can read the
+        // same coarse `as_nanos` value. This helper is the one #1479's probe
+        // directory was copied from, so the omission propagated once already.
+        let path = std::env::temp_dir().join(format!(
+            "chelis-exact-tagged-abi-{}-{nonce}",
+            std::process::id()
+        ));
         fs::create_dir_all(&path).expect("create probe directory");
         Self(path)
     }

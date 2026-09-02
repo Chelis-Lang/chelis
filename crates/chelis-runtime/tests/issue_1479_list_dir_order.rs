@@ -26,10 +26,18 @@ use chelis_runtime::{
 
 /// A self-cleaning probe directory. `chelis-runtime` deliberately carries
 /// almost no dev-dependencies (its one edge is documented in `Cargo.toml` as
-/// test-only), so this reuses the local idiom already in
-/// `tests/exact_tagged_c_header.rs` rather than adding `tempfile` here. The
-/// counter keeps two tests in the same binary from colliding within one clock
-/// tick.
+/// test-only), so this uses the local idiom rather than adding `tempfile`
+/// here.
+///
+/// The path needs entropy from all three of the process, the clock, and a
+/// counter. `cargo nextest` runs every test in its OWN process, so
+/// `PROBE_NONCE` reinitialises to `0` in each one and disambiguates nothing
+/// across tests; the clock alone is not enough either, because two processes
+/// spawned back to back can read the same coarse `as_nanos` value on a
+/// virtualised macOS runner. Both tests then build the same directory and
+/// each sees the other's fixture entries. The process id is what separates
+/// them, which is why `runtime_dtype_c_probe.rs`, `ownership_ledger.rs`, and
+/// `dim_carrier_int64.rs` all include it.
 struct TempDir(PathBuf);
 
 static PROBE_NONCE: AtomicU64 = AtomicU64::new(0);
@@ -41,7 +49,10 @@ impl TempDir {
             .expect("clock")
             .as_nanos();
         let seq = PROBE_NONCE.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("chelis-1479-list-dir-{clock}-{seq}"));
+        let path = std::env::temp_dir().join(format!(
+            "chelis-1479-list-dir-{}-{clock}-{seq}",
+            std::process::id()
+        ));
         fs::create_dir_all(&path).expect("create probe directory");
         Self(path)
     }
