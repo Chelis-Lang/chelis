@@ -107,9 +107,6 @@ struct Measured {
     plan: FunctionInferencePlan,
     flat: Vec<FlatItem>,
     module_fn_indices: BTreeSet<usize>,
-    /// Names that carry a `defsig` item, whether authored or synthesized
-    /// from a parameter or result annotation.
-    signed: BTreeSet<String>,
 }
 
 fn measure(program: &Program) -> Measured {
@@ -118,14 +115,6 @@ fn measure(program: &Program) -> Measured {
         .unwrap_or_else(|error| panic!("generated Surf must parse: {error:?}\n{source}"));
     let exprs = chelis_surf::desugar::desugar_program(&declarations);
     let items = top_level_decl_items_with_modules(&exprs);
-    let signed = items
-        .iter()
-        .filter_map(|(_, expr)| match stamped_parts(expr) {
-            Some((DeepTag::Defsig, _, kids)) => kids.first().and_then(symbol_name),
-            _ => None,
-        })
-        .map(str::to_string)
-        .collect::<BTreeSet<_>>();
     let flat = items
         .iter()
         .map(|(_, expr)| {
@@ -157,7 +146,6 @@ fn measure(program: &Program) -> Measured {
         plan,
         flat,
         module_fn_indices,
-        signed,
     }
 }
 
@@ -244,12 +232,10 @@ fn reference(program: &Program, measured: &Measured) -> Reference {
             {
                 if reader_is_module_fn {
                     edges.insert((vertex[function], vertex[index]), EdgeKind::Call);
-                } else if floor.is_some_and(|floor| index >= floor)
-                    && !measured.signed.contains(*name)
-                {
-                    // A signed function's header is global; only a
-                    // `defsig`-less function's scheme has to be inferred
-                    // before a reader can use it.
+                } else if floor.is_some_and(|floor| index >= floor) {
+                    // Unconditional, signed or not: a declared header may be
+                    // partial or generic and is only the function's scheme
+                    // once its body has narrowed it (chelis#1486).
                     edges.insert((vertex[function], vertex[index]), EdgeKind::Mirror);
                 }
             }
@@ -779,55 +765,39 @@ fn a_textual_chain_would_close_a_cycle_this_graph_does_not_have() {
 }
 
 #[test]
-fn a_value_naming_a_signed_function_that_reads_it_back_does_not_stall() {
-    // Round 10 F1: `carried` names `f` without applying it, and `f` reads
-    // `carried`. `f` carries a signature, so `carried`'s initializer needs
-    // only `f`'s header, which is global; an unconditional mirror edge
-    // `f -> carried` closed a two-cycle with the read edge `carried -> f`
-    // and the stall released `f` before `carried`. Only the `defsig`-less
-    // `wrap` earns a mirror edge, so the graph is acyclic.
-    let programs = [
-        named(
+fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
+    // chelis#1485: `carried` names `f` without applying it and `f` reads
+    // `carried`. Every reference is legal and there is no runtime cycle, but
+    // the mirror edge `f -> carried` and the read edge `carried -> f` point
+    // both ways, so the reference graph is cyclic and the schedule stalls.
+    // The mirror cannot be dropped for a signed `f` (chelis#1486), so this
+    // pins the stall: the reference graph must be cyclic and the schedule
+    // total with callees first. It reddens when the mirror rule changes;
+    // the parity suite and the CLI oracle pin the verdict itself and redden
+    // when #1485 closes.
+    for f in [
+        "def f(n: int32) -> int32 = if (n <= 0) then 0 else carried((n - 1))",
+        "def f(n) = if (n <= 0) then 0 else carried((n - 1))",
+    ] {
+        let program = named(
             true,
             vec![
                 function("anchor", "def anchor() -> int32 = 1", &[]),
                 value("carried", "carried = wrap(f)", &["wrap", "f"]),
                 function("wrap", "def wrap(g) = g", &[]),
-                function(
-                    "f",
-                    "def f(n: int32) -> int32 = if (n <= 0) then 0 else carried((n - 1))",
-                    &["carried"],
-                ),
+                function("f", f, &["carried"]),
             ],
-        ),
-        named(
-            true,
-            vec![
-                function("anchor", "def anchor() -> int32 = 1", &[]),
-                value(
-                    "carried",
-                    "carried = pick(fn (x: int32) -> f(x))",
-                    &["pick", "f"],
-                ),
-                function("pick", "def pick(g) = 5", &[]),
-                function(
-                    "f",
-                    "def f(n: int32) -> int32 = add(n, carried)",
-                    &["carried"],
-                ),
-            ],
-        ),
-    ];
-    for program in &programs {
-        let measured = measure(program);
-        let reference = reference(program, &measured);
-        assert!(is_acyclic(&reference), "{}", program.source());
-        assert!(violations(program).is_empty(), "{}", program.source());
-        assert_before(program, &measured, "carried", "f");
+        );
+        let measured = measure(&program);
+        let stall_reference = reference(&program, &measured);
+        assert!(
+            !is_acyclic(&stall_reference),
+            "chelis#1485 is closed for this spelling; retire the ratchet\n{}",
+            program.source()
+        );
+        assert!(violations(&program).is_empty(), "{}", program.source());
+        assert_eq!(measured.schedule.len(), measured.flat.len());
     }
-    let escape = &programs[0];
-    let measured = measure(escape);
-    assert_before(escape, &measured, "wrap", "carried");
 }
 
 #[test]
@@ -851,10 +821,9 @@ fn a_genuine_binding_cycle_stays_total_with_callees_first() {
     assert_eq!(measured.schedule.len(), measured.flat.len());
     assert_before(&three, &measured, "helper", "caller");
 
-    // `C1_mirror_cycle.ch`: the same runtime cycle through a SIGNED pair.
-    // `carried`'s initializer needs only `ping`'s header, so the reference
-    // graph is acyclic and the schedule never stalls; the cycle detector,
-    // not the schedule, owns the rejection.
+    // `C1_mirror_cycle.ch`: the same runtime cycle through a signed pair.
+    // The mirror edge is unconditional, so the reference graph is cyclic
+    // here too; the schedule stays total and the detector owns the verdict.
     let mirror = named(
         true,
         vec![
@@ -875,9 +844,9 @@ fn a_genuine_binding_cycle_stays_total_with_callees_first() {
     );
     let measured = measure(&mirror);
     let mirror_reference = reference(&mirror, &measured);
-    assert!(is_acyclic(&mirror_reference), "{}", mirror.source());
+    assert!(!is_acyclic(&mirror_reference), "{}", mirror.source());
     assert!(violations(&mirror).is_empty(), "{}", mirror.source());
-    assert_before(&mirror, &measured, "carried", "pong");
+    assert_eq!(measured.schedule.len(), measured.flat.len());
 }
 
 #[test]

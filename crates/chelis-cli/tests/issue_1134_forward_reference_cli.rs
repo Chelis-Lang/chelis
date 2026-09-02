@@ -288,13 +288,15 @@ fn check_accepts_a_backward_value_read_across_a_hoisted_module_function() {
     );
 }
 
-/// A header-less value naming a signed function that reads the value back
-/// (round 10). The initializer needs only the function's declared header, so
-/// nothing about the function has to be inferred first; a schedule that
-/// orders the function after the value anyway stalls and rejects this.
+/// chelis#1485, recorded rather than repaired: a header-less value naming a
+/// function that reads the value back. Legal under [04-INF-4], but the
+/// schedule's mirror and read edges point both ways and the stall releases the
+/// function first, so its backward read reports unbound. A ratchet, not a
+/// mute: this must still FAIL at the public surface, and reddens when #1485
+/// closes.
 #[test]
-fn check_accepts_a_value_that_names_a_signed_function_reading_it_back() {
-    assert_clean_report(
+fn a_value_that_names_a_function_reading_it_back_is_a_recorded_stall() {
+    assert_failed_report(
         "mirror_escape",
         "ch",
         "module MirrorEscape\n\n\
@@ -302,6 +304,7 @@ fn check_accepts_a_value_that_names_a_signed_function_reading_it_back() {
          carried = wrap(f)\n\n\
          def wrap(g) = g\n\n\
          def f(n: int32) -> int32 = if (n <= 0) then 0 else carried((n - 1))\n",
+        "UnboundVariable",
     );
 }
 

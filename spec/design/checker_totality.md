@@ -1561,16 +1561,17 @@ The edges, all "referenced before referencer", are:
   dependency. A forward value reference produces no edge, because the scope
   rule leaves it unbound;
 - **mirror**: an item at or after the earliest module-function ordinal after
-  every module function it reads whose scheme exists only once its body is
-  inferred, that is, one without a declared signature. A declared signature
-  is already in the global header environment, so a reader of a signed
-  function needs nothing scheduled first, and an edge there would close a
-  cycle on a legal program: a value that names a signed function which reads
-  the value back (round 10's finding). Bounded to the hoist's region, the
-  mirror reproduces exactly what the blunt hoist supplied implicitly, so
-  function visibility, which [04-INF-2]/[04-INF-3] own, is neither narrowed
-  nor widened. Bare functions keep textual availability and earn no call or
-  mirror edge.
+  every module function it reads, signed or not. A declared signature is in
+  the global header environment, but it is not yet the function's scheme: a
+  synthesized `defsig` with a wildcard slot or an implicit binder is
+  generalized over fresh variables, and a reader that instantiates it before
+  the body narrows it accepts programs the checker rejects when the body is
+  inferred first ([#1486]; round 11 measured the compiled wrong answer that
+  dropping the edge for signed functions produced). Bounded to the hoist's
+  region, the mirror reproduces exactly what the blunt hoist supplied
+  implicitly, so function visibility, which [04-INF-2]/[04-INF-3] own, is
+  neither narrowed nor widened. Bare functions keep textual availability and
+  earn no call or mirror edge.
 
 Nothing else orders the graph. In particular there is no textual chain over
 the non-function items and no chain over the planner order. Four earlier
@@ -1580,8 +1581,19 @@ the chains are not dependencies, so they closed cycles on legal programs
 (round 8's `C2_stall_no_cycle`), which made a cycle break a live path, and the
 break then released a function out of planner order (round 8's `D4_min`).
 With reference edges only, a cycle in the graph is a reference cycle through
-an eager value, which `detect_top_level_binding_cycles` already reports as
-`CycleDetected` at every ingress; the schedule stays total by releasing the
+an eager value. Most such cycles are runtime initialization cycles that
+`detect_top_level_binding_cycles` reports as `CycleDetected` at every ingress.
+One is not, and it is the recorded residual of this slice ([#1485]): a value
+that names a function reading the value back (`carried = wrap(f)` with `f`
+reading `carried`) is legal under [04-INF-4] and has no runtime cycle, but the
+mirror and the read edge point both ways. The stall releases the function
+first, its backward read reports unbound in Surf, and on stamped IR the
+serialized-IR ingress accepts from the body stamp while the typed ingress
+rejects. For a `defsig`-less function this is a genuine two-way inference
+dependency that no edge choice can order; for a signed one the edge cannot be
+dropped ([#1486]). The candidate repair, inferring a value/function reference
+cycle as one provisional group the way function SCCs are, is new mechanism
+and stays with [#1485]. Either way the schedule stays total by releasing the
 hoist-order-least remaining vertex, so a callee is still inferred before its
 caller.
 
@@ -1594,8 +1606,8 @@ component, which is invisible past `primary_inference_groups`: a program the
 blunt hoist scheduled correctly is grouped identically, and only programs it
 mis-scheduled change.
 Second, because every edge is a reference, the stall path is reachable only
-from a program the cycle detector rejects, so no accepted program depends on
-how a stall is broken.
+from a reference cycle through an eager value: a runtime initialization cycle
+the detector rejects, or the [#1485] shape above.
 
 The authoritative oracle for the schedule asserts these invariants directly on
 the returned order, not on accept/reject verdicts:
@@ -1610,13 +1622,13 @@ permutation with every component contiguous; that every declared edge is
 respected when the declared graph is acyclic; that the schedule equals the
 hoist order whenever the hoist order already respects every edge; and that a
 cyclic program still schedules every item once with callees before callers.
-Named regressions carry the shapes rounds 5 through 10 found: the hoisted
+Named regressions carry the shapes rounds 5 through 8 found: the hoisted
 reader, the straddled recursive component wrapped, bare and mixed, the value
-that reads a `defsig`-less caller, the planner-order break, the program a
-textual chain would have stalled, and the value that names a signed function
-reading it back. Each of the mutations that reproduces one of the abandoned
-repairs reddens it: restoring the blunt hoist, dropping the contraction,
-dropping the read edge, dropping the mirror, making the mirror unconditional,
+that reads a `defsig`-less caller, the planner-order break, and the program a
+textual chain would have stalled; the [#1485] shape is pinned as a stall
+ratchet that reddens when it closes. Each of the mutations that reproduces
+one of the abandoned repairs reddens the oracle: restoring the blunt hoist,
+dropping the contraction, dropping the read edge, dropping the mirror,
 reinstating either chain, releasing a stall by lowest ordinal, and restoring
 the identity short-circuit for bare units.
 
@@ -1644,7 +1656,14 @@ rejection, sequential-`let` shadowing, source-ordered value-only diagnostics,
 missing names, local forward references, and eager value cycles.
 `issue_1134_forward_reference_cli` carries the interleaved and straddled cases
 at the public `chelis check`, `eval`, and `build` surfaces, and the existing
-signature-inference and chelis#1124 suites are supporting regressions. This
+signature-inference and chelis#1124 suites are supporting regressions. The
+[#1485] shape is recorded as a ratchet in the parity suite and the CLI oracle:
+its Surf spellings must still reject identically and its stamped spelling must
+still split, so the residual cannot grow silently and both tests redden when
+it closes. Two adjacent pre-existing defects the rounds surfaced are tracked
+beside it and not absorbed here: a partial or generic header instantiated by a
+reader below the hoist floor ([#1486]), and the eager-cycle detector's blind
+spot for a lambda applied during a value's initialization ([#1487]). This
 slice does not absorb [#1125]'s reader audit, [#874]/[#887]'s tag-keyed
 vacuity, or [#1076]/[#672]'s independently owned name-precedence work.
 
@@ -1726,7 +1745,7 @@ vacuity, or [#1076]/[#672]'s independently owned name-precedence work.
 | PP5 (partial) | [#668]; the checker derives a rank fact for `ShapeClass::Identity` plus `conv2d`/`stride`/`expand`/`softmax` and rejects a positive-rank disagreement where it has one, on unforgeable rank-only facts; the tensor-DAG C emitter aborts on a positive-rank operand disagreement. No claim is made for operations outside that set or for the host-value emitter; see PP5 |
 | [#1247] residue | integer nominal arguments are kind-checked and concrete dimensions constrain every checker/test/compiler lane; [#1258] round trips the same representation |
 | [#1125] nominal-rank ingress residual | ordinary `.dp` ingress, `surf`, and `validate --deep` reject `d-rank` in nominal argument slots while preserving legal dimension arguments and tensor rank spreads; the broader reader-audit/lint issue remains open |
-| [#1134] forward-reference residual | both checker ingresses reject eager forward values, accept backward values from value initializers and from function bodies wherever the schedule places them, accept declaration-local explicitly typed external inputs, retain sequential local scope, and reject bare self-reference/eager value cycles identically; the schedule's order invariants are asserted directly |
+| [#1134] forward-reference residual | both checker ingresses reject eager forward values, accept backward values from value initializers and from function bodies wherever the schedule places them except the [#1485] shape, accept declaration-local explicitly typed external inputs, retain sequential local scope, and reject bare self-reference/eager value cycles identically; the schedule's order invariants are asserted directly |
 
 ## Decisions and remaining questions
 
@@ -1740,7 +1759,7 @@ vacuity, or [#1076]/[#672]'s independently owned name-precedence work.
 | 6 | whether two closures may each consume one underlying value through two user-visible names (`y = x`, one capture per name), or capture forwards through the alias chain generally | DECIDED 2026-08-21: preserved and made normative. A capture consumes the binding it names; distinct user-visible bindings of one value are distinct for capture; only a destructured component (or an alias of one) forwards to its carrier. Nautilus `lu_solve` and coral depend on the spelling; the reviewer guidance on [#1209] was to specify the choice explicitly and keep any tightening separate | [04-LIN-2] + PP3 |
 | 7 | whether one linked module's uniquely matching terminal name or one batched test file's declaration can confer unimported scope on another file | DECIDED 2026-08-31: no. Value lookup is exact-only after reef rewriting; batch entries are independently module-rewritten before combination; terminal matching is diagnostic-only | spec/02 P2 + [04-FIT-2] + PP4 |
 | 8 | whether an unannotated nominal parameter is a type, a dimension, or contextually reinterpreted per application | DECIDED 2026-08-31: one checker-owned header kind is fixed before body resolution. Dimension-only evidence selects `Dimension`; mixed use rejects; unused defaults to `Type`; transitive nominal uses propagate by least fixed point | [04-ADT-3]/[04-ADT-4] + [#1247] residue |
-| 9 | whether a top-level eager value may refer to a later value, and whether the two checker ingresses may differ | DECIDED 2026-09-01: no. Both ingresses reject a later eager value as unbound; serialized body metadata cannot create scope. Scope is read from declaration position, never from a binding timeline the inference schedule advances, and the schedule infers an eager value before any function that legally reads it, using only reference edges over the hoist order so a program without such a read keeps its previous order exactly. Only an explicitly typed self-reference receives a declaration-local external-input type; bare self-reference remains an eager cycle. Function inference groups remain separately governed by [04-INF-2]/[04-INF-3] | [04-INF-4] + [#1134] residue |
+| 9 | whether a top-level eager value may refer to a later value, and whether the two checker ingresses may differ | DECIDED 2026-09-01: no. Both ingresses reject a later eager value as unbound; serialized body metadata cannot create scope. Scope is read from declaration position, never from a binding timeline the inference schedule advances, and the schedule infers an eager value before any function that legally reads it, using only reference edges over the hoist order so a program without such a read keeps its previous grouped order. Only an explicitly typed self-reference receives a declaration-local external-input type; bare self-reference remains an eager cycle. Function inference groups remain separately governed by [04-INF-2]/[04-INF-3] | [04-INF-4] + [#1134] residue |
 
 ## Contract summary
 
@@ -1818,3 +1837,6 @@ cycles remain errors.
 [#1125]: https://github.com/Chelis-Lang/chelis/issues/1125
 [#1134]: https://github.com/Chelis-Lang/chelis/issues/1134
 [#887]: https://github.com/Chelis-Lang/chelis/issues/887
+[#1485]: https://github.com/Chelis-Lang/chelis/issues/1485
+[#1486]: https://github.com/Chelis-Lang/chelis/issues/1486
+[#1487]: https://github.com/Chelis-Lang/chelis/issues/1487

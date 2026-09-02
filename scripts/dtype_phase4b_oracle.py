@@ -58,7 +58,7 @@ FROZEN_FILE_DIGESTS = {
         "6f1c879bc89ab901fff658b63457a6846e5b6f8ab6ea4a17fd24ec6da0427bd2"
     ),
     "spec/04-type-system.md": (
-        "eb5954dfa63feba30ff6b4497e3b3adbaac1504ef9cf465b420228ae4d031ac8"
+        "cb8d029c61822460e25516c84a7c9c133d10339a6a96fb23d7aac2ebf4abbba6"
     ),
     "spec/05-risc-primitives.md": (
         "cc2814ddf033786c160fce9369053e38f09c3337166249eec5d93040f8e10271"

@@ -138,30 +138,52 @@ fn a_malformed_external_input_type_reports_identically_at_both_ingresses() {
     }
 }
 
-/// A header-less value that names a signed function which reads the value
-/// back. Every reference is legal and there is no initialization cycle: the
-/// value's initializer needs only the function's declared header, which is
-/// global. Round 10 found the schedule stalling on this shape because the
-/// mirror edge was unconditional; with a body stamp on the value (the
-/// serialized-IR spelling) the stall was an ingress split.
+/// chelis#1485, recorded rather than repaired: a header-less value that names
+/// a function which reads the value back. Every reference is legal under
+/// [04-INF-4] and there is no runtime cycle, but the schedule's mirror edge and
+/// read edge point both ways, the stall releases the function first, and its
+/// backward read reports unbound. The mirror cannot be dropped for a signed
+/// function without instantiating a partial header early (chelis#1486).
+///
+/// A ratchet, not a mute: the Surf spellings must still reject identically and
+/// the stamped spelling must still split, so the shape cannot grow silently
+/// and the test reddens the moment #1485 closes.
 #[test]
-fn a_value_naming_a_signed_function_that_reads_it_back_accepts_at_both_ingresses() {
-    let escape = surf_program(
-        "module MirrorEscape\n\n\
-         def anchor() -> int32 = 1\n\n\
-         carried = wrap(f)\n\n\
-         def wrap(g) = g\n\n\
-         def f(n: int32) -> int32 = if (n <= 0) then 0 else carried((n - 1))\n",
-    );
-    assert_accepts_at_both_ingresses(&escape, "value naming a signed reader");
-    let lambda = surf_program(
-        "module PickEscape\n\n\
-         def anchor() -> int32 = 1\n\n\
-         carried = pick(fn (x: int32) -> f(x))\n\n\
-         def pick(g) = 5\n\n\
-         def f(n: int32) -> int32 = add(n, carried)\n",
-    );
-    assert_accepts_at_both_ingresses(&lambda, "lambda naming a signed reader");
+fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
+    for (label, source) in [
+        (
+            "signed reader",
+            "module MirrorEscape\n\n\
+             def anchor() -> int32 = 1\n\n\
+             carried = wrap(f)\n\n\
+             def wrap(g) = g\n\n\
+             def f(n: int32) -> int32 = if (n <= 0) then 0 else carried((n - 1))\n",
+        ),
+        (
+            "lambda naming a signed reader",
+            "module PickEscape\n\n\
+             def anchor() -> int32 = 1\n\n\
+             carried = pick(fn (x: int32) -> f(x))\n\n\
+             def pick(g) = 5\n\n\
+             def f(n: int32) -> int32 = add(n, carried)\n",
+        ),
+        (
+            "defsig-less reader",
+            "module WrapEscape\n\n\
+             def anchor() -> int32 = 1\n\n\
+             carried = wrap(g)\n\n\
+             def wrap(h) = h\n\n\
+             def g(n) = if (n <= 0) then 0 else carried((n - 1))\n",
+        ),
+    ] {
+        let program = surf_program(source);
+        let (ir, typed) = diagnostics(&program);
+        assert_eq!(ir, typed, "{label}: ingress diagnostics diverged");
+        assert!(
+            ir.iter().any(|(kind, _)| kind == "UnboundVariable"),
+            "{label}: chelis#1485 is closed for this spelling; retire the ratchet: {ir:#?}"
+        );
+    }
     let stamped = deep_file_program(
         "(module {} MirrorEscapeStamped\n  \
            (defsig {} anchor (t-fn {} (t-prim {} int32)))\n  \
@@ -174,7 +196,12 @@ fn a_value_naming_a_signed_function_that_reads_it_back_accepts_at_both_ingresses
                (lit {type: (t-prim {} int32)} 0)\n      \
                (app {} (var {} carried) (app {} (var {} sub) (var {} n) (lit {type: (t-prim {} int32)} 1)))))))\n",
     );
-    assert_accepts_at_both_ingresses(&stamped, "stamped value naming a signed reader");
+    let (ir, typed) = diagnostics(&stamped);
+    assert!(
+        ir.is_empty() && typed.iter().any(|(kind, _)| kind == "UnboundVariable"),
+        "stamped reader: chelis#1485's ingress split has moved; retire or update the \
+         ratchet\n  ir:    {ir:#?}\n  typed: {typed:#?}"
+    );
 }
 
 #[test]

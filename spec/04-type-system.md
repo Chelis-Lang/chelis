@@ -779,6 +779,8 @@ recursive binding group, whether the recursion is direct or mutual.
 > inference groups remain governed by [04-INF-2] and [04-INF-3], and an eager
 > value cycle remains a type error reported as `CycleDetected`.
 
+(Not fully implemented; see chelis#1485.)
+
 ### 3.2 Inference Rules
 
 Standard notation: Γ ⊢ e : τ means "in environment Γ, expression e has type τ."

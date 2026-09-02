@@ -1529,12 +1529,13 @@ fn eager_value_definition_ordinals(
 ///   `def` has been inferred). For a module function this is the barrier
 ///   that keeps the hoist from carrying it across the value;
 /// - an item at or after the earliest module-function ordinal is inferred
-///   after every module function it reads whose scheme exists only once its
-///   body is inferred, that is, one without a declared signature. A declared
-///   signature is already in the global header environment, so a reader of a
-///   signed function needs nothing scheduled first, and an edge there would
-///   close a cycle on a legal program (a value naming a signed function that
-///   reads the value back). That mirrors what the hoist supplied implicitly,
+///   after every module function it reads, signed or not. A declared
+///   signature is in the global header environment, but it is not yet the
+///   function's scheme: a synthesized `defsig` with a wildcard slot or an
+///   implicit binder is generalized over fresh variables, and a reader that
+///   instantiates it before the body narrows it accepts programs the checker
+///   rejects when the body is inferred first (chelis#1486). The edge therefore
+///   stays unconditional; it mirrors what the hoist supplied implicitly,
 ///   bounded to the same region, so function visibility
 ///   ([04-INF-2]/[04-INF-3]) is neither narrowed nor widened;
 /// - a recursive component is one vertex, because
@@ -1547,10 +1548,15 @@ fn eager_value_definition_ordinals(
 /// chain over non-function items and no chain over the planner order. Such
 /// chains are not dependencies, and they close cycles on legal programs.
 /// With real reference edges only, a cycle in this graph is a reference cycle
-/// through an eager value, which `detect_top_level_binding_cycles` reports as
-/// `CycleDetected` at every ingress; the schedule then stays total by
-/// releasing the hoist-order-least remaining vertex, so a callee is still
-/// inferred before its caller.
+/// through an eager value. Most such cycles are runtime initialization cycles
+/// that `detect_top_level_binding_cycles` reports as `CycleDetected` at every
+/// ingress. One is not: a value that names a function reading the value back
+/// (`carried = wrap(f)` with `f` reading `carried`) is legal and cycles here
+/// because the mirror and the read edge point both ways; the stall then
+/// releases the function first and its backward read reports unbound
+/// (chelis#1485). Either way the schedule stays total by releasing the
+/// hoist-order-least remaining vertex, so a callee is still inferred before
+/// its caller.
 ///
 /// This is availability, not visibility. Whether a name is in scope is
 /// decided by `Env::top_level_value_visibility` from source position alone,
@@ -1620,14 +1626,6 @@ pub(super) fn primary_inference_schedule(
             module_fn_by_name.entry(name.to_string()).or_insert(index);
         }
     }
-    let signed_names = items
-        .iter()
-        .filter_map(|(_, expr)| match stamped_parts(expr) {
-            Some((DeepTag::Defsig, _, kids)) => kids.first().and_then(symbol_name),
-            _ => None,
-        })
-        .map(str::to_string)
-        .collect::<BTreeSet<_>>();
     let referenced_names = eager_value_ordinals
         .keys()
         .chain(module_fn_by_name.keys())
@@ -1648,14 +1646,10 @@ pub(super) fn primary_inference_schedule(
                 {
                     edges.insert((vertex_of[value], reader));
                 }
-                if let Some(&function) = module_fn_by_name.get(&name) {
-                    let call = reader_is_module_fn;
-                    let mirror = !reader_is_module_fn
-                        && floor.is_some_and(|floor| index >= floor)
-                        && !signed_names.contains(&name);
-                    if call || mirror {
-                        edges.insert((vertex_of[function], reader));
-                    }
+                if let Some(&function) = module_fn_by_name.get(&name)
+                    && (reader_is_module_fn || floor.is_some_and(|floor| index >= floor))
+                {
+                    edges.insert((vertex_of[function], reader));
                 }
             }
         }
