@@ -1927,16 +1927,42 @@ reinterpret either.
 `.venv/bin/python scripts/dtype_phase4b_oracle.py`; exit 0 and final line
 `DTYPE PHASE 4B ORACLE: PASS`. It validates the normative atoms in this slice,
 named-cast exclusion, typed numeric, sibling, and effect schema markers, frozen
-contract digests, phase naming, and generated rejection-registry agreement.
-Normative and schema inputs carry complete-file integrity fingerprints, and
-narrower atom/section fingerprints supply owning diagnostics. Updating a
-design or status document's integrity fingerprint is ordinary synchronized
-maintenance, not a semantic decision; only a change to the controlling
-numbered-spec atoms or frozen schema follows §B1. Roadmap and current-state
-documents are validated through required contract markers instead of whole-
-file semantic fingerprints.
+atom and region digests, the frozen-contract acknowledgement gate, phase
+naming, and generated rejection-registry agreement. Narrower atom and section
+fingerprints supply owning diagnostics for a changed clause. Roadmap and
+current-state documents are validated through required contract markers.
 Its success proves this freeze, not complete builtin-atom closure or any Phase
 4C implementation.
+
+The additive-contradiction leg is an acknowledgement, not a whole-file digest.
+An atom or region digest cannot defend its own boundaries, so the oracle also
+diffs every `CONTRACT_FILES` path against the merge base with the base branch
+and requires each changed file to be named in the pull request body:
+
+```text
+Frozen-contract-change: spec/04-type-system.md
+```
+
+one line per changed file, no leading whitespace, exactly one space after the
+colon, a repo-relative path with no glob and no `.`/`..` segment, and nothing
+after the path; lines inside fenced code blocks are ignored. An unacknowledged
+change and an acknowledgement naming an unchanged file both fail
+`--require-acknowledgement`, which is the mode CI runs on a pull request. A
+local run without that flag lists the changed contract files and the lines the
+body needs, then exits 0.
+
+Acknowledging a design or status document is ordinary synchronized
+maintenance, not a semantic decision; only a change to the controlling
+numbered-spec atoms or frozen schema follows §B1. Every earlier reference in
+this document to a "complete-file digest", a "full-file digest", or prose
+"resting on the file digests" describes the superseded mechanism, whether it
+records moving one or asserts what one defends: those digests are gone, the
+per-file granularity is unchanged, and the equivalent act is now the
+acknowledgement line. They were replaced because the digest table put every
+frozen contract file's hash in one Python dict, so two pull requests editing
+different chapters conflicted on adjacent lines and two editing the same
+chapter conflicted on a line whose correct post-rebase value was the digest of
+the merged text, which no side of the conflict held.
 
 ### Pre-4C - exact builtin-atom closure ([#1294])
 

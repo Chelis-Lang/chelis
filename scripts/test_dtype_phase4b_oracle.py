@@ -63,31 +63,9 @@ class ContractValidationTests(unittest.TestCase):
     def test_repository_contract_passes(self) -> None:
         oracle.validate_contract(REPO_ROOT)
 
-    def test_additive_prose_in_an_integrity_fingerprinted_file_fails(self) -> None:
-        for relative_name in oracle.FROZEN_FILE_DIGESTS:
-            relative = Path(relative_name)
-            with self.subTest(relative=relative):
-                path = self.root / relative
-                original = path.read_text(encoding="utf-8")
-                path.write_text(
-                    "An implementation MAY ignore the frozen Phase 4B contract.\n\n"
-                    + original,
-                    encoding="utf-8",
-                )
-                try:
-                    self.assert_contract_fails("frozen contract file")
-                finally:
-                    path.write_text(original, encoding="utf-8")
-
-    def test_spec06_additive_count_grad_contradiction_fails(self) -> None:
-        path = self.root / "spec/06-transformations.md"
-        original = path.read_text(encoding="utf-8")
-        path.write_text(
-            original
-            + "\nCount may return a silent zero cotangent when used under grad.\n",
-            encoding="utf-8",
-        )
-        self.assert_contract_fails("frozen contract file spec/06-transformations.md")
+    # The whole-file digest tests these replaced now live in
+    # FrozenContractChangeTests, which runs the same mutations against the
+    # merge-base acknowledgement gate.
 
     def test_agent_numeric_surface_additive_successor_exception_fails(self) -> None:
         path = self.root / "AGENTS.md"
@@ -104,6 +82,44 @@ class ContractValidationTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.assert_contract_fails("frozen agent numeric surface discipline")
+
+    def test_the_acknowledgement_gate_cannot_be_restated_as_a_digest(self) -> None:
+        # The Phase 4 handoff region digest moved when the plan's oracle
+        # description was rewritten. These three mutations are what defends the
+        # new text, so it rests on required literals rather than only on a
+        # re-hash.
+        self.replace(
+            Path("spec/design/dtype_semantics.md"),
+            "The additive-contradiction leg is an acknowledgement, not a "
+            "whole-file digest.",
+            "The additive-contradiction leg is a whole-file digest.",
+        )
+        self.assert_contract_fails(
+            "Phase 4B acknowledgement gate replaces whole-file digests"
+        )
+
+    def test_the_acknowledgement_cannot_become_a_blanket_declaration(self) -> None:
+        self.replace(
+            Path("spec/design/dtype_semantics.md"),
+            "requires each changed file to be named in the pull request body",
+            "requires the pull request to declare that contract files changed",
+        )
+        self.assert_contract_fails(
+            "Phase 4B acknowledgement is per changed file"
+        )
+
+    def test_a_stale_acknowledgement_cannot_be_made_advisory(self) -> None:
+        self.replace(
+            Path("spec/design/dtype_semantics.md"),
+            "An unacknowledged\nchange and an acknowledgement naming an "
+            "unchanged file both fail\n`--require-acknowledgement`, which is "
+            "the mode CI runs on a pull request.",
+            "An unacknowledged change fails `--require-acknowledgement`; an "
+            "acknowledgement naming an unchanged file is tolerated.",
+        )
+        self.assert_contract_fails(
+            "Phase 4B acknowledgement enforcing mode"
+        )
 
     def test_missing_operation_atom_fails(self) -> None:
         self.replace(
@@ -171,39 +187,9 @@ class ContractValidationTests(unittest.TestCase):
                 finally:
                     path.write_text(original, encoding="utf-8")
 
-    def test_top_level_value_scope_is_frozen_in_both_owning_chapters(self) -> None:
-        # [04-INF-4] and the spec/02 value-scope clause it qualifies move
-        # together; weakening either half must trip its file digest.
-        mutations = (
-            (
-                "spec/04-type-system.md",
-                "body-type\n> metadata SHALL NOT make that later value visible",
-                "body-type\n> metadata MAY make that later value visible",
-                "spec/04-type-system.md digest mismatch",
-            ),
-            (
-                "spec/04-type-system.md",
-                "A reference to an\n> earlier value SHALL resolve",
-                "A reference to an\n> earlier value MAY resolve",
-                "spec/04-type-system.md digest mismatch",
-            ),
-            (
-                "spec/02-surf-syntax.md",
-                "a non-function value declared earlier in the enclosing module",
-                "a non-function value declared anywhere in the enclosing module",
-                "spec/02-surf-syntax.md digest mismatch",
-            ),
-        )
-        for relative, old, new, message in mutations:
-            with self.subTest(message=f"{relative}: {old[:40]}"):
-                path = self.root / relative
-                original = path.read_text(encoding="utf-8")
-                self.assertIn(old, original)
-                path.write_text(original.replace(old, new, 1), encoding="utf-8")
-                try:
-                    self.assert_contract_fails(message)
-                finally:
-                    path.write_text(original, encoding="utf-8")
+    # test_top_level_value_scope_is_frozen_in_both_owning_chapters moved to
+    # FrozenContractChangeTests: neither clause sits inside a frozen region, so
+    # the acknowledgement gate is the leg that catches those mutations.
 
     def test_exact_read_atom_freezes_json_and_csv_numeric_boundaries(self) -> None:
         path = self.root / "spec/05-risc-primitives.md"
@@ -2997,7 +2983,11 @@ class ContractValidationTests(unittest.TestCase):
             "`and` / `or` / `not` are the logical operations; counting is the "
             "explicit-cast idiom",
         )
-        self.assert_contract_fails("frozen contract file")
+        # Confined to the frozen "numeric value semantics" region, so the
+        # region digest catches it with no git history in play. See
+        # FrozenRegionIndependenceTests for the same mutation run against a
+        # tree the acknowledgement gate cannot see at all.
+        self.assert_contract_fails("frozen numeric value semantics digest")
 
     def test_num8_keeps_representation_distinct_from_width(self) -> None:
         self.replace(
@@ -4004,6 +3994,813 @@ class RunnerTests(unittest.TestCase):
         run.side_effect = subprocess.CalledProcessError(1, [])
         with self.assertRaisesRegex(SystemExit, "rejection registry disagreement"):
             oracle.run_oracle(sys.executable, REPO_ROOT)
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ("git", "-C", str(root), *args),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _git_ok(root: Path, *args: str) -> str:
+    completed = _git(root, *args)
+    if completed.returncode != 0:
+        raise AssertionError(
+            f"git {' '.join(args)} failed in {root}: {completed.stderr}"
+        )
+    return completed.stdout
+
+
+def _commit_all(root: Path, message: str) -> str:
+    _git_ok(root, "add", "-A")
+    _git_ok(
+        root,
+        "-c",
+        "user.name=Frozen Contract Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--no-verify",
+        "-q",
+        "-m",
+        message,
+    )
+    return _git_ok(root, "rev-parse", "HEAD").strip()
+
+
+class AcknowledgementGrammarTests(unittest.TestCase):
+    """The line grammar is exact, case-sensitive, and glob-free."""
+
+    def parse(self, body: str) -> tuple[list[str], list[str]]:
+        return oracle.parse_acknowledgements(body)
+
+    def test_canonical_line_is_accepted(self) -> None:
+        paths, errors = self.parse(
+            "Some prose.\n"
+            "Frozen-contract-change: spec/04-type-system.md\n"
+            "Frozen-contract-change: AGENTS.md\n"
+        )
+        self.assertEqual(paths, ["spec/04-type-system.md", "AGENTS.md"])
+        self.assertEqual(errors, [])
+
+    def test_carriage_returns_from_a_github_body_are_tolerated(self) -> None:
+        # The pull request body arrives from the GitHub event payload with
+        # CRLF line endings; a lost acknowledgement here would read as an
+        # unacknowledged change and block every PR that edits a contract file.
+        paths, errors = self.parse(
+            "Body.\r\nFrozen-contract-change: spec/11-ffi.md\r\nMore.\r\n"
+        )
+        self.assertEqual(paths, ["spec/11-ffi.md"])
+        self.assertEqual(errors, [])
+
+    def test_lowercase_key_is_a_malformed_line_not_a_silent_miss(self) -> None:
+        paths, errors = self.parse("frozen-contract-change: spec/11-ffi.md\n")
+        self.assertEqual(paths, [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("malformed frozen contract acknowledgement", errors[0])
+
+    def test_list_bullet_and_indentation_are_malformed_lines(self) -> None:
+        for line in (
+            "- Frozen-contract-change: spec/11-ffi.md",
+            "  Frozen-contract-change: spec/11-ffi.md",
+            "> Frozen-contract-change: spec/11-ffi.md",
+            "* Frozen-contract-change: spec/11-ffi.md",
+        ):
+            with self.subTest(line=line):
+                paths, errors = self.parse(line + "\n")
+                self.assertEqual(paths, [])
+                self.assertEqual(len(errors), 1)
+
+    def test_missing_or_doubled_space_is_a_malformed_line(self) -> None:
+        for line in (
+            "Frozen-contract-change:spec/11-ffi.md",
+            "Frozen-contract-change:  spec/11-ffi.md",
+            "Frozen-contract-change: ",
+            "Frozen-contract-change:",
+        ):
+            with self.subTest(line=line):
+                paths, errors = self.parse(line + "\n")
+                self.assertEqual(paths, [])
+                self.assertEqual(len(errors), 1, errors)
+
+    def test_trailing_content_after_the_path_is_a_malformed_line(self) -> None:
+        paths, errors = self.parse(
+            "Frozen-contract-change: spec/11-ffi.md (adds a sentence)\n"
+        )
+        self.assertEqual(paths, [])
+        self.assertEqual(len(errors), 1)
+
+    def test_globs_and_traversal_are_rejected_paths(self) -> None:
+        for candidate in (
+            "spec/*.md",
+            "spec/0?-ffi.md",
+            "spec/[01]1-ffi.md",
+            "/spec/11-ffi.md",
+            "spec/../spec/11-ffi.md",
+            "./spec/11-ffi.md",
+            "spec\\11-ffi.md",
+            "spec//11-ffi.md",
+        ):
+            with self.subTest(candidate=candidate):
+                paths, errors = self.parse(
+                    f"Frozen-contract-change: {candidate}\n"
+                )
+                self.assertEqual(paths, [], candidate)
+                self.assertEqual(len(errors), 1, candidate)
+
+    def test_fenced_code_blocks_do_not_acknowledge(self) -> None:
+        # A body has to be able to quote the grammar without acknowledging a
+        # file, and a quoted example must not be mistaken for a real line.
+        paths, errors = self.parse(
+            "The grammar is:\n\n"
+            "```\n"
+            "Frozen-contract-change: spec/04-type-system.md\n"
+            "frozen-contract-change: wrong case\n"
+            "```\n\n"
+            "Frozen-contract-change: spec/11-ffi.md\n"
+        )
+        self.assertEqual(paths, ["spec/11-ffi.md"])
+        self.assertEqual(errors, [])
+
+    def test_a_tilde_run_does_not_close_a_backtick_fence(self) -> None:
+        # Round 1 F1. One boolean let any fence run close any other, so a line
+        # that GitHub renders as code could still acknowledge a change.
+        paths, errors = self.parse(
+            "```\n"
+            "~~~\n"
+            "Frozen-contract-change: spec/04-type-system.md\n"
+            "```\n"
+        )
+        self.assertEqual(paths, [])
+        self.assertEqual(errors, [])
+
+    def test_a_short_run_does_not_close_a_longer_fence(self) -> None:
+        # Round 1 F1. CommonMark requires the closing run to be at least as
+        # long as the opening one, so an inner ``` stays inside an outer ````.
+        paths, errors = self.parse(
+            "````\n"
+            "```\n"
+            "Frozen-contract-change: spec/04-type-system.md\n"
+            "```\n"
+            "````\n"
+        )
+        self.assertEqual(paths, [])
+        self.assertEqual(errors, [])
+
+    def test_a_longer_run_closes_a_shorter_fence(self) -> None:
+        paths, errors = self.parse(
+            "```\n"
+            "quoted\n"
+            "````\n"
+            "Frozen-contract-change: spec/11-ffi.md\n"
+        )
+        self.assertEqual(paths, ["spec/11-ffi.md"])
+        self.assertEqual(errors, [])
+
+    def test_a_tilde_fence_still_hides_its_contents(self) -> None:
+        paths, errors = self.parse(
+            "~~~\nFrozen-contract-change: spec/04-type-system.md\n~~~\n"
+        )
+        self.assertEqual((paths, errors), ([], []))
+
+    def test_an_unclosed_fence_is_an_error_not_a_silent_swallow(self) -> None:
+        # Round 1 F2. Without this the acknowledgement vanishes and the gate
+        # tells the author to add a line the body already carries.
+        paths, errors = self.parse(
+            "```\nFrozen-contract-change: spec/11-ffi.md\n"
+        )
+        self.assertEqual(paths, [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("unclosed", errors[0])
+
+    def test_an_unclosed_fence_errors_even_beside_a_valid_line(self) -> None:
+        # Round 2 RT2-5. Reporting the unclosed fence only when nothing parsed
+        # survived the round-1 suite: an author who acknowledges one file and
+        # then opens a fence loses every line after it with no diagnostic.
+        paths, errors = self.parse(
+            "Frozen-contract-change: spec/11-ffi.md\n"
+            "```\n"
+            "Frozen-contract-change: spec/10-serialization.md\n"
+        )
+        self.assertEqual(paths, ["spec/11-ffi.md"])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("unclosed", errors[0])
+
+    def test_trailing_whitespace_after_the_path_is_accepted(self) -> None:
+        # Round 2 RT2-5. `raw.rstrip()` is the reason, and it was untested in
+        # either direction, so replacing it with `rstrip("\n")` survived.
+        paths, errors = self.parse(
+            "Frozen-contract-change: spec/11-ffi.md   \t\n"
+        )
+        self.assertEqual(paths, ["spec/11-ffi.md"])
+        self.assertEqual(errors, [])
+
+    def test_lone_carriage_returns_still_separate_lines(self) -> None:
+        # Round 2 RT2-5. Dropping the lone-CR normalization survived, because
+        # every other test used LF or CRLF.
+        paths, errors = self.parse(
+            "Body.\rFrozen-contract-change: spec/11-ffi.md\rMore.\r"
+        )
+        self.assertEqual(paths, ["spec/11-ffi.md"])
+        self.assertEqual(errors, [])
+
+    def test_a_closed_fence_reports_no_unclosed_error(self) -> None:
+        paths, errors = self.parse("```\nquoted\n```\n")
+        self.assertEqual((paths, errors), ([], []))
+
+    def test_a_mid_sentence_mention_acknowledges_nothing(self) -> None:
+        paths, errors = self.parse(
+            "Each change adds a `Frozen-contract-change: <path>` line.\n"
+        )
+        self.assertEqual((paths, errors), ([], []))
+
+
+class FrozenContractChangeTests(unittest.TestCase):
+    """The merge-base diff plus acknowledgement gate.
+
+    Each test builds a real git repository so the check runs the same git
+    plumbing it runs in CI.
+    """
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name)
+        _git_ok(self.root, "init", "-q", "-b", "main")
+        for relative in CONTRACT_FILES:
+            destination = self.root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(REPO_ROOT / relative, destination)
+        self.base = _commit_all(self.root, "baseline")
+        _git_ok(self.root, "update-ref", "refs/remotes/origin/main", self.base)
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def check(self, **kwargs: object) -> list[str]:
+        parameters: dict[str, object] = {
+            "root": self.root,
+            "require_acknowledgement": True,
+        }
+        parameters.update(kwargs)
+        return oracle.validate_frozen_contract_changes(**parameters)  # type: ignore[arg-type]
+
+    def assert_fails(self, message: str, **kwargs: object) -> None:
+        with self.assertRaisesRegex(oracle.OracleError, message):
+            self.check(**kwargs)
+
+    def append(self, relative: str, text: str) -> None:
+        path = self.root / relative
+        path.write_text(
+            path.read_text(encoding="utf-8") + text, encoding="utf-8"
+        )
+
+    def test_unchanged_tree_passes(self) -> None:
+        report = self.check()
+        self.assertIn("0 of 28 contract files changed", report[0])
+
+    def test_every_contract_file_is_watched(self) -> None:
+        # The converted whole-file-digest test. Contradictory prose prepended
+        # to any contract file must fail, and the failure must name the file.
+        # The watched set is now all 28 CONTRACT_FILES, a superset of the 22
+        # that carried a whole-file digest.
+        self.assertEqual(len(CONTRACT_FILES), 28)
+        for relative in oracle.CONTRACT_FILES:
+            with self.subTest(relative=relative):
+                path = self.root / relative
+                original = path.read_text(encoding="utf-8")
+                path.write_text(
+                    "An implementation MAY ignore the frozen Phase 4B "
+                    "contract.\n\n" + original,
+                    encoding="utf-8",
+                )
+                try:
+                    self.assert_fails(
+                        "unacknowledged frozen contract change: "
+                        + re.escape(relative)
+                    )
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_top_level_value_scope_is_frozen_in_both_owning_chapters(self) -> None:
+        # [04-INF-4] and the spec/02 value-scope clause it qualifies move
+        # together; weakening either half must trip the freeze. This arrived on
+        # `main` asserting a whole-file digest mismatch. Neither clause is
+        # inside a frozen region, so the acknowledgement gate is what catches
+        # them now: same mutations, same guarantee.
+        mutations = (
+            (
+                "spec/04-type-system.md",
+                "body-type\n> metadata SHALL NOT make that later value visible",
+                "body-type\n> metadata MAY make that later value visible",
+            ),
+            (
+                "spec/04-type-system.md",
+                "A reference to an\n> earlier value SHALL resolve",
+                "A reference to an\n> earlier value MAY resolve",
+            ),
+            (
+                "spec/02-surf-syntax.md",
+                "a non-function value declared earlier in the enclosing module",
+                "a non-function value declared anywhere in the enclosing module",
+            ),
+        )
+        for relative, old, new in mutations:
+            with self.subTest(message=f"{relative}: {old[:40]}"):
+                path = self.root / relative
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_fails(
+                        "unacknowledged frozen contract change: "
+                        + re.escape(relative)
+                    )
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_spec06_additive_count_grad_contradiction_fails(self) -> None:
+        self.append(
+            "spec/06-transformations.md",
+            "\nCount may return a silent zero cotangent when used under grad.\n",
+        )
+        self.assert_fails(
+            "unacknowledged frozen contract change: spec/06-transformations.md"
+        )
+
+    def test_an_acknowledged_change_passes(self) -> None:
+        self.append("spec/11-ffi.md", "\nA reviewed sentence.\n")
+        report = self.check(acknowledgements=("spec/11-ffi.md",))
+        self.assertIn("1 of 28 contract files changed", report[0])
+        self.assertIn("  ok  Frozen-contract-change: spec/11-ffi.md", report)
+
+    def test_a_body_line_acknowledges_the_change(self) -> None:
+        self.append("spec/11-ffi.md", "\nA reviewed sentence.\n")
+        self.check(body="Frozen-contract-change: spec/11-ffi.md\n")
+
+    def test_acknowledging_one_file_does_not_cover_another(self) -> None:
+        self.append("spec/11-ffi.md", "\nA reviewed sentence.\n")
+        self.append("spec/10-serialization.md", "\nAn unreviewed sentence.\n")
+        self.assert_fails(
+            "unacknowledged frozen contract change: spec/10-serialization.md",
+            body="Frozen-contract-change: spec/11-ffi.md\n",
+        )
+
+    def test_a_stale_acknowledgement_fails(self) -> None:
+        self.assert_fails(
+            "stale frozen contract acknowledgement for spec/11-ffi.md",
+            body="Frozen-contract-change: spec/11-ffi.md\n",
+        )
+
+    def test_a_stale_acknowledgement_fails_beside_a_live_one(self) -> None:
+        self.append("spec/11-ffi.md", "\nA reviewed sentence.\n")
+        self.assert_fails(
+            "stale frozen contract acknowledgement for spec/10-serialization.md",
+            body=(
+                "Frozen-contract-change: spec/11-ffi.md\n"
+                "Frozen-contract-change: spec/10-serialization.md\n"
+            ),
+        )
+
+    def test_a_wrong_case_path_is_not_the_contract_file(self) -> None:
+        self.append("spec/11-ffi.md", "\nA reviewed sentence.\n")
+        self.assert_fails(
+            "names SPEC/11-ffi.md, which is not a frozen contract file",
+            body="Frozen-contract-change: SPEC/11-ffi.md\n",
+        )
+
+    def test_a_glob_never_acknowledges_a_change(self) -> None:
+        self.append("spec/11-ffi.md", "\nA reviewed sentence.\n")
+        self.assert_fails(
+            "malformed frozen contract acknowledgement path",
+            body="Frozen-contract-change: spec/*.md\n",
+        )
+
+    def test_a_non_contract_file_cannot_be_acknowledged(self) -> None:
+        self.assert_fails(
+            "names README.md, which is not a frozen contract file",
+            body="Frozen-contract-change: README.md\n",
+        )
+
+    def test_a_duplicate_acknowledgement_fails(self) -> None:
+        self.append("spec/11-ffi.md", "\nA reviewed sentence.\n")
+        self.assert_fails(
+            "duplicate frozen contract acknowledgement for spec/11-ffi.md",
+            body=(
+                "Frozen-contract-change: spec/11-ffi.md\n"
+                "Frozen-contract-change: spec/11-ffi.md\n"
+            ),
+        )
+
+    def test_a_deleted_contract_file_is_a_change(self) -> None:
+        (self.root / "spec/11-ffi.md").unlink()
+        self.assert_fails(
+            "unacknowledged frozen contract change: spec/11-ffi.md"
+        )
+
+    def test_a_whitespace_only_edit_is_a_change(self) -> None:
+        self.append("spec/11-ffi.md", "\n")
+        self.assert_fails(
+            "unacknowledged frozen contract change: spec/11-ffi.md"
+        )
+
+    def test_a_change_reverted_in_the_working_tree_is_not_a_change(self) -> None:
+        path = self.root / "spec/11-ffi.md"
+        original = path.read_text(encoding="utf-8")
+        path.write_text(original + "\nTemporary.\n", encoding="utf-8")
+        path.write_text(original, encoding="utf-8")
+        self.check()
+
+    def test_a_committed_change_on_the_branch_is_still_a_change(self) -> None:
+        # The comparison point is content, not the working tree's dirtiness:
+        # committing the edit must not clear the acknowledgement requirement.
+        _git_ok(self.root, "checkout", "-q", "-b", "topic")
+        self.append("spec/11-ffi.md", "\nA committed sentence.\n")
+        _commit_all(self.root, "edit the contract")
+        self.assert_fails(
+            "unacknowledged frozen contract change: spec/11-ffi.md"
+        )
+
+    def test_a_change_inherited_from_the_base_is_not_this_branch_s(self) -> None:
+        # The merge base, not the base tip, is the comparison point. A contract
+        # file that moved on `main` after this branch forked must not demand an
+        # acknowledgement from a branch that never touched it.
+        _git_ok(self.root, "checkout", "-q", "-b", "topic")
+        self.append("spec/10-serialization.md", "\nThis branch's edit.\n")
+        _commit_all(self.root, "branch edit")
+        _git_ok(self.root, "checkout", "-q", "main")
+        self.append("spec/11-ffi.md", "\nA later main-branch sentence.\n")
+        moved = _commit_all(self.root, "main moves on")
+        _git_ok(self.root, "update-ref", "refs/remotes/origin/main", moved)
+        _git_ok(self.root, "checkout", "-q", "topic")
+        report = self.check(
+            acknowledgements=("spec/10-serialization.md",)
+        )
+        self.assertIn("1 of 28 contract files changed", report[0])
+
+    def test_an_unreadable_baseline_blob_is_an_error_not_an_absence(self) -> None:
+        # Round 1 F3. Reading a failed `git show` as "absent at the merge base"
+        # would report a changed file as unchanged whenever the object store is
+        # degraded. The tree listing and the blob read are now separate.
+        merge_base = oracle.resolve_merge_base(self.root, "origin/main")
+        present = oracle.contract_files_at(
+            self.root, merge_base, oracle.CONTRACT_FILES
+        )
+        self.assertEqual(present, set(oracle.CONTRACT_FILES))
+
+        real_git = oracle._git
+
+        def failing_show(root: Path, *args: str):
+            if args and args[0] == "show":
+                return subprocess.CompletedProcess(
+                    args, 128, b"", b"fatal: unable to read object"
+                )
+            return real_git(root, *args)
+
+        with mock.patch.object(oracle, "_git", failing_show):
+            with self.assertRaisesRegex(
+                oracle.OracleError, r"cannot read .* at "
+            ):
+                oracle.changed_contract_files(
+                    self.root, merge_base, oracle.CONTRACT_FILES
+                )
+
+    def test_an_unlistable_merge_base_tree_is_an_error(self) -> None:
+        with self.assertRaisesRegex(
+            oracle.OracleError, "cannot list frozen contract files"
+        ):
+            oracle.contract_files_at(
+                self.root, "0" * 40, oracle.CONTRACT_FILES
+            )
+
+    def test_a_contract_file_absent_at_the_merge_base_is_a_change(self) -> None:
+        # The other half of F3: a genuine absence must still read as a change,
+        # not as an error.
+        _git_ok(self.root, "checkout", "-q", "-b", "topic")
+        new_path = self.root / "spec/11-ffi.md"
+        merge_base = oracle.resolve_merge_base(self.root, "origin/main")
+        present = oracle.contract_files_at(
+            self.root, merge_base, ("spec/11-ffi.md", "docs/absent-probe.md")
+        )
+        self.assertEqual(present, {"spec/11-ffi.md"})
+        self.assertTrue(new_path.exists())
+        (self.root / "docs/absent-probe.md").write_text("new\n", encoding="utf-8")
+        self.assertIn(
+            "docs/absent-probe.md",
+            oracle.changed_contract_files(
+                self.root, merge_base, ("docs/absent-probe.md",)
+            ),
+        )
+
+    def test_a_missing_merge_base_fails_loudly_in_strict_mode(self) -> None:
+        _git_ok(self.root, "update-ref", "-d", "refs/remotes/origin/main")
+        self.assert_fails("cannot determine the frozen contract merge base")
+
+    def test_a_non_repository_root_fails_loudly_in_strict_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as plain:
+            self.assert_fails(
+                "is not a git work tree", root=Path(plain)
+            )
+
+    def test_an_unreadable_tree_reports_and_exits_zero_in_advisory_mode(
+        self,
+    ) -> None:
+        # Round 2 RT2-4. The unreadable-blob repair made `changed_contract_files`
+        # raise, and advisory mode caught `OracleError` only around the merge
+        # base, so a degraded object store aborted the run before the atom and
+        # region digests. Advisory mode reports and continues.
+        real_git = oracle._git
+
+        def failing_listing(root: Path, *args: str):
+            if args and args[0] == "ls-tree":
+                return subprocess.CompletedProcess(
+                    args, 128, b"", b"fatal: not a tree object"
+                )
+            return real_git(root, *args)
+
+        with mock.patch.object(oracle, "_git", failing_listing):
+            report = self.check(require_acknowledgement=False)
+            self.assertTrue(
+                any("cannot list frozen contract files" in line for line in report),
+                report,
+            )
+            self.assertTrue(
+                any("change detection skipped" in line for line in report), report
+            )
+            with self.assertRaisesRegex(
+                oracle.OracleError, "cannot list frozen contract files"
+            ):
+                self.check(require_acknowledgement=True)
+
+    def test_a_missing_merge_base_reports_and_exits_zero_in_advisory_mode(
+        self,
+    ) -> None:
+        _git_ok(self.root, "update-ref", "-d", "refs/remotes/origin/main")
+        report = self.check(require_acknowledgement=False)
+        self.assertTrue(
+            any("cannot determine" in line for line in report), report
+        )
+        self.assertTrue(
+            any("change detection skipped" in line for line in report), report
+        )
+
+    def test_advisory_mode_reports_but_does_not_raise(self) -> None:
+        self.append("spec/11-ffi.md", "\nA reviewed sentence.\n")
+        report = self.check(require_acknowledgement=False)
+        self.assertTrue(
+            any(
+                "ISSUE unacknowledged frozen contract change: spec/11-ffi.md"
+                in line
+                for line in report
+            ),
+            report,
+        )
+
+    def test_an_explicit_base_ref_is_honoured(self) -> None:
+        _git_ok(self.root, "checkout", "-q", "-b", "topic")
+        self.append("spec/11-ffi.md", "\nA reviewed sentence.\n")
+        self.check(base=self.base, acknowledgements=("spec/11-ffi.md",))
+
+
+class FrozenRegionIndependenceTests(unittest.TestCase):
+    """A change inside a frozen region trips its digest on its own.
+
+    The acknowledgement gate replaces the whole-file digests. It does not
+    replace the atom and region digests, and it must not be the only thing
+    standing between a rewritten normative clause and a green oracle.
+    """
+
+    def test_a_region_edit_fails_without_any_git_history(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            for relative in CONTRACT_FILES:
+                destination = root / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(REPO_ROOT / relative, destination)
+            path = root / "spec/04-type-system.md"
+            original = path.read_text(encoding="utf-8")
+            old = (
+                "`and` / `or` / `not` are the\n  logical operations and "
+                "`count` is the bool-tensor counting operation"
+            )
+            self.assertIn(old, original)
+            path.write_text(
+                original.replace(
+                    old,
+                    "`and` / `or` / `not` are the logical operations; counting "
+                    "is the explicit-cast idiom",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                oracle.OracleError, "frozen numeric value semantics digest"
+            ):
+                oracle.validate_contract(root)
+
+
+class MergeConflictFreedomTests(unittest.TestCase):
+    """The property the acknowledgement gate exists to buy.
+
+    Two pull requests that edit different frozen contract files, or disjoint
+    sections of one, must not conflict in any tracked file other than the spec
+    files they each edited. The control leg reproduces the whole-file digest
+    table and shows the same pair of edits conflicting, so a clean merge in the
+    main leg is evidence rather than an artifact of the harness.
+    """
+
+    def build(self, root: Path, with_digest_table: bool) -> None:
+        (root / "spec").mkdir(parents=True, exist_ok=True)
+        (root / "spec/a.md").write_text(
+            "# A\n\n" + "".join(f"clause a{i}\n" for i in range(40)),
+            encoding="utf-8",
+        )
+        (root / "spec/b.md").write_text(
+            "# B\n\n" + "".join(f"clause b{i}\n" for i in range(40)),
+            encoding="utf-8",
+        )
+        if with_digest_table:
+            (root / "oracle.py").write_text(
+                "FROZEN_FILE_DIGESTS = {\n"
+                '    "spec/a.md": "' + "0" * 64 + '",\n'
+                '    "spec/b.md": "' + "1" * 64 + '",\n'
+                "}\n",
+                encoding="utf-8",
+            )
+
+    def edit(self, root: Path, relative: str, line: str, replacement: str) -> None:
+        path = root / relative
+        text = path.read_text(encoding="utf-8")
+        self.assertIn(line, text)
+        path.write_text(text.replace(line, replacement, 1), encoding="utf-8")
+
+    def move_digest(self, root: Path, relative: str, digit: str) -> None:
+        path = root / "oracle.py"
+        text = path.read_text(encoding="utf-8")
+        line = [entry for entry in text.splitlines() if relative in entry][0]
+        path.write_text(
+            text.replace(line, f'    "{relative}": "{digit * 64}",'),
+            encoding="utf-8",
+        )
+
+    def merge_is_clean(self, root: Path) -> bool:
+        merged = _git(root, "merge-tree", "--write-tree", "pr-one", "pr-two")
+        self.assertIn(
+            merged.returncode,
+            (0, 1),
+            f"git merge-tree errored: {merged.stderr}",
+        )
+        return merged.returncode == 0
+
+    def scenario(
+        self, with_digest_table: bool, same_file: bool
+    ) -> tuple[bool, str]:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            _git_ok(root, "init", "-q", "-b", "main")
+            self.build(root, with_digest_table)
+            _commit_all(root, "baseline")
+
+            _git_ok(root, "checkout", "-q", "-b", "pr-one")
+            self.edit(root, "spec/a.md", "clause a3\n", "clause a3 revised\n")
+            if with_digest_table:
+                self.move_digest(root, "spec/a.md", "a")
+            _commit_all(root, "pr one")
+
+            _git_ok(root, "checkout", "-q", "main")
+            _git_ok(root, "checkout", "-q", "-b", "pr-two")
+            if same_file:
+                self.edit(
+                    root, "spec/a.md", "clause a37\n", "clause a37 revised\n"
+                )
+                if with_digest_table:
+                    self.move_digest(root, "spec/a.md", "b")
+            else:
+                self.edit(
+                    root, "spec/b.md", "clause b3\n", "clause b3 revised\n"
+                )
+                if with_digest_table:
+                    self.move_digest(root, "spec/b.md", "b")
+            _commit_all(root, "pr two")
+
+            clean = self.merge_is_clean(root)
+            conflicts = _git(
+                root, "merge-tree", "--write-tree", "pr-one", "pr-two"
+            ).stdout
+            return clean, conflicts
+
+    def test_disjoint_contract_edits_merge_cleanly_without_the_digest_table(
+        self,
+    ) -> None:
+        for same_file in (False, True):
+            with self.subTest(same_file=same_file):
+                clean, _ = self.scenario(
+                    with_digest_table=False, same_file=same_file
+                )
+                self.assertTrue(
+                    clean,
+                    "edits to disjoint contract text must not conflict",
+                )
+
+    def test_the_digest_table_is_what_made_those_edits_conflict(self) -> None:
+        # Control. Without this leg a green test above would prove only that
+        # the harness cannot detect a conflict.
+        for same_file in (False, True):
+            with self.subTest(same_file=same_file):
+                clean, conflicts = self.scenario(
+                    with_digest_table=True, same_file=same_file
+                )
+                self.assertFalse(
+                    clean,
+                    "the whole-file digest table must reproduce the conflict "
+                    "this change removes",
+                )
+                self.assertIn("oracle.py", conflicts)
+                self.assertNotIn("spec/b.md", conflicts)
+
+
+class OracleEntryPointTests(unittest.TestCase):
+    """`main` runs the acknowledgement leg before it can print the pass line."""
+
+    def test_strict_mode_fails_before_the_success_line(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            _git_ok(root, "init", "-q", "-b", "main")
+            for relative in CONTRACT_FILES:
+                destination = root / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(REPO_ROOT / relative, destination)
+            base = _commit_all(root, "baseline")
+            _git_ok(root, "update-ref", "refs/remotes/origin/main", base)
+            path = root / "spec/11-ffi.md"
+            path.write_text(
+                path.read_text(encoding="utf-8") + "\nUnreviewed.\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                with self.assertRaisesRegex(
+                    SystemExit, "unacknowledged frozen contract change"
+                ):
+                    oracle.main(["--require-acknowledgement"], root=root)
+            self.assertNotIn(oracle.PASS_LINE, output.getvalue())
+
+    def test_at_most_one_acknowledgement_source(self) -> None:
+        parser = oracle.build_parser()
+        args = parser.parse_args(
+            ["--acknowledgements-file", "x", "--acknowledgements-env", "Y"]
+        )
+        with self.assertRaisesRegex(SystemExit, "at most one"):
+            oracle.acknowledgement_body(args)
+
+    def test_an_unset_acknowledgement_environment_variable_fails(self) -> None:
+        parser = oracle.build_parser()
+        args = parser.parse_args(
+            ["--acknowledgements-env", "CHELIS_ACK_ABSENT_FOR_TEST"]
+        )
+        with mock.patch.dict(oracle.os.environ, {}, clear=True):
+            with self.assertRaisesRegex(SystemExit, "is not set"):
+                oracle.acknowledgement_body(args)
+
+    def test_the_acknowledgement_environment_variable_is_read_verbatim(
+        self,
+    ) -> None:
+        parser = oracle.build_parser()
+        args = parser.parse_args(["--acknowledgements-env", "CHELIS_ACK_BODY"])
+        body = "Frozen-contract-change: spec/11-ffi.md\n"
+        with mock.patch.dict(oracle.os.environ, {"CHELIS_ACK_BODY": body}):
+            self.assertEqual(oracle.acknowledgement_body(args), body)
+
+    def test_an_acknowledgements_file_is_read(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / "body.md"
+            path.write_text(
+                "Frozen-contract-change: spec/11-ffi.md\n", encoding="utf-8"
+            )
+            args = oracle.build_parser().parse_args(
+                ["--acknowledgements-file", str(path)]
+            )
+            self.assertEqual(
+                oracle.acknowledgement_body(args),
+                "Frozen-contract-change: spec/11-ffi.md\n",
+            )
+
+    def test_a_missing_acknowledgements_file_fails(self) -> None:
+        args = oracle.build_parser().parse_args(
+            ["--acknowledgements-file", "/nonexistent/body.md"]
+        )
+        with self.assertRaisesRegex(SystemExit, "cannot read acknowledgements"):
+            oracle.acknowledgement_body(args)
+
+    def test_the_default_mode_does_not_require_acknowledgement(self) -> None:
+        args = oracle.build_parser().parse_args([])
+        self.assertFalse(args.require_acknowledgement)
+        self.assertEqual(args.base, oracle.DEFAULT_BASE_REF)
+        self.assertEqual(args.acknowledge, [])
 
 
 if __name__ == "__main__":

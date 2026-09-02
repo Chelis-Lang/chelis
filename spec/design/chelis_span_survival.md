@@ -744,8 +744,9 @@ sets, 1a through 1e, and slices 2 and 3 depend only on 1e.
    `.venv/bin/python scripts/generate_rejection_registries.py --write` and
    commits the generated registry. Because `spec/03-deep-syntax.md` is a
    frozen Phase 4B input, the same change amends
-   `spec/design/dtype_semantics.md` and tracker #729, deliberately updates
-   the full-file digest, and runs
+   `spec/design/dtype_semantics.md` and tracker #729, acknowledges both
+   contract files with a `Frozen-contract-change:` line per file in the pull
+   request body, and runs
    `.venv/bin/python scripts/dtype_phase4b_oracle.py` to the exact final line
    `DTYPE PHASE 4B ORACLE: PASS`. Until this slice lands, the remaining
    bullets are proposed implementation work and no source-identity wire or

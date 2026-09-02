@@ -1453,7 +1453,18 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
+      # Full history: the Phase 4B acknowledgement gate diffs every frozen
+      # contract file against `git merge-base origin/main HEAD`. The default
+      # shallow checkout gives neither a usable `origin/main` nor enough
+      # history behind it, and what it does give varies with the clone shape:
+      # measured, `--depth 1 --no-single-branch` makes `git merge-base` exit 1
+      # with no output, and `--depth 1 --branch <topic>` leaves `origin/main`
+      # absent entirely. The gate fails loudly on both, so a shallow checkout
+      # turns this job red rather than quiet, but the depth is what makes it
+      # green for the right reason.
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       # Free ~25-30 GB before the cargo build; see
       # .github/actions/free-disk-space (scripts/ci_free_disk.py).
@@ -1473,13 +1484,35 @@ jobs:
         run: uv run --managed-python --python 3.11 --no-project python -m unittest scripts.test_gate.CiParityTests.test_topology_docs_name_current_shard_owners
 
       # chelis#729 Phase 4B froze the numeric atoms and the capability schema
-      # behind complete-file and region digests over spec/ and spec/design/.
-      # The oracle validates documents and runs no cargo command, and a
-      # docs-only pull request skips every heavy job, so this always-run job is
-      # the only placement that actually defends the freeze against the edits
-      # most likely to break it.
+      # behind atom and region digests over spec/ and spec/design/, plus a
+      # per-file acknowledgement gate over every frozen contract file. The
+      # oracle validates documents and runs no cargo command, and a docs-only
+      # pull request skips every heavy job, so this always-run job is the only
+      # placement that actually defends the freeze against the edits most
+      # likely to break it. This step is unconditional: on a push or a
+      # workflow_dispatch it runs the atom and region digests and reports the
+      # contract diff without requiring a pull request body.
       - name: Validate the chelis#729 Phase 4B freeze
         run: uv run --managed-python --python 3.11 --no-project python scripts/dtype_phase4b_oracle.py
+
+      # The enforcing half. On a pull request every changed frozen contract
+      # file must be named by a `Frozen-contract-change:` line in the body.
+      # The body is untrusted text written by the PR author, so it is passed
+      # through the environment and never interpolated into a shell command.
+      #
+      # The base is the default `origin/main`, deliberately, not
+      # `github.event.pull_request.base.sha`. The checkout is `refs/pull/N/merge`,
+      # so HEAD is GitHub's test-merge commit and `git merge-base origin/main HEAD`
+      # is that commit's first parent: exactly the base the merge was built on.
+      # The payload SHA is only the base tip at event-creation time, so if `main`
+      # advances and GitHub regenerates the merge ref before the checkout, the
+      # payload SHA lags and main's changes get charged to this branch. The merge
+      # base cannot lag that way, and both steps then read one baseline.
+      - name: Require frozen contract acknowledgements
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: uv run --managed-python --python 3.11 --no-project python scripts/dtype_phase4b_oracle.py --require-acknowledgement --acknowledgements-env PR_BODY
 
       - name: Install mdBook
         uses: taiki-e/install-action@v2
