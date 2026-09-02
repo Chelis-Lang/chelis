@@ -253,9 +253,11 @@ dependency artifacts (4m15s to 4m45s per job).
 
 Test growth is the background trend: integration test files under
 `crates/*/tests/` went from 340 on 07-15 to 560 on 09-02, and the unsharded
-Workspace Tests job rose from 13.0 minutes (week 32) to 15 to 16 minutes
-(weeks 33 to 35). Sharding halved test execution to about 7 minutes per shard,
-but each shard still pays about 6.5 minutes of setup and full compile, which
-is why the shards only reached about 13 minutes before the two additions
-above landed on them. Compile time on 2 vCPUs, paid by nine Linux jobs per
+Workspace Tests job rose from a week-32 median of 13.0 minutes on push runs
+and 13.4 on pull-request runs to 15 to 16 minutes in weeks 33 to 35. Sharding
+halved test execution to about 7 minutes per shard, but each shard still pays
+about 6.5 minutes of setup and full compile, so before the two additions above
+landed the shards stood at about 13 minutes for shard 1 (its 17.2-minute
+median less the 4.4-minute listing) and 14.2 minutes for shard 2 (the week-36
+median before #1413). Compile time on 2 vCPUs, paid by nine Linux jobs per
 run, is the remaining structural cost.
