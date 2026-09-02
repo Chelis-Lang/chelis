@@ -25,11 +25,15 @@ Every source is read by a real parser for its language. Rust is read with
 `syn`. The headers are read through clang's front end (`-fsyntax-only -Xclang
 -ast-dump=json`) under a fixed target triple, `-ffreestanding -nostdlibinc`, a
 committed stub SDK, and a scrubbed environment, so the parse is the same on
-every host and every SDK state; the reader classifies the compiler's type
-spellings with the capacity census's closed word lists
-(`tests/support/c_lexical.rs`), which keeps one type-word authority in the
-repository rather than two. The owner of a seam is the declaration the
-compiler says encloses it, so declaration FORM is never this script's problem.
+every host and every SDK state. Each header's lane names the closed set of
+configurations it is parsed under and the row set is their union; an arm with
+code that no configuration parses, an include reaching outside the universe,
+and a type word no vocabulary classifies (in a declaration or an expression)
+all fail the scan. The reader classifies the compiler's type spellings with
+the capacity census's closed word lists (`tests/support/c_lexical.rs`), which
+keeps one type-word authority in the repository rather than two. The owner of
+a seam is the declaration the compiler says encloses it, so declaration FORM
+is never this script's problem.
 
 # Identity is the owning declaration
 
@@ -57,7 +61,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "698797cac2da1d28ea040f5d87b53145cfc88a2c3877c0032b615c44bf37118f"
+FREEZE_SHA256 = "37ebd59b76d8f0def9f54ca11e3e1169368df43de4101a3c5a30671186f6ccc5"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -964,6 +968,75 @@ def mutate_objc_element_pointer_parameter(source: str) -> str:
     )
 
 
+def mutate_c_carrier_in_simd_arm(source: str) -> str:
+    """A carrier inside the AVX2 arm of the SIMD header.
+
+    The scalar configuration never reads that arm; the lane's `avx2`
+    configuration must, or a helper that only ships on x86 servers is invisible.
+    """
+
+    return _insert_inside_include_guard(
+        source,
+        "runtime_representation_phase0_probe_avx",
+        """#ifdef __AVX2__
+static inline void runtime_representation_phase0_probe_avx(float *p) {
+    (void)p;
+}
+#endif""",
+    )
+
+
+def mutate_c_undeclared_conditional(source: str) -> str:
+    """A carrier behind a conditional no lane configuration selects.
+
+    The arm never parses, so the seam is invisible to every configuration; the
+    scan has to fail naming the directive rather than pass without the row.
+    """
+
+    return _insert_inside_include_guard(
+        source,
+        "RUNTIME_REPRESENTATION_PHASE0_PROBE_CFG",
+        """#ifdef RUNTIME_REPRESENTATION_PHASE0_PROBE_CFG
+extern float *runtime_representation_phase0_probe_cfg;
+#endif""",
+    )
+
+
+def mutate_objc_method_carrier(source: str) -> str:
+    """An Objective-C method whose result is an element pointer."""
+
+    return _append_probe(
+        source,
+        "RuntimeRepresentationPhase0Probe",
+        """@interface RuntimeRepresentationPhase0Probe : NSObject
+- (float *)elements;
+@end""",
+    )
+
+
+def mutate_c_unclassified_cast_spelling(source: str) -> str:
+    """An arithmetic spelling no vocabulary lists, in a cast rather than a
+    declaration. The inverted type-word rule holds in expression position."""
+
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_probe_cast",
+        """static inline void runtime_representation_phase0_probe_cast(void *p) {
+    ((_Float16 *)p)[0] = 0;
+}""",
+    )
+
+
+def mutate_c_pointer_to_element_array(source: str) -> str:
+    """A pointer to an array of elements, through a declarator group."""
+
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_probe_rows",
+        "void runtime_representation_phase0_probe_rows(float (*rows)[4]);",
+    )
+
+
 def mutate_rust_path_module(source: str) -> str:
     """`#[path]` compiles a file the inventory roots do not reach."""
 
@@ -1083,6 +1156,36 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
             "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
             mutate_objc_element_pointer_parameter,
             expected_owners=("runtime_representation_phase0_probe_fill",),
+        ),
+        _probe(
+            "raw-element-pointer",
+            "crates/chelis-runtime/include/chelis_simd.h",
+            mutate_c_carrier_in_simd_arm,
+            expected_owners=("runtime_representation_phase0_probe_avx",),
+        ),
+        _probe(
+            "undeclared-conditional",
+            "crates/chelis-runtime/include/chelis_runtime.h",
+            mutate_c_undeclared_conditional,
+            SOURCE_REJECTED_FAILURE,
+        ),
+        _probe(
+            "raw-element-pointer",
+            "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
+            mutate_objc_method_carrier,
+            expected_owners=("RuntimeRepresentationPhase0Probe::elements",),
+        ),
+        _probe(
+            "unknown-arithmetic-spelling",
+            "crates/chelis-runtime/include/chelis_runtime.h",
+            mutate_c_unclassified_cast_spelling,
+            SOURCE_REJECTED_FAILURE,
+        ),
+        _probe(
+            "raw-element-pointer",
+            "crates/chelis-runtime/include/chelis_runtime.h",
+            mutate_c_pointer_to_element_array,
+            expected_owners=("runtime_representation_phase0_probe_rows",),
         ),
         _probe(
             "rust-path-module",

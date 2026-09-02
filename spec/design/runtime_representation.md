@@ -512,15 +512,28 @@ The parse is host-independent by construction. Each header is read under a
 fixed target lane (C on `x86_64-unknown-linux-gnu`; `chelis_metal_runtime.h`
 as Objective-C on `x86_64-apple-macosx14.0`), with `-ffreestanding
 -nostdlibinc`, a committed stub SDK under `crates/chelis-repr-inventory/sdk-stubs/`
-standing in for libc, the HIP SDK, and the Apple frameworks, and a scrubbed
-environment, so Linux CI, macOS CI, Devenv, and a workstation see the same
-preprocessed text and produce the same rows. The stub SDK is deliberately
-minimal: a runtime header that starts using an SDK symbol the stub does not
-declare fails the scan until the stub declares it. `chelis_hip_runtime.h`'s only
-conditional beyond `__has_include` is `NDEBUG`; the lane parses the debug arm,
-which declares a strict superset of the release arm, and a scanner test proves
-that superset by execution. Cargo build scripts under the inventoried crates
-are roots too, since cargo compiles them like any other source.
+standing in for libc, the HIP SDK, the Apple frameworks, and the SIMD
+intrinsics headers, and a scrubbed environment, so Linux CI, macOS CI, Devenv,
+and a workstation see the same preprocessed text and produce the same rows.
+The stub SDK is deliberately minimal: a runtime header that starts using an
+SDK symbol the stub does not declare fails the scan until the stub declares
+it.
+
+A compiler reads one preprocessing configuration at a time, so a lane also
+names the closed set of configurations its headers are parsed under (the
+published headers scalar, with the AVX2 arm, and with the NEON arm; the HIP
+and Metal headers with and without `NDEBUG`), and a header's row set is the
+union over them. That set is checked rather than trusted: a marker planted at
+the start of every conditional arm lets the preprocessor itself report which
+arms each configuration keeps, and an arm that carries code and that no
+configuration keeps fails the scan naming its directive. An arm holding only
+other directives or a linkage-specification brace needs no configuration. Two
+more rules close the universe: an include that resolves to anything but the
+header itself, the stub SDK, the compiler's own headers, or the published
+include directory fails the scan, and the type-word rule applies in a cast,
+compound literal, or `sizeof` operand exactly as in a declaration. Cargo build
+scripts under the inventoried crates are roots too, since cargo compiles them
+like any other source.
 
 A row's identity is its kind, its path, and its owning declaration. Reformatting
 a literal inside a function does not move the freeze; adding a function, field,

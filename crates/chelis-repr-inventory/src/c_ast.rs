@@ -13,33 +13,44 @@
 //!
 //! Every header is parsed under a fixed target triple with `-ffreestanding
 //! -nostdlibinc` and a committed stub SDK (`sdk-stubs/`) in place of libc, the
-//! HIP SDK, and the Apple frameworks, and clang runs with a scrubbed
-//! environment. Linux CI, macOS CI, Devenv, and a workstation therefore see the
-//! same preprocessed text and produce the same rows, and the dumps stay small.
-//! The stub SDK is deliberately minimal: a runtime header that starts using an
-//! SDK symbol the stub does not declare fails the scan until the stub declares
-//! it, the same fail-closed discipline the capacity census applies to an
-//! unknown type word.
+//! HIP SDK, the Apple frameworks, and the SIMD intrinsics headers, and clang
+//! runs with a scrubbed environment. Linux CI, macOS CI, Devenv, and a
+//! workstation therefore see the same preprocessed text and produce the same
+//! rows, and the dumps stay small. The stub SDK is deliberately minimal: a
+//! runtime header that starts using an SDK symbol the stub does not declare
+//! fails the scan until the stub declares it, the same fail-closed discipline
+//! the capacity census applies to an unknown type word.
 //!
-//! # Configuration
+//! # Configurations and conditional arms
 //!
-//! `chelis_hip_runtime.h`'s only conditional beyond `__has_include` is
-//! `NDEBUG`. The lane parses the debug arm (no `-DNDEBUG`), which declares a
-//! strict superset of the release arm; `crate::c_ast::release_arm_rows` lets a
-//! test prove that claim by execution rather than by prose.
+//! The compiler reads one preprocessing configuration at a time, so a lane
+//! names the closed set of configurations a header is parsed under
+//! (`HeaderLane::configurations`), and the header's row set is the union over
+//! them. That set is checked, not trusted: every conditional arm in the
+//! header that carries code must be parsed by at least one configuration, or
+//! the scan fails naming the directive. The check asks the preprocessor
+//! itself which arms are live, through a marker pragma planted at the start
+//! of every arm, so no directive grammar is modelled here. An arm whose only
+//! content is other directives, or a linkage-specification brace, needs no
+//! configuration.
 //!
 //! # What fails closed
 //!
 //! - `clang` missing, or any diagnostic error, is a `ScanError` carrying the
 //!   compiler's own message.
-//! - A declaration kind this reader does not model is a `ScanError`, so a new
-//!   form cannot be dropped silently.
-//! - A declared type spelt with a word no vocabulary classifies (`_Float16`,
-//!   `__bf16`, `__int128`, ...) is a `ScanError` naming the word.
-//! - A seam that no named declaration encloses is a `ScanError`; a placeholder
-//!   owner would be a sink that absorbs every later seam of its kind.
-//! - A node missing the JSON fields the reader depends on is a `ScanError`,
-//!   so a clang JSON dialect change cannot look like an empty scan.
+//! - A conditional arm with code that no declared configuration parses.
+//! - An `#include` that resolves outside the universe: anything but the
+//!   staged copy, the stub SDK, the compiler's own resource headers, and the
+//!   published include directory (whose every header is registered).
+//! - A declaration kind this reader does not model, so a new form cannot be
+//!   dropped silently.
+//! - A type spelt with a word no vocabulary classifies (`_Float16`, `__bf16`,
+//!   `__int128`, ...), in declaration position or in a cast, compound
+//!   literal, or `sizeof` operand.
+//! - A seam that no named declaration encloses; a placeholder owner would be a
+//!   sink that absorbs every later seam of its kind.
+//! - A node missing the JSON fields the reader depends on, so a clang JSON
+//!   dialect change cannot look like an empty scan.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -51,7 +62,17 @@ use crate::{
     C_ELEMENT_TYPES, NARROWABLE_FIELDS, ScanError, SeamRow, c_lexical, excerpt, is_descriptor,
 };
 
-/// The front-end lane a registered header is read through.
+/// One preprocessing configuration a header is parsed under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Configuration {
+    pub name: &'static str,
+    /// Preprocessor flags that select the configuration.
+    pub flags: &'static [&'static str],
+}
+
+/// The front-end lane a registered header is read through: one language and
+/// target, and the closed set of configurations whose union is the header's
+/// row set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HeaderLane {
     /// clang `-x` language.
@@ -60,30 +81,78 @@ pub struct HeaderLane {
     pub target: &'static str,
     /// Additional front-end flags the language needs.
     pub extra: &'static [&'static str],
+    /// The configurations whose union is the row set.
+    pub configurations: &'static [Configuration],
 }
 
-/// Plain C on a Linux x86_64 target: the five published headers and the HIP
-/// support header (a host-side driver-API file with no device syntax).
-pub const C_LANE: HeaderLane = HeaderLane {
+/// The published headers: plain C, read scalar, then with the AVX2 arm and
+/// the NEON arm of `chelis_simd.h` selected. The SIMD macros are defined
+/// directly because the stub intrinsics headers carry no target-feature
+/// requirements, so no second target triple is needed.
+pub const PUBLIC_C_LANE: HeaderLane = HeaderLane {
     language: "c",
     target: "x86_64-unknown-linux-gnu",
     extra: &[],
+    configurations: &[
+        Configuration {
+            name: "scalar",
+            flags: &[],
+        },
+        Configuration {
+            name: "avx2",
+            flags: &["-D__AVX2__=1"],
+        },
+        Configuration {
+            name: "neon",
+            flags: &["-D__ARM_NEON=1"],
+        },
+    ],
+};
+
+/// The HIP support header: a host-side driver-API file with no device
+/// syntax, whose only conditional beyond `__has_include` is `NDEBUG`.
+pub const HIP_LANE: HeaderLane = HeaderLane {
+    language: "c",
+    target: "x86_64-unknown-linux-gnu",
+    extra: &[],
+    configurations: &[
+        Configuration {
+            name: "debug",
+            flags: &[],
+        },
+        Configuration {
+            name: "release",
+            flags: &["-DNDEBUG"],
+        },
+    ],
 };
 
 /// Objective-C on an x86_64 macOS target. The arm64 target would define
-/// `__ARM_NEON` and pull `arm_neon.h` into every dump for no row.
+/// `__ARM_NEON` and pull the NEON arm into every dump for no row.
 pub const OBJECTIVE_C_LANE: HeaderLane = HeaderLane {
     language: "objective-c",
     target: "x86_64-apple-macosx14.0",
     extra: &["-fobjc-arc", "-fblocks"],
+    configurations: &[
+        Configuration {
+            name: "debug",
+            flags: &[],
+        },
+        Configuration {
+            name: "release",
+            flags: &["-DNDEBUG"],
+        },
+    ],
 };
 
 /// Which lane reads a registered header path.
 pub fn lane_for(path: &str) -> HeaderLane {
     if path.ends_with("chelis_metal_runtime.h") {
         OBJECTIVE_C_LANE
+    } else if path.ends_with("chelis_hip_runtime.h") {
+        HIP_LANE
     } else {
-        C_LANE
+        PUBLIC_C_LANE
     }
 }
 
@@ -112,10 +181,27 @@ const QUALIFIER_WORDS: &[&str] = &[
 /// Objective-C spellings a declared type may contain that no C list names.
 const OBJECTIVE_C_TYPE_WORDS: &[&str] = &["BOOL", "Class", "SEL", "id", "instancetype"];
 
+/// Type operators that may appear inside a spelling and name no type of
+/// their own.
+const TYPE_OPERATOR_WORDS: &[&str] = &[
+    "__typeof",
+    "__typeof__",
+    "__typeof_unqual",
+    "__typeof_unqual__",
+    "typeof",
+    "typeof_unqual",
+];
+
 /// Element words the pointer rule accepts in a canonical (desugared) spelling
 /// in addition to `C_ELEMENT_TYPES`: `int64_t` desugars to `long`, `int16_t`
 /// to `short`.
 const CANONICAL_ELEMENT_WORDS: &[&str] = &["int", "long", "short"];
+
+/// The tokens a linkage-specification arm may contain: `extern "C" {` and
+/// its closing brace carry no seam and need no C++ configuration.
+const LINKAGE_TOKENS: &[&str] = &["extern", "\"C\"", "{", "}"];
+
+const ARM_MARKER: &str = "chelis_inventory_arm";
 
 /// Where the stub SDK and the published include directory live. The binary is
 /// built by the oracle inside the checkout it scans, so the crate's own
@@ -136,30 +222,32 @@ fn support_dirs() -> Result<(PathBuf, PathBuf), ScanError> {
     Ok((stubs, include))
 }
 
-/// Run clang over one file and return its JSON AST.
-fn dump_ast(lane: HeaderLane, file: &Path, defines: &[&str]) -> Result<Value, ScanError> {
-    let (stubs, include) = support_dirs()?;
+/// A clang invocation with the lane's language, target, stub SDK, published
+/// include directory, one configuration, and a scrubbed environment.
+fn clang_command(
+    lane: HeaderLane,
+    configuration: Configuration,
+    stubs: &Path,
+    include: &Path,
+) -> Command {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let mut command = Command::new("clang");
     command
         .env_clear()
         .env("PATH", path)
-        .args([
-            "-fsyntax-only",
-            "-Xclang",
-            "-ast-dump=json",
-            "-w",
-            "-fno-color-diagnostics",
-        ])
+        .args(["-w", "-fno-color-diagnostics"])
         .args(["-x", lane.language, "-target", lane.target])
         .args(["-ffreestanding", "-nostdlibinc"])
         .arg("-isystem")
-        .arg(&stubs)
+        .arg(stubs)
         .arg("-I")
-        .arg(&include)
+        .arg(include)
         .args(lane.extra)
-        .args(defines)
-        .arg(file);
+        .args(configuration.flags);
+    command
+}
+
+fn run_clang(mut command: Command, what: &str) -> Result<Vec<u8>, ScanError> {
     let output = command.output().map_err(|error| {
         ScanError::new(format!(
             "the runtime-representation inventory requires `clang` on PATH to parse the \
@@ -168,13 +256,56 @@ fn dump_ast(lane: HeaderLane, file: &Path, defines: &[&str]) -> Result<Value, Sc
     })?;
     if !output.status.success() {
         return Err(ScanError::new(format!(
-            "clang rejected `{}` ({}): {}",
-            file.display(),
+            "clang rejected {what} ({}): {}",
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
-    serde_json::from_slice(&output.stdout).map_err(|error| {
+    Ok(output.stdout)
+}
+
+/// The compiler's own header directory, so `stdint.h` and friends are
+/// recognised as inside the universe.
+fn resource_dir() -> Result<String, ScanError> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut command = Command::new("clang");
+    command
+        .env_clear()
+        .env("PATH", path)
+        .arg("-print-resource-dir");
+    let stdout = run_clang(command, "`-print-resource-dir`")?;
+    let dir = String::from_utf8_lossy(&stdout).trim().to_string();
+    if dir.is_empty() {
+        return Err(ScanError::new(
+            "clang did not report a resource directory; the inventory cannot tell the \
+             compiler's own headers from an include outside the universe",
+        ));
+    }
+    Ok(dir)
+}
+
+/// Run clang over one staged file under one configuration and return its
+/// JSON AST.
+fn dump_ast(
+    lane: HeaderLane,
+    configuration: Configuration,
+    stubs: &Path,
+    include: &Path,
+    file: &Path,
+) -> Result<Value, ScanError> {
+    let mut command = clang_command(lane, configuration, stubs, include);
+    command
+        .args(["-fsyntax-only", "-Xclang", "-ast-dump=json"])
+        .arg(file);
+    let stdout = run_clang(
+        command,
+        &format!(
+            "`{}` under the `{}` configuration",
+            file.display(),
+            configuration.name
+        ),
+    )?;
+    serde_json::from_slice(&stdout).map_err(|error| {
         ScanError::new(format!(
             "clang's AST dump for `{}` is not the JSON object this reader expects: {error}",
             file.display()
@@ -182,29 +313,63 @@ fn dump_ast(lane: HeaderLane, file: &Path, defines: &[&str]) -> Result<Value, Sc
     })
 }
 
-/// Scan one registered header's source text through its lane.
-pub fn scan_c_header(path: &str, source: &str) -> Result<Vec<SeamRow>, ScanError> {
-    scan_c_source(path, source, lane_for(path), &[])
+/// The arm ids the preprocessor keeps under one configuration, read back
+/// from the marker pragmas the staged copy plants.
+fn live_arms(
+    lane: HeaderLane,
+    configuration: Configuration,
+    stubs: &Path,
+    include: &Path,
+    marked_file: &Path,
+) -> Result<BTreeSet<usize>, ScanError> {
+    let mut command = clang_command(lane, configuration, stubs, include);
+    command.args(["-E", "-P"]).arg(marked_file);
+    let stdout = run_clang(
+        command,
+        &format!(
+            "the arm-marked copy of `{}` under the `{}` configuration",
+            marked_file.display(),
+            configuration.name
+        ),
+    )?;
+    let text = String::from_utf8_lossy(&stdout);
+    let prefix = format!("{ARM_MARKER}(");
+    let mut live = BTreeSet::new();
+    for line in text.lines() {
+        let mut rest = line;
+        while let Some(start) = rest.find(&prefix) {
+            let after = &rest[start + prefix.len()..];
+            if let Some(close) = after.find(')')
+                && let Ok(id) = after[..close].trim().parse::<usize>()
+            {
+                live.insert(id);
+            }
+            rest = after;
+        }
+    }
+    Ok(live)
 }
 
-/// The rows the release arm (`-DNDEBUG`) of a header yields. A test uses this
-/// to prove the debug arm the lane pins is a superset.
-pub fn release_arm_rows(path: &str, source: &str) -> Result<Vec<SeamRow>, ScanError> {
-    scan_c_source(path, source, lane_for(path), &["-DNDEBUG"])
+/// Scan one registered header's source text through its lane.
+pub fn scan_c_header(path: &str, source: &str) -> Result<Vec<SeamRow>, ScanError> {
+    scan_c_source(path, source, lane_for(path))
 }
 
 /// Scan source text as if it were the registered header at `path`, under an
-/// explicit lane and extra preprocessor definitions.
+/// explicit lane: every configuration is parsed, the rows are the union, and
+/// every conditional arm that carries code must have been parsed by one of
+/// them.
 pub fn scan_c_source(
     path: &str,
     source: &str,
     lane: HeaderLane,
-    defines: &[&str],
 ) -> Result<Vec<SeamRow>, ScanError> {
     let file_name = Path::new(path)
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| ScanError::new(format!("`{path}` has no file name")))?;
+    let (stubs, include) = support_dirs()?;
+    let resource = resource_dir()?;
     let scratch = tempfile::Builder::new()
         .prefix("chelis-repr-inventory-")
         .tempdir()
@@ -214,28 +379,217 @@ pub fn scan_c_source(
     let file = scratch.path().join(format!("staged-{file_name}"));
     std::fs::write(&file, source)
         .map_err(|error| ScanError::new(format!("cannot stage `{path}`: {error}")))?;
-    let tree = dump_ast(lane, &file, defines)?;
-    let file_text = file.to_string_lossy().to_string();
-    let mut names = DeclaredNames::default();
-    names.collect(&tree);
-    let mut reader = Reader {
-        path,
-        source,
-        file: file_text,
-        current_file: None,
-        names,
-        owners: Vec::new(),
-        function_depth: 0,
-        rows: Vec::new(),
-        seen: BTreeSet::new(),
-        record_descriptor: false,
-        error: None,
-    };
-    reader.visit_translation_unit(&tree);
-    match reader.error {
-        Some(error) => Err(error),
-        None => Ok(reader.rows),
+    let arms = ConditionalArms::analyze(source);
+    let marked_file = scratch.path().join(format!("staged-arms-{file_name}"));
+    std::fs::write(&marked_file, &arms.marked_source)
+        .map_err(|error| ScanError::new(format!("cannot stage `{path}`: {error}")))?;
+    let allowed_prefixes = vec![
+        file.to_string_lossy().to_string(),
+        stubs.to_string_lossy().to_string(),
+        include.to_string_lossy().to_string(),
+        resource,
+    ];
+
+    let mut rows = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut live = BTreeSet::new();
+    for configuration in lane.configurations {
+        live.extend(live_arms(
+            lane,
+            *configuration,
+            &stubs,
+            &include,
+            &marked_file,
+        )?);
+        let tree = dump_ast(lane, *configuration, &stubs, &include, &file)?;
+        let mut names = DeclaredNames::default();
+        names.collect(&tree);
+        let mut reader = Reader {
+            path,
+            source,
+            file: file.to_string_lossy().to_string(),
+            allowed_prefixes: &allowed_prefixes,
+            current_file: None,
+            names,
+            owners: Vec::new(),
+            function_depth: 0,
+            rows: std::mem::take(&mut rows),
+            seen: std::mem::take(&mut seen),
+            record_descriptor: false,
+            error: None,
+        };
+        reader.visit_translation_unit(&tree);
+        rows = reader.rows;
+        seen = reader.seen;
+        if let Some(error) = reader.error {
+            return Err(error);
+        }
     }
+    for arm in &arms.arms {
+        if arm.has_code && !live.contains(&arm.id) {
+            return Err(ScanError::new(format!(
+                "`{path}` line {}: the arm opened by `{}` carries code that none of the `{}` \
+                 lane's configurations ({}) parses, so its seams would be invisible; add the \
+                 configuration to the lane in crates/chelis-repr-inventory/src/c_ast.rs, or \
+                 remove the conditional",
+                arm.line,
+                arm.directive,
+                lane.language,
+                lane.configurations
+                    .iter()
+                    .map(|configuration| configuration.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+    }
+    Ok(rows)
+}
+
+/// One arm of a conditional directive, and whether it carries code that a
+/// configuration has to parse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConditionalArm {
+    pub id: usize,
+    /// The one-based physical line of the directive that opens the arm.
+    pub line: usize,
+    pub directive: String,
+    pub has_code: bool,
+}
+
+/// The conditional structure of a header, read lexically: where each arm
+/// opens, what it contains, and a copy of the source with a marker pragma
+/// planted at the start of every arm so the preprocessor can report which
+/// arms a configuration keeps.
+pub struct ConditionalArms {
+    pub arms: Vec<ConditionalArm>,
+    pub marked_source: String,
+}
+
+impl ConditionalArms {
+    pub fn analyze(source: &str) -> Self {
+        let stripped = c_lexical::strip_c_comments(source);
+        let original: Vec<&str> = source.split('\n').collect();
+        let physical: Vec<&str> = stripped.split('\n').collect();
+        // Logical lines: a backslash continues a directive onto the next
+        // physical line. Each logical line remembers its physical span.
+        let mut logical: Vec<(usize, usize, String)> = Vec::new();
+        let mut index = 0;
+        while index < physical.len() {
+            let start = index;
+            let mut text = String::new();
+            loop {
+                let line = physical[index];
+                if let Some(head) = line.strip_suffix('\\')
+                    && index + 1 < physical.len()
+                {
+                    text.push_str(head);
+                    text.push(' ');
+                    index += 1;
+                    continue;
+                }
+                text.push_str(line);
+                break;
+            }
+            logical.push((start, index, text));
+            index += 1;
+        }
+        let directive_of = |text: &str| -> Option<String> {
+            let trimmed = text.trim_start();
+            let rest = trimmed
+                .strip_prefix('#')
+                .or_else(|| trimmed.strip_prefix("%:"))?;
+            Some(rest.trim_start().to_string())
+        };
+        let is_conditional_open = |directive: &str| {
+            ["if", "ifdef", "ifndef"]
+                .iter()
+                .any(|word| starts_with_word(directive, word))
+        };
+        let is_conditional_alternative = |directive: &str| {
+            starts_with_word(directive, "elif") || starts_with_word(directive, "else")
+        };
+        let is_conditional_close = |directive: &str| starts_with_word(directive, "endif");
+
+        // Pass one: find every arm's opening logical line and its extent.
+        let mut arms: Vec<ConditionalArm> = Vec::new();
+        let mut open_arm_by_logical: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut spans: Vec<(usize, usize)> = Vec::new(); // arm id -> logical [start, end)
+        let mut stack: Vec<usize> = Vec::new(); // open arm ids
+        for (logical_index, (first, _, text)) in logical.iter().enumerate() {
+            let Some(directive) = directive_of(text) else {
+                continue;
+            };
+            if is_conditional_open(&directive) {
+                let id = arms.len();
+                arms.push(ConditionalArm {
+                    id,
+                    line: first + 1,
+                    directive: excerpt(&directive),
+                    has_code: false,
+                });
+                spans.push((logical_index + 1, logical.len()));
+                open_arm_by_logical.insert(logical_index, id);
+                stack.push(id);
+            } else if is_conditional_alternative(&directive) {
+                if let Some(previous) = stack.pop() {
+                    spans[previous].1 = logical_index;
+                }
+                let id = arms.len();
+                arms.push(ConditionalArm {
+                    id,
+                    line: first + 1,
+                    directive: excerpt(&directive),
+                    has_code: false,
+                });
+                spans.push((logical_index + 1, logical.len()));
+                open_arm_by_logical.insert(logical_index, id);
+                stack.push(id);
+            } else if is_conditional_close(&directive)
+                && let Some(previous) = stack.pop()
+            {
+                spans[previous].1 = logical_index;
+            }
+        }
+        // Pass two: an arm carries code when any non-directive logical line in
+        // its span has tokens beyond a linkage brace.
+        for (id, (start, end)) in spans.iter().enumerate() {
+            let has_code = logical[*start..*end].iter().any(|(_, _, text)| {
+                if directive_of(text).is_some() {
+                    return false;
+                }
+                let tokens = c_lexical::lex_c_tokens(text);
+                !tokens.is_empty()
+                    && !tokens
+                        .iter()
+                        .all(|token| LINKAGE_TOKENS.contains(&token.as_str()))
+            });
+            arms[id].has_code = has_code;
+        }
+        // Pass three: plant a marker after every arm-opening directive.
+        let mut marked = String::with_capacity(source.len() + arms.len() * 40);
+        let mut physical_index = 0;
+        for (logical_index, (first, last, _)) in logical.iter().enumerate() {
+            debug_assert_eq!(physical_index, *first);
+            for line in &original[*first..=*last] {
+                marked.push_str(line);
+                marked.push('\n');
+            }
+            physical_index = last + 1;
+            if let Some(id) = open_arm_by_logical.get(&logical_index) {
+                marked.push_str(&format!("#pragma {ARM_MARKER}({id})\n"));
+            }
+        }
+        Self {
+            arms,
+            marked_source: marked,
+        }
+    }
+}
+
+fn starts_with_word(text: &str, word: &str) -> bool {
+    text.strip_prefix(word)
+        .is_some_and(|rest| !rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_'))
 }
 
 /// Names the translation unit declares, gathered before the row pass so a
@@ -278,8 +632,8 @@ impl DeclaredNames {
                     .entry(owned)
                     .or_insert_with(|| name.to_string());
             }
-            if let Some(target) = desugared_type(node) {
-                let words = c_lexical::lex_c_tokens(&strip_attributes(target));
+            if let Some(target) = desugared_type(node.get("type")) {
+                let words = c_lexical::lex_c_tokens(&strip_annotations(target));
                 if words.iter().any(|word| word != name) {
                     self.aliases.entry(name.to_string()).or_insert(words);
                 }
@@ -324,14 +678,17 @@ fn field_str<'a>(node: &'a Value, key: &str) -> Option<&'a str> {
     node.get(key).and_then(Value::as_str)
 }
 
-fn qual_type(node: &Value) -> Option<&str> {
-    node.get("type").and_then(|ty| field_str(ty, "qualType"))
+/// The written spelling of a type object (`{"qualType": ..}`).
+fn qual_type(type_object: Option<&Value>) -> Option<&str> {
+    type_object.and_then(|ty| field_str(ty, "qualType"))
 }
 
-fn desugared_type(node: &Value) -> Option<&str> {
-    node.get("type")
+/// The one-level desugared spelling of a type object, or its written
+/// spelling when the dumper printed only that.
+fn desugared_type(type_object: Option<&Value>) -> Option<&str> {
+    type_object
         .and_then(|ty| field_str(ty, "desugaredQualType"))
-        .or_else(|| qual_type(node))
+        .or_else(|| qual_type(type_object))
 }
 
 /// A source position in the file the dumper last named, read the way the
@@ -352,6 +709,9 @@ struct Reader<'a> {
     source: &'a str,
     /// The staged file's path as clang prints it.
     file: String,
+    /// Path prefixes a declaration may come from: the staged copy, the stub
+    /// SDK, the published include directory, and the compiler's own headers.
+    allowed_prefixes: &'a [String],
     current_file: Option<String>,
     names: DeclaredNames,
     owners: Vec<String>,
@@ -500,14 +860,16 @@ impl<'a> Reader<'a> {
     /// translation unit's own typedefs.
     fn resolved_words(&self, spelling: &str) -> Vec<String> {
         c_lexical::resolve_words(
-            c_lexical::lex_c_tokens(&strip_attributes(spelling)),
+            c_lexical::lex_c_tokens(&strip_annotations(spelling)),
             &self.names.aliases,
         )
     }
 
-    /// Reject a declared type spelt with a word no vocabulary classifies.
-    fn check_type_words(&mut self, node: &Value, what: &str) {
-        let Some(spelling) = desugared_type(node) else {
+    /// Reject a type spelt with a word no vocabulary classifies, wherever the
+    /// spelling appears: a declaration, a cast, a compound literal, or a
+    /// `sizeof` operand.
+    fn check_type_words(&mut self, type_object: Option<&Value>, what: &str) {
+        let Some(spelling) = desugared_type(type_object) else {
             return;
         };
         for word in self.resolved_words(spelling) {
@@ -519,7 +881,7 @@ impl<'a> Reader<'a> {
                 continue;
             }
             self.fail(format!(
-                "`{}` declares {what} with the unrecognized C type word `{word}` (in \
+                "`{}` spells {what} with the unrecognized C type word `{word}` (in \
                  `{spelling}`): classify it in tests/support/c_lexical.rs rather than \
                  routing around it",
                 self.path
@@ -534,13 +896,14 @@ impl<'a> Reader<'a> {
             || C_ELEMENT_TYPES.contains(&word)
             || QUALIFIER_WORDS.contains(&word)
             || OBJECTIVE_C_TYPE_WORDS.contains(&word)
+            || TYPE_OPERATOR_WORDS.contains(&word)
             || self.names.words.contains(word)
     }
 
-    /// Does a declared type govern an element pointer, as written or once
-    /// every typedef alias is resolved?
-    fn governs_element_pointer(&self, node: &Value) -> bool {
-        [qual_type(node), desugared_type(node)]
+    /// Does a type govern an element pointer, as written or once every
+    /// typedef alias is resolved?
+    fn governs_element_pointer(&self, type_object: Option<&Value>) -> bool {
+        [qual_type(type_object), desugared_type(type_object)]
             .into_iter()
             .flatten()
             .any(|spelling| governs_a_pointer(&self.resolved_words(spelling)))
@@ -575,9 +938,25 @@ impl<'a> Reader<'a> {
             return;
         }
         if !in_file {
-            // Declarations from the stub SDK and the compiler's own headers
-            // are not inventory surface. Their children still advance the
+            // Declarations from the stub SDK, the compiler's own headers, and
+            // the published include directory are not this header's surface,
+            // but anything else reached through an include is a file the
+            // universe does not contain. Their children still advance the
             // dumper's file state, which the reader must follow.
+            if let Some(file) = self.current_file.clone()
+                && !self
+                    .allowed_prefixes
+                    .iter()
+                    .any(|prefix| file.starts_with(prefix.as_str()))
+            {
+                self.fail(format!(
+                    "`{}` includes `{file}`, which is outside the inventory universe (the \
+                     header itself, the stub SDK, the compiler's own headers, and the \
+                     published include directory); register the file under an inventory \
+                     root, or move the declarations it carries",
+                    self.path
+                ));
+            }
             self.skip_subtree(node);
             return;
         }
@@ -592,7 +971,7 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn name_of(&mut self, node: &Value, kind: &str) -> Option<String> {
+    fn name_of(&mut self, node: &Value) -> Option<String> {
         match field_str(node, "name") {
             Some(name) if !name.is_empty() => Some(name.to_string()),
             _ => {
@@ -601,7 +980,6 @@ impl<'a> Reader<'a> {
                 {
                     return Some(typedef.clone());
                 }
-                let _ = kind;
                 None
             }
         }
@@ -616,9 +994,9 @@ impl<'a> Reader<'a> {
         end: Option<Position>,
     ) {
         match kind {
-            "RecordDecl" | "CXXRecordDecl" => self.visit_record(node, begin),
+            "RecordDecl" | "CXXRecordDecl" => self.visit_record(node),
             "EnumDecl" => {
-                let name = self.name_of(node, kind).unwrap_or_default();
+                let name = self.name_of(node).unwrap_or_default();
                 if name.is_empty() {
                     // An anonymous enum's constants own themselves.
                     for child in children(node) {
@@ -640,12 +1018,12 @@ impl<'a> Reader<'a> {
                     }
                 });
             }
-            "FunctionDecl" | "ObjCMethodDecl" => self.visit_function(node, begin),
+            "FunctionDecl" | "ObjCMethodDecl" => self.visit_function(node, kind, begin),
             "VarDecl" => {
                 let name = field_str(node, "name").unwrap_or_default().to_string();
-                self.check_type_words(node, &format!("`{name}`"));
+                self.check_type_words(node.get("type"), &format!("`{name}`"));
                 let sample = self.declaration_sample(begin);
-                let governs = self.governs_element_pointer(node);
+                let governs = self.governs_element_pointer(node.get("type"));
                 self.with_owner(name.clone(), false, |reader| {
                     if governs {
                         reader.push("raw-element-pointer", sample.clone(), &name);
@@ -657,9 +1035,9 @@ impl<'a> Reader<'a> {
             }
             "TypedefDecl" => {
                 let name = field_str(node, "name").unwrap_or_default().to_string();
-                self.check_type_words(node, &format!("typedef `{name}`"));
+                self.check_type_words(node.get("type"), &format!("typedef `{name}`"));
                 let sample = self.declaration_sample(begin);
-                let governs = self.governs_element_pointer(node);
+                let governs = self.governs_element_pointer(node.get("type"));
                 self.with_owner(name.clone(), false, |reader| {
                     if governs {
                         reader.push("raw-element-pointer", sample.clone(), &name);
@@ -692,24 +1070,6 @@ impl<'a> Reader<'a> {
                     self.visit_nested(child);
                 }
             }
-            "StaticAssertDecl"
-            | "FileScopeAsmDecl"
-            | "PragmaCommentDecl"
-            | "PragmaDetectMismatchDecl"
-            | "ImportDecl"
-            | "NamespaceDecl"
-            | "UsingDecl"
-            | "UsingDirectiveDecl"
-            | "FunctionTemplateDecl"
-            | "ClassTemplateDecl"
-            | "TypeAliasDecl" => {
-                self.fail(format!(
-                    "`{}` contains a `{kind}` declaration the inventory reader does not \
-                     model; model it in crates/chelis-repr-inventory/src/c_ast.rs before \
-                     the file can be scanned",
-                    self.path
-                ));
-            }
             other if other.ends_with("Decl") => {
                 self.fail(format!(
                     "`{}` contains a `{other}` declaration the inventory reader does not \
@@ -734,8 +1094,8 @@ impl<'a> Reader<'a> {
         self.visit_declaration(node, kind, begin, end);
     }
 
-    fn visit_record(&mut self, node: &Value, begin: Option<Position>) {
-        let name = self.name_of(node, "RecordDecl");
+    fn visit_record(&mut self, node: &Value) {
+        let name = self.name_of(node);
         let is_definition = node
             .get("completeDefinition")
             .and_then(Value::as_bool)
@@ -767,7 +1127,6 @@ impl<'a> Reader<'a> {
                 }
             },
         };
-        let _ = begin;
         let field_names: BTreeSet<String> = collect_field_names(node);
         let descriptor = if inherited {
             self.record_descriptor
@@ -802,7 +1161,7 @@ impl<'a> Reader<'a> {
         node: &Value,
         descriptor: bool,
         begin: Option<Position>,
-        end: Option<Position>,
+        _end: Option<Position>,
     ) {
         let name = field_str(node, "name").unwrap_or_default().to_string();
         if name.is_empty() {
@@ -812,25 +1171,20 @@ impl<'a> Reader<'a> {
             }
             return;
         }
-        self.check_type_words(node, &format!("field `{name}`"));
+        self.check_type_words(node.get("type"), &format!("field `{name}`"));
         let sample = self.declaration_sample(begin);
-        let rendered = sample
-            .clone()
-            .unwrap_or_else(|| format!("{} {name}", qual_type(node).unwrap_or_default()));
-        let owner = match self.owners.last() {
-            Some(record) => format!("{record}::{name}"),
-            None => name.clone(),
-        };
-        let governs = self.governs_element_pointer(node);
+        let rendered = sample.clone().unwrap_or_else(|| {
+            format!("{} {name}", qual_type(node.get("type")).unwrap_or_default())
+        });
+        let governs = self.governs_element_pointer(node.get("type"));
         let narrow = NARROWABLE_FIELDS.contains(&name.as_str())
-            && qual_type(node).is_some_and(|spelling| {
+            && qual_type(node.get("type")).is_some_and(|spelling| {
                 c_lexical::lex_c_tokens(spelling)
                     .iter()
                     .any(|word| word == "int" || word == "int32_t")
             });
-        let extent = fixed_extent(qual_type(node).unwrap_or_default(), &rendered);
+        let extent = fixed_extent(qual_type(node.get("type")).unwrap_or_default(), &rendered);
         self.owners.push(name.clone());
-        let _ = end;
         if governs {
             self.push("raw-element-pointer", Some(rendered.clone()), &rendered);
         }
@@ -844,7 +1198,6 @@ impl<'a> Reader<'a> {
                 self.push("fixed-rank-metadata", Some(sample.clone()), &sample);
             }
         }
-        let _ = owner;
         self.owners.pop();
     }
 
@@ -854,11 +1207,31 @@ impl<'a> Reader<'a> {
         self.visit_record_field(node, false, begin, end);
     }
 
-    fn visit_function(&mut self, node: &Value, begin: Option<Position>) {
+    /// A C function or an Objective-C method. A function's type spells its
+    /// parameters and result together; a method carries its result under
+    /// `returnType` and its parameters as children, so both are read.
+    fn visit_function(&mut self, node: &Value, kind: &str, begin: Option<Position>) {
         let name = field_str(node, "name").unwrap_or_default().to_string();
-        self.check_type_words(node, &format!("`{name}`"));
+        let is_method = kind == "ObjCMethodDecl";
+        let type_object = if is_method {
+            node.get("returnType")
+        } else {
+            node.get("type")
+        };
+        let what = if is_method {
+            format!("the result of method `{name}`")
+        } else {
+            format!("`{name}`")
+        };
+        self.check_type_words(type_object, &what);
         let sample = self.declaration_sample(begin);
-        let governs = self.governs_element_pointer(node);
+        let mut governs = self.governs_element_pointer(type_object);
+        if is_method {
+            governs = governs
+                || children(node)
+                    .filter(|child| field_str(child, "kind") == Some("ParmVarDecl"))
+                    .any(|parameter| self.governs_element_pointer(parameter.get("type")));
+        }
         self.with_owner(name.clone(), true, |reader| {
             if governs {
                 reader.push("raw-element-pointer", sample.clone(), &name);
@@ -868,8 +1241,7 @@ impl<'a> Reader<'a> {
                 let (_, begin, end) = reader.locate(child);
                 if kind == "ParmVarDecl" {
                     let parameter = field_str(child, "name").unwrap_or_default().to_string();
-                    reader.check_type_words(child, &format!("parameter `{parameter}`"));
-                    // The function's own type already covered the carrier.
+                    reader.check_type_words(child.get("type"), &format!("parameter `{parameter}`"));
                     for grandchild in children(child) {
                         reader.visit_nested(grandchild);
                     }
@@ -882,6 +1254,7 @@ impl<'a> Reader<'a> {
 
     /// Statements, expressions, types, and attributes: only three expression
     /// forms are seams, and everything else is walked for what it encloses.
+    /// A type spelt in expression position is classified like a declared one.
     fn visit_expression(
         &mut self,
         node: &Value,
@@ -894,17 +1267,23 @@ impl<'a> Reader<'a> {
                 let sample = self.expression_sample(begin, end);
                 self.push("direct-data-access", sample, "->data");
             }
-            "UnaryExprOrTypeTraitExpr" if field_str(node, "name") == Some("sizeof") => {
-                let sample = self.expression_sample(begin, end);
-                self.push("width-arithmetic", sample, "sizeof");
+            "UnaryExprOrTypeTraitExpr" => {
+                self.check_type_words(node.get("argType"), "a sizeof operand");
+                if field_str(node, "name") == Some("sizeof") {
+                    let sample = self.expression_sample(begin, end);
+                    self.push("width-arithmetic", sample, "sizeof");
+                }
             }
-            "CStyleCastExpr" | "CompoundLiteralExpr" if self.governs_element_pointer(node) => {
-                let sample = self.expression_sample(begin, end);
-                self.push(
-                    "raw-element-pointer",
-                    sample,
-                    qual_type(node).unwrap_or("element pointer cast"),
-                );
+            "CStyleCastExpr" | "CompoundLiteralExpr" | "CXXFunctionalCastExpr" => {
+                self.check_type_words(node.get("type"), "a cast");
+                if self.governs_element_pointer(node.get("type")) {
+                    let sample = self.expression_sample(begin, end);
+                    self.push(
+                        "raw-element-pointer",
+                        sample,
+                        qual_type(node.get("type")).unwrap_or("element pointer cast"),
+                    );
+                }
             }
             _ => {}
         }
@@ -936,14 +1315,27 @@ fn collect_field_names(node: &Value) -> BTreeSet<String> {
     names
 }
 
-/// Remove `__attribute__((...))` groups from a type spelling before its words
-/// are classified.
-fn strip_attributes(spelling: &str) -> String {
+/// Remove `__attribute__((...))` groups and the dumper's `(unnamed at ...)`,
+/// `(anonymous ...)`, and `(lambda at ...)` annotations from a type spelling
+/// before its words are classified: a path inside an annotation is not a
+/// type word.
+fn strip_annotations(spelling: &str) -> String {
     let mut output = String::with_capacity(spelling.len());
     let mut rest = spelling;
-    while let Some(start) = rest.find("__attribute__") {
+    loop {
+        let attribute = rest.find("__attribute__");
+        let annotation = ["(unnamed", "(anonymous", "(lambda"]
+            .iter()
+            .filter_map(|marker| rest.find(marker))
+            .min();
+        let (start, group_start) = match (attribute, annotation) {
+            (Some(a), Some(b)) if a <= b => (a, a + "__attribute__".len()),
+            (Some(a), None) => (a, a + "__attribute__".len()),
+            (_, Some(b)) => (b, b),
+            (None, None) => break,
+        };
         output.push_str(&rest[..start]);
-        let after = &rest[start + "__attribute__".len()..];
+        let after = &rest[group_start..];
         let mut depth = 0usize;
         let mut consumed = after.len();
         for (index, character) in after.char_indices() {
@@ -959,6 +1351,7 @@ fn strip_attributes(spelling: &str) -> String {
                 _ => {}
             }
         }
+        output.push(' ');
         rest = &after[consumed..];
     }
     output.push_str(rest);
@@ -966,8 +1359,9 @@ fn strip_attributes(spelling: &str) -> String {
 }
 
 /// Does an element type in this spelling GOVERN a pointer? The star must
-/// follow the element type through qualifiers only, so an opaque handle
-/// beside an integer return width does not count.
+/// follow the element type through qualifiers, or through the parenthesis
+/// that opens a pointer-to-array or pointer-to-function declarator, so an
+/// opaque handle beside an integer return width does not count.
 fn governs_a_pointer(words: &[String]) -> bool {
     words.iter().enumerate().any(|(index, word)| {
         if !(C_ELEMENT_TYPES.contains(&word.as_str())
@@ -977,7 +1371,7 @@ fn governs_a_pointer(words: &[String]) -> bool {
         }
         words[index + 1..]
             .iter()
-            .take_while(|next| QUALIFIER_WORDS.contains(&next.as_str()))
+            .take_while(|next| QUALIFIER_WORDS.contains(&next.as_str()) || *next == "(")
             .count()
             .checked_add(index + 1)
             .and_then(|star| words.get(star))
@@ -987,25 +1381,43 @@ fn governs_a_pointer(words: &[String]) -> bool {
 
 /// A fixed-rank array is one whose extent is a compile-time rank cap: a
 /// `*MAX_DIM` constant in the source spelling, or a literal above one in the
-/// compiler's canonical spelling.
+/// compiler's canonical spelling. A multi-dimensional extent is rendered with
+/// its dimensions joined by `x`.
 fn fixed_extent(qual_type: &str, rendered: &str) -> Option<String> {
-    let open = qual_type.find('[')?;
-    let close = qual_type[open..].find(']')? + open;
-    let canonical = qual_type[open + 1..close].trim();
-    if canonical.is_empty() {
+    let canonical: Vec<&str> = bracket_groups(qual_type);
+    let first = canonical.first()?.trim();
+    if first.is_empty() {
         return None;
     }
-    let source_extent = rendered.find('[').map(|open| {
-        rendered[open + 1..]
-            .trim_end_matches(']')
-            .trim()
-            .to_string()
-    });
-    let spelled = source_extent
-        .as_deref()
-        .filter(|extent| !extent.is_empty())
-        .unwrap_or(canonical);
-    let is_cap =
-        spelled.contains("MAX_DIM") || canonical.parse::<u64>().is_ok_and(|extent| extent > 1);
-    is_cap.then(|| spelled.to_string())
+    let source: Vec<&str> = bracket_groups(rendered);
+    let spelled =
+        if source.len() == canonical.len() && source.iter().all(|group| !group.trim().is_empty()) {
+            source
+                .iter()
+                .map(|group| group.trim())
+                .collect::<Vec<_>>()
+                .join("x")
+        } else {
+            canonical
+                .iter()
+                .map(|group| group.trim())
+                .collect::<Vec<_>>()
+                .join("x")
+        };
+    let is_cap = spelled.contains("MAX_DIM") || first.parse::<u64>().is_ok_and(|extent| extent > 1);
+    is_cap.then_some(spelled)
+}
+
+/// The contents of every `[...]` group in a spelling, in order.
+fn bracket_groups(spelling: &str) -> Vec<&str> {
+    let mut groups = Vec::new();
+    let mut rest = spelling;
+    while let Some(open) = rest.find('[') {
+        let Some(close) = rest[open..].find(']') else {
+            break;
+        };
+        groups.push(&rest[open + 1..open + close]);
+        rest = &rest[open + close + 1..];
+    }
+    groups
 }

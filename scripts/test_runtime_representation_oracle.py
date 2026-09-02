@@ -358,6 +358,11 @@ class RedTeamRegressionTests(unittest.TestCase):
             "phase0.mutate_c_enum_width",
             "phase0.mutate_objc_element_pointer_parameter",
             "phase0.mutate_unknown_c_arithmetic_spelling",
+            "phase0.mutate_c_carrier_in_simd_arm",
+            "phase0.mutate_c_undeclared_conditional",
+            "phase0.mutate_objc_method_carrier",
+            "phase0.mutate_c_unclassified_cast_spelling",
+            "phase0.mutate_c_pointer_to_element_array",
         ):
             self.assertIn(expected, witnesses)
 

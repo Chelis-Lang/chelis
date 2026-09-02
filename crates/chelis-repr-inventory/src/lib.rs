@@ -16,10 +16,12 @@
 //! its enclosing owner, so the declaration forms a hand-written token walk
 //! mis-modelled in turn (tagged aggregates, unions, macro-typed declarators,
 //! multi-declarator lists, attributes, K&R definitions, keywords inside string
-//! literals) are the compiler's problem rather than this crate's. What the
-//! crate keeps from the numeric capacity census is its closed type-word lists
-//! (`tests/support/c_lexical.rs`), so a C type word has one classification
-//! authority in the repository rather than two.
+//! literals) are the compiler's problem rather than this crate's. Each header
+//! is parsed under a closed set of preprocessing configurations whose union
+//! is its row set, and an arm no configuration parses fails the scan. What
+//! the crate keeps from the numeric capacity census is its closed type-word
+//! lists (`tests/support/c_lexical.rs`), so a C type word has one
+//! classification authority in the repository rather than two.
 //!
 //! A seam row is owned by its enclosing declaration, not by a source offset or
 //! a hash of the exact bytes: Phases 3 and 4 delete functions and call sites,
@@ -77,8 +79,26 @@ const NARROWABLE_FIELDS: &[&str] = &["ndim", "rank", "size", "storage_size"];
 /// Rust spellings of a tensor element. `u8` is deliberately absent: it is the
 /// raw byte carrier, inventoried through `direct-data-access` instead.
 const RUST_ELEMENT_TYPES: &[&str] = &[
-    "Bf16Bits", "Bool8", "F16Bits", "bf16", "f16", "f32", "f64", "i16", "i32", "i64", "i8", "u16",
-    "u32", "u64",
+    "Bf16Bits",
+    "Bool8",
+    "F16Bits",
+    "bf16",
+    "c_double",
+    "c_float",
+    "c_int",
+    "c_long",
+    "c_longlong",
+    "c_short",
+    "f16",
+    "f32",
+    "f64",
+    "i16",
+    "i32",
+    "i64",
+    "i8",
+    "u16",
+    "u32",
+    "u64",
 ];
 
 /// C spellings of a tensor element.
@@ -281,27 +301,46 @@ pub fn production_rust_source(source: &str) -> Result<String, ScanError> {
     })
 }
 
-/// Does this Rust type name a tensor element?
+/// Does this Rust type name a tensor element, or an array or slice of one?
 fn is_rust_element_type(ty: &syn::Type) -> bool {
     match ty {
         syn::Type::Path(path) => path.path.segments.last().is_some_and(|segment| {
             RUST_ELEMENT_TYPES.contains(&segment.ident.to_string().as_str())
         }),
         syn::Type::Paren(inner) => is_rust_element_type(&inner.elem),
+        syn::Type::Array(array) => is_rust_element_type(&array.elem),
+        syn::Type::Slice(slice) => is_rust_element_type(&slice.elem),
         _ => false,
     }
 }
 
 /// A pointer whose pointee is an element type is a raw element pointer however
-/// many `const`/`mut` layers sit above it.
+/// many `const`/`mut` layers sit above it; `NonNull<T>` is the same pointer
+/// with a non-null proof and nothing else.
 fn is_raw_element_pointer(ty: &syn::Type) -> bool {
     match ty {
         syn::Type::Ptr(pointer) => {
             is_rust_element_type(&pointer.elem) || is_raw_element_pointer(&pointer.elem)
         }
         syn::Type::Paren(inner) => is_raw_element_pointer(&inner.elem),
+        syn::Type::Path(path) => non_null_pointee(path).is_some_and(is_rust_element_type),
         _ => false,
     }
+}
+
+/// The `T` of a `NonNull<T>` spelling, by any path.
+fn non_null_pointee(path: &syn::TypePath) -> Option<&syn::Type> {
+    let segment = path.path.segments.last()?;
+    if segment.ident != "NonNull" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return None;
+    };
+    arguments.args.iter().find_map(|argument| match argument {
+        syn::GenericArgument::Type(ty) => Some(ty),
+        _ => None,
+    })
 }
 
 /// A fixed-rank array is one whose length is a compile-time rank cap: a
@@ -682,6 +721,25 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
         visit::visit_expr_field(self, field);
     }
 
+    fn visit_type_path(&mut self, path: &'ast syn::TypePath) {
+        if non_null_pointee(path).is_some_and(is_rust_element_type) {
+            self.push("raw-element-pointer", path.to_token_stream().to_string());
+        }
+        visit::visit_type_path(self, path);
+    }
+
+    fn visit_impl_item_type(&mut self, item: &'ast syn::ImplItemType) {
+        self.with_owner(item.ident.to_string(), |scanner| {
+            visit::visit_impl_item_type(scanner, item);
+        });
+    }
+
+    fn visit_foreign_item_static(&mut self, item: &'ast syn::ForeignItemStatic) {
+        self.with_owner(item.ident.to_string(), |scanner| {
+            visit::visit_foreign_item_static(scanner, item);
+        });
+    }
+
     fn visit_type_ptr(&mut self, pointer: &'ast syn::TypePtr) {
         // Casts are not the only place a raw element pointer appears: a
         // parameter, a return type, and a foreign declaration all hand one
@@ -803,6 +861,22 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
         // then as `matches!(expr, pat)`. A body none of those can read, and
         // that mentions a seam word, fails rather than hiding the seam.
         let tokens = macro_call.tokens.clone();
+        // `offset_of!(T, data)` names the field by path rather than by access;
+        // a layout computed from the field is a direct use of it.
+        if macro_call
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "offset_of")
+            && tokens.clone().into_iter().any(
+                |token| matches!(token, proc_macro2::TokenTree::Ident(ident) if ident == "data"),
+            )
+        {
+            self.push(
+                "direct-data-access",
+                macro_call.to_token_stream().to_string(),
+            );
+        }
         let comma_list = Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
         if let Ok(arguments) = comma_list.parse2(tokens.clone()) {
             for argument in &arguments {
@@ -991,4 +1065,4 @@ pub fn scan_rust_source(path: &str, source: &str) -> Result<Vec<SeamRow>, ScanEr
 // ---------------------------------------------------------------------------
 
 pub mod c_ast;
-pub use c_ast::{HeaderLane, lane_for, release_arm_rows, scan_c_header, scan_c_source};
+pub use c_ast::{Configuration, HeaderLane, lane_for, scan_c_header, scan_c_source};

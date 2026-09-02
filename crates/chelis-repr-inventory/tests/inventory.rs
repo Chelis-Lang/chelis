@@ -6,9 +6,9 @@
 //! controls that matter most are the ones proving an unregistered file and an
 //! unclassifiable type word both fail rather than disappearing.
 
-use chelis_repr_inventory::c_ast::{C_LANE, OBJECTIVE_C_LANE};
+use chelis_repr_inventory::c_ast::{ConditionalArms, HIP_LANE, OBJECTIVE_C_LANE, PUBLIC_C_LANE};
 use chelis_repr_inventory::{
-    SourceClass, lane_for, release_arm_rows, scan_c_header, scan_c_source, scan_rust_source,
+    SourceClass, lane_for, scan_c_header, scan_c_source, scan_rust_source,
 };
 
 const RUNTIME: &str = "crates/chelis-runtime/src/lib.rs";
@@ -616,7 +616,6 @@ fn a_block_argument_call_does_not_open_an_owner() {
         }
         "#,
         OBJECTIVE_C_LANE,
-        &[],
     )
     .expect("header must scan");
     let owners: Vec<&str> = rows.iter().map(|row| row.owner.as_str()).collect();
@@ -849,51 +848,274 @@ fn the_public_header_is_owned_declaration_by_declaration() {
 }
 
 #[test]
-fn the_hip_header_release_arm_is_a_strict_subset_of_the_pinned_debug_arm() {
-    // The lane parses the debug arm of `NDEBUG`. That is only the right
-    // choice while the release arm declares nothing the debug arm does not;
-    // this proves it by execution rather than by prose.
-    let source = tracked_source(HIP_HEADER);
-    let debug: std::collections::BTreeSet<(String, String)> = scan_c_header(HIP_HEADER, &source)
-        .expect("debug arm must scan")
-        .into_iter()
-        .map(|row| (row.kind, row.owner))
+fn every_arm_with_code_in_the_real_headers_is_parsed_by_a_declared_configuration() {
+    // The lane's configuration set is checked against the header, not
+    // trusted: an arm no configuration parses is a scan failure, so the real
+    // headers scanning at all proves their arms are covered.
+    for header in [
+        HEADER,
+        HIP_HEADER,
+        METAL_HEADER,
+        "crates/chelis-runtime/include/chelis_simd.h",
+    ] {
+        scan_c_header(header, &tracked_source(header))
+            .unwrap_or_else(|error| panic!("{header}: {error}"));
+    }
+    let simd = tracked_source("crates/chelis-runtime/include/chelis_simd.h");
+    let arms = ConditionalArms::analyze(&simd);
+    assert!(
+        arms.arms
+            .iter()
+            .any(|arm| arm.has_code && arm.directive.contains("__AVX2__")),
+        "the SIMD header's AVX2 arm carries code: {:?}",
+        arms.arms
+    );
+}
+
+#[test]
+fn a_carrier_in_a_non_default_arm_is_still_a_row() {
+    // The scalar configuration never sees these arms; the avx2, neon, and
+    // release configurations do, and the row set is their union.
+    let rows = c_owners(
+        r#"
+        #ifdef __AVX2__
+        static inline void chelis_probe_avx(float *p) { (void)p; }
+        #elif defined(__ARM_NEON)
+        static inline void chelis_probe_neon(const float *p) { (void)sizeof(*p); }
+        #else
+        static inline void chelis_probe_scalar(double *p) { (void)p; }
+        #endif
+        "#,
+    );
+    for expected in [
+        ("raw-element-pointer", "chelis_probe_avx"),
+        ("raw-element-pointer", "chelis_probe_neon"),
+        ("width-arithmetic", "chelis_probe_neon"),
+        ("raw-element-pointer", "chelis_probe_scalar"),
+    ] {
+        assert!(
+            rows.contains(&(expected.0.to_string(), expected.1.to_string())),
+            "missing {expected:?} in {rows:?}"
+        );
+    }
+    let release = scan_c_source(
+        HIP_HEADER,
+        r#"
+        static inline void chelis_probe_launch(void *p) {
+        #ifndef NDEBUG
+            (void)p;
+        #else
+            (void)sizeof(float);
+        #endif
+        }
+        #ifdef NDEBUG
+        static inline void chelis_probe_release_only(float *p) { (void)p; }
+        #endif
+        "#,
+        HIP_LANE,
+    )
+    .expect("must scan");
+    let mut release: Vec<(&str, &str)> = release
+        .iter()
+        .map(|row| (row.kind.as_str(), row.owner.as_str()))
         .collect();
-    let release: std::collections::BTreeSet<(String, String)> =
-        release_arm_rows(HIP_HEADER, &source)
-            .expect("release arm must scan")
-            .into_iter()
-            .map(|row| (row.kind, row.owner))
-            .collect();
-    assert!(
-        release.is_subset(&debug),
-        "release-only rows: {:?}",
-        release.difference(&debug).collect::<Vec<_>>()
+    release.sort();
+    assert_eq!(
+        release,
+        vec![
+            ("raw-element-pointer", "chelis_probe_release_only"),
+            ("width-arithmetic", "chelis_probe_launch"),
+        ]
+    );
+}
+
+#[test]
+fn an_arm_no_configuration_parses_fails_closed() {
+    for (source, needle) in [
+        (
+            "#ifdef CHELIS_PROBE_UNDECLARED\nextern float *chelis_probe_hidden;\n#endif\n",
+            "CHELIS_PROBE_UNDECLARED",
+        ),
+        (
+            "#if __has_include(<hip/hip_fp16.h>)\nstatic inline void chelis_probe_fp16(float *p) { (void)p; }\n#endif\n",
+            "hip_fp16.h",
+        ),
+        ("#if 0\nextern double *chelis_probe_dead;\n#endif\n", "if 0"),
+    ] {
+        let error = scan_c_header(HEADER, source).expect_err("an unparsed arm must fail closed");
+        assert!(error.message.contains(needle), "{}", error.message);
+        assert!(error.message.contains("none of the"), "{}", error.message);
+    }
+}
+
+#[test]
+fn an_arm_with_only_directives_or_linkage_braces_needs_no_configuration() {
+    // The include guard, a `__cplusplus` linkage block, and a directive-only
+    // arm (an include, a define, an `#error`) carry no seam, so no
+    // configuration has to parse them.
+    let rows = c_owners(
+        r#"
+        #ifndef CHELIS_PROBE_H
+        #define CHELIS_PROBE_H
+        #ifdef __cplusplus
+        extern "C" {
+        #endif
+        #if __has_include(<stdint.h>)
+        #include <stdint.h>
+        #define CHELIS_PROBE_HAS_IT 1
+        #else
+        #error "not present"
+        #endif
+        extern float *chelis_probe_visible;
+        #ifdef __cplusplus
+        }
+        #endif
+        #endif
+        "#,
     );
     assert!(
-        debug.contains(&(
-            "width-arithmetic".to_string(),
-            "chelis_gpu_failure_symbol".to_string()
+        rows.contains(&(
+            "raw-element-pointer".to_string(),
+            "chelis_probe_visible".to_string()
         )),
-        "{debug:?}"
+        "{rows:?}"
+    );
+}
+
+#[test]
+fn an_objective_c_method_signature_is_a_carrier() {
+    let rows = scan_c_source(
+        METAL_HEADER,
+        r#"
+        #include <Foundation/Foundation.h>
+        @interface ChelisProbeBuffer : NSObject
+        - (void)fill:(float *)values count:(NSUInteger)n;
+        - (float *)elements;
+        - (NSUInteger)count;
+        @end
+        @protocol ChelisProbeSource
+        - (const float *)chelisProbeRows:(NSUInteger)n;
+        @end
+        "#,
+        OBJECTIVE_C_LANE,
+    )
+    .expect("must scan");
+    let mut owners: Vec<(&str, &str)> = rows
+        .iter()
+        .map(|row| (row.kind.as_str(), row.owner.as_str()))
+        .collect();
+    owners.sort();
+    assert_eq!(
+        owners,
+        vec![
+            ("raw-element-pointer", "ChelisProbeBuffer::elements"),
+            ("raw-element-pointer", "ChelisProbeBuffer::fill:count:"),
+            ("raw-element-pointer", "ChelisProbeSource::chelisProbeRows:"),
+        ]
+    );
+}
+
+#[test]
+fn an_unclassified_spelling_in_expression_position_fails_closed() {
+    // The inverted type-word rule holds in a cast, a compound literal, and a
+    // sizeof operand, not only in declarations.
+    for body in [
+        "((_Float16 *)p)[0] = 0;",
+        "(void)sizeof(__bf16);",
+        "(void)(_Float16 *){0};",
+    ] {
+        let source = format!("static inline void chelis_probe_expr(void *p) {{ (void)p; {body} }}");
+        let error = scan_c_header(HEADER, &source)
+            .expect_err("an unclassified spelling in expression position must fail closed");
+        assert!(
+            error.message.contains("c_lexical.rs"),
+            "{body}: {}",
+            error.message
+        );
+    }
+}
+
+#[test]
+fn an_include_outside_the_universe_fails_closed() {
+    let scratch = tempfile::tempdir().expect("scratch dir");
+    let side = scratch.path().join("chelis_probe_side.h");
+    std::fs::write(&side, "extern float *chelis_probe_side(void);\n").expect("write");
+    let source = format!(
+        "#include \"{}\"\nextern float *chelis_probe_own(void);\n",
+        side.display()
+    );
+    let error = scan_c_header(HEADER, &source).expect_err("an out-of-universe include must fail");
+    assert!(
+        error.message.contains("outside the inventory universe"),
+        "{}",
+        error.message
     );
     assert!(
-        release.len() < debug.len(),
-        "the debug arm is a strict superset"
+        error.message.contains("chelis_probe_side.h"),
+        "{}",
+        error.message
     );
+    // The published include directory and the stub SDK remain inside it.
     assert!(
-        debug.contains(&(
-            "descriptor-field".to_string(),
-            "chelis_gpu_tensor::data".to_string()
+        scan_c_header(HEADER, "#include \"chelis_runtime_dtype.h\"\n#include <stdint.h>\nextern float *chelis_probe_ok(void);\n").is_ok()
+    );
+}
+
+#[test]
+fn a_pointer_to_an_element_array_is_a_carrier() {
+    let rows = c_owners("void chelis_probe_rows(float (*rows)[4]);");
+    assert!(
+        rows.contains(&(
+            "raw-element-pointer".to_string(),
+            "chelis_probe_rows".to_string()
         )),
-        "{debug:?}"
+        "{rows:?}"
     );
+}
+
+#[test]
+fn named_anonymous_members_and_typeof_spellings_scan() {
+    let rows = c_owners(
+        r#"
+        typedef struct { struct { float *p; } inner; int n; } chelis_probe_outer;
+        __typeof__(float *) chelis_probe_ty(void);
+        "#,
+    );
+    assert!(
+        rows.contains(&(
+            "raw-element-pointer".to_string(),
+            "chelis_probe_outer::p".to_string()
+        )),
+        "{rows:?}"
+    );
+    assert!(
+        rows.contains(&(
+            "raw-element-pointer".to_string(),
+            "chelis_probe_ty".to_string()
+        )),
+        "{rows:?}"
+    );
+}
+
+#[test]
+fn a_multi_dimensional_extent_renders_every_dimension() {
+    let rows = scan_c_header(
+        HEADER,
+        "#include <stdint.h>\ntypedef struct { void *data; uint8_t dtype; int64_t size; int32_t rank; int64_t shape[8][2]; const int64_t *strides; } chelis_probe_grid;",
+    )
+    .expect("must scan");
+    let extent = rows
+        .iter()
+        .find(|row| row.kind == "fixed-rank-metadata" && row.owner == "chelis_probe_grid::shape")
+        .expect("a fixed-rank row");
+    assert!(extent.sample.ends_with("(extent 8x2)"), "{}", extent.sample);
 }
 
 #[test]
 fn the_objective_c_header_is_read_through_its_own_lane() {
     assert_eq!(lane_for(METAL_HEADER), OBJECTIVE_C_LANE);
-    assert_eq!(lane_for(HIP_HEADER), C_LANE);
+    assert_eq!(lane_for(HIP_HEADER), HIP_LANE);
+    assert_eq!(lane_for(HEADER), PUBLIC_C_LANE);
     let rows = scan_c_header(METAL_HEADER, &tracked_source(METAL_HEADER))
         .expect("the Objective-C header must scan");
     let mut owners: Vec<(&str, &str)> = rows
@@ -1042,5 +1264,75 @@ fn an_unreadable_macro_body_hiding_a_seam_fails_closed() {
     assert!(
         scan_rust_source(RUNTIME, "pub fn quiet() { weird!(x => 4 @@ ) }").is_ok(),
         "a seam-free macro body is not the inventory's business"
+    );
+}
+
+#[test]
+fn an_offset_of_the_data_field_is_a_seam() {
+    // `offset_of!(T, data)` names the field by path rather than by access.
+    // A destructuring pattern (`let T { data, .. } = t;`) is deliberately not
+    // a seam: the registered sources destructure `RiscOp::ConstTensor { data }`,
+    // an IR literal payload that no representation phase touches, and a rule
+    // on the field name alone cannot tell that from a descriptor.
+    let rows = identities(
+        RUNTIME,
+        r#"
+        pub struct T { pub data: *mut u8, pub n: usize }
+        pub fn c() -> usize { std::mem::offset_of!(T, data) }
+        "#,
+    );
+    assert!(
+        rows.contains(&("direct-data-access".to_string(), "c".to_string())),
+        "{rows:?}"
+    );
+}
+
+#[test]
+fn non_null_c_aliases_and_element_arrays_are_carriers() {
+    let rows = identities(
+        RUNTIME,
+        r#"
+        use std::ptr::NonNull;
+        use std::os::raw::c_float;
+        pub fn a(p: NonNull<f32>) -> usize { p.as_ptr() as usize }
+        pub fn b(p: *mut c_float) -> usize { p as usize }
+        pub fn c(p: *mut [f32]) -> usize { p as *mut f32 as usize }
+        pub fn d(p: *const [i64; 4]) -> usize { p as usize }
+        pub fn e(p: *mut u8) -> usize { p as usize }
+        "#,
+    );
+    for owner in ["a", "b", "c", "d"] {
+        assert!(
+            rows.contains(&("raw-element-pointer".to_string(), owner.to_string())),
+            "{owner}: {rows:?}"
+        );
+    }
+    assert!(
+        !rows.contains(&("raw-element-pointer".to_string(), "e".to_string())),
+        "a byte pointer is still not an element pointer: {rows:?}"
+    );
+}
+
+#[test]
+fn an_impl_associated_type_and_a_foreign_static_own_their_rows() {
+    let rows = identities(
+        RUNTIME,
+        r#"
+        pub trait Tr { type Elem; }
+        pub struct Foo;
+        impl Tr for Foo { type Elem = *mut f32; }
+        unsafe extern "C" { pub static mut CHELIS_PROBE_BUF: *mut f32; }
+        "#,
+    );
+    assert!(
+        rows.contains(&("raw-element-pointer".to_string(), "Foo::Elem".to_string())),
+        "{rows:?}"
+    );
+    assert!(
+        rows.contains(&(
+            "raw-element-pointer".to_string(),
+            "CHELIS_PROBE_BUF".to_string()
+        )),
+        "{rows:?}"
     );
 }

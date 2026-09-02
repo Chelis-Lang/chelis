@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "698797cac2da1d28ea040f5d87b53145cfc88a2c3877c0032b615c44bf37118f",
+  "freeze_sha256": "37ebd59b76d8f0def9f54ca11e3e1169368df43de4101a3c5a30671186f6ccc5",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -3417,6 +3417,72 @@
           },
           "expected_owners": [
             "runtime_representation_phase0_probe_fill"
+          ],
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        },
+        {
+          "witness_id": "phase0.mutate_c_carrier_in_simd_arm",
+          "expected_kind": "raw-element-pointer",
+          "path": "crates/chelis-runtime/include/chelis_simd.h",
+          "implementation_sha256": "bba59895b0bee2e4291fa8a743048dc79c7c96793fe130c2c292059a1a057827",
+          "expected_failure": {
+            "code": "inventory.unclassified",
+            "reason_prefix": "unclassified inventory hit"
+          },
+          "expected_owners": [
+            "runtime_representation_phase0_probe_avx"
+          ],
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        },
+        {
+          "witness_id": "phase0.mutate_c_undeclared_conditional",
+          "expected_kind": "undeclared-conditional",
+          "path": "crates/chelis-runtime/include/chelis_runtime.h",
+          "implementation_sha256": "7d6ecdd87843d497c6b202490003f980111197eaf8ac2bf681d08929057d1a6d",
+          "expected_failure": {
+            "code": "source.rejected",
+            "reason_prefix": "fail-closed inventory scanner rejected"
+          },
+          "expected_owners": [],
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        },
+        {
+          "witness_id": "phase0.mutate_objc_method_carrier",
+          "expected_kind": "raw-element-pointer",
+          "path": "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
+          "implementation_sha256": "56bdca1c019b3b0ec4771372617b231c695bcad5038312d3427e6bc879b1a32d",
+          "expected_failure": {
+            "code": "inventory.unclassified",
+            "reason_prefix": "unclassified inventory hit"
+          },
+          "expected_owners": [
+            "RuntimeRepresentationPhase0Probe::elements"
+          ],
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        },
+        {
+          "witness_id": "phase0.mutate_c_unclassified_cast_spelling",
+          "expected_kind": "unknown-arithmetic-spelling",
+          "path": "crates/chelis-runtime/include/chelis_runtime.h",
+          "implementation_sha256": "a52f7f228aa161f0c440ccb28bc37a6e8cc775fa6482f053074720d320af4fbe",
+          "expected_failure": {
+            "code": "source.rejected",
+            "reason_prefix": "fail-closed inventory scanner rejected"
+          },
+          "expected_owners": [],
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        },
+        {
+          "witness_id": "phase0.mutate_c_pointer_to_element_array",
+          "expected_kind": "raw-element-pointer",
+          "path": "crates/chelis-runtime/include/chelis_runtime.h",
+          "implementation_sha256": "b29d9ac289d3f98a3920d1ef03b69c8ababa67229d9c4870539bfe188c8bfea0",
+          "expected_failure": {
+            "code": "inventory.unclassified",
+            "reason_prefix": "unclassified inventory hit"
+          },
+          "expected_owners": [
+            "runtime_representation_phase0_probe_rows"
           ],
           "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
         },
