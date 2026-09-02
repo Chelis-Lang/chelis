@@ -4374,6 +4374,162 @@ fn extract_numeric_leaf(expr: &Expr) -> Option<StagedScalar> {
     }
 }
 
+/// Read an optional scalar type stamp without treating malformed type
+/// metadata as absence. The outer `Option` is recognition success; the inner
+/// one distinguishes an unstamped expression from a stamped scalar.
+fn optional_scalar_prim(expr: &Expr) -> Option<Option<Prim>> {
+    match unique_metadata_value(expr, "type")? {
+        Some(ty) => Some(Some(LowerCtx::try_extract_prim(ty)?)),
+        None => Some(None),
+    }
+}
+
+/// Read a metadata key only when it occurs at most once.
+///
+/// `None` rejects an untagged carrier or duplicate key; `Some(None)` is a
+/// canonical absence. Static folding must not reproduce the parser's
+/// first-entry behavior because duplicate contract metadata is malformed,
+/// not an alternate spelling.
+fn unique_metadata_value<'a>(expr: &'a Expr, key: &str) -> Option<Option<&'a Expr>> {
+    let meta = match expr {
+        Expr::Node(_, _) | Expr::List(_, _) => {
+            let (_, meta, _) = stamped_parts(expr)?;
+            meta
+        }
+        Expr::Atom(_, _)
+        | Expr::Map(_, _)
+        | Expr::MetaExpr(_, _)
+        | Expr::BareList(_, _)
+        | Expr::UnknownForm(_) => return Some(None),
+    };
+    let mut values = meta
+        .entries
+        .iter()
+        .filter_map(|(candidate, value)| (candidate == key).then_some(value));
+    let first = values.next();
+    if values.next().is_some() {
+        return None;
+    }
+    Some(first)
+}
+
+/// Decode one canonical numeric `lit` under [04-LIT-1].
+///
+/// This is the fold's only literal ingress. It jointly validates the value
+/// atom, declared primitive, and the optional provenance marker. The sole
+/// cross-family form is an exact integer atom with one
+/// `literal_source: integer` marker at a float dtype; `scalar_from_i64`
+/// performs its one required target-width finalization without an f64 hop.
+fn extract_type_checked_literal(expr: &Expr) -> Option<chelis_types::ScalarValue> {
+    use chelis_types::{scalar_from_f64, scalar_from_i64};
+
+    let (DeepTag::Lit, _, kids) = stamped_parts(expr)? else {
+        return None;
+    };
+    let [Expr::Atom(atom, _)] = kids else {
+        return None;
+    };
+    let declared = optional_scalar_prim(expr)??;
+    let literal_source = unique_metadata_value(expr, "literal_source")?;
+    let integer_source = matches!(
+        literal_source,
+        Some(Expr::Atom(Atom::Name(source), _)) if source == "integer"
+    );
+
+    match (atom, declared, literal_source) {
+        (Atom::Int(value), prim, None) if prim.is_integer() => {
+            scalar_from_i64("lit", prim, *value).ok()
+        }
+        (Atom::Int(value), prim, Some(_)) if prim.is_float() && integer_source => {
+            scalar_from_i64("lit", prim, *value).ok()
+        }
+        (Atom::Float(value), prim, None) if prim.is_float() => {
+            scalar_from_f64("lit", prim, *value).ok()
+        }
+        (Atom::Bool(value), Prim::Bool, None) => {
+            scalar_from_i64("lit", Prim::Bool, i64::from(*value)).ok()
+        }
+        (Atom::Str(_) | Atom::Name(_) | Atom::Tag(_), _, _)
+        | (Atom::Int(_) | Atom::Float(_) | Atom::Bool(_), _, _) => None,
+    }
+}
+
+/// Evaluate the closed static scalar grammar while preserving a checked dtype
+/// at every edge.
+///
+/// This is stricter than `extract_numeric_leaf`, whose `RawScalar` form is
+/// intentionally useful for general literal folding but cannot distinguish
+/// `true` from integer `1`. A seed needs that distinction: literal payload and
+/// type metadata must agree before a wrapper can consume the value, while a
+/// successful explicit cast establishes its target dtype per [04-NUM-14].
+fn extract_type_checked_scalar(expr: &Expr) -> Option<chelis_types::ScalarValue> {
+    match expr {
+        // A BARE atom carries no type metadata, so there is nothing for the
+        // payload to agree with and this fold declines it. Stamping one here
+        // would invent a dtype the source never wrote, in two ways that both
+        // matter. It would widen the fold's accept set past the checker's,
+        // which classifies a bare integer atom as an UNSUFFIXED seed literal
+        // and rejects it (`chelis_types::infer::expr::seed_literal_form`); and
+        // any stamp it picked would contradict spec/04-type-system.md §5.3,
+        // where an integer literal defaults to `int32` and a float literal to
+        // `f32` rather than to the int64/f64 a seed wants. So
+        // `extract_type_checked_literal` stays the fold's ONLY literal
+        // ingress, as its doc says, and a bare atom reaches the caller's loud
+        // rejection instead of a guessed value (chelis#794).
+        Expr::Atom(_, _) => None,
+        Expr::List(_, _) | Expr::Node(_, _) => {
+            let (tag, _, kids) = stamped_parts(expr)?;
+            match tag {
+                DeepTag::Lit => extract_type_checked_literal(expr),
+                DeepTag::Cast => {
+                    let inner = extract_type_checked_scalar(kids.first()?)?;
+                    let target = LowerCtx::try_extract_prim(kids.get(1)?)?;
+                    if optional_scalar_prim(expr)?.is_some_and(|declared| declared != target) {
+                        return None;
+                    }
+                    match chelis_deep::cast_mode_of(kids).ok()? {
+                        chelis_deep::CastMode::Checked => {
+                            chelis_types::CheckedCastPlan::new(inner.prim(), target)
+                                .ok()?
+                                .cast_scalar("cast", inner)
+                                .ok()
+                        }
+                        chelis_deep::CastMode::Trunc => {
+                            if !inner.prim().is_float() || !target.is_integer() {
+                                return None;
+                            }
+                            chelis_types::cast_trunc_scalar("cast_trunc", inner, target).ok()
+                        }
+                    }
+                }
+                DeepTag::App => {
+                    if kids.len() != 2 || !expr_is_var_named(&kids[0], "neg") {
+                        return None;
+                    }
+                    let inner = extract_type_checked_scalar(&kids[1])?;
+                    let negated = if inner.prim().is_float() {
+                        chelis_types::float_unop(chelis_types::FloatUnOp::Neg, inner).ok()?
+                    } else if inner.prim().is_integer() {
+                        chelis_types::int_unop(chelis_types::IntUnOp::Neg, inner).ok()?
+                    } else {
+                        return None;
+                    };
+                    if optional_scalar_prim(expr)?
+                        .is_some_and(|declared| declared != negated.prim())
+                    {
+                        return None;
+                    }
+                    Some(negated)
+                }
+                _ => None,
+            }
+        }
+        Expr::Map(_, _) | Expr::MetaExpr(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => {
+            None
+        }
+    }
+}
+
 /// Return true iff any element of `dims` is a wildcard placeholder
 /// dim (a `Named("*", _)` or `Named("", _)` entry that
 /// `crates/chelis-backend-c/src/emit.rs`'s `rename_anonymous_dims`
@@ -11502,7 +11658,29 @@ impl LowerCtx {
             Ok(EffectKind::Random) if elems.len() >= 4 => {
                 let saved_seed = self.random_seed;
                 let saved_counter = self.random_counter;
-                self.random_seed = self.extract_u64_value(&elems[2]).or(saved_seed);
+                let seed = self.extract_u64_value(&elems[2]).unwrap_or_else(|| {
+                    let unsupported = Unsupported::new(
+                        UnsupportedKind::Construct(
+                            "an explicit random seed that is not a statically-resolvable signed \
+                             int64 value"
+                                .to_owned(),
+                        ),
+                        "`with seed(...)` in IR lowering",
+                        Stage::Lowering,
+                        chelis_types::deliberate_rejection!(
+                            "[05-RNG-1]",
+                            "an explicit random seed is a signed int64 value; lowering \
+                             reinterprets its two's-complement bits as uint64 and never \
+                             substitutes zero or ambient state (Chelis-Lang/chelis#794)"
+                        ),
+                    );
+                    raise_fatal_lowering_error(
+                        unsupported.to_string(),
+                        Some(elems[2].span()),
+                        elems[2].span_id().map(ToOwned::to_owned),
+                    )
+                });
+                self.random_seed = Some(seed);
                 self.random_counter = 0;
                 let result = self.lower_expr(&elems[3]);
                 self.random_seed = saved_seed;
@@ -11524,7 +11702,28 @@ impl LowerCtx {
     }
 
     fn extract_u64_value(&self, expr: &Expr) -> Option<u64> {
-        self.extract_usize_value(expr).map(|value| value as u64)
+        // [05-RNG-1] owns a signed int64 seed, not a dimension-like integer.
+        // Require that exact checked type before recognizing the static leaf;
+        // `extract_int_for_dim` would also accept a float-typed `(lit ... 7)`
+        // by looking only at its payload. Reinterpret the accepted signed
+        // value as two's-complement bits; negative seeds are conforming.
+        let declared = expr_type_metadata(expr)
+            .and_then(Self::try_extract_prim)
+            .or_else(|| {
+                let (DeepTag::Cast, _, kids) = stamped_parts(expr)? else {
+                    return None;
+                };
+                Self::try_extract_prim(kids.get(1)?)
+            });
+        if declared != Some(Prim::Int64) {
+            return None;
+        }
+        let value = extract_type_checked_scalar(expr)?;
+        if value.prim() != Prim::Int64 {
+            return None;
+        }
+        let signed = value.as_i64_exact()?;
+        Some(signed as u64)
     }
 
     /// Extract a compile-time-constant f64 from an expression, seeing through
@@ -11572,13 +11771,18 @@ impl LowerCtx {
                         let inner = kids.get(1)?;
                         Self::extract_f64_value(inner).map(|v| -v)
                     }
-                    // `(lit {} <atom>)` and any other list carrying a bare numeric
-                    // atom in the value slot (pre-chelis#776 behavior, preserved).
-                    _ => match kids.first() {
+                    // Only `(lit {} <atom>)` owns this value slot. Reading the
+                    // first child of an arbitrary composite silently folded
+                    // `(par {} 2.0 3.0)` to 2.0 even though `par`'s value is
+                    // its last child, 3.0 (chelis#794). Composite semantics
+                    // belong to ordinary lowering; this static extractor
+                    // rejects them instead of guessing or dropping effects.
+                    DeepTag::Lit => match kids.first() {
                         Some(Expr::Atom(Atom::Float(f), _)) => Some(*f),
                         Some(Expr::Atom(Atom::Int(n), _)) => Some(*n as f64),
                         _ => None,
                     },
+                    _ => None,
                 }
             }
             _ => None,
@@ -15500,6 +15704,337 @@ mod tests {
             !message.contains("is not a numeric dtype and has no finalize semantics"),
             "the unreachable-by-construction panic must not be the user-facing \
              message; got: {message}"
+        );
+    }
+
+    #[test]
+    fn issue_794_static_float_extraction_rejects_par_instead_of_folding_first_child() {
+        let mut exprs = chelis_deep::parser::parse_str("(par {} 2.0 3.0)").expect("parse par");
+        let par = exprs.pop().expect("one par expression");
+        assert_eq!(
+            LowerCtx::extract_f64_value(&par),
+            None,
+            "a composite `par` is not a static literal: reading its first child \
+             would substitute 2.0 for its specified last-child value 3.0"
+        );
+
+        let literal = chelis_deep::parser::parse_str("(lit {type: (t-prim {} f64)} 3.0)")
+            .expect("parse literal")
+            .pop()
+            .expect("one literal");
+        assert_eq!(
+            LowerCtx::extract_f64_value(&literal),
+            Some(3.0),
+            "narrowing the extractor must preserve the admitted literal path"
+        );
+    }
+
+    #[test]
+    fn issue_794_negative_explicit_seed_reinterprets_signed_int64_bits() {
+        let expr = chelis_deep::parser::parse_str(
+            "(handle-effect {effect: random} \
+                (lit {type: (t-prim {} int64)} -1) \
+                (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} \
+                     (var {} uniform_like) \
+                     (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 0.0) \
+                     (lit {type: (t-prim {} f64)} 0.0) \
+                     (lit {type: (t-prim {} f64)} 1.0)))",
+        )
+        .expect("parse handled random expression")
+        .pop()
+        .expect("one expression");
+        let outcome = catch_lowering(move || {
+            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+            ctx.random_seed = Some(7);
+            let _ = ctx.lower_expr(&expr);
+            ctx.dag
+        });
+        let dag = outcome.expect("signed int64 seeds are valid");
+        let seed = dag
+            .nodes()
+            .iter()
+            .find_map(|node| match node.op {
+                RiscOp::UniformLike { seed, .. } => Some(seed),
+                _ => None,
+            })
+            .expect("handled body contains a uniform_like node");
+        assert_eq!(
+            seed,
+            u64::MAX,
+            "[05-RNG-1] reinterprets -1i64 as its uint64 two's-complement bits"
+        );
+    }
+
+    #[test]
+    fn issue_794_non_negative_explicit_seed_still_lowers() {
+        let expr = chelis_deep::parser::parse_str(
+            "(handle-effect {effect: random} \
+                (lit {type: (t-prim {} int64)} 7) \
+                (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} \
+                     (var {} uniform_like) \
+                     (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 0.0) \
+                     (lit {type: (t-prim {} f64)} 0.0) \
+                     (lit {type: (t-prim {} f64)} 1.0)))",
+        )
+        .expect("parse handled random expression")
+        .pop()
+        .expect("one expression");
+        let outcome = catch_lowering(move || {
+            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+            let _ = ctx.lower_expr(&expr);
+            ctx.dag
+        });
+        assert!(
+            outcome.is_ok(),
+            "non-negative seed control must lower: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn issue_794_signed_int64_seed_boundaries_and_exact_cast_stay_admitted() {
+        let cases = [
+            (
+                "(lit {type: (t-prim {} int64)} -9223372036854775808)",
+                i64::MIN as u64,
+            ),
+            (
+                "(lit {type: (t-prim {} int64)} 9223372036854775807)",
+                i64::MAX as u64,
+            ),
+            (
+                "(cast {} (lit {type: (t-prim {} int32)} 7) (t-prim {} int64))",
+                7,
+            ),
+            (
+                "(cast {} (lit {type: (t-prim {} bool)} true) (t-prim {} int64))",
+                1,
+            ),
+            (
+                "(cast {} (lit {type: (t-prim {} f64)} 7.0) (t-prim {} int64))",
+                7,
+            ),
+            (
+                "(cast {} (lit {type: (t-prim {} f64), literal_source: integer} 7) (t-prim {} int64))",
+                7,
+            ),
+        ];
+        let ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+        for (source, expected) in cases {
+            let expr = chelis_deep::parser::parse_str(source)
+                .unwrap_or_else(|error| panic!("parse seed control {source}: {error}"))
+                .pop()
+                .expect("one seed control");
+            assert_eq!(
+                ctx.extract_u64_value(&expr),
+                Some(expected),
+                "signed int64 seed control must remain admitted: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_794_seed_wrappers_reject_payload_type_disagreement() {
+        let cases = [
+            "(app {type: (t-prim {} int64)} (var {} neg) \
+                 (lit {type: (t-prim {} bool)} 1))",
+            "(app {type: (t-prim {} int64)} (var {} neg) \
+                 (lit {type: (t-prim {} f64)} 1))",
+            "(app {type: (t-prim {} int64)} (var {} neg) \
+                 (lit {type: (t-prim {} string)} 1))",
+            "(cast {} (lit {type: (t-prim {} bool)} 1) (t-prim {} int64))",
+            "(cast {} (lit {type: (t-prim {} f64), literal_source: floating} 7.0) \
+                 (t-prim {} int64))",
+            "(cast {} (lit {type: (t-prim {} f64), literal_source: integer, \
+                 literal_source: integer} 7) (t-prim {} int64))",
+            "(cast {} (lit {type: (t-prim {} int32)} 7) (t-prim {} int64) trunc)",
+            "(cast {} (cast {} (lit {type: (t-prim {} int32)} 7) \
+                 (t-prim {} string)) (t-prim {} int64))",
+        ];
+        let ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+        for source in cases {
+            let expr = chelis_deep::parser::parse_str(source)
+                .unwrap_or_else(|error| panic!("parse forged seed {source}: {error}"))
+                .pop()
+                .expect("one forged seed");
+            assert_eq!(
+                ctx.extract_u64_value(&expr),
+                None,
+                "payload/type disagreement must not become a seed: {source}"
+            );
+        }
+    }
+
+    /// Negative parity for the typed fold's literal ingress: a BARE atom
+    /// carries no type metadata, so `extract_type_checked_scalar` declines it
+    /// rather than stamping a dtype the source never wrote. The
+    /// `(cast {} 42 (t-prim {} int64))` case is the one that used to fold: the
+    /// outer cast supplied the declared int64 while the bare `42` was silently
+    /// given `Prim::Int64`, which both widened this fold past the checker (a
+    /// bare atom is an UNSUFFIXED seed literal it rejects) and contradicted
+    /// spec/04-type-system.md §5.3's int32/f32 literal defaults. The stamped
+    /// `(lit {type: (t-prim {} int32)} 7)` control in
+    /// `issue_794_signed_int64_seed_boundaries_and_exact_cast_stay_admitted`
+    /// is the positive parity: an explicit stamp still folds.
+    #[test]
+    fn issue_794_bare_atom_seed_payload_requires_an_explicit_stamp() {
+        let cases = [
+            "42",
+            "(cast {} 42 (t-prim {} int64))",
+            "(cast {} 42.0 (t-prim {} int64))",
+            "(cast {} true (t-prim {} int64))",
+            "(app {type: (t-prim {} int64)} (var {} neg) 1)",
+            "(cast {} (cast {} 42 (t-prim {} int32)) (t-prim {} int64))",
+        ];
+        let ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+        for source in cases {
+            let expr = chelis_deep::parser::parse_str(source)
+                .unwrap_or_else(|error| panic!("parse unstamped seed {source}: {error}"))
+                .pop()
+                .expect("one unstamped seed");
+            assert_eq!(
+                ctx.extract_u64_value(&expr),
+                None,
+                "an unstamped literal payload must not become a seed: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_794_malformed_literal_and_cast_modes_use_typed_unsupported_channel() {
+        let seeds = [
+            "(cast {} (lit {type: (t-prim {} f64), literal_source: floating} 7.0) \
+                 (t-prim {} int64))",
+            "(cast {} (lit {type: (t-prim {} int32)} 7) (t-prim {} int64) trunc)",
+        ];
+        for seed in seeds {
+            let source = format!(
+                "(handle-effect {{effect: random}} \
+                    {seed} \
+                    (app {{type: (t-tensor {{}} (d-lit {{}} 2) (t-prim {{}} f32))}} \
+                         (var {{}} uniform_like) \
+                         (lit {{type: (t-tensor {{}} (d-lit {{}} 2) (t-prim {{}} f32))}} 0.0) \
+                         (lit {{type: (t-prim {{}} f64)}} 0.0) \
+                         (lit {{type: (t-prim {{}} f64)}} 1.0)))"
+            );
+            let expr = chelis_deep::parser::parse_str(&source)
+                .unwrap_or_else(|error| panic!("parse malformed seed {seed}: {error}"))
+                .pop()
+                .expect("one handled-random expression");
+            let outcome = catch_lowering(move || {
+                let mut ctx =
+                    LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+                ctx.random_seed = Some(7);
+                let _ = ctx.lower_expr(&expr);
+            });
+            let diagnostic = outcome.expect_err(&format!(
+                "malformed seed must be rejected, not lowered: {seed}"
+            ));
+            assert!(
+                diagnostic.fatal,
+                "rejection must bypass host fallback: {seed}"
+            );
+            let message = diagnostic.to_string();
+            assert!(message.starts_with("unsupported:"), "{seed}: {message}");
+            assert!(
+                message.contains("[05-RNG-1]") && message.contains("int64"),
+                "{seed}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_794_wrong_typed_explicit_seed_uses_typed_unsupported_channel() {
+        let expr = chelis_deep::parser::parse_str(
+            "(handle-effect {effect: random} \
+                (lit {type: (t-prim {} f64)} 7) \
+                (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} \
+                     (var {} uniform_like) \
+                     (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 0.0) \
+                     (lit {type: (t-prim {} f64)} 0.0) \
+                     (lit {type: (t-prim {} f64)} 1.0)))",
+        )
+        .expect("parse handled random expression")
+        .pop()
+        .expect("one expression");
+        let outcome = catch_lowering(move || {
+            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+            ctx.random_seed = Some(7);
+            let _ = ctx.lower_expr(&expr);
+        });
+        let diagnostic = outcome.expect_err("an f64 seed is not an int64 seed");
+        assert!(
+            diagnostic.fatal,
+            "host fallback must not swallow the rejection"
+        );
+        let message = diagnostic.to_string();
+        assert!(message.starts_with("unsupported:"), "{message}");
+        assert!(
+            message.contains("[05-RNG-1]") && message.contains("int64"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn issue_794_bool_payload_stamped_int64_uses_typed_unsupported_channel() {
+        let expr = chelis_deep::parser::parse_str(
+            "(handle-effect {effect: random} \
+                (lit {type: (t-prim {} int64)} true) \
+                (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} \
+                     (var {} uniform_like) \
+                     (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 0.0) \
+                     (lit {type: (t-prim {} f64)} 0.0) \
+                     (lit {type: (t-prim {} f64)} 1.0)))",
+        )
+        .expect("parse handled random expression")
+        .pop()
+        .expect("one expression");
+        let outcome = catch_lowering(move || {
+            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+            ctx.random_seed = Some(7);
+            let _ = ctx.lower_expr(&expr);
+        });
+        let diagnostic = outcome.expect_err("a bool payload is not an int64 seed");
+        assert!(
+            diagnostic.fatal,
+            "host fallback must not swallow the rejection"
+        );
+        let message = diagnostic.to_string();
+        assert!(message.starts_with("unsupported:"), "{message}");
+        assert!(
+            message.contains("[05-RNG-1]") && message.contains("int64"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn issue_794_runtime_explicit_seed_uses_typed_unsupported_channel() {
+        let expr = chelis_deep::parser::parse_str(
+            "(handle-effect {effect: random} \
+                (var {type: (t-prim {} int64)} runtime_seed) \
+                (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} \
+                     (var {} uniform_like) \
+                     (lit {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} 0.0) \
+                     (lit {type: (t-prim {} f64)} 0.0) \
+                     (lit {type: (t-prim {} f64)} 1.0)))",
+        )
+        .expect("parse handled random expression")
+        .pop()
+        .expect("one expression");
+        let outcome = catch_lowering(move || {
+            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+            ctx.random_seed = Some(7);
+            let _ = ctx.lower_expr(&expr);
+        });
+        let diagnostic = outcome.expect_err("a runtime seed is not statically resolvable");
+        assert!(
+            diagnostic.fatal,
+            "host fallback must not swallow the rejection"
+        );
+        let message = diagnostic.to_string();
+        assert!(message.starts_with("unsupported:"), "{message}");
+        assert!(
+            message.contains("[05-RNG-1]") && message.contains("int64"),
+            "{message}"
         );
     }
 
