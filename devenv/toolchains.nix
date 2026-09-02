@@ -134,6 +134,11 @@ in
       patchedKache
     ]
     ++ lib.optionals stdenv.isLinux [
+      # The chelis#893 Phase 0 inventory reads C and Objective-C headers
+      # through clang's front end; on Linux `cc` is gcc, which has no AST
+      # dump, so the driver is added explicitly. Darwin's cc wrapper already
+      # exposes `clang`.
+      clang
       gcc
       openblas
       valgrind

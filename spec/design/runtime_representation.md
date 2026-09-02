@@ -1,8 +1,8 @@
 # Runtime Representation and Tensor-Access Safety
 
-**Status:** PROPOSED. This document specifies the complete implementation plan;
-no phase is implemented by this change. Tracking issue: [#893]. Code evidence was
-rechecked on `main` at `8190b6d8` unless a later receipt is named.
+**Status:** ACTIVE. Phase 0 is implemented and continuously enforced by its
+authoritative oracle; Phases 1-5 remain planned. Tracking issue: [#893]. Code
+evidence was rechecked on `main` at `8190b6d8` unless a later receipt is named.
 **Owning specs:** `spec/04-type-system.md` [04-NUM-4], [04-NUM-8],
 [04-NUM-10], [04-NUM-11], and [04-SHAPE-1], plus
 `spec/05-risc-primitives.md` [05-DIM-1], [05-DIM-2], [05-OP-31], and
@@ -475,10 +475,86 @@ or a final authority class.
 Anything neither final nor an unchanged frozen debt identity fails. The
 inventory includes descriptor fields, `data` access, pointer casts,
 width/arithmetic matches, `normalized_key` arithmetic, fixed-rank arrays,
-narrow metadata fields, backend element spellings, and load/store templates.
+narrow metadata fields, backend element spellings, load/store templates, and
+the dtype contract itself: the `Repr` and `RuntimeDType` variants and the
+element bindings that tie a Rust marker to a runtime tag. A dtype added
+without its complete contract is the mutation this last enumerator exists to
+catch, so each variant and each binding is its own row.
 A final-form exception may name a private owner function and reason, but a
 stale or unmatched entry fails and an issue citation does not authorize a raw
 path.
+
+### The inventory's universe is a file list
+
+The inventory's completeness claim is over an explicit, reviewed list of the
+repository files that can carry a seam, held in the oracle as
+`INVENTORY_SOURCES`. The oracle proves that list still equals the on-disk
+contents of its declared roots, so a new file fails until someone registers it,
+and it reads the filesystem rather than the git index because cargo compiles
+what is on disk.
+
+Stating the claim over a *language* instead would not be dischargeable: a
+reviewer can always name one more construct. Stated over a file list it is
+decidable, and every source in it is read by a real parser for its own
+language: the Rust files with `syn`, and the C and Objective-C headers through
+clang's front end (`clang -fsyntax-only -Xclang -ast-dump=json`). A seam's
+owner is the declaration that encloses it, and producing that owner means
+parsing declarations; a token walk cannot do it, because C declaration form
+(tagged aggregates, unions, macro-typed declarators, multi-declarator lists,
+attributes, K&R definitions, keywords inside string literals) is a grammar,
+and each form a hand-written walk left unmodelled dropped a seam silently. The
+compiler supplies the declarations; the reader classifies their type spellings
+with the capacity census's closed type-word lists, so a C type word keeps one
+classification authority in the repository, and a spelling neither list names
+still fails the scan.
+
+The parse is host-independent by construction. Each header is read under a
+fixed target lane (C on `x86_64-unknown-linux-gnu`; `chelis_metal_runtime.h`
+as Objective-C on `x86_64-apple-macosx14.0`), with `-ffreestanding
+-nostdlibinc`, a committed stub SDK under `crates/chelis-repr-inventory/sdk-stubs/`
+standing in for libc, the HIP SDK, hipBLAS, the BLAS headers, SLEEF, the
+Apple frameworks, and the SIMD intrinsics headers, and a scrubbed environment,
+so Linux CI, macOS CI, Devenv,
+and a workstation see the same preprocessed text and produce the same rows.
+The stub SDK is deliberately minimal: a runtime header that starts using an
+SDK symbol the stub does not declare fails the scan until the stub declares
+it.
+
+A compiler reads one preprocessing configuration at a time, so a lane also
+names the closed set of configurations its headers are parsed under (the
+published headers scalar, with the AVX2 arm, with the NEON arm, with the Apple
+arms, with the SLEEF arm, and with the OpenBLAS arm; the HIP header with and
+without `NDEBUG` and with the hipBLAS header present; the Metal header with
+and without `NDEBUG`), and a header's row set is the union over them. That set is checked rather than trusted: a marker planted at
+the start of every conditional arm lets the preprocessor itself report which
+arms each configuration keeps, and an arm that carries code and that no
+configuration keeps fails the scan naming its directive. An arm carries code
+when it holds a declaration, a quoted `#include` (a repository file), or a
+`#define` with a body; an angle `#include` (an SDK or compiler header the
+universe supplies), an include guard's bodiless `#define`, an `#error`, a
+`#pragma`, and a linkage-specification brace carry none and need no
+configuration. Two more
+rules close the universe: an include that resolves, canonically, to anything
+but the header itself, the stub SDK, the compiler's own headers, or the
+published include directory fails the scan, and the type-word rule applies to
+a block parameter and in a cast, compound literal, or `sizeof` operand exactly
+as in a declaration. A `sizeof` in an array bound or bit-field width is a
+width seam of the declaration that spells it. Cargo build scripts under the
+inventoried crates are roots too, since cargo compiles them like any other
+source.
+
+A row's identity is its kind, its path, and its owning declaration. Reformatting
+a literal inside a function does not move the freeze; adding a function, field,
+or dtype variant that carries a seam does. That is the granularity Phases 3 and
+4 delete at, since those phases remove declarations and call sites rather than
+individual bytes.
+
+The two backend runtime headers are inventoried here rather than through the
+capacity census. Their device carrier is a bare `float *data` with fixed-rank
+`int` metadata, which [#1288]'s ratchet gives no citation or override path:
+registering them as a census surface today would produce blocking rows that
+only Phase 2's migration onto the tagged carrier can clear. Phase 2 therefore
+owns adding that census leg, and its exit is not complete until it does.
 
 The oracle self-validates with temporary mutations that are restored before it
 returns:
@@ -491,12 +567,17 @@ returns:
 - replace exact product arithmetic with saturation;
 - add a fixed-rank device field or narrow one metadata field;
 - handwrite a second ABI field list;
+- register a source file's seam without registering the file;
+- use an arithmetic type spelling no vocabulary classifies;
 - change a Bool8 lane spelling to `float`; and
 - make a Bool8 kernel store `1.0f` or omit the device failure flag.
 
-Every mutation must make the relevant phase command fail for the intended
-reason. A source scan is the completeness guard; compile-fail and execution
-tests prove its sanctioned replacements work.
+Every mutation must plant a real seam of its class rather than a token pattern,
+and must make the phase command fail for its exact intended reason. A witness
+that only a pattern-matcher would catch proves nothing about a structural
+classifier. The same command also executes the scanner's own positive and
+negative suite. A source scan is the completeness guard; compile-fail and
+execution tests prove its sanctioned replacements work.
 
 ---
 
@@ -506,7 +587,14 @@ tests prove its sanctioned replacements work.
 
 - Phase 0 freezes the derived inventory, mutation set, current accepted/rejected
   behavior, and the exact issue-to-phase map. Later phases may reduce raw hits
-  but may not add an exception.
+  but may not add an exception. The digest binds one canonical object holding
+  both the immutable foundation rows and the executable coverage manifest
+  (enumerator, universe, identity rule, command, success condition, and mutation
+  set); the separately stored active-debt list sits outside that digest so it
+  can only shrink. Each mutation binds a stable witness ID, source path, exact
+  implementation digest, expected failure code and reason, and required command,
+  so a witness cannot be weakened while its manifest entry still claims the old
+  semantics.
 - Phase 1 freezes `DTypeContract`, sealed element markers, exact capacity keys,
   and checked finite-count types. Later phases consume them without parallel
   tables.
@@ -565,11 +653,14 @@ code-generation text test.
 ## Phase 0 — executable inventory and red controls
 
 **Delivers:** the derived inventory and exact shrink-only transition-debt
-manifest in C6; release-profile reproducers for exact capacity collision,
-count/byte overflow, zero extents, and malformed foreign metadata; detection
-mutations for a new direct field access and incomplete dtype registration;
-source-only and hardware probe harnesses; all landed receipts as positive
-controls.
+manifest in C6, over the frozen source list; a structural seam scanner with its
+own positive and negative suite; release-profile reproducers for exact capacity
+collision, count/byte overflow, zero extents, and malformed foreign metadata,
+including a planner-level [#888] witness that shows the collision reaching slot
+reuse rather than only key equality; one detection mutation per classifier plus
+fail-closed controls for an unregistered source file and an unclassified
+arithmetic spelling; source-only and hardware probe harnesses; all landed
+receipts as positive controls.
 
 The inventory records identities, not mutable line numbers. Each enumerator has
 a mutation that plants a new hit in a different file/configuration. HIP and
@@ -633,6 +724,16 @@ zero-extent behavior are positive receipts.
 device-to-host, and DLPack paths pass rank 0, 1, 8, and greater-than-8 cases,
 preserve `int64` values above `i32::MAX`, reject out-of-domain values before
 copy, and have no fixed array or narrow mirror left.
+
+**Also delivers:** the backend runtime headers' capacity-census leg. Phase 0
+inventories `chelis_hip_runtime.h` and `chelis_metal_runtime.h` as seams rather
+than as a census surface, because their bare `float *` device carrier has no
+citation or override path under [#1288]'s ratchet and would only produce
+blocking rows. Once this phase moves those headers onto the tagged carrier the
+leg becomes both possible and required, so add it here, with its own baseline
+and `coverage_manifest()` entry, reusing the census's existing `preprocess_root`
+enumerator. Phase 2 is not complete while a generated device header carries
+numeric surface no census enumerates.
 
 **Oracle:**
 

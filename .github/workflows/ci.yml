@@ -684,7 +684,7 @@ jobs:
       # apt-get under retry (scripts/ci_apt_get.py); see the lint-rust
       # job for the transient-mirror-reset rationale.
       - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
+        run: python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

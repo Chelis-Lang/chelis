@@ -809,6 +809,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "chelis-repr-inventory"
+version = "0.18.6"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde",
+ "serde_json",
+ "syn 2.0.117",
+ "tempfile",
+]
+
+[[package]]
 name = "chelis-runtime"
 version = "0.18.6"
 dependencies = [

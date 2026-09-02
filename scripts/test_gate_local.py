@@ -192,7 +192,8 @@ class LocalCommandListTests(unittest.TestCase):
         # pipeline artifact contracts, the raw-checkpoint fixture, the
         # two cheap pipeline-core boundary guards (dependency + no_std doc),
         # the canonical chelis-std generated-artifact currency check, and the
-        # chelis#908 unrepresentable-domain oracle.
+        # chelis#908 unrepresentable-domain oracle, and chelis#893's
+        # release-profile runtime-representation Phase 0 oracle.
         # Assert the exact list so no pre-push stage disappears silently.
         rendered = [gate.render(c) for c in gate.local_command_list([])]
         self.assertEqual(
@@ -225,6 +226,8 @@ class LocalCommandListTests(unittest.TestCase):
                 "<managed-python> scripts/pipeline_core_dependency_guard.py",
                 "<managed-python> scripts/pipeline_core_documentation_guard.py",
                 "<managed-python> scripts/unrepresentable_domain_oracle.py",
+                "<managed-python> scripts/runtime_representation_oracle.py "
+                "--phase 0",
             ],
         )
 

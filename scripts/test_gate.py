@@ -526,7 +526,10 @@ GATE_WORKER_RUN_COMMANDS = {
         "python3 scripts/gate.py lint-and-unit",
     ),
     "workspace-tests-shard": (
-        "python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1",
+        # `clang` is the chelis#893 Phase 0 oracle's C/Objective-C front end
+        # and the census's `cc` is gcc here; the image ships clang, but the
+        # gate asserts it rather than assuming it.
+        "python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1",
         "python3 scripts/ci_setup_uv_python.py",
         "python3 scripts/gate.py integration --tests-only "
         "--partition hash:${{ matrix.shard }}/2",
@@ -909,6 +912,26 @@ class ListOutputTests(unittest.TestCase):
             [gate.render(entry) for entry in gate.LOCAL_STATIC_COMMANDS],
         )
         self.assertIn(command, [gate.render(entry) for entry in gate.full_command_list()])
+
+    def test_runtime_representation_phase0_oracle_is_continuous_and_local(self):
+        command = (
+            "<managed-python> scripts/runtime_representation_oracle.py --phase 0"
+        )
+        self.assertIn(
+            command,
+            [gate.render(entry) for entry in gate.STAGES["integration"]],
+        )
+        self.assertIn(
+            command,
+            [gate.render(entry) for entry in gate.LOCAL_STATIC_COMMANDS],
+        )
+        self.assertIn(command, [gate.render(entry) for entry in gate.full_command_list()])
+        script = REPO_ROOT / "scripts" / "runtime_representation_oracle.py"
+        self.assertTrue(script.is_file())
+        self.assertIn(
+            "RUNTIME REPRESENTATION PHASE 0: PASS",
+            script.read_text(),
+        )
 
     def test_front_end_performance_oracle_runs_in_continuous_integration(self):
         command = "<managed-python> scripts/compiler_front_end_performance.py"
