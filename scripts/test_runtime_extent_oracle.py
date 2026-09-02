@@ -32,6 +32,8 @@ class RuntimeExtentOracleTests(unittest.TestCase):
             "grad.input_axis.runtime_movement_source.eval_c",
             "grad_vmap.backward_expand.eval_c",
             "ir.movement_input_cardinality",
+            "reshape.negative.runtime_eval_c",
+            "vmap.element_derived_extent",
             "vmap.shared_shape_bound",
             "vmap.shared_shape_bound.concrete_c_emit",
             "wire.input_axis.round_trip",
@@ -39,6 +41,20 @@ class RuntimeExtentOracleTests(unittest.TestCase):
             "wire.capacity_census",
         ):
             self.assertIn(required, ids)
+
+        by_id = {row.id: row for row in rows}
+        self.assertEqual(
+            by_id["vmap.element_derived_extent"].receipt,
+            "cli.vmap_rejects_element_derived_extent_at_public_checker",
+        )
+        self.assertEqual(
+            by_id["vmap.shared_shape_bound.concrete_c_emit"].phase_a,
+            "silent_unguarded",
+        )
+        self.assertEqual(
+            by_id["reshape.negative.runtime_eval_c"].phase_a,
+            "rejects_exactly",
+        )
 
     def test_checked_baseline_exactly_matches_generated_corpus(self) -> None:
         payload = ORACLE.load_and_validate_baseline()

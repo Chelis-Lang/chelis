@@ -1,12 +1,11 @@
 //! Slice A executable contract for chelis#1277.
 
-use std::collections::HashMap;
-
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtAxis, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_ir::verify;
 use chelis_ir::vmap::vectorize_axis0;
 use chelis_types::types::Prim;
+use chelis_unord::UnordMap;
 
 fn ty(dims: Vec<DimInfo>, precision: Prim) -> TensorType {
     TensorType { dims, precision }
@@ -395,12 +394,12 @@ fn input_axis_vmap_shifts_literal_axis() {
 
 #[test]
 fn input_axis_eval_does_not_read_tensor_elements() {
-    let mut a = HashMap::new();
+    let mut a = UnordMap::new();
     a.insert(
         "source",
         TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
     );
-    let mut b = HashMap::new();
+    let mut b = UnordMap::new();
     b.insert(
         "source",
         TensorValue::from_vec(vec![3], vec![9.0, 8.0, 7.0]),

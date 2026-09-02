@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "5fc99a09ded919bd6c914be08a6f2a0d5a3ada3a1eaa6d6a9cad798202e8d6c0",
+  "corpus_sha256": "29a3bf773f1637a70ec533b1d24ecfac7d0f7ce637af98a117f612abafa044e1",
   "rows": [
     {
       "id": "expand.binder.eval_c",
@@ -117,10 +117,16 @@
       "receipt": "ir.movement_ops_reject_unowned_runtime_extent_inputs"
     },
     {
+      "id": "reshape.negative.runtime_eval_c",
+      "baseline": "rejects_exactly",
+      "phase_a": "rejects_exactly",
+      "receipt": "runtime_negative.issue_616_runtime_reshape_negative_extent_errs_in_both_lanes"
+    },
+    {
       "id": "vmap.element_derived_extent",
       "baseline": "silent_unguarded",
       "phase_a": "rejects_exactly",
-      "receipt": "ir.vmap_rejects_element_derived_extent"
+      "receipt": "cli.vmap_rejects_element_derived_extent_at_public_checker"
     },
     {
       "id": "vmap.input_axis_shift",
@@ -137,7 +143,7 @@
     {
       "id": "vmap.shared_shape_bound.concrete_c_emit",
       "baseline": "silent_unguarded",
-      "phase_a": "executes_exactly",
+      "phase_a": "silent_unguarded",
       "receipt": "cli.vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice"
     },
     {

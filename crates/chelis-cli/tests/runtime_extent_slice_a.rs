@@ -267,9 +267,10 @@ fn stale_extent_guidance_is_removed_but_axis_guidance_stays_int32() {
 /// internal `ToEnd` sentinel beside `tensor[2, ...]` makes the C backend panic
 /// before it can emit the object-only program currently masked by chelis#1397.
 ///
-/// The negative parity row is the IR-level
-/// `vmap_rejects_element_derived_extent`: a genuinely batch-varying bound must
-/// still reject instead of being forced into this shared-axis construction.
+/// The public checker receipt below owns the negative parity row. The IR-level
+/// `vmap_rejects_element_derived_extent` remains defense in depth: a genuinely
+/// batch-varying bound must still reject instead of being forced into this
+/// shared-axis construction.
 #[test]
 fn vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice() {
     let source = "def g(x: tensor[n, f32]) -> tensor[m, f32] = shrink(x, [[1i64, shape(x, 0)]])\n\
@@ -309,4 +310,68 @@ fn vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice() {
         emitted.contains("t0->shape[1]"),
         "the shared shape extent must still read the unbatched function's axis 0, shifted behind the mapped batch axis:\n{emitted}"
     );
+}
+
+#[test]
+fn vmap_rejects_element_derived_extent_at_public_checker() {
+    let source = "def g(x: tensor[n, f32]) -> tensor[m, f32] = {\n\
+        \x20 end = cast(tensor_to_scalar(sum(x, cast(0, int32))), int64)\n\
+        \x20 shrink(x, [[0i64, end]])\n\
+        }\n\
+        out = vmap(g)(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n";
+    let report = check(source);
+    let joined = errors(&report).join("\n");
+    assert!(
+        report["score"].as_f64().is_some_and(|score| score < 1.0),
+        "a public checker rejection must lower the fitness score: {report}"
+    );
+    for required in [
+        "batch_varying_extent",
+        "shrink",
+        "vmapped argument 'x'",
+        "shape() or a scalar argument",
+    ] {
+        assert!(
+            joined.contains(required),
+            "missing {required:?} from the public diagnostic: {report}"
+        );
+    }
+}
+
+#[test]
+fn vmap_rejects_helper_result_derived_from_tensor_elements() {
+    let source = "def data_end(x: tensor[n, f32]) -> int64 = \
+        cast(tensor_to_scalar(sum(x, cast(0, int32))), int64)\n\
+        def g(x: tensor[n, f32]) -> tensor[m, f32] = \
+        shrink(x, [[0i64, data_end(x)]])\n\
+        out = vmap(g)(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n";
+    let report = check(source);
+    let joined = errors(&report).join("\n");
+    assert!(
+        joined.contains("batch_varying_extent")
+            && joined.contains("shrink")
+            && joined.contains("vmapped argument 'x'"),
+        "a helper call must preserve the element-dependency proof: {report}"
+    );
+}
+
+#[test]
+fn vmap_accepts_shape_and_shared_scalar_extent_sources() {
+    let shape_source = "def g(x: tensor[n, f32]) -> tensor[m, f32] = \
+        shrink(x, [[0i64, shape(x, 0)]])\n\
+        out = vmap(g)(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))\n";
+    let shape_report = check(shape_source);
+    assert_eq!(shape_report["score"].as_f64(), Some(1.0), "{shape_report}");
+    assert!(errors(&shape_report).is_empty(), "{shape_report}");
+
+    let scalar_source = "def g(x: tensor[n, f32], end: int64) -> tensor[m, f32] = \
+        shrink(x, [[0i64, end]])\n\
+        out = vmap(g)(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]), 2i64)\n";
+    let scalar_report = check(scalar_source);
+    assert_eq!(
+        scalar_report["score"].as_f64(),
+        Some(1.0),
+        "{scalar_report}"
+    );
+    assert!(errors(&scalar_report).is_empty(), "{scalar_report}");
 }

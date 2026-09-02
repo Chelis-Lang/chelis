@@ -1148,7 +1148,7 @@ impl<'a> EvalContext<'a> {
                     // makes `expand(b, 0, k)` consume the same witnessed
                     // extent as compiled lowering instead of looking up an
                     // unbound textual runtime name (chelis#1382).
-                    let mut dimension_bindings: HashMap<String, usize> = HashMap::new();
+                    let mut dimension_bindings: UnordMap<String, usize> = UnordMap::new();
                     for (declared, arg) in param_types.iter().zip(args.iter()) {
                         let (Some(declared), RuntimeValue::Tensor(tensor)) = (declared, arg) else {
                             continue;
@@ -1203,7 +1203,8 @@ impl<'a> EvalContext<'a> {
                     // callee-owned binders shadow a same-spelled lexical
                     // binding instead of conflicting with it.
                     self.precision_bindings.merge(call_precisions);
-                    for (name, size) in dimension_bindings {
+                    // Dimension-name order is canonical for extending the callee frame.
+                    for (name, size) in dimension_bindings.into_sorted() {
                         let size = i64::try_from(size).map_err(|_| {
                             format!("dimension binder `{name}` exceeds the exact int64 range")
                         })?;

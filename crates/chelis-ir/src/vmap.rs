@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
 
 use crate::dag::{Dag, DimInfo, NodeId, RiscOp, RtAxis, RtDim, TensorType};
 
@@ -23,7 +23,7 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
     // tensor IR cannot represent.
     let shared_bound_nodes = shared_bound_nodes(dag)?;
     let mut mapped_ids = Vec::with_capacity(dag.nodes().len());
-    let mut expanded_shared = HashMap::<NodeId, NodeId>::new();
+    let mut expanded_shared = UnordMap::<NodeId, NodeId>::new();
 
     for node in dag.nodes() {
         let shared = shared_bound_nodes.contains(&node.id);
@@ -225,8 +225,8 @@ fn shift_input_axis(dim: &RtDim) -> RtDim {
     }
 }
 
-fn bound_input_slots(op: &RiscOp) -> HashSet<usize> {
-    let mut slots = HashSet::new();
+fn bound_input_slots(op: &RiscOp) -> UnordSet<usize> {
+    let mut slots = UnordSet::new();
     let mut add = |dim: &RtDim| {
         if let RtDim::Node(slot) = dim {
             slots.insert(*slot);
@@ -247,10 +247,11 @@ fn bound_input_slots(op: &RiscOp) -> HashSet<usize> {
     slots
 }
 
-fn shared_bound_nodes(dag: &Dag) -> Result<HashSet<NodeId>, String> {
-    let mut shared = HashSet::new();
+fn shared_bound_nodes(dag: &Dag) -> Result<UnordSet<NodeId>, String> {
+    let mut shared = UnordSet::new();
     for owner in dag.nodes() {
-        for slot in bound_input_slots(&owner.op) {
+        // Operand-slot order is the IR's canonical order for this dependency walk.
+        for slot in bound_input_slots(&owner.op).into_sorted() {
             let Some(source) = owner.inputs.get(slot).copied() else {
                 continue;
             };
@@ -302,7 +303,7 @@ fn shared_scalar_op(op: &RiscOp) -> bool {
     )
 }
 
-fn mark_shared_bound(dag: &Dag, id: NodeId, shared: &mut HashSet<NodeId>) -> Result<(), String> {
+fn mark_shared_bound(dag: &Dag, id: NodeId, shared: &mut UnordSet<NodeId>) -> Result<(), String> {
     if shared.contains(&id) {
         return Ok(());
     }

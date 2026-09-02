@@ -188,10 +188,16 @@ def generated_phase_a_corpus() -> tuple[CorpusRow, ...]:
             "ir.movement_ops_reject_unowned_runtime_extent_inputs",
         ),
         _row(
+            "reshape.negative.runtime_eval_c",
+            TERMINAL_CONTROL,
+            TERMINAL_CONTROL,
+            "runtime_negative.issue_616_runtime_reshape_negative_extent_errs_in_both_lanes",
+        ),
+        _row(
             "vmap.element_derived_extent",
             "silent_unguarded",
             TERMINAL_CONTROL,
-            "ir.vmap_rejects_element_derived_extent",
+            "cli.vmap_rejects_element_derived_extent_at_public_checker",
         ),
         _row(
             "vmap.input_axis_shift",
@@ -208,7 +214,7 @@ def generated_phase_a_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "vmap.shared_shape_bound.concrete_c_emit",
             "silent_unguarded",
-            EXECUTES,
+            "silent_unguarded",
             "cli.vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice",
         ),
         _row(
@@ -329,9 +335,22 @@ def automatic_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
                 "negative_extent_remains_a_static_type_error",
                 "shape_sourced_expand_rejects_wrong_rank_ascription",
                 "stale_extent_guidance_is_removed_but_axis_guidance_stays_int32",
+                "vmap_accepts_shape_and_shared_scalar_extent_sources",
+                "vmap_rejects_element_derived_extent_at_public_checker",
+                "vmap_rejects_helper_result_derived_from_tensor_elements",
                 "vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice",
                 "zero_extent_is_check_clean_and_evaluates_to_empty_tensor",
             ),
+        ),
+        TestTarget(
+            "runtime_negative",
+            (
+                "cargo", "test", "-p", "chelis-cli", "--test",
+                "issue_616_runtime_reshape_c_parity",
+                "issue_616_runtime_reshape_negative_extent_errs_in_both_lanes",
+                "--", "--exact", "--nocapture",
+            ),
+            ("issue_616_runtime_reshape_negative_extent_errs_in_both_lanes",),
         ),
         TestTarget(
             "rank_poly",

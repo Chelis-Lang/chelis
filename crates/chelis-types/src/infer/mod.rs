@@ -78,6 +78,7 @@ mod shape_honesty;
 mod static_int;
 mod static_value;
 mod validate;
+mod vmap_extent;
 
 use annotate::*;
 use app::*;
@@ -104,6 +105,7 @@ use program::*;
 pub use static_int::fold_static_int_expr;
 use static_value::*;
 use validate::*;
+use vmap_extent::*;
 
 pub use checked::{
     CheckedProgram, FunctionSignatureInference, InferResult, InferStats, ParamSignatureInference,
