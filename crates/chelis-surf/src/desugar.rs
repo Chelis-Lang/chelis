@@ -1253,7 +1253,7 @@ impl DesugarCtx {
         // as a dim-var when it appears in a dim slot — the
         // dim/precision distinction is determined by position inside
         // the tensor type, not by per-name kind tracking. When
-        // `dim_params` is empty, the WS-A5 implicit collection on the
+        // `type_binders` is empty, the WS-A5 implicit collection on the
         // synthesized sig is preserved and parameter annotations keep
         // their pre-WS-A6 behavior (an unbound precision name surfaces
         // a diagnostic via `validate_tensor_precisions_in_program`).

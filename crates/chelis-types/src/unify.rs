@@ -2829,6 +2829,71 @@ mod tests {
         );
     }
 
+    /// chelis#1417: identifying a `Numeric`-bounded variable with a
+    /// `Float`-bounded one keeps the INTERSECTION, in both orders.
+    ///
+    /// This is the direction test, not the conflict test. The two acceptance
+    /// tests that exercise narrowing through a program detect
+    /// `merge_tvar_restrictions` returning `Err`, so a reversion that merely
+    /// widens survives them; this one asserts the surviving family IS `Float`
+    /// and that `int32` is consequently rejected.
+    ///
+    /// It does not isolate either mechanism, and measurement rather than
+    /// reasoning says so. `bind_tvar`'s `merged_restriction` and
+    /// `narrow_tvar_restriction` each independently suffice to produce the
+    /// narrowing, so reverting either ALONE leaves this green (and leaves all
+    /// 1460 crate tests green); only reverting BOTH reds it. Neither is dead
+    /// code — both sit on live paths — but neither is individually necessary
+    /// for this behavior, so no single test can discriminate them. Five
+    /// program shapes, including the reversed order, were tried and none
+    /// discriminates either.
+    #[test]
+    fn identifying_a_numeric_variable_with_a_float_one_keeps_float() {
+        for numeric_first in [true, false] {
+            let mut vg = var_gen();
+            let mut subst = Subst::new();
+            let numeric = vg.fresh_tvar();
+            let float = vg.fresh_tvar();
+            subst
+                .narrow_tvar_restriction(numeric, TypeVarRestriction::ActiveNumeric)
+                .expect("fresh variable takes a bound");
+            subst
+                .narrow_tvar_restriction(float, TypeVarRestriction::ActiveFloat)
+                .expect("fresh variable takes a bound");
+
+            let (left, right) = if numeric_first {
+                (numeric, float)
+            } else {
+                (float, numeric)
+            };
+            unify(&Type::Var(left), &Type::Var(right), &mut subst)
+                .expect("Float is a subset of Numeric, so the two are compatible");
+
+            // Whichever variable survives the binding must admit floats only.
+            let surviving = match subst.resolve_tvar(left) {
+                Type::Var(v) => v,
+                other => panic!("expected a variable, got {other}"),
+            };
+            assert_eq!(
+                subst.tvar_restriction(surviving),
+                Some(TypeVarRestriction::ActiveFloat),
+                "identifying Numeric with Float must narrow to Float, not keep \
+                 Numeric (numeric_first = {numeric_first})"
+            );
+
+            // And the narrowing is observable: int32 is in Numeric but not in
+            // Float, so it must now be rejected.
+            let error = unify(&Type::Var(surviving), &Type::Prim(Prim::Int32), &mut subst)
+                .expect_err("a narrowed variable must reject a non-float dtype");
+            assert!(
+                matches!(error.kind, TypeErrorKind::PrecisionMismatch)
+                    && error.message.contains("Float"),
+                "expected a Float PrecisionMismatch, got: {}",
+                error.message
+            );
+        }
+    }
+
     #[test]
     fn active_float_restrictions_propagate_through_aliases_and_generalization() {
         let mut vg = var_gen();
