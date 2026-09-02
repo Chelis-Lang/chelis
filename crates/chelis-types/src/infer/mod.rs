@@ -24,7 +24,7 @@ use crate::deep_type::{
     BinderMode, DeepTypeResolver, ResolvedCastTarget, TypeDiagnosticLocation, TypeResolutionEnv,
     TypeUseSite,
 };
-use crate::env::Env;
+use crate::env::{Env, TopLevelValueVisibility};
 use crate::errors::*;
 use crate::linearity::LinearityInfo;
 use crate::session::DiagnosticSink;
