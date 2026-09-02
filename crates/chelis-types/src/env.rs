@@ -130,6 +130,18 @@ pub struct Env {
     /// #1298. Never serialized or exposed to entry source.
     #[serde(skip)]
     exact_stdlib_expected_result: Option<Type>,
+    /// chelis#260: the source name bound to each declared dimension
+    /// parameter of a signature, keyed by definition name.
+    ///
+    /// Recorded when a `defsig` is resolved, where the names are still in
+    /// scope, and consumed after instantiation so a declared-dim diagnostic
+    /// can say `n` and `m` rather than `d44` and `d45`. The `DimVar` keys are
+    /// PRE-generalization; `instantiate_with_dvar_mapping` supplies the
+    /// original-to-fresh hop that makes them comparable to what a check on an
+    /// instantiated signature actually sees. Checker state only, never
+    /// serialized.
+    #[serde(skip)]
+    declared_dim_names: UnordMap<String, UnordMap<DimVar, String>>,
     /// chelis#397/#469: provenance of `let`-bound `int`-valued names, so a
     /// runtime `expand` size built from a `let` binding can be checked for
     /// materializability. Cloned at every lexical scope boundary along with
@@ -145,6 +157,15 @@ pub struct Env {
     #[serde(skip)]
     list_literal_lens: UnordMap<String, usize>,
 }
+
+/// An instantiated scheme body, paired with the original-to-fresh renaming of
+/// each kind of quantifier that a caller can need to read back.
+///
+/// The type-variable renaming maps to a `Type` because a quantified type
+/// variable may instantiate to any type; a quantified dimension variable
+/// always instantiates to another dimension variable, so that renaming is
+/// `DimVar` to `DimVar`.
+type InstantiatedScheme = (Type, Vec<(TypeVar, Type)>, Vec<(DimVar, DimVar)>);
 
 impl Env {
     pub fn new() -> Self {
@@ -302,6 +323,41 @@ impl Env {
         self.bindings.remove(name);
     }
 
+    /// chelis#260: record the source names of a signature's declared dim
+    /// parameters, so a later diagnostic on the instantiated signature can
+    /// render them.
+    pub(crate) fn record_declared_dim_names(
+        &mut self,
+        name: &str,
+        names: UnordMap<DimVar, String>,
+    ) {
+        if !names.is_empty() {
+            self.declared_dim_names.insert(name.to_string(), names);
+        }
+    }
+
+    /// Resolve a definition's declared dim-parameter names against the fresh
+    /// variables a given instantiation minted (chelis#260).
+    ///
+    /// `dvar_mapping` is the original-to-fresh pairing from
+    /// [`Self::instantiate_with_dvar_mapping`]. The result is keyed by the
+    /// FRESH variables, which is what a post-instantiation check reports on.
+    /// An empty map means the names were never recorded; callers fall back to
+    /// the internal id rather than inventing a name.
+    pub(crate) fn declared_dim_names_for(
+        &self,
+        name: &str,
+        dvar_mapping: &[(DimVar, DimVar)],
+    ) -> UnordMap<DimVar, String> {
+        let Some(original) = self.declared_dim_names.get(name) else {
+            return UnordMap::new();
+        };
+        dvar_mapping
+            .iter()
+            .filter_map(|(from, to)| original.get(from).map(|n| (*to, n.clone())))
+            .collect()
+    }
+
     /// Instantiate a scheme into the caller's inference substitution so
     /// quantified semantic restrictions follow the fresh variables.
     pub fn instantiate(
@@ -310,8 +366,7 @@ impl Env {
         var_gen: &mut VarGen,
         inference_subst: &Subst,
     ) -> Type {
-        self.instantiate_with_tvar_mapping(scheme, var_gen, inference_subst)
-            .0
+        self.instantiate_scheme(scheme, var_gen, inference_subst).0
     }
 
     /// Instantiate a scheme and return the fresh type minted for each
@@ -325,8 +380,51 @@ impl Env {
         var_gen: &mut VarGen,
         inference_subst: &Subst,
     ) -> (Type, Vec<(TypeVar, Type)>) {
+        let (ty, tvar_mapping, _) = self.instantiate_scheme(scheme, var_gen, inference_subst);
+        (ty, tvar_mapping)
+    }
+
+    /// Instantiate a scheme and return the fresh dimension variable minted for
+    /// each quantified dim variable, in quantifier order (chelis#260).
+    ///
+    /// The dim analogue of [`Self::instantiate_with_tvar_mapping`]. Declared
+    /// dim diagnostics run against the instantiated signature, so they need
+    /// this hop to get back to the names the source wrote.
+    pub(crate) fn instantiate_with_dvar_mapping(
+        &self,
+        scheme: &Scheme,
+        var_gen: &mut VarGen,
+        inference_subst: &Subst,
+    ) -> (Type, Vec<(DimVar, DimVar)>) {
+        let (ty, _, dvar_mapping) = self.instantiate_scheme(scheme, var_gen, inference_subst);
+        (ty, dvar_mapping)
+    }
+
+    /// The one instantiation mechanism (chelis#260 / chelis#1292).
+    ///
+    /// Every quantifier is renamed here and nowhere else, so the two jobs the
+    /// callers above need cannot drift apart: #1292's installation of
+    /// quantified type-variable restrictions onto the fresh variables, and
+    /// #260's original-to-fresh dimension pairing that lets a diagnostic
+    /// recover the source name of a declared dim parameter.
+    ///
+    /// Keeping them in one body is deliberate. Both were separately-authored
+    /// copies of this loop at one point, and a second copy is exactly how a
+    /// scheme gets instantiated with its restrictions dropped: the omission
+    /// compiles, and the only symptom is a program that should have been
+    /// rejected type-checking.
+    ///
+    /// Callable directly by a site that needs more than one of the renamings
+    /// at once, which is why it is crate-visible rather than a fourth
+    /// projection beside the three above.
+    pub(crate) fn instantiate_scheme(
+        &self,
+        scheme: &Scheme,
+        var_gen: &mut VarGen,
+        inference_subst: &Subst,
+    ) -> InstantiatedScheme {
         let mut subst = Subst::new();
-        let mut mapping = Vec::with_capacity(scheme.tvars.len());
+        let mut tvar_mapping = Vec::with_capacity(scheme.tvars.len());
         for &tv in &scheme.tvars {
             let fresh = var_gen.fresh_type();
             subst
@@ -342,17 +440,24 @@ impl Env {
                     .narrow_tvar_restriction(fresh_var, *restriction)
                     .expect("a fresh instantiation variable carries no prior dtype bound");
             }
-            mapping.push((tv, fresh));
+            tvar_mapping.push((tv, fresh));
         }
+        let mut dvar_mapping = Vec::with_capacity(scheme.dvars.len());
         for &dv in &scheme.dvars {
-            subst.insert_dim(dv, var_gen.fresh_dim());
+            // Mint the variable directly rather than destructuring
+            // `fresh_dim()`: that is `Dim::Var(fresh_dvar())` today, but a
+            // pattern match would silently drop the mapping entry (and the
+            // name with it) if it ever returned another shape.
+            let fresh_dv = var_gen.fresh_dvar();
+            dvar_mapping.push((dv, fresh_dv));
+            subst.insert_dim(dv, Dim::Var(fresh_dv));
         }
         for &rv in &scheme.rvars {
             // Each rank var instantiates to a fresh sole-`Rank` shape so every
             // call site gets its own rank (Tier-2 rank polymorphism).
             subst.insert_rank(rv, vec![Dim::Rank(var_gen.fresh_rvar())]);
         }
-        (subst.apply(&scheme.body), mapping)
+        (subst.apply(&scheme.body), tvar_mapping, dvar_mapping)
     }
 
     /// Collect all free type variables across all bindings in the environment.
@@ -761,6 +866,165 @@ fn collect_rvars(ty: &Type, vars: &mut Vec<RankVar>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scheme exercising every quantifier kind, with a restriction on one
+    /// type variable and none on the other, so a route that drops
+    /// restrictions and a route that installs them indiscriminately are both
+    /// distinguishable from the correct one.
+    fn restricted_scheme() -> Scheme {
+        Scheme {
+            tvars: vec![TypeVar(1), TypeVar(2)],
+            tvar_restrictions: vec![(TypeVar(2), TypeVarRestriction::ActiveFloat)],
+            dvars: vec![DimVar(3), DimVar(4)],
+            rvars: vec![RankVar(5)],
+            body: Type::Tuple(vec![
+                Type::Var(TypeVar(1)),
+                Type::Tensor(
+                    vec![
+                        Dim::Var(DimVar(3)),
+                        Dim::Var(DimVar(4)),
+                        Dim::Rank(RankVar(5)),
+                    ],
+                    TensorPrec::Var(TypeVar(2)),
+                ),
+            ]),
+        }
+    }
+
+    /// chelis#260: `instantiate_with_dvar_mapping` replaced a plain
+    /// `instantiate` call at the annotated-def site. It must therefore mint
+    /// the SAME variables in the SAME order, or the substitution the checker
+    /// runs on would change and this diagnostic-only fix would perturb
+    /// inference. Locking the equivalence rather than assuming it.
+    ///
+    /// The scheme carries a chelis#1292 restriction, so this also pins that
+    /// the two jobs compose: naming a dim parameter must not cost the
+    /// instantiation its quantified type-variable restrictions.
+    #[test]
+    fn dvar_mapping_instantiation_matches_plain_instantiation() {
+        let scheme = restricted_scheme();
+        let env = Env::new();
+
+        let plain_subst = Subst::new();
+        let mut plain_gen = VarGen::default();
+        let plain = env.instantiate(&scheme, &mut plain_gen, &plain_subst);
+
+        let mapped_subst = Subst::new();
+        let mut mapped_gen = VarGen::default();
+        let (mapped, mapping) =
+            env.instantiate_with_dvar_mapping(&scheme, &mut mapped_gen, &mapped_subst);
+
+        assert_eq!(
+            plain, mapped,
+            "the mapping variant must produce an identical instantiated type"
+        );
+        assert_eq!(
+            format!("{plain_gen:?}"),
+            format!("{mapped_gen:?}"),
+            "both variants must advance the generator identically"
+        );
+        assert_eq!(
+            mapping.iter().map(|(from, _)| *from).collect::<Vec<_>>(),
+            scheme.dvars,
+            "the mapping must cover every quantified dim in quantifier order"
+        );
+        let fresh: Vec<DimVar> = mapping.iter().map(|(_, to)| *to).collect();
+        assert!(
+            fresh.iter().all(|f| !scheme.dvars.contains(f)),
+            "every mapped-to variable must be fresh, got {fresh:?}"
+        );
+    }
+
+    /// chelis#1292 + chelis#260: quantified type-variable restrictions follow
+    /// the fresh variables through EVERY instantiation route, not just the
+    /// one #1292 happened to touch.
+    ///
+    /// This is the integration the two changes needed. Before they were
+    /// reconciled, the dim-mapping route was a separate copy of the
+    /// substitution loop that predated restriction installation, so a
+    /// signature instantiated through it silently lost its `ActiveFloat`
+    /// domain -- and the only symptom would have been a non-float program
+    /// type-checking. A dropped restriction cannot fail loudly, so it is
+    /// pinned here rather than left to a downstream rejection test.
+    #[test]
+    fn every_instantiation_route_installs_quantified_restrictions() {
+        let scheme = restricted_scheme();
+        let env = Env::new();
+
+        // Every route instantiates the same scheme from the same starting
+        // generator state, so all three mint the same fresh variables and the
+        // observed restriction sets are directly comparable.
+        let restrictions_after = |instantiate: &dyn Fn(&Subst, &mut VarGen)| {
+            let subst = Subst::new();
+            let mut var_gen = VarGen::default();
+            instantiate(&subst, &mut var_gen);
+            (0..64)
+                .map(TypeVar)
+                .filter_map(|v| subst.tvar_restriction(v).map(|r| (v, r)))
+                .collect::<Vec<_>>()
+        };
+
+        let via_instantiate = restrictions_after(&|subst, var_gen| {
+            env.instantiate(&scheme, var_gen, subst);
+        });
+        let via_tvar_mapping = restrictions_after(&|subst, var_gen| {
+            env.instantiate_with_tvar_mapping(&scheme, var_gen, subst);
+        });
+        let via_dvar_mapping = restrictions_after(&|subst, var_gen| {
+            env.instantiate_with_dvar_mapping(&scheme, var_gen, subst);
+        });
+
+        assert_eq!(
+            via_instantiate.len(),
+            1,
+            "exactly the restricted quantifier installs a restriction, got {via_instantiate:?}"
+        );
+        assert_eq!(
+            via_instantiate[0].1,
+            TypeVarRestriction::ActiveFloat,
+            "the installed restriction must be the one the scheme declared"
+        );
+        assert_eq!(
+            via_instantiate, via_tvar_mapping,
+            "the tvar-mapping route must install the same restrictions as the plain route"
+        );
+        assert_eq!(
+            via_instantiate, via_dvar_mapping,
+            "the dvar-mapping route must install the same restrictions as the plain route"
+        );
+    }
+
+    /// chelis#260: a name is only rendered when the mapping vouches for it.
+    /// An unrecorded definition, or one whose recorded variables do not
+    /// appear in this instantiation, must yield nothing rather than a name
+    /// borrowed from another signature.
+    #[test]
+    fn declared_dim_names_resolve_only_through_the_mapping() {
+        let mut env = Env::new();
+        env.record_declared_dim_names(
+            "go",
+            UnordMap::from([(DimVar(3), "n".to_string()), (DimVar(4), "m".to_string())]),
+        );
+
+        let resolved = env.declared_dim_names_for("go", &[(DimVar(3), DimVar(90))]);
+        assert_eq!(resolved.get(&DimVar(90)).map(String::as_str), Some("n"));
+        assert_eq!(resolved.len(), 1, "only mapped variables are named");
+
+        assert!(
+            env.declared_dim_names_for("absent", &[(DimVar(3), DimVar(90))])
+                .is_empty(),
+            "an unrecorded definition names nothing"
+        );
+        assert!(
+            env.declared_dim_names_for("go", &[]).is_empty(),
+            "an empty instantiation mapping names nothing"
+        );
+        assert!(
+            env.declared_dim_names_for("go", &[(DimVar(77), DimVar(91))])
+                .is_empty(),
+            "a variable this signature never declared names nothing"
+        );
+    }
 
     #[test]
     fn lexical_value_shadowing_does_not_replace_constructor_authority() {

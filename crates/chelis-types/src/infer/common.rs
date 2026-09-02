@@ -852,6 +852,16 @@ pub(super) fn resolve_type_aliases(ty: &Type, adt_reg: &AdtRegistry, vg: &mut Va
     AliasExpansionSession::new(adt_reg, vg).resolve(ty)
 }
 
+/// A declaration's resolved type together with the two binder facts the
+/// declaration carries: the dtype-family bounds its metadata declared
+/// (chelis#1474) and the source spelling of every dimension parameter it
+/// introduced (chelis#260).
+type ResolvedDeclaredType = (
+    Type,
+    Vec<(TypeVar, TypeVarRestriction)>,
+    UnordMap<DimVar, String>,
+);
+
 pub(super) fn resolve_deep_type(
     expr: &deep::Expr,
     vg: &mut VarGen,
@@ -860,7 +870,7 @@ pub(super) fn resolve_deep_type(
     binder_mode: BinderMode<'_>,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<Type, ErrorWitness> {
-    let (ty, _) = resolve_deep_type_with_bounds(
+    let (ty, _, _) = resolve_deep_type_with_bounds_and_dim_names(
         expr,
         vg,
         adt_reg,
@@ -873,12 +883,21 @@ pub(super) fn resolve_deep_type(
 }
 
 /// Resolve a declaration's type expression under declared dtype-family bounds
-/// (`spec/04-type-system.md` §5.9).
+/// (`spec/04-type-system.md` §5.9), additionally returning the source name
+/// bound to each dimension variable the resolution minted (chelis#260).
 ///
 /// The bounds arrive from the declaration node's `dtype_bounds` metadata and
 /// leave as `(variable, family)` pairs the caller installs on the
-/// substitution, so generalization re-quantifies them onto the scheme.
-pub(super) fn resolve_deep_type_with_bounds(
+/// substitution, so generalization re-quantifies them onto the scheme. The
+/// resolver holds `name -> DimVar` only for its own lifetime; every other
+/// caller drops it, which is why a declared-dim collapse could report `d44`
+/// and `d45` but never `n` and `m`.
+///
+/// One call returns both because one call site needs both: the `Defsig` arm
+/// installs the bounds and records the names for the same declaration. Two
+/// entry points that each ran the resolver would resolve the declaration
+/// twice and leave two mechanisms to keep in step.
+pub(super) fn resolve_deep_type_with_bounds_and_dim_names(
     expr: &deep::Expr,
     vg: &mut VarGen,
     adt_reg: &AdtRegistry,
@@ -886,16 +905,17 @@ pub(super) fn resolve_deep_type_with_bounds(
     binder_mode: BinderMode<'_>,
     dtype_bounds: UnordMap<String, TypeVarRestriction>,
     errors: &mut DiagnosticSink<'_>,
-) -> Result<(Type, Vec<(TypeVar, TypeVarRestriction)>), ErrorWitness> {
-    let (ty, bounds) = {
+) -> Result<ResolvedDeclaredType, ErrorWitness> {
+    let (ty, bounds, dim_names) = {
         let mut resolver =
             DeepTypeResolver::new(use_site, binder_mode, adt_reg.resolution_env(), vg, errors)
                 .with_dtype_bounds(dtype_bounds);
         let ty = resolver.resolve(expr)?.into_type();
+        let dim_names = resolver.dim_var_names();
         let bounds = resolver.finish_dtype_bounds()?;
-        (ty, bounds)
+        (ty, bounds, dim_names)
     };
-    Ok((resolve_type_aliases(&ty, adt_reg, vg), bounds))
+    Ok((resolve_type_aliases(&ty, adt_reg, vg), bounds, dim_names))
 }
 
 /// Decode a declaration node's `dtype_bounds` metadata into checker
@@ -1695,7 +1715,7 @@ pub(super) fn collect_declarations(
                     return;
                 };
                 let signature_level = subst.enter_level(vg);
-                let resolved = resolve_deep_type_with_bounds(
+                let resolved = resolve_deep_type_with_bounds_and_dim_names(
                     &kids[1],
                     vg,
                     adt_reg,
@@ -1705,13 +1725,17 @@ pub(super) fn collect_declarations(
                     errors,
                 );
                 let installed = match &resolved {
-                    Ok((_, bounds)) => install_declared_bounds(bounds, subst, name, errors),
+                    Ok((_, bounds, _)) => install_declared_bounds(bounds, subst, name, errors),
                     Err(_) => Ok(()),
                 };
                 subst.leave_level(signature_level, vg);
-                if let (Ok((ty, _)), Ok(())) = (resolved, installed) {
+                if let (Ok((ty, _, dim_names)), Ok(())) = (resolved, installed) {
                     let scheme = env.generalize(&ty, subst);
                     env.bind(name.to_string(), scheme);
+                    // chelis#260: keep the source names of the declared dim
+                    // parameters. This is the only point where `n` and `m`
+                    // are still associated with their variables.
+                    env.record_declared_dim_names(name, dim_names);
                 }
             }
         }
@@ -2165,11 +2189,23 @@ pub(super) fn infer_top_level(
         // instantiated at, so in-group recursive calls can be validated
         // against the caller's own instantiation.
         let mut recursion_caller_guard = recursion::CallerGuard::inactive();
+        // chelis#260: the names of this signature's declared dim parameters,
+        // keyed by the FRESH variables the instantiation below mints. Empty
+        // when the signature was never recorded, in which case the collapse
+        // diagnostic falls back to the internal id.
+        let mut declared_dim_names: UnordMap<DimVar, String> = UnordMap::new();
         let declared_ty = if provisional_recursive_type.is_none() {
             env.lookup(&name).map(|s| {
                 let s = s.clone();
                 if recursion::group_member(&name) {
-                    let (ty, mapping) = env.instantiate_with_tvar_mapping(&s, vg, subst);
+                    // Both renamings: the type mapping validates in-group
+                    // recursive calls, and the dim mapping names this
+                    // signature's declared parameters. A recursive `def` can
+                    // collapse two rigid dims exactly like a non-recursive
+                    // one, so it may not be the branch that falls back to
+                    // the internal id (spec/04 [04-FIT-9]).
+                    let (ty, mapping, dvar_mapping) = env.instantiate_scheme(&s, vg, subst);
+                    declared_dim_names = env.declared_dim_names_for(&name, &dvar_mapping);
                     recursion_caller_guard = recursion::begin_caller(
                         &name,
                         declared_signatures.get(&name).map(|m| &m.binders),
@@ -2177,7 +2213,9 @@ pub(super) fn infer_top_level(
                     );
                     ty
                 } else {
-                    env.instantiate(&s, vg, subst)
+                    let (ty, dvar_mapping) = env.instantiate_with_dvar_mapping(&s, vg, subst);
+                    declared_dim_names = env.declared_dim_names_for(&name, &dvar_mapping);
+                    ty
                 }
             })
         } else {
@@ -2328,13 +2366,19 @@ pub(super) fn infer_top_level(
                     }
                 }
             }
-            check_declared_dvars_rigid(&declared_dvars, subst, errors);
+            check_declared_dvars_rigid(&declared_dvars, &declared_dim_names, subst, errors);
             // chelis#273: the param-position guard above never sees a dim
             // parameter that occurs only in the return type, so a body
             // could silently pin a return-only rigid dim. Reject the
             // input-coupled pins/collapses while keeping the legitimate
             // output-inferred uses (hello_tensor-style) green.
-            check_return_only_dvars_rigid(&decl_ty, &declared_dvars, subst, errors);
+            check_return_only_dvars_rigid(
+                &decl_ty,
+                &declared_dvars,
+                &declared_dim_names,
+                subst,
+                errors,
+            );
             // Tier-2 rank-polymorphism Body Discipline
             // (spec/design/rank_polymorphism.md §Soundness Boundary, spec §4.2):
             // a def whose signature mentions a rank variable `..r` may call only
@@ -2366,7 +2410,12 @@ pub(super) fn infer_top_level(
             // already caught above: the tightened Cons-join now unifies
             // the two rigid dims, and `check_declared_dvars_rigid`
             // reports the collapse.)
-            check_list_elem_rigid_dim_vs_wildcard(&decl_ty, &resolved_body, errors);
+            check_list_elem_rigid_dim_vs_wildcard(
+                &decl_ty,
+                &resolved_body,
+                &declared_dim_names,
+                errors,
+            );
             // Implicit-copy fan-out v3 Shape A relaxed retry: if the
             // initial unify fails and the body's tail position resolves
             // to a `(var x)` reference whose declared return is owned

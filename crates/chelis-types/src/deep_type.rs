@@ -380,6 +380,27 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         vars
     }
 
+    /// The source name bound to each dimension variable this resolver
+    /// minted, as `DimVar -> name` (chelis#260).
+    ///
+    /// `dim_vars` above discards the names, which is why a declared-dim
+    /// diagnostic could only render the internal `d{N}` id. These are the
+    /// PRE-generalization variables: a consumer that reports on an
+    /// instantiated signature must compose this with the instantiation's
+    /// original-to-fresh mapping.
+    pub(crate) fn dim_var_names(&self) -> UnordMap<DimVar, String> {
+        // `to_sorted` rather than an unordered walk: `UnordMap` deliberately
+        // offers no `iter`, because hash order must not reach observable
+        // compiler behavior (chelis#1444). The result is a map, so the order
+        // this is built in cannot escape -- but taking the deterministic
+        // walk keeps that true by construction rather than by argument.
+        self.dim_vars
+            .to_sorted()
+            .into_iter()
+            .map(|(name, dv)| (*dv, name.clone()))
+            .collect()
+    }
+
     pub(crate) fn dim_vars(&self) -> Vec<DimVar> {
         let mut vars = self
             .dim_vars

@@ -1415,6 +1415,19 @@ than resting on a file digest.
 Required-literal anchors with matching mutation tests defend the new normative
 rules; connective prose rests on the file digests.
 
+[#1371] adds `spec/04-type-system.md` §6.5 with [04-FIT-9] and [04-FIT-10], the
+source-identity rule for diagnostics: where provenance exists a diagnostic
+identifies an entity by its source spelling, and a compiler-generated inference
+identity is never its sole user-facing identity. This is a diagnostic-rendering
+rule outside the numeric contracts: it does not touch a frozen [04-NUM] atom,
+the §9.1 per-dtype table, the capability schema, or a numeric-surface identity,
+and it changes no value, dtype, or acceptance decision. The complete-file
+digests for `spec/04-type-system.md` and this document move deliberately, every
+frozen atom and region digest and every required-literal anchor is unchanged,
+and the generated rejection registry gains exactly the [04-FIT-9] and
+[04-FIT-10] atoms. The full Phase 4B oracle is rerun so the unchanged numeric
+matrix remains executable evidence rather than an inference from scope.
+
 ## B2. Invariants that hold across every boundary
 
 1. **Controls never move.** Every green control in the audit test files
@@ -2246,3 +2259,4 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#1338]: https://github.com/Chelis-Lang/chelis/issues/1338
 [#1370]: https://github.com/Chelis-Lang/chelis/pull/1370
 [#1399]: https://github.com/Chelis-Lang/chelis/pull/1399
+[#1371]: https://github.com/Chelis-Lang/chelis/pull/1371
