@@ -81,18 +81,20 @@ through a typed implementation receipt, to exact execution.
    symbolic-rank body ([#578]) is rejected by the separate rank-polymorphism
    gate in `crates/chelis-types/src/infer/common.rs:1630-1716`, whose
    legality half belongs to the rank-polymorphism plans.
-2. **Deferred shape candidates** (`crates/chelis-types/src/unify.rs:131`,
-   `deferred_expand_constraints: Mutex<HashMap<TypeVar, _>>`). Positional
+2. **Deferred shape candidates** (`crates/chelis-types/src/unify.rs:136`,
+   `deferred_expand_constraints: Mutex<DeferredExpandConstraints>` over an
+   `UnordMap<TypeVar, Vec<Sourced<DeferredExpandConstraint>>>`). Positional
    `expand(x, axis, n)` genuinely defers a choice, insert a new axis or
    replace an extent, as constraints keyed by the unresolved result type
-   variable. Selection fires only in `bind_tvar` (`unify.rs:1782-1846`) when
+   variable. Selection fires only in `bind_tvar` (`unify.rs:2153-2232`) when
    that variable unifies against a non-variable type. The comparison family
    constructs its `bool` result and returns it without unifying anything
-   (`infer/app_post.rs:570-589`), so a comparison can never select
+   (`infer/app_post.rs:327-346`), so a comparison can never select
    ([#1265]). The freeze-point fallback
-   (`materialize_deferred_expand_defaults`, `unify.rs:996-1009`) iterates a
-   `HashMap`, so coupled defaults settle in hash order and the same file is
-   accepted or rejected at random ([#1338]).
+   (`materialize_deferred_expand_defaults`, `unify.rs:1072-1092`) now walks
+   `settlement_order()`, so [#1338]'s coin flip between accept and reject is
+   closed; what remains open in this mechanism is the consumer's failure to
+   select, not the store's order.
 3. **The IR carries the extent by name.** `RiscOp::Expand { axis, size:
    DimExpr }` (`crates/chelis-ir/src/dag.rs:870-873`) is the only movement
    operation whose bound is not an `RtDim`; `DimExpr` is `Concrete | Sym |
@@ -617,7 +619,9 @@ the properties below; the generator, not this document, enumerates rows.
    [#1338]'s spelling and its operand-swapped form
    `sub(expand(t1, 0, 3i64), reshape(expand(t0, 0, 6i64), [3i64, 2i64]))`,
    which passes only when `reshape`'s literal target list counts as
-   independent evidence.
+   independent evidence. [#1341]'s Phase A already runs both spellings at
+   K=24 (`crates/chelis-cli/tests/hash_order_stability.rs`), so this property
+   composes that harness rather than authoring one.
 7. **Rebuild survival.** After each rebuild pass (vmap, grad, specialization,
    fusion, CSE, DCE, cloning, `splice_dag`), every bound slot and shifted
    axis is still present by `NodeId`, the stamped names survive on the
@@ -771,17 +775,16 @@ every pass.
 ### Slice C - deferral totality and deterministic settlement
 
 **Entry requirements:** the Slice A oracle runner; the `spec/04` §4.7.2
-settlement-order rule; [#1341]'s ordered-store mechanism, or, if it has not
-landed, the two deferred stores keyed locally by the result's
-source-introduction position with a citation to [#1341].
+settlement-order rule; [#1341]'s ordered-store mechanism, landed by its
+Phase A, which records a source ordinal on each deferred obligation and
+settles the two stores in that order.
 
-**Deliver:** the three-action protocol over resolved expected-shape evidence,
-the comparison-family unification route, source-order settlement, the
-recursive composite-carrier rows, and the builtin-consumer tripwire; where
-allocation order implements introduction order, the K-run rows prove the two
-coincide at every freeze point. Close [#1265] when its complete reproducer
-is green. Use `Part of #1338`; close #1338 only if every remaining
-acceptance row owned by that issue is green.
+**Deliver:** on top of that settlement, the three-action protocol over
+resolved expected-shape evidence, the comparison-family unification route,
+the recursive composite-carrier rows, and the builtin-consumer tripwire.
+Close [#1265] when its complete reproducer is green. Use `Part of #1338`;
+close #1338 only if every remaining acceptance row owned by that issue is
+green.
 
 **Frozen at exit:** the action mapping, evidence variant set, recursive
 composite dispositions, settlement order, and K-run count.
@@ -812,7 +815,10 @@ class completion oracle and ends with `RUNTIME EXTENT ORACLE: PASS`.
   owns ordered-iteration mechanics, the lint ratchet, and the K-run harness.
   This plan consumes them in C3 and C5 property 6 and owns which verdict
   determinism settles on. [#1338] keeps [#1277] as its structural parent with
-  an `Also part of #1341` cross-link.
+  an `Also part of #1341` cross-link. That tracker closed with PR #1444
+  (`bcde1133`): its Phase A landed the source-ordinal stores C3's `Freeze`
+  names and property 6's K-run rows, and its C2.3 records the enforcement
+  residuals, neither of which reaches `chelis-types`.
 - **[#731]:** owns witnessed checker errors; remaining rejections and the
   [#609] rank error use that channel.
 - **[#730]:** owns the typed `Unsupported` receipt used by C4's interim
@@ -858,7 +864,7 @@ class completion oracle and ends with `RUNTIME EXTENT ORACLE: PASS`.
 | [#1379] | arithmetic size under a named claim: eval unguarded, compiled lanes reject | B |
 | [#1382] | bare binder as an `expand` size: no witness in eval, compiled lanes ICE | A |
 | [#1265] | comparison consumer never selects the deferred shape | C |
-| [#1338] | coupled defaults settle nondeterministically | C / [#1341] mechanism |
+| [#1338] | coupled defaults settle nondeterministically | C / [#1341] Phase A |
 | [#578] | mechanism evidence only; full rank-polymorphic repro stays open | external rank-polymorphism work |
 | [#1112] | HIP metadata-carrier width; Slice B HIP guard rows | [#729] |
 | [#1298] | runtime axes and windows; `RtAxis::Node` rows and wire ordering | [#729] |

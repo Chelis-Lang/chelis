@@ -1,7 +1,8 @@
 # Hash-Order Determinism: observable behavior never depends on hash iteration order
 
 **Status:** Phase A is implemented. Phase B is implemented and its named oracle
-passes; the change carrying it is in review. Tracking issue: [#1341].
+passes; PR #1444 merged it as `bcde1133` and [#1341] closed.
+Tracking issue: [#1341].
 Amended 2026-08-28: the mechanism moved from the census enumerator that PR #1366
 merged to a type-level ban, then was cut to what defends a known instance or a spec
 sentence. Amended 2026-09-01: Phase B's completeness leg moved from a
@@ -262,20 +263,33 @@ source, an empty dep-info set, and a stale or ungated exception.
 
 **Residual: the host dimension.** Both registered hosts are unix, so
 `#[cfg(not(unix))]` is compiled by no row at any cadence. Eighteen such sites
-exist, including production code in `chelis-cli`, `chelis-reef`,
-`chelis-compiler-api`, and `chelisup`. Windows is not a supported host: no
+exist, seventeen of them in `src/`, including production code in `chelis-cli`,
+`chelis-reef`, `chelis-compiler-api`, `chelis-image-id`, `chelis-python`,
+`chelis-conformance`, and `chelisup`. Windows is not a supported host: no
 workflow uses a Windows runner and `release.yml` builds only Linux and macOS,
 so those regions ship nowhere and the class cannot reach a user through them.
 They are nonetheless outside the ban's enforcement, and this document does not
-claim otherwise. Bringing them in requires a supported Windows host, not a
-further row.
+claim otherwise. Leg 3 does not see the gap either, for the same reason it does
+not see a partly feature-gated file: dep-info is file-granular, so a source
+whose `#[cfg(not(unix))]` regions rustc never lowered still reads as covered.
+The two residuals differ in that the feature one has a nightly `--all-features`
+backstop and this one has none at any cadence. Bringing it in requires a
+supported Windows host, not a further row.
 
 Separately, the three per-pull-request rows list macOS among their hosts, but
-no continuous job runs Clippy on macOS: the macOS jobs run `gate.py
-integration`, which is nextest. `#[cfg(target_os = "macos")]` regions are
-therefore linted by `python3 scripts/gate.py --local`, which `AGENTS.md` makes
-mandatory before a non-documentation push, and not by default CI. Recording
-that here is what the Manual Gates rule requires.
+no continuous job runs Clippy on macOS. The two macOS jobs in `ci.yml` are
+`macos-workspace-shard`, which inlines `cargo nextest run --workspace --profile
+ci-full` rather than calling the gate, and `smt-build-darwin-arm64`, a release
+build; no step of either runs Clippy, and neither requests the component.
+No macOS job in another workflow runs Clippy either, and the only one of them
+on a push trigger is `build-cvc5.yml`'s `build-darwin-arm64`, which harvests a
+cvc5 artifact. Attribute-form
+`#[cfg(target_os = "macos")]` regions are therefore linted by `python3
+scripts/gate.py --local`, which `AGENTS.md` makes mandatory before a
+non-documentation push, and not by default CI. The `cfg!()` macro form is not
+in this residual: it compiles both arms on every host, which is what covers the
+link-flag and BLAS-provider selection in `chelis-backend-c/src/toolchain.rs`.
+Recording the attribute-form gap here is what the Manual Gates rule requires.
 
 **Residual: the feature dimension.** `z3`, `carcara`, and `arb` need external
 solver toolchains
