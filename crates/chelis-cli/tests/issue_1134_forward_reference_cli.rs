@@ -222,3 +222,58 @@ fn eval_and_build_reject_a_later_external_input_before_lowering() {
         }
     }
 }
+
+/// The public-surface half of the [04-INF-4] ordering matrix.
+///
+/// A module whose first declaration is a function makes the body-inference
+/// planner hoist every module function toward that ordinal. A later function
+/// then reads a value declared between them, which is a backward reference the
+/// atom requires to resolve. `chelis check` is the surface a user meets, so it
+/// carries the same interleaving cases as the library oracle: both value
+/// spellings, and the forward control that must still reject with the reader
+/// sitting in the same hoisted position.
+#[test]
+fn check_accepts_a_backward_value_read_across_a_hoisted_module_function() {
+    assert_clean_report(
+        "interleaved_backward_declared",
+        "ch",
+        "module InterleavedBackwardDeclared\n\n\
+         def anchor() -> int32 = 1\n\n\
+         carried: int32 = 7\n\n\
+         def reader() -> int32 = carried\n",
+    );
+    assert_clean_report(
+        "interleaved_backward_unannotated",
+        "ch",
+        "module InterleavedBackwardUnannotated\n\n\
+         def anchor() -> int32 = 1\n\n\
+         carried = 7\n\n\
+         def reader() -> int32 = carried\n",
+    );
+    assert_clean_report(
+        "interleaved_backward_through_helper",
+        "ch",
+        "module InterleavedBackwardHelper\n\n\
+         def caller() -> int32 = helper()\n\n\
+         carried = 5\n\n\
+         def helper() -> int32 = carried\n",
+    );
+    assert_failed_report(
+        "interleaved_forward_declared",
+        "ch",
+        "module InterleavedForwardDeclared\n\n\
+         def anchor() -> int32 = 1\n\n\
+         def reader() -> int32 = carried\n\n\
+         carried: int32 = 7\n",
+        "UnboundVariable",
+    );
+    assert_failed_report(
+        "interleaved_forward_unannotated",
+        "ch",
+        "module InterleavedForwardUnannotated\n\n\
+         def anchor() -> int32 = 1\n\n\
+         def reader() -> int32 = carried\n\n\
+         carried = 7\n",
+        "UnboundVariable",
+    );
+}

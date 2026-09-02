@@ -1,7 +1,7 @@
 //! chelis#1134 / [04-INF-4]: top-level eager-value scope is identical at the
 //! stamped typed and serialized-IR checker ingresses.
 
-use chelis_deep::parse_and_stamp;
+use chelis_deep::{parse_and_stamp, parse_and_stamp_file};
 use chelis_surf::{desugar::desugar_program, parser::parse_str as parse_surf};
 use chelis_types::{
     TypeEnv, build_type_env_from_library, check_ir_program, check_ir_with_context,
@@ -12,6 +12,13 @@ type Diagnostics = Vec<(String, String)>;
 
 fn deep_program(source: &str) -> Vec<chelis_deep::Expr> {
     parse_and_stamp(source).expect("Deep fixture must parse and stamp")
+}
+
+/// Declaration-level Deep parse. `parse_and_stamp` stamps expression forms;
+/// a `(module {} ...)` wrapper is only valid at declaration position, so the
+/// matrix's wrapped rows need this entry point.
+fn deep_file_program(source: &str) -> Vec<chelis_deep::Expr> {
+    parse_and_stamp_file(source).expect("Deep file fixture must parse and stamp")
 }
 
 fn surf_program(source: &str) -> Vec<chelis_deep::Expr> {
@@ -266,4 +273,238 @@ fn diagnostics_remain_in_source_order_when_a_value_mentions_a_later_value() {
         first < later,
         "diagnostics must retain source order: {ir:#?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// [04-INF-4] generated ordering matrix
+//
+// This is the authoritative oracle for the atom. The named regressions above
+// each pin one spelling; they cannot pin the interaction between declaration
+// ORDER and the body-inference schedule, which is where every repair of this
+// rule has failed. `primary_inference_schedule` reorders module functions, so
+// a program's verdict depends on the layout as much as on the spelling, and a
+// hand-written case only ever samples one layout. The matrix enumerates the
+// layouts instead and derives each expected verdict from the atom: a
+// top-level eager value is visible from its own `def` onward and nowhere
+// earlier, at both ingresses, identically.
+//
+// The `wrapped` axis matters and is easy to lose. Bare declarations carry no
+// lexical module key, so `module_fn_indices` is empty and the schedule is the
+// identity map: an unwrapped program cannot reach the reordering at all.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Item {
+    /// A module function that reads nothing. Its only job is to exist before
+    /// the value, so the planner has an earlier function to hoist toward.
+    Anchor,
+    Value,
+    Reader,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ReaderKind {
+    Function,
+    Value,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SurfSpelling {
+    Unannotated,
+    DeclarationTyped,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DeepSpelling {
+    /// No sibling signature: the `def`'s own body stamp is the only type
+    /// evidence, and only the serialized-IR ingress prebinds from it.
+    BodyStampOnly,
+    /// `(defsig ...)` immediately before the matching `(def ...)`.
+    AdjacentSignature,
+    /// The signature is declared at the head of the unit and the `def` stays
+    /// at its layout position. A signature is metadata about a declaration,
+    /// not the declaration, so it must not publish the value early.
+    SeparatedSignature,
+}
+
+/// Every layout the matrix walks: all orderings of anchor/value/reader, plus
+/// the two anchor-free orderings.
+fn layouts() -> Vec<Vec<Item>> {
+    vec![
+        vec![Item::Anchor, Item::Value, Item::Reader],
+        vec![Item::Anchor, Item::Reader, Item::Value],
+        vec![Item::Value, Item::Anchor, Item::Reader],
+        vec![Item::Value, Item::Reader, Item::Anchor],
+        vec![Item::Reader, Item::Anchor, Item::Value],
+        vec![Item::Reader, Item::Value, Item::Anchor],
+        vec![Item::Value, Item::Reader],
+        vec![Item::Reader, Item::Value],
+    ]
+}
+
+/// [04-INF-4]: the reader resolves exactly when the value's `def` precedes it.
+fn layout_accepts(layout: &[Item]) -> bool {
+    let position = |wanted: Item| layout.iter().position(|item| *item == wanted);
+    position(Item::Value) < position(Item::Reader)
+}
+
+fn surf_source(
+    layout: &[Item],
+    reader: ReaderKind,
+    spelling: SurfSpelling,
+    wrapped: bool,
+) -> String {
+    let mut source = String::new();
+    if wrapped {
+        source.push_str("module OrderingMatrix\n\n");
+    }
+    for item in layout {
+        let declaration = match item {
+            Item::Anchor => "def anchor() -> int32 = 1".to_string(),
+            Item::Value => match spelling {
+                SurfSpelling::Unannotated => "carried = 7".to_string(),
+                SurfSpelling::DeclarationTyped => "carried: int32 = 7".to_string(),
+            },
+            Item::Reader => match reader {
+                ReaderKind::Function => "def reader() -> int32 = carried".to_string(),
+                ReaderKind::Value => "echoed = carried".to_string(),
+            },
+        };
+        source.push_str(&declaration);
+        source.push_str("\n\n");
+    }
+    source
+}
+
+fn deep_source(
+    layout: &[Item],
+    reader: ReaderKind,
+    spelling: DeepSpelling,
+    wrapped: bool,
+) -> String {
+    let value_signature = "(defsig {} carried (t-prim {} int32))";
+    let value_def = "(def {} carried (lit {type: (t-prim {} int32)} 7))";
+    let mut declarations: Vec<String> = Vec::new();
+    if spelling == DeepSpelling::SeparatedSignature {
+        declarations.push(value_signature.to_string());
+    }
+    for item in layout {
+        match item {
+            Item::Anchor => declarations.push(
+                "(def {} anchor (fn {} (params {}) (lit {type: (t-prim {} int32)} 1)))".to_string(),
+            ),
+            Item::Value => match spelling {
+                DeepSpelling::BodyStampOnly | DeepSpelling::SeparatedSignature => {
+                    declarations.push(value_def.to_string())
+                }
+                DeepSpelling::AdjacentSignature => {
+                    declarations.push(value_signature.to_string());
+                    declarations.push(value_def.to_string());
+                }
+            },
+            Item::Reader => declarations.push(match reader {
+                ReaderKind::Function => {
+                    "(def {} reader (fn {} (params {}) (var {} carried)))".to_string()
+                }
+                ReaderKind::Value => "(def {} echoed (var {} carried))".to_string(),
+            }),
+        }
+    }
+    if wrapped {
+        format!(
+            "(module {{}} OrderingMatrix\n  {})\n",
+            declarations.join("\n  ")
+        )
+    } else {
+        format!("{}\n", declarations.join("\n\n"))
+    }
+}
+
+/// Check one generated program and report the disagreement, if any.
+fn ordering_row_failure(
+    program: &[chelis_deep::Expr],
+    accepts: bool,
+    label: &str,
+) -> Option<String> {
+    let (ir, typed) = diagnostics(program);
+    if ir != typed {
+        return Some(format!(
+            "{label}: ingress diagnostics diverged\n  ir:    {ir:#?}\n  typed: {typed:#?}"
+        ));
+    }
+    match (accepts, ir.is_empty()) {
+        (true, false) => Some(format!("{label}: expected acceptance, got {ir:#?}")),
+        (false, true) => Some(format!("{label}: expected UnboundVariable, got acceptance")),
+        (false, false) if !ir.iter().any(|(kind, _)| kind == "UnboundVariable") => {
+            Some(format!("{label}: expected UnboundVariable, got {ir:#?}"))
+        }
+        _ => None,
+    }
+}
+
+fn report(failures: Vec<String>, rows: usize) {
+    assert!(
+        failures.is_empty(),
+        "{}/{rows} ordering rows disagree with [04-INF-4]:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
+
+#[test]
+fn surf_ordering_matrix_matches_04_inf_4_at_both_ingresses() {
+    let mut failures = Vec::new();
+    let mut rows = 0;
+    for layout in layouts() {
+        for reader in [ReaderKind::Function, ReaderKind::Value] {
+            for spelling in [SurfSpelling::Unannotated, SurfSpelling::DeclarationTyped] {
+                for wrapped in [true, false] {
+                    rows += 1;
+                    let source = surf_source(&layout, reader, spelling, wrapped);
+                    let label = format!(
+                        "surf layout={layout:?} reader={reader:?} spelling={spelling:?} \
+                         wrapped={wrapped}\n{source}"
+                    );
+                    let program = surf_program(&source);
+                    if let Some(failure) =
+                        ordering_row_failure(&program, layout_accepts(&layout), &label)
+                    {
+                        failures.push(failure);
+                    }
+                }
+            }
+        }
+    }
+    report(failures, rows);
+}
+
+#[test]
+fn deep_ordering_matrix_matches_04_inf_4_at_both_ingresses() {
+    let mut failures = Vec::new();
+    let mut rows = 0;
+    for layout in layouts() {
+        for reader in [ReaderKind::Function, ReaderKind::Value] {
+            for spelling in [
+                DeepSpelling::BodyStampOnly,
+                DeepSpelling::AdjacentSignature,
+                DeepSpelling::SeparatedSignature,
+            ] {
+                for wrapped in [true, false] {
+                    rows += 1;
+                    let source = deep_source(&layout, reader, spelling, wrapped);
+                    let label = format!(
+                        "deep layout={layout:?} reader={reader:?} spelling={spelling:?} \
+                         wrapped={wrapped}\n{source}"
+                    );
+                    let program = deep_file_program(&source);
+                    if let Some(failure) =
+                        ordering_row_failure(&program, layout_accepts(&layout), &label)
+                    {
+                        failures.push(failure);
+                    }
+                }
+            }
+        }
+    }
+    report(failures, rows);
 }
