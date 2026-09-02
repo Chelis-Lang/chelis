@@ -4157,6 +4157,61 @@ class AcknowledgementGrammarTests(unittest.TestCase):
         self.assertEqual(paths, ["spec/11-ffi.md"])
         self.assertEqual(errors, [])
 
+    def test_a_tilde_run_does_not_close_a_backtick_fence(self) -> None:
+        # Round 1 F1. One boolean let any fence run close any other, so a line
+        # that GitHub renders as code could still acknowledge a change.
+        paths, errors = self.parse(
+            "```\n"
+            "~~~\n"
+            "Frozen-contract-change: spec/04-type-system.md\n"
+            "```\n"
+        )
+        self.assertEqual(paths, [])
+        self.assertEqual(errors, [])
+
+    def test_a_short_run_does_not_close_a_longer_fence(self) -> None:
+        # Round 1 F1. CommonMark requires the closing run to be at least as
+        # long as the opening one, so an inner ``` stays inside an outer ````.
+        paths, errors = self.parse(
+            "````\n"
+            "```\n"
+            "Frozen-contract-change: spec/04-type-system.md\n"
+            "```\n"
+            "````\n"
+        )
+        self.assertEqual(paths, [])
+        self.assertEqual(errors, [])
+
+    def test_a_longer_run_closes_a_shorter_fence(self) -> None:
+        paths, errors = self.parse(
+            "```\n"
+            "quoted\n"
+            "````\n"
+            "Frozen-contract-change: spec/11-ffi.md\n"
+        )
+        self.assertEqual(paths, ["spec/11-ffi.md"])
+        self.assertEqual(errors, [])
+
+    def test_a_tilde_fence_still_hides_its_contents(self) -> None:
+        paths, errors = self.parse(
+            "~~~\nFrozen-contract-change: spec/04-type-system.md\n~~~\n"
+        )
+        self.assertEqual((paths, errors), ([], []))
+
+    def test_an_unclosed_fence_is_an_error_not_a_silent_swallow(self) -> None:
+        # Round 1 F2. Without this the acknowledgement vanishes and the gate
+        # tells the author to add a line the body already carries.
+        paths, errors = self.parse(
+            "```\nFrozen-contract-change: spec/11-ffi.md\n"
+        )
+        self.assertEqual(paths, [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("unclosed", errors[0])
+
+    def test_a_closed_fence_reports_no_unclosed_error(self) -> None:
+        paths, errors = self.parse("```\nquoted\n```\n")
+        self.assertEqual((paths, errors), ([], []))
+
     def test_a_mid_sentence_mention_acknowledges_nothing(self) -> None:
         paths, errors = self.parse(
             "Each change adds a `Frozen-contract-change: <path>` line.\n"
@@ -4348,6 +4403,60 @@ class FrozenContractChangeTests(unittest.TestCase):
             acknowledgements=("spec/10-serialization.md",)
         )
         self.assertIn("1 of 28 contract files changed", report[0])
+
+    def test_an_unreadable_baseline_blob_is_an_error_not_an_absence(self) -> None:
+        # Round 1 F3. Reading a failed `git show` as "absent at the merge base"
+        # would report a changed file as unchanged whenever the object store is
+        # degraded. The tree listing and the blob read are now separate.
+        merge_base = oracle.resolve_merge_base(self.root, "origin/main")
+        present = oracle.contract_files_at(
+            self.root, merge_base, oracle.CONTRACT_FILES
+        )
+        self.assertEqual(present, set(oracle.CONTRACT_FILES))
+
+        real_git = oracle._git
+
+        def failing_show(root: Path, *args: str):
+            if args and args[0] == "show":
+                return subprocess.CompletedProcess(
+                    args, 128, b"", b"fatal: unable to read object"
+                )
+            return real_git(root, *args)
+
+        with mock.patch.object(oracle, "_git", failing_show):
+            with self.assertRaisesRegex(
+                oracle.OracleError, r"cannot read .* at "
+            ):
+                oracle.changed_contract_files(
+                    self.root, merge_base, oracle.CONTRACT_FILES
+                )
+
+    def test_an_unlistable_merge_base_tree_is_an_error(self) -> None:
+        with self.assertRaisesRegex(
+            oracle.OracleError, "cannot list frozen contract files"
+        ):
+            oracle.contract_files_at(
+                self.root, "0" * 40, oracle.CONTRACT_FILES
+            )
+
+    def test_a_contract_file_absent_at_the_merge_base_is_a_change(self) -> None:
+        # The other half of F3: a genuine absence must still read as a change,
+        # not as an error.
+        _git_ok(self.root, "checkout", "-q", "-b", "topic")
+        new_path = self.root / "spec/11-ffi.md"
+        merge_base = oracle.resolve_merge_base(self.root, "origin/main")
+        present = oracle.contract_files_at(
+            self.root, merge_base, ("spec/11-ffi.md", "docs/absent-probe.md")
+        )
+        self.assertEqual(present, {"spec/11-ffi.md"})
+        self.assertTrue(new_path.exists())
+        (self.root / "docs/absent-probe.md").write_text("new\n", encoding="utf-8")
+        self.assertIn(
+            "docs/absent-probe.md",
+            oracle.changed_contract_files(
+                self.root, merge_base, ("docs/absent-probe.md",)
+            ),
+        )
 
     def test_a_missing_merge_base_fails_loudly_in_strict_mode(self) -> None:
         _git_ok(self.root, "update-ref", "-d", "refs/remotes/origin/main")

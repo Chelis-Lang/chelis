@@ -1953,9 +1953,11 @@ body needs, then exits 0.
 
 Acknowledging a design or status document is ordinary synchronized
 maintenance, not a semantic decision; only a change to the controlling
-numbered-spec atoms or frozen schema follows §B1. Earlier entries in this
-document that record moving a "complete-file digest" describe the superseded
-mechanism: those digests are gone, and the equivalent act is now the
+numbered-spec atoms or frozen schema follows §B1. Every earlier reference in
+this document to a "complete-file digest", a "full-file digest", or prose
+"resting on the file digests" describes the superseded mechanism, whether it
+records moving one or asserts what one defends: those digests are gone, the
+per-file granularity is unchanged, and the equivalent act is now the
 acknowledgement line. They were replaced because the digest table put every
 frozen contract file's hash in one Python dict, so two pull requests editing
 different chapters conflicted on adjacent lines and two editing the same

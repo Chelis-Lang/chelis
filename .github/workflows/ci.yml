@@ -1456,8 +1456,12 @@ jobs:
       # Full history: the Phase 4B acknowledgement gate diffs every frozen
       # contract file against the MERGE BASE with the base branch, so a change
       # that landed on `main` after this branch forked is never charged to this
-      # branch. A shallow checkout cannot compute that merge base, and the gate
-      # fails loudly rather than reading "no base" as "nothing changed".
+      # branch. A shallow checkout does not fail here, which is why the depth
+      # matters: `git merge-base` succeeds against a grafted `origin/main` and
+      # returns HEAD, and the unconditional step below then reports zero
+      # changed files with a real contract change in the tree. The enforcing
+      # step names an explicit base SHA and so fails loudly instead, but the
+      # depth is what makes both steps read the same history.
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0

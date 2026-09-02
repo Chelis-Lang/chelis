@@ -454,7 +454,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/dtype_semantics.md",
         "## Phase 4 - the capability table becomes the permanent guard",
         "## I1. Interlock with loud unsupported ([#730])",
-        "73778d2eb3ecb139573116b2c0df81617a76da52513f8d7e253002922f8b3023",
+        "3c19e7a262100f1798e41ef5910a8022488ddaf6bb669bc9beb710e9620021f3",
     ),
     "compiled stdlib consumer": (
         "spec/design/loud_unsupported.md",
@@ -666,7 +666,11 @@ ACKNOWLEDGEMENT_NEAR_MISS = re.compile(
     r"^[\s>]*(?:[-*+]\s+)?frozen[-_ ]?contract[-_ ]?change\s*:",
     re.IGNORECASE,
 )
-FENCE_LINE = re.compile(r"^\s*(?:`{3,}|~{3,})")
+# CommonMark fence tracking. The opening run's character and length are both
+# part of the contract: a `~~~` run never closes a ``` block, and a closing run
+# must be at least as long as the one that opened it. One boolean would let a
+# line that renders as code still acknowledge a change.
+FENCE_LINE = re.compile(r"^\s*(?P<fence>`{3,}|~{3,})")
 # A repo-relative POSIX path. The character class excludes every glob
 # metacharacter, the backslash, and whitespace; the segment rule excludes an
 # absolute path, an empty segment, and `.`/`..`.
@@ -678,17 +682,25 @@ def parse_acknowledgements(body: str) -> tuple[list[str], list[str]]:
 
     ``body`` is normally a pull request body. Lines inside fenced code blocks
     are ignored so a body can quote the grammar without acknowledging anything.
+    A fence that is never closed is an error rather than a silent swallow of
+    every line after it.
     """
 
     paths: list[str] = []
     errors: list[str] = []
-    fenced = False
+    open_fence: str | None = None
     for raw in body.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         line = raw.rstrip()
-        if FENCE_LINE.match(line):
-            fenced = not fenced
+        fence = FENCE_LINE.match(line)
+        if fence is not None:
+            run = fence.group("fence")
+            if open_fence is None:
+                open_fence = run
+                continue
+            if run[0] == open_fence[0] and len(run) >= len(open_fence):
+                open_fence = None
             continue
-        if fenced:
+        if open_fence is not None:
             continue
         match = ACKNOWLEDGEMENT_LINE.match(line)
         if match is None:
@@ -710,6 +722,12 @@ def parse_acknowledgements(body: str) -> tuple[list[str], list[str]]:
             )
             continue
         paths.append(candidate)
+    if open_fence is not None:
+        errors.append(
+            f"unclosed {open_fence!r} code fence in the acknowledgement "
+            "document: every line after it was ignored, so an acknowledgement "
+            "there would be lost"
+        )
     return paths, errors
 
 
@@ -746,15 +764,51 @@ def resolve_merge_base(root: Path, base: str) -> str:
     return merge_base.stdout.decode("utf-8").strip()
 
 
+def contract_files_at(
+    root: Path, merge_base: str, contract_files: tuple[str, ...]
+) -> set[str]:
+    """Return the subset of ``contract_files`` present at ``merge_base``.
+
+    Absence and an unreadable object store are different failures, and reading
+    the second as the first would report a changed file as unchanged. This
+    enumerates the tree once so a later `git show` failure is an error.
+    """
+
+    listing = _git(
+        root, "ls-tree", "-r", "-z", "--name-only", merge_base, "--", *contract_files
+    )
+    if listing.returncode != 0:
+        detail = listing.stderr.decode("utf-8", "replace").strip()
+        raise OracleError(
+            f"cannot list frozen contract files at {merge_base}"
+            + (f": {detail}" if detail else "")
+        )
+    present = {
+        name
+        for name in listing.stdout.decode("utf-8", "surrogateescape").split("\0")
+        if name
+    }
+    return present & set(contract_files)
+
+
 def changed_contract_files(
     root: Path, merge_base: str, contract_files: tuple[str, ...] = CONTRACT_FILES
 ) -> list[str]:
     """Return the contract files whose bytes differ from ``merge_base``."""
 
+    present = contract_files_at(root, merge_base, contract_files)
     changed: list[str] = []
     for relative in contract_files:
-        blob = _git(root, "show", f"{merge_base}:{relative}")
-        baseline = blob.stdout if blob.returncode == 0 else None
+        baseline: bytes | None = None
+        if relative in present:
+            blob = _git(root, "show", f"{merge_base}:{relative}")
+            if blob.returncode != 0:
+                detail = blob.stderr.decode("utf-8", "replace").strip()
+                raise OracleError(
+                    f"cannot read {relative} at {merge_base}"
+                    + (f": {detail}" if detail else "")
+                )
+            baseline = blob.stdout
         path = root / relative
         try:
             current: bytes | None = path.read_bytes()

@@ -2403,6 +2403,9 @@ class CiParityTests(unittest.TestCase):
         # the environment, so it is never interpolated into a shell command.
         self.assertIn("PR_BODY: ${{ github.event.pull_request.body }}", step)
         self.assertIn("BASE: ${{ github.event.pull_request.base.sha }}", step)
+        # A step-level `continue-on-error: true` would leave the command pin
+        # above matching while the gate stopped gating.
+        self.assertNotIn("continue-on-error", step)
         self.assertNotIn("${{ github.event.pull_request.body }}", step.split("run:")[-1])
 
     def test_docs_checkout_is_deep_enough_for_the_merge_base(self):
