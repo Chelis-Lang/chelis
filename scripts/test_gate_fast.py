@@ -232,6 +232,7 @@ class FastArgTests(unittest.TestCase):
     def test_fast_excludes_stage_list_local_and_integration_selectors(self):
         for argv in (
             ["--fast", "lint-and-unit"],
+            ["--fast", "runtime-representation"],
             ["--fast", "--list"],
             ["--fast", "--local"],
             ["--fast", "integration", "--tests-only"],
@@ -242,7 +243,12 @@ class FastArgTests(unittest.TestCase):
 
     def test_lease_flags_exclude_list_and_stages(self):
         for flag in (["--no-wait"], ["--no-lease"], ["--lease-timeout", "5"]):
-            for other in (["--list"], ["lint-and-unit"], ["integration"]):
+            for other in (
+                ["--list"],
+                ["lint-and-unit"],
+                ["integration"],
+                ["runtime-representation"],
+            ):
                 with self.subTest(flag=flag, other=other), self.assertRaises(SystemExit):
                     _parse_quietly([*other, *flag])
 

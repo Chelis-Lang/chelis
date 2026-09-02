@@ -18,7 +18,7 @@ contract for binaries named by oracle `--test` arguments. Selector-based
 oracle legs still overlap the workspace lane, including `-E` expressions with
 whole-binary arms, so the dtype oracle is not a third disjoint profile.
 
-Two tiers of check:
+Three tiers of check:
 
   - `FilterTextTests` is a fast, no-compile lock on the *text* of the
     three filter blocks: `ci` may add only binaries named by oracle `--test`
@@ -29,6 +29,18 @@ Two tiers of check:
     full unfiltered list and asserts the partition. It is skipped when
     `cargo`/`cargo nextest` is unavailable, and is `slow`-tolerant
     (listing compiles test binaries on a cold tree).
+  - `GeneralizationPartitionTests` lists the explicit generalization lane,
+    `--features chelis-types/generalize-sweep-oracle`, and asserts that the
+    two nightly-owned contention cases stay out of it.
+
+The last two classes list different compiled configurations, and that is
+why CI runs them in different jobs. `ProfilePartitionTests` runs on workspace
+shard 1, whose default-feature build is warm; `GeneralizationPartitionTests`
+runs on generalization shard 1, whose feature-enabled build is warm. Listing
+the generalization lane on the workspace shard recompiled the workspace under
+a second feature set and cost 4.4 hosted minutes per run. Both classes also
+run wherever the whole module is invoked, so a developer machine still sees
+the complete oracle.
 """
 
 import json
@@ -394,7 +406,6 @@ class ProfilePartitionTests(unittest.TestCase):
         cls.ci = _list_profile("ci")
         cls.nightly = _list_profile("nightly")
         cls.full = _list_profile(None)
-        cls.generalization_pr = _list_generalization_pr()
         cls.dtype_flat = _list_filterset(
             dtype_oracle_manifest.flattened_filter(sys.executable)
         )
@@ -491,24 +502,16 @@ class ProfilePartitionTests(unittest.TestCase):
             f"`#[ignore]`-d, so they never run: {sorted(nightly_ignored)}",
         )
 
-    def test_nightly_contention_cases_are_excluded_from_generalization_pr(self):
+    def test_nightly_contention_cases_are_nightly_owned(self):
+        # The generalization-lane half of this contract lives in
+        # `GeneralizationPartitionTests`, which lists the feature-enabled
+        # configuration where it is already built.
         for test_id in (NIGHTLY_RECURSIVE_TEST, NIGHTLY_CACHE_CONCURRENCY_TEST):
             with self.subTest(test_id=test_id):
                 self.assertIn(test_id, self.nightly)
                 nightly_status, ignored = self.nightly[test_id]
                 self.assertEqual(nightly_status, "matches")
                 self.assertFalse(ignored)
-        recursive_status, recursive_ignored = self.generalization_pr[
-            NIGHTLY_RECURSIVE_TEST
-        ]
-        self.assertEqual(recursive_status, "mismatch")
-        self.assertFalse(recursive_ignored)
-        self.assertNotIn(
-            NIGHTLY_CACHE_CONCURRENCY_TEST,
-            self.generalization_pr,
-            "the generalization PR selector must exclude the entire "
-            "nightly-owned cache-concurrency binary",
-        )
 
     def test_flattened_dtype_filter_is_the_exact_union_of_phase_owners(self):
         flattened = {
@@ -533,6 +536,45 @@ class ProfilePartitionTests(unittest.TestCase):
             len(flattened),
             "the control corpus no longer contains any inherited duplicate "
             "selection, so flattening has no executable duplication to remove",
+        )
+
+
+@unittest.skipUnless(
+    _have_nextest(), "cargo nextest unavailable; skipping generalization census"
+)
+class GeneralizationPartitionTests(unittest.TestCase):
+    """Set math for the explicit generalization lane's selection.
+
+    This class lists `--features chelis-types/generalize-sweep-oracle`, a
+    different compiled configuration from every `ProfilePartitionTests`
+    listing, so CI runs it on generalization shard 1 where that build is
+    warm. The nightly-side half of the contention contract stays in
+    `ProfilePartitionTests.test_nightly_contention_cases_are_nightly_owned`.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.generalization_pr = _list_generalization_pr()
+
+    def test_generalization_lane_selects_a_nonempty_corpus(self):
+        selected = {
+            key
+            for key, (status, ignored) in self.generalization_pr.items()
+            if status == "matches" and not ignored
+        }
+        self.assertGreater(len(selected), 0, "generalization lane is empty")
+
+    def test_nightly_contention_cases_are_excluded_from_generalization_pr(self):
+        recursive_status, recursive_ignored = self.generalization_pr[
+            NIGHTLY_RECURSIVE_TEST
+        ]
+        self.assertEqual(recursive_status, "mismatch")
+        self.assertFalse(recursive_ignored)
+        self.assertNotIn(
+            NIGHTLY_CACHE_CONCURRENCY_TEST,
+            self.generalization_pr,
+            "the generalization PR selector must exclude the entire "
+            "nightly-owned cache-concurrency binary",
         )
 
 

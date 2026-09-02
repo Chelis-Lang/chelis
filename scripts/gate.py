@@ -22,6 +22,7 @@ Usage (an unmanaged launcher is automatically re-executed through uv):
     python3 scripts/gate.py integration     # run the integration subset
     python3 scripts/gate.py integration --tests-only --partition hash:1/2
     python3 scripts/gate.py integration --support-only
+    python3 scripts/gate.py runtime-representation  # run the #893 oracle stage
     python3 scripts/gate.py --list     # print the canonical full list,
                                        # annotated fast/local/CI-owned
     python3 scripts/gate.py --fast     # the pre-push gate: fix in place, then
@@ -419,11 +420,16 @@ UNREPRESENTABLE_DOMAIN_ORACLE: list[str] = [
     "scripts/unrepresentable_domain_oracle.py",
 ]
 
-# chelis#893 Phase 0. The structural inventory and detector mutations are
-# cheap, but its acceptance surface deliberately runs release-profile Rust
-# reproducers. Keep it in the nextest-equipped integration support slice so
-# CI executes the documented phase command itself rather than only its mocked
-# Python unit tests.
+# chelis#893 Phase 0. Its acceptance surface deliberately runs release-profile
+# Rust reproducers and re-scans the seam inventory once per controlled
+# mutation, so on a hosted runner the oracle costs about eleven minutes: the
+# release builds of chelis-ir, chelis-backend-c, chelis-backend-hip, and
+# chelis-runtime never come from the shared cache (the workspace-cache writer
+# builds only the test profile), and the mutation re-scans run serially. It is
+# therefore its own gate stage, run by its own CI job, so the workspace test
+# shards keep their partition wall and the oracle keeps its own failure
+# boundary, like the other phase oracles. The stage still needs
+# `cargo nextest`, and `--local` keeps the obligation on developer machines.
 RUNTIME_REPRESENTATION_ORACLE: list[str] = [
     MANAGED_PYTHON,
     "scripts/runtime_representation_oracle.py",
@@ -484,11 +490,17 @@ STAGES: dict[str, list[list[str]]] = {
         NEXTEST_WORKSPACE_CI,
         COMPILER_FRONT_END_PERFORMANCE_ORACLE,
         UNREPRESENTABLE_DOMAIN_ORACLE,
+    ],
+    "runtime-representation": [
         RUNTIME_REPRESENTATION_ORACLE,
     ],
 }
 
-STAGE_ORDER: list[str] = ["lint-and-unit", "integration"]
+STAGE_ORDER: list[str] = [
+    "lint-and-unit",
+    "integration",
+    "runtime-representation",
+]
 
 HASH_PARTITION_RE = re.compile(
     r"^hash:(?P<shard>[1-9][0-9]*)/(?P<count>[1-9][0-9]*)$"
