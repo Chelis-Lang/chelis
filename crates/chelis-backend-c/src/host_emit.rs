@@ -607,9 +607,14 @@ pub(crate) fn emit_host_abi_program(
     // scope; `emit_main` assigns them in binding order instead of declaring
     // locals, so function bodies and `main()` resolve the same object
     // (mirroring eval's load-closure, which serves the binding's value at
-    // call time). Check-time name resolution rejects forward references
-    // from a use site to a later binding, so every hoisted binding is
-    // initialized before the first user call that reads it.
+    // call time). [04-INF-4] rejects a DIRECT forward reference from a
+    // compiled function to a later binding at check time, annotated or not,
+    // so a hoisted binding a function names is initialized before the first
+    // user call that reads it. That does not cover the INDIRECT shape, where
+    // an earlier binding's initializer calls a function that reads a later
+    // binding: every reference there is legal and `main()` still assigns in
+    // binding order, so the callee reads a zero-initialized static. That
+    // remainder is chelis#1339.
     let captured_globals = captured_global_names(program);
     if !captured_globals.is_empty() {
         body.push("// Top-level bindings captured by compiled functions (issue #352):".to_string());

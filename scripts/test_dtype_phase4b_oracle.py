@@ -171,6 +171,40 @@ class ContractValidationTests(unittest.TestCase):
                 finally:
                     path.write_text(original, encoding="utf-8")
 
+    def test_top_level_value_scope_is_frozen_in_both_owning_chapters(self) -> None:
+        # [04-INF-4] and the spec/02 value-scope clause it qualifies move
+        # together; weakening either half must trip its file digest.
+        mutations = (
+            (
+                "spec/04-type-system.md",
+                "body-type\n> metadata SHALL NOT make that later value visible",
+                "body-type\n> metadata MAY make that later value visible",
+                "spec/04-type-system.md digest mismatch",
+            ),
+            (
+                "spec/04-type-system.md",
+                "A reference to an\n> earlier value SHALL resolve",
+                "A reference to an\n> earlier value MAY resolve",
+                "spec/04-type-system.md digest mismatch",
+            ),
+            (
+                "spec/02-surf-syntax.md",
+                "a non-function value declared earlier in the enclosing module",
+                "a non-function value declared anywhere in the enclosing module",
+                "spec/02-surf-syntax.md digest mismatch",
+            ),
+        )
+        for relative, old, new, message in mutations:
+            with self.subTest(message=f"{relative}: {old[:40]}"):
+                path = self.root / relative
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
     def test_exact_read_atom_freezes_json_and_csv_numeric_boundaries(self) -> None:
         path = self.root / "spec/05-risc-primitives.md"
         mutations = (

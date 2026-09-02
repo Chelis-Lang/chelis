@@ -761,6 +761,26 @@ recursive binding group, whether the recursion is direct or mutual.
 > HIP, and Metal paths reject an offending program identically, before any
 > lane-specific stage runs.
 
+#### 3.1.2 Top-level value scope
+
+> **[04-INF-4]** A top-level non-function `def` SHALL become visible only after
+> its declaration in its exact declaration namespace. A reference to that
+> value from an earlier declaration is a type error reported as
+> `UnboundVariable`, whichever checker entry receives the program; body-type
+> metadata SHALL NOT make that later value visible. A reference to an
+> earlier value SHALL resolve, whether it occurs in a value's initializer or
+> in a function body. An explicitly typed self-reference, spelled either
+> `x: T = x` or `x = (x : T)`, declares an external input rather than reading
+> an eager value; its type is available only while checking its own
+> declaration, and the binding becomes visible to later declarations
+> afterward. The untyped spelling `x = x` is an ordinary eager self-reference
+> and is not an external input declaration. Local `let` bindings are
+> sequential per `spec/03-deep-syntax.md` §6.2. Function recursion and
+> inference groups remain governed by [04-INF-2] and [04-INF-3], and an eager
+> value cycle remains a type error reported as `CycleDetected`.
+
+(Not fully implemented; see chelis#1485.)
+
 ### 3.2 Inference Rules
 
 Standard notation: Γ ⊢ e : τ means "in environment Γ, expression e has type τ."

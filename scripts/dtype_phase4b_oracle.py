@@ -52,13 +52,13 @@ CONTRACT_FILES = (
 )
 FROZEN_FILE_DIGESTS = {
     "spec/02-surf-syntax.md": (
-        "4e8612210c68001955a81a295ccdbf0f8492b8cbaff45bee81cf22cfd89fcd1b"
+        "366aed4c2ecaf5b9e1ea7386b1e708e38dcb81ea73f0b20afcc391ed33bb5de6"
     ),
     "spec/03-deep-syntax.md": (
         "6f1c879bc89ab901fff658b63457a6846e5b6f8ab6ea4a17fd24ec6da0427bd2"
     ),
     "spec/04-type-system.md": (
-        "6b2b37cd1fb6d4455244ba86d8cc9ef6ba66a8b5b39714ece1f69d18034804c6"
+        "cb8d029c61822460e25516c84a7c9c133d10339a6a96fb23d7aac2ebf4abbba6"
     ),
     "spec/05-risc-primitives.md": (
         "cc2814ddf033786c160fce9369053e38f09c3337166249eec5d93040f8e10271"
@@ -76,7 +76,7 @@ FROZEN_FILE_DIGESTS = {
         "b0de5579fa3b7c076ff5e809b2b6d8accf741d82305fe198233cce64ddefaf1c"
     ),
     "spec/design/compiled_value_ownership.md": (
-        "4a6013c2dc5a074d19ae12696c109a35218facfdb423d29ff07cef79fe6689b9"
+        "209f1cac065d0c9ff4e644723d3455fa52c061e8470a32c8514da5b373830c9c"
     ),
     "spec/design/dtype_semantics.md": (
         "aa66287ddcee9cd4139cf6611b277cb1b73a627a01f6ae9e242221633eb7b1b1"

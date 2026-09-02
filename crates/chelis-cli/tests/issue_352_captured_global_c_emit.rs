@@ -18,9 +18,11 @@
 //! the function definitions); `main()` assigns them in binding order instead
 //! of declaring locals. Both the function bodies and `main()` then resolve
 //! the same object, mirroring eval's call-time load-closure semantics.
-//! Check-time name resolution already rejects forward references from a
-//! call site to a later binding, so every captured binding is initialized
-//! before any user call runs.
+//! [04-INF-4] rejects a direct forward reference from a compiled function
+//! to a later binding at check time, so a captured binding a function names
+//! is initialized before any user call reads it. The indirect shape, where an
+//! earlier binding's initializer calls a function that reads a later binding,
+//! is still assigned in binding order and remains chelis#1339.
 //!
 //! This file is the closing oracle for #352: build --target c, compile with
 //! the native cc, run, and assert exact output plus `chelis eval` agreement.

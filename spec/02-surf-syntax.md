@@ -224,8 +224,10 @@ but whose trailing name that module does not export is rejected with a
 `module \`M\` does not export \`N\`` error, not silently accepted.
 
 **Value scope (unqualified references).** A bare value reference is in scope
-only when it names a lexical binding, a value declared in the enclosing
-module, a builtin, or a value brought into unqualified scope by an `import`.
+only when it names a lexical binding, a function declared in the enclosing
+module, a non-function value declared earlier in the enclosing module
+(`spec/04-type-system.md` [04-INF-4]), a builtin, or a value brought into
+unqualified scope by an `import`.
 An exported value in another linked module does not enter scope merely because
 its terminal name is a unique match. A bare name with no in-scope binding is an
 `unbound variable: X` error at `chelis check`; adding, removing, or renaming an

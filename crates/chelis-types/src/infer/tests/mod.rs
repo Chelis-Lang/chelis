@@ -2064,3 +2064,4 @@ fn builtin_conv2d_rejects_kernel_precision_mismatch() {
 mod issue_1316;
 mod more;
 mod recursion_uniformity;
+mod schedule_invariants;

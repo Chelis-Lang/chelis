@@ -253,6 +253,7 @@ pub(super) fn infer_program_with_product_in_session(
     // module-wrapped programs.
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
+    let external_input_types = collect_literal_external_input_types(&items);
     let metadata_prebound_names = UnordSet::new();
     product.function_inference_plan = FunctionInferencePlan::build(&items);
     let inference_groups = primary_inference_groups(&product.function_inference_plan, &items);
@@ -314,6 +315,18 @@ pub(super) fn infer_program_with_product_in_session(
                 crate::opacity::module_key_for_item(module.as_deref(), decl_name),
                 decl_name.map(str::to_string),
             );
+            env.set_current_declaration_ordinal(Some(declaration_index));
+            let external_input_failure = prebind_literal_external_input_for_declaration(
+                declaration_index,
+                expr,
+                &external_input_types,
+                &declared_signatures,
+                &mut env,
+                &mut vg,
+                &mut subst,
+                &adt_reg,
+                errors,
+            );
             if let Some(binding) = infer_top_level(
                 expr,
                 &mut env,
@@ -322,7 +335,7 @@ pub(super) fn infer_program_with_product_in_session(
                 &adt_reg,
                 errors,
                 &mut product,
-                None,
+                external_input_failure.as_ref(),
                 provisional_types.get(&declaration_index),
                 group.recursive,
                 &user_def_names,
@@ -371,6 +384,7 @@ pub(super) fn infer_program_with_product_in_session(
         }
     }
     crate::opacity::set_current_item(None, None);
+    env.set_current_declaration_ordinal(None);
 
     if cancelled() {
         errors.push(crate::cancel::cancellation_check_error());
@@ -1048,6 +1062,14 @@ pub(crate) fn check_typed_program_in_session(
     // located failure rather than a partially-annotated `Ok`.
     let stack_scope = StackExhaustionScope::enter();
     let product = infer_program_with_product_in_session(exprs, errors);
+    // [04-INF-4] makes eager value cycles an ingress-independent checker
+    // error. The serialized-IR ingress runs this detector from
+    // `validate_ir_program`; the stamped typed ingress reaches inference
+    // directly, so run the same detector here after normalizing the carrier.
+    // Keep it after inference to preserve the shared diagnostic order:
+    // body-inference errors first, then `CycleDetected`.
+    let normalized = normalize_nodes_to_lists(exprs);
+    detect_top_level_binding_cycles(&normalized, errors);
     let stats = product.stats();
     if errors.is_empty() {
         let annotated_exprs = annotate_ir_program(exprs, &product, errors);
@@ -1194,9 +1216,13 @@ pub(super) fn infer_ir_program_with_state(
     // `state.env` by `collect_all_declarations` above. The prebind below reads
     // each def's own BODY type stamp (via `collect_ir_types_with_origins`) and
     // rebinds the name to it — the mechanism that lets a `defsig`-less def be
-    // resolved by cross-references before its body is inferred. But letting a
-    // body stamp overwrite a defsig binding replaces the declared signature
-    // with the body's own type, so `infer_top_level`'s body-vs-defsig
+    // resolved by cross-references before its body is inferred. It may bind an
+    // eager value's name too: chelis#1134 scope is decided by
+    // `Env::top_level_value_visibility`, so a binding that exists early can no
+    // longer make a later value readable, and the two ingresses stay in
+    // agreement without this ingress withholding anything. Letting a body stamp
+    // overwrite a defsig binding replaces the declared signature with the
+    // body's own type, so `infer_top_level`'s body-vs-defsig
     // unification (which the IR ingress DOES run) then compares the body
     // against itself and silently accepts a `defsig`/body mismatch. The typed
     // ingress (`infer_program_with_product_in_session`) has no such rebind and
@@ -1327,6 +1353,15 @@ pub(super) fn infer_ir_program_with_state(
                 crate::opacity::module_key_for_item(module.as_deref(), decl_name),
                 decl_name.map(str::to_string),
             );
+            state
+                .env
+                .set_current_declaration_ordinal(Some(declaration_index));
+            // An explicitly typed self-reference (`x = (x : T)`) needs no
+            // separate external-input prebind at this ingress: its body stamp
+            // is in `collected_ir_types`, so the loop above already bound it
+            // or recorded its resolution failure. Resolving the same type
+            // expression again here would report that failure twice and
+            // split the ingresses on exactly the input [04-INF-4] aligns.
             if let Some(binding) = infer_top_level(
                 expr,
                 &mut state.env,
@@ -1387,6 +1422,7 @@ pub(super) fn infer_ir_program_with_state(
         }
     }
     crate::opacity::set_current_item(None, None);
+    state.env.set_current_declaration_ordinal(None);
 
     if cancelled() {
         // Abandoned mid-schedule. The remaining declarations were never
@@ -1417,12 +1453,117 @@ pub(super) fn infer_ir_program_with_state(
     product
 }
 
-/// Primary body-inference schedule. Function declarations inside a lexical
-/// module use the same dependency/SCC planner as signature inference, so a
-/// forward helper's body-derived scheme is available to its caller. Bare defs
-/// and every non-function declaration retain textual order. The returned
-/// values are original flattened ordinals: scheduling never changes diagnostic
-/// ownership, collected-type origins, or output order.
+/// The hoist order: the total order the body-inference schedule used before
+/// chelis#1134 and still uses as its priority. Every module function is
+/// spliced at the earliest module-function ordinal in the planner's
+/// callee-first order, and every other item keeps textual order.
+///
+/// This order is a linear extension of every precedence edge
+/// [`primary_inference_schedule`] builds except a barrier into a hoisted
+/// function (an eager value declared before a module function that reads it),
+/// which is exactly the [04-INF-4] defect the schedule exists to repair. The
+/// schedule therefore reproduces this order on every program that carries no
+/// such barrier, up to the contiguity of a contracted recursive component, so
+/// the grouped order [`primary_inference_groups`] infers is identical.
+fn hoist_order(
+    function_plan: &FunctionInferencePlan,
+    item_count: usize,
+    module_fn_indices: &BTreeSet<usize>,
+) -> Vec<usize> {
+    let Some(&insertion) = module_fn_indices.first() else {
+        return (0..item_count).collect();
+    };
+    let ordered_module_fns = function_plan
+        .ordered_members()
+        .map(|member| member.item_index)
+        .filter(|index| module_fn_indices.contains(index))
+        .collect::<Vec<_>>();
+    let mut order = Vec::with_capacity(item_count);
+    for index in 0..item_count {
+        if index == insertion {
+            order.extend(ordered_module_fns.iter().copied());
+        }
+        if !module_fn_indices.contains(&index) {
+            order.push(index);
+        }
+    }
+    order
+}
+
+/// Eager (non-function) top-level value `def`s, as name -> flattened ordinal.
+/// The first `def` of a duplicated name owns the position, matching
+/// `Env::note_top_level_value_ordinal`; the duplicate is already an error.
+fn eager_value_definition_ordinals(
+    items: &[(Option<String>, &deep::Expr)],
+) -> BTreeMap<String, usize> {
+    let mut ordinals = BTreeMap::new();
+    for (index, (_, expr)) in items.iter().enumerate() {
+        let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
+            continue;
+        };
+        if definition_owns_function_metadata_prebind(expr) {
+            continue;
+        }
+        let Some(name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        ordinals.entry(name.to_string()).or_insert(index);
+    }
+    ordinals
+}
+
+/// Primary body-inference schedule: the order in which top-level declaration
+/// bodies are inferred. The returned values are original flattened ordinals,
+/// so scheduling never changes diagnostic ownership, collected-type origins,
+/// or output order.
+///
+/// The schedule is the [`hoist_order`]-least linear extension of a
+/// precedence graph whose every edge is a real reference in the program:
+///
+/// - a module function is inferred after every module function it calls,
+///   so a forward helper's body-derived scheme is available to its caller
+///   (the planner's callee-first order);
+/// - an item is inferred after every eager value it reads that is declared
+///   before it ([04-INF-4] makes exactly those reads legal; an unannotated
+///   value has no header anywhere, so its type exists only once its own
+///   `def` has been inferred). For a module function this is the barrier
+///   that keeps the hoist from carrying it across the value;
+/// - an item at or after the earliest module-function ordinal is inferred
+///   after every module function it reads, signed or not. A declared
+///   signature is in the global header environment, but it is not yet the
+///   function's scheme: a synthesized `defsig` with a wildcard slot or an
+///   implicit binder is generalized over fresh variables, and a reader that
+///   instantiates it before the body narrows it accepts programs the checker
+///   rejects when the body is inferred first (chelis#1486). The edge therefore
+///   stays unconditional; it mirrors what the hoist supplied implicitly,
+///   bounded to the same region, so function visibility
+///   ([04-INF-2]/[04-INF-3]) is neither narrowed nor widened;
+/// - a recursive component is one vertex, because
+///   [`primary_inference_groups`] infers it as one unit at the first member
+///   the schedule reaches, so an edge one member earns constrains them all.
+///
+/// Bare functions keep textual availability (no call or mirror edge), and a
+/// forward value reference produces no edge because the scope rule leaves it
+/// unbound. Nothing else orders the graph: in particular there is no textual
+/// chain over non-function items and no chain over the planner order. Such
+/// chains are not dependencies, and they close cycles on legal programs.
+/// With real reference edges only, a cycle in this graph is a reference cycle
+/// through an eager value: a runtime initialization cycle that
+/// `detect_top_level_binding_cycles` reports as `CycleDetected` at every
+/// ingress, a runtime cycle through a lambda applied during the value's
+/// initialization that the detector does not yet see (chelis#1487), or the
+/// one legal shape, a value that names a function reading the value back
+/// (`carried = wrap(f)` with `f` reading `carried`), which cycles here because
+/// the mirror and the read edge point both ways; the stall then releases the
+/// function first and its backward read reports unbound (chelis#1485). In
+/// every case the schedule stays total by releasing the hoist-order-least
+/// remaining vertex, so a callee is still inferred before its caller.
+///
+/// This is availability, not visibility. Whether a name is in scope is
+/// decided by `Env::top_level_value_visibility` from source position alone,
+/// so no order this function produces can widen or narrow [04-INF-4] scope.
+/// `crates/chelis-types/src/infer/tests/schedule_invariants.rs` asserts the
+/// invariants above directly on the returned order.
 pub(super) fn primary_inference_schedule(
     function_plan: &FunctionInferencePlan,
     items: &[(Option<String>, &deep::Expr)],
@@ -1432,33 +1573,135 @@ pub(super) fn primary_inference_schedule(
     }
     let module_fn_indices = function_plan
         .ordered_members()
-        .filter_map(|member| {
-            items[member.item_index]
-                .0
-                .as_ref()
-                .map(|_| member.item_index)
-        })
-        .collect::<UnordSet<_>>();
-    if module_fn_indices.is_empty() {
-        return (0..items.len()).collect();
+        .filter(|member| items[member.item_index].0.is_some())
+        .map(|member| member.item_index)
+        .collect::<BTreeSet<_>>();
+    let mut key = vec![0usize; items.len()];
+    for (position, index) in hoist_order(function_plan, items.len(), &module_fn_indices)
+        .into_iter()
+        .enumerate()
+    {
+        key[index] = position;
     }
 
-    let ordered_module_fns = function_plan
-        .ordered_members()
-        .map(|member| member.item_index)
-        .filter(|index| module_fn_indices.contains(index))
-        .collect::<Vec<_>>();
-    let insertion = module_fn_indices
-        .to_sorted()
-        .first()
-        .map_or(0, |index| **index);
-    let mut schedule = Vec::with_capacity(items.len());
-    for index in 0..items.len() {
-        if index == insertion {
-            schedule.extend(ordered_module_fns.iter().copied());
+    // Contract every recursive component to one vertex, named by its lowest
+    // member ordinal and carrying its lowest member key. Members are emitted
+    // together, in the plan's own member order.
+    let mut vertex_of = (0..items.len()).collect::<Vec<_>>();
+    let mut component_members: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for component in &function_plan.components {
+        if !component.recursive {
+            continue;
         }
-        if !module_fn_indices.contains(&index) {
-            schedule.push(index);
+        let mut members = Vec::new();
+        for member in &component.members {
+            if !members.contains(&member.item_index) {
+                members.push(member.item_index);
+            }
+        }
+        let Some(&representative) = members.iter().min() else {
+            continue;
+        };
+        for &member in &members {
+            vertex_of[member] = representative;
+        }
+        component_members.insert(representative, members);
+    }
+    let vertex_key = |vertex: usize| -> usize {
+        component_members
+            .get(&vertex)
+            .map_or(key[vertex], |members| {
+                members
+                    .iter()
+                    .map(|member| key[*member])
+                    .min()
+                    .unwrap_or(key[vertex])
+            })
+    };
+
+    // Reference edges, `(before, after)`, deduplicated and self-edge free.
+    let eager_value_ordinals = eager_value_definition_ordinals(items);
+    let mut module_fn_by_name: BTreeMap<String, usize> = BTreeMap::new();
+    for &index in &module_fn_indices {
+        if let Some(name) = top_level_decl_name(items[index].1) {
+            module_fn_by_name.entry(name.to_string()).or_insert(index);
+        }
+    }
+    let referenced_names = eager_value_ordinals
+        .keys()
+        .chain(module_fn_by_name.keys())
+        .cloned()
+        .collect::<UnordSet<_>>();
+    let floor = module_fn_indices.first().copied();
+    let mut edges: BTreeSet<(usize, usize)> = BTreeSet::new();
+    if !referenced_names.is_empty() {
+        for (index, (_, expr)) in items.iter().enumerate() {
+            let mut referenced = UnordSet::new();
+            let mut bound = Vec::new();
+            collect_top_level_calls(expr, &referenced_names, &mut bound, &mut referenced);
+            let reader = vertex_of[index];
+            let reader_is_module_fn = module_fn_indices.contains(&index);
+            for name in referenced.into_sorted() {
+                if let Some(&value) = eager_value_ordinals.get(&name)
+                    && value < index
+                {
+                    edges.insert((vertex_of[value], reader));
+                }
+                if let Some(&function) = module_fn_by_name.get(&name)
+                    && (reader_is_module_fn || floor.is_some_and(|floor| index >= floor))
+                {
+                    edges.insert((vertex_of[function], reader));
+                }
+            }
+        }
+    }
+    edges.retain(|(before, after)| before != after);
+
+    // Kahn's algorithm, releasing the hoist-order-least ready vertex. A stall
+    // is a reference cycle (already a `CycleDetected` error); release the
+    // hoist-order-least remaining vertex so the schedule stays total. An
+    // early-released vertex is skipped by the `emitted` guard when its
+    // remaining predecessors arrive, so no counter is ever decremented past
+    // zero.
+    let mut successors: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    let mut remaining_predecessors: BTreeMap<usize, usize> = BTreeMap::new();
+    for &(before, after) in &edges {
+        successors.entry(before).or_default().push(after);
+        *remaining_predecessors.entry(after).or_default() += 1;
+    }
+    let mut pending = (0..items.len())
+        .filter(|index| vertex_of[*index] == *index)
+        .map(|vertex| (vertex_key(vertex), vertex))
+        .collect::<BTreeSet<_>>();
+    let mut ready = pending
+        .iter()
+        .copied()
+        .filter(|(_, vertex)| remaining_predecessors.get(vertex).copied().unwrap_or(0) == 0)
+        .collect::<BTreeSet<_>>();
+    let mut emitted = vec![false; items.len()];
+    let mut schedule = Vec::with_capacity(items.len());
+    while let Some(&(key, vertex)) = ready.first().or_else(|| pending.first()) {
+        ready.remove(&(key, vertex));
+        pending.remove(&(key, vertex));
+        if emitted[vertex] {
+            continue;
+        }
+        emitted[vertex] = true;
+        match component_members.get(&vertex) {
+            Some(members) => schedule.extend(members.iter().copied()),
+            None => schedule.push(vertex),
+        }
+        for &successor in successors.get(&vertex).into_iter().flatten() {
+            if emitted[successor] {
+                continue;
+            }
+            let remaining = remaining_predecessors
+                .get_mut(&successor)
+                .expect("every successor was counted when its edge was added");
+            *remaining -= 1;
+            if *remaining == 0 {
+                ready.insert((vertex_key(successor), successor));
+            }
         }
     }
     schedule
@@ -1479,6 +1722,15 @@ pub(super) fn primary_inference_groups(
     items: &[(Option<String>, &deep::Expr)],
 ) -> Vec<PrimaryInferenceGroup> {
     let schedule = primary_inference_schedule(function_plan, items);
+    primary_inference_groups_for_schedule(function_plan, schedule)
+}
+
+/// Group one explicit schedule: a recursive component is emitted whole, in
+/// the plan's member order, at the first member the schedule reaches.
+pub(super) fn primary_inference_groups_for_schedule(
+    function_plan: &FunctionInferencePlan,
+    schedule: Vec<usize>,
+) -> Vec<PrimaryInferenceGroup> {
     let recursive_components = function_plan
         .components
         .iter()
@@ -1576,6 +1828,68 @@ pub(super) type IrTypeEnv = BTreeMap<String, deep::Expr>;
 pub(super) struct CollectedIrTypes {
     type_env: IrTypeEnv,
     final_origin_by_name: UnordMap<String, usize>,
+}
+
+fn collect_literal_external_input_types(
+    items: &[(Option<String>, &deep::Expr)],
+) -> UnordMap<usize, deep::Expr> {
+    let collected = collect_ir_types_with_origins(items.iter().map(|(_, expr)| *expr));
+    collected
+        .type_env
+        .iter()
+        .filter_map(|(name, ty_expr)| {
+            let declaration_index = collected.final_origin_by_name[name];
+            let expr = items[declaration_index].1;
+            let (DeepTag::Def, _, kids) = stamped_parts(expr)? else {
+                return None;
+            };
+            let body = kids.get(1)?;
+            body_is_type_stamped_literal_self_ref(body, name)
+                .then(|| (declaration_index, ty_expr.clone()))
+        })
+        .collect()
+}
+
+/// [04-INF-4]'s typed literal self-reference declares an external input. Its
+/// own type must therefore be visible while that declaration is inferred,
+/// but never to an earlier declaration. Bind exactly the current ordinal just
+/// before its body check; ordinary values and future external inputs remain
+/// source-ordered at both checker ingresses.
+#[allow(clippy::too_many_arguments)]
+fn prebind_literal_external_input_for_declaration(
+    declaration_index: usize,
+    expr: &deep::Expr,
+    external_input_types: &UnordMap<usize, deep::Expr>,
+    declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+) -> Option<ErrorWitness> {
+    let ty_expr = external_input_types.get(&declaration_index)?;
+    let name = top_level_decl_name(expr)?;
+    if declared_signatures.contains_key(name) {
+        return None;
+    }
+    let metadata_level = subst.enter_level(vg);
+    let resolved = resolve_deep_type(
+        ty_expr,
+        vg,
+        adt_reg,
+        TypeUseSite::CompilerMetadata,
+        BinderMode::TrustedCompilerMetadata,
+        errors,
+    );
+    subst.leave_level(metadata_level, vg);
+    match resolved {
+        Ok(ty) => {
+            let scheme = env.generalize(&ty, subst);
+            env.bind(name.to_string(), scheme);
+            None
+        }
+        Err(witness) => Some(witness),
+    }
 }
 
 pub(super) fn build_ir_type_env(exprs: &[deep::Expr]) -> IrTypeEnv {

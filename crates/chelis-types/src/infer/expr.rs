@@ -989,8 +989,17 @@ pub(super) fn infer_var(
             }
             return report(errors, err);
         }
-        if let Some(scheme) = env.lookup(name) {
-            let scheme = scheme.clone();
+        // [04-INF-4]: a top-level eager value is visible only from its own
+        // declaration onward. The test is on source position, never on
+        // whether a binding happens to exist: the body schedule reorders
+        // function declarations, so binding presence answers a different
+        // question. When the not-yet-declared name shadows an outer import,
+        // that outer binding is still the one in scope here.
+        let resolved_scheme = match env.top_level_value_visibility(name) {
+            TopLevelValueVisibility::Visible => env.lookup(name).cloned(),
+            TopLevelValueVisibility::NotYetDeclared { shadowed } => shadowed.cloned(),
+        };
+        if let Some(scheme) = resolved_scheme {
             // spec/04 §3.1.1: inside a recursive binding group, record the
             // instantiation minted for an in-group reference so the group
             // can be validated for uniform recursive instantiation.
