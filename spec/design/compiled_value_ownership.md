@@ -464,11 +464,16 @@ and the non-launch child rows exactly as [#1362] does. The implementation phases
 may be structural prerequisites for those rows without making every issue they
 also serve a launch blocker.
 
-[#1339]'s prerequisite is an exact checker rejection, not a compiled expected
-failure: both annotated heap-capture shapes and the unannotated control must
-report an unbound forward value before build. That transition follows
-[04-INF-4]'s source-order decision and leaves no emitted ownership behavior for
-the ownership phases to repair.
+[#1339]'s **direct** forward capture, where a compiled function names the later
+value itself, is now an exact checker rejection rather than a compiled expected
+failure: both annotated heap-capture shapes and the unannotated control report
+an unbound forward value before build, following [04-INF-4]'s source-order
+decision. Those three rows leave no emitted ownership behavior for the
+ownership phases to repair. [#1339]'s **indirect** shape does: when an earlier
+value's initializer calls a function that reads a later-assigned value, every
+reference obeys [04-INF-4] and the emitted `main` still assigns in source
+order, so the compiled read of an unassigned global survives. It is unchanged
+by that decision, is not an ownership defect, and remains owned by [#1339].
 
 The final invocation is:
 
@@ -512,7 +517,9 @@ The complete run covers:
 9. the existing [#1222] and [#1344] regressions; and
 10. [#1339]'s annotated list/tensor forward captures and unannotated control as
     exact source-order rejections, a separately classified Tier 1 prerequisite
-    rather than a member of this ownership class.
+    rather than a member of this ownership class. Its indirect
+    initializer-through-a-call shape is not covered by those rows and is not
+    an ownership defect.
 
 Required mutations include:
 
@@ -800,7 +807,8 @@ exit zero and final line `COMPILED VALUE OWNERSHIP ORACLE: PASS`.
   ownership suite remains independently callable and spec-derived.
 - **[#1339]:** initialization order is a distinct Tier 1 class. Its annotated
   list/tensor captures and unannotated control must reject as unbound before
-  backend emission. Those regressions run beside the ownership suite so the
+  backend emission; its indirect initializer-through-a-call shape stays open
+  under that issue. Those regressions run beside the ownership suite so the
   launch gate is complete, but the issue is not parented here and does not
   change this issue map.
 - **[#729]:** numeric representation and operation semantics remain controlling.

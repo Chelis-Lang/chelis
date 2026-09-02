@@ -76,7 +76,7 @@ FROZEN_FILE_DIGESTS = {
         "ac8e3f8761f8470774e093ac4c15b0f35e547e84209659eae4f0eaf8667ccc62"
     ),
     "spec/design/compiled_value_ownership.md": (
-        "80047614e3aa941e6ad563c18a1a174d6d17c70bd0b5f1f00d54491d2788b0d6"
+        "209f1cac065d0c9ff4e644723d3455fa52c061e8470a32c8514da5b373830c9c"
     ),
     "spec/design/dtype_semantics.md": (
         "2404679404fb438296707ea18873ded671b0ed5a920be5ad98b22c072e7d9d3f"
