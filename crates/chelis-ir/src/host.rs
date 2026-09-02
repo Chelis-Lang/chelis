@@ -10614,14 +10614,17 @@ fn actualize_tensor_helper_types(
                     }
                     actual
                 }),
-            _ => None,
-        }
-        .or_else(|| {
-            node.reusable_input
+            // A reusable input is a storage hint, so it may supply a shape
+            // only when this pass has no operation-specific rule. Keep this
+            // fallback inside the unhandled arm: `None` from any explicit
+            // rule is a deliberate decline for malformed or unavailable
+            // shape evidence and must preserve `node.output_type`.
+            _ => node
+                .reusable_input
                 .and_then(|id| inferred.get(&id))
                 .filter(|input| input.dims.len() == node.output_type.dims.len())
-                .map(|input| precision_like(input, node.output_type.precision))
-        });
+                .map(|input| precision_like(input, node.output_type.precision)),
+        };
         if let Some(actual) = actual {
             inferred.insert(node.id, actual);
         }
@@ -16591,13 +16594,13 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType {
-                dims: vec![DimInfo::Lit(4)],
+                dims: vec![DimInfo::Named("actual_input".into(), None)],
                 precision: Prim::F32,
             },
             None,
         );
         let declared = TensorType {
-            dims: vec![DimInfo::Named("*".into(), None)],
+            dims: vec![DimInfo::Named("d47".into(), None)],
             precision: Prim::F32,
         };
         let input_axis = || RtDim::InputAxis {
@@ -16631,13 +16634,17 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             ),
         ];
         for node in malformed {
+            // `reusable_input` is a storage-reuse hint, not shape authority.
+            // Exercise the generic fallback explicitly: a declined malformed
+            // movement carrier must not inherit its reusable buffer's shape.
+            dag.set_reusable_input(node, input);
             dag.add_root(node);
         }
 
         let scope = UnordMap::from([(
             "x".into(),
             HostTypeTerm::Tensor(TensorType {
-                dims: vec![DimInfo::Lit(4)],
+                dims: vec![DimInfo::Named("actual_input".into(), None)],
                 precision: Prim::F32,
             }),
         )]);
