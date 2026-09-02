@@ -308,6 +308,24 @@ fn a_value_that_names_a_function_reading_it_back_is_a_recorded_stall() {
     );
 }
 
+/// A partial header must not be instantiated before its body narrows it
+/// (chelis#1486): the reader's mismatched ascription must still reject at the
+/// public surface even though the function is deferred past the value it
+/// reads.
+#[test]
+fn check_rejects_a_mismatched_read_of_a_partial_header_deferred_by_a_barrier() {
+    assert_failed_report(
+        "partial_header",
+        "ch",
+        "module PartialHeader\n\n\
+         def anchor() -> int32 = 1\n\n\
+         r: f32 = f(2)\n\n\
+         v: int32 = 1\n\n\
+         def f(n: int32) = add(v, n)\n",
+        "TypeMismatch",
+    );
+}
+
 /// The public-surface half of the recursive-component ordering matrix.
 ///
 /// A mutually recursive pair is inferred as one unit, so the schedule moves

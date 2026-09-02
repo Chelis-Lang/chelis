@@ -1607,7 +1607,9 @@ blunt hoist scheduled correctly is grouped identically, and only programs it
 mis-scheduled change.
 Second, because every edge is a reference, the stall path is reachable only
 from a reference cycle through an eager value: a runtime initialization cycle
-the detector rejects, or the [#1485] shape above.
+the detector rejects, a runtime cycle through a lambda applied during the
+value's initialization that the detector does not yet see ([#1487]), or the
+[#1485] shape above.
 
 The authoritative oracle for the schedule asserts these invariants directly on
 the returned order, not on accept/reject verdicts:
@@ -1625,8 +1627,10 @@ cyclic program still schedules every item once with callees before callers.
 Named regressions carry the shapes rounds 5 through 8 found: the hoisted
 reader, the straddled recursive component wrapped, bare and mixed, the value
 that reads a `defsig`-less caller, the planner-order break, and the program a
-textual chain would have stalled; the [#1485] shape is pinned as a stall
-ratchet that reddens when it closes. Each of the mutations that reproduces
+textual chain would have stalled; the [#1485] shape is pinned as a stall whose
+reference graph must stay cyclic, while the parity suite and the CLI oracle
+pin its verdict and are the ratchets that redden when it closes. Each of the
+mutations that reproduces
 one of the abandoned repairs reddens the oracle: restoring the blunt hoist,
 dropping the contraction, dropping the read edge, dropping the mirror,
 reinstating either chain, releasing a stall by lowest ordinal, and restoring
@@ -1660,10 +1664,14 @@ signature-inference and chelis#1124 suites are supporting regressions. The
 [#1485] shape is recorded as a ratchet in the parity suite and the CLI oracle:
 its Surf spellings must still reject identically and its stamped spelling must
 still split, so the residual cannot grow silently and both tests redden when
-it closes. Two adjacent pre-existing defects the rounds surfaced are tracked
-beside it and not absorbed here: a partial or generic header instantiated by a
-reader below the hoist floor ([#1486]), and the eager-cycle detector's blind
-spot for a lambda applied during a value's initialization ([#1487]). This
+it closes. The reason the mirror edge stays unconditional has its own direct
+regressions beside the ratchet: a partial and a generic header read by a value
+the schedule defers the function past must still reject at both ingresses and
+at `chelis check`. Two adjacent pre-existing defects the rounds surfaced are
+tracked beside it and not absorbed here: a partial or generic header
+instantiated by a reader below the hoist floor ([#1486]), and the eager-cycle
+detector's blind spot for a lambda applied during a value's initialization
+([#1487]). This
 slice does not absorb [#1125]'s reader audit, [#874]/[#887]'s tag-keyed
 vacuity, or [#1076]/[#672]'s independently owned name-precedence work.
 

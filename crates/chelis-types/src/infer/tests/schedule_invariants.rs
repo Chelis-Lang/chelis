@@ -772,9 +772,9 @@ fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
     // both ways, so the reference graph is cyclic and the schedule stalls.
     // The mirror cannot be dropped for a signed `f` (chelis#1486), so this
     // pins the stall: the reference graph must be cyclic and the schedule
-    // total with callees first. It reddens when the mirror rule changes;
-    // the parity suite and the CLI oracle pin the verdict itself and redden
-    // when #1485 closes.
+    // total with callees first. It reddens when the reference's mirror rule
+    // changes; the implementation is pinned by the verdict ratchets in the
+    // parity suite and the CLI oracle, which redden when #1485 closes.
     for f in [
         "def f(n: int32) -> int32 = if (n <= 0) then 0 else carried((n - 1))",
         "def f(n) = if (n <= 0) then 0 else carried((n - 1))",

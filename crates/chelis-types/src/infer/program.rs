@@ -1548,15 +1548,16 @@ fn eager_value_definition_ordinals(
 /// chain over non-function items and no chain over the planner order. Such
 /// chains are not dependencies, and they close cycles on legal programs.
 /// With real reference edges only, a cycle in this graph is a reference cycle
-/// through an eager value. Most such cycles are runtime initialization cycles
-/// that `detect_top_level_binding_cycles` reports as `CycleDetected` at every
-/// ingress. One is not: a value that names a function reading the value back
-/// (`carried = wrap(f)` with `f` reading `carried`) is legal and cycles here
-/// because the mirror and the read edge point both ways; the stall then
-/// releases the function first and its backward read reports unbound
-/// (chelis#1485). Either way the schedule stays total by releasing the
-/// hoist-order-least remaining vertex, so a callee is still inferred before
-/// its caller.
+/// through an eager value: a runtime initialization cycle that
+/// `detect_top_level_binding_cycles` reports as `CycleDetected` at every
+/// ingress, a runtime cycle through a lambda applied during the value's
+/// initialization that the detector does not yet see (chelis#1487), or the
+/// one legal shape, a value that names a function reading the value back
+/// (`carried = wrap(f)` with `f` reading `carried`), which cycles here because
+/// the mirror and the read edge point both ways; the stall then releases the
+/// function first and its backward read reports unbound (chelis#1485). In
+/// every case the schedule stays total by releasing the hoist-order-least
+/// remaining vertex, so a callee is still inferred before its caller.
 ///
 /// This is availability, not visibility. Whether a name is in scope is
 /// decided by `Env::top_level_value_visibility` from source position alone,

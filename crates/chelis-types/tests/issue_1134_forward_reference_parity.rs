@@ -204,6 +204,33 @@ fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
     );
 }
 
+/// A partial or generic header must not be instantiated before its body
+/// narrows it (round 11, chelis#1486). `def f(n: int32) = ...` synthesizes a
+/// `defsig` with a wildcard result and `def f(x: a) -> a` an implicit binder;
+/// both are generalized over fresh variables until the body is inferred. A
+/// reader scheduled ahead of that body would accept a mismatched ascription
+/// and compile a wrong answer, so the schedule keeps the mirror edge for a
+/// signed function and these must reject identically at both ingresses.
+#[test]
+fn a_partial_or_generic_header_is_not_instantiated_before_its_body_narrows_it() {
+    let partial = surf_program(
+        "module PartialHeader\n\n\
+         def anchor() -> int32 = 1\n\n\
+         r: f32 = f(2)\n\n\
+         v: int32 = 1\n\n\
+         def f(n: int32) = add(v, n)\n",
+    );
+    assert_rejects_identically(&partial, "TypeMismatch", "partial header read early");
+    let generic = surf_program(
+        "module GenericHeader\n\n\
+         def anchor() -> int32 = 1\n\n\
+         r: f32 = f(1.5)\n\n\
+         v: int32 = 1\n\n\
+         def f(x: a) -> a = add(x, v)\n",
+    );
+    assert_rejects_identically(&generic, "PrecisionMismatch", "generic header read early");
+}
+
 #[test]
 fn a_later_external_input_is_not_visible_to_an_earlier_declaration() {
     for (label, source) in [
