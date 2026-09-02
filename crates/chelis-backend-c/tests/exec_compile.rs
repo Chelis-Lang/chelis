@@ -3276,6 +3276,79 @@ int main(void) {{
     );
 }
 
+#[test]
+fn direct_positive_rank_mismatch_traps_before_indexing() {
+    let mut dag = Dag::new();
+    let vector = TensorType {
+        dims: vec![DimInfo::Named("n".into(), None)],
+        precision: Prim::F32,
+    };
+    let matrix = TensorType {
+        dims: vec![
+            DimInfo::Named("n".into(), None),
+            DimInfo::Named("m".into(), None),
+        ],
+        precision: Prim::F32,
+    };
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vector.clone(),
+        None,
+    );
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], matrix, None);
+    let out = dag.add_node(RiscOp::Add, vec![a, b], vector, None);
+    dag.add_root(out);
+
+    let function = "direct_positive_rank_shape_guard";
+    let src = chelis_backend_c::codegen(&dag, function)
+        .expect("rank-divergent codegen must stay defensive")
+        .c_source;
+    assert!(
+        src.contains("elementwise operand rank mismatch"),
+        "generated C omitted the positive-rank mismatch guard:\n{src}"
+    );
+
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+static chelis_tensor make_ranked_view(
+    float *data, int rank, int64_t *shape, int64_t *strides, int64_t size
+) {{
+    return (chelis_tensor){{
+        .data = data, .shape = shape, .strides = strides, .size = size,
+        .byte_capacity = size * (int64_t)sizeof(float), .rank = rank,
+        .dtype = CHELIS_DTYPE_F32, .owns_data = 0, .reserved = {{0, 0}},
+    }};
+}}
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    float a_data[3] = {{1, 2, 3}};
+    float b_data[3] = {{4, 5, 6}};
+    int64_t a_shape[1] = {{3}}, a_strides[1] = {{1}};
+    int64_t b_shape[2] = {{3, 1}}, b_strides[2] = {{1, 1}};
+    chelis_tensor a = make_ranked_view(a_data, 1, a_shape, a_strides, 3);
+    chelis_tensor b = make_ranked_view(b_data, 2, b_shape, b_strides, 3);
+    chelis_tensor *inputs[2] = {{&a, &b}};
+    chelis_tensor *outputs[1] = {{NULL}};
+    {function}(inputs, 2, outputs, 1);
+    puts("UNREACHABLE");
+    return 0;
+}}
+"#
+    );
+    let run = compile_and_capture_run(function, &src, &harness);
+    assert!(
+        !run.status.success(),
+        "positive-rank mismatch reached indexing; stdout={}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains("elementwise operand rank mismatch"),
+        "rank guard emitted the wrong diagnostic: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
 fn direct_fused_reduction_runtime_shape_guard_case(reduce_kind: &str) {
     let matrix = |row_name: &str, column_name: &str| TensorType {
         dims: vec![
