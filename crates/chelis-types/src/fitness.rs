@@ -280,7 +280,7 @@ pub fn structural_stats(exprs: &[chelis_deep::Expr]) -> StructuralStats {
     let invalid_nodes = warnings
         .iter()
         .map(|warning| warning.offset)
-        .collect::<std::collections::HashSet<_>>()
+        .collect::<chelis_unord::UnordSet<_>>()
         .len();
     StructuralStats {
         total_nodes: count_nodes(exprs),

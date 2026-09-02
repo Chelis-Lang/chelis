@@ -7,7 +7,7 @@
 //! - reduction-inlined fused elementwise nodes are skipped entirely
 //! - cleanup frees every metadata wrapper, then each slot exactly once
 
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_ir::dag::{Dag, DimExpr, DimExprKey, DimInfo, NodeId, RiscOp};
 use chelis_types::types::Prim;
@@ -50,7 +50,7 @@ struct OwnerRequirement {
 }
 
 impl MemoryPlan {
-    pub fn build(dag: &Dag, output_ids: &[NodeId], reduction_inlined: &HashSet<NodeId>) -> Self {
+    pub fn build(dag: &Dag, output_ids: &[NodeId], reduction_inlined: &UnordSet<NodeId>) -> Self {
         let mut node_kinds = classify_nodes(dag, reduction_inlined);
         let owner_of = compute_owner_map(dag, &node_kinds);
         let requirements = owner_requirements(dag, &node_kinds, &owner_of, output_ids);
@@ -87,7 +87,10 @@ impl MemoryPlan {
         render_dim_expr_sum(&self.peak_device_bytes_terms())
     }
 
-    pub fn peak_device_bytes_at(&self, bindings: &HashMap<String, usize>) -> Result<usize, String> {
+    pub fn peak_device_bytes_at(
+        &self,
+        bindings: &UnordMap<String, usize>,
+    ) -> Result<usize, String> {
         self.peak_device_bytes_terms()
             .into_iter()
             .try_fold(0usize, |acc, term| Ok(acc + term.evaluate(bindings)?))
@@ -111,9 +114,9 @@ impl MemoryPlan {
     }
 }
 
-fn classify_nodes(dag: &Dag, reduction_inlined: &HashSet<NodeId>) -> Vec<NodeMemoryKind> {
+fn classify_nodes(dag: &Dag, reduction_inlined: &UnordSet<NodeId>) -> Vec<NodeMemoryKind> {
     let mut kinds = Vec::with_capacity(dag.len());
-    let mut first_load_by_name: HashMap<String, NodeId> = HashMap::new();
+    let mut first_load_by_name: UnordMap<String, NodeId> = UnordMap::new();
 
     for node in dag.nodes() {
         let kind = if reduction_inlined.contains(&node.id) {
@@ -227,7 +230,7 @@ fn owner_requirements(
     output_ids: &[NodeId],
 ) -> Vec<OwnerRequirement> {
     let epilogue_index = dag.len();
-    let mut by_owner = HashMap::<NodeId, OwnerRequirement>::new();
+    let mut by_owner = UnordMap::<NodeId, OwnerRequirement>::new();
 
     for node in dag.nodes() {
         match node_kinds[node.id.0] {
@@ -298,7 +301,11 @@ fn owner_requirements(
         }
     }
 
-    let mut ordered = by_owner.into_values().collect::<Vec<_>>();
+    let mut ordered = by_owner
+        .into_sorted()
+        .into_iter()
+        .map(|(_, requirement)| requirement)
+        .collect::<Vec<_>>();
     ordered.sort_by_key(|req| req.birth_index);
     ordered
 }
@@ -311,7 +318,7 @@ fn assign_slots(
     let mut availability: Vec<usize> = Vec::new();
     let mut slot_capacity_concretes = Vec::<Option<usize>>::new();
     let mut slot_capacity_keys = Vec::<DimExprKey>::new();
-    let mut owner_to_slot = HashMap::<NodeId, usize>::new();
+    let mut owner_to_slot = UnordMap::<NodeId, usize>::new();
 
     for req in requirements {
         let reused = slots.iter().enumerate().find_map(|(slot_id, slot)| {
@@ -470,7 +477,7 @@ mod tests {
     }
 
     fn build_plan(dag: &Dag, output_ids: &[NodeId]) -> MemoryPlan {
-        MemoryPlan::build(dag, output_ids, &HashSet::new())
+        MemoryPlan::build(dag, output_ids, &UnordSet::new())
     }
 
     #[test]
@@ -803,7 +810,7 @@ mod tests {
         assert_eq!(plan.peak_device_bytes_estimate(), None);
         assert_eq!(plan.peak_device_bytes_formula(), "(batch * 4)");
 
-        let bindings = HashMap::from([(String::from("batch"), 32usize)]);
+        let bindings = UnordMap::from([(String::from("batch"), 32usize)]);
         assert_eq!(plan.peak_device_bytes_at(&bindings).unwrap(), 128);
     }
 }

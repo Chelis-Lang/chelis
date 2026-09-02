@@ -12,12 +12,12 @@ pub(super) fn validate_ir_program(
 ) {
     detect_top_level_binding_cycles(exprs, errors);
     detect_trivial_non_terminating_fns(exprs, errors);
-    let mut static_env = HashMap::new();
+    let mut static_env = UnordMap::new();
     // Names of let-bindings whose RHS validation already emitted a
     // diagnostic (so their derived output type is unknown). Downstream
     // shape-sensitive calls that consume such a name emit a redundant
     // cascade diagnostic; suppress it. See RT-205 round-2 F3.
-    let mut failed_let_names: HashSet<String> = HashSet::new();
+    let mut failed_let_names: UnordSet<String> = UnordSet::new();
     // chelis#930: per-top-level-declaration cancellation, same grain as
     // inference. Without it this validator is one uninterruptible step whose
     // cost grows with the program, and interrupt latency is bounded by the
@@ -57,7 +57,7 @@ pub(super) fn detect_trivial_non_terminating_fns(
     // reached at every tail position of the body. `Some(set)` means
     // every tail is a call; the set is who's called. `None` means the
     // body has at least one non-call tail (a base case exists).
-    let mut terminal_callees: HashMap<String, Option<HashSet<String>>> = HashMap::new();
+    let mut terminal_callees: UnordMap<String, Option<UnordSet<String>>> = UnordMap::new();
     let mut def_order: Vec<String> = Vec::new();
     for expr in top_level_decl_items(exprs) {
         // chelis#1107 amendment: carrier-preserving read.
@@ -70,7 +70,7 @@ pub(super) fn detect_trivial_non_terminating_fns(
         let Some(body) = kids.get(1) else { continue };
         // Check params for a name that shadows the def — a body that
         // terminal-calls a shadowed name is NOT self-recursion.
-        let mut shadows: HashSet<String> = HashSet::new();
+        let mut shadows: UnordSet<String> = UnordSet::new();
         if let deep::Expr::List(fn_list, _) = body
             && get_tag(fn_list) == Some(DeepTag::Fn)
             && let Some(deep::Expr::List(params, _)) = children(fn_list).first()
@@ -89,7 +89,7 @@ pub(super) fn detect_trivial_non_terminating_fns(
             _ => None,
         };
         let entry = if let Some(fn_body) = fn_body {
-            let mut callees: HashSet<String> = HashSet::new();
+            let mut callees: UnordSet<String> = UnordSet::new();
             if collect_terminal_callees(fn_body, &shadows, &mut callees) {
                 Some(callees)
             } else {
@@ -106,8 +106,9 @@ pub(super) fn detect_trivial_non_terminating_fns(
     // call (no base case) and iteratively remove any def that calls out
     // to a base-case def (outside the candidate set). What survives is
     // a closed recursion group with no base case anywhere.
-    let mut non_terminating: HashSet<String> = terminal_callees
-        .iter()
+    let mut non_terminating: UnordSet<String> = terminal_callees
+        .to_sorted()
+        .into_iter()
         .filter_map(|(name, callees)| {
             callees.as_ref().and_then(|set| {
                 if set.is_empty() {
@@ -120,7 +121,7 @@ pub(super) fn detect_trivial_non_terminating_fns(
         .collect();
     loop {
         let mut changed = false;
-        let snapshot: Vec<String> = non_terminating.iter().cloned().collect();
+        let snapshot: Vec<String> = non_terminating.to_sorted().into_iter().cloned().collect();
         for name in &snapshot {
             let Some(Some(callees)) = terminal_callees.get(name) else {
                 non_terminating.remove(name);
@@ -132,8 +133,9 @@ pub(super) fn detect_trivial_non_terminating_fns(
             // base case (isn't in non_terminating), this def has an
             // escape route and isn't trivially non-terminating.
             let ok = callees
-                .iter()
-                .all(|c| c == name || non_terminating.contains(c));
+                .to_sorted()
+                .into_iter()
+                .all(|callee| callee == name || non_terminating.contains(callee));
             if !ok {
                 non_terminating.remove(name);
                 changed = true;
@@ -170,8 +172,8 @@ pub(super) fn detect_trivial_non_terminating_fns(
 /// non-call (literal, var-read, tuple, etc.) — a base case exists.
 pub(super) fn collect_terminal_callees(
     expr: &deep::Expr,
-    shadowed: &HashSet<String>,
-    out: &mut HashSet<String>,
+    shadowed: &UnordSet<String>,
+    out: &mut UnordSet<String>,
 ) -> bool {
     stack_guard!("collect_terminal_callees", expr, false);
     match expr {
@@ -373,7 +375,7 @@ pub(super) fn validate_tensor_precisions_in_program(
     exprs: &[deep::Expr],
     errors: &mut impl DiagnosticOutput,
 ) {
-    let mut seen: HashSet<(String, String)> = HashSet::new();
+    let mut seen: UnordSet<(String, String)> = UnordSet::new();
     // Descend through `(module {} name ...)` wrappers so per-def dedup
     // keeps each def's tensor types in their own key space (otherwise
     // every def lives under def_context="" and errors collapse).
@@ -403,7 +405,7 @@ pub(super) fn validate_tensor_precisions_in_program(
 pub(super) fn walk_for_tensor_precision(
     expr: &deep::Expr,
     errors: &mut impl DiagnosticOutput,
-    seen: &mut HashSet<(String, String)>,
+    seen: &mut UnordSet<(String, String)>,
     def_context: &str,
 ) {
     // Bail before this walker's own unbounded recursion exhausts the
@@ -639,8 +641,8 @@ pub(super) fn validate_polymorphic_op_constraints(
 pub(super) fn build_def_param_scope(
     expr: &deep::Expr,
     sigs: &IrTypeEnv,
-) -> HashMap<String, deep::Expr> {
-    let mut scope = HashMap::new();
+) -> BTreeMap<String, deep::Expr> {
+    let mut scope = BTreeMap::new();
     // chelis#1107: carrier-preserving read. A `List`-only destructure returned
     // an empty scope for every stamped `def`, which -- together with the two
     // collectors below and the callee read in
@@ -734,8 +736,8 @@ pub(super) fn param_name_and_inline_type(
 /// name → sig-expr map. WS-A8 needs this so polymorphic-sig info reaches
 /// the cross-row enforcement pass even when the def's body annotation
 /// has not yet been populated by the annotator.
-pub(super) fn collect_defsig_exprs(exprs: &[deep::Expr]) -> HashMap<String, deep::Expr> {
-    let mut out = HashMap::new();
+pub(super) fn collect_defsig_exprs(exprs: &[deep::Expr]) -> BTreeMap<String, deep::Expr> {
+    let mut out = BTreeMap::new();
     for expr in top_level_decl_items(exprs) {
         // chelis#1107: carrier-preserving read; see `build_def_param_scope`.
         let Some((tag, _, kids)) = stamped_parts(expr) else {
@@ -754,10 +756,10 @@ pub(super) fn collect_defsig_exprs(exprs: &[deep::Expr]) -> HashMap<String, deep
 }
 
 /// Map from def name to (params: Vec<param-name>, body-expr).
-pub(super) type DefBodyMap = HashMap<String, (Vec<String>, deep::Expr)>;
+pub(super) type DefBodyMap = UnordMap<String, (Vec<String>, deep::Expr)>;
 
 pub(super) fn collect_def_bodies(exprs: &[deep::Expr]) -> DefBodyMap {
-    let mut out = HashMap::new();
+    let mut out = UnordMap::new();
     for expr in top_level_decl_items(exprs) {
         // chelis#1107: carrier-preserving read; see `build_def_param_scope`.
         let Some((tag, _, kids)) = stamped_parts(expr) else {
@@ -807,7 +809,7 @@ pub(super) fn walk_for_poly_op_constraint_violations(
     expr: &deep::Expr,
     defs: &DefBodyMap,
     type_env: &IrTypeEnv,
-    scope: &HashMap<String, deep::Expr>,
+    scope: &BTreeMap<String, deep::Expr>,
     errors: &mut DiagnosticSink<'_>,
 ) {
     stack_guard!("walk_for_poly_op_constraint_violations", expr);
@@ -860,7 +862,7 @@ pub(super) fn check_app_for_poly_op_constraint(
     list: &deep::List,
     defs: &DefBodyMap,
     type_env: &IrTypeEnv,
-    scope: &HashMap<String, deep::Expr>,
+    scope: &BTreeMap<String, deep::Expr>,
     errors: &mut DiagnosticSink<'_>,
 ) {
     let kids = children(list);
@@ -899,7 +901,7 @@ pub(super) fn check_app_for_poly_op_constraint(
     // call-site argument's concrete precision. Try the arg's `type:`
     // annotation first; fall back to the enclosing-def `scope` when the
     // arg is `(var x)` for an unannotated body-level reference.
-    let mut subst: HashMap<String, String> = HashMap::new();
+    let mut subst: UnordMap<String, String> = UnordMap::new();
     for (sig_param, arg_expr) in sig_params.iter().zip(kids.iter().skip(1)) {
         let Some(prec_var_name) = precision_var_name_in_type_expr(sig_param) else {
             continue;
@@ -925,7 +927,7 @@ pub(super) fn check_app_for_poly_op_constraint(
     // names, so we can resolve `(var x)` inside the body to a precision
     // variable. The body's params and the sig's params line up by
     // position.
-    let mut param_to_prec: HashMap<String, String> = HashMap::new();
+    let mut param_to_prec: UnordMap<String, String> = UnordMap::new();
     for (body_param_name, sig_param) in body_params.iter().zip(sig_params.iter()) {
         if let Some(prec_var_name) = precision_var_name_in_type_expr(sig_param) {
             param_to_prec.insert(body_param_name.clone(), prec_var_name);
@@ -1041,7 +1043,7 @@ pub(super) fn precision_prim_name_in_type_expr(expr: &deep::Expr) -> Option<Stri
 /// scope.
 pub(super) fn resolve_var_type_in_scope(
     expr: &deep::Expr,
-    scope: &HashMap<String, deep::Expr>,
+    scope: &BTreeMap<String, deep::Expr>,
 ) -> Option<deep::Expr> {
     // chelis#1107: carrier-preserving read.
     let (tag, _, kids) = stamped_parts(expr)?;
@@ -1070,8 +1072,8 @@ pub(super) fn annotated_type_of_expr(expr: &deep::Expr) -> Option<deep::Expr> {
 /// precision against the spec rule.
 pub(super) fn walk_body_for_restricted_ops(
     expr: &deep::Expr,
-    param_to_prec: &HashMap<String, String>,
-    subst: &HashMap<String, String>,
+    param_to_prec: &UnordMap<String, String>,
+    subst: &UnordMap<String, String>,
     callee_name: &str,
     call_site_list: &deep::List,
     errors: &mut DiagnosticSink<'_>,
@@ -1160,8 +1162,8 @@ pub(super) const INTEGER_REJECTED_OPS: &[&str] = &["matmul"];
 pub(super) fn check_restricted_op_in_body(
     op_name: &str,
     op_args: &[deep::Expr],
-    param_to_prec: &HashMap<String, String>,
-    subst: &HashMap<String, String>,
+    param_to_prec: &UnordMap<String, String>,
+    subst: &UnordMap<String, String>,
     callee_name: &str,
     call_site_list: &deep::List,
     errors: &mut DiagnosticSink<'_>,
@@ -1294,8 +1296,8 @@ pub(super) fn check_restricted_op_in_body(
 /// slot is concrete, use that. Returns `Some(prim_name)` if resolvable.
 pub(super) fn resolve_arg_precision_through_subst(
     arg: &deep::Expr,
-    param_to_prec: &HashMap<String, String>,
-    subst: &HashMap<String, String>,
+    param_to_prec: &UnordMap<String, String>,
+    subst: &UnordMap<String, String>,
 ) -> Option<String> {
     // chelis#1107: carrier-preserving read -- the last link in the WS-A8
     // chain, so a stamped `(var {} x)` operand resolves its precision.
@@ -1320,8 +1322,8 @@ pub(super) fn resolve_arg_precision_through_subst(
 pub(super) fn validate_ir_expr(
     expr: &deep::Expr,
     type_env: &IrTypeEnv,
-    static_env: &mut HashMap<String, StaticValue>,
-    failed_let_names: &mut HashSet<String>,
+    static_env: &mut UnordMap<String, StaticValue>,
+    failed_let_names: &mut UnordSet<String>,
     errors: &mut DiagnosticSink<'_>,
 ) -> StaticValue {
     stack_guard!("validate_ir_expr", expr, StaticValue::Unknown);
@@ -1731,14 +1733,14 @@ pub(super) fn ir_builtin_name(list: &deep::List) -> Option<&str> {
 /// and pattern binders are inserted before their bodies are visited.
 pub(super) fn active_ir_builtin_name<'a>(
     list: &'a deep::List,
-    static_env: &HashMap<String, StaticValue>,
+    static_env: &UnordMap<String, StaticValue>,
 ) -> Option<&'a str> {
     ir_builtin_name(list).filter(|name| compiler_name_is_active(name, static_env))
 }
 
 pub(super) fn compiler_name_is_active(
     name: &str,
-    static_env: &HashMap<String, StaticValue>,
+    static_env: &UnordMap<String, StaticValue>,
 ) -> bool {
     !builtins::BUILTIN_NAMES.contains(&name) || !static_env.contains_key(name)
 }
@@ -1876,7 +1878,7 @@ pub(super) fn is_ir_binary_shape_passthrough_builtin(name: &str) -> bool {
 /// chain.
 pub(super) fn let_rhs_is_recognized_shape_sensitive(
     expr: &deep::Expr,
-    static_env: &HashMap<String, StaticValue>,
+    static_env: &UnordMap<String, StaticValue>,
 ) -> bool {
     stack_guard!("let_rhs_is_recognized_shape_sensitive", expr, false);
     let inner = peel_borrow(expr);
@@ -2046,7 +2048,7 @@ pub(super) fn validate_ir_builtin_symbolic_requirements(
     list: &deep::List,
     func_name: &str,
     type_env: &IrTypeEnv,
-    failed_let_names: &HashSet<String>,
+    failed_let_names: &UnordSet<String>,
     errors: &mut DiagnosticSink<'_>,
 ) {
     match func_name {
@@ -2089,7 +2091,7 @@ pub(super) fn validate_ir_builtin_symbolic_requirements(
 /// the owning diagnostic (RT-205 round-2 F3).
 pub(super) fn conv2d_input_is_failed_let_name(
     list: &deep::List,
-    failed_let_names: &HashSet<String>,
+    failed_let_names: &UnordSet<String>,
 ) -> bool {
     if failed_let_names.is_empty() {
         return false;
@@ -2193,7 +2195,7 @@ pub(super) fn parse_span_offset(span_id: &str) -> Option<usize> {
 pub(super) fn validate_conv2d_symbolic_requirements(
     list: &deep::List,
     type_env: &IrTypeEnv,
-    failed_let_names: &HashSet<String>,
+    failed_let_names: &UnordSet<String>,
     errors: &mut DiagnosticSink<'_>,
 ) {
     // The inference pass owns builtin arity diagnostics. This validator only
@@ -2442,7 +2444,7 @@ pub(super) fn conv2d_output_extent(
 pub(super) fn derive_ir_builtin_output_type(
     expr: &deep::Expr,
     type_env: &IrTypeEnv,
-    static_env: &HashMap<String, StaticValue>,
+    static_env: &UnordMap<String, StaticValue>,
 ) -> Option<deep::Expr> {
     // chelis#1107 amendment: carrier-preserving entry. The `derive_*` helpers
     // below take `&deep::List`, so bridge a stamped Node once here.
@@ -2505,7 +2507,7 @@ pub(super) fn derive_ir_builtin_output_type(
 pub(super) fn derive_unary_shape_passthrough(
     list: &deep::List,
     type_env: &IrTypeEnv,
-    static_env: &HashMap<String, StaticValue>,
+    static_env: &UnordMap<String, StaticValue>,
 ) -> Option<deep::Expr> {
     let arg = list.elements.get(3)?;
     resolve_let_value_tensor_type(arg, type_env, static_env)
@@ -2520,7 +2522,7 @@ pub(super) fn derive_unary_shape_passthrough(
 pub(super) fn derive_binary_shape_passthrough(
     list: &deep::List,
     type_env: &IrTypeEnv,
-    static_env: &HashMap<String, StaticValue>,
+    static_env: &UnordMap<String, StaticValue>,
 ) -> Option<deep::Expr> {
     let lhs = list.elements.get(3)?;
     if let Some(ty) = resolve_let_value_tensor_type(lhs, type_env, static_env) {
@@ -2538,7 +2540,7 @@ pub(super) fn derive_binary_shape_passthrough(
 pub(super) fn resolve_let_value_tensor_type(
     expr: &deep::Expr,
     type_env: &IrTypeEnv,
-    static_env: &HashMap<String, StaticValue>,
+    static_env: &UnordMap<String, StaticValue>,
 ) -> Option<deep::Expr> {
     if let Some(ty) = arg_tensor_type_expr(expr, type_env) {
         return Some(ty);

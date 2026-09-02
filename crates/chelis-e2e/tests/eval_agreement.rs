@@ -32,7 +32,7 @@
 //! #897 lands, the status below changes in the same change set as its
 //! arithmetic-width oracle.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
@@ -258,7 +258,7 @@ int main(void) {{
 }
 
 fn eval_last_rendered(dag: &Dag) -> (Prim, String) {
-    let inputs = HashMap::new();
+    let inputs = UnordMap::new();
     let vals = eval_tensor(dag, &inputs).unwrap();
     let last_id = NodeId(dag.len() - 1);
     let declared = dag

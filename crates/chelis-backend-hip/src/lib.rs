@@ -17,7 +17,7 @@ pub const TENSOR_CAPABLE_PRIMS: &[chelis_types::types::Prim] = &[
     chelis_types::types::Prim::Int64,
 ];
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use chelis_ir::dag::DimExpr;
 
@@ -53,7 +53,10 @@ pub struct HipCodegenResult {
 }
 
 impl HipCodegenResult {
-    pub fn peak_device_bytes_at(&self, bindings: &HashMap<String, usize>) -> Result<usize, String> {
+    pub fn peak_device_bytes_at(
+        &self,
+        bindings: &UnordMap<String, usize>,
+    ) -> Result<usize, String> {
         self.peak_device_bytes_terms
             .iter()
             .try_fold(self.peak_device_bytes_static_extra, |acc, term| {

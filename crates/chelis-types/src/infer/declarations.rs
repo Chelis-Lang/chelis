@@ -83,8 +83,8 @@ pub(super) fn detect_module_reopens(exprs: &[deep::Expr], errors: &mut Diagnosti
     fn walk(
         expr: &deep::Expr,
         prefix: Option<&str>,
-        seen: &mut HashSet<String>,
-        reported: &mut HashSet<String>,
+        seen: &mut UnordSet<String>,
+        reported: &mut UnordSet<String>,
         errors: &mut DiagnosticSink<'_>,
     ) {
         // chelis#1107: carrier-preserving read. A `List`-only destructure
@@ -121,8 +121,8 @@ pub(super) fn detect_module_reopens(exprs: &[deep::Expr], errors: &mut Diagnosti
             walk(child, key.as_deref(), seen, reported, errors);
         }
     }
-    let mut seen = HashSet::new();
-    let mut reported = HashSet::new();
+    let mut seen = UnordSet::new();
+    let mut reported = UnordSet::new();
     for expr in exprs {
         walk(expr, None, &mut seen, &mut reported, errors);
     }
@@ -226,7 +226,7 @@ pub(super) fn detect_forged_linker_names(exprs: &[deep::Expr], errors: &mut Diag
 pub(super) fn infer_signature_metadata_with_context_and_headers(
     exprs: &[deep::Expr],
     function_plan: &FunctionInferencePlan,
-    type_env: &HashMap<String, deep::Expr>,
+    type_env: &BTreeMap<String, deep::Expr>,
     signature_context: &SignatureInferenceMetadata,
     type_headers: &TypeResolutionEnv,
     errors: &mut DiagnosticSink<'_>,
@@ -235,7 +235,7 @@ pub(super) fn infer_signature_metadata_with_context_and_headers(
     let authored_signature_types = collect_authored_signature_types(exprs, type_headers, errors);
     let recursive_members = function_plan.recursive_member_names();
     let mut functions = BTreeMap::new();
-    let mut defs_by_name = HashMap::<String, VecDeque<&deep::Expr>>::new();
+    let mut defs_by_name = UnordMap::<String, VecDeque<&deep::Expr>>::new();
     for expr in top_level_decl_items(exprs) {
         let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
             continue;
@@ -264,7 +264,7 @@ pub(super) fn infer_signature_metadata_with_context_and_headers(
         .functions
         .iter()
         .map(|(name, inference)| (name.clone(), inference.display_signature.clone()))
-        .collect::<HashMap<_, _>>();
+        .collect::<UnordMap<_, _>>();
 
     // chelis#930: cooperative cancellation at declaration granularity. This
     // fixed point runs one full sweep of every def per def (`passes` is the
@@ -412,7 +412,7 @@ impl FunctionInferencePlan {
         profile_plan_build();
         let cancel = crate::cancel::current_cancel_token();
         let cancelled = || cancel.as_ref().is_some_and(CancelToken::is_cancelled);
-        let mut vertex_by_name = HashMap::<String, usize>::new();
+        let mut vertex_by_name = UnordMap::<String, usize>::new();
         let mut def_items = Vec::new();
         for (item_index, (_, expr)) in items.iter().enumerate() {
             if cancelled() {
@@ -443,7 +443,11 @@ impl FunctionInferencePlan {
             });
         }
 
-        let def_names = vertex_by_name.keys().cloned().collect::<HashSet<_>>();
+        let def_names = vertex_by_name
+            .to_sorted()
+            .into_iter()
+            .map(|(name, _)| name.clone())
+            .collect::<UnordSet<_>>();
         let mut graph = vec![Vec::<usize>::new(); vertex_by_name.len()];
         for item in &def_items {
             if cancelled() {
@@ -467,9 +471,10 @@ impl FunctionInferencePlan {
                     .map(|(name, _)| name)
                     .collect(),
             ];
-            let mut calls = HashSet::new();
+            let mut calls = UnordSet::new();
             collect_top_level_calls(body, &def_names, &mut bound, &mut calls);
             let mut callees = calls
+                .into_sorted()
                 .into_iter()
                 .filter_map(|name| vertex_by_name.get(&name).copied())
                 .collect::<Vec<_>>();
@@ -530,7 +535,7 @@ impl FunctionInferencePlan {
             .flat_map(|component| component.members.iter())
     }
 
-    pub(super) fn recursive_member_names(&self) -> HashSet<String> {
+    pub(super) fn recursive_member_names(&self) -> UnordSet<String> {
         self.components
             .iter()
             .filter(|component| component.recursive)
@@ -628,7 +633,7 @@ fn ordered_scc_vertex_components(
     // Tarjan's discovery order is an implementation detail. Re-form the
     // component list in first-source-occurrence order before applying the
     // old callee-first postorder, preserving diagnostics and serialization.
-    let mut compact_by_raw = HashMap::new();
+    let mut compact_by_raw = UnordMap::new();
     let mut unordered = Vec::<Vec<usize>>::new();
     for (vertex, &raw) in raw_component_by_vertex.iter().enumerate() {
         let next = compact_by_raw.len();
@@ -644,7 +649,7 @@ fn ordered_scc_vertex_components(
             component_by_vertex[vertex] = component;
         }
     }
-    let mut component_graph = vec![HashSet::<usize>::new(); unordered.len()];
+    let mut component_graph = vec![UnordSet::<usize>::new(); unordered.len()];
     for (caller, callees) in graph.iter().enumerate() {
         if cancelled() {
             return None;
@@ -659,11 +664,7 @@ fn ordered_scc_vertex_components(
     }
     let dependencies = component_graph
         .into_iter()
-        .map(|component| {
-            let mut dependencies = component.into_iter().collect::<Vec<_>>();
-            dependencies.sort_unstable();
-            dependencies
-        })
+        .map(|component| component.into_sorted())
         .collect::<Vec<_>>();
 
     let mut order = Vec::with_capacity(unordered.len());
@@ -801,8 +802,8 @@ pub(super) fn linear_scc_component_vertices_for_test(graph: &[Vec<usize>]) -> Ve
     ordered_scc_vertex_components(graph, None).expect("uncancelled SCC construction completes")
 }
 
-pub(super) fn collect_defsig_names(exprs: &[deep::Expr]) -> HashSet<String> {
-    let mut names = HashSet::new();
+pub(super) fn collect_defsig_names(exprs: &[deep::Expr]) -> UnordSet<String> {
+    let mut names = UnordSet::new();
     for expr in top_level_decl_items(exprs) {
         if let Some((DeepTag::Defsig, _, kids)) = stamped_parts(expr)
             && let Some(name) = kids.first().and_then(symbol_name)
@@ -817,8 +818,8 @@ pub(super) fn collect_authored_signature_types(
     exprs: &[deep::Expr],
     type_headers: &TypeResolutionEnv,
     errors: &mut DiagnosticSink<'_>,
-) -> HashMap<String, Type> {
-    let mut signatures = HashMap::new();
+) -> UnordMap<String, Type> {
+    let mut signatures = UnordMap::new();
     for expr in top_level_decl_items(exprs) {
         let Some((DeepTag::Defsig, _, kids)) = stamped_parts(expr) else {
             continue;
@@ -836,9 +837,9 @@ pub(super) fn collect_authored_signature_types(
 
 pub(super) fn collect_top_level_calls(
     expr: &deep::Expr,
-    def_names: &HashSet<String>,
-    bound: &mut Vec<HashSet<String>>,
-    calls: &mut HashSet<String>,
+    def_names: &UnordSet<String>,
+    bound: &mut Vec<UnordSet<String>>,
+    calls: &mut UnordSet<String>,
 ) {
     // Bail before this walker's own unbounded recursion exhausts the native
     // stack on a deeply-nested `app` body. This pass accumulates into
@@ -900,7 +901,7 @@ pub(super) fn collect_top_level_calls(
                 if kids.len() < 2 {
                     return;
                 }
-                let mut let_names = HashSet::new();
+                let mut let_names = UnordSet::new();
                 if let Some(bind_kids) = kids
                     .first()
                     .and_then(|bind| tagged_children(bind, DeepTag::Bind))
@@ -963,8 +964,8 @@ pub(super) fn collect_top_level_calls(
 pub(crate) fn param_has_consuming_use(
     expr: &deep::Expr,
     param: &str,
-    available_signatures: &HashMap<String, Type>,
-    type_env: &HashMap<String, deep::Expr>,
+    available_signatures: &UnordMap<String, Type>,
+    type_env: &BTreeMap<String, deep::Expr>,
     type_headers: &TypeResolutionEnv,
 ) -> Result<bool, InferResult> {
     crate::session::param_has_consuming_use(
@@ -979,8 +980,8 @@ pub(crate) fn param_has_consuming_use(
 pub(crate) fn param_has_consuming_use_in_session(
     expr: &deep::Expr,
     param: &str,
-    available_signatures: &HashMap<String, Type>,
-    type_env: &HashMap<String, deep::Expr>,
+    available_signatures: &UnordMap<String, Type>,
+    type_env: &BTreeMap<String, deep::Expr>,
     type_headers: &TypeResolutionEnv,
     errors: &mut DiagnosticSink<'_>,
 ) -> bool {
@@ -997,8 +998,8 @@ pub(crate) fn param_has_consuming_use_in_session(
 pub(super) fn param_has_consuming_use_with_headers(
     expr: &deep::Expr,
     param: &str,
-    available_signatures: &HashMap<String, Type>,
-    type_env: &HashMap<String, deep::Expr>,
+    available_signatures: &UnordMap<String, Type>,
+    type_env: &BTreeMap<String, deep::Expr>,
     type_headers: &TypeResolutionEnv,
     errors: &mut DiagnosticSink<'_>,
 ) -> bool {
@@ -1017,9 +1018,9 @@ pub(super) fn param_has_consuming_use_with_headers(
 pub(super) fn param_has_consuming_use_inner(
     expr: &deep::Expr,
     param: &str,
-    bound: &mut Vec<HashSet<String>>,
-    available_signatures: &HashMap<String, Type>,
-    type_env: &HashMap<String, deep::Expr>,
+    bound: &mut Vec<UnordSet<String>>,
+    available_signatures: &UnordMap<String, Type>,
+    type_env: &BTreeMap<String, deep::Expr>,
     type_headers: &TypeResolutionEnv,
     errors: &mut DiagnosticSink<'_>,
 ) -> bool {
@@ -1106,7 +1107,7 @@ pub(super) fn param_has_consuming_use_inner(
                 if kids.len() < 2 {
                     return false;
                 }
-                let mut let_names = HashSet::new();
+                let mut let_names = UnordSet::new();
                 if let Some(bind_kids) = kids
                     .first()
                     .and_then(|bind| tagged_children(bind, DeepTag::Bind))
@@ -1236,9 +1237,9 @@ pub(super) fn param_has_consuming_use_inner(
 pub(super) fn param_nested_consuming_use(
     expr: &deep::Expr,
     param: &str,
-    bound: &mut Vec<HashSet<String>>,
-    available_signatures: &HashMap<String, Type>,
-    type_env: &HashMap<String, deep::Expr>,
+    bound: &mut Vec<UnordSet<String>>,
+    available_signatures: &UnordMap<String, Type>,
+    type_env: &BTreeMap<String, deep::Expr>,
     type_headers: &TypeResolutionEnv,
     errors: &mut DiagnosticSink<'_>,
 ) -> bool {
@@ -1259,9 +1260,9 @@ pub(super) fn param_nested_consuming_use(
 pub(super) fn app_consumes_param(
     list: &deep::List,
     param: &str,
-    bound: &mut Vec<HashSet<String>>,
-    available_signatures: &HashMap<String, Type>,
-    type_env: &HashMap<String, deep::Expr>,
+    bound: &mut Vec<UnordSet<String>>,
+    available_signatures: &UnordMap<String, Type>,
+    type_env: &BTreeMap<String, deep::Expr>,
     type_headers: &TypeResolutionEnv,
     errors: &mut DiagnosticSink<'_>,
 ) -> bool {
@@ -1318,9 +1319,9 @@ pub(super) fn app_consumes_param(
 pub(super) fn pipe_consumes_param(
     list: &deep::List,
     param: &str,
-    bound: &mut Vec<HashSet<String>>,
-    available_signatures: &HashMap<String, Type>,
-    type_env: &HashMap<String, deep::Expr>,
+    bound: &mut Vec<UnordSet<String>>,
+    available_signatures: &UnordMap<String, Type>,
+    type_env: &BTreeMap<String, deep::Expr>,
     type_headers: &TypeResolutionEnv,
     errors: &mut DiagnosticSink<'_>,
 ) -> bool {
@@ -1370,8 +1371,8 @@ pub(super) fn pipe_consumes_param(
 pub(super) fn callee_arg_is_borrowed(
     callee: Option<&str>,
     index: usize,
-    available_signatures: &HashMap<String, Type>,
-    type_env: &HashMap<String, deep::Expr>,
+    available_signatures: &UnordMap<String, Type>,
+    type_env: &BTreeMap<String, deep::Expr>,
     type_headers: &TypeResolutionEnv,
     errors: &mut DiagnosticSink<'_>,
 ) -> bool {
@@ -1404,7 +1405,7 @@ pub(super) fn builtin_arg_is_ref(name: &str, index: usize) -> bool {
 pub(super) fn expr_mentions_unshadowed_name(
     expr: &deep::Expr,
     name: &str,
-    bound: &mut Vec<HashSet<String>>,
+    bound: &mut Vec<UnordSet<String>>,
 ) -> bool {
     stack_guard!("expr_mentions_unshadowed_name", expr, false);
     match expr {
@@ -1489,7 +1490,7 @@ pub(super) fn type_contains_tensor(ty: &Type) -> bool {
 /// by-name decision — it only sees the `Type::Adt` shell, not the
 /// variant fields — which is exactly why the deferred-borrow gate must
 /// be handed the carrier set rather than trust an args-only check.
-pub(super) fn type_carries_tensor_with_carriers(ty: &Type, carriers: &HashSet<String>) -> bool {
+pub(super) fn type_carries_tensor_with_carriers(ty: &Type, carriers: &UnordSet<String>) -> bool {
     match ty {
         Type::Tensor(_, _) => true,
         Type::Ref(inner) => type_carries_tensor_with_carriers(inner, carriers),
@@ -1523,8 +1524,8 @@ pub(super) fn type_carries_tensor_with_carriers(ty: &Type, carriers: &HashSet<St
 /// the ADT count. The two classifiers must agree: the gate uses this set
 /// to reject a deferred borrow that resolved to a non-carrying ADT, and
 /// linearity uses its own set to reject the concrete (non-deferred) form.
-pub(super) fn adt_carrier_set(adt_reg: &AdtRegistry) -> HashSet<String> {
-    let mut carriers: HashSet<String> = HashSet::new();
+pub(super) fn adt_carrier_set(adt_reg: &AdtRegistry) -> UnordSet<String> {
+    let mut carriers: UnordSet<String> = UnordSet::new();
     loop {
         let mut grew = false;
         for (name, def) in &adt_reg.defs {
@@ -1722,13 +1723,13 @@ pub(super) fn param_source_infos(expr: &deep::Expr) -> Vec<(String, bool)> {
         .collect()
 }
 
-pub(super) fn pattern_names_for_signature(expr: &deep::Expr) -> HashSet<String> {
-    let mut names = HashSet::new();
+pub(super) fn pattern_names_for_signature(expr: &deep::Expr) -> UnordSet<String> {
+    let mut names = UnordSet::new();
     collect_pattern_names_for_signature(expr, &mut names);
     names
 }
 
-pub(super) fn collect_pattern_names_for_signature(expr: &deep::Expr, names: &mut HashSet<String>) {
+pub(super) fn collect_pattern_names_for_signature(expr: &deep::Expr, names: &mut UnordSet<String>) {
     // Bail before unbounded recursion exhausts the native stack on a
     // deeply-nested pattern. No error vector here; the guard records the bail
     // so the check entry boundary fails hard with a located diagnostic. See
@@ -1790,12 +1791,12 @@ pub(super) fn borrow_inner_for_signature(expr: &deep::Expr) -> Option<&deep::Exp
 pub(super) fn is_direct_unshadowed_var(
     expr: &deep::Expr,
     name: &str,
-    bound: &[HashSet<String>],
+    bound: &[UnordSet<String>],
 ) -> bool {
     var_name_expr(expr) == Some(name) && !is_bound_name(name, bound)
 }
 
-pub(super) fn is_bound_name(name: &str, bound: &[HashSet<String>]) -> bool {
+pub(super) fn is_bound_name(name: &str, bound: &[UnordSet<String>]) -> bool {
     bound.iter().rev().any(|scope| scope.contains(name))
 }
 
@@ -1811,8 +1812,8 @@ pub(super) fn detect_top_level_binding_cycles(
     errors: &mut DiagnosticSink<'_>,
 ) {
     let mut def_names: Vec<String> = Vec::new();
-    let mut def_name_set: HashSet<String> = HashSet::new();
-    let mut def_bodies: HashMap<String, &deep::Expr> = HashMap::new();
+    let mut def_name_set: UnordSet<String> = UnordSet::new();
+    let mut def_bodies: UnordMap<String, &deep::Expr> = UnordMap::new();
     // Descend through `(module {} name ...)` wrappers so this check works
     // on idiomatic Surf sources (every `.ch` file starts with `module X`,
     // which desugars to a single top-level `module` list wrapping every
@@ -1837,16 +1838,16 @@ pub(super) fn detect_top_level_binding_cycles(
     // Phase 1: per-def, collect both the vars referenced EAGERLY (outside fn
     // bodies) and the top-level fns APPLIED eagerly. Lazy refs inside fn
     // bodies are captured separately so we can chain them in on demand.
-    let mut direct_refs: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut applied_fns: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut fn_body_refs: HashMap<String, (HashSet<String>, HashSet<String>)> = HashMap::new();
+    let mut direct_refs: UnordMap<String, UnordSet<String>> = UnordMap::new();
+    let mut applied_fns: UnordMap<String, UnordSet<String>> = UnordMap::new();
+    let mut fn_body_refs: UnordMap<String, (UnordSet<String>, UnordSet<String>)> = UnordMap::new();
     for name in &def_names {
         let Some(body) = def_bodies.get(name) else {
             continue;
         };
-        let mut refs: HashSet<String> = HashSet::new();
-        let mut applied: HashSet<String> = HashSet::new();
-        let mut bound: HashSet<String> = HashSet::new();
+        let mut refs: UnordSet<String> = UnordSet::new();
+        let mut applied: UnordSet<String> = UnordSet::new();
+        let mut bound: UnordSet<String> = UnordSet::new();
         collect_eager_refs(body, &mut bound, &mut refs, &mut applied);
         direct_refs.insert(name.clone(), refs);
         applied_fns.insert(name.clone(), applied);
@@ -1856,9 +1857,9 @@ pub(super) fn detect_top_level_binding_cycles(
             && get_tag(list) == Some(DeepTag::Fn)
             && let Some(fn_body) = children(list).get(1)
         {
-            let mut inner_refs: HashSet<String> = HashSet::new();
-            let mut inner_applied: HashSet<String> = HashSet::new();
-            let mut inner_bound: HashSet<String> = HashSet::new();
+            let mut inner_refs: UnordSet<String> = UnordSet::new();
+            let mut inner_applied: UnordSet<String> = UnordSet::new();
+            let mut inner_bound: UnordSet<String> = UnordSet::new();
             // Bind the fn's own params so they aren't flagged as refs.
             if let Some(params_list) = children(list).first()
                 && let deep::Expr::List(params, _) = params_list
@@ -1894,8 +1895,8 @@ pub(super) fn detect_top_level_binding_cycles(
     // evaluating. If a value-edge lands on a stack member, that's a real
     // binding cycle. Fn names aren't pushed onto the stack — they are
     // intermediates in the path.
-    let mut value_edges: HashMap<String, Vec<String>> = HashMap::new();
-    let mut call_edges: HashMap<String, Vec<String>> = HashMap::new();
+    let mut value_edges: UnordMap<String, Vec<String>> = UnordMap::new();
+    let mut call_edges: UnordMap<String, Vec<String>> = UnordMap::new();
     for name in &def_names {
         let body = def_bodies.get(name).copied();
         let is_nautilus_literal_self = body.is_some_and(|b| body_is_literal_self_ref(b, name));
@@ -1905,8 +1906,8 @@ pub(super) fn detect_top_level_binding_cycles(
         );
 
         let (raw_refs, raw_applied) = if body_is_fn {
-            let empty_refs: HashSet<String> = HashSet::new();
-            let empty_applied: HashSet<String> = HashSet::new();
+            let empty_refs: UnordSet<String> = UnordSet::new();
+            let empty_applied: UnordSet<String> = UnordSet::new();
             fn_body_refs
                 .get(name)
                 .map(|(r, a)| (r.clone(), a.clone()))
@@ -1919,6 +1920,7 @@ pub(super) fn detect_top_level_binding_cycles(
         };
 
         let mut value_out: Vec<String> = raw_refs
+            .into_sorted()
             .into_iter()
             .filter(|r| {
                 if r == name && is_nautilus_literal_self {
@@ -1928,6 +1930,7 @@ pub(super) fn detect_top_level_binding_cycles(
             })
             .collect();
         let mut call_out: Vec<String> = raw_applied
+            .into_sorted()
             .into_iter()
             .filter(|r| def_name_set.contains(r))
             .collect();
@@ -1937,7 +1940,7 @@ pub(super) fn detect_top_level_binding_cycles(
         call_edges.insert(name.clone(), call_out);
     }
 
-    let mut reported: HashSet<Vec<String>> = HashSet::new();
+    let mut reported: UnordSet<Vec<String>> = UnordSet::new();
 
     // DFS from each value def. Track:
     //   - `value_stack`: the value defs we're "currently evaluating". A
@@ -1957,12 +1960,12 @@ pub(super) fn detect_top_level_binding_cycles(
     fn dfs(
         node: &str,
         is_value: &dyn Fn(&str) -> bool,
-        value_edges: &HashMap<String, Vec<String>>,
-        call_edges: &HashMap<String, Vec<String>>,
-        color: &mut HashMap<String, Color>,
+        value_edges: &UnordMap<String, Vec<String>>,
+        call_edges: &UnordMap<String, Vec<String>>,
+        color: &mut UnordMap<String, Color>,
         value_stack: &mut Vec<String>,
         path: &mut Vec<String>,
-        reported: &mut HashSet<Vec<String>>,
+        reported: &mut UnordSet<Vec<String>>,
         errors: &mut DiagnosticSink<'_>,
     ) {
         color.insert(node.to_string(), Color::Gray);
@@ -2054,7 +2057,7 @@ pub(super) fn detect_top_level_binding_cycles(
             .map(|body| !matches!(body, deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Fn)))
             .unwrap_or(false)
     };
-    let mut color: HashMap<String, Color> = def_names
+    let mut color: UnordMap<String, Color> = def_names
         .iter()
         .map(|n| (n.clone(), Color::White))
         .collect();
@@ -2120,9 +2123,9 @@ pub(super) fn param_name_for_refs(param: &deep::Expr) -> Option<String> {
 /// between fn defs never called eagerly — but misses the cycle above.
 pub(super) fn collect_eager_refs(
     expr: &deep::Expr,
-    bound: &mut HashSet<String>,
-    refs: &mut HashSet<String>,
-    applied: &mut HashSet<String>,
+    bound: &mut UnordSet<String>,
+    refs: &mut UnordSet<String>,
+    applied: &mut UnordSet<String>,
 ) {
     stack_guard!("collect_eager_refs", expr);
     match expr {

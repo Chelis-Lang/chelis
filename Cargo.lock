@@ -457,6 +457,7 @@ dependencies = [
  "chelis-ir",
  "chelis-runtime",
  "chelis-types",
+ "chelis-unord",
  "chelis-vocab",
  "half",
  "pkg-config",
@@ -471,6 +472,7 @@ dependencies = [
  "chelis-ir",
  "chelis-runtime",
  "chelis-types",
+ "chelis-unord",
  "chelis-vocab",
  "half",
  "serde_json",
@@ -484,6 +486,7 @@ dependencies = [
  "chelis-ir",
  "chelis-runtime",
  "chelis-types",
+ "chelis-unord",
  "chelis-vocab",
  "half",
  "serde_json",
@@ -516,6 +519,7 @@ dependencies = [
  "chelis-surf",
  "chelis-tide",
  "chelis-types",
+ "chelis-unord",
  "chelis-validate",
  "chelis-vocab",
  "chelisup",
@@ -554,6 +558,7 @@ dependencies = [
  "chelis-std-bundle",
  "chelis-surf",
  "chelis-types",
+ "chelis-unord",
  "chelis-validate",
  "chelis-vocab",
  "half",
@@ -616,6 +621,7 @@ dependencies = [
  "chelis-runtime",
  "chelis-surf",
  "chelis-types",
+ "chelis-unord",
  "predicates",
  "serde",
  "serde_json",
@@ -630,6 +636,7 @@ dependencies = [
  "chelis-macros",
  "chelis-surf",
  "chelis-types",
+ "chelis-unord",
  "chelis-vocab",
 ]
 
@@ -653,6 +660,7 @@ dependencies = [
  "chelis-macros",
  "chelis-surf",
  "chelis-types",
+ "chelis-unord",
  "chelis-vocab",
  "serde",
  "serde_json",
@@ -667,6 +675,7 @@ dependencies = [
  "assert_cmd",
  "chelis-deep",
  "chelis-surf",
+ "chelis-unord",
  "ignore",
  "predicates",
  "regex",
@@ -683,6 +692,7 @@ dependencies = [
  "chelis-surf",
  "chelis-tide",
  "chelis-types",
+ "chelis-unord",
  "serde",
  "serde_json",
  "tempfile",
@@ -699,6 +709,7 @@ dependencies = [
  "chelis-ir",
  "chelis-surf",
  "chelis-types",
+ "chelis-unord",
  "thiserror 2.0.18",
 ]
 
@@ -710,6 +721,7 @@ dependencies = [
  "chelis-effects",
  "chelis-ir",
  "chelis-types",
+ "chelis-unord",
 ]
 
 [[package]]
@@ -733,6 +745,7 @@ dependencies = [
  "chelis-pred",
  "chelis-surf",
  "chelis-types",
+ "chelis-unord",
  "clarabel",
  "cvc5-rs",
  "gmp-mpfr-sys",
@@ -772,12 +785,14 @@ dependencies = [
  "bincode",
  "chelis-deep",
  "chelis-effects",
+ "chelis-image-id",
  "chelis-macros",
  "chelis-pipeline-core",
  "chelis-shell",
  "chelis-std-bundle",
  "chelis-surf",
  "chelis-types",
+ "chelis-unord",
  "flate2",
  "reqwest",
  "rustix",
@@ -798,6 +813,7 @@ name = "chelis-runtime"
 version = "0.18.6"
 dependencies = [
  "chelis-types",
+ "chelis-unord",
  "chelis-vocab",
  "half",
  "libc",
@@ -832,6 +848,7 @@ version = "0.18.6"
 dependencies = [
  "chelis-deep",
  "chelis-pred",
+ "chelis-unord",
  "chelis-vocab",
  "miette",
  "proptest",
@@ -869,6 +886,7 @@ dependencies = [
  "chelis-macros",
  "chelis-pred",
  "chelis-surf",
+ "chelis-unord",
  "chelis-vocab",
  "half",
  "quote",
@@ -880,12 +898,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "chelis-unord"
+version = "0.18.6"
+dependencies = [
+ "serde",
+ "serde_json",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "chelis-validate"
 version = "0.18.6"
 dependencies = [
  "chelis-deep",
  "chelis-macros",
  "chelis-surf",
+ "chelis-unord",
  "pest",
  "pest_derive",
  "tempfile",

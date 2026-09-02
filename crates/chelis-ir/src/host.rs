@@ -1,7 +1,8 @@
 use chelis_deep::DeepTag;
+use chelis_unord::{UnordMap, UnordSet};
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -26,23 +27,23 @@ thread_local! {
     // `inline_top_level_host_call`. Prevents infinite specialization for
     // recursive/mutually recursive definitions — the specialized body would
     // re-encounter the same call and inline forever.
-    static INLINING_STACK: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
-    static TYPE_POLYMORPHIC_FN_CACHE: RefCell<HashMap<(usize, String), bool>> =
-        RefCell::new(HashMap::new());
+    static INLINING_STACK: RefCell<UnordSet<String>> = RefCell::new(UnordSet::new());
+    static TYPE_POLYMORPHIC_FN_CACHE: RefCell<UnordMap<(usize, String), bool>> =
+        RefCell::new(UnordMap::new());
     static TOP_LEVEL_FN_CALL_GRAPH_CACHE:
-        RefCell<HashMap<usize, HashMap<String, HashSet<String>>>> =
-        RefCell::new(HashMap::new());
-    static PROGRAM_DEFS_CACHE: RefCell<HashMap<usize, Arc<HashMap<String, Expr>>>> =
-        RefCell::new(HashMap::new());
+        RefCell<UnordMap<usize, BTreeMap<String, BTreeSet<String>>>> =
+        RefCell::new(UnordMap::new());
+    static PROGRAM_DEFS_CACHE: RefCell<UnordMap<usize, Arc<BTreeMap<String, Expr>>>> =
+        RefCell::new(UnordMap::new());
     static SUBEXPR_LOWERING_CONTEXT_CACHE:
-        RefCell<HashMap<usize, crate::lower::SubexprLoweringContext>> =
-        RefCell::new(HashMap::new());
-    static HELPER_SUMMARY_REJECTS_CACHE: RefCell<HashMap<(usize, String), bool>> =
-        RefCell::new(HashMap::new());
+        RefCell<UnordMap<usize, crate::lower::SubexprLoweringContext>> =
+        RefCell::new(UnordMap::new());
+    static HELPER_SUMMARY_REJECTS_CACHE: RefCell<UnordMap<(usize, String), bool>> =
+        RefCell::new(UnordMap::new());
     static DYNAMIC_TO_TENSOR_DEF_SUMMARIES_CACHE:
-        RefCell<HashMap<usize, Arc<HashMap<String, bool>>>> = RefCell::new(HashMap::new());
+        RefCell<UnordMap<usize, Arc<BTreeMap<String, bool>>>> = RefCell::new(UnordMap::new());
     static TENSOR_HELPER_PREFLIGHT_STACK:
-        RefCell<Vec<HashMap<usize, TensorHelperPreflightFacts>>> = const { RefCell::new(Vec::new()) };
+        RefCell<Vec<UnordMap<usize, TensorHelperPreflightFacts>>> = const { RefCell::new(Vec::new()) };
     static HOST_LOWERING_CACHE_ACTIVE: Cell<bool> = const { Cell::new(false) };
     // chelis#1158: bounded memoized monomorphization of recursive generic
     // host calls. Keyed by the callee's canonical checked type application;
@@ -184,11 +185,11 @@ fn deep_expr_nodes(expr: &Expr) -> usize {
 #[derive(Default, Clone)]
 struct MonoSpecializationState {
     /// Canonical `(def identity, type application)` key -> specialized symbol.
-    memo: HashMap<String, String>,
+    memo: UnordMap<String, String>,
     /// Minted symbol -> the canonical key it was minted from. A second key
     /// arriving at an existing symbol is a hash collision and fails loudly
     /// (harden-bounded-monomorphization D4).
-    symbol_keys: HashMap<String, String>,
+    symbol_keys: UnordMap<String, String>,
     /// Completed specialized definitions, in completion order.
     functions: Vec<HostFunction>,
     /// Stack of specializations currently being lowered. A recursive edge
@@ -292,7 +293,7 @@ struct TensorHelperPreflightFacts {
 /// copying a growing map at every boundary.
 #[derive(Default)]
 struct CallableScope {
-    bindings: HashMap<String, Option<String>>,
+    bindings: UnordMap<String, Option<String>>,
 }
 
 struct CallableScopeUndo {
@@ -336,7 +337,7 @@ struct TensorHelperPreflightGuard;
 impl TensorHelperPreflightGuard {
     fn begin(expr: &Expr, program: &CheckedProgram) -> Self {
         let summaries = cached_dynamic_to_tensor_def_summaries(program);
-        let mut facts = HashMap::new();
+        let mut facts = UnordMap::new();
         analyze_tensor_helper_preflight(expr, &summaries, &mut facts);
         TENSOR_HELPER_PREFLIGHT_STACK.with(|stack| stack.borrow_mut().push(facts));
         Self
@@ -1657,7 +1658,7 @@ pub fn host_program_requires_host_backend(program: &ConcreteHostProgram) -> bool
                     .all(|param| matches!(param.ty, ConcreteHostType::Tensor(_)))
         })
         .map(|function| function.name.clone())
-        .collect::<HashSet<_>>();
+        .collect::<UnordSet<_>>();
 
     program.functions.iter().any(|function| {
         !tensor_only_functions.contains(&function.name)
@@ -1667,7 +1668,7 @@ pub fn host_program_requires_host_backend(program: &ConcreteHostProgram) -> bool
 
 fn host_expr_stays_on_tensor_path(
     expr: &ConcreteHostExpr,
-    tensor_only_functions: &HashSet<String>,
+    tensor_only_functions: &UnordSet<String>,
 ) -> bool {
     match &expr.kind {
         ConcreteHostExprKind::Var(_, ConcreteHostType::Tensor(_)) => true,
@@ -1747,7 +1748,7 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
         .and_then(|ty| parse_expanded_fn_type_expr(program, &ty))
         .map(|(params, _)| params)
         .unwrap_or_default();
-    let mut scope = HashMap::new();
+    let mut scope = UnordMap::new();
     for (index, param) in children(params_list).iter().enumerate() {
         let pname = param_name(param)?;
         let pty = declared_param_tys
@@ -1848,14 +1849,14 @@ pub fn program_has_top_level_value_bindings(program: &CheckedProgram) -> bool {
 
 fn lower_host_program(
     program: &CheckedProgram,
-    lowered_names: &HashMap<String, bool>,
+    lowered_names: &BTreeMap<String, bool>,
 ) -> Result<HostProgram, crate::lower::LowerDiagnostic> {
     // chelis#1158: specialization state is per-invocation; a fresh program
     // lowering must rebuild every specialization (and must not inherit a
     // failed run's partial memo).
     MONO_SPECIALIZATIONS.with(|state| *state.borrow_mut() = MonoSpecializationState::default());
     let mut host = HostProgram::default();
-    let mut global_scope = HashMap::new();
+    let mut global_scope = UnordMap::new();
     // Count pure-tensor `fn`-body top-level defs in the program. When there
     // is more than one, the legacy DAG-only path would collapse them into a
     // single file-named entry point that drops all but one def's parameters
@@ -1889,7 +1890,7 @@ fn lower_host_program(
     // `host.globals` too (the C emitter's `captured_global_names` only
     // declares globals a function actually references, so a non-captured
     // binding still costs nothing in the pure-DAG case).
-    let mut names_captured_by_fn_defs: HashSet<String> = HashSet::new();
+    let mut names_captured_by_fn_defs: UnordSet<String> = UnordSet::new();
     for expr in top_level_items(program.exprs()) {
         let Expr::List(list, _) = expr else {
             continue;
@@ -2173,7 +2174,7 @@ fn lower_host_program(
             // matches the declared dtype.
             let declared_ty = ty_expr
                 .as_ref()
-                .map(|ty| decode_host_type_or_raise(ty, &HashMap::new()))
+                .map(|ty| decode_host_type_or_raise(ty, &UnordMap::new()))
                 .filter(|ty| !ty.is_unresolved());
             let ty = declared_ty.clone().unwrap_or_else(|| inferred_ty.clone());
             // When the declared type sharpens the inferred type (e.g.
@@ -2544,7 +2545,7 @@ fn derive_host_function_specializations(functions: &mut [HostFunction]) {
                 .clone()
                 .map(|summary| (function.name.clone(), summary))
         })
-        .collect::<HashMap<_, _>>();
+        .collect::<UnordMap<_, _>>();
 
     loop {
         let mut changed = false;
@@ -2622,8 +2623,8 @@ fn collect_function_summary_rejections(function: &mut HostFunction) {
 /// observed callsite span wins; a `None` entry means the helper is
 /// referenced but the call site has no span. Helpers never referenced
 /// are absent from the map.
-fn body_callsite_span_per_helper(expr: &HostExpr) -> HashMap<usize, Option<String>> {
-    fn walk(expr: &HostExpr, out: &mut HashMap<usize, Option<String>>) {
+fn body_callsite_span_per_helper(expr: &HostExpr) -> UnordMap<usize, Option<String>> {
+    fn walk(expr: &HostExpr, out: &mut UnordMap<usize, Option<String>>) {
         match &expr.kind {
             HostExprKind::TensorCall { helper, args, .. } => {
                 out.entry(*helper).or_insert_with(|| expr.span_id.clone());
@@ -2709,7 +2710,7 @@ fn body_callsite_span_per_helper(expr: &HostExpr) -> HashMap<usize, Option<Strin
             _ => {}
         }
     }
-    let mut out = HashMap::new();
+    let mut out = UnordMap::new();
     walk(expr, &mut out);
     out
 }
@@ -2801,7 +2802,7 @@ fn detect_multiple_return_paths_rejection(function: &HostFunction) -> Option<Sum
 
 fn derive_host_function_specialization(
     function: &HostFunction,
-    summaries: &HashMap<String, HostFunctionSpecialization>,
+    summaries: &UnordMap<String, HostFunctionSpecialization>,
 ) -> Option<HostFunctionSpecialization> {
     match &function.body.kind {
         HostExprKind::TensorCall { helper, args, .. } => {
@@ -3037,7 +3038,7 @@ fn lower_host_function(
         .or_else(|| lookup_declared_fn_type(program, name))
         .unwrap_or((Vec::new(), fresh_host_inference()));
 
-    let mut scope = HashMap::new();
+    let mut scope = UnordMap::new();
     let mut params = Vec::new();
     let mut tensor_helpers = Vec::new();
     let body_expr = if let Expr::List(list, _) = body {
@@ -3232,7 +3233,7 @@ fn synthesize_callable_application(
 fn try_lower_tensor_helper_call(
     expr: &Expr,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
     expected: TensorType,
 ) -> Option<HostExpr> {
@@ -3289,7 +3290,7 @@ fn try_lower_tensor_helper_call(
 fn lower_tensor_helper_dag(
     expr: &Expr,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
     expected: &TensorType,
 ) -> Option<crate::Dag> {
     let defs = cached_program_defs(program);
@@ -3309,7 +3310,7 @@ fn lower_tensor_helper_dag(
     // semantics and its C binary silently zeros where eval aborts; the
     // precise fix is scoping the exemption to the differentiated
     // sub-expression.
-    if !expr_contains_grad_like(expr) && expr_reaches_fail(expr, &defs, &mut HashSet::new()) {
+    if !expr_contains_grad_like(expr) && expr_reaches_fail(expr, &defs, &mut UnordSet::new()) {
         record_host_work(|profile| profile.tensor_helper_fail_guard_rejections += 1);
         return None;
     }
@@ -3338,11 +3339,11 @@ fn lower_tensor_helper_dag(
 fn lower_tensor_helper_dag_with_controls(
     expr: &Expr,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
     expected: &TensorType,
 ) -> Option<crate::lower::LoweredSubexprWithControls> {
     let defs = cached_program_defs(program);
-    if !expr_contains_grad_like(expr) && expr_reaches_fail(expr, &defs, &mut HashSet::new()) {
+    if !expr_contains_grad_like(expr) && expr_reaches_fail(expr, &defs, &mut UnordSet::new()) {
         record_host_work(|profile| profile.tensor_helper_fail_guard_rejections += 1);
         return None;
     }
@@ -3367,7 +3368,7 @@ fn lower_tensor_helper_dag_with_controls(
 
 fn finish_tensor_helper_call(
     dag: crate::Dag,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
     expected: TensorType,
 ) -> HostExpr {
@@ -4213,16 +4214,16 @@ fn summary_dims_bind_to_inputs(input_tys: &[TensorType], dims: &[DimExpr]) -> bo
             DimInfo::Named(name, None) => Some(name.as_str()),
             _ => None,
         })
-        .collect::<HashSet<_>>();
+        .collect::<UnordSet<_>>();
     dims.iter()
-        .flat_map(|dim| dim.symbolic_names())
+        .flat_map(|dim| dim.symbolic_names().into_sorted())
         .all(|name| available.contains(name.as_str()))
 }
 
 fn lower_host_expr(
     expr: &Expr,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     lower_host_expr_with_expected(expr, program, scope, tensor_helpers, None)
@@ -4234,7 +4235,7 @@ fn lower_host_expr(
 fn lower_host_expr_with_expected_opt(
     expr: &Expr,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
     expected_ty: Option<&HostTypeTerm>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
@@ -4244,7 +4245,7 @@ fn lower_host_expr_with_expected_opt(
 fn lower_host_expr_with_expected(
     expr: &Expr,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
     expected_ty: Option<&HostTypeTerm>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
@@ -4518,7 +4519,7 @@ fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
 fn lower_host_expr_kind(
     expr: &Expr,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
     expected_ty: Option<&HostTypeTerm>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
@@ -5079,7 +5080,7 @@ fn refine_host_function_signatures(functions: &mut [HostFunction]) -> bool {
                     ),
                 )
             })
-            .collect::<HashMap<_, _>>();
+            .collect::<UnordMap<_, _>>();
 
         for function in functions.iter_mut() {
             let inferred_param_fns = infer_callable_param_types(&function.params, &function.body);
@@ -5098,7 +5099,7 @@ fn refine_host_function_signatures(functions: &mut [HostFunction]) -> bool {
                 .params
                 .iter()
                 .map(|param| (param.name.clone(), param.ty.clone()))
-                .collect::<HashMap<_, _>>();
+                .collect::<UnordMap<_, _>>();
             if refine_host_expr_types(&mut function.body, &mut scope, &signatures) {
                 changed = true;
             }
@@ -5186,10 +5187,10 @@ fn refine_host_globals(globals: &mut [HostBinding], functions: &[HostFunction]) 
                     ),
                 )
             })
-            .collect::<HashMap<_, _>>();
+            .collect::<UnordMap<_, _>>();
 
         let mut changed = false;
-        let mut scope = HashMap::new();
+        let mut scope = UnordMap::new();
         for binding in globals.iter_mut() {
             if refine_host_expr_types(&mut binding.value, &mut scope, &signatures) {
                 changed = true;
@@ -5214,7 +5215,7 @@ fn propagate_named_callback_signatures(
     functions: &mut [HostFunction],
     globals: &[HostBinding],
 ) -> bool {
-    let mut inferred = HashMap::<String, (Vec<HostTypeTerm>, HostTypeTerm)>::new();
+    let mut inferred = UnordMap::<String, (Vec<HostTypeTerm>, HostTypeTerm)>::new();
     for function in functions.iter() {
         collect_named_callback_signatures(&function.body, &mut inferred);
     }
@@ -5243,7 +5244,7 @@ fn propagate_named_callback_signatures(
 
 fn collect_named_callback_signatures(
     expr: &HostExpr,
-    out: &mut HashMap<String, (Vec<HostTypeTerm>, HostTypeTerm)>,
+    out: &mut UnordMap<String, (Vec<HostTypeTerm>, HostTypeTerm)>,
 ) {
     match &expr.kind {
         HostExprKind::Call { args, .. } | HostExprKind::Builtin { args, .. } => {
@@ -5349,7 +5350,7 @@ fn collect_named_callback_signatures(
 
 fn collect_named_callback_signatures_in_callback(
     callback: &HostCallback,
-    out: &mut HashMap<String, (Vec<HostTypeTerm>, HostTypeTerm)>,
+    out: &mut UnordMap<String, (Vec<HostTypeTerm>, HostTypeTerm)>,
 ) {
     if let HostCallbackKind::Inline { body, .. } = &callback.kind {
         collect_named_callback_signatures(body, out);
@@ -5358,7 +5359,7 @@ fn collect_named_callback_signatures_in_callback(
 
 fn merge_named_callback_signature(
     callback: &HostCallback,
-    out: &mut HashMap<String, (Vec<HostTypeTerm>, HostTypeTerm)>,
+    out: &mut UnordMap<String, (Vec<HostTypeTerm>, HostTypeTerm)>,
 ) {
     let HostCallbackKind::Named { function, params } = &callback.kind else {
         return;
@@ -5389,21 +5390,21 @@ fn merge_named_callback_signature(
 fn infer_callable_param_types(
     params: &[HostParam],
     body: &HostExpr,
-) -> HashMap<String, HostTypeTerm> {
+) -> UnordMap<String, HostTypeTerm> {
     let unknown = params
         .iter()
         .filter(|param| param.ty.is_unresolved())
         .map(|param| param.name.clone())
-        .collect::<HashSet<_>>();
-    let mut out = HashMap::new();
+        .collect::<UnordSet<_>>();
+    let mut out = UnordMap::new();
     infer_callable_param_types_in_expr(body, &unknown, &mut out);
     out
 }
 
 fn infer_callable_param_types_in_expr(
     expr: &HostExpr,
-    unknown: &HashSet<String>,
-    out: &mut HashMap<String, HostTypeTerm>,
+    unknown: &UnordSet<String>,
+    out: &mut UnordMap<String, HostTypeTerm>,
 ) {
     match &expr.kind {
         HostExprKind::Call {
@@ -5522,8 +5523,8 @@ fn infer_callable_param_types_in_expr(
 
 fn infer_callable_param_types_in_callback(
     callback: &HostCallback,
-    unknown: &HashSet<String>,
-    out: &mut HashMap<String, HostTypeTerm>,
+    unknown: &UnordSet<String>,
+    out: &mut UnordMap<String, HostTypeTerm>,
 ) {
     if let HostCallbackKind::Inline { body, .. } = &callback.kind {
         infer_callable_param_types_in_expr(body, unknown, out);
@@ -5532,8 +5533,8 @@ fn infer_callable_param_types_in_callback(
 
 fn refine_host_expr_types(
     expr: &mut HostExpr,
-    scope: &mut HashMap<String, HostTypeTerm>,
-    signatures: &HashMap<String, (Vec<HostTypeTerm>, HostTypeTerm)>,
+    scope: &mut UnordMap<String, HostTypeTerm>,
+    signatures: &UnordMap<String, (Vec<HostTypeTerm>, HostTypeTerm)>,
 ) -> bool {
     let mut changed = false;
     match &mut expr.kind {
@@ -5888,8 +5889,8 @@ fn specialize_host_callback_types(
 
 fn refine_host_callback_types(
     callback: &mut HostCallback,
-    scope: &mut HashMap<String, HostTypeTerm>,
-    signatures: &HashMap<String, (Vec<HostTypeTerm>, HostTypeTerm)>,
+    scope: &mut UnordMap<String, HostTypeTerm>,
+    signatures: &UnordMap<String, (Vec<HostTypeTerm>, HostTypeTerm)>,
 ) -> bool {
     match &mut callback.kind {
         HostCallbackKind::Inline { params, body } => {
@@ -5962,7 +5963,7 @@ fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
 fn lower_match_host_expr(
     list: &List,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
     // chelis#1201: the match's RESULT type, when the caller knows it. Arm
     // bodies are result positions, so a generic ADT constructed in an arm
@@ -6222,7 +6223,7 @@ fn lower_match_host_expr(
 fn lower_literal_match_host_expr(
     list: &List,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
     scrutinee: HostExpr,
     scrutinee_ty: HostTypeTerm,
@@ -6322,7 +6323,7 @@ fn host_literal_expr(expr: &Expr, expected_ty: &HostTypeTerm) -> Option<HostExpr
 fn lower_record_host_expr(
     list: &List,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
     expected_ty: Option<&HostTypeTerm>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
@@ -6382,7 +6383,7 @@ fn lower_record_host_expr(
                 format!("record constructor `{ctor}` is not concretely instantiated: {error}"),
             )
         })?;
-    let mut supplied = HashMap::new();
+    let mut supplied = UnordMap::new();
     for field in kids.iter().skip(1) {
         let kv_list = as_list(field).ok_or_else(|| {
             host_expr_lowering_error(&record_expr, "a record field is not a `kv` node")
@@ -6450,7 +6451,7 @@ fn lower_record_host_expr(
             Ok(force_host_expr_type(value, field.ty.clone()))
         })
         .collect::<Result<Vec<_>, crate::lower::LowerDiagnostic>>()?;
-    if let Some(extra) = supplied.keys().next() {
+    if let Some((extra, _)) = supplied.to_sorted().into_iter().next() {
         return Err(host_expr_lowering_error(
             &record_expr,
             format!("record constructor `{ctor}` has no field `{extra}`"),
@@ -6466,7 +6467,7 @@ fn lower_record_host_expr(
 fn lower_access_host_expr(
     list: &List,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     let kids = children(list);
@@ -6554,7 +6555,7 @@ fn pattern_field_bindings<'a>(
 fn lower_tuple_get_host_expr(
     list: &List,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     let kids = children(list);
@@ -6717,7 +6718,7 @@ fn resolve_scalar_def<'a>(
 fn try_lower_scalar_grad_app(
     list: &List,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
     let kids = children(list);
@@ -6782,7 +6783,7 @@ fn try_lower_scalar_grad_app(
     // One forward pass per `wrt` parameter.
     let mut derivs = Vec::new();
     for wrt_name in &wrt_names {
-        let mut env: HashMap<String, Dual> = HashMap::new();
+        let mut env: UnordMap<String, Dual> = UnordMap::new();
         for (idx, pname) in param_names.iter().enumerate() {
             let seed = if pname == wrt_name { 1.0 } else { 0.0 };
             env.insert(
@@ -6899,7 +6900,7 @@ fn static_list_spine_items(expr: &Expr) -> Option<Vec<Expr>> {
 fn resolve_list_grad_shape_expr(
     actual: &Expr,
     program: &CheckedProgram,
-    defs: &HashMap<String, Expr>,
+    defs: &BTreeMap<String, Expr>,
 ) -> Expr {
     let mut resolved = actual.clone();
     for _ in 0..=MAX_DUAL_INLINE_DEPTH {
@@ -6940,9 +6941,9 @@ fn list_grad_pack_plan(
             .iter()
             .zip(&alias.params)
             .map(|(variable, name)| (format!("t{}", variable.0), name.clone()))
-            .collect::<HashMap<_, _>>();
+            .collect::<UnordMap<_, _>>();
         let expanded = rename_host_type_variables(
-            decode_host_type_or_raise(&type_to_deep_expr(&alias.body), &HashMap::new()),
+            decode_host_type_or_raise(&type_to_deep_expr(&alias.body), &UnordMap::new()),
             &checker_parameter_names,
         );
         let substitutions = alias
@@ -7139,7 +7140,7 @@ fn try_lower_general_list_grad_app(
     app_expr: &Expr,
     list: &List,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
     expected_ty: Option<&HostTypeTerm>,
 ) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
@@ -7473,7 +7474,7 @@ const MAX_DUAL_INLINE_DEPTH: usize = 64;
 /// `depth` tracks inlined-call / `let` nesting against `MAX_DUAL_INLINE_DEPTH`.
 fn dual_eval(
     expr: &Expr,
-    env: &HashMap<String, Dual>,
+    env: &UnordMap<String, Dual>,
     program: &CheckedProgram,
     depth: usize,
 ) -> Option<Dual> {
@@ -7532,7 +7533,7 @@ fn dual_eval(
 /// body contains a construct `dual_eval` does not support.
 fn dual_eval_let(
     list: &List,
-    env: &HashMap<String, Dual>,
+    env: &UnordMap<String, Dual>,
     program: &CheckedProgram,
     depth: usize,
 ) -> Option<Dual> {
@@ -7558,7 +7559,7 @@ fn dual_eval_let(
 
 fn dual_eval_app(
     list: &List,
-    env: &HashMap<String, Dual>,
+    env: &UnordMap<String, Dual>,
     program: &CheckedProgram,
     depth: usize,
 ) -> Option<Dual> {
@@ -7718,7 +7719,7 @@ fn dual_eval_user_call(
     if param_tys.iter().any(|ty| !is_dual_scalar_type(ty)) {
         return None;
     }
-    let mut call_env: HashMap<String, Dual> = HashMap::new();
+    let mut call_env: UnordMap<String, Dual> = UnordMap::new();
     for (name, arg) in param_names.iter().zip(args.iter()) {
         call_env.insert(name.clone(), arg.clone());
     }
@@ -7743,7 +7744,7 @@ fn lower_app_host_expr(
     app_expr: &Expr,
     list: &List,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
     expected_ty: Option<&HostTypeTerm>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
@@ -8378,11 +8379,11 @@ fn beta_reduce_inline_host_call(expr: &Expr) -> Option<Expr> {
         .iter()
         .zip(args)
         .filter_map(|(param, arg)| param_name(param).map(|name| (name, arg.clone())))
-        .collect::<HashMap<_, _>>();
+        .collect::<UnordMap<_, _>>();
     Some(inline_local_callable_lets(&substitute_expr(
         fn_kids.get(1)?,
         &substitutions,
-        &HashSet::new(),
+        &UnordSet::new(),
     )))
 }
 
@@ -8423,11 +8424,11 @@ fn inline_top_level_host_call(expr: &Expr, program: &CheckedProgram) -> Option<E
         .iter()
         .zip(args.iter())
         .filter_map(|(param, arg)| param_name(param).map(|name| (name, arg.clone())))
-        .collect::<HashMap<_, _>>();
+        .collect::<UnordMap<_, _>>();
     Some(inline_local_callable_lets(&substitute_expr(
         fn_kids.get(1)?,
         &substitutions,
-        &HashSet::new(),
+        &UnordSet::new(),
     )))
 }
 
@@ -8443,7 +8444,7 @@ fn lower_recursive_generic_call(
     explicit_ty: &HostTypeTerm,
     inferred_ret_ty: &HostTypeTerm,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     // Resolve the callee to its defining declaration first: the interned
@@ -8555,13 +8556,13 @@ fn lower_recursive_generic_call(
                 .collect::<Vec<_>>(),
             None => Vec::new(),
         };
-        let mut subst: HashMap<String, HostTypeTerm> = HashMap::new();
+        let mut subst: UnordMap<String, HostTypeTerm> = UnordMap::new();
         for (slot, declared_expr) in declared.iter().enumerate() {
             if let Some(declared_expr) = declared_expr
                 && let Some(actual) = param_tys.get(slot)
                 && !actual.is_unresolved()
             {
-                let declared_term = decode_host_type_or_raise(declared_expr, &HashMap::new());
+                let declared_term = decode_host_type_or_raise(declared_expr, &UnordMap::new());
                 solve_host_type_vars(&declared_term, actual, &mut subst);
             }
         }
@@ -8575,7 +8576,7 @@ fn lower_recursive_generic_call(
         if !ret_ty.is_unresolved()
             && let Some(declared_ret) = declared_return_type_expr(program.exprs(), &canonical_name)
         {
-            let declared_ret_term = decode_host_type_or_raise(&declared_ret, &HashMap::new());
+            let declared_ret_term = decode_host_type_or_raise(&declared_ret, &UnordMap::new());
             solve_host_type_vars(&declared_ret_term, &ret_ty, &mut subst);
         }
         if !subst.is_empty() {
@@ -8945,7 +8946,7 @@ fn ensure_mono_specialization(
             ),
         ));
     }
-    let mut spec_scope = HashMap::new();
+    let mut spec_scope = UnordMap::new();
     let mut spec_params = Vec::with_capacity(param_exprs.len());
     for (param, param_ty) in param_exprs.iter().zip(param_tys.iter()) {
         let Some(pname) = param_name(param) else {
@@ -8997,7 +8998,7 @@ fn lower_mono_specialized_function(
     body_expr: &Expr,
     fn_expr: &Expr,
     program: &CheckedProgram,
-    spec_scope: &HashMap<String, HostTypeTerm>,
+    spec_scope: &UnordMap<String, HostTypeTerm>,
 ) -> Result<HostFunction, crate::lower::LowerDiagnostic> {
     let body_expr = inline_local_callable_lets(body_expr);
     let mut fn_tensor_helpers = Vec::new();
@@ -9012,7 +9013,7 @@ fn lower_mono_specialized_function(
     // body says `t376`. A substitution keyed on the declared names installs
     // correctly and then matches nothing, because no body node ever mentions
     // `a`. Only the recorded generic signature shares the body's namespace.
-    let mut subst: HashMap<String, HostTypeTerm> = HashMap::new();
+    let mut subst: UnordMap<String, HostTypeTerm> = UnordMap::new();
     if let Some((generic_params, generic_ret)) = expr_fn_type(fn_expr) {
         for (generic, actual) in generic_params.iter().zip(params.iter()) {
             solve_host_type_vars(generic, &actual.ty, &mut subst);
@@ -9104,8 +9105,8 @@ fn top_level_fn_is_nullary_generic_constructor_wrapper(
 
 fn substitute_expr(
     expr: &Expr,
-    substitutions: &HashMap<String, Expr>,
-    shadowed: &HashSet<String>,
+    substitutions: &UnordMap<String, Expr>,
+    shadowed: &UnordSet<String>,
 ) -> Expr {
     match expr {
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
@@ -9305,8 +9306,8 @@ fn inline_local_callable_lets(expr: &Expr) -> Expr {
             // host backend can lower it the same way.
             body = substitute_expr(
                 &body,
-                &HashMap::from([(name.to_string(), value)]),
-                &HashSet::new(),
+                &UnordMap::from([(name.to_string(), value)]),
+                &UnordSet::new(),
             );
         } else {
             rebuilt_pairs.push((name.to_string(), value));
@@ -9344,7 +9345,7 @@ fn inline_local_callable_lets(expr: &Expr) -> Expr {
 fn expr_needs_host_lane_tensor_lowering(expr: &Expr, program: &CheckedProgram) -> bool {
     let graph = top_level_fn_call_graph(program);
     let recursive = recursive_top_level_fn_names_from_graph(&graph);
-    let fn_names = graph.keys().cloned().collect::<HashSet<_>>();
+    let fn_names = graph.keys().cloned().collect::<BTreeSet<_>>();
     collect_called_top_level_fns(expr, &fn_names)
         .into_iter()
         .any(|name| call_graph_reaches_any(&graph, &name, &recursive))
@@ -9444,7 +9445,7 @@ fn top_level_fn_helper_summary_rejects(
 /// classification) for the local-wrapper-over-callable-param case.
 fn expr_calls_top_level_fn_with_callable_param(expr: &Expr, program: &CheckedProgram) -> bool {
     let graph = top_level_fn_call_graph(program);
-    let fn_names = graph.keys().cloned().collect::<HashSet<_>>();
+    let fn_names = graph.keys().cloned().collect::<BTreeSet<_>>();
     collect_called_top_level_fns(expr, &fn_names)
         .iter()
         .any(|name| top_level_fn_has_callable_param(program, name))
@@ -9470,8 +9471,8 @@ fn expr_calls_summary_rejecting_top_level_fn(
     program: &CheckedProgram,
 ) -> Result<bool, crate::lower::LowerDiagnostic> {
     let graph = top_level_fn_call_graph(program);
-    let fn_names = graph.keys().cloned().collect::<HashSet<_>>();
-    // Sorted, not HashSet order: each probe is state-isolated by
+    let fn_names = graph.keys().cloned().collect::<BTreeSet<_>>();
+    // Sorted, not UnordSet order: each probe is state-isolated by
     // `MonoProbeGuard`, but probe ORDER must not vary per process either
     // (harden-bounded-monomorphization D1).
     let mut called: Vec<String> = collect_called_top_level_fns(expr, &fn_names)
@@ -9486,7 +9487,7 @@ fn expr_calls_summary_rejecting_top_level_fn(
     Ok(false)
 }
 
-fn top_level_fn_call_graph(program: &CheckedProgram) -> HashMap<String, HashSet<String>> {
+fn top_level_fn_call_graph(program: &CheckedProgram) -> BTreeMap<String, BTreeSet<String>> {
     let key = program as *const CheckedProgram as usize;
     if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get)
         && let Some(cached) =
@@ -9499,9 +9500,9 @@ fn top_level_fn_call_graph(program: &CheckedProgram) -> HashMap<String, HashSet<
         .iter()
         .filter(|(_, body)| matches!(body, Expr::List(list, _) if tag(list) == Some(DeepTag::Fn)))
         .map(|(name, _)| name.clone())
-        .collect::<HashSet<_>>();
+        .collect::<BTreeSet<_>>();
 
-    let graph: HashMap<String, HashSet<String>> = fn_names
+    let graph: BTreeMap<String, BTreeSet<String>> = fn_names
         .iter()
         .map(|name| {
             let callees = defs
@@ -9520,17 +9521,17 @@ fn top_level_fn_call_graph(program: &CheckedProgram) -> HashMap<String, HashSet<
 }
 
 fn recursive_top_level_fn_names_from_graph(
-    graph: &HashMap<String, HashSet<String>>,
-) -> HashSet<String> {
+    graph: &BTreeMap<String, BTreeSet<String>>,
+) -> BTreeSet<String> {
     graph
         .keys()
-        .filter(|name| call_graph_reaches_any(graph, name, &HashSet::from([(*name).clone()])))
+        .filter(|name| call_graph_reaches_any(graph, name, &BTreeSet::from([(*name).clone()])))
         .cloned()
         .collect()
 }
 
-fn collect_called_top_level_fns(expr: &Expr, fn_names: &HashSet<String>) -> HashSet<String> {
-    let mut out = HashSet::new();
+fn collect_called_top_level_fns(expr: &Expr, fn_names: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
     let mut stack = vec![expr];
     while let Some(current) = stack.pop() {
         match current {
@@ -9553,11 +9554,11 @@ fn collect_called_top_level_fns(expr: &Expr, fn_names: &HashSet<String>) -> Hash
 }
 
 fn call_graph_reaches_any(
-    graph: &HashMap<String, HashSet<String>>,
+    graph: &BTreeMap<String, BTreeSet<String>>,
     start: &str,
-    targets: &HashSet<String>,
+    targets: &BTreeSet<String>,
 ) -> bool {
-    let mut visited = HashSet::new();
+    let mut visited = UnordSet::new();
     let mut stack = graph
         .get(start)
         .into_iter()
@@ -9579,14 +9580,14 @@ fn call_graph_reaches_any(
 
 type HoistedHostLaneBindings<'expr, 'scope> = (
     Cow<'expr, Expr>,
-    Cow<'scope, HashMap<String, HostTypeTerm>>,
+    Cow<'scope, UnordMap<String, HostTypeTerm>>,
     Vec<HostBinding>,
 );
 
 fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     expr: &'expr Expr,
     program: &CheckedProgram,
-    scope: &'scope HashMap<String, HostTypeTerm>,
+    scope: &'scope UnordMap<String, HostTypeTerm>,
     fn_sig: Option<&(Vec<HostTypeTerm>, HostTypeTerm)>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> Result<HoistedHostLaneBindings<'expr, 'scope>, crate::lower::LowerDiagnostic> {
@@ -9688,7 +9689,7 @@ fn top_level_fn_is_type_polymorphic(program: &CheckedProgram, name: &str) -> boo
     // source-level polymorphism. Generalized local callbacks deliberately
     // carry `authored_signature = false`.
     let polymorphic = checked_authored_function_signature(program, name).is_some_and(|signature| {
-        checker_type_has_stored_variable(signature, program.adt_registry(), &mut HashSet::new())
+        checker_type_has_stored_variable(signature, program.adt_registry(), &mut UnordSet::new())
     });
     if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get) {
         TYPE_POLYMORPHIC_FN_CACHE.with(|cache| {
@@ -9706,7 +9707,11 @@ fn top_level_fn_is_nested_rank_polymorphic(program: &CheckedProgram, name: &str)
     // ADT argument used only as a nested tensor dimension has no stored ABI
     // field and must be specialized at its call site.
     checked_authored_function_signature(program, name).is_some_and(|signature| {
-        checker_type_has_erased_adt_variable(signature, program.adt_registry(), &mut HashSet::new())
+        checker_type_has_erased_adt_variable(
+            signature,
+            program.adt_registry(),
+            &mut UnordSet::new(),
+        )
     })
 }
 
@@ -9744,7 +9749,7 @@ fn checked_authored_function_signature<'a>(
 fn checker_type_has_stored_variable(
     ty: &Type,
     registry: &AdtRegistry,
-    visiting: &mut HashSet<(String, usize)>,
+    visiting: &mut UnordSet<(String, usize)>,
 ) -> bool {
     match ty {
         Type::Var(_) => true,
@@ -9821,7 +9826,7 @@ fn checker_type_has_variable(ty: &Type) -> bool {
 fn checker_type_has_erased_adt_variable(
     ty: &Type,
     registry: &AdtRegistry,
-    visiting: &mut HashSet<(String, usize)>,
+    visiting: &mut UnordSet<(String, usize)>,
 ) -> bool {
     match ty {
         Type::Fn(params, ret) => {
@@ -9867,7 +9872,7 @@ fn checker_type_has_erased_adt_variable(
 fn lower_host_callback(
     expr: &Expr,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> Result<Option<HostCallback>, crate::lower::LowerDiagnostic> {
     match expr {
@@ -9954,7 +9959,7 @@ fn lower_host_callback(
 fn lower_list_literal_items(
     expr: &Expr,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> Result<Option<Vec<HostExpr>>, crate::lower::LowerDiagnostic> {
     match expr {
@@ -9992,7 +9997,7 @@ fn lower_list_literal_items(
 
 fn tensor_helper_args(
     inputs: &[HostTensorInput],
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
 ) -> Vec<HostExpr> {
     inputs
         .iter()
@@ -10009,7 +10014,7 @@ fn tensor_helper_args(
 }
 
 fn tensor_helper_inputs(dag: &crate::Dag) -> Vec<HostTensorInput> {
-    let mut seen = HashSet::new();
+    let mut seen = UnordSet::new();
     dag.nodes()
         .iter()
         .filter_map(|node| match &node.op {
@@ -10026,7 +10031,7 @@ fn tensor_helper_inputs(dag: &crate::Dag) -> Vec<HostTensorInput> {
 
 fn remap_tensor_helper_dim_symbols(
     dag: &crate::Dag,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
     expected_output: &TensorType,
 ) -> crate::Dag {
     fn tensor_type_has_synthetic_dims(tensor_ty: &TensorType) -> bool {
@@ -10123,11 +10128,11 @@ fn remap_tensor_helper_dim_symbols(
 
 fn actualize_tensor_helper_types(
     dag: &crate::Dag,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
 ) -> crate::Dag {
     fn inferred_load_type(
         name: &str,
-        scope: &HashMap<String, HostTypeTerm>,
+        scope: &UnordMap<String, HostTypeTerm>,
         fallback: &TensorType,
     ) -> TensorType {
         match scope.get(name) {
@@ -10185,8 +10190,8 @@ fn actualize_tensor_helper_types(
         }
     }
 
-    let mut inferred = HashMap::<crate::dag::NodeId, TensorType>::new();
-    let mut uses = HashMap::<crate::dag::NodeId, Vec<crate::dag::NodeId>>::new();
+    let mut inferred = UnordMap::<crate::dag::NodeId, TensorType>::new();
+    let mut uses = UnordMap::<crate::dag::NodeId, Vec<crate::dag::NodeId>>::new();
     for node in dag.nodes() {
         for input in &node.inputs {
             uses.entry(*input).or_default().push(node.id);
@@ -10376,7 +10381,7 @@ fn actualize_tensor_helper_types(
         .iter()
         .map(|node| node.id)
         .collect::<Vec<_>>();
-    let mut synthetic_renames = HashMap::<String, crate::dag::DimInfo>::new();
+    let mut synthetic_renames = UnordMap::<String, crate::dag::DimInfo>::new();
     for id in node_ids {
         let Some(node) = actualized.get(id).cloned() else {
             continue;
@@ -10396,10 +10401,10 @@ fn actualize_tensor_helper_types(
                 && old_dim != new_dim
             {
                 match synthetic_renames.entry(name.clone()) {
-                    std::collections::hash_map::Entry::Vacant(slot) => {
+                    chelis_unord::Entry::Vacant(slot) => {
                         slot.insert(new_dim.clone());
                     }
-                    std::collections::hash_map::Entry::Occupied(existing) => {
+                    chelis_unord::Entry::Occupied(existing) => {
                         // A single checker dim-var has a single extent in
                         // a well-typed program; a conflicting re-bind
                         // means the helper DAG was already inconsistent.
@@ -10460,8 +10465,8 @@ fn expr_contains_grad_like(expr: &Expr) -> bool {
 /// abort.
 fn expr_reaches_fail(
     expr: &Expr,
-    defs: &HashMap<String, Expr>,
-    visiting: &mut HashSet<String>,
+    defs: &BTreeMap<String, Expr>,
+    visiting: &mut UnordSet<String>,
 ) -> bool {
     record_host_work(|profile| profile.fail_scan_nodes += 1);
     match expr {
@@ -10488,7 +10493,7 @@ fn expr_reaches_fail(
     }
 }
 
-fn cached_program_defs(program: &CheckedProgram) -> Arc<HashMap<String, Expr>> {
+fn cached_program_defs(program: &CheckedProgram) -> Arc<BTreeMap<String, Expr>> {
     let key = program as *const CheckedProgram as usize;
     if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get)
         && let Some(cached) = PROGRAM_DEFS_CACHE.with(|cache| cache.borrow().get(&key).cloned())
@@ -10533,7 +10538,7 @@ fn cached_subexpr_lowering_context(
     context
 }
 
-fn cached_dynamic_to_tensor_def_summaries(program: &CheckedProgram) -> Arc<HashMap<String, bool>> {
+fn cached_dynamic_to_tensor_def_summaries(program: &CheckedProgram) -> Arc<BTreeMap<String, bool>> {
     let key = program as *const CheckedProgram as usize;
     if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get)
         && let Some(cached) =
@@ -10543,16 +10548,16 @@ fn cached_dynamic_to_tensor_def_summaries(program: &CheckedProgram) -> Arc<HashM
     }
 
     let defs = cached_program_defs(program);
-    let def_names = defs.keys().cloned().collect::<HashSet<_>>();
+    let def_names = defs.keys().cloned().collect::<BTreeSet<_>>();
     let mut summaries = defs
         .keys()
         .map(|name| (name.clone(), false))
-        .collect::<HashMap<_, _>>();
-    let mut reverse_edges = HashMap::<String, Vec<String>>::new();
+        .collect::<BTreeMap<_, _>>();
+    let mut reverse_edges = UnordMap::<String, Vec<String>>::new();
     let mut queue = VecDeque::new();
 
     for (name, body) in defs.iter() {
-        let mut referenced_defs = HashSet::new();
+        let mut referenced_defs = BTreeSet::new();
         let mut callable_scope = CallableScope::default();
         let directly_dynamic = collect_dynamic_to_tensor_def_refs(
             body,
@@ -10599,9 +10604,9 @@ fn cached_dynamic_to_tensor_def_summaries(program: &CheckedProgram) -> Arc<HashM
 
 fn collect_dynamic_to_tensor_def_refs(
     expr: &Expr,
-    def_names: &HashSet<String>,
+    def_names: &BTreeSet<String>,
     callable_scope: &mut CallableScope,
-    referenced_defs: &mut HashSet<String>,
+    referenced_defs: &mut BTreeSet<String>,
 ) -> bool {
     record_host_work(|profile| profile.tensor_helper_preflight_nodes += 1);
     let mut directly_dynamic =
@@ -10708,17 +10713,17 @@ fn collect_dynamic_to_tensor_def_refs(
 
 fn analyze_tensor_helper_preflight(
     expr: &Expr,
-    def_summaries: &HashMap<String, bool>,
-    out: &mut HashMap<usize, TensorHelperPreflightFacts>,
+    def_summaries: &BTreeMap<String, bool>,
+    out: &mut UnordMap<usize, TensorHelperPreflightFacts>,
 ) -> TensorHelperPreflightFacts {
     analyze_tensor_helper_preflight_scoped(expr, def_summaries, &mut CallableScope::default(), out)
 }
 
 fn analyze_tensor_helper_preflight_scoped(
     expr: &Expr,
-    def_summaries: &HashMap<String, bool>,
+    def_summaries: &BTreeMap<String, bool>,
     callable_scope: &mut CallableScope,
-    out: &mut HashMap<usize, TensorHelperPreflightFacts>,
+    out: &mut UnordMap<usize, TensorHelperPreflightFacts>,
 ) -> TensorHelperPreflightFacts {
     record_host_work(|profile| profile.tensor_helper_preflight_nodes += 1);
     let mut facts = TensorHelperPreflightFacts {
@@ -10735,15 +10740,16 @@ fn analyze_tensor_helper_preflight_scoped(
         facts.reaches_dynamic_to_tensor |= def_summaries.get(&target).copied().unwrap_or(false);
     }
 
-    let merge_child = |facts: &mut TensorHelperPreflightFacts,
-                       child: &Expr,
-                       callable_scope: &mut CallableScope,
-                       out: &mut HashMap<usize, TensorHelperPreflightFacts>| {
-        let child_facts =
-            analyze_tensor_helper_preflight_scoped(child, def_summaries, callable_scope, out);
-        facts.reaches_dynamic_to_tensor |= child_facts.reaches_dynamic_to_tensor;
-        facts.contains_grad_like |= child_facts.contains_grad_like;
-    };
+    let merge_child =
+        |facts: &mut TensorHelperPreflightFacts,
+         child: &Expr,
+         callable_scope: &mut CallableScope,
+         out: &mut UnordMap<usize, TensorHelperPreflightFacts>| {
+            let child_facts =
+                analyze_tensor_helper_preflight_scoped(child, def_summaries, callable_scope, out);
+            facts.reaches_dynamic_to_tensor |= child_facts.reaches_dynamic_to_tensor;
+            facts.contains_grad_like |= child_facts.contains_grad_like;
+        };
     match stamped_parts(expr) {
         Some((DeepTag::Fn, _, kids)) => {
             if let Some(params) = kids.first() {
@@ -10824,7 +10830,7 @@ fn direct_var_name(expr: &Expr) -> Option<&str> {
 fn resolve_top_level_callable_from_names(
     name: &str,
     callable_scope: &CallableScope,
-    def_names: &HashSet<String>,
+    def_names: &BTreeSet<String>,
 ) -> Option<String> {
     match callable_scope.get(name) {
         Some(target) => target.clone(),
@@ -10835,7 +10841,7 @@ fn resolve_top_level_callable_from_names(
 fn resolve_top_level_callable_from_summaries(
     name: &str,
     callable_scope: &CallableScope,
-    def_summaries: &HashMap<String, bool>,
+    def_summaries: &BTreeMap<String, bool>,
 ) -> Option<String> {
     match callable_scope.get(name) {
         Some(target) => target.clone(),
@@ -10911,9 +10917,9 @@ fn tensor_helper_preflight_rejects(expr: &Expr) -> bool {
     })
 }
 
-fn collect_program_defs(exprs: &[Expr]) -> HashMap<String, Expr> {
+fn collect_program_defs(exprs: &[Expr]) -> BTreeMap<String, Expr> {
     record_host_work(|profile| profile.program_def_collections += 1);
-    let mut defs = HashMap::new();
+    let mut defs = BTreeMap::new();
     for expr in top_level_items(exprs) {
         let Expr::List(list, _) = expr else {
             continue;
@@ -10954,9 +10960,10 @@ fn collect_top_level_items<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
     out.push(expr);
 }
 
-fn collect_tensor_scope(scope: &HashMap<String, HostTypeTerm>) -> HashMap<String, TensorType> {
+fn collect_tensor_scope(scope: &UnordMap<String, HostTypeTerm>) -> UnordMap<String, TensorType> {
     scope
-        .iter()
+        .to_sorted()
+        .into_iter()
         .filter_map(|(name, ty)| {
             tensor_type_from_host_input(ty).map(|tensor| (name.clone(), tensor))
         })
@@ -11028,7 +11035,7 @@ fn host_type_from_tensor_input(ty: &TensorType) -> HostTypeTerm {
 fn expr_host_type(
     expr: &Expr,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
 ) -> HostTypeTerm {
     let raw = expr_host_type_raw(expr, program, scope);
     let subst = active_type_subst();
@@ -11056,7 +11063,7 @@ fn expand_host_type_aliases(program: &CheckedProgram, ty: HostTypeTerm) -> HostT
     fn expand(
         program: &CheckedProgram,
         ty: HostTypeTerm,
-        visiting: &mut HashSet<String>,
+        visiting: &mut UnordSet<String>,
     ) -> HostTypeTerm {
         match ty {
             HostTypeTerm::Adt(name, args) => {
@@ -11083,11 +11090,11 @@ fn expand_host_type_aliases(program: &CheckedProgram, ty: HostTypeTerm) -> HostT
                         }
                         _ => None,
                     })
-                    .collect::<HashMap<_, _>>();
+                    .collect::<UnordMap<_, _>>();
                 let body = rename_host_type_variables(
                     decode_host_type_or_raise(
                         &type_to_deep_expr(&program.adt_registry().expand_aliases(&alias.body)),
-                        &HashMap::new(),
+                        &UnordMap::new(),
                     ),
                     &checker_parameter_names,
                 );
@@ -11096,8 +11103,8 @@ fn expand_host_type_aliases(program: &CheckedProgram, ty: HostTypeTerm) -> HostT
                 } else {
                     Cow::Owned(vec![NominalParamKind::Type; alias.params.len()])
                 };
-                let mut type_substitutions = HashMap::new();
-                let mut dimension_substitutions = HashMap::new();
+                let mut type_substitutions = UnordMap::new();
+                let mut dimension_substitutions = UnordMap::new();
                 for ((parameter, kind), argument) in
                     alias.params.iter().zip(parameter_kinds.iter()).zip(args)
                 {
@@ -11150,11 +11157,14 @@ fn expand_host_type_aliases(program: &CheckedProgram, ty: HostTypeTerm) -> HostT
         }
     }
 
-    expand(program, ty, &mut HashSet::new())
+    expand(program, ty, &mut UnordSet::new())
 }
 
 /// Replace every bound `TypeVariable` in a host type (chelis#1201).
-fn apply_host_type_subst(ty: &HostTypeTerm, subst: &HashMap<String, HostTypeTerm>) -> HostTypeTerm {
+fn apply_host_type_subst(
+    ty: &HostTypeTerm,
+    subst: &UnordMap<String, HostTypeTerm>,
+) -> HostTypeTerm {
     match ty {
         HostTypeTerm::TypeVariable(name) => subst.get(name).cloned().unwrap_or_else(|| ty.clone()),
         HostTypeTerm::Adt(name, args) => HostTypeTerm::Adt(
@@ -11193,7 +11203,7 @@ fn apply_host_type_subst(ty: &HostTypeTerm, subst: &HashMap<String, HostTypeTerm
 fn expr_host_type_raw(
     expr: &Expr,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
 ) -> HostTypeTerm {
     match expr {
         Expr::Atom(Atom::Int(_), _) => HostTypeTerm::Int64,
@@ -11243,7 +11253,7 @@ fn app_expr_needs_inferred_type(explicit: &HostTypeTerm) -> bool {
 fn infer_app_expr_host_type(
     expr: &Expr,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
 ) -> Option<HostTypeTerm> {
     let (DeepTag::App, _, kids) = stamped_parts(expr)? else {
         return None;
@@ -11259,7 +11269,7 @@ fn infer_app_expr_host_type(
         // stamp the wrong package's ADT name onto the expression. Decline
         // instead; the application itself rejects the same ambiguity.
         if let Some(definition) = lookup_adt_constructor_definition(program, name) {
-            let mut substitutions = HashMap::new();
+            let mut substitutions = UnordMap::new();
             for (field, argument) in definition.fields.iter().zip(kids.iter().skip(1)) {
                 let applied = expr_host_type(argument, program, scope);
                 collect_host_type_variable_substitutions(&field.term, &applied, &mut substitutions);
@@ -11275,7 +11285,7 @@ fn infer_app_expr_host_type(
             return Some(substitute_host_type_term(result, &substitutions));
         }
         let (params, ret) = lookup_declared_fn_type(program, name)?;
-        let mut substitutions = HashMap::new();
+        let mut substitutions = UnordMap::new();
         for (pattern, argument) in params.iter().zip(kids.iter().skip(1)) {
             let applied = expr_host_type(argument, program, scope);
             collect_host_type_variable_substitutions(pattern, &applied, &mut substitutions);
@@ -11493,7 +11503,7 @@ fn infer_einsum_tensor_type(equation: &str, tensors: &[TensorType]) -> Option<Te
         return None;
     }
 
-    let mut labels = HashMap::<char, crate::dag::DimInfo>::new();
+    let mut labels = UnordMap::<char, crate::dag::DimInfo>::new();
     for (spec, tensor) in input_specs.iter().zip(tensors.iter()) {
         let axes = spec
             .chars()
@@ -11594,7 +11604,7 @@ fn reduce_axis_tensor_type(tensor_ty: &TensorType, axis: usize) -> TensorType {
     }
 }
 
-fn lookup_type_expr<'a>(type_env: &'a HashMap<String, Expr>, name: &str) -> Option<&'a Expr> {
+fn lookup_type_expr<'a>(type_env: &'a BTreeMap<String, Expr>, name: &str) -> Option<&'a Expr> {
     type_env.get(name).or_else(|| {
         let mut matches = type_env
             .iter()
@@ -11651,7 +11661,7 @@ fn lookup_declared_fn_type(
         .and_then(|ty| parse_expanded_fn_type_expr(program, ty))
 }
 
-fn lookup_program_def<'a>(defs: &'a HashMap<String, Expr>, name: &str) -> Option<&'a Expr> {
+fn lookup_program_def<'a>(defs: &'a BTreeMap<String, Expr>, name: &str) -> Option<&'a Expr> {
     defs.get(name).or_else(|| {
         let mut matches = defs
             .iter()
@@ -11710,7 +11720,7 @@ fn find_top_level_def_named<'a>(exprs: &'a [Expr], name: &str) -> Option<(&'a st
 fn expr_tensor_type(
     expr: &Expr,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &UnordMap<String, HostTypeTerm>,
 ) -> Option<TensorType> {
     match expr_host_type(expr, program, scope) {
         HostTypeTerm::Tensor(ty) => Some(ty),
@@ -11757,9 +11767,9 @@ fn parse_fn_type_expr(expr: &Expr) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> 
     let (args, ret) = parse_fn_type_expr_parts(expr)?;
     Some((
         args.iter()
-            .map(|arg| decode_host_type_or_raise(arg, &HashMap::new()))
+            .map(|arg| decode_host_type_or_raise(arg, &UnordMap::new()))
             .collect(),
-        decode_host_type_or_raise(&ret, &HashMap::new()),
+        decode_host_type_or_raise(&ret, &UnordMap::new()),
     ))
 }
 
@@ -11821,8 +11831,8 @@ fn decode_expanded_host_type_expr(program: &CheckedProgram, expr: &Expr) -> Opti
         } else {
             Cow::Owned(vec![NominalParamKind::Type; alias.params.len()])
         };
-        let mut type_substitutions = HashMap::new();
-        let mut dimension_substitutions = HashMap::new();
+        let mut type_substitutions = UnordMap::new();
+        let mut dimension_substitutions = UnordMap::new();
         for ((parameter, kind), argument) in alias
             .params
             .iter()
@@ -11855,7 +11865,7 @@ fn decode_expanded_host_type_expr(program: &CheckedProgram, expr: &Expr) -> Opti
                 }
                 _ => None,
             })
-            .collect::<HashMap<_, _>>();
+            .collect::<UnordMap<_, _>>();
         let body = rename_host_type_variables(
             decode_host_type(&type_to_deep_expr(
                 &program.adt_registry().expand_aliases(&alias.body),
@@ -11899,14 +11909,14 @@ fn parse_fn_type_expr_parts(expr: &Expr) -> Option<(Vec<Expr>, Expr)> {
 
 fn decode_host_type_with_subst(
     expr: &Expr,
-    subst: &HashMap<String, HostTypeTerm>,
+    subst: &UnordMap<String, HostTypeTerm>,
 ) -> Result<HostTypeTerm, HostTypeDecodeError> {
     decode_host_type(expr).map(|term| substitute_host_type_term(term, subst))
 }
 
 fn substitute_host_type_term(
     term: HostTypeTerm,
-    subst: &HashMap<String, HostTypeTerm>,
+    subst: &UnordMap<String, HostTypeTerm>,
 ) -> HostTypeTerm {
     match term {
         HostTypeTerm::Scalar(HostPrecisionTerm::Variable(name)) => match subst.get(&name) {
@@ -11974,7 +11984,7 @@ fn substitute_host_type_term(
 
 fn substitute_host_dimension_terms(
     term: HostTypeTerm,
-    subst: &HashMap<String, DimInfo>,
+    subst: &UnordMap<String, DimInfo>,
 ) -> HostTypeTerm {
     let substitute_dim = |dim: DimInfo| match dim {
         DimInfo::Named(name, _) if subst.contains_key(&name) => subst[&name].clone(),
@@ -12040,7 +12050,7 @@ fn substitute_host_dimension_terms(
 fn collect_host_type_variable_substitutions(
     pattern: &HostTypeTerm,
     applied: &HostTypeTerm,
-    subst: &mut HashMap<String, HostTypeTerm>,
+    subst: &mut UnordMap<String, HostTypeTerm>,
 ) {
     match (pattern, applied) {
         (
@@ -12105,7 +12115,7 @@ fn collect_host_type_variable_substitutions(
     }
 }
 
-fn decode_host_type_or_raise(expr: &Expr, subst: &HashMap<String, HostTypeTerm>) -> HostTypeTerm {
+fn decode_host_type_or_raise(expr: &Expr, subst: &UnordMap<String, HostTypeTerm>) -> HostTypeTerm {
     decode_host_type_with_subst(expr, subst).unwrap_or_else(|error| {
         crate::lower::raise_fatal_lowering_diagnostic(
             crate::lower::LowerDiagnostic::new(
@@ -12268,7 +12278,7 @@ fn force_host_expr_type(expr: HostExpr, ty: HostTypeTerm) -> HostExpr {
             body,
             ty: actual_ty,
         } => {
-            let mut substitutions = HashMap::new();
+            let mut substitutions = UnordMap::new();
             collect_host_type_variable_substitutions(&actual_ty, &ty, &mut substitutions);
             collect_host_type_variable_substitutions(
                 &host_expr_type(&body),
@@ -13290,7 +13300,7 @@ fn adt_constructor_definitions(program: &CheckedProgram) -> Vec<GenericAdtConstr
                 }
                 _ => None,
             })
-            .collect::<HashMap<_, _>>();
+            .collect::<UnordMap<_, _>>();
         let parameters = definition.type_params.clone();
         let stored_parameters = definition
             .type_params
@@ -13301,7 +13311,7 @@ fn adt_constructor_definitions(program: &CheckedProgram) -> Vec<GenericAdtConstr
                     definition,
                     index,
                     program.adt_registry(),
-                    &mut HashSet::new(),
+                    &mut UnordSet::new(),
                 )
             })
             .collect::<Vec<_>>();
@@ -13312,7 +13322,7 @@ fn adt_constructor_definitions(program: &CheckedProgram) -> Vec<GenericAdtConstr
                 .map(|(name, ty)| GenericAdtField {
                     name: name.clone(),
                     term: rename_host_type_variables(
-                        decode_host_type_or_raise(&type_to_deep_expr(ty), &HashMap::new()),
+                        decode_host_type_or_raise(&type_to_deep_expr(ty), &UnordMap::new()),
                         &checker_parameter_names,
                     ),
                 })
@@ -13332,7 +13342,10 @@ fn adt_constructor_definitions(program: &CheckedProgram) -> Vec<GenericAdtConstr
     definitions
 }
 
-fn rename_host_type_variables(term: HostTypeTerm, names: &HashMap<String, String>) -> HostTypeTerm {
+fn rename_host_type_variables(
+    term: HostTypeTerm,
+    names: &UnordMap<String, String>,
+) -> HostTypeTerm {
     let rename_dim = |dim: DimInfo| match dim {
         DimInfo::Named(name, extent) => {
             DimInfo::Named(names.get(&name).cloned().unwrap_or(name), extent)
@@ -13416,7 +13429,7 @@ fn checker_adt_parameter_is_stored(
     definition: &AdtDef,
     parameter_index: usize,
     registry: &AdtRegistry,
-    visiting: &mut HashSet<(String, usize)>,
+    visiting: &mut UnordSet<(String, usize)>,
 ) -> bool {
     let Some(argument) = definition.param_args.get(parameter_index) else {
         return true;
@@ -13442,7 +13455,7 @@ fn checker_type_stores_variable(
     ty: &Type,
     target: chelis_types::types::TypeVar,
     registry: &AdtRegistry,
-    visiting: &mut HashSet<(String, usize)>,
+    visiting: &mut UnordSet<(String, usize)>,
 ) -> bool {
     match ty {
         Type::Var(variable) => *variable == target,
@@ -13907,7 +13920,7 @@ fn symbol_name(expr: &Expr) -> Option<&str> {
 /// is harmless (the C emitter's `captured_global_names` is the final
 /// gate — an emitted global is only declared if a function actually
 /// references it).
-fn collect_deep_var_names(expr: &Expr, out: &mut HashSet<String>) {
+fn collect_deep_var_names(expr: &Expr, out: &mut UnordSet<String>) {
     match expr {
         Expr::List(list, _) => {
             if tag(list) == Some(DeepTag::Var)
@@ -13960,7 +13973,7 @@ thread_local! {
     /// call sites across this file; scoping it here matches the idiom
     /// `MONO_SPECIALIZATIONS` and `HOST_LOWERING_CACHE_ACTIVE` already use,
     /// and applies at the single point that decodes a node's checked type.
-    static ACTIVE_TYPE_SUBST: RefCell<Vec<HashMap<String, HostTypeTerm>>> =
+    static ACTIVE_TYPE_SUBST: RefCell<Vec<UnordMap<String, HostTypeTerm>>> =
         const { RefCell::new(Vec::new()) };
 }
 
@@ -13971,10 +13984,10 @@ thread_local! {
 /// bound there, so applying it is the identity. Spelled as an explicit
 /// branch instead of a default so the empty map is visibly the stated
 /// outcome (spec/design/loud_unsupported.md C4.3).
-fn active_type_subst() -> HashMap<String, HostTypeTerm> {
+fn active_type_subst() -> UnordMap<String, HostTypeTerm> {
     ACTIVE_TYPE_SUBST.with(|stack| match stack.borrow().last() {
         Some(subst) => subst.clone(),
-        None => HashMap::new(),
+        None => UnordMap::new(),
     })
 }
 
@@ -13982,7 +13995,7 @@ fn active_type_subst() -> HashMap<String, HostTypeTerm> {
 struct ActiveTypeSubstGuard;
 
 impl ActiveTypeSubstGuard {
-    fn push(subst: HashMap<String, HostTypeTerm>) -> Self {
+    fn push(subst: UnordMap<String, HostTypeTerm>) -> Self {
         ACTIVE_TYPE_SUBST.with(|stack| stack.borrow_mut().push(subst));
         ActiveTypeSubstGuard
     }
@@ -14073,7 +14086,7 @@ fn declared_return_type_expr(exprs: &[Expr], name: &str) -> Option<Expr> {
 fn solve_host_type_vars(
     declared: &HostTypeTerm,
     actual: &HostTypeTerm,
-    out: &mut HashMap<String, HostTypeTerm>,
+    out: &mut UnordMap<String, HostTypeTerm>,
 ) {
     match (declared, actual) {
         (HostTypeTerm::TypeVariable(name), resolved) if !resolved.is_unresolved() => {
@@ -14247,8 +14260,8 @@ def bad[b](box: Box[b]) -> bool =
         );
         let int32 = HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int32));
         let seeded = MonoSpecializationState {
-            memo: HashMap::from([("seed-key".to_string(), "seed-symbol".to_string())]),
-            symbol_keys: HashMap::from([("seed-symbol".to_string(), "seed-key".to_string())]),
+            memo: UnordMap::from([("seed-key".to_string(), "seed-symbol".to_string())]),
+            symbol_keys: UnordMap::from([("seed-symbol".to_string(), "seed-key".to_string())]),
             functions: vec![HostFunction {
                 name: "seeded__mono_0123456789abcdef".to_string(),
                 params: Vec::new(),
@@ -14567,7 +14580,7 @@ def bad[b](box: Box[b]) -> bool =
                             + summary_profile.callable_scope_work;
 
                         reset_host_work_profile();
-                        let mut facts = HashMap::new();
+                        let mut facts = UnordMap::new();
                         let nested_facts =
                             analyze_tensor_helper_preflight(nested_body, &summaries, &mut facts);
                         assert!(nested_facts.reaches_dynamic_to_tensor);
@@ -14662,7 +14675,7 @@ def bad[b](box: Box[b]) -> bool =
             let body = lookup_program_def(&defs, definition).expect("fixture definition exists");
             let final_app = issue_1205_find_named_app(body, final_callee)
                 .expect("fixture contains its final named application");
-            let mut facts = HashMap::new();
+            let mut facts = UnordMap::new();
             let body_facts = analyze_tensor_helper_preflight(body, &summaries, &mut facts);
             assert!(
                 body_facts.reaches_dynamic_to_tensor,
@@ -14748,7 +14761,7 @@ def bad[b](box: Box[b]) -> bool =
             .iter()
             .find_map(|expr| issue_1205_find_named_app(expr, "add"))
             .expect("fixture contains the twice body");
-        let mut facts = HashMap::new();
+        let mut facts = UnordMap::new();
         let add_facts = analyze_tensor_helper_preflight(add, &summaries, &mut facts);
         assert!(
             !add_facts.reaches_dynamic_to_tensor,
@@ -14780,7 +14793,7 @@ def bad[b](box: Box[b]) -> bool =
         let shadowed_defs = cached_program_defs(&shadowed);
         let local_body = lookup_program_def(&shadowed_defs, "local").expect("local definition");
         let local_call = issue_1205_find_named_app(local_body, "bc").expect("local bc call");
-        let mut shadowed_facts = HashMap::new();
+        let mut shadowed_facts = UnordMap::new();
         analyze_tensor_helper_preflight(local_body, &shadowed_summaries, &mut shadowed_facts);
         assert!(
             !shadowed_facts[&(local_call as *const Expr as usize)].reaches_dynamic_to_tensor,
@@ -14809,7 +14822,7 @@ def bad[b](box: Box[b]) -> bool =
         let aliased_body =
             lookup_program_def(&aliased_defs, "aliased").expect("aliased definition");
         let alias_call = issue_1205_find_named_app(aliased_body, "f").expect("local f call");
-        let mut aliased_facts = HashMap::new();
+        let mut aliased_facts = UnordMap::new();
         analyze_tensor_helper_preflight(aliased_body, &aliased_summaries, &mut aliased_facts);
         assert!(
             aliased_facts[&(alias_call as *const Expr as usize)].reaches_dynamic_to_tensor,
@@ -15086,7 +15099,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         // Empty checked program: the arm under test must not depend on
         // program-level lookups for the precision recovery.
         let program = surf_check("unrelated = 1\n");
-        infer_app_expr_host_type(&app, &program, &HashMap::new())
+        infer_app_expr_host_type(&app, &program, &UnordMap::new())
     }
 
     #[test]
@@ -15191,7 +15204,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             "(app {{}} (var {{}} concat) (var {{}} rows) {axis_src})"
         ));
         let program = surf_check("unrelated = 1\n");
-        let mut scope = HashMap::new();
+        let mut scope = UnordMap::new();
         scope.insert(
             "rows".to_string(),
             HostTypeTerm::List(Box::new(HostTypeTerm::Tensor(rank2_element()))),
@@ -15512,13 +15525,13 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         // variants so the entry-param boundary can recover the width.
         let f32_ty = parse_deep_app("(t-prim {} f32)");
         assert_eq!(
-            decode_host_type_with_subst(&f32_ty, &HashMap::new()),
+            decode_host_type_with_subst(&f32_ty, &UnordMap::new()),
             Ok(HostTypeTerm::Float32),
         );
 
         let f64_ty = parse_deep_app("(t-prim {} f64)");
         assert_eq!(
-            decode_host_type_with_subst(&f64_ty, &HashMap::new()),
+            decode_host_type_with_subst(&f64_ty, &UnordMap::new()),
             Ok(HostTypeTerm::Float64),
         );
     }
@@ -15560,15 +15573,15 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
     #[test]
     fn call_graph_recursion_detection_does_not_mark_every_function_recursive() {
-        let graph = HashMap::from([
-            ("plain".to_string(), HashSet::from(["leaf".to_string()])),
-            ("leaf".to_string(), HashSet::new()),
+        let graph = BTreeMap::from([
+            ("plain".to_string(), BTreeSet::from(["leaf".to_string()])),
+            ("leaf".to_string(), BTreeSet::new()),
             (
                 "self_rec".to_string(),
-                HashSet::from(["self_rec".to_string()]),
+                BTreeSet::from(["self_rec".to_string()]),
             ),
-            ("mut_a".to_string(), HashSet::from(["mut_b".to_string()])),
-            ("mut_b".to_string(), HashSet::from(["mut_a".to_string()])),
+            ("mut_a".to_string(), BTreeSet::from(["mut_b".to_string()])),
+            ("mut_b".to_string(), BTreeSet::from(["mut_a".to_string()])),
         ]);
 
         let recursive = recursive_top_level_fn_names_from_graph(&graph);
@@ -15610,7 +15623,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         let body = lookup_program_def(&defs, "softplus").unwrap();
         let fn_list = as_list(body).unwrap();
         let body = children(fn_list).get(1).unwrap();
-        let mut scope = HashMap::new();
+        let mut scope = UnordMap::new();
         scope.insert(
             "x".to_string(),
             HostTypeTerm::Tensor(TensorType {
@@ -15875,7 +15888,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         );
         dag.add_root(root);
 
-        let mut scope = HashMap::new();
+        let mut scope = UnordMap::new();
         scope.insert(
             "x".into(),
             HostTypeTerm::Tensor(TensorType {
@@ -15967,7 +15980,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         );
         dag.add_root(root);
 
-        let mut scope = HashMap::new();
+        let mut scope = UnordMap::new();
         scope.insert(
             "x".into(),
             HostTypeTerm::Tensor(TensorType {
@@ -16048,7 +16061,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         );
         dag.add_root(root);
 
-        let mut scope = HashMap::new();
+        let mut scope = UnordMap::new();
         scope.insert(
             "x".into(),
             HostTypeTerm::Tensor(TensorType {
@@ -16477,7 +16490,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
     fn lower_against(program: &CheckedProgram, source: &str) -> Result<HostExpr, String> {
         let mut helpers = Vec::new();
-        lower_host_expr(&deep_expr(source), program, &HashMap::new(), &mut helpers)
+        lower_host_expr(&deep_expr(source), program, &UnordMap::new(), &mut helpers)
             .map_err(|diagnostic| diagnostic.message)
     }
 

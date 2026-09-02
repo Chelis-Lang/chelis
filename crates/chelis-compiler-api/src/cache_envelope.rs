@@ -40,9 +40,9 @@
 //! torn write is never silently mistaken for a valid miss.
 
 use chelis_ir::lower::LoweredLibrary;
+use chelis_unord::UnordMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -125,16 +125,26 @@ struct Envelope {
 
 const ENVELOPE_FORMAT_VERSION: u32 = 1;
 
-fn sorted_map_bytes<T: Serialize>(map: &HashMap<String, T>) -> Result<Vec<u8>, String> {
-    let mut entries: Vec<_> = map
-        .iter()
+fn sorted_map_bytes<T: Serialize>(map: &UnordMap<String, T>) -> Result<Vec<u8>, String> {
+    let entries = map
+        .to_sorted()
+        .into_iter()
         .map(|(key, value)| (key.as_str(), value))
-        .collect();
-    entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
+        .collect::<Vec<_>>();
     bincode::serialize(&entries).map_err(|error| error.to_string())
 }
 
-/// Compare raw lower results without dependence on `HashMap` iteration order.
+fn sorted_btree_map_bytes<T: Serialize>(
+    map: &std::collections::BTreeMap<String, T>,
+) -> Result<Vec<u8>, String> {
+    let entries = map
+        .iter()
+        .map(|(key, value)| (key.as_str(), value))
+        .collect::<Vec<_>>();
+    bincode::serialize(&entries).map_err(|error| error.to_string())
+}
+
+/// Compare raw lower results without dependence on `UnordMap` iteration order.
 ///
 /// Bincode preserves float bits. This comparison therefore accepts equal NaN
 /// payloads but rejects every changed field in the raw cache carrier.
@@ -154,12 +164,12 @@ pub(crate) fn lowered_library_payload_matches(
             == bincode::serialize(expected.dag()).map_err(|error| error.to_string())?
             && sorted_map_bytes(cached.symbol_table())?
                 == sorted_map_bytes(expected.symbol_table())?
-            && sorted_map_bytes(cached.program_defs())?
-                == sorted_map_bytes(expected.program_defs())?
-            && sorted_map_bytes(cached.program_types())?
-                == sorted_map_bytes(expected.program_types())?
-            && sorted_map_bytes(cached.lowered_names())?
-                == sorted_map_bytes(expected.lowered_names())?,
+            && sorted_btree_map_bytes(cached.program_defs())?
+                == sorted_btree_map_bytes(expected.program_defs())?
+            && sorted_btree_map_bytes(cached.program_types())?
+                == sorted_btree_map_bytes(expected.program_types())?
+            && sorted_btree_map_bytes(cached.lowered_names())?
+                == sorted_btree_map_bytes(expected.lowered_names())?,
     )
 }
 

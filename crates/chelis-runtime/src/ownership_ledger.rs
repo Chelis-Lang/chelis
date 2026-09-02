@@ -37,7 +37,7 @@ impl Kind {
 #[cfg(feature = "ownership-ledger")]
 mod enabled {
     use super::{c_void, Kind};
-    use std::collections::HashMap;
+    use chelis_unord::UnordMap;
     use std::env;
     use std::fs::{File, OpenOptions};
     use std::io::Write;
@@ -57,7 +57,7 @@ mod enabled {
 
     struct State {
         file: File,
-        by_pointer: HashMap<usize, Allocation>,
+        by_pointer: UnordMap<usize, Allocation>,
         next_id: u64,
         allocations: u64,
         finalized: u64,
@@ -74,7 +74,7 @@ mod enabled {
             file.flush()?;
             Ok(Self {
                 file,
-                by_pointer: HashMap::new(),
+                by_pointer: UnordMap::new(),
                 next_id: 1,
                 allocations: 0,
                 finalized: 0,

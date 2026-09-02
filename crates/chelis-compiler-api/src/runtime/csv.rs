@@ -4,7 +4,7 @@
 //! numeric cell type; numeric meaning enters only through an explicit
 //! `csv_int*` or `csv_f64*` accessor under [05-OP-2..3].
 
-use std::collections::HashSet;
+use chelis_unord::UnordSet;
 
 use super::RuntimeValue;
 use super::host_ops::describe_value;
@@ -194,8 +194,8 @@ fn csv_table<'a>(builtin: &str, value: &'a RuntimeValue) -> Result<CsvTable<'a>,
         if row_index == 0 {
             columns = names;
         } else {
-            let expected: HashSet<_> = columns.iter().copied().collect();
-            let actual: HashSet<_> = names.iter().copied().collect();
+            let expected: UnordSet<_> = columns.iter().copied().collect();
+            let actual: UnordSet<_> = names.iter().copied().collect();
             if actual != expected {
                 return Err(format!(
                     "{builtin}: data row {row_index} does not have the same columns as row 0"
@@ -208,7 +208,7 @@ fn csv_table<'a>(builtin: &str, value: &'a RuntimeValue) -> Result<CsvTable<'a>,
 }
 
 fn assert_unique_columns<S: AsRef<str>>(builtin: &str, columns: &[S]) -> Result<(), String> {
-    let mut seen = HashSet::new();
+    let mut seen = UnordSet::new();
     for (index, column) in columns.iter().enumerate() {
         let column = column.as_ref();
         if !seen.insert(column) {

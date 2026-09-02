@@ -10,7 +10,8 @@ pub use stack::{
     reset_grow_segment_bytes_for_test, run_on_grown_stack, set_grow_segment_bytes_for_test,
 };
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use chelis_unord::{UnordMap, UnordSet};
+use std::collections::{BTreeMap, VecDeque};
 
 use chelis_deep::ast as deep;
 use chelis_deep::{DeepTag, Span, decode_effect_kind};

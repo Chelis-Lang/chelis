@@ -135,6 +135,61 @@ pub struct RunningImage {
     pub id: ImageId,
 }
 
+/// Return the exact per-build identity shared by every compiler cache layer.
+///
+/// All workspace crates have one release version, so the running image's
+/// content identity plus this crate's package version is the compiler build
+/// identity. Keeping the formatter here prevents lower-level caches such as
+/// `chelis-reef` from approximating `chelis-compiler-api`'s fingerprint or
+/// creating a dependency cycle to obtain it.
+pub fn build_fingerprint() -> &'static str {
+    static FINGERPRINT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FINGERPRINT.get_or_init(|| {
+        let image = running_image();
+        if image.is_none() {
+            // The degraded identity is safe because it forces misses, but it
+            // is expensive enough to diagnose rather than hiding the cause.
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr(),
+                "chelis: warning: could not identify the running compiler image, so \
+                 compiled-context caches cannot be shared between invocations and \
+                 every run will rebuild them (chelis#1156)."
+            );
+        }
+        fingerprint_string(image.as_ref())
+    })
+}
+
+/// Format one image-identification result as the workspace build identity.
+///
+/// This is public for cross-crate negative controls; production callers use
+/// [`build_fingerprint`], which pins one result for the process.
+#[doc(hidden)]
+pub fn fingerprint_string(image: Option<&RunningImage>) -> String {
+    const COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
+    match image {
+        Some(image) => format!(
+            "{COMPILER_VERSION}+{scheme}.{id}.{len:x}",
+            scheme = image.id.scheme(),
+            id = image.id.hex(),
+            len = image.len
+        ),
+        None => {
+            // A per-process random discriminator fails toward misses instead
+            // of ever sharing an unidentified build's semantic cache.
+            use std::hash::{BuildHasher, Hasher};
+            let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+            hasher.write_u32(std::process::id());
+            let nonce = hasher.finish();
+            format!(
+                "{COMPILER_VERSION}+degraded.{pid:x}.{nonce:x}",
+                pid = std::process::id()
+            )
+        }
+    }
+}
+
 /// The path of the object image containing this crate's code.
 ///
 /// Asks the dynamic loader (`dladdr`) which object a symbol defined *here* was

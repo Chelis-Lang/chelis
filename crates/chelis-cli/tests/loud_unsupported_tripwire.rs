@@ -96,7 +96,7 @@ macro_rules! declare_pats {
         /// plus the hosted chelis#732 format classes.
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
         enum Pat {
-            $($(#[$meta])* $name,)+
+            $($name,)+
         }
 
         /// Every pattern, generated from the same list that declares the

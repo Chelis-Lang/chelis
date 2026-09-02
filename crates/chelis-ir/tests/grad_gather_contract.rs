@@ -27,7 +27,7 @@
 //! reads as size-1 broadcast, but the rank-increasing form is equivalent for
 //! AD purposes and is what's currently differentiable, so this test uses it.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, RtDim, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
@@ -147,7 +147,7 @@ fn gather_via_section_3_5_lowering_accumulates_duplicate_indices() {
 
     // Forward sanity check: sum over the gather of [[1,0],[1,0],[1,0]] @ table
     // is 3*(table[0,0] + table[0,1]) = 3*(1+2) = 9.
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
         "table".to_string(),
         TensorValue::from_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]),
@@ -230,7 +230,7 @@ fn first_class_gather_adjoint_scatter_add_accumulates_duplicate_indices() {
         "first-class gather verification errors: {fwd_errs:?}"
     );
 
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
         "table".to_string(),
         TensorValue::from_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]),
@@ -299,7 +299,7 @@ fn first_class_gather_axis1_adjoint_scatter_add_accumulates_duplicate_indices() 
         "axis-1 gather verification errors: {fwd_errs:?}"
     );
 
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
         "table".to_string(),
         TensorValue::from_vec(vec![2, 3], vec![1.0, 2.0, 3.0, 10.0, 20.0, 30.0]),

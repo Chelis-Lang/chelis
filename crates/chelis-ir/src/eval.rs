@@ -15,7 +15,7 @@
 //! index groups into the same closed typed-kernel boundary; this module
 //! does not own numeric accumulation or comparison.
 
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
 
 use crate::dag::{
     Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStepOp, NodeId,
@@ -217,7 +217,7 @@ fn concrete_shape(ty: &TensorType) -> Result<Vec<usize>, String> {
 /// runtime extents (node-valued movement / reshape output dims).
 fn concrete_shape_with(
     ty: &TensorType,
-    runtime_dims: &HashMap<String, usize>,
+    runtime_dims: &UnordMap<String, usize>,
 ) -> Result<Vec<usize>, String> {
     ty.dims
         .iter()
@@ -1138,7 +1138,7 @@ pub fn count_tensor(input: &TensorValue, axes: &[usize]) -> Result<TensorValue, 
         ));
     }
 
-    let selected: HashSet<usize> = axes.iter().copied().collect();
+    let selected: UnordSet<usize> = axes.iter().copied().collect();
     let out_shape: Vec<usize> = input
         .shape
         .iter()
@@ -1230,7 +1230,7 @@ fn one_hot(indices: &TensorValue, vocab: usize, prim: Prim) -> Result<TensorValu
 fn resolve_eval_bound(
     bound: &RtDim,
     node: &DagNode,
-    values: &HashMap<NodeId, TensorValue>,
+    values: &UnordMap<NodeId, TensorValue>,
     input_extent: usize,
 ) -> Result<usize, String> {
     match bound {
@@ -1274,7 +1274,7 @@ fn resolve_eval_bound(
 fn resolve_eval_pairs(
     bounds: &[(RtDim, RtDim)],
     node: &DagNode,
-    values: &HashMap<NodeId, TensorValue>,
+    values: &UnordMap<NodeId, TensorValue>,
     input_shape: &[usize],
 ) -> Result<Vec<(usize, usize)>, String> {
     bounds
@@ -1294,7 +1294,7 @@ fn resolve_eval_pairs(
 fn resolve_eval_strides(
     strides: &[RtDim],
     node: &DagNode,
-    values: &HashMap<NodeId, TensorValue>,
+    values: &UnordMap<NodeId, TensorValue>,
     input_shape: &[usize],
 ) -> Result<Vec<usize>, String> {
     strides
@@ -1562,12 +1562,12 @@ fn verify_bound_movement_bounds(dag: &Dag, live: Option<&[bool]>) -> Result<(), 
 
 fn infer_symbolic_bindings_from_inputs(
     dag: &Dag,
-    inputs: &HashMap<String, TensorValue>,
-    required_symbols: &HashSet<String>,
+    inputs: &UnordMap<String, TensorValue>,
+    required_symbols: &UnordSet<String>,
     live: Option<&[bool]>,
-) -> Result<HashMap<String, usize>, String> {
-    let mut bindings = HashMap::new();
-    let mut load_types = HashMap::<String, TensorType>::new();
+) -> Result<UnordMap<String, usize>, String> {
+    let mut bindings = UnordMap::new();
+    let mut load_types = UnordMap::<String, TensorType>::new();
 
     for node in dag.nodes() {
         if let RiscOp::Load { name } = &node.op {
@@ -1577,7 +1577,7 @@ fn infer_symbolic_bindings_from_inputs(
         }
     }
 
-    for (name, ty) in &load_types {
+    for (name, ty) in load_types.to_sorted() {
         if let Some(value) = inputs.get(name) {
             validate_shape_against_type(name, value, ty)?;
         }
@@ -1591,7 +1591,7 @@ fn infer_symbolic_bindings_from_inputs(
             RiscOp::Load { name } => Some(name.as_str()),
             _ => None,
         })
-        .collect::<HashSet<_>>();
+        .collect::<UnordSet<_>>();
 
     for binding in symbolic_bindings(dag)
         .into_iter()
@@ -1704,7 +1704,7 @@ fn infer_symbolic_bindings_from_inputs(
     Ok(bindings)
 }
 
-fn collect_dim_expr_symbols(expr: &DimExpr, symbols: &mut HashSet<String>) {
+fn collect_dim_expr_symbols(expr: &DimExpr, symbols: &mut UnordSet<String>) {
     match expr {
         DimExpr::Concrete(_) => {}
         DimExpr::Sym(name) => {
@@ -1721,8 +1721,8 @@ fn collect_dim_expr_symbols(expr: &DimExpr, symbols: &mut HashSet<String>) {
 /// deliberately ignores generic declarations from unrelated dependency
 /// modules (chelis#991), while `live_mask_for_roots` has already retained any
 /// shape dependencies a live node genuinely needs (chelis#351/#616).
-fn required_symbolic_dims(dag: &Dag, live: Option<&[bool]>) -> HashSet<String> {
-    let mut symbols = HashSet::new();
+fn required_symbolic_dims(dag: &Dag, live: Option<&[bool]>) -> UnordSet<String> {
+    let mut symbols = UnordSet::new();
     for node in dag.nodes() {
         if live.is_some_and(|mask| !mask[node.id.0]) {
             continue;
@@ -1768,13 +1768,13 @@ fn resolve_load_inputs<F>(
     dag: &Dag,
     live: Option<&[bool]>,
     strict_loads: bool,
-    symbolic_dim_load_inputs: &HashSet<&str>,
+    symbolic_dim_load_inputs: &UnordSet<&str>,
     mut load_input: F,
-) -> Result<HashMap<String, TensorValue>, String>
+) -> Result<UnordMap<String, TensorValue>, String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     for node in dag.nodes() {
         let RiscOp::Load { name } = &node.op else {
             continue;
@@ -1828,7 +1828,7 @@ fn eval_tensor_internal<F>(
     strict_loads: bool,
     random_counter: u64,
     mut load_input: F,
-) -> Result<(HashMap<NodeId, TensorValue>, u64), String>
+) -> Result<(UnordMap<NodeId, TensorValue>, u64), String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
@@ -1866,7 +1866,7 @@ where
     // `infer_symbolic_bindings_from_inputs` reports the targeted
     // "missing required input ... for symbolic dimension" error
     // instead of the strict-load one.
-    let symbolic_dim_load_inputs: HashSet<&str> = if needs_symbolic_binding && live.is_some() {
+    let symbolic_dim_load_inputs: UnordSet<&str> = if needs_symbolic_binding && live.is_some() {
         dag.nodes()
             .iter()
             .filter_map(|node| {
@@ -1883,7 +1883,7 @@ where
             })
             .collect()
     } else {
-        HashSet::new()
+        UnordSet::new()
     };
     let resolved_inputs = resolve_load_inputs(
         dag,
@@ -1892,7 +1892,7 @@ where
         &symbolic_dim_load_inputs,
         &mut load_input,
     )?;
-    let mut prebound_dims: HashMap<String, usize> = HashMap::new();
+    let mut prebound_dims: UnordMap<String, usize> = UnordMap::new();
     let bound_dag = if needs_symbolic_binding {
         let mut bindings =
             infer_symbolic_bindings_from_inputs(dag, &resolved_inputs, &required_symbols, live)?;
@@ -1928,7 +1928,7 @@ where
         dag.clone()
     };
 
-    let mut values: HashMap<NodeId, TensorValue> = HashMap::new();
+    let mut values: UnordMap<NodeId, TensorValue> = UnordMap::new();
 
     // chelis#616: op-declared runtime dims (node-valued movement / reshape
     // output extents) have no pre-eval binding; each binds to its actual
@@ -2514,7 +2514,10 @@ where
     Ok((values, path_random_counter))
 }
 
-pub fn eval_tensor_with<F>(dag: &Dag, load_input: F) -> Result<HashMap<NodeId, TensorValue>, String>
+pub fn eval_tensor_with<F>(
+    dag: &Dag,
+    load_input: F,
+) -> Result<UnordMap<NodeId, TensorValue>, String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
@@ -2525,7 +2528,7 @@ where
 pub fn eval_tensor_with_strict<F>(
     dag: &Dag,
     load_input: F,
-) -> Result<HashMap<NodeId, TensorValue>, String>
+) -> Result<UnordMap<NodeId, TensorValue>, String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
@@ -2537,7 +2540,7 @@ pub fn eval_tensor_roots_with<F>(
     dag: &Dag,
     roots: &[NodeId],
     load_input: F,
-) -> Result<HashMap<NodeId, TensorValue>, String>
+) -> Result<UnordMap<NodeId, TensorValue>, String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
@@ -2561,7 +2564,7 @@ pub fn eval_tensor_roots_with_strict<F>(
     dag: &Dag,
     roots: &[NodeId],
     load_input: F,
-) -> Result<HashMap<NodeId, TensorValue>, String>
+) -> Result<UnordMap<NodeId, TensorValue>, String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
@@ -2589,7 +2592,7 @@ pub fn eval_tensor_roots_with_strict_random_progress<F>(
     roots: &[NodeId],
     random_counter: u64,
     load_input: F,
-) -> Result<(HashMap<NodeId, TensorValue>, u64), String>
+) -> Result<(UnordMap<NodeId, TensorValue>, u64), String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
@@ -2617,19 +2620,21 @@ fn reject_drop_roots(dag: &Dag, roots: &[NodeId]) -> Result<(), String> {
 
 pub fn eval_tensor(
     dag: &Dag,
-    inputs: &HashMap<String, TensorValue>,
-) -> Result<HashMap<NodeId, TensorValue>, String> {
+    inputs: &UnordMap<String, TensorValue>,
+) -> Result<UnordMap<NodeId, TensorValue>, String> {
     eval_tensor_with(dag, |name| inputs.get(name).cloned())
 }
 
 /// Evaluate a DAG on scalar inputs. Each node produces a single f64.
-pub fn eval_scalar(dag: &Dag, inputs: &HashMap<String, f64>) -> HashMap<NodeId, f64> {
-    let tensor_inputs: HashMap<String, TensorValue> = inputs
-        .iter()
+pub fn eval_scalar(dag: &Dag, inputs: &UnordMap<String, f64>) -> UnordMap<NodeId, f64> {
+    let tensor_inputs: UnordMap<String, TensorValue> = inputs
+        .to_sorted()
+        .into_iter()
         .map(|(name, value)| (name.clone(), TensorValue::scalar(*value)))
         .collect();
     eval_tensor(dag, &tensor_inputs)
         .expect("scalar evaluation should not fail")
+        .into_sorted()
         .into_iter()
         .map(|(id, value)| (id, value.first_f64_lossy_or_zero()))
         .collect()
@@ -3042,7 +3047,7 @@ mod tests {
             None,
         );
         let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
-        let vals = eval_scalar(&dag, &HashMap::new());
+        let vals = eval_scalar(&dag, &UnordMap::new());
         assert!((vals[&c] - 3.0).abs() < 1e-10);
     }
 
@@ -3052,7 +3057,7 @@ mod tests {
         let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec3_f32(), None);
         let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec3_f32(), None);
         let c = dag.add_node(RiscOp::Add, vec![a, b], vec3_f32(), None);
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "a".into(),
             TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
@@ -3074,7 +3079,7 @@ mod tests {
     #[test]
     fn int64_elementwise_add_is_exact_above_binary64_mantissa() {
         let dag = int_div_dag(RiscOp::Add, Prim::Int64);
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "a".into(),
             TensorValue::finalize_from_wide_int(
@@ -3101,7 +3106,7 @@ mod tests {
     #[test]
     fn int8_elementwise_add_overflow_uses_branded_trap() {
         let dag = int_div_dag(RiscOp::Add, Prim::Int8);
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "a".into(),
             TensorValue::finalize_from_wide_int("test", Prim::Int8, vec![2], vec![127, 1]).unwrap(),
@@ -3127,7 +3132,7 @@ mod tests {
         let out = dag.add_node(RiscOp::CmpLt, vec![a, b], tensor_ty(&[2], Prim::Bool), None);
         dag.add_root(out);
 
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "a".into(),
             TensorValue::finalize_from_wide_int(
@@ -3176,7 +3181,7 @@ mod tests {
                 .any(|node| matches!(node.op, RiscOp::FusedElem { .. }))
         );
 
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "a".into(),
             TensorValue::finalize_from_wide_int(
@@ -3226,7 +3231,7 @@ mod tests {
         );
         dag.add_root(out);
 
-        let inputs = HashMap::from([
+        let inputs = UnordMap::from([
             (
                 "values".to_string(),
                 TensorValue::from_vec(vec![2, 4, 2], (0..16).map(|x| x as f64).collect()),
@@ -3283,7 +3288,7 @@ mod tests {
         );
         dag.add_root(out);
 
-        let inputs = HashMap::from([
+        let inputs = UnordMap::from([
             (
                 "target".to_string(),
                 TensorValue::from_vec(vec![2, 3, 2], vec![0.0; 12]),
@@ -3336,7 +3341,7 @@ mod tests {
             out_ty,
             None,
         );
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert("x".into(), TensorValue::from_vec(vec![1], vec![2.5]));
         let vals = eval_tensor(&dag, &inputs).unwrap();
         assert_eq!(
@@ -3643,7 +3648,7 @@ mod tests {
             (def {} y (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} (var {} relu) (var {} x)))
         "#;
         let dag = lower(src);
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".into(),
             TensorValue::from_vec(vec![3], vec![-2.0, 0.5, 4.0]),
@@ -3667,7 +3672,7 @@ mod tests {
                     (t-prim {} int32)))
         "#;
         let dag = lower(src);
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".into(),
             TensorValue::from_vec(vec![3], vec![2.7, -2.7, 3.0]),
@@ -3694,7 +3699,7 @@ mod tests {
                     (t-prim {} f64)))
         "#;
         let dag = lower(src);
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert("x".into(), TensorValue::from_vec(vec![2], vec![7.0, -3.0]));
         let vals = eval_tensor(&dag, &inputs).unwrap();
         let last = vals.get(dag.roots().last().expect("DAG root")).unwrap();
@@ -3715,7 +3720,7 @@ mod tests {
                    (var {} matmul) (var {} a) (var {} b)))
         "#;
         let dag = lower(src);
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "a".into(),
             TensorValue::from_vec(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
@@ -3741,7 +3746,7 @@ mod tests {
                    (var {} softmax) (var {} x) (lit {} 0)))
         "#;
         let dag = lower(src);
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".into(),
             TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
@@ -3765,7 +3770,7 @@ mod tests {
                    (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta)))
         "#;
         let dag = lower(src);
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".into(),
             TensorValue::from_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 5.0]),
@@ -3796,7 +3801,7 @@ mod tests {
                    (var {} conv2d) (var {} x) (var {} k) (lit {} 1) (lit {} 0)))
         "#;
         let dag = lower(src);
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".into(),
             TensorValue::from_vec(vec![1, 1, 2, 2], vec![1.0, 2.0, 3.0, 4.0]),
@@ -3823,7 +3828,7 @@ mod tests {
                    (var {} conv2d) (var {} x) (var {} k) (lit {} 1) (lit {} 0)))
         "#;
         let dag = lower(src);
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".into(),
             TensorValue::from_vec(
@@ -3853,8 +3858,8 @@ mod tests {
                 (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
         "#;
         let dag = lower(src);
-        let vals_a = eval_tensor(&dag, &HashMap::new()).unwrap();
-        let vals_b = eval_tensor(&dag, &HashMap::new()).unwrap();
+        let vals_a = eval_tensor(&dag, &UnordMap::new()).unwrap();
+        let vals_b = eval_tensor(&dag, &UnordMap::new()).unwrap();
         let out_a = vals_a.get(dag.roots().last().expect("DAG root")).unwrap();
         let out_b = vals_b.get(dag.roots().last().expect("DAG root")).unwrap();
         assert_eq!(out_a, out_b);
@@ -3880,11 +3885,11 @@ mod tests {
         "#;
         let dag_a = lower(src_a);
         let dag_b = lower(src_b);
-        let out_a = eval_tensor(&dag_a, &HashMap::new())
+        let out_a = eval_tensor(&dag_a, &UnordMap::new())
             .unwrap()
             .remove(&NodeId(dag_a.len() - 1))
             .unwrap();
-        let out_b = eval_tensor(&dag_b, &HashMap::new())
+        let out_b = eval_tensor(&dag_b, &UnordMap::new())
             .unwrap()
             .remove(&NodeId(dag_b.len() - 1))
             .unwrap();
@@ -4059,8 +4064,8 @@ mod tests {
         (dag, y)
     }
 
-    fn inputs_2x3() -> HashMap<String, TensorValue> {
-        let mut inputs = HashMap::new();
+    fn inputs_2x3() -> UnordMap<String, TensorValue> {
+        let mut inputs = UnordMap::new();
         inputs.insert(
             "x".into(),
             TensorValue::from_vec(vec![2, 3], vec![1.0, 4.0, -2.0, 3.0, -1.0, 5.0]),
@@ -4217,8 +4222,8 @@ mod tests {
         dag
     }
 
-    fn divisor_inputs(b: Vec<f64>) -> HashMap<String, TensorValue> {
-        let mut inputs = HashMap::new();
+    fn divisor_inputs(b: Vec<f64>) -> UnordMap<String, TensorValue> {
+        let mut inputs = UnordMap::new();
         inputs.insert("a".into(), TensorValue::from_vec(vec![2], vec![10.0, 7.0]));
         inputs.insert("b".into(), TensorValue::from_vec(vec![2], b));
         inputs
@@ -4248,7 +4253,7 @@ mod tests {
         // floor_div rounds toward -inf: floor_div(10, 4) == 2,
         // floor_div(7, -2) == -4 (7 / -2 == -3.5 -> floor -4).
         let dag = int_div_dag(RiscOp::FloorDiv, Prim::Int32);
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert("a".into(), TensorValue::from_vec(vec![2], vec![10.0, 7.0]));
         inputs.insert("b".into(), TensorValue::from_vec(vec![2], vec![4.0, -2.0]));
         let vals = eval_tensor(&dag, &inputs).expect("non-zero divisor must not trap");
@@ -4261,7 +4266,7 @@ mod tests {
         // trunc_div rounds toward zero: trunc_div(10, 4) == 2,
         // trunc_div(7, -2) == -3 (7 / -2 == -3.5 -> trunc -3).
         let dag = int_div_dag(RiscOp::TruncDiv, Prim::Int32);
-        let mut inputs = HashMap::new();
+        let mut inputs = UnordMap::new();
         inputs.insert("a".into(), TensorValue::from_vec(vec![2], vec![10.0, 7.0]));
         inputs.insert("b".into(), TensorValue::from_vec(vec![2], vec![4.0, -2.0]));
         let vals = eval_tensor(&dag, &inputs).expect("non-zero divisor must not trap");

@@ -1,6 +1,7 @@
 use chelis_deep::DeepTag;
+use chelis_unord::{UnordMap, UnordSet};
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use chelis_deep::Span;
@@ -16,7 +17,7 @@ use crate::types::Type;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinearityInfo {
-    reusable_inputs_by_offset: HashMap<usize, usize>,
+    reusable_inputs_by_offset: UnordMap<usize, usize>,
 }
 
 impl LinearityInfo {
@@ -38,7 +39,7 @@ impl LinearityInfo {
     /// they come from separately-parsed source regions.
     pub fn merged_with(&self, other: &LinearityInfo) -> LinearityInfo {
         let mut reusable_inputs_by_offset = self.reusable_inputs_by_offset.clone();
-        for (offset, input_index) in &other.reusable_inputs_by_offset {
+        for (offset, input_index) in other.reusable_inputs_by_offset.to_sorted() {
             reusable_inputs_by_offset
                 .entry(*offset)
                 .or_insert(*input_index);
@@ -177,12 +178,12 @@ struct BindingRecord {
 #[derive(Debug, Clone, Default)]
 struct LinearScope {
     /// All checker state, keyed by binding generation.
-    records: HashMap<BindingId, BindingRecord>,
+    records: UnordMap<BindingId, BindingRecord>,
     /// Name -> stack of generations, innermost last. Shadowing pushes,
     /// scope exit pops. This map answers "which binding does this use
     /// site mean" and nothing else; every consumption mark, alias link,
     /// and component mark lives on the id-keyed record it resolved to.
-    visible: HashMap<String, Vec<BindingId>>,
+    visible: UnordMap<String, Vec<BindingId>>,
     /// Generation counter. Shared (`Rc`) across clones so branch and
     /// closure scopes forked from one root cannot mint colliding ids;
     /// `Default` mints a fresh zero counter, which is what makes each
@@ -291,7 +292,12 @@ impl LinearScope {
     /// join that only saw stack tops would drop that consume
     /// (chelis#1209).
     fn all_visible_ids(&self) -> Vec<BindingId> {
-        let mut ids: Vec<BindingId> = self.visible.values().flatten().copied().collect();
+        let mut ids: Vec<BindingId> = self
+            .visible
+            .to_sorted()
+            .into_iter()
+            .flat_map(|(_, ids)| ids.iter().copied())
+            .collect();
         ids.sort_unstable();
         ids
     }
@@ -366,7 +372,17 @@ impl LinearScope {
     /// `join_branch_states` are unaffected, and a destructure *inside* the
     /// branch marks its own components normally.
     fn clear_destructured_marks(&mut self) {
-        for record in self.records.values_mut() {
+        let ids = self
+            .records
+            .to_sorted()
+            .into_iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        for id in ids {
+            let record = self
+                .records
+                .get_mut(&id)
+                .expect("collected binding id remains present");
             record.origin.destructured = false;
         }
     }
@@ -387,7 +403,7 @@ impl LinearScope {
     /// pair, treating a chain that closes a cycle as no alias at all.
     fn resolve_alias_chain(&self, id: BindingId) -> Option<BindingId> {
         let mut current = id;
-        let mut visited: HashSet<BindingId> = HashSet::new();
+        let mut visited: UnordSet<BindingId> = UnordSet::new();
         let mut walked = false;
         loop {
             if !visited.insert(current) {
@@ -407,7 +423,7 @@ impl LinearScope {
 struct Checker {
     errors: Vec<CheckError>,
     info: LinearityInfo,
-    top_level_types: HashMap<String, Expr>,
+    top_level_types: BTreeMap<String, Expr>,
     /// Names of ADTs whose definitions (transitively) carry a tensor
     /// field. Computed once per `check_linearity` call by walking
     /// `deftype` declarations in `annotated_exprs`. Used by
@@ -425,13 +441,13 @@ struct Checker {
     /// linearity checker runs, every name in this set corresponds to
     /// exactly one `deftype`. That guarantee is what makes a bare
     /// `String` key safe here; without it the carrier set would be
-    /// order-dependent (last-write-wins via `HashMap::insert` in
+    /// order-dependent (last-write-wins via `UnordMap::insert` in
     /// `compute_tensor_carrying_adts`). Once Chelis gains qualified
     /// ADT names, this set should migrate to a `Set<AdtId>` queried
     /// off the shared `AdtRegistry` instead of reparsing `deftype`
     /// exprs here. See the function-level note on
     /// [`compute_tensor_carrying_adts`].
-    tensor_carrying_adts: HashSet<String>,
+    tensor_carrying_adts: UnordSet<String>,
     /// Snapshot of `signature_inference` from the program under check.
     /// Used by `arg_is_borrowed` to recognize call-site borrow
     /// classification on user-defined functions whose params were
@@ -461,7 +477,7 @@ impl Checker {
 /// wrapped defs participate in cross-statement linearity tracking.
 fn pre_declare_top_level_defs(
     exprs: &[Expr],
-    type_env: &HashMap<String, Expr>,
+    type_env: &BTreeMap<String, Expr>,
     scope: &mut LinearScope,
 ) {
     for expr in exprs {
@@ -469,7 +485,7 @@ fn pre_declare_top_level_defs(
     }
 }
 
-fn pre_declare_one(expr: &Expr, type_env: &HashMap<String, Expr>, scope: &mut LinearScope) {
+fn pre_declare_one(expr: &Expr, type_env: &BTreeMap<String, Expr>, scope: &mut LinearScope) {
     let Some((tag, _, kids)) = stamped_parts(expr) else {
         return;
     };
@@ -560,7 +576,7 @@ pub fn check_linearity_with_context(
     // simply not feeding library exprs to `check_top_level` is what
     // enforces the "don't re-walk library bodies" invariant. The
     // pre-computation here is the documented contract surface.
-    let _library_callables: HashSet<String> = library_program
+    let _library_callables: UnordSet<String> = library_program
         .annotated_exprs()
         .iter()
         .filter_map(|expr| {
@@ -1032,7 +1048,7 @@ impl Checker {
         let captured = free_vars(&kids[1], &params);
         let mut inner_scope = outer_scope.clone();
         let body = &kids[1];
-        // Build a temporary `HashMap<String, Type>` of currently-known
+        // Build a temporary `UnordMap<String, Type>` of currently-known
         // user-fn display signatures so the closure-body consuming-use
         // probe can recognize user-defined borrow-arg callees inside
         // the body. The probe's secondary `type_env` lookup also
@@ -1040,7 +1056,7 @@ impl Checker {
         // `available_signatures` matches by `Type` (the inferencer's
         // own metadata) so passing the inferred display signatures
         // covers user fns whose params were auto-borrow-inferred.
-        let available_signatures: HashMap<String, Type> = self
+        let available_signatures: UnordMap<String, Type> = self
             .signature_inference
             .functions
             .iter()
@@ -1843,7 +1859,7 @@ fn collect_pattern_named_types(expr: &Expr, bindings: &mut Vec<(String, Option<E
 /// goes — it consumes or borrows each capture and can raise
 /// `UseAfterConsume`. When two captures are on one alias chain
 /// (`y = x; fn () -> add(realize(x), realize(y))`), the verdict depends
-/// on which is visited first, so a `HashSet`'s iteration order made the
+/// on which is visited first, so a `UnordSet`'s iteration order made the
 /// same program compile or fail run to run (measured: 11/12 reject,
 /// 1/12 accept). Sorting is the cheap half of the fix; forwarding the
 /// capture consume through the alias chain in `check_fn` is the half
@@ -1856,15 +1872,13 @@ fn collect_pattern_named_types(expr: &Expr, bindings: &mut Vec<(String, Option<E
 /// chain the verdict still depends on which capture consumes first.
 /// The sort stays semantically necessary, not merely cosmetic.
 fn free_vars(expr: &Expr, params: &[String]) -> Vec<String> {
-    let mut bound = vec![params.iter().cloned().collect::<HashSet<_>>()];
-    let mut free = HashSet::new();
+    let mut bound = vec![params.iter().cloned().collect::<UnordSet<_>>()];
+    let mut free = UnordSet::new();
     collect_free_vars(expr, &mut bound, &mut free);
-    let mut free: Vec<String> = free.into_iter().collect();
-    free.sort();
-    free
+    free.into_sorted()
 }
 
-fn collect_free_vars(expr: &Expr, bound: &mut Vec<HashSet<String>>, free: &mut HashSet<String>) {
+fn collect_free_vars(expr: &Expr, bound: &mut Vec<UnordSet<String>>, free: &mut UnordSet<String>) {
     match expr {
         Expr::Atom(_, _) | Expr::Map(_, _) => {}
         Expr::MetaExpr(meta, _) => collect_free_vars(&meta.expr, bound, free),
@@ -1889,7 +1903,7 @@ fn collect_free_vars(expr: &Expr, bound: &mut Vec<HashSet<String>>, free: &mut H
                 if kids.len() < 2 {
                     return;
                 }
-                let mut let_scope = HashSet::new();
+                let mut let_scope = UnordSet::new();
                 if let Some(bind_kids) = tagged_children(&kids[0], DeepTag::Bind) {
                     let mut index = 0;
                     while index + 1 < bind_kids.len() {
@@ -2203,7 +2217,7 @@ fn bind_introduces_destructure_tmp(bind_expr: &Expr) -> bool {
     })
 }
 
-fn type_expr_contains_tensor(expr: &Expr, tensor_carrying_adts: &HashSet<String>) -> bool {
+fn type_expr_contains_tensor(expr: &Expr, tensor_carrying_adts: &UnordSet<String>) -> bool {
     let Some((tag, _, children)) = stamped_parts(expr) else {
         return false;
     };
@@ -2271,7 +2285,7 @@ fn type_expr_is_unresolved_tvar(expr: &Expr) -> bool {
     }
 }
 
-fn type_expr_is_owned_linear(expr: &Expr, tensor_carrying_adts: &HashSet<String>) -> bool {
+fn type_expr_is_owned_linear(expr: &Expr, tensor_carrying_adts: &UnordSet<String>) -> bool {
     type_expr_contains_tensor(expr, tensor_carrying_adts) && !type_expr_is_ref(expr)
 }
 
@@ -2325,7 +2339,7 @@ fn type_expr_is_owned_linear(expr: &Expr, tensor_carrying_adts: &HashSet<String>
 /// checker gains direct access to a shared `AdtRegistry`, this helper
 /// retires in favor of querying that registry's variant-field types
 /// (which already know about aliases too).
-fn compute_tensor_carrying_adts<'a, I>(exprs: I) -> HashSet<String>
+fn compute_tensor_carrying_adts<'a, I>(exprs: I) -> UnordSet<String>
 where
     I: IntoIterator<Item = &'a Expr>,
 {
@@ -2338,8 +2352,8 @@ where
     // and new-code so cross-package field references (a new-code ADT
     // wrapping a library tensor-carrying ADT) are resolved by the same
     // fixed-point pass instead of two independent ones.
-    let mut adt_field_types: HashMap<String, Vec<Expr>> = HashMap::new();
-    fn collect(expr: &Expr, out: &mut HashMap<String, Vec<Expr>>) {
+    let mut adt_field_types: UnordMap<String, Vec<Expr>> = UnordMap::new();
+    fn collect(expr: &Expr, out: &mut UnordMap<String, Vec<Expr>>) {
         let Some((tag, _, kids)) = stamped_parts(expr) else {
             return;
         };
@@ -2388,10 +2402,10 @@ where
     // the in-progress carrier set, so the recursive `t-adt` lookup
     // walks the same code path used at check time. Stop when a pass
     // adds no new names; bounded by the ADT count.
-    let mut carriers: HashSet<String> = HashSet::new();
+    let mut carriers: UnordSet<String> = UnordSet::new();
     loop {
         let mut grew = false;
-        for (name, field_tys) in &adt_field_types {
+        for (name, field_tys) in adt_field_types.to_sorted() {
             if carriers.contains(name) {
                 continue;
             }
@@ -2640,7 +2654,7 @@ mod tests {
         );
         let program = CheckedProgram::unchecked_for_linearity_diagnostic_test(
             vec![node("def", vec![], vec![sym("outer"), outer_fn])],
-            HashMap::from([("poison".to_string(), node("t-fn", vec![], vec![]))]),
+            BTreeMap::from([("poison".to_string(), node("t-fn", vec![], vec![]))]),
         );
 
         let errors = check_linearity(&program)

@@ -3,7 +3,7 @@
 //! The DAG is a flat vector of nodes, each referencing earlier nodes by [`NodeId`].
 //! Nodes are always in topological order (an invariant maintained by append-only construction).
 
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
 use std::fmt;
 
 use chelis_types::types::Prim;
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::load_store_name::LoadStoreName;
 
 /// Index into the DAG node array.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub usize);
 
 /// Tensor type carried on each DAG node.
@@ -168,7 +168,7 @@ pub enum DimExprKey {
 }
 
 impl DimExpr {
-    pub fn evaluate(&self, bindings: &HashMap<String, usize>) -> Result<usize, String> {
+    pub fn evaluate(&self, bindings: &UnordMap<String, usize>) -> Result<usize, String> {
         match self {
             Self::Concrete(value) => Ok(*value),
             Self::Sym(name) => bindings
@@ -213,13 +213,13 @@ impl DimExpr {
         }
     }
 
-    pub fn symbolic_names(&self) -> HashSet<String> {
-        let mut names = HashSet::new();
+    pub fn symbolic_names(&self) -> UnordSet<String> {
+        let mut names = UnordSet::new();
         self.collect_symbolic_names(&mut names);
         names
     }
 
-    fn collect_symbolic_names(&self, names: &mut HashSet<String>) {
+    fn collect_symbolic_names(&self, names: &mut UnordSet<String>) {
         match self {
             Self::Concrete(_) => {}
             Self::Sym(name) => {
@@ -232,7 +232,7 @@ impl DimExpr {
         }
     }
 
-    pub fn bind(&self, bindings: &HashMap<String, usize>) -> Result<Self, String> {
+    pub fn bind(&self, bindings: &UnordMap<String, usize>) -> Result<Self, String> {
         match self {
             Self::Concrete(value) => Ok(Self::Concrete(*value)),
             Self::Sym(name) => {
@@ -258,8 +258,8 @@ impl DimExpr {
     /// missing-binding error.
     pub fn bind_except(
         &self,
-        bindings: &HashMap<String, usize>,
-        exempt: &HashSet<String>,
+        bindings: &UnordMap<String, usize>,
+        exempt: &UnordSet<String>,
     ) -> Result<Self, String> {
         match self {
             Self::Sym(name)
@@ -1590,7 +1590,7 @@ impl Dag {
         &mut self,
         new_id: NodeId,
         source_deps: &[NodeId],
-        remap: &HashMap<NodeId, NodeId>,
+        remap: &UnordMap<NodeId, NodeId>,
     ) {
         if source_deps.is_empty() {
             return;
@@ -1668,8 +1668,8 @@ impl Dag {
 
 pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
     let mut occurrences = Vec::new();
-    let mut seen_inputs = HashSet::new();
-    let mut named_dims_in_loads: HashSet<String> = HashSet::new();
+    let mut seen_inputs = UnordSet::new();
+    let mut named_dims_in_loads: UnordSet<String> = UnordSet::new();
 
     // First pass: collect Load occurrences. These are the canonical
     // sources for symbolic dim values (the C codegen turns each into
@@ -1696,7 +1696,7 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
     // lane skips pre-eval binding for it. A symbol that is also Load-carried
     // keeps the Load as its canonical declaration; the op site then becomes
     // a runtime equality guard rather than a redeclaration.
-    let mut op_declared: HashSet<String> = HashSet::new();
+    let mut op_declared: UnordSet<String> = UnordSet::new();
     for node in dag.nodes() {
         for (symbol, axis) in op_declared_output_axes(dag, node) {
             if !named_dims_in_loads.contains(&symbol) {
@@ -1724,7 +1724,7 @@ pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
     // AFTER the declarer in emission (= node id) order, or the C references
     // an undeclared identifier. A violation is a producing-pass bug; fail
     // loud rather than emit non-compiling (or worse, shadowed) C.
-    for symbol in &op_declared {
+    for symbol in op_declared.to_sorted() {
         if named_dims_in_loads.contains(symbol) {
             // Load-declared in the prologue; every reference is dominated.
             continue;
@@ -2012,7 +2012,7 @@ pub(crate) fn op_declarable_axes(dag: &Dag, node: &DagNode) -> Vec<usize> {
 /// DAG (see [`op_declared_output_axes`]). Used by [`bind_symbolic_dims`] to
 /// exempt these names from the pre-eval "missing symbolic dimension binding"
 /// error — their values do not exist until the owning op evaluates.
-pub fn op_declared_dim_names(dag: &Dag) -> HashSet<String> {
+pub fn op_declared_dim_names(dag: &Dag) -> UnordSet<String> {
     dag.nodes()
         .iter()
         .flat_map(|node| op_declared_output_axes(dag, node))
@@ -2024,8 +2024,8 @@ pub fn op_declared_dim_names(dag: &Dag) -> HashSet<String> {
 /// [`op_declared_output_axes`]), for the evaluator's mid-evaluation binding:
 /// when the declaring node's value is computed, each `(symbol, axis)` binds
 /// the symbol to the value's actual extent on that axis.
-pub(crate) fn op_declared_axes_by_node(dag: &Dag) -> HashMap<NodeId, Vec<(String, usize)>> {
-    let mut out = HashMap::new();
+pub(crate) fn op_declared_axes_by_node(dag: &Dag) -> UnordMap<NodeId, Vec<(String, usize)>> {
+    let mut out = UnordMap::new();
     for node in dag.nodes() {
         let axes = op_declared_output_axes(dag, node);
         if !axes.is_empty() {
@@ -2043,7 +2043,7 @@ pub(crate) fn op_declared_axes_by_node(dag: &Dag) -> HashMap<NodeId, Vec<(String
 /// declarer's VALUE is dead (e.g. a backward `Expand` over a runtime reshape
 /// extent whose forward result the gradient never reads).
 pub fn record_runtime_dim_shape_deps(dag: &mut Dag) {
-    let mut declarers: HashMap<String, NodeId> = HashMap::new();
+    let mut declarers: UnordMap<String, NodeId> = UnordMap::new();
     for node in dag.nodes() {
         for (symbol, _) in op_declared_output_axes(dag, node) {
             declarers.entry(symbol).or_insert(node.id);
@@ -2085,7 +2085,7 @@ fn bind_symbol_from_any_load(
     dag: &Dag,
     symbol: &str,
     occurrences: &mut Vec<SymbolicDimOccurrence>,
-    named_dims_in_loads: &mut HashSet<String>,
+    named_dims_in_loads: &mut UnordSet<String>,
 ) -> bool {
     for candidate in dag.nodes() {
         let RiscOp::Load { name: load_name } = &candidate.op else {
@@ -2319,7 +2319,7 @@ pub fn symbolic_params(dag: &Dag) -> Vec<String> {
         .collect()
 }
 
-pub fn bind_symbolic_dims(dag: &Dag, bindings: &HashMap<String, usize>) -> Result<Dag, String> {
+pub fn bind_symbolic_dims(dag: &Dag, bindings: &UnordMap<String, usize>) -> Result<Dag, String> {
     // chelis#616: an op-declared dim (a node-valued movement output extent)
     // has no pre-eval value — the evaluator computes it from actual bound
     // scalars. Leave it unbound instead of raising the loud missing-binding
@@ -2803,7 +2803,7 @@ mod tests {
 
         let rebound = bind_symbolic_dims(
             &dag,
-            &HashMap::from([
+            &UnordMap::from([
                 ("batch".to_string(), 3usize),
                 ("hidden".to_string(), 8usize),
             ]),
@@ -2862,7 +2862,7 @@ mod tests {
         );
         dag.add_root(shrunk);
 
-        let rebound = bind_symbolic_dims(&dag, &HashMap::from([("m".to_string(), 3usize)]))
+        let rebound = bind_symbolic_dims(&dag, &UnordMap::from([("m".to_string(), 3usize)]))
             .expect("bindings should apply");
         let node = rebound.get(shrunk).unwrap();
         // The concrete axis-0 bound is untouched; the sentinel axis-1 bound
@@ -2908,7 +2908,7 @@ mod tests {
         dag.add_root(shrunk);
         // No binding for `m`: bind_dim fails first on the output type, but
         // even a partial binding map must not silently drop the sentinel.
-        let err = bind_symbolic_dims(&dag, &HashMap::new());
+        let err = bind_symbolic_dims(&dag, &UnordMap::new());
         assert!(err.is_err(), "unbound symbolic dim must fail closed");
     }
 

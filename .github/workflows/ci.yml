@@ -399,6 +399,15 @@ jobs:
       - name: Run cvc5 engine smoke tests
         run: cargo test -p chelis-prove --features smt --lib cvc5_engine_
 
+      # Clippy's `disallowed_types` ban on raw hash collections
+      # (spec/design/hash_order_determinism.md C2.3) only sees the
+      # configuration it compiles. This job already provisions cvc5, so it is
+      # the cheapest place to lint the `smt` feature's code. Registered in
+      # scripts/check_configuration_closure.py CLIPPY_MATRIX, which fails if
+      # this command drifts from it.
+      - name: Clippy over the cvc5 feature configuration
+        run: cargo clippy --workspace --all-targets --features chelis-cli/smt,chelis-prove/smt,chelis-tide/smt -- -D warnings
+
   # chelis#422 (WS-4) PROVE-IN-CI lanes. release.yml ships
   # `chelis-cli --features smt` on three targets; cvc5 builds from
   # source (cmake/g++/libgmp) and is only PROVEN on ubuntu-latest by the

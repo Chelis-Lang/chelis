@@ -1,0 +1,18 @@
+[package]
+name = "chelis-unord"
+description = "Order-free hash collections for Chelis compiler internals"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json = "1"
+syn.workspace = true
+
+[lints]
+workspace = true

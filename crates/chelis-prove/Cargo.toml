@@ -58,6 +58,7 @@ carcara = ["smt", "dep:carcara", "gmp-mpfr-sys/use-system-libs"]
 arb = ["dep:arb-sys"]
 
 [dependencies]
+chelis-unord.workspace = true
 cvc5-rs = { version = "0.3", optional = true }
 # WI-14 oracle: FFI to FLINT/Arb. 0.3.6 vendors FLINT 2.8.5 + Arb c2b7e36 (it
 # does NOT link a system FLINT) and exposes `arb_hypgeom_erf` plus the interval
@@ -158,3 +159,6 @@ required-features = ["arb"]
 name = "certify_special_fn_envelope"
 path = "src/bin/certify_special_fn_envelope.rs"
 required-features = ["arb"]
+
+[lints]
+workspace = true

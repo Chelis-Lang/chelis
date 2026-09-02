@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use chelis_deep::{DeepTag, Expr as DeepExpr};
 use chelis_types::CheckedProgram;
@@ -7,7 +7,7 @@ use crate::{AllRootNames, IrName, RootMetadata, TensorRootNames};
 
 pub(crate) fn root_metadata(
     program: &CheckedProgram,
-    lowered_names: Option<&HashMap<String, bool>>,
+    lowered_names: Option<&BTreeMap<String, bool>>,
 ) -> RootMetadata {
     let all_names = AllRootNames(root_names_from_checked_exprs(
         program.exprs(),
@@ -36,8 +36,8 @@ pub(crate) fn root_metadata(
 
 fn root_names_from_checked_exprs(
     exprs: &[DeepExpr],
-    type_env: &HashMap<String, DeepExpr>,
-    lowered_names: Option<&HashMap<String, bool>>,
+    type_env: &BTreeMap<String, DeepExpr>,
+    lowered_names: Option<&BTreeMap<String, bool>>,
 ) -> Vec<IrName> {
     let mut names = Vec::new();
     for expr in exprs {
@@ -48,8 +48,8 @@ fn root_names_from_checked_exprs(
 
 fn collect_checked_decl_names(
     expr: &DeepExpr,
-    type_env: &HashMap<String, DeepExpr>,
-    lowered_names: Option<&HashMap<String, bool>>,
+    type_env: &BTreeMap<String, DeepExpr>,
+    lowered_names: Option<&BTreeMap<String, bool>>,
     output: &mut Vec<IrName>,
 ) {
     let Some((tag, children)) = tagged_children(expr) else {
@@ -166,11 +166,11 @@ mod tests {
 
         let expected = vec![IrName::new("out.0"), IrName::new("out.1")];
         assert_eq!(
-            root_names_from_checked_exprs(&list_exprs, &HashMap::new(), None),
+            root_names_from_checked_exprs(&list_exprs, &BTreeMap::new(), None),
             expected
         );
         assert_eq!(
-            root_names_from_checked_exprs(&typed_exprs, &HashMap::new(), None),
+            root_names_from_checked_exprs(&typed_exprs, &BTreeMap::new(), None),
             expected
         );
     }
@@ -180,7 +180,7 @@ mod tests {
         let expressions = chelis_deep::parser::parse_str("(def {} empty (tuple {}))")
             .expect("empty tuple Deep must parse");
 
-        assert!(root_names_from_checked_exprs(&expressions, &HashMap::new(), None).is_empty());
+        assert!(root_names_from_checked_exprs(&expressions, &BTreeMap::new(), None).is_empty());
     }
 
     #[test]
@@ -192,7 +192,7 @@ mod tests {
             chelis_deep::parser::parse_str(source).expect("mixed tuple Deep must parse");
 
         assert_eq!(
-            root_names_from_checked_exprs(&expressions, &HashMap::new(), None),
+            root_names_from_checked_exprs(&expressions, &BTreeMap::new(), None),
             vec![IrName::new("mixed.0"), IrName::new("mixed.1")]
         );
     }
@@ -203,6 +203,6 @@ mod tests {
         let typed_exprs =
             chelis_deep::parse_and_stamp_file(source).expect("typed Deep must parse and stamp");
 
-        assert!(root_names_from_checked_exprs(&typed_exprs, &HashMap::new(), None).is_empty());
+        assert!(root_names_from_checked_exprs(&typed_exprs, &BTreeMap::new(), None).is_empty());
     }
 }

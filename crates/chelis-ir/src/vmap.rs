@@ -111,7 +111,7 @@ mod tests {
     use crate::dag::{DimExpr, NodeId, RiscOp, TensorType};
     use crate::eval::{TensorValue, eval_tensor_roots_with_strict};
     use chelis_types::types::Prim;
-    use std::collections::HashMap;
+    use chelis_unord::UnordMap;
 
     fn vec_f32(n: usize) -> TensorType {
         TensorType {
@@ -134,7 +134,7 @@ mod tests {
         }
     }
 
-    fn eval_root(dag: &Dag, root: NodeId, inputs: &HashMap<String, TensorValue>) -> TensorValue {
+    fn eval_root(dag: &Dag, root: NodeId, inputs: &UnordMap<String, TensorValue>) -> TensorValue {
         let values = eval_tensor_roots_with_strict(dag, &[root], |name| inputs.get(name).cloned())
             .expect("evaluation should succeed");
         values[&root].clone()
@@ -152,7 +152,7 @@ mod tests {
         let actual = eval_root(
             &vmapped,
             root,
-            &HashMap::from([(
+            &UnordMap::from([(
                 "x".to_string(),
                 TensorValue::from_vec(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, -5.0, 6.0]),
             )]),
@@ -189,7 +189,7 @@ mod tests {
         let actual = eval_root(
             &vmapped,
             root,
-            &HashMap::from([(
+            &UnordMap::from([(
                 "x".to_string(),
                 TensorValue::from_vec(
                     vec![2, 2, 3],

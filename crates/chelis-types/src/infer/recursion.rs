@@ -12,8 +12,8 @@
 //! instantiation than the caller's own — polymorphic recursion — and is
 //! rejected with the atom-citing diagnostic [04-INF-3] requires.
 
+use chelis_unord::{UnordMap, UnordSet};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
 
 use crate::env::Env;
 use crate::errors::{CheckError, CheckErrorKind};
@@ -29,12 +29,12 @@ struct GroupCtx {
     /// Member name -> member facts at group start, used to make sure a
     /// recorded reference resolved the top-level member and not a local
     /// shadow of the same name, and to select the strict or relaxed rule.
-    members: HashMap<String, MemberSnapshot>,
+    members: UnordMap<String, MemberSnapshot>,
     caller: Option<Caller>,
     occurrences: Vec<Occurrence>,
     /// Fresh tvars minted for in-group instantiations. Pinned against
     /// generalization while the group is being inferred.
-    pinned: HashSet<TypeVar>,
+    pinned: UnordSet<TypeVar>,
 }
 
 struct MemberSnapshot {
@@ -89,7 +89,7 @@ pub(super) fn abort_group() {
 /// snapshotted after any monomorphic prebinding so occurrence recording can
 /// verify it resolved the top-level member.
 pub(super) fn begin_group<'a>(member_names: impl Iterator<Item = (&'a str, bool)>, env: &Env) {
-    let mut members = HashMap::new();
+    let mut members = UnordMap::new();
     for (name, authored_generic) in member_names {
         let Some(scheme) = env.lookup(name) else {
             continue;
@@ -109,7 +109,7 @@ pub(super) fn begin_group<'a>(member_names: impl Iterator<Item = (&'a str, bool)
             members,
             caller: None,
             occurrences: Vec::new(),
-            pinned: HashSet::new(),
+            pinned: UnordSet::new(),
         });
     });
 }
@@ -151,11 +151,11 @@ impl Drop for CallerGuard {
 /// the caller's own body (empty for a monomorphically prebound member).
 pub(super) fn begin_caller(
     name: &str,
-    binder_names: Option<&HashSet<String>>,
+    binder_names: Option<&UnordSet<String>>,
     own_instantiation: &[(TypeVar, Type)],
 ) -> CallerGuard {
     let mut binders: Vec<String> = binder_names
-        .map(|set| set.iter().cloned().collect())
+        .map(|set| set.to_sorted().into_iter().cloned().collect())
         .unwrap_or_default();
     binders.sort();
     let own_tvars = own_instantiation
@@ -352,8 +352,8 @@ pub(super) fn finish_group(subst: &Subst, errors: &mut DiagnosticSink<'_>) {
 /// unambiguous (one declared binder, one own tvar), the resolved own tvar
 /// renders under its declared name so the diagnostic reads `Box[a]` rather
 /// than `Box[?17]`.
-fn binder_display_names(occ: &Occurrence, subst: &Subst) -> HashMap<TypeVar, String> {
-    let mut names = HashMap::new();
+fn binder_display_names(occ: &Occurrence, subst: &Subst) -> UnordMap<TypeVar, String> {
+    let mut names = UnordMap::new();
     if occ.caller_binder_names.len() == 1 && occ.caller_own_tvars.len() == 1 {
         let resolved = subst.apply(&Type::Var(occ.caller_own_tvars[0]));
         if let Type::Var(v) = resolved {
@@ -363,7 +363,7 @@ fn binder_display_names(occ: &Occurrence, subst: &Subst) -> HashMap<TypeVar, Str
     names
 }
 
-fn render_type(ty: &Type, names: &HashMap<TypeVar, String>, fallback: Option<&str>) -> String {
+fn render_type(ty: &Type, names: &UnordMap<TypeVar, String>, fallback: Option<&str>) -> String {
     match ty {
         Type::Prim(p) => prim_name(*p),
         Type::Var(v) => names.get(v).cloned().unwrap_or_else(|| {

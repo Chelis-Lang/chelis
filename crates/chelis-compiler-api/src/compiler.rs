@@ -1,5 +1,6 @@
 use chelis_deep::DeepTag;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_backend_c::CodegenResult;
 use chelis_backend_hip::HipCodegenResult;
@@ -1001,8 +1002,8 @@ fn project_host_program_to_entry(
 
     fn collect_callback(
         callback: &ConcreteHostCallback,
-        bound: &HashSet<String>,
-        out: &mut HashSet<String>,
+        bound: &UnordSet<String>,
+        out: &mut UnordSet<String>,
     ) {
         match &callback.kind {
             HostCallbackKind::Named { function, .. } => {
@@ -1018,7 +1019,7 @@ fn project_host_program_to_entry(
         }
     }
 
-    fn collect_expr(expr: &ConcreteHostExpr, bound: &HashSet<String>, out: &mut HashSet<String>) {
+    fn collect_expr(expr: &ConcreteHostExpr, bound: &UnordSet<String>, out: &mut UnordSet<String>) {
         match &expr.kind {
             ConcreteHostExprKind::Call { function, args, .. } => {
                 if !bound.contains(function) {
@@ -1132,7 +1133,7 @@ fn project_host_program_to_entry(
         }
     }
 
-    let function_names: HashSet<&str> = program
+    let function_names: UnordSet<&str> = program
         .functions
         .iter()
         .map(|function| function.name.as_str())
@@ -1141,7 +1142,7 @@ fn project_host_program_to_entry(
         return None;
     }
 
-    let mut reachable = HashSet::from([entry.to_string()]);
+    let mut reachable = UnordSet::from([entry.to_string()]);
     let mut pending = vec![entry.to_string()];
     while let Some(name) = pending.pop() {
         let function = program
@@ -1154,9 +1155,9 @@ fn project_host_program_to_entry(
             .iter()
             .map(|param| param.name.clone())
             .collect();
-        let mut referenced = HashSet::new();
+        let mut referenced = UnordSet::new();
         collect_expr(&function.body, &bound, &mut referenced);
-        for referenced_name in referenced {
+        for referenced_name in referenced.into_sorted() {
             if function_names.contains(referenced_name.as_str())
                 && reachable.insert(referenced_name.clone())
             {
@@ -1482,7 +1483,7 @@ fn entry_lane_decision<'a>(
             entry: entry.to_string(),
         }));
     }
-    let declared_params: HashSet<&str> = host_program
+    let declared_params: UnordSet<&str> = host_program
         .functions
         .iter()
         .find(|function| function.name == entry)
@@ -2506,12 +2507,8 @@ fn eval_compiled(
         selected_root_names,
     );
     let manifest = effective_program.manifest();
-    let selected = selected_root_names.map(|roots| {
-        roots
-            .iter()
-            .cloned()
-            .collect::<std::collections::HashSet<String>>()
-    });
+    let selected =
+        selected_root_names.map(|roots| roots.iter().cloned().collect::<BTreeSet<String>>());
     let observed_entries = manifest
         .entries
         .iter()
@@ -2530,7 +2527,7 @@ fn eval_compiled(
     let required_inputs = observed_entries
         .iter()
         .flat_map(|entry| entry.required_inputs.iter().cloned())
-        .collect::<HashSet<_>>();
+        .collect::<UnordSet<_>>();
 
     let bindings = bindings
         .into_iter()
@@ -2545,7 +2542,7 @@ fn eval_compiled(
             })?;
             Ok((name, tensor))
         })
-        .collect::<Result<HashMap<_, _>>>()?;
+        .collect::<Result<UnordMap<_, _>>>()?;
 
     let tensor_entries = observed_entries
         .iter()
@@ -2565,7 +2562,7 @@ fn eval_compiled(
         })
         .collect::<Result<Vec<_>>>()?;
     let tensor_values = if roots.is_empty() {
-        HashMap::new()
+        UnordMap::new()
     } else {
         eval::eval_tensor_roots_with_strict(&compiled.dag, &roots, |name| {
             bindings.get(name).cloned()
@@ -2573,7 +2570,7 @@ fn eval_compiled(
         .map_err(eval_stage_error)?
     };
 
-    let mut tensor_values_by_name = HashMap::<String, RuntimeTensorValue>::new();
+    let mut tensor_values_by_name = UnordMap::<String, RuntimeTensorValue>::new();
     for entry in &tensor_entries {
         let name = crate::pipeline::IrName::new(entry.name.as_str());
         let node_id = compiled.named_roots.get(&name).ok_or_else(|| {
@@ -2629,7 +2626,7 @@ fn eval_compiled(
         .entries
         .iter()
         .map(|entry| (entry.def_name.clone(), entry.lane == Lane::Tensor))
-        .collect::<HashMap<_, _>>();
+        .collect::<BTreeMap<_, _>>();
     let host_outcome = if let Some(library) = compiled.library_runtime.as_ref() {
         evaluate_host_program_with_library_and_types(
             compiled.checked(),
@@ -2665,7 +2662,7 @@ fn eval_compiled(
                 .get(entry.def_name.as_str())
                 .cloned()
                 .and_then(|value| {
-                    let synthetic_bindings = HashMap::from([(entry.def_name.clone(), value)]);
+                    let synthetic_bindings = UnordMap::from([(entry.def_name.clone(), value)]);
                     lookup_runtime_value_for_manifest_root(
                         entry,
                         &synthetic_bindings,
@@ -2978,7 +2975,7 @@ fn manifested_program_for_eval<'a>(
     binding_names: impl Iterator<Item = &'a str>,
     selected_root_names: Option<&[String]>,
 ) -> ManifestedProgram {
-    let available = binding_names.collect::<HashSet<_>>();
+    let available = binding_names.collect::<UnordSet<_>>();
     let candidate_names = selected_root_names
         .map(|names| {
             names
@@ -3052,7 +3049,7 @@ fn manifested_program_for_eval<'a>(
             .params
             .iter()
             .map(|param| param.name.clone())
-            .collect::<HashSet<_>>();
+            .collect::<BTreeSet<_>>();
         let live_parameter_names =
             chelis_effects::realizability::referenced_runtime_inputs(body, &parameter_names);
         if live_parameter_names.iter().any(|name| {
@@ -3164,7 +3161,7 @@ fn selected_callable_result_expr<'a>(
         .find_map(|expr| find(expr, selected))
 }
 
-fn checked_def_order(program: &CheckedProgram) -> HashMap<&str, usize> {
+fn checked_def_order(program: &CheckedProgram) -> UnordMap<&str, usize> {
     fn collect<'a>(expr: &'a DeepExpr, names: &mut Vec<&'a str>) {
         let Some((tag, children)) = deep_tagged_children(expr) else {
             return;
@@ -3245,7 +3242,7 @@ fn route_tensor_inputs_from_dag(
 
 fn required_inputs_for_dag_root(dag: &Dag, root: NodeId) -> BTreeSet<String> {
     let mut stack = vec![root];
-    let mut seen = HashSet::new();
+    let mut seen = UnordSet::new();
     let mut required = BTreeSet::new();
     while let Some(node_id) = stack.pop() {
         if !seen.insert(node_id) {
@@ -3275,12 +3272,12 @@ struct LibraryRuntime {
     /// expects the merged library + new-code Deep type-env so a
     /// library-name reference inside a `grad` body resolves the same
     /// way it does in the monolithic compile.
-    type_env: HashMap<String, DeepExpr>,
+    type_env: BTreeMap<String, DeepExpr>,
     /// Library-side lowered-vs-host classification. Threaded through
     /// so `evaluate_host_program_with_library`'s "is this a tensor
     /// root vs a host-init" decision is byte-identical to what the
     /// monolithic pipeline would have computed.
-    lowered_names: HashMap<String, bool>,
+    lowered_names: BTreeMap<String, bool>,
 }
 
 fn compile_source(source_kind: SourceKind, source: &str) -> Result<CompiledSource> {
@@ -3605,7 +3602,7 @@ fn compile_result_hip_host(
 }
 
 fn execution_input_specs(dag: &Dag, labels: &[String]) -> Result<Vec<ExecutionTensorSpec>> {
-    let mut load_types = HashMap::<String, TensorType>::new();
+    let mut load_types = UnordMap::<String, TensorType>::new();
     for node in dag.nodes() {
         if let RiscOp::Load { name } = &node.op {
             load_types
@@ -3653,7 +3650,7 @@ fn execution_output_specs(dag: &Dag, labels: &[String]) -> Result<Vec<ExecutionT
 }
 
 fn execution_output_nodes(dag: &Dag) -> Vec<NodeId> {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = chelis_unord::UnordSet::new();
     let mut nodes = Vec::new();
 
     for node in dag.nodes() {
@@ -4871,7 +4868,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
     // the integer family have typed kernel templates. bf16/f16 are narrower:
     // storage and hipBLAS matmul are implemented, while an ordinary compute
     // node would still reach the elementwise suffix rejection.
-    let narrow_float_admissible: HashSet<NodeId> = dag
+    let narrow_float_admissible: UnordSet<NodeId> = dag
         .nodes()
         .iter()
         .filter(|node| {

@@ -36,7 +36,7 @@
 //!    cotangents gather at the same indices, and the discrete indices receive
 //!    no cotangent.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use chelis_ir::DimInfo;
 use chelis_ir::dag::{Dag, NodeId, RiscOp, TensorType};
@@ -131,7 +131,7 @@ fn gather_axis0_distinct_indices_gradient_is_one_per_picked_row() {
     let grad = grad_dag_checked(&dag, out, &[table]).expect("grad");
     let grad_node = grad.grad_nodes[&table];
 
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
         "table".to_string(),
         TensorValue::from_vec(vec![4, 2], vec![1.0; 8]),
@@ -173,7 +173,7 @@ fn gather_axis0_mixed_indices_gradient_matches_per_row_counts() {
     let grad = grad_dag_checked(&dag, out, &[table]).expect("grad");
     let grad_node = grad.grad_nodes[&table];
 
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
         "table".to_string(),
         TensorValue::from_vec(vec![4, 2], vec![1.0; 8]),
@@ -246,7 +246,7 @@ fn gather_axis1_mixed_indices_gradient_matches_per_column_counts() {
     let grad = grad_dag_checked(&dag, s2, &[table]).expect("grad");
     let grad_node = grad.grad_nodes[&table];
 
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
         "table".to_string(),
         TensorValue::from_vec(vec![2, 5], vec![1.0; 10]),
@@ -299,7 +299,7 @@ fn gather_eval_out_of_bounds_index_panics_fail_closed() {
         None,
     );
 
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
         "table".to_string(),
         TensorValue::from_vec(vec![3, 2], vec![1.0; 6]),
@@ -340,7 +340,7 @@ fn gather_eval_negative_index_panics_fail_closed() {
         None,
     );
 
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
         "table".to_string(),
         TensorValue::from_vec(vec![3, 2], vec![1.0; 6]),
@@ -387,7 +387,7 @@ fn scatter_add_eval_out_of_bounds_index_panics_fail_closed() {
         None,
     );
 
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
         "target".to_string(),
         TensorValue::from_vec(vec![3, 2], vec![0.0; 6]),
@@ -438,7 +438,7 @@ fn scatter_replace_eval_out_of_bounds_index_panics_fail_closed() {
         None,
     );
 
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
         "target".to_string(),
         TensorValue::from_vec(vec![3, 2], vec![0.0; 6]),
@@ -624,7 +624,7 @@ fn scatter_add_backward_routes_target_and_updates_but_not_indices() {
         "integer ScatterAdd indices must remain a stop-gradient boundary"
     );
 
-    let inputs = HashMap::from([
+    let inputs = UnordMap::from([
         (
             "target".to_string(),
             TensorValue::from_vec(vec![4], vec![11.0, 13.0, 17.0, 19.0]),

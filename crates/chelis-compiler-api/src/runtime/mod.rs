@@ -1,5 +1,6 @@
 use chelis_deep::DeepTag;
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
+use std::collections::BTreeMap;
 
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_ir::eval::TensorValue as IrTensorValue;
@@ -182,11 +183,11 @@ pub enum RuntimeValue {
         /// call expression result, including context-fixed empty containers.
         return_type: Option<Expr>,
         body: Expr,
-        env: HashMap<String, RuntimeValue>,
+        env: UnordMap<String, RuntimeValue>,
         /// Lexically captured concrete precision variables. A call derives a
         /// fresh specialization from checked argument/result types and lets
         /// the callee's own binders shadow same-spelled outer binders.
-        precision_env: HashMap<String, Prim>,
+        precision_env: UnordMap<String, Prim>,
     },
     /// A captured `grad(f)` / `vmap(f)` waiting to be applied to args. The
     /// `transform_expr` holds the original `(grad ...)` or `(vmap ...)`
@@ -198,7 +199,7 @@ pub enum RuntimeValue {
     Transform {
         kind: TransformKind,
         transform_expr: Expr,
-        captured_env: HashMap<String, RuntimeValue>,
+        captured_env: UnordMap<String, RuntimeValue>,
     },
     Unit,
 }
@@ -338,7 +339,7 @@ impl RuntimeValue {
 
 #[derive(Debug, Default)]
 pub(crate) struct RuntimeOutcome {
-    pub(crate) host_bindings: HashMap<String, RuntimeValue>,
+    pub(crate) host_bindings: UnordMap<String, RuntimeValue>,
     /// Applied values of host-lane *zero-argument fn* top-level roots
     /// (the desugared shape of the arrow-form `def name() -> T = body`,
     /// which the Surf desugarer wraps as `(def name (fn () body))`).
@@ -349,19 +350,19 @@ pub(crate) struct RuntimeOutcome {
     /// the bare name would shadow the callable and break any `name()`
     /// call). Keyed by bare root name; consulted by `eval_compiled` as a
     /// fallback after `lookup_runtime_value_for_root`.
-    pub(crate) host_root_values: HashMap<String, RuntimeValue>,
+    pub(crate) host_root_values: UnordMap<String, RuntimeValue>,
     /// Evaluation failures for those same applied nullary roots. Retained by
     /// root name so the manifest consumer can report them through [05-UNS-1]
     /// instead of either swallowing the cause or returning an unbranded host
     /// evaluator error.
-    pub(crate) host_root_errors: HashMap<String, String>,
+    pub(crate) host_root_errors: UnordMap<String, String>,
     pub(crate) transcript: Vec<String>,
 }
 
 #[cfg(test)]
 pub(crate) fn evaluate_host_program(
     program: &CheckedProgram,
-    tensor_bindings: &HashMap<String, RuntimeTensorValue>,
+    tensor_bindings: &UnordMap<String, RuntimeTensorValue>,
 ) -> Result<RuntimeOutcome, String> {
     evaluate_host_program_filtered(program, tensor_bindings, None, None)
 }
@@ -377,14 +378,14 @@ pub(crate) fn evaluate_host_program(
 /// running as module init.
 pub(crate) fn evaluate_host_program_filtered(
     program: &CheckedProgram,
-    tensor_bindings: &HashMap<String, RuntimeTensorValue>,
+    tensor_bindings: &UnordMap<String, RuntimeTensorValue>,
     selected_roots: Option<&[String]>,
-    manifested_lowered_names: Option<&HashMap<String, bool>>,
+    manifested_lowered_names: Option<&BTreeMap<String, bool>>,
 ) -> Result<RuntimeOutcome, String> {
     evaluate_host_program_with_library_and_types(
         program,
         &[],
-        &HashMap::new(),
+        &BTreeMap::new(),
         None,
         tensor_bindings,
         selected_roots,
@@ -418,11 +419,11 @@ pub(crate) fn evaluate_host_program_filtered(
 pub(crate) fn evaluate_host_program_with_library_and_types(
     program: &CheckedProgram,
     library_exprs: &[Expr],
-    library_type_env: &HashMap<String, Expr>,
-    library_lowered_names: Option<&HashMap<String, bool>>,
-    tensor_bindings: &HashMap<String, RuntimeTensorValue>,
+    library_type_env: &BTreeMap<String, Expr>,
+    library_lowered_names: Option<&BTreeMap<String, bool>>,
+    tensor_bindings: &UnordMap<String, RuntimeTensorValue>,
     selected_roots: Option<&[String]>,
-    manifested_lowered_names: Option<&HashMap<String, bool>>,
+    manifested_lowered_names: Option<&BTreeMap<String, bool>>,
 ) -> Result<RuntimeOutcome, String> {
     // Lowered classification. A new-code value binding that references a
     // library function (e.g. `imported_val = lib_add(20, 22)`) must
@@ -440,7 +441,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     // top for names the combined walk doesn't cover.
     let mut combined_exprs: Vec<Expr> = library_exprs.to_vec();
     combined_exprs.extend(program.exprs().iter().cloned());
-    let mut combined_type_env: HashMap<String, Expr> = library_type_env.clone();
+    let mut combined_type_env: BTreeMap<String, Expr> = library_type_env.clone();
     for (name, ty_expr) in program.type_env() {
         combined_type_env.insert(name.clone(), ty_expr.clone());
     }
@@ -452,7 +453,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
                 .map(|(name, lowered)| (name.clone(), *lowered)),
         );
     }
-    let mut lowered_names: HashMap<String, bool> = HashMap::new();
+    let mut lowered_names: BTreeMap<String, bool> = BTreeMap::new();
     if let Some(lib) = library_lowered_names {
         lowered_names.extend(lib.iter().map(|(k, v)| (k.clone(), *v)));
     }
@@ -462,11 +463,11 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     // record-pattern match on a library ADT in new code resolves field
     // names correctly.
     let mut adt_fields = collect_adt_ctor_fields(library_exprs);
-    adt_fields.extend(collect_adt_ctor_fields(program.exprs()));
+    adt_fields.merge(collect_adt_ctor_fields(program.exprs()));
 
-    let mut top_level_defs = HashMap::new();
+    let mut top_level_defs = UnordMap::new();
     let mut top_level_order = Vec::new();
-    let mut declared_signatures = HashMap::new();
+    let mut declared_signatures = UnordMap::new();
 
     register_declared_signatures(library_exprs, &mut declared_signatures);
     register_declared_signatures(program.exprs(), &mut declared_signatures);
@@ -501,17 +502,20 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     // We need this for grad/vmap/realize routing through
     // `lower_subexpr_program`: the IR lowerer's `lower_subexpr_program`
     // resolves free names against `full_type_env`.
-    let mut type_env: HashMap<String, Expr> = library_type_env.clone();
+    let mut type_env = library_type_env
+        .iter()
+        .map(|(name, ty_expr)| (name.clone(), ty_expr.clone()))
+        .collect::<UnordMap<String, Expr>>();
     for (name, ty_expr) in program.type_env() {
         type_env.insert(name.clone(), ty_expr.clone());
     }
 
     let mut ctx = EvalContext {
-        bindings: HashMap::new(),
-        binding_types: HashMap::new(),
-        precision_bindings: HashMap::new(),
-        named_axis_route_cache: HashMap::new(),
-        named_axis_route_visiting: HashSet::new(),
+        bindings: UnordMap::new(),
+        binding_types: UnordMap::new(),
+        precision_bindings: UnordMap::new(),
+        named_axis_route_cache: UnordMap::new(),
+        named_axis_route_visiting: UnordSet::new(),
         top_level_defs,
         declared_signatures,
         adt_registry: program.adt_registry().clone(),
@@ -550,8 +554,8 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     // Tensor-lane callable surfaces through the DAG/`tensor_bindings` path.
     // Failures stay attached to the root and become [05-UNS-1]; no partial
     // root is fabricated.
-    let mut host_root_values = HashMap::new();
-    let mut host_root_errors = HashMap::new();
+    let mut host_root_values = UnordMap::new();
+    let mut host_root_errors = UnordMap::new();
     for expr in top_level_items(program.exprs()) {
         let Some((DeepTag::Def, kids)) = tagged_expr_children(expr) else {
             continue;
@@ -653,7 +657,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     })
 }
 
-fn register_declared_signatures(exprs: &[Expr], signatures: &mut HashMap<String, Expr>) {
+fn register_declared_signatures(exprs: &[Expr], signatures: &mut UnordMap<String, Expr>) {
     for expr in top_level_items(exprs) {
         let Some((DeepTag::Defsig, kids)) = tagged_expr_children(expr) else {
             continue;
@@ -668,9 +672,9 @@ fn register_declared_signatures(exprs: &[Expr], signatures: &mut HashMap<String,
 
 fn register_top_level_defs(
     exprs: &[Expr],
-    lowered_names: &HashMap<String, bool>,
+    lowered_names: &BTreeMap<String, bool>,
     selected_roots: Option<&[String]>,
-    top_level_defs: &mut HashMap<String, Expr>,
+    top_level_defs: &mut UnordMap<String, Expr>,
     top_level_order: &mut Vec<String>,
     register_runtime_order: bool,
 ) {
@@ -722,8 +726,8 @@ fn register_top_level_defs(
 /// builtins.
 pub(crate) fn library_lowered_names(
     library_exprs: &[Expr],
-    library_type_env: &HashMap<String, Expr>,
-) -> HashMap<String, bool> {
+    library_type_env: &BTreeMap<String, Expr>,
+) -> BTreeMap<String, bool> {
     top_level_lowering_map(library_exprs, library_type_env)
 }
 
@@ -862,8 +866,8 @@ pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> Result<ExecutionV
 
 pub(crate) fn lookup_runtime_value_for_manifest_root(
     entry: &RootEntry,
-    host_bindings: &HashMap<String, RuntimeValue>,
-    tensor_bindings: &HashMap<String, RuntimeTensorValue>,
+    host_bindings: &UnordMap<String, RuntimeValue>,
+    tensor_bindings: &UnordMap<String, RuntimeTensorValue>,
 ) -> Option<RuntimeValue> {
     if let Some(value) = tensor_bindings.get(entry.name.as_str()) {
         return Some(RuntimeValue::Tensor(value.clone()));
@@ -898,7 +902,7 @@ fn descend_manifest_path(value: RuntimeValue, step: RootPathStep) -> Option<Runt
 }
 
 struct EvalContext<'a> {
-    bindings: HashMap<String, RuntimeValue>,
+    bindings: UnordMap<String, RuntimeValue>,
     /// Declared/static Deep type expression for names in `bindings`,
     /// maintained in lockstep with `bindings` (saved/swapped/restored at
     /// every frame boundary). Every locally-bound name gets a key here:
@@ -906,20 +910,20 @@ struct EvalContext<'a> {
     /// `None` otherwise. The explicit `None` marker matters: it masks a
     /// same-named top-level `type_env` entry so a local shadow is never
     /// typed with the outer binding's type (chelis#338 named-axis routing).
-    binding_types: HashMap<String, Option<Expr>>,
+    binding_types: UnordMap<String, Option<Expr>>,
     /// Call-frame actualizations for precision variables used by generic
     /// casts. Values come only from checker-owned call-site argument/result
     /// types matched against the callee's declared signature.
-    precision_bindings: HashMap<String, Prim>,
+    precision_bindings: UnordMap<String, Prim>,
     /// Memoized per-def result of [`Self::def_requires_named_axis_routing`].
-    named_axis_route_cache: HashMap<String, bool>,
+    named_axis_route_cache: UnordMap<String, bool>,
     /// Cycle guard for the recursive routing detection walk.
-    named_axis_route_visiting: HashSet<String>,
-    top_level_defs: HashMap<String, Expr>,
+    named_axis_route_visiting: UnordSet<String>,
+    top_level_defs: UnordMap<String, Expr>,
     /// Authored `defsig` function types, including source binder spellings.
     /// The inferred `type_env` intentionally freshens those binders, so the
     /// evaluator keeps this separate map for generic cast targets in bodies.
-    declared_signatures: HashMap<String, Expr>,
+    declared_signatures: UnordMap<String, Expr>,
     /// Checker-owned nominal definitions used when the executed constructor
     /// alone cannot reveal whether the parameter type has a float leaf.
     adt_registry: chelis_types::adt::AdtRegistry,
@@ -928,9 +932,9 @@ struct EvalContext<'a> {
     /// hits a `grad` / `vmap` form so the lowerer can resolve free names
     /// the same way the C backend does. Empty when no library context is
     /// present (e.g. unit tests that don't need transform support).
-    type_env: HashMap<String, Expr>,
-    adt_fields: HashMap<String, Vec<String>>,
-    tensor_bindings: &'a HashMap<String, RuntimeTensorValue>,
+    type_env: UnordMap<String, Expr>,
+    adt_fields: UnordMap<String, Vec<String>>,
+    tensor_bindings: &'a UnordMap<String, RuntimeTensorValue>,
     transcript: Vec<String>,
     resolving_top_levels: Vec<String>,
     random_seed: Option<u64>,

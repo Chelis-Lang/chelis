@@ -32,7 +32,7 @@
 //!
 //! Both assertions fail on `main` before the fix and pass after.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use chelis_deep::Expr;
 use chelis_ir::dag::{DimInfo, RiscOp, RtDim, TensorType};
@@ -66,7 +66,7 @@ fn cons_chain_reshape_expr() -> Expr {
 }
 
 fn lower_with_x_bound() -> chelis_ir::dag::Dag {
-    let mut scoped = HashMap::new();
+    let mut scoped = UnordMap::new();
     scoped.insert(
         "x".to_string(),
         TensorType {
@@ -77,8 +77,8 @@ fn lower_with_x_bound() -> chelis_ir::dag::Dag {
     lower_subexpr_program(
         &cons_chain_reshape_expr(),
         scoped,
-        HashMap::new(),
-        HashMap::new(),
+        UnordMap::new(),
+        UnordMap::new(),
     )
 }
 

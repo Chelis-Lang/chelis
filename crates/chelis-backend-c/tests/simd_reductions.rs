@@ -259,8 +259,8 @@ int main(void) {{
 
 /// Parse `n value` lines from sweep-program stdout into a map from size to
 /// the raw value string.
-fn parse_sweep_output(out: &str) -> std::collections::HashMap<usize, String> {
-    let mut map = std::collections::HashMap::new();
+fn parse_sweep_output(out: &str) -> chelis_unord::UnordMap<usize, String> {
+    let mut map = chelis_unord::UnordMap::new();
     for line in out.lines() {
         let line = line.trim();
         if line.is_empty() {

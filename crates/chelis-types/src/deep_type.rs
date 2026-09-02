@@ -7,7 +7,7 @@
 //! instead of inventing a variable, wildcard, or partial type.
 
 use chelis_deep::DeepTag;
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::ast as deep;
 
@@ -121,10 +121,10 @@ pub(crate) enum BinderMode<'a> {
     ClosedInput,
     /// A `deftype` or `typealias` parameter list explicitly names every legal
     /// type, dimension, and rank binder.
-    Explicit(&'a HashSet<String>),
+    Explicit(&'a UnordSet<String>),
     /// A nominal declaration whose parameter kinds were fixed before any
     /// declaration body was resolved.
-    ExplicitKinds(&'a HashMap<String, NominalParamKind>),
+    ExplicitKinds(&'a UnordMap<String, NominalParamKind>),
     /// A `defsig` implicitly quantifies each named type/dimension/rank variable.
     ImplicitGeneric,
     /// Metadata emitted by a checked compiler pass may carry generated names.
@@ -141,7 +141,7 @@ pub(crate) enum BinderMode<'a> {
 /// later check.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TypeResolutionEnv {
-    headers: HashMap<String, Vec<NominalParamKind>>,
+    headers: UnordMap<String, Vec<NominalParamKind>>,
 }
 
 impl TypeResolutionEnv {
@@ -178,7 +178,7 @@ impl TypeResolutionEnv {
     }
 
     pub(crate) fn extend_from(&mut self, other: &Self) {
-        for (name, kinds) in &other.headers {
+        for (name, kinds) in other.headers.to_sorted() {
             self.headers.insert(name.clone(), kinds.clone());
         }
     }
@@ -196,9 +196,9 @@ pub(crate) struct DeepTypeResolver<'resolver, 'session, 'binders> {
     headers: &'resolver TypeResolutionEnv,
     vg: &'resolver mut VarGen,
     errors: &'resolver mut DiagnosticSink<'session>,
-    type_vars: HashMap<String, TypeVar>,
-    dim_vars: HashMap<String, DimVar>,
-    rank_vars: HashMap<String, RankVar>,
+    type_vars: UnordMap<String, TypeVar>,
+    dim_vars: UnordMap<String, DimVar>,
+    rank_vars: UnordMap<String, RankVar>,
     owner_location: Option<TypeDiagnosticLocation>,
     resolution_location: Option<TypeDiagnosticLocation>,
     current_location: Option<TypeDiagnosticLocation>,
@@ -218,9 +218,9 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             headers,
             vg,
             errors,
-            type_vars: HashMap::new(),
-            dim_vars: HashMap::new(),
-            rank_vars: HashMap::new(),
+            type_vars: UnordMap::new(),
+            dim_vars: UnordMap::new(),
+            rank_vars: UnordMap::new(),
             owner_location: None,
             resolution_location: None,
             current_location: None,
@@ -228,14 +228,14 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         if let BinderMode::Explicit(names) = binder_mode {
             // Nominal parameters are type arguments even when their occurrence
             // in a field is dimension- or rank-kinded.
-            for name in names {
+            for name in names.to_sorted() {
                 resolver
                     .type_vars
                     .insert(name.clone(), resolver.vg.fresh_tvar());
             }
         }
         if let BinderMode::ExplicitKinds(kinds) = binder_mode {
-            for (name, kind) in kinds {
+            for (name, kind) in kinds.to_sorted() {
                 match kind {
                     NominalParamKind::Type => {
                         resolver
@@ -318,19 +318,34 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
     }
 
     pub(crate) fn type_vars(&self) -> Vec<TypeVar> {
-        let mut vars: Vec<_> = self.type_vars.values().copied().collect();
+        let mut vars = self
+            .type_vars
+            .to_sorted()
+            .into_iter()
+            .map(|(_, var)| *var)
+            .collect::<Vec<_>>();
         vars.sort_by_key(|var| var.0);
         vars
     }
 
     pub(crate) fn dim_vars(&self) -> Vec<DimVar> {
-        let mut vars: Vec<_> = self.dim_vars.values().copied().collect();
+        let mut vars = self
+            .dim_vars
+            .to_sorted()
+            .into_iter()
+            .map(|(_, var)| *var)
+            .collect::<Vec<_>>();
         vars.sort_by_key(|var| var.0);
         vars
     }
 
     pub(crate) fn rank_vars(&self) -> Vec<RankVar> {
-        let mut vars: Vec<_> = self.rank_vars.values().copied().collect();
+        let mut vars = self
+            .rank_vars
+            .to_sorted()
+            .into_iter()
+            .map(|(_, var)| *var)
+            .collect::<Vec<_>>();
         vars.sort_by_key(|var| var.0);
         vars
     }

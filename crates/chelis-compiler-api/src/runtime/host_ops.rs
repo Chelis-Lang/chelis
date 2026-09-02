@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use chelis_deep::ast::{Atom, Expr};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
@@ -20,8 +20,8 @@ use super::*;
 pub(super) fn pattern_matches(
     value: &RuntimeValue,
     pattern: &Expr,
-    bindings: &mut HashMap<String, RuntimeValue>,
-    adt_fields: &HashMap<String, Vec<String>>,
+    bindings: &mut UnordMap<String, RuntimeValue>,
+    adt_fields: &UnordMap<String, Vec<String>>,
 ) -> Result<bool, String> {
     let Some(list) = as_list(pattern) else {
         return Ok(false);
@@ -143,8 +143,8 @@ pub(super) fn pattern_matches(
     }
 }
 
-pub(crate) fn collect_adt_ctor_fields(exprs: &[Expr]) -> HashMap<String, Vec<String>> {
-    let mut out = HashMap::new();
+pub(crate) fn collect_adt_ctor_fields(exprs: &[Expr]) -> UnordMap<String, Vec<String>> {
+    let mut out = UnordMap::new();
     for expr in top_level_items(exprs) {
         let Expr::List(list, _) = expr else {
             continue;
@@ -1921,7 +1921,7 @@ fn add_load(dag: &mut Dag, name: String, ty: TensorType) -> NodeId {
 
 fn extract_root(
     dag: &Dag,
-    inputs: &HashMap<String, IrTensorValue>,
+    inputs: &UnordMap<String, IrTensorValue>,
     root: NodeId,
     op_label: &str,
 ) -> Result<RuntimeTensorValue, String> {
@@ -1965,7 +1965,7 @@ where
     let x_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}0");
     let x_id = add_load(&mut dag, x_name.clone(), ty.clone());
     let root = build(&mut dag, x_id, &ty);
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(x_name, x.value.clone());
     extract_root(&dag, &inputs, root, "composed unary tier2")
 }
@@ -1993,7 +1993,7 @@ where
     let g_id = add_load(&mut dag, g_name.clone(), g_ty.clone());
     let b_id = add_load(&mut dag, b_name.clone(), b_ty.clone());
     let root = build(&mut dag, x_id, g_id, b_id, (&x_ty, &g_ty, &b_ty));
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(x_name, x.value.clone());
     inputs.insert(g_name, gamma.value.clone());
     inputs.insert(b_name, beta.value.clone());
@@ -2069,7 +2069,7 @@ pub(super) fn conv2d_host(
     let root = tier2::lower_conv2d(
         &mut dag, x_id, k_id, &input_ty, &kernel_ty, &output_ty, stride, padding, None,
     );
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(x_name, input.value.clone());
     inputs.insert(k_name, kernel.value.clone());
     extract_root(&dag, &inputs, root, "conv2d")
@@ -2828,7 +2828,7 @@ pub(super) fn tensor_einsum_value(
     let mut out = vec![0.0; output_total];
     for (out_linear, slot) in out.iter_mut().enumerate() {
         let out_index = linear_to_indices(out_linear, &out_shape);
-        let mut label_values = std::collections::HashMap::<char, usize>::new();
+        let mut label_values = chelis_unord::UnordMap::<char, usize>::new();
         for (label, value) in out_labels.iter().zip(out_index.iter()) {
             label_values.insert(*label, *value);
         }

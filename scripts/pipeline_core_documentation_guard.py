@@ -25,6 +25,7 @@ REQUIRED_CRATES = (
     "`chelis-types`",
     "`chelis-effects`",
     "`chelis-ir`",
+    "`chelis-unord`",
 )
 
 

@@ -1,0 +1,4 @@
+disallowed-types = [
+  { path = "std::collections::HashMap", reason = "hash iteration order must not reach observable compiler behavior; see spec/design/hash_order_determinism.md", replacement = "chelis_unord::UnordMap" },
+  { path = "std::collections::HashSet", reason = "hash iteration order must not reach observable compiler behavior; see spec/design/hash_order_determinism.md", replacement = "chelis_unord::UnordSet" },
+]

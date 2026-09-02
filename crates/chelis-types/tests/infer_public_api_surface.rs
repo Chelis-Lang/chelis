@@ -11,7 +11,7 @@
 //!
 //! A new public item is not a failure here. A *missing or moved* one is.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 // Every public item of `chelis_types::infer`, imported by exact path.
 use chelis_types::infer::{
@@ -114,7 +114,7 @@ fn public_result_shape_is_reachable() {
     let checked: CheckedProgram = check_ir_program(&empty).expect("empty program checks");
     let _exprs: &[deep::Expr] = checked.exprs();
     let _annotated: &[deep::Expr] = checked.annotated_exprs();
-    let _type_env: &HashMap<String, deep::Expr> = checked.type_env();
+    let _type_env: &BTreeMap<String, deep::Expr> = checked.type_env();
     let _linearity: &chelis_types::LinearityInfo = checked.linearity();
     let _sig: &SignatureInferenceMetadata = checked.signature_inference();
     let _adt: &chelis_types::adt::AdtRegistry = checked.adt_registry();

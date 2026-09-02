@@ -6,10 +6,11 @@ use chelis_surf::ast::{
     Decl, EffectExpr, Expr, ImportKind, LetBinding, LetPattern, MatchArm, Param, Pattern,
     PropertyOption, TypeExpr, TypeInvariant, Variant, VariantFields,
 };
+use chelis_unord::{UnordMap, UnordSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::io::{Cursor, Read, Write};
@@ -442,6 +443,12 @@ pub struct PreparedProgram {
     /// The cross-process chelis-std typecheck cache content-addresses
     /// this. Empty when the graph has no chelis-std package.
     pub stdlib_decls: Vec<Decl>,
+    /// Digest of the exact chelis-std manifest, source inventory, source
+    /// bytes, and published artifact identities that produced
+    /// `stdlib_decls`. The typecheck cache requires this determinant in
+    /// addition to the parsed declarations so trivia-only source edits cannot
+    /// stale-hit an artifact built from different bytes.
+    pub stdlib_source_digest: [u8; 32],
     /// `decls` minus `stdlib_decls`, in the same relative order: the
     /// user package's own modules plus any non-stdlib path-deps. Checked
     /// `_with_context` against the cached chelis-std sub-context.
@@ -1546,6 +1553,10 @@ pub struct PreparedReefGraph {
     /// from the linked chelis-std decls. Empty when the graph has no
     /// chelis-std package, such as a package that depends on nothing.
     pub linked_stdlib_decls: Vec<Decl>,
+    /// Exact-source determinant paired with `linked_stdlib_decls`. Persisting
+    /// it in the prepared graph keeps the typecheck-cache hot path free of a
+    /// second filesystem walk while preserving trivia and inventory changes.
+    stdlib_source_digest: [u8; 32],
     /// `linked_library_decls` minus `linked_stdlib_decls`, in the same
     /// relative order: the user package's own modules plus any non-stdlib
     /// path-deps. The chelis-std typecheck cache checks this `_with_context`
@@ -1556,7 +1567,7 @@ pub struct PreparedReefGraph {
     /// Linker-produced declarations from dependency packages only. This is a
     /// provenance partition, not a name filter.
     pub linked_dependency_decls: Vec<Decl>,
-    pub(crate) internal_maps: HashMap<(String, String), HashMap<String, String>>,
+    pub(crate) internal_maps: UnordMap<(String, String), UnordMap<String, String>>,
     pub(crate) dep_shells: BTreeMap<String, ShellPackage>,
     pub(crate) eval_module_prefix: String,
 }
@@ -1572,6 +1583,11 @@ impl PreparedReefGraph {
         bincode::deserialize(bytes).map_err(|e| format!("decode prepared graph: {e}"))
     }
 
+    /// Exact source determinant for the linked chelis-std slice.
+    pub fn stdlib_source_digest(&self) -> [u8; 32] {
+        self.stdlib_source_digest
+    }
+
     /// Returns a content digest for the complete live `.ch` inventory under
     /// every declared source root backing this graph, including path and
     /// registry dependencies. Inventory paths as well as exact file bytes are
@@ -1585,6 +1601,25 @@ impl PreparedReefGraph {
     ///
     pub fn source_digests(&self) -> Result<Vec<SourceDigest>, String> {
         self.source_digests_inner(false)
+    }
+
+    fn compute_stdlib_source_digest(&self) -> Result<[u8; 32], String> {
+        let mut hasher = Sha256::new();
+        hasher.update(b"chelis-std-exact-source-v1");
+        for digest in self
+            .source_digests()?
+            .into_iter()
+            .filter(|digest| digest.package_name == CHELIS_STD_PACKAGE_NAME)
+        {
+            hasher.update((digest.package_name.len() as u64).to_le_bytes());
+            hasher.update(digest.package_name.as_bytes());
+            hasher.update((digest.package_version.len() as u64).to_le_bytes());
+            hasher.update(digest.package_version.as_bytes());
+            hasher.update((digest.module_name.len() as u64).to_le_bytes());
+            hasher.update(digest.module_name.as_bytes());
+            hasher.update(digest.sha256);
+        }
+        Ok(hasher.finalize().into())
     }
 
     fn validated_source_digests(&self) -> Result<Vec<SourceDigest>, String> {
@@ -2077,6 +2112,7 @@ pub fn prepare_program_for_file(file: &Path) -> Result<Option<PreparedProgram>, 
         entry_decls,
         package_root: root,
         stdlib_decls: graph.linked_stdlib_decls.clone(),
+        stdlib_source_digest: graph.stdlib_source_digest(),
         non_stdlib_decls: graph.linked_non_stdlib_library_decls.clone(),
         dependency_decls: graph.linked_dependency_decls.clone(),
     }))
@@ -2197,17 +2233,20 @@ fn prepare_graph_from_loaded(
         linked_library_decls.extend(module.decls);
     }
 
-    Ok(PreparedReefGraph {
+    let mut prepared = PreparedReefGraph {
         package_root: root,
         graph,
         linked_library_decls,
         linked_stdlib_decls,
+        stdlib_source_digest: [0; 32],
         linked_non_stdlib_library_decls,
         linked_dependency_decls,
         internal_maps,
         dep_shells,
         eval_module_prefix,
-    })
+    };
+    prepared.stdlib_source_digest = prepared.compute_stdlib_source_digest()?;
+    Ok(prepared)
 }
 
 const PREPARED_GRAPH_CACHE_MAGIC: &[u8] = b"CHELIS_REEF_GRAPH_V1\n";
@@ -2215,12 +2254,22 @@ const PREPARED_GRAPH_CACHE_MAGIC: &[u8] = b"CHELIS_REEF_GRAPH_V1\n";
 // for multi-dependency graphs, changing the serialized decl order. Bumped so a
 // warm project does not load a stale old-order graph (which would make #1182
 // inert and make the same binary emit different C depending on cache state).
-const PREPARED_GRAPH_CACHE_VERSION: u32 = 3;
+// v3 (chelis#1341 Phase B): PreparedReefGraph persists the exact-source
+// chelis-std digest used by the typecheck-cache key. V2 payloads lack the field
+// and must clean-miss before positional bincode decoding.
+// v4 (chelis#1341 Phase B): the filename key and envelope carry the exact
+// running compiler build identity, not the release version shared by distinct
+// builds. V3 envelopes cannot prove that identity and must clean-miss.
+// v5 combines that V4 lineage with chelis#1247's independent V3 payload, whose
+// declarations can carry dimension-valued nominal arguments. Either preceding
+// branch format clean-misses before positional bincode decoding.
+const PREPARED_GRAPH_CACHE_VERSION: u32 = 5;
+const PREPARED_GRAPH_CACHE_KEY_DOMAIN: &[u8] = b"chelis-prepared-graph-cache-key-v1\0";
 
 #[derive(Serialize, Deserialize)]
 struct PreparedGraphCacheEnvelope {
     version: u32,
-    compiler_version: String,
+    compiler_identity: String,
     source_hash: [u8; 32],
     payload_sha256: [u8; 32],
     payload: Vec<u8>,
@@ -2315,16 +2364,43 @@ fn prepared_graph_cache_path(root: &Path) -> Option<PathBuf> {
             .join("chelis")
             .join("prepared-graphs")
     };
-    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let mut hasher = Sha256::new();
-    hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
-    hasher.update(canonical.to_string_lossy().as_bytes());
-    let identity: [u8; 32] = hasher.finalize().into();
+    let inputs = prepared_graph_cache_key_input_bytes(root).ok()?;
+    let identity: [u8; 32] = Sha256::digest(inputs).into();
     let identity_hex = identity[..16]
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     Some(cache_dir.join(format!("{identity_hex}.graph")))
+}
+
+/// Exact byte preimage hashed to name the prepared-graph cache artifact.
+///
+/// Fields are domain-separated and length-delimited. The opaque compiler
+/// identity is the same shared running-image fingerprint exported by
+/// `chelis-compiler-api`, while the canonical package root is encoded with the
+/// platform's lossless `OsStr` representation rather than a lossy display
+/// string.
+pub fn prepared_graph_cache_key_input_bytes(root: &Path) -> Result<Vec<u8>, String> {
+    prepared_graph_cache_key_input_bytes_for_identity(root, chelis_image_id::build_fingerprint())
+}
+
+fn prepared_graph_cache_key_input_bytes_for_identity(
+    root: &Path,
+    compiler_identity: &str,
+) -> Result<Vec<u8>, String> {
+    let canonical = root
+        .canonicalize()
+        .map_err(|error| format!("canonicalize cache package root: {error}"))?;
+    let root_bytes = canonical.as_os_str().as_encoded_bytes();
+    let mut inputs = Vec::with_capacity(
+        PREPARED_GRAPH_CACHE_KEY_DOMAIN.len() + 16 + compiler_identity.len() + root_bytes.len(),
+    );
+    inputs.extend_from_slice(PREPARED_GRAPH_CACHE_KEY_DOMAIN);
+    inputs.extend_from_slice(&(compiler_identity.len() as u64).to_le_bytes());
+    inputs.extend_from_slice(compiler_identity.as_bytes());
+    inputs.extend_from_slice(&(root_bytes.len() as u64).to_le_bytes());
+    inputs.extend_from_slice(root_bytes);
+    Ok(inputs)
 }
 
 fn prepared_graph_source_hash(graph: &PreparedReefGraph) -> Result<[u8; 32], String> {
@@ -2371,7 +2447,7 @@ fn load_prepared_graph_cache(
             envelope.version, PREPARED_GRAPH_CACHE_VERSION
         ));
     }
-    if envelope.compiler_version != env!("CARGO_PKG_VERSION") {
+    if envelope.compiler_identity != chelis_image_id::build_fingerprint() {
         return Ok(None);
     }
     let payload_sha256: [u8; 32] = Sha256::digest(&envelope.payload).into();
@@ -2409,7 +2485,7 @@ fn save_prepared_graph_cache_with_hash(
     let payload = graph.encode()?;
     let envelope = PreparedGraphCacheEnvelope {
         version: PREPARED_GRAPH_CACHE_VERSION,
-        compiler_version: env!("CARGO_PKG_VERSION").to_string(),
+        compiler_identity: chelis_image_id::build_fingerprint().to_string(),
         source_hash,
         payload_sha256: Sha256::digest(&payload).into(),
         payload,
@@ -2613,8 +2689,16 @@ pub fn rewrite_isolated_entry_modules_with_reef_graph(
         occupied.extend(
             graph
                 .internal_maps
-                .values()
-                .flat_map(|symbols| symbols.keys().cloned()),
+                .to_sorted()
+                .into_iter()
+                .map(|(_, symbols)| symbols)
+                .flat_map(|symbols| {
+                    symbols
+                        .to_sorted()
+                        .into_iter()
+                        .map(|(name, _)| name.clone())
+                        .collect::<Vec<_>>()
+                }),
         );
         let mut source_decls = entry.declarations.clone();
         let mut synthetic_roots = Vec::new();
@@ -2659,7 +2743,7 @@ pub fn rewrite_isolated_entry_modules_with_reef_graph(
                     internal_name(&graph.graph.root_package, &module_name, name),
                 )
             })
-            .collect::<HashMap<_, _>>();
+            .collect::<UnordMap<_, _>>();
         let mut internal_maps = graph.internal_maps.clone();
         internal_maps.insert(module_key, local_map.clone());
         let module = ModuleSource {
@@ -2707,6 +2791,7 @@ fn assemble_rewritten_entry_program(
         entry_decls: rewritten_entry_decls.to_vec(),
         package_root: graph.package_root.clone(),
         stdlib_decls: graph.linked_stdlib_decls.clone(),
+        stdlib_source_digest: graph.stdlib_source_digest(),
         non_stdlib_decls,
         dependency_decls: graph.linked_dependency_decls.clone(),
     }
@@ -5077,8 +5162,8 @@ fn topo_sort_bootstrap(nodes: &[BootstrapNode]) -> Result<Vec<usize>, BootstrapE
     // Map (name, version) -> index for edge resolution. Built up
     // front so cycle detection can map back to (name, version) pairs
     // inside the DFS.
-    let mut index_by_key: std::collections::HashMap<(String, String), usize> =
-        std::collections::HashMap::new();
+    let mut index_by_key: chelis_unord::UnordMap<(String, String), usize> =
+        chelis_unord::UnordMap::new();
     for (i, (name, version, _)) in nodes.iter().enumerate() {
         if let Some(prior) = index_by_key.insert((name.clone(), version.clone()), i) {
             // Defensive: bootstrap-input dedup happens before topo
@@ -5311,15 +5396,14 @@ pub fn install_bootstrap(
     // two versions in the input list is ambiguous; refuse rather than
     // silently picking one.
     {
-        let mut by_name: std::collections::HashMap<&str, Vec<&str>> =
-            std::collections::HashMap::new();
+        let mut by_name: chelis_unord::UnordMap<&str, Vec<&str>> = chelis_unord::UnordMap::new();
         for (name, version, _) in &nodes {
             by_name
                 .entry(name.as_str())
                 .or_default()
                 .push(version.as_str());
         }
-        for (name, versions) in &by_name {
+        for (name, versions) in by_name.to_sorted() {
             if versions.len() > 1 {
                 let mut sorted: Vec<String> = versions.iter().map(|s| s.to_string()).collect();
                 sorted.sort();
@@ -5335,8 +5419,8 @@ pub fn install_bootstrap(
     }
 
     // Build (name, version) -> index for edge validation.
-    let mut index_by_key: std::collections::HashMap<(String, String), usize> =
-        std::collections::HashMap::with_capacity(nodes.len());
+    let mut index_by_key: chelis_unord::UnordMap<(String, String), usize> =
+        chelis_unord::UnordMap::new();
     for (i, (name, version, _)) in nodes.iter().enumerate() {
         index_by_key.insert((name.clone(), version.clone()), i);
     }
@@ -6181,7 +6265,7 @@ fn validate_manifest_with(
     if let Some(warning) = compiler_pin_outcome(manifest, allow_compiler_drift)? {
         eprintln!("{warning}");
     }
-    let mut seen_additional = HashSet::new();
+    let mut seen_additional = UnordSet::new();
     for entry in &manifest.package.additional_sources {
         if entry.trim().is_empty() {
             return Err("package.additional_sources entries must not be empty".to_string());
@@ -6236,7 +6320,7 @@ fn validate_manifest_with(
         }
     }
     if let Some(src) = &manifest.chelis_src {
-        let mut seen_crate = HashSet::new();
+        let mut seen_crate = UnordSet::new();
         for entry in &src.crates {
             if entry.trim().is_empty() {
                 return Err("chelis-src.crates entries must not be empty".to_string());
@@ -6365,7 +6449,7 @@ fn is_safe_artifact_name(name: &str) -> bool {
 
 fn resolve_package_graph(root: &Path, options: LoadOptions) -> Result<PackageGraph, String> {
     let mut packages = BTreeMap::new();
-    let mut by_name = HashMap::<String, PackageId>::new();
+    let mut by_name = UnordMap::<String, PackageId>::new();
     let mut stack = Vec::new();
     let root_manifest = read_manifest(&root.join("reef.toml"))?;
     let root_id = PackageId {
@@ -6402,7 +6486,7 @@ fn resolve_package_recursive(
     maybe_shell: Option<ShellPackage>,
     remote_origin: Option<String>,
     packages: &mut BTreeMap<String, LoadedPackage>,
-    by_name: &mut HashMap<String, PackageId>,
+    by_name: &mut UnordMap<String, PackageId>,
     stack: &mut Vec<String>,
     options: LoadOptions,
 ) -> Result<(), String> {
@@ -7339,7 +7423,7 @@ fn compute_exports(decls: &[Decl]) -> BTreeSet<String> {
     // required for chelis#157: a downstream module that imports `Column`
     // must be able to write `IntCol(...)` and resolve it to the exporting
     // module's mangled constructor.
-    let ctors_for_type: HashMap<&str, &[Variant]> = decls
+    let ctors_for_type: UnordMap<&str, &[Variant]> = decls
         .iter()
         .filter_map(|decl| match decl {
             Decl::TypeDef { name, variants, .. } => Some((name.as_str(), variants.as_slice())),
@@ -8033,8 +8117,8 @@ fn canonical_shell_scheme(
 
     let mut renamer = SchemeVariableRenamer::default();
     let canonical_body = renamer.rewrite_type(&scheme.body);
-    let quantified = scheme.tvars.iter().copied().collect::<HashSet<_>>();
-    let mut seen = HashSet::new();
+    let quantified = scheme.tvars.iter().copied().collect::<UnordSet<_>>();
+    let mut seen = UnordSet::new();
     let mut restrictions = Vec::with_capacity(scheme.tvar_restrictions.len());
 
     for (variable, restriction) in &scheme.tvar_restrictions {
@@ -8082,9 +8166,9 @@ fn canonical_shell_scheme(
 
 #[derive(Default)]
 struct SchemeVariableRenamer {
-    type_vars: HashMap<chelis_types::types::TypeVar, chelis_types::types::TypeVar>,
-    dim_vars: HashMap<chelis_types::types::DimVar, chelis_types::types::DimVar>,
-    rank_vars: HashMap<chelis_types::types::RankVar, chelis_types::types::RankVar>,
+    type_vars: UnordMap<chelis_types::types::TypeVar, chelis_types::types::TypeVar>,
+    dim_vars: UnordMap<chelis_types::types::DimVar, chelis_types::types::DimVar>,
+    rank_vars: UnordMap<chelis_types::types::RankVar, chelis_types::types::RankVar>,
 }
 
 impl SchemeVariableRenamer {
@@ -8348,11 +8432,13 @@ fn dependency_shells(graph: &PackageGraph) -> BTreeMap<String, ShellPackage> {
         .collect::<BTreeMap<_, _>>()
 }
 
-fn build_internal_maps(graph: &PackageGraph) -> HashMap<(String, String), HashMap<String, String>> {
-    let mut maps = HashMap::new();
+fn build_internal_maps(
+    graph: &PackageGraph,
+) -> UnordMap<(String, String), UnordMap<String, String>> {
+    let mut maps = UnordMap::new();
     for (package_name, package) in &graph.packages {
         for module in package.modules.values() {
-            let mut module_map = HashMap::new();
+            let mut module_map = UnordMap::new();
             for name in module.symbols.keys() {
                 module_map.insert(
                     name.clone(),
@@ -8371,17 +8457,17 @@ fn build_internal_maps(graph: &PackageGraph) -> HashMap<(String, String), HashMa
 fn build_name_resolver(
     module: &ModuleSource,
     graph: &PackageGraph,
-    internal_maps: &HashMap<(String, String), HashMap<String, String>>,
+    internal_maps: &UnordMap<(String, String), UnordMap<String, String>>,
     dep_shells: &BTreeMap<String, ShellPackage>,
 ) -> Result<NameResolver, String> {
-    let mut qualified = HashMap::<String, HashMap<String, String>>::new();
-    let mut unqualified = HashMap::<String, String>::new();
+    let mut qualified = UnordMap::<String, UnordMap<String, String>>::new();
+    let mut unqualified = UnordMap::<String, String>::new();
     let module_internal = internal_maps
         .get(&(module.package_name.clone(), module.module_name.clone()))
         .cloned()
         .unwrap_or_default();
 
-    for (name, internal) in &module_internal {
+    for (name, internal) in module_internal.to_sorted() {
         unqualified.insert(name.clone(), internal.clone());
     }
 
@@ -8435,12 +8521,12 @@ fn build_name_resolver(
                     .get(name)
                     .map(|internal| (name.clone(), internal.clone()))
             })
-            .collect::<HashMap<_, _>>();
+            .collect::<UnordMap<_, _>>();
         qualified.insert(import_module.clone(), qualified_map.clone());
         match kind {
             ImportKind::Qualified => {}
             ImportKind::All => {
-                for (name, internal) in qualified_map {
+                for (name, internal) in qualified_map.into_sorted() {
                     import_sources
                         .entry(name.clone())
                         .or_default()
@@ -8509,7 +8595,7 @@ fn build_name_resolver(
 fn rewrite_module_decls(
     module: &ModuleSource,
     graph: &PackageGraph,
-    internal_maps: &HashMap<(String, String), HashMap<String, String>>,
+    internal_maps: &UnordMap<(String, String), UnordMap<String, String>>,
     dep_shells: &BTreeMap<String, ShellPackage>,
 ) -> Result<Vec<Decl>, String> {
     let resolver = build_name_resolver(module, graph, internal_maps, dep_shells)?;
@@ -8564,7 +8650,7 @@ fn drain_qualified_failures(resolver: &NameResolver) -> Result<(), String> {
 fn rewrite_eval_module_decls(
     module: &ModuleSource,
     graph: &PackageGraph,
-    internal_maps: &HashMap<(String, String), HashMap<String, String>>,
+    internal_maps: &UnordMap<(String, String), UnordMap<String, String>>,
     dep_shells: &BTreeMap<String, ShellPackage>,
 ) -> Result<Vec<Decl>, String> {
     let resolver = build_name_resolver(module, graph, internal_maps, dep_shells)?;
@@ -8665,9 +8751,9 @@ fn find_imported_module<'a>(
 }
 
 struct NameResolver {
-    own_names: HashMap<String, String>,
-    imported_names: HashMap<String, String>,
-    qualified_modules: HashMap<String, HashMap<String, String>>,
+    own_names: UnordMap<String, String>,
+    imported_names: UnordMap<String, String>,
+    qualified_modules: UnordMap<String, UnordMap<String, String>>,
     /// Qualified references whose head named an imported module but whose leaf
     /// that module does not export — a typo or unexported name. Recorded by
     /// the expression / pattern / type resolvers as they run, then drained
@@ -8720,7 +8806,7 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
             let mut locals = params
                 .iter()
                 .map(|param| param.name.clone())
-                .collect::<HashSet<_>>();
+                .collect::<UnordSet<_>>();
             // [05-OP-35] exposes Std.Sort.sort as the sole stdlib identity
             // while its body delegates to the compiler primitive of the
             // same spelling. Keep that one body reference bare so builtin-
@@ -8752,7 +8838,7 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
         } => Decl::LetDef {
             name: internal_name(package, module, name),
             ty: ty.as_ref().map(|ty| rewrite_type(ty, resolver)),
-            value: rewrite_expr(value, resolver, &mut HashSet::new()),
+            value: rewrite_expr(value, resolver, &mut UnordSet::new()),
             span: *span,
         },
         Decl::Property {
@@ -8766,7 +8852,7 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
             let mut locals = params
                 .iter()
                 .map(|param| param.name.clone())
-                .collect::<HashSet<_>>();
+                .collect::<UnordSet<_>>();
             Decl::Property {
                 name: internal_name(package, module, name),
                 params: params
@@ -8833,7 +8919,7 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
             body,
             span,
         } => {
-            let mut locals = params.iter().cloned().collect::<HashSet<_>>();
+            let mut locals = params.iter().cloned().collect::<UnordSet<_>>();
             Decl::MacroDef {
                 name: internal_name(package, module, name),
                 params: params.clone(),
@@ -8866,7 +8952,7 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
             let mut locals = params
                 .iter()
                 .map(|param| param.name.clone())
-                .collect::<HashSet<_>>();
+                .collect::<UnordSet<_>>();
             let body = rewrite_expr(body, resolver, &mut locals);
             Decl::FunDef {
                 name: name.clone(),
@@ -8889,7 +8975,7 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
         } => Decl::LetDef {
             name: name.clone(),
             ty: ty.as_ref().map(|ty| rewrite_type(ty, resolver)),
-            value: rewrite_expr(value, resolver, &mut HashSet::new()),
+            value: rewrite_expr(value, resolver, &mut UnordSet::new()),
             span: *span,
         },
         Decl::Property {
@@ -8903,7 +8989,7 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
             let mut locals = params
                 .iter()
                 .map(|param| param.name.clone())
-                .collect::<HashSet<_>>();
+                .collect::<UnordSet<_>>();
             Decl::Property {
                 name: name.clone(),
                 params: params
@@ -8978,7 +9064,7 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
         } => Decl::MacroDef {
             name: name.clone(),
             params: params.clone(),
-            body: rewrite_expr(body, resolver, &mut HashSet::new()),
+            body: rewrite_expr(body, resolver, &mut UnordSet::new()),
             span: *span,
         },
         Decl::Dim { names, span } => Decl::Dim {
@@ -8990,7 +9076,7 @@ fn rewrite_eval_decl(decl: &Decl, resolver: &NameResolver) -> Decl {
 }
 
 fn rewrite_property_option(option: &PropertyOption, resolver: &NameResolver) -> PropertyOption {
-    let mut locals = HashSet::new();
+    let mut locals = UnordSet::new();
     match option {
         PropertyOption::Tolerance(value, span) => {
             PropertyOption::Tolerance(rewrite_expr(value, resolver, &mut locals), *span)
@@ -9056,7 +9142,7 @@ fn rewrite_variant_fields(fields: &VariantFields, resolver: &NameResolver) -> Va
 /// to in-module zero-arg constants get reef-mangled while the binder
 /// stays bare (mirrors the `Decl::Property` precondition/body rewrite).
 fn rewrite_invariant(invariant: &TypeInvariant, resolver: &NameResolver) -> TypeInvariant {
-    let mut locals = HashSet::new();
+    let mut locals = UnordSet::new();
     locals.insert(invariant.binder.clone());
     TypeInvariant {
         binder: invariant.binder.clone(),
@@ -9129,7 +9215,7 @@ fn rewrite_type(ty: &TypeExpr, resolver: &NameResolver) -> TypeExpr {
     }
 }
 
-fn rewrite_expr(expr: &Expr, resolver: &NameResolver, locals: &mut HashSet<String>) -> Expr {
+fn rewrite_expr(expr: &Expr, resolver: &NameResolver, locals: &mut UnordSet<String>) -> Expr {
     if let Some(resolved) = resolve_qualified_expr(expr, resolver) {
         return resolved;
     }
@@ -9312,7 +9398,7 @@ fn rewrite_expr(expr: &Expr, resolver: &NameResolver, locals: &mut HashSet<Strin
     }
 }
 
-fn rewrite_arm(arm: &MatchArm, resolver: &NameResolver, locals: &mut HashSet<String>) -> MatchArm {
+fn rewrite_arm(arm: &MatchArm, resolver: &NameResolver, locals: &mut UnordSet<String>) -> MatchArm {
     let mut scoped = locals.clone();
     collect_pattern_binders(&arm.pattern, &mut scoped);
     MatchArm {
@@ -9368,7 +9454,7 @@ fn rewrite_pattern(pattern: &Pattern, resolver: &NameResolver) -> Pattern {
 fn rewrite_let_binding(
     binding: &LetBinding,
     resolver: &NameResolver,
-    locals: &mut HashSet<String>,
+    locals: &mut UnordSet<String>,
 ) -> LetBinding {
     let value = rewrite_expr(&binding.value, resolver, locals);
     collect_let_pattern_binders(&binding.pattern, locals);
@@ -9382,7 +9468,7 @@ fn rewrite_let_binding(
 // Deliberately separate from `chelis_deep::pattern_binder_names`: Reef is
 // resolving the Surf parser's `Pattern` AST before any Deep pattern exists.
 // Deep consumers must use the shared helper instead of copying its tag walk.
-fn collect_pattern_binders(pattern: &Pattern, locals: &mut HashSet<String>) {
+fn collect_pattern_binders(pattern: &Pattern, locals: &mut UnordSet<String>) {
     match pattern {
         Pattern::Var(name, _) => {
             locals.insert(name.clone());
@@ -9405,7 +9491,7 @@ fn collect_pattern_binders(pattern: &Pattern, locals: &mut HashSet<String>) {
     }
 }
 
-fn collect_let_pattern_binders(pattern: &LetPattern, locals: &mut HashSet<String>) {
+fn collect_let_pattern_binders(pattern: &LetPattern, locals: &mut UnordSet<String>) {
     match pattern {
         LetPattern::Var(name, _) => {
             locals.insert(name.clone());
@@ -9419,7 +9505,7 @@ fn collect_let_pattern_binders(pattern: &LetPattern, locals: &mut HashSet<String
     }
 }
 
-fn resolve_name(name: &str, resolver: &NameResolver, locals: &HashSet<String>) -> String {
+fn resolve_name(name: &str, resolver: &NameResolver, locals: &UnordSet<String>) -> String {
     if locals.contains(name) {
         return name.to_string();
     }
@@ -12564,7 +12650,7 @@ module_prefix = "Stray"
             "digests must be sorted by (package, module)"
         );
         // No two rows for the same module — the walker must not double-count.
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = chelis_unord::UnordSet::new();
         for d in &digests {
             assert!(
                 seen.insert((d.package_name.clone(), d.module_name.clone())),
@@ -12632,9 +12718,10 @@ module_prefix = "RegistryLib"
             graph,
             linked_library_decls: Vec::new(),
             linked_stdlib_decls: Vec::new(),
+            stdlib_source_digest: [0; 32],
             linked_non_stdlib_library_decls: Vec::new(),
             linked_dependency_decls: Vec::new(),
-            internal_maps: HashMap::new(),
+            internal_maps: UnordMap::new(),
             dep_shells: BTreeMap::new(),
             eval_module_prefix: "Consumer".to_string(),
         };
@@ -12756,6 +12843,7 @@ module_prefix = "RegistryLib"
             entry_decls,
             package_root: PathBuf::new(),
             stdlib_decls: Vec::new(),
+            stdlib_source_digest: [0; 32],
             non_stdlib_decls: Vec::new(),
             dependency_decls: Vec::new(),
         };
@@ -12795,6 +12883,7 @@ module_prefix = "RegistryLib"
             entry_decls: invariant_entry,
             package_root: PathBuf::new(),
             stdlib_decls: Vec::new(),
+            stdlib_source_digest: [0; 32],
             non_stdlib_decls: Vec::new(),
             dependency_decls: Vec::new(),
         };
@@ -12828,6 +12917,7 @@ module_prefix = "RegistryLib"
             entry_decls: macro_entry,
             package_root: PathBuf::new(),
             stdlib_decls: Vec::new(),
+            stdlib_source_digest: [0; 32],
             non_stdlib_decls: Vec::new(),
             dependency_decls: Vec::new(),
         };
@@ -12856,7 +12946,7 @@ module_prefix = "RegistryLib"
 
         // Spot-check the fields that matter for downstream compilation:
         // package_root + linked decl count + dep shell count + module
-        // prefix. Full PartialEq isn't derived (HashMap key-order would
+        // prefix. Full PartialEq isn't derived (UnordMap key-order would
         // make it non-deterministic anyway), so check the load-bearing
         // surface explicitly.
         assert_eq!(original.package_root, restored.package_root);
@@ -12900,6 +12990,96 @@ module_prefix = "RegistryLib"
         assert!(
             chelis_surf::format::format_program(&changed.linked_library_decls).contains("x - y"),
             "changed dependency source cannot reuse stale graph"
+        );
+    }
+
+    #[test]
+    fn prepared_graph_cache_version_tracks_both_branch_formats() {
+        assert_eq!(PREPARED_GRAPH_CACHE_VERSION, 5);
+    }
+
+    #[test]
+    fn prepared_graph_cache_rejects_the_preceding_positional_format() {
+        let _guard = lock_reef_home_env();
+        let (dir, root) = shared_graph_fixture();
+        unsafe {
+            std::env::set_var("CHELIS_REEF_HOME", dir.path().join("reef-home"));
+        }
+
+        let graph = prepare_reef_graph_cached(&root).expect("cold graph");
+        assert_ne!(
+            graph.stdlib_source_digest(),
+            [0; 32],
+            "prepared graph carries the exact stdlib source determinant"
+        );
+        let cache_path = prepared_graph_cache_path(&root).expect("cache path");
+        let bytes = fs::read(&cache_path).expect("read prepared graph cache");
+        let mut envelope: PreparedGraphCacheEnvelope =
+            bincode::deserialize(&bytes[PREPARED_GRAPH_CACHE_MAGIC.len()..])
+                .expect("decode prepared graph envelope");
+        envelope.version = PREPARED_GRAPH_CACHE_VERSION - 1;
+        let encoded = bincode::serialize(&envelope).expect("encode preceding envelope");
+        let mut preceding = PREPARED_GRAPH_CACHE_MAGIC.to_vec();
+        preceding.extend(encoded);
+        fs::write(&cache_path, preceding).expect("write preceding-format cache");
+
+        let error = load_prepared_graph_cache(&cache_path, &root)
+            .expect_err("preceding positional payload must be rejected before decode");
+        assert!(
+            error.contains("format version 4 unsupported (expected 5)"),
+            "unexpected version diagnostic: {error}"
+        );
+    }
+
+    #[test]
+    fn prepared_graph_cache_key_separates_exact_build_identities() {
+        let (_dir, root) = shared_graph_fixture();
+        let first = prepared_graph_cache_key_input_bytes_for_identity(&root, "build-a")
+            .expect("first key input");
+        let second = prepared_graph_cache_key_input_bytes_for_identity(&root, "build-b")
+            .expect("second key input");
+        assert_ne!(
+            first, second,
+            "different compiler builds cannot share a key"
+        );
+        assert_eq!(
+            first,
+            prepared_graph_cache_key_input_bytes_for_identity(&root, "build-a")
+                .expect("stable key input"),
+            "identical semantic inputs have one byte preimage"
+        );
+    }
+
+    #[test]
+    fn prepared_graph_cache_envelope_rejects_a_distinct_build_identity() {
+        let _guard = lock_reef_home_env();
+        let (dir, root) = shared_graph_fixture();
+        unsafe {
+            std::env::set_var("CHELIS_REEF_HOME", dir.path().join("reef-home"));
+        }
+
+        prepare_reef_graph_cached(&root).expect("cold graph");
+        let cache_path = prepared_graph_cache_path(&root).expect("cache path");
+        let bytes = fs::read(&cache_path).expect("read prepared graph cache");
+        let mut envelope: PreparedGraphCacheEnvelope =
+            bincode::deserialize(&bytes[PREPARED_GRAPH_CACHE_MAGIC.len()..])
+                .expect("decode prepared graph envelope");
+        assert_eq!(
+            envelope.compiler_identity,
+            chelis_image_id::build_fingerprint(),
+            "the envelope must carry the same opaque identity as the cache key"
+        );
+        envelope.compiler_identity.push_str("-other-build");
+        let encoded = bincode::serialize(&envelope).expect("encode changed envelope");
+        let mut changed = PREPARED_GRAPH_CACHE_MAGIC.to_vec();
+        changed.extend(encoded);
+        fs::write(&cache_path, changed).expect("write changed-build cache");
+
+        assert!(
+            load_prepared_graph_cache(&cache_path, &root)
+                .expect("build mismatch is a clean miss")
+                .is_none(),
+            "another build's prepared graph cannot be accepted"
         );
     }
 

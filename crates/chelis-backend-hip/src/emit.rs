@@ -78,7 +78,7 @@ pub struct HipEmitter {
     /// Planner-driven slot/wrapper ownership.
     plan: MemoryPlan,
     /// FusedElem nodes inlined into a trailing reduction (no standalone emission).
-    reduction_inlined: std::collections::HashSet<usize>,
+    reduction_inlined: chelis_unord::UnordSet<usize>,
     /// Worst-case inline staged-reduction scratch requirement outside the slot plan.
     extra_peak_device_bytes_estimate: usize,
     /// Device entrypoints pre-allocate slot storage because borrowed input-backed views
@@ -277,7 +277,11 @@ impl HipEmitter {
             indent: 0,
             kernel_sources: Vec::new(),
             plan,
-            reduction_inlined: reduction_inlined.iter().map(|id| id.0).collect(),
+            reduction_inlined: reduction_inlined
+                .to_sorted()
+                .into_iter()
+                .map(|id| id.0)
+                .collect(),
             extra_peak_device_bytes_estimate: 0,
             device_entrypoint_mode: false,
         };
@@ -444,7 +448,7 @@ impl HipEmitter {
         dag: &Dag,
         func_name: &str,
         output_specs: &[OutputSpec],
-        input_slots: &std::collections::HashMap<String, usize>,
+        input_slots: &chelis_unord::UnordMap<String, usize>,
         kernel_names: &[String],
     ) -> Result<(), Unsupported> {
         let expected_inputs = input_slots.len();
@@ -544,7 +548,7 @@ impl HipEmitter {
     // ------------------------------------------------------------------
 
     fn collect_kernels(&mut self, dag: &Dag) -> Result<(), Unsupported> {
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = chelis_unord::UnordSet::new();
         for node in dag.nodes() {
             // Skip reduction-inlined FusedElem nodes (they become part of the
             // reduction kernel).
@@ -629,8 +633,8 @@ impl HipEmitter {
         name.starts_with("kernel_fused_")
     }
 
-    fn input_types(dag: &Dag) -> std::collections::HashMap<String, TensorType> {
-        let mut seen = std::collections::HashMap::<String, TensorType>::new();
+    fn input_types(dag: &Dag) -> chelis_unord::UnordMap<String, TensorType> {
+        let mut seen = chelis_unord::UnordMap::<String, TensorType>::new();
         for node in dag.nodes() {
             if let RiscOp::Load { name } = &node.op {
                 seen.entry(name.as_str().to_string())
@@ -643,21 +647,20 @@ impl HipEmitter {
     fn emit_input_shape_preamble(
         &mut self,
         dag: &Dag,
-        input_slots: &std::collections::HashMap<String, usize>,
+        input_slots: &chelis_unord::UnordMap<String, usize>,
         func_name: &str,
     ) {
-        // Iteration order over `input_types` (a HashMap) must be
+        // Iteration order over `input_types` (a UnordMap) must be
         // deterministic so the emitted host code is byte-identical
         // across runs. Sort by label; lookups are by name and emitted
         // lines are independent per label.
         // See spec/upstream-bugs/host-emit-hashmap-iteration-nondeterminism.md.
         let input_types = Self::input_types(dag);
-        let mut sorted_labels: Vec<&String> = input_types.keys().collect();
-        sorted_labels.sort();
+        let sorted_labels = input_types.to_sorted();
         // Producer-supplied `func_name` flows into format-string context;
         // sanitize per spec/upstream-bugs/producer-string-sanitization.md.
         let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
-        for label in sorted_labels {
+        for (label, _) in sorted_labels {
             let ty = &input_types[label];
             let slot = input_slots[label];
             // `label` is `LoadStoreName::as_str()` (validated); route
@@ -733,21 +736,20 @@ impl HipEmitter {
     fn emit_input_shape_preamble_device(
         &mut self,
         dag: &Dag,
-        input_slots: &std::collections::HashMap<String, usize>,
+        input_slots: &chelis_unord::UnordMap<String, usize>,
         func_name: &str,
     ) {
-        // Iteration order over `input_types` (a HashMap) must be
+        // Iteration order over `input_types` (a UnordMap) must be
         // deterministic so the emitted device-side code is byte-
         // identical across runs. Sort by label; lookups are by name
         // and emitted lines are independent per label.
         // See spec/upstream-bugs/host-emit-hashmap-iteration-nondeterminism.md.
         let input_types = Self::input_types(dag);
-        let mut sorted_labels: Vec<&String> = input_types.keys().collect();
-        sorted_labels.sort();
+        let sorted_labels = input_types.to_sorted();
         // Format-string-context sanitization for producer-supplied
         // strings per spec/upstream-bugs/producer-string-sanitization.md.
         let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
-        for label in sorted_labels {
+        for (label, _) in sorted_labels {
             let ty = &input_types[label];
             let slot = input_slots[label];
             let label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(label);
@@ -4026,7 +4028,7 @@ impl HipEmitter {
 
     pub fn input_labels(dag: &Dag) -> Vec<String> {
         let mut labels = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = chelis_unord::UnordSet::new();
         for node in dag.nodes() {
             if let RiscOp::Load { name } = &node.op
                 && seen.insert(name.as_str().to_string())
@@ -4046,7 +4048,7 @@ impl HipEmitter {
 
     fn output_specs(dag: &Dag) -> Vec<OutputSpec> {
         let mut specs = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = chelis_unord::UnordSet::new();
 
         for node in dag.nodes() {
             if let RiscOp::Store { name } = &node.op
@@ -4078,7 +4080,7 @@ impl HipEmitter {
         specs
     }
 
-    fn input_slots(labels: &[String]) -> std::collections::HashMap<String, usize> {
+    fn input_slots(labels: &[String]) -> chelis_unord::UnordMap<String, usize> {
         labels
             .iter()
             .cloned()

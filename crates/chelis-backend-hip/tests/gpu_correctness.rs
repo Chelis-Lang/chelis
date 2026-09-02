@@ -18,7 +18,7 @@ use chelis_ir::dag::{Dag, DimInfo, ExtremaKind, ExtremaOperand, RiscOp, RtDim, T
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -248,7 +248,7 @@ fn cpu_runtime_library_path() -> PathBuf {
 }
 
 fn copy_runtime_artifacts(dst: &Path) {
-    let include = cpu_runtime_include_dir();
+    let include_dir = cpu_runtime_include_dir();
     for header in &[
         "chelis_runtime.h",
         "chelis_runtime_dtype.h",
@@ -259,7 +259,8 @@ fn copy_runtime_artifacts(dst: &Path) {
         write_temp_file(
             dst,
             header,
-            &fs::read_to_string(include.join(header)).unwrap_or_else(|_| panic!("read {header}")),
+            &fs::read_to_string(include_dir.join(header))
+                .unwrap_or_else(|_| panic!("read {header}")),
         );
     }
     fs::copy(cpu_runtime_library_path(), dst.join("libchelis_runtime.a"))
@@ -850,7 +851,7 @@ fn compile_and_run_output_cases(
 }
 
 fn expected_single_output(dag: &Dag, inputs: &[TestInput]) -> Vec<f32> {
-    let input_map: HashMap<String, TensorValue> = inputs
+    let input_map: UnordMap<String, TensorValue> = inputs
         .iter()
         .map(|input| (input.name.clone(), input.evaluator_value()))
         .collect();
@@ -2844,7 +2845,7 @@ fn compile_and_run_single_output_f64(
 }
 
 fn expected_single_output_f64(dag: &Dag, inputs: &[TestInputF64]) -> Vec<f64> {
-    let input_map: HashMap<String, TensorValue> = inputs
+    let input_map: UnordMap<String, TensorValue> = inputs
         .iter()
         .map(|input| (input.name.clone(), input.evaluator_value()))
         .collect();

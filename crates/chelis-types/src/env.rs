@@ -1,6 +1,6 @@
 //! Type environment: maps variable names to type schemes.
 
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -82,7 +82,7 @@ pub enum SizeProvenance {
 /// declarations and therefore a different lexical binder scope.
 #[derive(Debug, Clone, Default)]
 struct TypeResolutionScope {
-    binders: Option<HashSet<String>>,
+    binders: Option<UnordSet<String>>,
 }
 
 /// Constructor identity selected by declaration/import scope.
@@ -100,7 +100,7 @@ struct ConstructorBinding {
 /// Type environment (Γ): maps names to polymorphic type schemes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Env {
-    bindings: HashMap<String, Scheme>,
+    bindings: UnordMap<String, Scheme>,
     /// Active constructor bindings, separate from ordinary value lookup.
     ///
     /// Every exact owner remains available so constructor syntax can select by
@@ -111,7 +111,7 @@ pub struct Env {
     /// binding may replace `bindings[name]` for bare value position without
     /// changing constructor position.
     #[serde(default)]
-    constructor_bindings: HashMap<String, Vec<ConstructorBinding>>,
+    constructor_bindings: UnordMap<String, Vec<ConstructorBinding>>,
     /// Names introduced by the current lexical scope (function parameters,
     /// block bindings, and pattern bindings). Builtin-specific inference may
     /// only dispatch on a name from the closed builtin vocabulary when that
@@ -119,7 +119,7 @@ pub struct Env {
     /// check-time provenance, not part of the reusable or serialized type
     /// environment.
     #[serde(skip)]
-    lexical_bindings: HashSet<String>,
+    lexical_bindings: UnordSet<String>,
     /// Current declaration's type/dimension/rank binders. Installed only on
     /// the cloned environment used to infer that declaration, inherited by
     /// nested lexical clones, and omitted from cached checker state.
@@ -136,14 +136,14 @@ pub struct Env {
     /// `bindings` (so it has correct lexical scoping for free) and dropped
     /// from serialization (it is a check-time-only analysis artifact).
     #[serde(skip)]
-    size_provenance: HashMap<String, SizeProvenance>,
+    size_provenance: UnordMap<String, SizeProvenance>,
     /// chelis#631: literal element counts of `let`-bound list expressions,
     /// so `concat(rows, axis)` can size its concat axis through the
     /// binding (a list's length is not part of its type). Same
     /// lexical-scoping-by-`Clone` and add-symmetric mark/clear discipline
     /// as `size_provenance`; check-time-only, dropped from serialization.
     #[serde(skip)]
-    list_literal_lens: HashMap<String, usize>,
+    list_literal_lens: UnordMap<String, usize>,
 }
 
 impl Env {
@@ -179,14 +179,14 @@ impl Env {
     /// Install the binder set owned by the declaration whose body is about to
     /// be inferred. Callers use a cloned `Env`, so this scope cannot leak to a
     /// sibling declaration or back into a reusable library snapshot.
-    pub(crate) fn set_type_resolution_binders(&mut self, binders: Option<&HashSet<String>>) {
+    pub(crate) fn set_type_resolution_binders(&mut self, binders: Option<&UnordSet<String>>) {
         self.type_resolution_scope.binders = binders.cloned();
     }
 
     /// Binder names visible to a nested source annotation in this lexical
     /// environment. Absence means closed input: named `t-var`/`d-var`/
     /// `d-rank` nodes do not allocate inference variables.
-    pub(crate) fn type_resolution_binders(&self) -> Option<&HashSet<String>> {
+    pub(crate) fn type_resolution_binders(&self) -> Option<&UnordSet<String>> {
         self.type_resolution_scope.binders.as_ref()
     }
 
@@ -251,15 +251,17 @@ impl Env {
     /// `LowerCtx::symbol_has_tensor_source`.
     pub fn tensor_carries_dim(&self, name: &str) -> bool {
         self.bindings
-            .values()
-            .any(|scheme| type_carries_dim_name(&scheme.body, name))
+            .to_sorted()
+            .into_iter()
+            .any(|(_, scheme)| type_carries_dim_name(&scheme.body, name))
     }
 
     /// Look up an imported or qualified name by its unique terminal segment.
     pub fn lookup_terminal_unique(&self, name: &str) -> Option<&Scheme> {
         let mut matches = self
             .bindings
-            .iter()
+            .to_sorted()
+            .into_iter()
             .filter_map(|(key, value)| terminal_name_matches(key, name).then_some(value));
         let first = matches.next()?;
         matches.next().is_none().then_some(first)
@@ -353,9 +355,9 @@ impl Env {
 
     /// Collect all free type variables across all bindings in the environment.
     #[cfg(any(test, feature = "generalize-sweep-oracle"))]
-    pub fn free_tvars(&self, subst: &Subst) -> HashSet<TypeVar> {
-        let mut result = HashSet::new();
-        for scheme in self.bindings.values() {
+    pub fn free_tvars(&self, subst: &Subst) -> UnordSet<TypeVar> {
+        let mut result = UnordSet::new();
+        for (_, scheme) in self.bindings.to_sorted() {
             #[cfg(feature = "generalize-sweep-oracle")]
             note_generalize_sweep_env_visit();
             let ty = subst.apply_scheme(scheme);
@@ -371,9 +373,9 @@ impl Env {
 
     /// Collect all free dimension variables across all bindings in the environment.
     #[cfg(any(test, feature = "generalize-sweep-oracle"))]
-    pub fn free_dvars(&self, subst: &Subst) -> HashSet<DimVar> {
-        let mut result = HashSet::new();
-        for scheme in self.bindings.values() {
+    pub fn free_dvars(&self, subst: &Subst) -> UnordSet<DimVar> {
+        let mut result = UnordSet::new();
+        for (_, scheme) in self.bindings.to_sorted() {
             #[cfg(feature = "generalize-sweep-oracle")]
             note_generalize_sweep_env_visit();
             let ty = subst.apply_scheme(scheme);
@@ -389,9 +391,9 @@ impl Env {
 
     /// Free rank variables in the environment (Tier-2 rank polymorphism).
     #[cfg(any(test, feature = "generalize-sweep-oracle"))]
-    pub fn free_rvars(&self, subst: &Subst) -> HashSet<RankVar> {
-        let mut result = HashSet::new();
-        for scheme in self.bindings.values() {
+    pub fn free_rvars(&self, subst: &Subst) -> UnordSet<RankVar> {
+        let mut result = UnordSet::new();
+        for (_, scheme) in self.bindings.to_sorted() {
             #[cfg(feature = "generalize-sweep-oracle")]
             note_generalize_sweep_env_visit();
             let ty = subst.apply_scheme(scheme);
@@ -919,8 +921,8 @@ mod tests {
         subst.insert_dim(source_dim, Dim::Var(target_dim));
         subst.insert_rank(source_rank, vec![Dim::Rank(target_rank)]);
 
-        assert_eq!(env.free_tvars(&subst), HashSet::from([target_type]));
-        assert_eq!(env.free_dvars(&subst), HashSet::from([target_dim]));
-        assert_eq!(env.free_rvars(&subst), HashSet::from([target_rank]));
+        assert_eq!(env.free_tvars(&subst), UnordSet::from([target_type]));
+        assert_eq!(env.free_dvars(&subst), UnordSet::from([target_dim]));
+        assert_eq!(env.free_rvars(&subst), UnordSet::from([target_rank]));
     }
 }

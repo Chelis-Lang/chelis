@@ -111,6 +111,21 @@ jobs:
       - name: Build smt feature
         run: cargo build -p chelis-cli --features smt
 
+      # This runner is the only one that provisions every solver toolchain, so
+      # it is the only place `--all-features` can compile. It closes Clippy's
+      # `disallowed_types` coverage over the `z3`, `carcara`, and `arb`
+      # features, whose per-pull-request cost this repository has declined.
+      # Registered in scripts/check_configuration_closure.py CLIPPY_MATRIX.
+      - name: Clippy over every declared feature
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      # With every feature compiled, the nightly-only allowance is dropped: the
+      # reconciliation must account for every repository source from dep-info
+      # alone. This is what keeps NIGHTLY_ONLY_SOURCES from becoming a place to
+      # park an uncovered file.
+      - name: Reconcile every source against dep-info
+        run: python3 scripts/check_configuration_closure.py --require-complete
+
       - name: Harvest cvc5 build for cache
         id: cvc5harvest
         run: python3 scripts/ci_cvc5_cache.py harvest --dir "${{ steps.cvc5key.outputs.dir }}"

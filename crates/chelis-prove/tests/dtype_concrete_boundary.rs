@@ -11,11 +11,11 @@ fn function_slice<'a>(source: &'a str, start: &str, next: &str) -> &'a str {
 fn concrete_evaluator_and_tier_c_have_no_bare_f64_environment() {
     let concrete = include_str!("../src/concrete_eval.rs");
     assert!(
-        concrete.contains("pub type ConcreteEnv = HashMap<String, ScalarValue>"),
+        concrete.contains("pub type ConcreteEnv = UnordMap<String, ScalarValue>"),
         "the concrete evaluator environment must carry sealed dtype values"
     );
     assert!(
-        !concrete.contains("HashMap<String, f64>"),
+        !concrete.contains("UnordMap<String, f64>"),
         "a bare f64 environment reopens the int64-collapse class"
     );
 

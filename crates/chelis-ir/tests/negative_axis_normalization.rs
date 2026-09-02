@@ -28,7 +28,7 @@
 //! `packages/chelis-std/src/nn/attention.ch` (Bug B, `softmax(_, -1)`)
 //! must lower without panicking.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use chelis_ir::dag::{DimInfo, TensorType};
 use chelis_ir::lower::{lower_program, try_lower_subexpr_program};
@@ -256,7 +256,7 @@ fn lowering_rejects_out_of_range_axis_without_panicking() {
         .into_iter()
         .next()
         .expect("one expr");
-    let scoped = HashMap::from([(
+    let scoped = UnordMap::from([(
         "x".to_string(),
         TensorType {
             dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
@@ -267,7 +267,7 @@ fn lowering_rejects_out_of_range_axis_without_panicking() {
     // of panicking when lowering rejects a form. An out-of-range
     // softmax axis must take that path -- it must not unwind through
     // `require_dim`.
-    let result = try_lower_subexpr_program(&expr, scoped, HashMap::new(), HashMap::new());
+    let result = try_lower_subexpr_program(&expr, scoped, UnordMap::new(), UnordMap::new());
     let diagnostic = result.expect_err("out-of-range softmax axis must be a lowering diagnostic");
     let rendered = diagnostic.to_string();
     assert!(

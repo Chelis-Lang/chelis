@@ -180,7 +180,7 @@ use chelis_types::manifest::RootPathStep;
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_types::{CheckedCastKind, CheckedCastPlan, NumericTrap};
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
 
 /// The set of parameter indices a user function's result may alias
 /// (issue #406 call-escape interprocedural summary). `Indices(s)` means
@@ -194,7 +194,7 @@ use std::collections::{HashMap, HashSet};
 /// emit site over-retains rather than risking a use-after-free.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ParamAlias {
-    Indices(HashSet<usize>),
+    Indices(UnordSet<usize>),
     Any,
 }
 
@@ -215,7 +215,7 @@ struct ReturnsArg {
 impl ReturnsArg {
     fn empty() -> Self {
         ReturnsArg {
-            params: ParamAlias::Indices(HashSet::new()),
+            params: ParamAlias::Indices(UnordSet::new()),
             outer: false,
         }
     }
@@ -224,7 +224,7 @@ impl ReturnsArg {
     /// allocation or one of this function's own parameters (chelis#1222).
     fn outer() -> Self {
         ReturnsArg {
-            params: ParamAlias::Indices(HashSet::new()),
+            params: ParamAlias::Indices(UnordSet::new()),
             outer: true,
         }
     }
@@ -236,7 +236,7 @@ impl ReturnsArg {
         let params = match (self.params, other.params) {
             (ParamAlias::Any, _) | (_, ParamAlias::Any) => ParamAlias::Any,
             (ParamAlias::Indices(mut a), ParamAlias::Indices(b)) => {
-                a.extend(b);
+                a.merge(b);
                 ParamAlias::Indices(a)
             }
         };
@@ -276,8 +276,8 @@ impl ReturnsArg {
 /// bindings escape through a call and must be retained; an over-estimate
 /// retains a binding that did not actually escape (a documented residual
 /// leak), never frees one that did (which would be a use-after-free).
-fn analyze_returns_arg(program: &HostProgram) -> HashMap<String, ReturnsArg> {
-    let mut summary: HashMap<String, ReturnsArg> = program
+fn analyze_returns_arg(program: &HostProgram) -> UnordMap<String, ReturnsArg> {
+    let mut summary: UnordMap<String, ReturnsArg> = program
         .functions
         .iter()
         .map(|f| (f.name.clone(), ReturnsArg::empty()))
@@ -288,13 +288,13 @@ fn analyze_returns_arg(program: &HostProgram) -> HashMap<String, ReturnsArg> {
     loop {
         let mut changed = false;
         for function in &program.functions {
-            let param_index: HashMap<&str, usize> = function
+            let param_index: UnordMap<&str, usize> = function
                 .params
                 .iter()
                 .enumerate()
                 .map(|(i, p)| (p.name.as_str(), i))
                 .collect();
-            let mut env: HashMap<String, ReturnsArg> = HashMap::new();
+            let mut env: UnordMap<String, ReturnsArg> = UnordMap::new();
             let computed = result_alias_set(
                 &function.body,
                 &param_index,
@@ -331,9 +331,9 @@ fn analyze_returns_arg(program: &HostProgram) -> HashMap<String, ReturnsArg> {
 /// tensor lanes produce fresh allocations and contribute the empty set.
 fn result_alias_set(
     expr: &HostExpr,
-    param_index: &HashMap<&str, usize>,
-    summary: &HashMap<String, ReturnsArg>,
-    env: &mut HashMap<String, ReturnsArg>,
+    param_index: &UnordMap<&str, usize>,
+    summary: &UnordMap<String, ReturnsArg>,
+    env: &mut UnordMap<String, ReturnsArg>,
     helpers: &[HostTensorHelper],
 ) -> ReturnsArg {
     match &expr.kind {
@@ -351,7 +351,7 @@ fn result_alias_set(
                 set.clone()
             } else if let Some(&i) = param_index.get(name.as_str()) {
                 ReturnsArg {
-                    params: ParamAlias::Indices(HashSet::from([i])),
+                    params: ParamAlias::Indices(UnordSet::from([i])),
                     outer: false,
                 }
             } else if name == "Nil" || name == "None" {
@@ -650,7 +650,7 @@ pub(crate) fn emit_host_abi_program(
             .is_none_or(|reachable| reachable.contains(name))
     };
 
-    let mut stubbed_functions: HashSet<String> = HashSet::new();
+    let mut stubbed_functions: UnordSet<String> = UnordSet::new();
     let mut function_bodies: Vec<String> = Vec::new();
     for function in &program.functions {
         let emitted_name = emitted_names
@@ -706,7 +706,7 @@ pub(crate) fn emit_host_abi_program(
     body.extend(function_bodies);
 
     if !program.globals.is_empty() {
-        let hoisted: HashSet<&str> = captured_globals.iter().map(String::as_str).collect();
+        let hoisted: UnordSet<&str> = captured_globals.iter().map(String::as_str).collect();
         emit_main(&mut body, program_name, program, &returns_arg, &hoisted)?;
     }
 
@@ -772,13 +772,14 @@ fn emitted_function_name(program_name: &str, function_name: &str) -> String {
 /// would otherwise emit a whole-TU symbol redefinition from a build that
 /// reported success.
 fn reject_duplicate_emitted_function_names(
-    emitted_names: &HashMap<String, String>,
+    emitted_names: &UnordMap<String, String>,
 ) -> Result<(), Unsupported> {
-    let mut by_emitted: HashMap<&str, Vec<&str>> = HashMap::new();
-    for (original, emitted) in emitted_names {
+    let mut by_emitted: UnordMap<&str, Vec<&str>> = UnordMap::new();
+    for (original, emitted) in emitted_names.to_sorted() {
         by_emitted.entry(emitted).or_default().push(original);
     }
     let mut collisions: Vec<String> = by_emitted
+        .into_sorted()
         .into_iter()
         .filter(|(_, originals)| originals.len() > 1)
         .map(|(emitted, mut originals)| {
@@ -807,7 +808,7 @@ fn reject_duplicate_emitted_function_names(
     ))
 }
 
-fn emitted_function_names(program: &HostProgram, program_name: &str) -> HashMap<String, String> {
+fn emitted_function_names(program: &HostProgram, program_name: &str) -> UnordMap<String, String> {
     program
         .functions
         .iter()
@@ -820,7 +821,7 @@ fn emitted_function_names(program: &HostProgram, program_name: &str) -> HashMap<
         .collect()
 }
 
-fn function_specializations(program: &HostProgram) -> HashMap<String, HostFunctionSpecialization> {
+fn function_specializations(program: &HostProgram) -> UnordMap<String, HostFunctionSpecialization> {
     program
         .functions
         .iter()
@@ -1880,9 +1881,9 @@ fn emit_function(
     out: &mut Vec<String>,
     function: &HostFunction,
     emitted_name: &str,
-    emitted_names: &HashMap<String, String>,
-    function_specializations: &HashMap<String, HostFunctionSpecialization>,
-    returns_arg: &HashMap<String, ReturnsArg>,
+    emitted_names: &UnordMap<String, String>,
+    function_specializations: &UnordMap<String, HostFunctionSpecialization>,
+    returns_arg: &UnordMap<String, ReturnsArg>,
     internal_linkage: bool,
 ) -> Result<(), Unsupported> {
     let params = function
@@ -1927,8 +1928,8 @@ fn emit_main(
     out: &mut Vec<String>,
     program_name: &str,
     program: &HostProgram,
-    returns_arg: &HashMap<String, ReturnsArg>,
-    hoisted: &HashSet<&str>,
+    returns_arg: &UnordMap<String, ReturnsArg>,
+    hoisted: &UnordSet<&str>,
 ) -> Result<(), Unsupported> {
     out.push("int main(void) {".to_string());
     // chelis#840: the globals emitter needs the same original-to-emitted
@@ -2031,11 +2032,11 @@ fn emit_main(
 /// missing a genuine capture reproduces the undeclared-identifier build
 /// break this pass exists to prevent.
 fn captured_global_names(program: &HostProgram) -> Vec<String> {
-    let mut referenced: HashSet<String> = HashSet::new();
+    let mut referenced: UnordSet<String> = UnordSet::new();
     for function in &program.functions {
         collect_var_names(&function.body, &mut referenced);
     }
-    let mut seen: HashSet<&str> = HashSet::new();
+    let mut seen: UnordSet<&str> = UnordSet::new();
     program
         .globals
         .iter()
@@ -2048,7 +2049,7 @@ fn captured_global_names(program: &HostProgram) -> Vec<String> {
 /// Record every `Var` name referenced anywhere in `expr`, including
 /// let-binding values, match arms, and inline-callback bodies. Exhaustive
 /// over `HostExprKind` so a new variant forces this walk to be revisited.
-fn collect_var_names(expr: &HostExpr, out: &mut HashSet<String>) {
+fn collect_var_names(expr: &HostExpr, out: &mut UnordSet<String>) {
     match &expr.kind {
         HostExprKind::Int(_)
         | HostExprKind::Float(_)
@@ -2146,7 +2147,7 @@ fn collect_var_names(expr: &HostExpr, out: &mut HashSet<String>) {
     }
 }
 
-fn collect_callback_var_names(callback: &HostCallback, out: &mut HashSet<String>) {
+fn collect_callback_var_names(callback: &HostCallback, out: &mut UnordSet<String>) {
     match &callback.kind {
         HostCallbackKind::Named { .. } => {}
         HostCallbackKind::Inline { body, .. } => collect_var_names(body, out),
@@ -2158,9 +2159,9 @@ fn collect_callback_var_names(callback: &HostCallback, out: &mut HashSet<String>
 /// over-approximation direction is the safe one for the reachability
 /// gate below: an over-counted reference makes a failing wrapper a hard
 /// build error rather than a loud stub.
-fn collect_referenced_fn_names(expr: &HostExpr, out: &mut HashSet<String>) {
+fn collect_referenced_fn_names(expr: &HostExpr, out: &mut UnordSet<String>) {
     collect_var_names(expr, out);
-    fn walk(expr: &HostExpr, out: &mut HashSet<String>) {
+    fn walk(expr: &HostExpr, out: &mut UnordSet<String>) {
         match &expr.kind {
             HostExprKind::Call { function, args, .. } => {
                 out.insert(function.clone());
@@ -2259,7 +2260,7 @@ fn collect_referenced_fn_names(expr: &HostExpr, out: &mut HashSet<String>) {
             | HostExprKind::Var(_, _) => {}
         }
     }
-    fn walk_callback(callback: &HostCallback, out: &mut HashSet<String>) {
+    fn walk_callback(callback: &HostCallback, out: &mut UnordSet<String>) {
         match &callback.kind {
             HostCallbackKind::Named { function, .. } => {
                 out.insert(function.clone());
@@ -2277,18 +2278,19 @@ fn collect_referenced_fn_names(expr: &HostExpr, out: &mut HashSet<String>) {
 /// loud abort stub (an exported-but-unreachable wrapper - e.g. a def
 /// whose only use was inlined into a grad DAG; the abort keeps an
 /// external caller loud at run time, the Metal rank-2 stub precedent).
-fn host_functions_reachable_from_main(program: &HostProgram) -> HashSet<String> {
-    let by_name: HashMap<&str, &HostFunction> = program
+fn host_functions_reachable_from_main(program: &HostProgram) -> UnordSet<String> {
+    let by_name: UnordMap<&str, &HostFunction> = program
         .functions
         .iter()
         .map(|function| (function.name.as_str(), function))
         .collect();
-    let mut seed = HashSet::new();
+    let mut seed = UnordSet::new();
     for binding in &program.globals {
         collect_referenced_fn_names(&binding.value, &mut seed);
     }
-    let mut reachable: HashSet<String> = HashSet::new();
+    let mut reachable: UnordSet<String> = UnordSet::new();
     let mut stack: Vec<String> = seed
+        .into_sorted()
         .into_iter()
         .filter(|name| by_name.contains_key(name.as_str()))
         .collect();
@@ -2297,9 +2299,9 @@ fn host_functions_reachable_from_main(program: &HostProgram) -> HashSet<String> 
             continue;
         }
         if let Some(function) = by_name.get(name.as_str()) {
-            let mut refs = HashSet::new();
+            let mut refs = UnordSet::new();
             collect_referenced_fn_names(&function.body, &mut refs);
-            for r in refs {
+            for r in refs.into_sorted() {
                 if by_name.contains_key(r.as_str()) && !reachable.contains(&r) {
                     stack.push(r);
                 }
@@ -2321,7 +2323,7 @@ fn host_functions_reachable_from_main(program: &HostProgram) -> HashSet<String> 
 /// The key must therefore be a string no source identifier can produce.
 /// `#` is the discriminator: it is not a Chelis identifier character, so
 /// `c_ident` can never return a name containing one, while the key itself
-/// is only ever a `HashMap` key and never reaches emitted C.
+/// is only ever a `UnordMap` key and never reaches emitted C.
 ///
 /// The first cut spelled keys `__bind_N`, on `c_ident`'s premise that
 /// "Surf/Deep identifiers cannot start with `__`". The lexer and checker
@@ -2336,8 +2338,8 @@ struct HostEmitter<'a> {
     lines: Vec<String>,
     indent: String,
     helper_prefix: String,
-    emitted_names: HashMap<String, String>,
-    function_specializations: HashMap<String, HostFunctionSpecialization>,
+    emitted_names: UnordMap<String, String>,
+    function_specializations: UnordMap<String, HostFunctionSpecialization>,
     /// Interprocedural "result aliases parameter" summary (issue #406
     /// call-escape): maps a user function's name to the set of parameter
     /// indices whose allocation its result may *be* (rather than a fresh
@@ -2350,7 +2352,7 @@ struct HostEmitter<'a> {
     /// genuinely opaque call) is treated conservatively as may-return-any
     /// by the emit-site logic, which is use-after-free-safe (it may
     /// over-retain, never under-retain).
-    returns_arg: HashMap<String, ReturnsArg>,
+    returns_arg: UnordMap<String, ReturnsArg>,
     tensor_helpers: &'a [HostTensorHelper],
     temp_counter: usize,
     /// When `Some`, every heap-owning allocation created in this emit
@@ -2392,13 +2394,13 @@ struct HostEmitter<'a> {
     /// not recorded either -- the block-release ledger tracks the name, not
     /// its `__let_N` value temp, so a chain through the name would report a
     /// binding this block genuinely owns as borrowed.
-    alias_source: HashMap<String, String>,
+    alias_source: UnordMap<String, String>,
     /// chelis#1222: C variables holding a pointer this scope did not
     /// allocate and whose owner it cannot name -- the result of a call
     /// whose callee may hand back a value it read out of an enclosing
     /// scope (`may_return_outer`). There is no source variable to record,
     /// only the fact that claiming ownership would be wrong.
-    foreign: HashSet<String>,
+    foreign: UnordSet<String>,
     /// chelis#1222: a stack of binder scopes, mapping a **raw source name**
     /// to the alias-graph key that currently means it.
     ///
@@ -2419,7 +2421,7 @@ struct HostEmitter<'a> {
     /// saves and restores shadowed names in all three of its binder arms.
     /// The `Let` arm did not until chelis#1222, so an earlier version of
     /// this comment cited a precedent that did not exist.
-    binder_keys: Vec<HashMap<String, String>>,
+    binder_keys: Vec<UnordMap<String, String>>,
     /// chelis#1222: counter for [`HostEmitter::bind_alias_key`].
     ///
     /// Deliberately NOT `temp_counter`. A binder key is a key in
@@ -2443,7 +2445,7 @@ struct LetReleaseScope {
     /// close, or by whatever owns the result target). A copy into any other
     /// temp (a transient arg fed to `chelis_tuple_get`, say) is a borrow and
     /// is not retained.
-    owned_destinations: HashSet<String>,
+    owned_destinations: UnordSet<String>,
     /// The subset of `owned_destinations` that are binding value temps.
     /// Their reference is transferred to the binding name and released at
     /// this block's close unconditionally, so a bare copy into one must
@@ -2451,18 +2453,18 @@ struct LetReleaseScope {
     /// is deliberately NOT in this set: its release path is the caller's
     /// alias-aware machinery, so it keeps the tracked-binding-source rule
     /// (see `retain_transferred_result`).
-    value_temps: HashSet<String>,
+    value_temps: UnordSet<String>,
     /// Heap binding names this block releases at its close.
-    bindings: HashSet<String>,
+    bindings: UnordSet<String>,
 }
 
 impl<'a> HostEmitter<'a> {
     fn new(
         indent: String,
         helper_prefix: &str,
-        emitted_names: HashMap<String, String>,
-        function_specializations: HashMap<String, HostFunctionSpecialization>,
-        returns_arg: HashMap<String, ReturnsArg>,
+        emitted_names: UnordMap<String, String>,
+        function_specializations: UnordMap<String, HostFunctionSpecialization>,
+        returns_arg: UnordMap<String, ReturnsArg>,
         tensor_helpers: &'a [HostTensorHelper],
     ) -> Self {
         Self {
@@ -2476,8 +2478,8 @@ impl<'a> HostEmitter<'a> {
             temp_counter: 0,
             scope_releases: None,
             let_scopes: Vec::new(),
-            alias_source: HashMap::new(),
-            foreign: HashSet::new(),
+            alias_source: UnordMap::new(),
+            foreign: UnordSet::new(),
             binder_keys: Vec::new(),
             binder_key_counter: 0,
         }
@@ -2583,7 +2585,7 @@ impl<'a> HostEmitter<'a> {
     /// releases is exactly the ownership question.
     fn alias_chain(&self, var: &str) -> Vec<String> {
         let mut chain = vec![var.to_string()];
-        let mut seen: HashSet<String> = HashSet::from([var.to_string()]);
+        let mut seen: UnordSet<String> = UnordSet::from([var.to_string()]);
         while let Some(next) = self.alias_source.get(chain.last().expect("non-empty")) {
             if !seen.insert(next.clone()) {
                 break;
@@ -2659,7 +2661,7 @@ impl<'a> HostEmitter<'a> {
         let Some(releases) = self.scope_releases.take() else {
             return;
         };
-        let mut seen: HashSet<String> = HashSet::new();
+        let mut seen: UnordSet<String> = UnordSet::new();
         for (var, ty) in releases.into_iter().rev() {
             if !seen.insert(var.clone()) {
                 continue;
@@ -2961,7 +2963,7 @@ impl<'a> HostEmitter<'a> {
                 // keeps emitted C unchanged for every program that does not
                 // shadow: a reference to it dead-ends exactly as it does
                 // today.
-                self.binder_keys.push(HashMap::new());
+                self.binder_keys.push(UnordMap::new());
                 self.bind_alias_key(bind_name);
                 self.assign_expr(target, some_expr, ty)?;
                 self.binder_keys.pop();
@@ -3002,16 +3004,16 @@ impl<'a> HostEmitter<'a> {
                 // value temp that aliases an earlier binding) is retained so
                 // each owned slot keeps exactly one reference.
                 self.let_scopes.push(LetReleaseScope {
-                    owned_destinations: HashSet::from([target.to_string()]),
-                    value_temps: HashSet::new(),
-                    bindings: HashSet::new(),
+                    owned_destinations: UnordSet::from([target.to_string()]),
+                    value_temps: UnordSet::new(),
+                    bindings: UnordSet::new(),
                 });
                 // chelis#1222: open a binder scope. It starts EMPTY on
                 // purpose -- each name enters only after its own initializer
                 // has been emitted, because that initializer runs in the
                 // enclosing scope and may read the outer meaning of the very
                 // name being bound.
-                self.binder_keys.push(HashMap::new());
+                self.binder_keys.push(UnordMap::new());
                 let mut heap_bindings: Vec<(String, HostType)> = Vec::new();
                 for binding in bindings {
                     // Compute the value into a temp before declaring the binding name.
@@ -5403,7 +5405,7 @@ impl<'a> HostEmitter<'a> {
         summary: &HostBlasMatmulSummary,
         tensor_args: &[String],
     ) {
-        let mut symbolic_first = HashMap::<String, String>::new();
+        let mut symbolic_first = UnordMap::<String, String>::new();
         for (input_index, (arg, ty)) in tensor_args.iter().zip(summary.input_tys.iter()).enumerate()
         {
             self.lines
@@ -5615,7 +5617,7 @@ impl<'a> HostEmitter<'a> {
         summary: &HostSparseOpSummary,
         tensor_args: &[String],
     ) {
-        let mut symbolic_first = HashMap::<String, String>::new();
+        let mut symbolic_first = UnordMap::<String, String>::new();
         for (input_index, (arg, ty)) in tensor_args.iter().zip(summary.input_tys.iter()).enumerate()
         {
             let expected_dtype = sparse_dtype_macro(ty.precision);
@@ -6294,7 +6296,7 @@ impl<'a> HostEmitter<'a> {
             // carry no outgoing edge -- `chelis_adt_field` hands back an
             // independently retained handle, so the arm binding is not a
             // copy of anything this scope already owns.
-            self.binder_keys.push(HashMap::new());
+            self.binder_keys.push(UnordMap::new());
             for binding in &arm.bindings {
                 let field_var = self.next_temp(&format!("{}_field", binding.name));
                 self.lines.push(format!(
@@ -6873,7 +6875,7 @@ impl<'a> HostEmitter<'a> {
                 // whether a retain was emitted inside the loop, so the same
                 // program leaked or did not depending on the parameter's
                 // spelling. Edge-less, like the other extraction binders.
-                self.binder_keys.push(HashMap::new());
+                self.binder_keys.push(UnordMap::new());
                 for (param, arg_var) in params.iter().zip(arg_vars.iter()) {
                     self.lines.push(format!(
                         "{}{} {} = {};",
@@ -8307,9 +8309,9 @@ mod expression_dispatch_tests {
         let mut emitter = HostEmitter::new(
             "    ".to_string(),
             "manifest",
-            HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
+            UnordMap::new(),
+            UnordMap::new(),
+            UnordMap::new(),
             &[],
         );
         emitter.emit_labeled_boxed_root("root", "boxed");

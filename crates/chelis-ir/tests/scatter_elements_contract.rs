@@ -22,7 +22,7 @@
 //!    a graph whose `indices.dims != updates.dims` is rejected (the
 //!    element-wise contract, negative parity for part 1).
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use chelis_ir::dag::{Dag, RiscOp};
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
@@ -93,7 +93,7 @@ fn scatter_elements_forward_axis0_preserves_off_axis_coord() {
         "forward DAG verification errors: {fwd_errs:?}"
     );
 
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
         "data".to_string(),
         TensorValue::from_vec(vec![3, 3], vec![0.0; 9]),
@@ -174,7 +174,7 @@ fn scatter_elements_forward_axis1_substitutes_column() {
 
     assert!(chelis_ir::verify::verify(&dag).is_empty());
 
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
         "data".to_string(),
         TensorValue::from_vec(vec![2, 3], vec![10.0, 11.0, 12.0, 20.0, 21.0, 22.0]),
@@ -243,7 +243,7 @@ fn scatter_elements_forward_duplicate_last_write_wins() {
         None,
     );
 
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
         "data".to_string(),
         TensorValue::from_vec(vec![3, 2], vec![0.0; 6]),

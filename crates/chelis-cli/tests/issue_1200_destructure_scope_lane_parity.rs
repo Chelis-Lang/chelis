@@ -445,7 +445,7 @@ out = run()
 ///
 /// `check_fn` walks the capture list mutating the outer scope as it goes,
 /// so when two captures sit on one alias chain the verdict depends on
-/// visit order — and the list came from a `HashSet`. Measured on stock
+/// visit order — and the list came from a `UnordSet`. Measured on stock
 /// 0.18.4, this exact program rejected 11 times in 12 and compiled once.
 /// `free_vars` now sorts, which is what makes the verdict stable.
 ///

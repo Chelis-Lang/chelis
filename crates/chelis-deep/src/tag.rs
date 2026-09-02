@@ -340,7 +340,7 @@ impl DeepTag {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
+    use std::collections::BTreeSet;
 
     /// The §2.10 tag-count-summary rows, spelled out independently of the
     /// enum so the enum cannot drift from spec/03 without this failing
@@ -412,8 +412,8 @@ mod tests {
 
     #[test]
     fn vocabulary_matches_spec_03_section_2_10_exactly() {
-        let expected: HashSet<&str> = SPEC_03_SECTION_2_10.into_iter().collect();
-        let actual: HashSet<&str> = DeepTag::ALL_STRS.into_iter().collect();
+        let expected: BTreeSet<&str> = SPEC_03_SECTION_2_10.into_iter().collect();
+        let actual: BTreeSet<&str> = DeepTag::ALL_STRS.into_iter().collect();
         let missing: Vec<&&str> = expected.difference(&actual).collect();
         let extra: Vec<&&str> = actual.difference(&expected).collect();
         assert!(
@@ -426,9 +426,9 @@ mod tests {
     #[test]
     fn vocabulary_count_and_uniqueness() {
         assert_eq!(DeepTag::COUNT, 62);
-        let unique_tags: HashSet<DeepTag> = DeepTag::ALL.into_iter().collect();
+        let unique_tags: BTreeSet<&str> = DeepTag::ALL.into_iter().map(DeepTag::as_str).collect();
         assert_eq!(unique_tags.len(), 62, "ALL must list every variant once");
-        let unique_strs: HashSet<&str> = DeepTag::ALL_STRS.into_iter().collect();
+        let unique_strs: BTreeSet<&str> = DeepTag::ALL_STRS.into_iter().collect();
         assert_eq!(unique_strs.len(), 62, "spellings must be distinct");
     }
 

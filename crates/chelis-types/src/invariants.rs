@@ -29,7 +29,7 @@
 //! is not refinement typing; the checker records it, never evaluates it.
 
 use chelis_deep::DeepTag;
-use std::collections::{HashMap, HashSet};
+use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::{Atom, Expr};
 use chelis_pred::{PredAmenability, PredGrammarError};
@@ -91,13 +91,13 @@ fn validate_type_invariants(exprs: &[Expr], errors: &mut impl DiagnosticOutput) 
     // predicate may freely reference these (RFC D-WF). A constant def is
     // a `(def {} name <value>)` whose body is a bare value or a `fn` with
     // an empty params node.
-    let mut constants: HashMap<Option<String>, HashSet<String>> = HashMap::new();
+    let mut constants: UnordMap<Option<String>, UnordSet<String>> = UnordMap::new();
     // Resolve nested `t-adt` field references against the program's own
     // `deftype` declarations: a field typed as a single-variant record of
     // value-class types is in the value class. Builtin ADTs (`List`,
     // `Option`, ...) are not in this map, so they reject (correct: they
     // are multi-variant, outside the value class).
-    let mut deftypes: HashMap<String, &Expr> = HashMap::new();
+    let mut deftypes: UnordMap<String, &Expr> = UnordMap::new();
     for (module, item) in &items {
         if let Some((name, body)) = as_def(item)
             && is_zero_arg_constant(body)
@@ -118,7 +118,7 @@ fn validate_type_invariants(exprs: &[Expr], errors: &mut impl DiagnosticOutput) 
         if tag(item) != Some(DeepTag::Deftype) {
             continue;
         }
-        let empty = HashSet::new();
+        let empty = UnordSet::new();
         let in_module_constants = constants.get(module).unwrap_or(&empty);
         validate_one_deftype(item, in_module_constants, &deftypes, errors);
     }
@@ -127,8 +127,8 @@ fn validate_type_invariants(exprs: &[Expr], errors: &mut impl DiagnosticOutput) 
 /// Validate one `deftype` node carrying (or lacking) invariant metadata.
 fn validate_one_deftype(
     deftype: &Expr,
-    in_module_constants: &HashSet<String>,
-    deftypes: &HashMap<String, &Expr>,
+    in_module_constants: &UnordSet<String>,
+    deftypes: &UnordMap<String, &Expr>,
     errors: &mut impl DiagnosticOutput,
 ) {
     let invariant = meta_value(deftype, "invariant");
@@ -168,7 +168,7 @@ fn validate_one_deftype(
 fn validate_representation(
     deftype: &Expr,
     type_name: &str,
-    deftypes: &HashMap<String, &Expr>,
+    deftypes: &UnordMap<String, &Expr>,
     errors: &mut impl DiagnosticOutput,
 ) {
     let variants: Vec<&Expr> = children(deftype)
@@ -203,7 +203,7 @@ fn validate_representation(
         let Some(field_ty) = field_kids.get(1) else {
             continue;
         };
-        let mut visiting = HashSet::new();
+        let mut visiting = UnordSet::new();
         if !is_value_class_type(field_ty, deftypes, &mut visiting) {
             errors.push_error(err(format!(
                 "field `{field_name}` of opaque type `{type_name}` is not in the V1 \
@@ -221,8 +221,8 @@ fn validate_representation(
 /// type cycles (a recursive ADT is not value-class anyway).
 fn is_value_class_type(
     ty: &Expr,
-    deftypes: &HashMap<String, &Expr>,
-    visiting: &mut HashSet<String>,
+    deftypes: &UnordMap<String, &Expr>,
+    visiting: &mut UnordSet<String>,
 ) -> bool {
     match tag(ty) {
         // Only the numeric/boolean scalar prims an invariant can be verified
@@ -282,8 +282,8 @@ fn is_value_class_type(
 /// field is in the value class.
 fn is_single_record_of_value_class(
     deftype: &Expr,
-    deftypes: &HashMap<String, &Expr>,
-    visiting: &mut HashSet<String>,
+    deftypes: &UnordMap<String, &Expr>,
+    visiting: &mut UnordSet<String>,
 ) -> bool {
     let variants: Vec<&Expr> = children(deftype)
         .iter()
@@ -313,7 +313,7 @@ fn validate_predicate(
     invariant_fn: &Expr,
     deftype: &Expr,
     type_name: &str,
-    in_module_constants: &HashSet<String>,
+    in_module_constants: &UnordSet<String>,
     errors: &mut impl DiagnosticOutput,
 ) {
     // Grammar (D-WF).

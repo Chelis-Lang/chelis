@@ -111,11 +111,11 @@ fn static_condition_fold_keeps_values_sealed() {
         .expect("fold boundary marker must remain present");
     let fold = &source[start..end];
 
-    assert!(fold.contains("HashMap<NodeId, ScalarValue>"));
+    assert!(fold.contains("UnordMap<NodeId, ScalarValue>"));
     assert!(fold.contains("cast_scalar"));
     assert!(fold.contains("compare_scalars"));
     assert!(
-        !fold.contains("HashMap<NodeId, f64>"),
+        !fold.contains("UnordMap<NodeId, f64>"),
         "chelis#729 section C5 forbids a lossy f64 memo in the static condition fold"
     );
 }

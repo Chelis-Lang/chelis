@@ -4,7 +4,7 @@
 //! conservative: the no-op cleanup has a closed list, and specialization
 //! replaces recognized subgraphs with explicit backend-specialized IR nodes.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use crate::dag::{Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType};
 use chelis_types::types::Prim;
@@ -39,7 +39,7 @@ pub fn specialize_for_blas(dag: &Dag) -> Dag {
 /// identity Cast, identity Reshape, and identity Permute.
 pub fn eliminate_closed_list_noops(dag: &Dag) -> Dag {
     let mut out = Dag::new();
-    let mut id_map: HashMap<NodeId, NodeId> = HashMap::new();
+    let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
 
     for node in dag.nodes() {
         let remapped_inputs: Vec<NodeId> = node.inputs.iter().map(|id| id_map[id]).collect();
@@ -123,7 +123,7 @@ fn identity_source(node: &DagNode, dag: &Dag) -> Option<NodeId> {
 
 fn replace_matmul_patterns(dag: &Dag) -> Dag {
     let mut out = Dag::new();
-    let mut id_map: HashMap<NodeId, NodeId> = HashMap::new();
+    let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
 
     for node in dag.nodes() {
         if let Some(info) = detect_matmul_pattern(dag, node.id) {
@@ -187,7 +187,7 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
 
 fn replace_dense_gather_patterns(dag: &Dag) -> Dag {
     let mut out = Dag::new();
-    let mut id_map: HashMap<NodeId, NodeId> = HashMap::new();
+    let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
 
     for node in dag.nodes() {
         if let Some(info) = detect_dense_gather_pattern(dag, node.id) {
@@ -236,7 +236,7 @@ fn replace_dense_gather_patterns(dag: &Dag) -> Dag {
 
 fn lower_unmatched_one_hot(dag: &Dag) -> Dag {
     let mut out = Dag::new();
-    let mut id_map: HashMap<NodeId, NodeId> = HashMap::new();
+    let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
 
     for node in dag.nodes() {
         if let RiscOp::OneHot { vocab } = node.op {
@@ -1214,7 +1214,7 @@ mod tests {
             "specialized gather DAG must verify"
         );
 
-        let inputs = std::collections::HashMap::from([
+        let inputs = chelis_unord::UnordMap::from([
             (
                 "values".to_string(),
                 crate::eval::TensorValue::from_vec(
@@ -1347,7 +1347,7 @@ mod tests {
             "lowered one_hot DAG must verify"
         );
 
-        let inputs = std::collections::HashMap::from([(
+        let inputs = chelis_unord::UnordMap::from([(
             "indices".to_string(),
             crate::eval::TensorValue::from_vec(vec![3], vec![2.0, 0.0, 1.0]),
         )]);

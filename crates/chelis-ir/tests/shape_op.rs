@@ -2,7 +2,7 @@
 //! DAG node. Unit + pipeline coverage for the value node itself: lowering,
 //! verification (positive + negative), evaluation, and AD-transparency.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_with};
@@ -56,7 +56,7 @@ fn shape_node_evaluates_to_runtime_extent() {
     );
 
     // Feed a concrete 2x3 input; extents are 2 and 3.
-    let mut inputs: HashMap<String, TensorValue> = HashMap::new();
+    let mut inputs: UnordMap<String, TensorValue> = UnordMap::new();
     inputs.insert(
         "x".into(),
         TensorValue::from_vec(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),

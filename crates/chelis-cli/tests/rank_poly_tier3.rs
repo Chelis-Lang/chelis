@@ -1137,7 +1137,7 @@ fn build_expecting_failure(source: &str, name: &str) -> String {
 
 /// Build `source` to C and return the generated `<name>.c` file contents
 /// (chelis#469 codegen-determinism oracle). Each call is an independent
-/// `chelis build` subprocess, so two calls exercise two fresh HashMap seeds —
+/// `chelis build` subprocess, so two calls exercise two fresh UnordMap seeds —
 /// the condition under which the pre-fix non-deterministic tensor-kernel input
 /// ordering surfaced.
 fn build_c_source(source: &str, name: &str) -> String {
@@ -2705,12 +2705,12 @@ fn form3_arith_over_shape_expand_size_rejected_at_build() {
 /// must build to BYTE-IDENTICAL C across independent `chelis build`
 /// invocations. The shape-source operand `x` is referenced ONLY via
 /// `shape(x, …)`, so its `Load` is pre-created alongside `b`'s in
-/// `lower_subexpr_program_inner`; that pre-creation iterated a `HashMap`
+/// `lower_subexpr_program_inner`; that pre-creation iterated a `UnordMap`
 /// (per-process-random order), flipping the tensor-kernel input slots
 /// (`inputs[0]`/`inputs[1]`) build-to-build — a codegen-determinism-invariant
 /// violation the `bias_broadcast` oracle could otherwise never assert
 /// "byte-identical". Sorting the pre-creation by name makes the kernel ABI
-/// stable. Two independent subprocess builds (each a fresh HashMap seed) must
+/// stable. Two independent subprocess builds (each a fresh UnordMap seed) must
 /// emit identical `.c`.
 #[test]
 fn form3_bias_broadcast_c_is_byte_deterministic() {

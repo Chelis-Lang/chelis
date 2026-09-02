@@ -33,7 +33,8 @@
 
 use chelis_deep::DeepTag;
 use chelis_deep::{Atom as DeepAtom, Expr as DeepExpr};
-use std::collections::{HashMap, HashSet, VecDeque};
+use chelis_unord::{UnordMap, UnordSet};
+use std::collections::VecDeque;
 
 /// The `def`/`defsig` children of a `module` node start after the tag,
 /// metadata map, and module-name atom.
@@ -111,9 +112,9 @@ pub fn prune_to_reachable_seeds(
     let def_map = exprs
         .iter()
         .filter_map(|expr| deep_def_name(expr).map(|name| (name.to_string(), expr)))
-        .collect::<HashMap<_, _>>();
+        .collect::<UnordMap<_, _>>();
 
-    let mut reachable = HashSet::<String>::new();
+    let mut reachable = UnordSet::<String>::new();
     let mut queue = VecDeque::from_iter(seeds);
     while let Some(name) = queue.pop_front() {
         if !reachable.insert(name.clone()) {
@@ -127,6 +128,11 @@ pub fn prune_to_reachable_seeds(
             }
         }
     }
+
+    // `def_map` borrows `exprs`; the wrapper's canonical `Drop` makes that
+    // borrow explicit through scope end unless we retire it before moving the
+    // declarations into the filtered result.
+    drop(def_map);
 
     exprs
         .into_iter()

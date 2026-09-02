@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+chelis-unord.workspace = true
 chelis-deep.workspace = true
 chelis-effects.workspace = true
 chelis-types = { path = "../chelis-types" }
@@ -20,3 +21,6 @@ chelis-surf.workspace = true
 chelis-macros.workspace = true
 bincode = "1"
 serde_json = "1"
+
+[lints]
+workspace = true

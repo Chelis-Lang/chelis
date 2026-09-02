@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::errors::ErrorWitness;
 
 /// A unique identifier for a type variable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TypeVar(pub u32);
 
 /// A semantic domain attached to a quantified type variable.
@@ -29,12 +29,12 @@ pub enum TypeVarRestriction {
 }
 
 /// A unique identifier for a dimension variable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct DimVar(pub u32);
 
 /// A unique identifier for a *rank* variable — a `Dim::Rank` stands for an
 /// entire shape vector (Tier-2 rank polymorphism, `spec/design/rank_polymorphism.md`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RankVar(pub u32);
 
 /// Numeric precision types.
@@ -60,6 +60,20 @@ pub enum Prim {
     Int64,
     Bool,
     String,
+}
+
+// Canonical identity order for order-free collection indices. This is byte
+// order over the public dtype spelling, not a semantic numeric ordinal.
+impl PartialOrd for Prim {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Prim {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.name().cmp(other.name())
+    }
 }
 
 impl Prim {

@@ -133,7 +133,7 @@ fn reference_reaches(
     start: usize,
     current: usize,
     graph: &[Vec<usize>],
-    visited: &mut std::collections::HashSet<usize>,
+    visited: &mut chelis_unord::UnordSet<usize>,
 ) -> bool {
     for &next in &graph[current] {
         if next == start {
@@ -147,9 +147,9 @@ fn reference_reaches(
 }
 
 fn reference_components(graph: &[Vec<usize>]) -> Vec<Vec<usize>> {
-    use std::collections::{HashMap, HashSet};
+    use chelis_unord::{UnordMap, UnordSet};
 
-    let mut assigned = HashSet::new();
+    let mut assigned = UnordSet::new();
     let mut unordered = Vec::new();
     for name in 0..graph.len() {
         if assigned.contains(&name) {
@@ -158,21 +158,21 @@ fn reference_components(graph: &[Vec<usize>]) -> Vec<Vec<usize>> {
         let members = (0..graph.len())
             .filter(|&candidate| {
                 candidate == name
-                    || (reference_reaches(candidate, name, graph, &mut HashSet::new())
-                        && reference_reaches(name, candidate, graph, &mut HashSet::new()))
+                    || (reference_reaches(candidate, name, graph, &mut UnordSet::new())
+                        && reference_reaches(name, candidate, graph, &mut UnordSet::new()))
             })
             .collect::<Vec<_>>();
         assigned.extend(members.iter().copied());
         unordered.push(members);
     }
 
-    let mut component_by_vertex = HashMap::new();
+    let mut component_by_vertex = UnordMap::new();
     for (component_index, members) in unordered.iter().enumerate() {
         for member in members {
             component_by_vertex.insert(*member, component_index);
         }
     }
-    let mut component_graph = vec![HashSet::new(); unordered.len()];
+    let mut component_graph = vec![UnordSet::new(); unordered.len()];
     for (caller, callees) in graph.iter().enumerate() {
         for callee in callees {
             let caller_component = component_by_vertex[&caller];
@@ -185,16 +185,19 @@ fn reference_components(graph: &[Vec<usize>]) -> Vec<Vec<usize>> {
 
     fn visit(
         component: usize,
-        graph: &[HashSet<usize>],
-        visiting: &mut HashSet<usize>,
-        visited: &mut HashSet<usize>,
+        graph: &[UnordSet<usize>],
+        visiting: &mut UnordSet<usize>,
+        visited: &mut UnordSet<usize>,
         out: &mut Vec<usize>,
     ) {
         if visited.contains(&component) || !visiting.insert(component) {
             return;
         }
-        let mut dependencies = graph[component].iter().copied().collect::<Vec<_>>();
-        dependencies.sort_unstable();
+        let dependencies = graph[component]
+            .to_sorted()
+            .into_iter()
+            .copied()
+            .collect::<Vec<_>>();
         for dependency in dependencies {
             visit(dependency, graph, visiting, visited, out);
         }
@@ -204,8 +207,8 @@ fn reference_components(graph: &[Vec<usize>]) -> Vec<Vec<usize>> {
     }
 
     let mut order = Vec::new();
-    let mut visiting = HashSet::new();
-    let mut visited = HashSet::new();
+    let mut visiting = UnordSet::new();
+    let mut visited = UnordSet::new();
     for component in 0..unordered.len() {
         visit(
             component,

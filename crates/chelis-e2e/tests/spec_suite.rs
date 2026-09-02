@@ -3,7 +3,7 @@
 // Tests organized by language behavior, not by crate. Each test exercises the
 // full pipeline or relevant subset and asserts specific expected values.
 
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 use std::io::Write;
 use std::process::Command;
 
@@ -702,7 +702,8 @@ fn spec_grad_add_is_one() {
     let dx_node = grad_result.grad_nodes[&x];
     let dy_node = grad_result.grad_nodes[&y];
 
-    let inputs: HashMap<String, f64> = [("x".into(), 3.0), ("y".into(), 7.0)].into_iter().collect();
+    let inputs: UnordMap<String, f64> =
+        [("x".into(), 3.0), ("y".into(), 7.0)].into_iter().collect();
     let vals = eval_scalar(&grad_result.dag, &inputs);
 
     assert!(
@@ -718,10 +719,10 @@ fn spec_grad_add_is_one() {
 
     // Verify by finite differences: f(x+h)-f(x-h) / 2h ~ 1.0
     let h = 1e-5;
-    let f_plus: HashMap<String, f64> = [("x".into(), 3.0 + h), ("y".into(), 7.0)]
+    let f_plus: UnordMap<String, f64> = [("x".into(), 3.0 + h), ("y".into(), 7.0)]
         .into_iter()
         .collect();
-    let f_minus: HashMap<String, f64> = [("x".into(), 3.0 - h), ("y".into(), 7.0)]
+    let f_minus: UnordMap<String, f64> = [("x".into(), 3.0 - h), ("y".into(), 7.0)]
         .into_iter()
         .collect();
     let v_plus = eval_scalar(&dag, &f_plus);
@@ -754,7 +755,8 @@ fn spec_grad_mul_is_cross() {
 
     let grad_result = grad_dag(&dag, out, &[x, y]).expect("grad_dag failed");
 
-    let inputs: HashMap<String, f64> = [("x".into(), 3.0), ("y".into(), 5.0)].into_iter().collect();
+    let inputs: UnordMap<String, f64> =
+        [("x".into(), 3.0), ("y".into(), 5.0)].into_iter().collect();
     let vals = eval_scalar(&grad_result.dag, &inputs);
 
     let dx = vals[&grad_result.grad_nodes[&x]];
@@ -770,10 +772,10 @@ fn spec_grad_mul_is_cross() {
 
     // Finite difference check for df/dx.
     let h = 1e-5;
-    let f_p: HashMap<String, f64> = [("x".into(), 3.0 + h), ("y".into(), 5.0)]
+    let f_p: UnordMap<String, f64> = [("x".into(), 3.0 + h), ("y".into(), 5.0)]
         .into_iter()
         .collect();
-    let f_m: HashMap<String, f64> = [("x".into(), 3.0 - h), ("y".into(), 5.0)]
+    let f_m: UnordMap<String, f64> = [("x".into(), 3.0 - h), ("y".into(), 5.0)]
         .into_iter()
         .collect();
     let v_p = eval_scalar(&dag, &f_p);
@@ -803,7 +805,7 @@ fn spec_grad_composed_chain() {
     let dx_node = grad_result.grad_nodes[&x];
 
     let x_val = 2.0;
-    let inputs: HashMap<String, f64> = [("x".into(), x_val)].into_iter().collect();
+    let inputs: UnordMap<String, f64> = [("x".into(), x_val)].into_iter().collect();
     let vals = eval_scalar(&grad_result.dag, &inputs);
     let analytic = -(-x_val).exp(); // -exp(-x)
     assert!(
@@ -814,8 +816,8 @@ fn spec_grad_composed_chain() {
 
     // Finite differences verification.
     let h = 1e-5;
-    let f_p: HashMap<String, f64> = [("x".into(), x_val + h)].into_iter().collect();
-    let f_m: HashMap<String, f64> = [("x".into(), x_val - h)].into_iter().collect();
+    let f_p: UnordMap<String, f64> = [("x".into(), x_val + h)].into_iter().collect();
+    let f_m: UnordMap<String, f64> = [("x".into(), x_val - h)].into_iter().collect();
     let v_p = eval_scalar(&dag, &f_p);
     let v_m = eval_scalar(&dag, &f_m);
     let fd = (v_p[&out] - v_m[&out]) / (2.0 * h);
@@ -842,7 +844,7 @@ def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features
             1.0, -2.0, 3.0, -4.0, 0.5, 1.5, -2.5, 4.5, -3.0, 2.0, 1.0, -0.5,
         ],
     );
-    let inputs = HashMap::from([
+    let inputs = UnordMap::from([
         ("xs".to_string(), xs.clone()),
         (
             "x".to_string(),
@@ -887,7 +889,7 @@ def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features
 
     let mut expected = Vec::with_capacity(xs.len());
     for example in xs.to_f64_lossy_vec().chunks(4) {
-        let baseline_inputs = HashMap::from([(
+        let baseline_inputs = UnordMap::from([(
             "x".to_string(),
             TensorValue::from_vec(vec![4], example.to_vec()),
         )]);
@@ -1036,7 +1038,7 @@ fn spec_eval_matmul_correct() {
     "#;
     let dag = lower_deep(src);
 
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(
         "a".into(),
         TensorValue::from_vec(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
@@ -1063,7 +1065,7 @@ fn spec_eval_softmax_sums_to_one() {
     "#;
     let dag = lower_deep(src);
 
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(
         "x".into(),
         TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
@@ -1103,7 +1105,7 @@ fn spec_eval_relu_preserves_positive() {
     "#;
     let dag = lower_deep(src);
 
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(
         "x".into(),
         TensorValue::from_vec(vec![5], vec![-1.0, 0.0, 2.0, -3.0, 5.0]),

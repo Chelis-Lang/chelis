@@ -476,7 +476,7 @@ pub(super) fn check_declared_dvars_rigid(
 ) {
     // First resolved dim seen -> the declared dvar that produced it.
     // A second declared dvar resolving to the same dim is a collapse.
-    let mut seen: HashMap<Dim, DimVar> = HashMap::new();
+    let mut seen: Vec<(Dim, DimVar)> = Vec::new();
     for dv in declared_dvars {
         let resolved = subst.apply_dim(&Dim::Var(*dv));
         if let Dim::Lit(n) = resolved {
@@ -497,8 +497,8 @@ pub(super) fn check_declared_dvars_rigid(
         // A declared dim parameter that resolves to itself (still
         // unbound) is the legitimate polymorphic case; it cannot
         // collide with another declared dvar's distinct identity.
-        if let Some(&prev) = seen.get(&resolved) {
-            if prev != *dv {
+        if let Some((_, prev)) = seen.iter().find(|(candidate, _)| candidate == &resolved) {
+            if *prev != *dv {
                 errors.push(CheckError::new(
                     CheckErrorKind::DimensionMismatch,
                     format!(
@@ -517,7 +517,7 @@ pub(super) fn check_declared_dvars_rigid(
                 ));
             }
         } else {
-            seen.insert(resolved, *dv);
+            seen.push((resolved, *dv));
         }
     }
 }

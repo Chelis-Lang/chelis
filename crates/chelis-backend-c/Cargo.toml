@@ -10,6 +10,7 @@ repository.workspace = true
 sleef = []
 
 [dependencies]
+chelis-unord.workspace = true
 chelis-ir = { path = "../chelis-ir" }
 chelis-types = { path = "../chelis-types" }
 chelis-vocab.workspace = true
@@ -25,3 +26,6 @@ pkg-config = "0.3"
 chelis-runtime.workspace = true
 serde_json = "1"
 tempfile = "3"
+
+[lints]
+workspace = true

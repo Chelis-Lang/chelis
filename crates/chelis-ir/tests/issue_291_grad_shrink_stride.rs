@@ -46,7 +46,7 @@ use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtDim, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor, eval_tensor_roots_with_strict};
 use chelis_ir::grad::{AdError, grad_dag_checked};
 use chelis_types::types::Prim;
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 fn vec_n_f32(n: usize) -> TensorType {
     TensorType {
@@ -135,7 +135,7 @@ fn issue_291_grad_through_stride_is_exact_scatter() {
     let (dag, x, out) = build_stride_sum_1d(4, 2);
     let result = grad_dag_checked(&dag, out, &[x]).expect("grad must construct (issue #291)");
     let grad_x = result.grad_nodes[&x];
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(
         "x".into(),
         TensorValue::from_vec(vec![4], vec![10.0, 20.0, 30.0, 40.0]),
@@ -181,7 +181,7 @@ fn issue_291_grad_stride_routes_nonuniform_cotangent() {
     );
     let result = grad_dag_checked(&dag, out, &[x]).expect("grad must construct");
     let grad_x = result.grad_nodes[&x];
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(
         "x".into(),
         TensorValue::from_vec(vec![4], vec![3.0, 99.0, 5.0, 99.0]),
@@ -206,7 +206,7 @@ fn issue_291_grad_stride_non_dividing_step() {
     let (dag, x, out) = build_stride_sum_1d(5, 2);
     let result = grad_dag_checked(&dag, out, &[x]).expect("grad must construct");
     let grad_x = result.grad_nodes[&x];
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(
         "x".into(),
         TensorValue::from_vec(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0]),
@@ -229,7 +229,7 @@ fn issue_291_grad_stride_step_three() {
     let (dag, x, out) = build_stride_sum_1d(4, 3);
     let result = grad_dag_checked(&dag, out, &[x]).expect("grad must construct");
     let grad_x = result.grad_nodes[&x];
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(
         "x".into(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
@@ -277,7 +277,7 @@ fn issue_291_grad_stride_two_axes() {
     );
     let result = grad_dag_checked(&dag, out, &[x]).expect("multi-axis stride grad must construct");
     let grad_x = result.grad_nodes[&x];
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(
         "x".into(),
         TensorValue::from_vec(vec![4, 4], (0..16).map(|v| v as f64).collect()),
@@ -327,7 +327,7 @@ fn issue_291_grad_stride_mixed_identity_axis() {
     );
     let result = grad_dag_checked(&dag, out, &[x]).expect("mixed-step stride grad must construct");
     let grad_x = result.grad_nodes[&x];
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(
         "x".into(),
         TensorValue::from_vec(vec![3, 4], (0..12).map(|v| v as f64).collect()),
@@ -372,7 +372,7 @@ fn issue_291_grad_stride_matches_finite_difference() {
     let grad_x = result.grad_nodes[&x];
 
     let base = TensorValue::from_vec(vec![4], vec![0.7, -1.3, 2.1, 0.4]);
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert("x".into(), base.clone());
     let analytic = eval_tensor(&result.dag, &inputs).expect("analytic eval")[&grad_x]
         .to_f64_lossy_vec()
@@ -387,9 +387,9 @@ fn issue_291_grad_stride_matches_finite_difference() {
         minus_data[j] -= h;
         let plus = TensorValue::from_vec(base.shape.clone(), plus_data);
         let minus = TensorValue::from_vec(base.shape.clone(), minus_data);
-        let mut ip = HashMap::new();
+        let mut ip = UnordMap::new();
         ip.insert("x".into(), plus);
-        let mut im = HashMap::new();
+        let mut im = UnordMap::new();
         im.insert("x".into(), minus);
         let fp = eval_tensor(&dag, &ip).expect("plus eval")[&out].to_f64_lossy_vec()[0];
         let fm = eval_tensor(&dag, &im).expect("minus eval")[&out].to_f64_lossy_vec()[0];
@@ -414,7 +414,7 @@ fn issue_291_grad_stride_step_exceeds_axis() {
     let (dag, x, out) = build_stride_sum_1d(2, 5);
     let result = grad_dag_checked(&dag, out, &[x]).expect("grad must construct");
     let grad_x = result.grad_nodes[&x];
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert("x".into(), TensorValue::from_vec(vec![2], vec![10.0, 20.0]));
     let vals = eval_tensor(&result.dag, &inputs).expect("grad eval");
     assert_close(
@@ -434,7 +434,7 @@ fn issue_291_grad_stride_step_equals_axis() {
     let (dag, x, out) = build_stride_sum_1d(4, 4);
     let result = grad_dag_checked(&dag, out, &[x]).expect("grad must construct");
     let grad_x = result.grad_nodes[&x];
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(
         "x".into(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
@@ -492,7 +492,7 @@ fn issue_291_grad_stride_supports_higher_order_ad() {
     let second = grad_dag_checked(&g2dag, sum_grad, &[x])
         .expect("second grad must construct (higher-order AD through stride adjoint)");
     let grad2_x = second.grad_nodes[&x];
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(
         "x".into(),
         TensorValue::from_vec(vec![4], vec![3.0, 99.0, 5.0, 99.0]),
@@ -542,7 +542,7 @@ fn issue_291_grad_stride_symbolic_axis_is_runtime_upsample() {
     );
     let grad = grad_dag_checked(&dag, out, &[x]).expect("runtime strided adjoint constructs");
     let grad_x = grad.grad_nodes[&x];
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(
         "x".to_string(),
         TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]),
@@ -588,7 +588,7 @@ fn issue_291_grad_through_shrink_is_exact_pad() {
     let result =
         grad_dag_checked(&dag, out, &[x]).expect("shrink grad must construct (issue #291)");
     let grad_x = result.grad_nodes[&x];
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(
         "x".into(),
         TensorValue::from_vec(vec![4], vec![10.0, 20.0, 30.0, 40.0]),
@@ -632,7 +632,7 @@ fn issue_291_grad_shrink_interior_nonuniform() {
     );
     let result = grad_dag_checked(&dag, out, &[x]).expect("shrink grad must construct");
     let grad_x = result.grad_nodes[&x];
-    let mut inputs = HashMap::new();
+    let mut inputs = UnordMap::new();
     inputs.insert(
         "x".into(),
         TensorValue::from_vec(vec![4], vec![99.0, 4.0, 6.0, 99.0]),

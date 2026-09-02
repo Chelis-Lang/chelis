@@ -8663,7 +8663,7 @@ fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
     // Every dim that appears in a `(int64_t[]){ <name>` literal must also
     // appear as an `int64_t <name> = inputs[...]->shape[<axis>];`
     // declaration. Walk both sets and assert containment.
-    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut used: chelis_unord::UnordSet<String> = chelis_unord::UnordSet::new();
     for line in source.lines() {
         if let Some(after) = line.split("(int64_t[]){ ").nth(1) {
             let name: String = after
@@ -8675,7 +8675,7 @@ fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
             }
         }
     }
-    let mut declared: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut declared: chelis_unord::UnordSet<String> = chelis_unord::UnordSet::new();
     for line in source.lines() {
         if let Some(idx) = line.find("int64_t ")
             && let Some(rest) = line.get(idx + 8..)
@@ -8690,7 +8690,7 @@ fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
             }
         }
     }
-    for name in &used {
+    for name in used.to_sorted() {
         assert!(
             declared.contains(name),
             "dim `{name}` used in `(int64_t[]){{ {name} }}` but never declared as \

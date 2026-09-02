@@ -22,7 +22,7 @@
 //! invariants. A residual irreducible `match` falls to Tier C.
 
 use chelis_deep::DeepTag;
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 
 use chelis_deep::ast::{Atom, Expr};
 
@@ -167,11 +167,11 @@ pub fn lower_obligation(
     // The set of producer-param names that are opaque inputs, mapped to
     // their (binder-name -> flattened-prefix) so the body lowering
     // resolves `access(var p) field` to `Var("p.field")`.
-    let mut opaque_params: HashMap<String, OpaqueInvariant> = HashMap::new();
+    let mut opaque_params: UnordMap<String, OpaqueInvariant> = UnordMap::new();
     // Substitution: a scalar param maps to a free solver var; an opaque
     // input param is left as itself (its field projections lower directly
     // to flattened vars, so it must NOT be substituted by a single var).
-    let mut subst: HashMap<String, Expr> = HashMap::new();
+    let mut subst: UnordMap<String, Expr> = UnordMap::new();
 
     for (pname, (vname, pty)) in prod.params.iter().zip(producer_params.iter()) {
         match pty {
@@ -228,7 +228,7 @@ pub fn lower_obligation(
 /// flattening, so the body and the assumption share one variable space.
 fn rewrite_opaque_field_access(
     expr: &Expr,
-    opaque_params: &HashMap<String, OpaqueInvariant>,
+    opaque_params: &UnordMap<String, OpaqueInvariant>,
 ) -> Expr {
     // `(access (var p) field)` -> `(var "p.field")` when p is opaque.
     if tag(expr) == Some(DeepTag::Access) {
@@ -288,8 +288,8 @@ fn make_var(name: &str) -> Expr {
 #[allow(clippy::too_many_arguments)]
 fn lower_obligation_body(
     result_expr: &Expr,
-    subst: &HashMap<String, Expr>,
-    opaque_params: &HashMap<String, OpaqueInvariant>,
+    subst: &UnordMap<String, Expr>,
+    opaque_params: &UnordMap<String, OpaqueInvariant>,
     inv: &OpaqueInvariant,
     ob: &ObligationProperty,
     exprs: &[Expr],
@@ -402,13 +402,13 @@ fn predicate_body(fn_node: &Expr) -> Option<&Expr> {
 }
 
 /// Extract the `(record C (kv {} field expr) ...)` field map.
-fn record_fields(expr: &Expr) -> Option<HashMap<String, Expr>> {
+fn record_fields(expr: &Expr) -> Option<UnordMap<String, Expr>> {
     if tag(expr) != Some(DeepTag::Record) {
         return None;
     }
     let kids = children(expr);
     // kids[0] is the constructor name; the rest are kv nodes.
-    let mut map = HashMap::new();
+    let mut map = UnordMap::new();
     for kv in &kids[1..] {
         if tag(kv) == Some(DeepTag::Kv) {
             let kkids = children(kv);
@@ -429,7 +429,7 @@ fn record_fields(expr: &Expr) -> Option<HashMap<String, Expr>> {
 /// producer/helper calls, and beta-reduce `(access (record ...) field)`.
 fn reduce(
     expr: &Expr,
-    subst: &HashMap<String, Expr>,
+    subst: &UnordMap<String, Expr>,
     consts: &crate::opaque::ConstEnv,
     exprs: &[Expr],
     depth: usize,
@@ -483,7 +483,7 @@ fn reduce(
             && let Some(prod) = lookup_producer(exprs, name)
             && prod.params.len() == reduced_args.len()
         {
-            let inner_subst: HashMap<String, Expr> =
+            let inner_subst: UnordMap<String, Expr> =
                 prod.params.iter().cloned().zip(reduced_args).collect();
             return reduce(prod.body, &inner_subst, consts, exprs, depth + 1);
         }
@@ -640,7 +640,7 @@ fn rebuild_app(callee: &str, args: Vec<Expr>) -> Expr {
 fn lower_pred_bool(
     expr: &Expr,
     binder: &str,
-    fields: &HashMap<String, Expr>,
+    fields: &UnordMap<String, Expr>,
     consts: &crate::opaque::ConstEnv,
     exprs: &[Expr],
     binder_fields: &[(String, crate::opaque::FieldType)],
@@ -736,7 +736,7 @@ fn pred_arg_is_int_sorted(
 fn lower_pred_arith(
     expr: &Expr,
     binder: &str,
-    fields: &HashMap<String, Expr>,
+    fields: &UnordMap<String, Expr>,
     consts: &crate::opaque::ConstEnv,
     exprs: &[Expr],
 ) -> Option<SmtExpr> {

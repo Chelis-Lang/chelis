@@ -63,7 +63,8 @@
 //! It requires one opaque identity on both type products.
 //! It reruns effect and linearity checks before it creates a library proof.
 
-use std::collections::{HashMap, HashSet};
+use chelis_unord::UnordSet;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chelis_deep::ast as deep;
@@ -130,11 +131,11 @@ pub(crate) struct TypeEnvInner {
     /// IR declared-type lookup: library def name → declared type
     /// expression. Used by the validate pass (which checks shape
     /// invariants against declared types).
-    pub(crate) ir_types: HashMap<String, deep::Expr>,
+    pub(crate) ir_types: BTreeMap<String, deep::Expr>,
     /// Set of names declared by the library — used by the new-code
     /// cycle / unbound suppression logic to distinguish library
     /// references from new-code references.
-    pub(crate) library_def_names: HashSet<String>,
+    pub(crate) library_def_names: UnordSet<String>,
     /// Checker-enforced opacity metadata (RFC D-CHECK): per-module
     /// export sets, binding -> module attribution, and producer text,
     /// accumulated across the library and new-code phases. Defaults
@@ -161,8 +162,8 @@ impl TypeEnv {
                 var_gen,
                 subst: Subst::new(),
                 adt_reg,
-                ir_types: HashMap::new(),
-                library_def_names: HashSet::new(),
+                ir_types: BTreeMap::new(),
+                library_def_names: UnordSet::new(),
                 opacity: crate::opacity::OpacityModuleMeta::default(),
             }),
             library_proof_id: None,

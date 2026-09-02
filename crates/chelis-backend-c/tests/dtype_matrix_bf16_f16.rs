@@ -20,7 +20,7 @@ use chelis_backend_c::codegen;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::eval_tensor;
 use chelis_types::types::Prim;
-use std::collections::HashMap;
+use chelis_unord::UnordMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -415,7 +415,7 @@ int main(void) {{
 /// trailing node has a scalar `data` slot, which holds true for the
 /// reduction-rooted tests below).
 fn eval_scalar(dag: &Dag) -> f64 {
-    let inputs = HashMap::new();
+    let inputs = UnordMap::new();
     let vals = eval_tensor(dag, &inputs).unwrap();
     let last_id = chelis_ir::dag::NodeId(dag.len() - 1);
     vals[&last_id].element_f64_lossy(0)

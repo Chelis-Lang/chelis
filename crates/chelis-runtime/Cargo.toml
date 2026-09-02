@@ -11,9 +11,10 @@ crate-type = ["staticlib", "rlib"]
 [features]
 # chelis#1286 Phase 0: private, test-only allocation telemetry. Normal
 # runtime artifacts do not enable this feature and retain the published ABI.
-ownership-ledger = []
+ownership-ledger = ["dep:chelis-unord"]
 
 [dependencies]
+chelis-unord = { workspace = true, optional = true }
 chelis-vocab.workspace = true
 # chelis#732 Phase 2: exact f16/bf16 widening and correctly rounded
 # narrowing for the shortest-round-trip formatter and the per-dtype
@@ -30,3 +31,6 @@ num-bigint = "0.4"
 # keeps zero checker dependencies; this edge exists only for
 # `tests/format_shortest_matches_reference.rs`.
 chelis-types = { workspace = true }
+
+[lints]
+workspace = true

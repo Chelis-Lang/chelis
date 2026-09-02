@@ -8,6 +8,9 @@ repository.workspace = true
 
 # These lints protect the ABI vocabulary from lossy numeric operations.
 # The workspace does not enable these lint classes.
+[lints.rust]
+unexpected_cfgs = "deny"
+
 [lints.clippy]
 cast_possible_truncation = "deny"
 cast_possible_wrap = "deny"

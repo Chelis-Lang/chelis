@@ -105,12 +105,20 @@ version = "0.18.6"
 dependencies = [
  "chelis-deep",
  "chelis-pred",
+ "chelis-unord",
  "chelis-vocab",
  "half",
  "serde",
  "sha2",
  "stacker",
  "thiserror",
+]
+
+[[package]]
+name = "chelis-unord"
+version = "0.18.6"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

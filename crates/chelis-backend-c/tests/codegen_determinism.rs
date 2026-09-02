@@ -2,10 +2,11 @@
 //!
 //! Per `spec/upstream-bugs/host-emit-hashmap-iteration-nondeterminism.md`,
 //! `chelis_backend_c::emit::CEmitter::emit_input_shape_preamble` previously
-//! iterated a `HashMap<String, TensorType>` of input parameters; HashMap
-//! iteration order is non-deterministic across process runs (and across
-//! compilations within a single run, since each emitter call constructs a
-//! fresh HashMap with its own random seed under stdlib's RandomState).
+//! iterated a `HashMap<String, TensorType>` of input parameters, whose
+//! iteration order was non-deterministic across process runs, and across
+//! compilations within a single run because each emitter call constructed a
+//! freshly seeded map. That store is a `UnordMap` today and its order is the
+//! key's, but the regression this file locks is the original one.
 //!
 //! The user-visible symptom was that the input-validation block (NULL
 //! checks, ndim checks, fixed-axis-size checks, and symbolic-dim binding
@@ -16,9 +17,10 @@
 //! The two assertions below lock the invariant:
 //!   1. **Cross-process determinism.** Building the same DAG in many fresh
 //!      `CEmitter` instances within one test run produces byte-identical C.
-//!      Stdlib `RandomState` uses a per-HashMap seed, so multiple maps
-//!      within one process exercise the same non-determinism that a fresh
-//!      `chelis build` would.
+//!      A hash map seeded per instance, so multiple maps within one process
+//!      exercised the same non-determinism a fresh `chelis build` would have.
+//!      The assertion still holds against an ordered store; it would now fail
+//!      only if something reintroduced an order that is not the key's.
 //!   2. **Lex-sorted preamble.** The input-validation block lists labels
 //!      in lex order — a stable, observer-visible ordering.
 
@@ -34,7 +36,7 @@ fn vec_f32(n: usize) -> TensorType {
 }
 
 /// A DAG with multiple distinct Load names. The number of inputs is large
-/// enough that HashMap-iteration non-determinism would almost certainly
+/// enough that UnordMap-iteration non-determinism would almost certainly
 /// surface across repeated emissions if it were still present.
 fn build_multi_input_dag() -> Dag {
     let mut dag = Dag::new();
@@ -66,7 +68,7 @@ fn build_multi_input_dag() -> Dag {
 fn codegen_is_byte_deterministic_across_repeated_emissions() {
     let dag = build_multi_input_dag();
     let baseline = codegen(&dag, "multi_input").unwrap().c_source;
-    // Run many times; every emission constructs fresh HashMaps internally,
+    // Run many times; every emission constructs fresh collections internally,
     // so any residual hash-iteration non-determinism would show up here.
     for i in 0..32 {
         let again = codegen(&dag, "multi_input").unwrap().c_source;

@@ -11,7 +11,7 @@
 //! BLOCKER test has been inverted to verify the spec-compliant
 //! rejection / build success per the new contract.
 //!
-//! The 2 bounded-gap findings (4: WS-A6 fresh-HashMap-per-param;
+//! The 2 bounded-gap findings (4: WS-A6 fresh-UnordMap-per-param;
 //! 5: multi-letter dim names treated as concrete) remain open and
 //! are marked `#[ignore = "WS-A9 follow-up"]` so a future agent can
 //! pick them up without the regression-flip noise.
@@ -55,7 +55,7 @@
 //!    leakage. The same shape with `add` (in place of `matmul`)
 //!    works. The same logical sig written as sig + bare-def works.
 //!    This is the WS-A6 gap documented in the WS-C v3 commit body
-//!    under "fresh-HashMap-per-param".
+//!    under "fresh-UnordMap-per-param".
 //!
 //! 5. multi_letter_dim_in_sig_rejects_concrete_caller:
 //!    SPEC-DIVERGENCE. A sig `tensor[batch, p]` rejects a call with
@@ -598,13 +598,13 @@ fn finding_3_scalar_form_correctly_rejects_integer() {
 }
 
 // =================================================================
-// FINDING 4: WS-A6 fresh-HashMap-per-param surfaces in a def with
+// FINDING 4: WS-A6 fresh-UnordMap-per-param surfaces in a def with
 // explicit `[..p]` quantifier sharing `p` across params used in
 // matmul. Same shape with `add` works.
 // =================================================================
 
 #[test]
-#[ignore = "WS-A9 follow-up: WS-A6 fresh-HashMap-per-param bug; out of WS-A8 scope"]
+#[ignore = "WS-A9 follow-up: WS-A6 fresh-UnordMap-per-param bug; out of WS-A8 scope"]
 fn finding_4_wsa6_fresh_hashmap_breaks_matmul_def_quantifier() {
     // Adversarial reproducer: legitimate f32 inputs, polymorphic
     // wrapper, fails with `matmul requires matching precisions, got
@@ -621,7 +621,7 @@ def call(x: &tensor[3, 4, f32], y: &tensor[4, 5, f32]) -> tensor[3, 5, f32] = mm
     let kinds = error_kinds(&json);
     assert!(
         kinds.iter().any(|k| k == "PrecisionMismatch"),
-        "finding-4 regression-flip: WS-A6 fresh-HashMap-per-param bug appears fixed. Got kinds {kinds:?}"
+        "finding-4 regression-flip: WS-A6 fresh-UnordMap-per-param bug appears fixed. Got kinds {kinds:?}"
     );
     let messages = error_messages(&json);
     assert!(
