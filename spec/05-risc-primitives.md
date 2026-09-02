@@ -1356,6 +1356,17 @@ the enclosing handler is rejected by the ordinary effect rules; neither an
 unreachable definition nor another definition's effects change this call's
 legality.
 
+> **[05-HOST-4]** `list_dir(path: string) -> List[string]` returns one element
+> per directory entry, each the entry's own name rather than a path, and
+> retains its declared `IO` effect. The current-directory and parent-directory
+> links are not entries. The result is ordered by the byte sequence of the
+> entry name the host reports, which for a name that is valid UTF-8 is
+> lexicographically by Unicode scalar value. That order is fixed on the host's
+> names before any conversion to `string`, so it does not depend on how a name
+> that is not valid UTF-8 converts. A directory with no entries yields the
+> empty `List`. The operation is outside AD: it has no adjoint, no cotangent,
+> and no accumulator.
+
 ### 3.6.1 The `test_*` assertion family
 
 The `Test`-effect assertion builtins are exactly `test_assert`,
