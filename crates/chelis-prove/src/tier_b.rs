@@ -389,6 +389,13 @@ pub(crate) fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> Ti
     // 2. Assert preconditions. cvc5's `assert_formula` requires a Bool-sorted
     //    term; asserting a non-Bool aborts ("Expected term with sort Bool"),
     //    so a precondition that lowers to a non-Bool sort routes to Tier C.
+    //
+    //    Each asserted term is retained so step 4 can ask the solver to
+    //    evaluate it under the solver's OWN returned model (chelis#1224). An
+    //    assumption that never reached the assertion stack is otherwise
+    //    invisible: the model simply comes back unconstrained by it.
+    let mut precondition_terms: Vec<cvc5_rs::Term> =
+        Vec::with_capacity(property.preconditions.len());
     for pre in &property.preconditions {
         let term = match lower_to_cvc5(&tm, pre, &vars, &sorts) {
             Ok((t, SmtSort::Bool)) => t,
@@ -399,7 +406,8 @@ pub(crate) fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> Ti
             }
             Err(reason) => return TierBResult::Error(reason),
         };
-        solver.assert_formula(term);
+        solver.assert_formula(term.clone());
+        precondition_terms.push(term);
     }
 
     // 3. Assert negation of postcondition. cvc5's NOT requires a Bool operand;
@@ -429,11 +437,446 @@ pub(crate) fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> Ti
             let val = solver.get_value(var.clone());
             bindings.insert(name.clone(), Value::String(val.to_string()));
         }
+        // chelis#1224: a returned model MUST satisfy every stated assumption.
+        // A model that violates one is not a counterexample to this property,
+        // it is evidence that the query the solver answered was not the query
+        // we built. Report that as a typed error so the disproof is never
+        // laundered into a `Failed` verdict.
+        if let Err(reason) = validate_model_satisfies_preconditions(
+            property,
+            &bindings,
+            &solver,
+            &precondition_terms,
+        ) {
+            return TierBResult::Error(reason);
+        }
         TierBResult::Disproved(Value::Object(bindings))
     } else {
         // Unknown or timeout
         TierBResult::Unknown
     }
+}
+
+/// Reject a `sat` model that does not satisfy the property's own assumptions
+/// (chelis#1224).
+///
+/// The observed failure was a model with `d = -4.0` returned for a property
+/// whose `where` clause states `d > 0.5`. Such a model is a sound
+/// counterexample to the goal *without* that assumption, so reporting it as a
+/// disproof of the stated property is a wrong answer, not a weak one.
+///
+/// Two checks run, and both must pass:
+///
+/// 1. **Solver-side.** Ask cvc5 to evaluate each retained precondition term
+///    under its own model. This is exact and needs no value parsing, but it
+///    shares whatever state produced the model.
+/// 2. **Independent.** Parse the model back into exact rationals and
+///    re-evaluate the preconditions without consulting the solver, which is
+///    the point: if the solver's own state is the thing that went wrong, only
+///    an independent evaluation can see it.
+///
+/// Leg 2 evaluates in `BigRational`, not `f64`. cvc5 decides in exact rational
+/// arithmetic and does not model IEEE-754 rounding (see the `SOUNDNESS:` /
+/// `KNOWN LIMITATION` note in `lower_to_cvc5`'s `SmtExpr::RealLit` arm), so an
+/// `f64` re-evaluation disagrees with the solver
+/// wherever a witness is not representable: cvc5 answers `x > 1e17` with
+/// `100000000000000001.0`, which rounds to exactly `1e17` in `f64` and reads as
+/// violating its own bound. Every strict bound past 2^53 would lose its
+/// disproof that way.
+///
+/// Leg 2 is also **one-sided**: it rejects only when it has exactly decided a
+/// precondition to be false, and abstains whenever it cannot decide one
+/// (a quantifier, an uninterpreted application, a value form it cannot parse,
+/// division by zero). A guard that cannot decide must not discard a
+/// counterexample, because the cost of a false rejection is a silently weaker
+/// prover: `TierBResult::Error` degrades the disproof to Tier C fuzzing under
+/// `auto`, and to `Unsupported` under `smt-only`.
+///
+/// The consequence worth naming, since abstention is silent by design: a
+/// `sqrt`-guarded property gets no precondition validation in either direction,
+/// and cvc5's SQRT is underspecified at a negative argument, so a model whose
+/// argument is negative can satisfy a `sqrt` lower bound vacuously and surface
+/// as a counterexample to a property that is true. That is chelis#1475, and it
+/// belongs at the lowering, which introduces the partiality, not here. Widening
+/// this guard to reject on any non-`true` would appear to cover it while
+/// reintroducing the false-rejection class that made the first version of this
+/// check unsound in the rejecting direction.
+#[cfg(feature = "smt")]
+fn validate_model_satisfies_preconditions(
+    property: &SmtProperty,
+    bindings: &serde_json::Map<String, Value>,
+    solver: &cvc5_rs::Solver,
+    precondition_terms: &[cvc5_rs::Term],
+) -> Result<(), String> {
+    // Leg 1: the solver's own evaluation of each assumption under its model.
+    // A term cvc5 cannot fully evaluate comes back as a residual expression
+    // rather than `true`/`false`; that is not a decided violation, so only an
+    // explicit `false` rejects here.
+    for (index, term) in precondition_terms.iter().enumerate() {
+        if solver.get_value(term.clone()).to_string().trim() == "false" {
+            return Err(format!(
+                "cvc5 returned a model that does not satisfy precondition {index}: the solver \
+                 evaluates that assumption to `false` under its own model, so the model is not a \
+                 counterexample to the stated property (chelis#1224); routing to Tier C"
+            ));
+        }
+    }
+
+    // Leg 2: independent re-evaluation, without consulting the solver.
+    validate_model_independently(property, bindings)
+}
+
+/// The solver-free half of [`validate_model_satisfies_preconditions`].
+///
+/// Split out so the check that matters most can be unit-tested against a
+/// planted model without standing up cvc5: if the solver's own state is what
+/// went wrong, this is the leg that catches it.
+///
+/// One-sided by construction: a variable this function cannot read, or a
+/// precondition it cannot decide exactly, yields no verdict rather than a
+/// rejection.
+#[cfg(feature = "smt")]
+fn validate_model_independently(
+    property: &SmtProperty,
+    bindings: &serde_json::Map<String, Value>,
+) -> Result<(), String> {
+    let mut env: std::collections::BTreeMap<String, ExactValue> = std::collections::BTreeMap::new();
+    for (name, sort) in &property.variables {
+        // A variable this function cannot read is simply left out of the
+        // environment. `eval_exact_bool` then abstains on any precondition
+        // that mentions it, while preconditions over the readable variables
+        // are still decided. Returning early here instead would switch the
+        // whole leg off because ONE unrelated variable came back as, say, an
+        // algebraic number, which is routine in the NRA logic this file
+        // selects.
+        let Some(value) = bindings
+            .get(name)
+            .and_then(Value::as_str)
+            .and_then(|raw| parse_smt_model_value(raw, *sort))
+        else {
+            continue;
+        };
+        env.insert(name.clone(), value);
+    }
+    for (index, pre) in property.preconditions.iter().enumerate() {
+        if eval_exact_bool(pre, &env, 0) == Some(false) {
+            return Err(format!(
+                "cvc5 returned a model that exactly violates precondition {index} under \
+                 independent rational re-evaluation, so it is not a counterexample to the stated \
+                 property (chelis#1224); routing to Tier C"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A model value read back exactly. Reals and integers share one exact
+/// rational representation; there is no `f64` anywhere on this path.
+#[cfg(feature = "smt")]
+#[derive(Debug, Clone, PartialEq)]
+enum ExactValue {
+    Num(num_rational::BigRational),
+    Bool(bool),
+}
+
+/// Bound on the nesting this evaluator and the model-value parser will walk.
+///
+/// `solve_property_cvc5` already refuses a property deeper than
+/// `MAX_SMT_EXPR_DEPTH` because an unbounded recursive walk overflows the stack
+/// and aborts the process. These helpers run on solver output rather than on
+/// the checked property, so they carry their own bound rather than relying on
+/// that one.
+#[cfg(feature = "smt")]
+const MAX_MODEL_VALUE_DEPTH: usize = 64;
+
+/// Bound on the raw model-value string this parser will read.
+///
+/// Reading a decimal exactly is quadratic in its digit count, and the guard
+/// runs AFTER `check_sat`, so `tlimit-per` does not bound it: cvc5's budget
+/// covers the solve, not the revalidation. A property built by chained
+/// squaring makes each witness roughly twice as wide as the last, so a few
+/// levels reach tens of thousands of digits and the guard costs more than the
+/// solve it is checking. Past this width leg 2 abstains, which is the same
+/// answer it already gives for a value form it cannot parse.
+#[cfg(feature = "smt")]
+const MAX_MODEL_VALUE_CHARS: usize = 4096;
+
+/// Exactly evaluate a boolean-shaped [`SmtExpr`] under a model.
+///
+/// `None` means "cannot decide exactly", never "false". Connectives use
+/// three-valued (Kleene) semantics so a decided operand can still settle the
+/// result: `false && undecided` is `false`, `true || undecided` is `true`.
+#[cfg(feature = "smt")]
+fn eval_exact_bool(
+    expr: &SmtExpr,
+    env: &std::collections::BTreeMap<String, ExactValue>,
+    depth: usize,
+) -> Option<bool> {
+    if depth > MAX_MODEL_VALUE_DEPTH {
+        return None;
+    }
+    match expr {
+        SmtExpr::BoolLit(value) => Some(*value),
+        SmtExpr::Var(name) => match env.get(name) {
+            Some(ExactValue::Bool(value)) => Some(*value),
+            _ => None,
+        },
+        SmtExpr::Not(inner) => eval_exact_bool(inner, env, depth + 1).map(|value| !value),
+        SmtExpr::Cmp(op, left, right) => {
+            let left = eval_exact_num(left, env, depth + 1)?;
+            let right = eval_exact_num(right, env, depth + 1)?;
+            Some(match op {
+                CmpOp::Lt => left < right,
+                CmpOp::Le => left <= right,
+                CmpOp::Gt => left > right,
+                CmpOp::Ge => left >= right,
+                CmpOp::Eq => left == right,
+                CmpOp::Ne => left != right,
+            })
+        }
+        SmtExpr::Bool(op, operands) => {
+            let evaluated: Vec<Option<bool>> = operands
+                .iter()
+                .map(|operand| eval_exact_bool(operand, env, depth + 1))
+                .collect();
+            match op {
+                BoolOp::And => kleene_and(evaluated.into_iter()),
+                BoolOp::Or => kleene_or(evaluated.into_iter()),
+                BoolOp::Implies => {
+                    // `a => b` is `!a || b`; anything else is not a shape this
+                    // evaluator claims to decide.
+                    let [antecedent, consequent] = evaluated.as_slice() else {
+                        return None;
+                    };
+                    kleene_or([antecedent.map(|value| !value), *consequent].into_iter())
+                }
+            }
+        }
+        SmtExpr::Ite(condition, then_branch, else_branch) => {
+            match eval_exact_bool(condition, env, depth + 1)? {
+                true => eval_exact_bool(then_branch, env, depth + 1),
+                false => eval_exact_bool(else_branch, env, depth + 1),
+            }
+        }
+        // A quantifier or an uninterpreted application is not something this
+        // evaluator decides. Abstain rather than reading it as false.
+        SmtExpr::Forall(_, _)
+        | SmtExpr::Exists(_, _)
+        | SmtExpr::Apply(_, _)
+        | SmtExpr::RealLit(_)
+        | SmtExpr::IntLit(_)
+        | SmtExpr::Arith(_, _, _) => None,
+    }
+}
+
+#[cfg(feature = "smt")]
+fn kleene_and(mut values: impl Iterator<Item = Option<bool>>) -> Option<bool> {
+    let mut undecided = false;
+    let decided_false = values.any(|value| match value {
+        Some(false) => true,
+        Some(true) => false,
+        None => {
+            undecided = true;
+            false
+        }
+    });
+    if decided_false {
+        return Some(false);
+    }
+    if undecided { None } else { Some(true) }
+}
+
+#[cfg(feature = "smt")]
+fn kleene_or(mut values: impl Iterator<Item = Option<bool>>) -> Option<bool> {
+    let mut undecided = false;
+    let decided_true = values.any(|value| match value {
+        Some(true) => true,
+        Some(false) => false,
+        None => {
+            undecided = true;
+            false
+        }
+    });
+    if decided_true {
+        return Some(true);
+    }
+    if undecided { None } else { Some(false) }
+}
+
+/// Exactly evaluate a numeric [`SmtExpr`] under a model.
+///
+/// A `RealLit` is converted the same way the lowering converts it for cvc5
+/// (`BigRational::from_float`), so the two sides reason about the identical
+/// number rather than about the literal's decimal spelling.
+#[cfg(feature = "smt")]
+fn eval_exact_num(
+    expr: &SmtExpr,
+    env: &std::collections::BTreeMap<String, ExactValue>,
+    depth: usize,
+) -> Option<num_rational::BigRational> {
+    use num_rational::BigRational;
+
+    if depth > MAX_MODEL_VALUE_DEPTH {
+        return None;
+    }
+    match expr {
+        SmtExpr::Var(name) => match env.get(name) {
+            Some(ExactValue::Num(value)) => Some(value.clone()),
+            _ => None,
+        },
+        SmtExpr::RealLit(value) => BigRational::from_float(*value),
+        SmtExpr::IntLit(value) => exact_from_decimal(&value.to_string()),
+        SmtExpr::Arith(op, left, right) => {
+            let left = eval_exact_num(left, env, depth + 1)?;
+            if matches!(op, ArithOp::Neg) {
+                return Some(-left);
+            }
+            let right = eval_exact_num(right, env, depth + 1)?;
+            Some(match op {
+                ArithOp::Add => left + right,
+                ArithOp::Sub => left - right,
+                ArithOp::Mul => left * right,
+                ArithOp::Div => {
+                    if right == exact_zero() {
+                        return None;
+                    }
+                    left / right
+                }
+                ArithOp::Neg => unreachable!("handled above"),
+            })
+        }
+        SmtExpr::Ite(condition, then_branch, else_branch) => {
+            match eval_exact_bool(condition, env, depth + 1)? {
+                true => eval_exact_num(then_branch, env, depth + 1),
+                false => eval_exact_num(else_branch, env, depth + 1),
+            }
+        }
+        SmtExpr::BoolLit(_)
+        | SmtExpr::Not(_)
+        | SmtExpr::Cmp(_, _, _)
+        | SmtExpr::Bool(_, _)
+        | SmtExpr::Forall(_, _)
+        | SmtExpr::Exists(_, _)
+        | SmtExpr::Apply(_, _) => None,
+    }
+}
+
+/// Parse one SMT-LIB model value into an exact value.
+///
+/// cvc5 renders model values as SMT-LIB terms rather than plain numerals:
+/// negatives are `(- 4.0)`, exact rationals are `(/ 3.0 2.0)`, and an
+/// irrational witness comes back as `(_ real_algebraic_number <...>)`. Anything
+/// this function does not recognise yields `None`, which makes the caller
+/// abstain rather than reject.
+#[cfg(feature = "smt")]
+fn parse_smt_model_value(raw: &str, sort: SmtSort) -> Option<ExactValue> {
+    match sort {
+        SmtSort::Bool => match raw.trim() {
+            "true" => Some(ExactValue::Bool(true)),
+            "false" => Some(ExactValue::Bool(false)),
+            _ => None,
+        },
+        SmtSort::Int | SmtSort::Real => parse_smt_rational(raw, 0).map(ExactValue::Num),
+    }
+}
+
+/// Evaluate an SMT-LIB numeric model term to an exact rational.
+///
+/// Decimals are read digit-wise rather than through `f64`, so a value cvc5
+/// chose because it is the least integer above a bound does not collapse onto
+/// that bound on the way back in.
+#[cfg(feature = "smt")]
+fn parse_smt_rational(raw: &str, depth: usize) -> Option<num_rational::BigRational> {
+    if depth > MAX_MODEL_VALUE_DEPTH || raw.len() > MAX_MODEL_VALUE_CHARS {
+        return None;
+    }
+    let text = raw.trim();
+    if let Some(inner) = text.strip_prefix('(').and_then(|t| t.strip_suffix(')')) {
+        let inner = inner.trim();
+        if let Some(rest) = inner.strip_prefix("- ") {
+            // Unary negation only. A binary `(- a b)` has a second top-level
+            // operand and is not a shape this parser claims.
+            if split_smt_operands(rest.trim()).is_some() {
+                return None;
+            }
+            return Some(-parse_smt_rational(rest, depth + 1)?);
+        }
+        if let Some(rest) = inner.strip_prefix("/ ") {
+            let (numerator, denominator) = split_smt_operands(rest.trim())?;
+            let denominator = parse_smt_rational(&denominator, depth + 1)?;
+            if denominator == exact_zero() {
+                return None;
+            }
+            return Some(parse_smt_rational(&numerator, depth + 1)? / denominator);
+        }
+        return None;
+    }
+    if text.is_empty() {
+        return None;
+    }
+    exact_from_decimal(text)
+}
+
+/// Exact zero, built without a direct `num-bigint` dependency edge.
+#[cfg(feature = "smt")]
+fn exact_zero() -> num_rational::BigRational {
+    use std::str::FromStr;
+    num_rational::BigRational::from_str("0").expect("`0` is a valid rational")
+}
+
+/// Read a bare numeral or decimal exactly, digit-wise.
+///
+/// `"100000000000000001.0"` must come back as that integer, not as the `f64`
+/// it rounds to. Parsing goes through `BigRational`'s `FromStr` over the digit
+/// string and an exact power of ten, so no `f64` is involved at any point.
+#[cfg(feature = "smt")]
+fn exact_from_decimal(text: &str) -> Option<num_rational::BigRational> {
+    use num_rational::BigRational;
+    use std::str::FromStr;
+
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let (integer_part, fraction_part) = match digits.split_once('.') {
+        Some((integer_part, fraction_part)) => (integer_part, fraction_part),
+        None => (digits, ""),
+    };
+    if integer_part.is_empty() && fraction_part.is_empty() {
+        return None;
+    }
+    if !integer_part.bytes().all(|b| b.is_ascii_digit())
+        || !fraction_part.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let combined = format!("{integer_part}{fraction_part}");
+    let numerator = BigRational::from_str(&combined).ok()?;
+    let ten = BigRational::from_str("10").ok()?;
+    let mut denominator = BigRational::from_str("1").ok()?;
+    for _ in 0..fraction_part.len() {
+        denominator *= ten.clone();
+    }
+    let value = numerator / denominator;
+    Some(if negative { -value } else { value })
+}
+
+/// Split `"a b"` into its two top-level operands, respecting nesting.
+#[cfg(feature = "smt")]
+fn split_smt_operands(text: &str) -> Option<(String, String)> {
+    let mut depth = 0usize;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.checked_sub(1)?,
+            ' ' if depth == 0 => {
+                let (left, right) = text.split_at(index);
+                return Some((left.to_string(), right.trim_start().to_string()));
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Build the cvc5 BOUND variables for a quantifier's binder list. cvc5's
@@ -2052,5 +2495,474 @@ mod tests {
             matches!(solve_property(&bound, 5000), TierBResult::Error(_)),
             "a NUL-containing bound-variable name must be a clean Error, not a panic"
         );
+    }
+
+    // ---- chelis#1224: a counterexample must satisfy the stated assumptions ----
+
+    fn exact(text: &str) -> num_rational::BigRational {
+        parse_smt_rational(text, 0).expect("test value parses")
+    }
+
+    /// The property from the observed failure: `d > 0.5, r > g, r < 9.5`.
+    /// Only the assumptions matter here; the postcondition is never consulted
+    /// by the validator.
+    fn quotient_grad_property() -> SmtProperty {
+        let var = |name: &str| Box::new(SmtExpr::Var(name.to_string()));
+        SmtProperty {
+            variables: vec![
+                ("d".to_string(), SmtSort::Real),
+                ("r".to_string(), SmtSort::Real),
+                ("g".to_string(), SmtSort::Real),
+            ],
+            preconditions: vec![
+                SmtExpr::Cmp(CmpOp::Gt, var("d"), Box::new(SmtExpr::RealLit(0.5))),
+                SmtExpr::Cmp(CmpOp::Gt, var("r"), var("g")),
+                SmtExpr::Cmp(CmpOp::Lt, var("r"), Box::new(SmtExpr::RealLit(9.5))),
+            ],
+            postcondition: SmtExpr::BoolLit(true),
+        }
+    }
+
+    fn model(pairs: &[(&str, &str)]) -> serde_json::Map<String, Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), Value::String((*v).to_string())))
+            .collect()
+    }
+
+    #[test]
+    fn model_violating_a_precondition_is_rejected() {
+        // The exact model CI run 31554449486 reported as a counterexample.
+        // `d = -4.0` violates `d > 0.5`, so this is a counterexample to the
+        // UNGUARDED goal and must never be reported as a disproof.
+        let reason = validate_model_independently(
+            &quotient_grad_property(),
+            &model(&[("d", "(- 4.0)"), ("r", "4.0"), ("g", "2.0")]),
+        )
+        .expect_err("a precondition-violating model must be rejected");
+        assert!(
+            reason.contains("exactly violates precondition 0"),
+            "the diagnostic must name which assumption failed: {reason}"
+        );
+    }
+
+    #[test]
+    fn model_satisfying_every_precondition_is_accepted() {
+        // Negative parity: the guard must not reject legitimate counterexamples,
+        // or every disproof would degrade to Tier C. This is the model the
+        // named-`def` polarity probe returns.
+        assert!(
+            validate_model_independently(
+                &quotient_grad_property(),
+                &model(&[("d", "2.0"), ("r", "5.0"), ("g", "1.0")]),
+            )
+            .is_ok(),
+            "a model satisfying every stated assumption is a valid counterexample"
+        );
+    }
+
+    /// The regression that made the first version of this guard unsound in the
+    /// rejecting direction: cvc5 decides in exact rationals, so it answers
+    /// `x > 1e17` with the least integer above the bound. Read back through
+    /// `f64` that value collapses onto the bound and the disproof was thrown
+    /// away. Every strict bound past 2^53 was affected.
+    #[test]
+    fn witnesses_beyond_f64_precision_are_still_accepted() {
+        let above = |bound: f64, witness: &str| {
+            let property = SmtProperty {
+                variables: vec![("x".to_string(), SmtSort::Real)],
+                preconditions: vec![SmtExpr::Cmp(
+                    CmpOp::Gt,
+                    Box::new(SmtExpr::Var("x".to_string())),
+                    Box::new(SmtExpr::RealLit(bound)),
+                )],
+                postcondition: SmtExpr::BoolLit(true),
+            };
+            validate_model_independently(&property, &model(&[("x", witness)]))
+        };
+        assert!(above(1e17, "100000000000000001.0").is_ok(), "2^53 boundary");
+        assert!(above(9.1e15, "9100000000000001.0").is_ok());
+        assert!(
+            above(1e300, "1000000000000000052504760255204420248704468581108159154915854115511802457988908195786371375080447864043704443832883878176942523235360430575644792184786706982848387200926575803737830233794788090059368953234970799945081119038967640880074652742780142494579258788820056842838115669472135067360170731089224008034192946103522494276477283076570639713657624277070295118594349217453200873511175487.0").is_ok(),
+            "1e300 witness"
+        );
+        // A witness that genuinely violates the bound is still rejected, at any
+        // magnitude: the fix must not turn the guard off.
+        assert!(
+            above(1e17, "100000000000000000.0").is_err(),
+            "equal is not >"
+        );
+    }
+
+    #[test]
+    fn integer_witnesses_beyond_i64_are_not_truncated() {
+        let property = SmtProperty {
+            variables: vec![("n".to_string(), SmtSort::Int)],
+            preconditions: vec![SmtExpr::Cmp(
+                CmpOp::Gt,
+                Box::new(SmtExpr::Var("n".to_string())),
+                Box::new(SmtExpr::RealLit(1.6e19)),
+            )],
+            postcondition: SmtExpr::BoolLit(true),
+        };
+        assert!(
+            validate_model_independently(&property, &model(&[("n", "16000000000000000001")]))
+                .is_ok(),
+            "an integer past i64::MAX must not saturate into a false rejection"
+        );
+    }
+
+    #[test]
+    fn an_undecidable_precondition_abstains_rather_than_rejecting() {
+        // A quantifier is not something this evaluator decides. Reading it as
+        // `false` would discard every counterexample of any property whose
+        // assumptions mention one.
+        let property = SmtProperty {
+            variables: vec![("x".to_string(), SmtSort::Real)],
+            preconditions: vec![SmtExpr::Forall(
+                vec![("k".to_string(), SmtSort::Real)],
+                Box::new(SmtExpr::Cmp(
+                    CmpOp::Ge,
+                    Box::new(SmtExpr::Arith(
+                        ArithOp::Mul,
+                        Box::new(SmtExpr::Var("k".to_string())),
+                        Box::new(SmtExpr::Var("k".to_string())),
+                    )),
+                    Box::new(SmtExpr::RealLit(0.0)),
+                )),
+            )],
+            postcondition: SmtExpr::BoolLit(true),
+        };
+        assert!(
+            validate_model_independently(&property, &model(&[("x", "0.0")])).is_ok(),
+            "an undecidable assumption must abstain, not reject"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_model_abstains_rather_than_rejecting() {
+        // Both an absent value and a value form the parser does not recognise
+        // leave the guard with no verdict. cvc5 emits an irrational witness as
+        // `(_ real_algebraic_number <...>)`; that is honestly unusable here,
+        // but discarding the disproof over it would be a false rejection.
+        assert!(
+            validate_model_independently(
+                &quotient_grad_property(),
+                &model(&[("d", "2.0"), ("r", "5.0")]),
+            )
+            .is_ok(),
+            "a model missing a declared variable cannot be revalidated"
+        );
+        assert!(
+            validate_model_independently(
+                &quotient_grad_property(),
+                &model(&[
+                    ("d", "(_ real_algebraic_number <1*x^2 + (-2), (5/4, 3/2)>)"),
+                    ("r", "5.0"),
+                    ("g", "1.0"),
+                ]),
+            )
+            .is_ok(),
+            "an algebraic-number witness cannot be revalidated"
+        );
+    }
+
+    #[test]
+    fn kleene_connectives_settle_on_a_decided_operand() {
+        // `false && undecided` is false, so a decided violation inside a
+        // conjunction still rejects; `true || undecided` is true.
+        let undecidable = SmtExpr::Apply("mystery".to_string(), vec![]);
+        let property = SmtProperty {
+            variables: vec![("x".to_string(), SmtSort::Real)],
+            preconditions: vec![SmtExpr::Bool(
+                BoolOp::And,
+                vec![
+                    SmtExpr::Cmp(
+                        CmpOp::Gt,
+                        Box::new(SmtExpr::Var("x".to_string())),
+                        Box::new(SmtExpr::RealLit(10.0)),
+                    ),
+                    undecidable.clone(),
+                ],
+            )],
+            postcondition: SmtExpr::BoolLit(true),
+        };
+        assert!(
+            validate_model_independently(&property, &model(&[("x", "0.0")])).is_err(),
+            "a decided-false conjunct settles the conjunction"
+        );
+        let disjunction = SmtProperty {
+            preconditions: vec![SmtExpr::Bool(
+                BoolOp::Or,
+                vec![
+                    SmtExpr::Cmp(
+                        CmpOp::Lt,
+                        Box::new(SmtExpr::Var("x".to_string())),
+                        Box::new(SmtExpr::RealLit(10.0)),
+                    ),
+                    undecidable,
+                ],
+            )],
+            ..property
+        };
+        assert!(
+            validate_model_independently(&disjunction, &model(&[("x", "0.0")])).is_ok(),
+            "a decided-true disjunct settles the disjunction"
+        );
+    }
+
+    #[test]
+    fn smt_model_values_parse_exactly() {
+        assert_eq!(parse_smt_rational("4.0", 0), Some(exact("4")));
+        assert_eq!(parse_smt_rational("(- 4.0)", 0), Some(-exact("4")));
+        assert_eq!(
+            parse_smt_rational("(/ 3.0 2.0)", 0),
+            Some(exact("3") / exact("2"))
+        );
+        assert_eq!(
+            parse_smt_rational("(- (/ 3.0 2.0))", 0),
+            Some(-(exact("3") / exact("2")))
+        );
+        assert_eq!(
+            parse_smt_rational("(/ (- 3.0) 2.0)", 0),
+            Some(-(exact("3") / exact("2")))
+        );
+        // Exactness past f64: this must NOT equal 1e17.
+        assert_ne!(
+            parse_smt_rational("100000000000000001.0", 0),
+            parse_smt_rational("100000000000000000.0", 0),
+            "a decimal must not round through f64"
+        );
+        // Fail closed on division by zero, binary minus, and unrecognised forms.
+        assert_eq!(parse_smt_rational("(/ 1.0 0.0)", 0), None);
+        assert_eq!(
+            parse_smt_rational("(- 1 2)", 0),
+            None,
+            "binary minus is not unary negation"
+        );
+        assert_eq!(parse_smt_rational("(_ real_algebraic_number <x>)", 0), None);
+        assert_eq!(parse_smt_rational("(- )", 0), None);
+        assert_eq!(parse_smt_rational("", 0), None);
+        assert_eq!(
+            parse_smt_rational("1e5", 0),
+            None,
+            "exponent notation is not claimed"
+        );
+        assert_eq!(parse_smt_rational("0x10", 0), None);
+    }
+
+    #[test]
+    fn deeply_nested_model_values_are_bounded_not_a_stack_overflow() {
+        // The value comes from the solver rather than from the checked
+        // property, so it carries its own depth bound: an unbounded walk here
+        // would abort the process the way `property_exceeds_smt_depth` exists
+        // to prevent.
+        let deep = format!(
+            "{}1.0{}",
+            "(- ".repeat(MAX_MODEL_VALUE_DEPTH + 10),
+            ")".repeat(MAX_MODEL_VALUE_DEPTH + 10)
+        );
+        assert_eq!(
+            parse_smt_rational(&deep, 0),
+            None,
+            "past the bound, abstain"
+        );
+        let shallow = format!("{}1.0{}", "(- ".repeat(4), ")".repeat(4));
+        assert_eq!(parse_smt_rational(&shallow, 0), Some(exact("1")));
+    }
+
+    #[test]
+    fn parsed_model_values_carry_their_declared_sort() {
+        assert_eq!(
+            parse_smt_model_value("(- 4.0)", SmtSort::Real),
+            Some(ExactValue::Num(-exact("4")))
+        );
+        assert_eq!(
+            parse_smt_model_value("7", SmtSort::Int),
+            Some(ExactValue::Num(exact("7")))
+        );
+        assert_eq!(
+            parse_smt_model_value("true", SmtSort::Bool),
+            Some(ExactValue::Bool(true))
+        );
+        assert_eq!(parse_smt_model_value("4.0", SmtSort::Bool), None);
+    }
+
+    #[test]
+    fn a_real_disproof_still_reports_a_counterexample_end_to_end() {
+        // The whole guard, through cvc5: a genuinely false property under its
+        // own preconditions must still come back Disproved, not Error.
+        let var = |name: &str| Box::new(SmtExpr::Var(name.to_string()));
+        let prop = SmtProperty {
+            variables: vec![
+                ("d".to_string(), SmtSort::Real),
+                ("r".to_string(), SmtSort::Real),
+            ],
+            preconditions: vec![SmtExpr::Cmp(
+                CmpOp::Gt,
+                var("d"),
+                Box::new(SmtExpr::RealLit(0.5)),
+            )],
+            // False under `d > 0.5`: nothing forces d < 0.
+            postcondition: SmtExpr::Cmp(CmpOp::Lt, var("d"), Box::new(SmtExpr::RealLit(0.0))),
+        };
+        match solve_property(&prop, 5000) {
+            TierBResult::Disproved(model) => {
+                let raw = model["d"].as_str().expect("model carries d");
+                let value = parse_smt_rational(raw, 0).expect("model value parses");
+                assert!(
+                    value > exact("1") / exact("2"),
+                    "the reported counterexample must satisfy the stated precondition: {raw}"
+                );
+            }
+            other => panic!("expected a counterexample, got {other:?}"),
+        }
+    }
+
+    /// Round-2 F1: one unreadable variable must not switch off the whole leg.
+    ///
+    /// An algebraic-number witness for an unrelated variable is routine in the
+    /// NRA logic this file selects. Before the fix, its presence made the
+    /// independent leg return early, so a precondition over a perfectly
+    /// readable variable went unchecked.
+    #[test]
+    fn an_unreadable_sibling_does_not_disable_the_readable_checks() {
+        let property = SmtProperty {
+            variables: vec![
+                ("d".to_string(), SmtSort::Real),
+                ("z".to_string(), SmtSort::Real),
+            ],
+            preconditions: vec![SmtExpr::Cmp(
+                CmpOp::Gt,
+                Box::new(SmtExpr::Var("d".to_string())),
+                Box::new(SmtExpr::RealLit(0.5)),
+            )],
+            postcondition: SmtExpr::BoolLit(true),
+        };
+        // `d = 0.0` violates `d > 0.5`, and it must still be caught even though
+        // `z` came back as an algebraic number this parser cannot read.
+        let reason = validate_model_independently(
+            &property,
+            &model(&[
+                ("d", "0.0"),
+                ("z", "(_ real_algebraic_number <1*x^2 + (-2), (5/4, 3/2)>)"),
+            ]),
+        )
+        .expect_err("a readable violation must be caught beside an unreadable sibling");
+        assert!(
+            reason.contains("exactly violates precondition 0"),
+            "{reason}"
+        );
+        // A precondition that mentions the unreadable variable still abstains.
+        let over_z = SmtProperty {
+            preconditions: vec![SmtExpr::Cmp(
+                CmpOp::Gt,
+                Box::new(SmtExpr::Var("z".to_string())),
+                Box::new(SmtExpr::RealLit(1e9)),
+            )],
+            ..property
+        };
+        assert!(
+            validate_model_independently(
+                &over_z,
+                &model(&[
+                    ("d", "2.0"),
+                    ("z", "(_ real_algebraic_number <1*x^2 + (-2), (5/4, 3/2)>)"),
+                ]),
+            )
+            .is_ok(),
+            "a precondition over the unreadable variable must abstain"
+        );
+    }
+
+    /// Round-2 F2: reading a decimal exactly is quadratic, and the guard runs
+    /// after `check_sat`, where cvc5's `tlimit-per` no longer applies. Past the
+    /// width bound leg 2 abstains rather than spending unbounded time.
+    #[test]
+    fn an_oversized_model_value_abstains_rather_than_parsing() {
+        let wide = format!("{}.0", "9".repeat(MAX_MODEL_VALUE_CHARS + 1));
+        assert!(wide.len() > MAX_MODEL_VALUE_CHARS);
+        assert_eq!(parse_smt_rational(&wide, 0), None, "past the width bound");
+        let at_bound = "9".repeat(MAX_MODEL_VALUE_CHARS);
+        assert!(
+            parse_smt_rational(&at_bound, 0).is_some(),
+            "a value at the bound is still read exactly"
+        );
+    }
+
+    /// Round-1's ulp-tight shape: adjacent f64s, so every real strictly between
+    /// them rounds to an endpoint that violates one bound. Distinct from the
+    /// magnitude family - this is about interval width, not size.
+    #[test]
+    fn an_ulp_tight_interval_still_disproves() {
+        let hi = f64::from_bits(1.0f64.to_bits() + 1);
+        let prop = SmtProperty {
+            variables: vec![("x".to_string(), SmtSort::Real)],
+            preconditions: vec![
+                SmtExpr::Cmp(
+                    CmpOp::Gt,
+                    Box::new(SmtExpr::Var("x".to_string())),
+                    Box::new(SmtExpr::RealLit(1.0)),
+                ),
+                SmtExpr::Cmp(
+                    CmpOp::Lt,
+                    Box::new(SmtExpr::Var("x".to_string())),
+                    Box::new(SmtExpr::RealLit(hi)),
+                ),
+            ],
+            postcondition: SmtExpr::BoolLit(false),
+        };
+        assert!(
+            matches!(solve_property(&prop, 5000), TierBResult::Disproved(_)),
+            "a witness inside a one-ulp interval must survive the guard"
+        );
+    }
+
+    /// A Bool-sorted variable read straight out of the model, and the
+    /// empty-precondition no-op.
+    #[test]
+    fn bool_sorted_variables_and_empty_preconditions() {
+        let property = SmtProperty {
+            variables: vec![("b".to_string(), SmtSort::Bool)],
+            preconditions: vec![SmtExpr::Var("b".to_string())],
+            postcondition: SmtExpr::BoolLit(true),
+        };
+        assert!(
+            validate_model_independently(&property, &model(&[("b", "false")])).is_err(),
+            "a Bool precondition false under the model is a decided violation"
+        );
+        assert!(
+            validate_model_independently(&property, &model(&[("b", "true")])).is_ok(),
+            "a Bool precondition true under the model is satisfied"
+        );
+        let none = SmtProperty {
+            preconditions: vec![],
+            ..property
+        };
+        assert!(
+            validate_model_independently(&none, &model(&[("b", "false")])).is_ok(),
+            "no preconditions means nothing to violate"
+        );
+    }
+
+    /// The measured chelis#1224 false-positive family, end to end through cvc5:
+    /// a strict bound past 2^53 must still yield a counterexample.
+    #[test]
+    fn large_magnitude_disproofs_survive_the_guard_end_to_end() {
+        for bound in [1e0, 1e12, 9.1e15, 1e17, 1e30] {
+            let prop = SmtProperty {
+                variables: vec![("x".to_string(), SmtSort::Real)],
+                preconditions: vec![SmtExpr::Cmp(
+                    CmpOp::Gt,
+                    Box::new(SmtExpr::Var("x".to_string())),
+                    Box::new(SmtExpr::RealLit(bound)),
+                )],
+                postcondition: SmtExpr::BoolLit(false),
+            };
+            assert!(
+                matches!(solve_property(&prop, 5000), TierBResult::Disproved(_)),
+                "x > {bound} must still disprove; the guard must not eat it"
+            );
+        }
     }
 }
