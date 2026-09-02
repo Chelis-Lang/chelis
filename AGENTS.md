@@ -47,8 +47,10 @@ not drift.
 
 - Red team against the spec, the code, the tests, the examples, and the CLI behavior.
 - Execute tests and commands; do not treat source inspection as sufficient proof.
-- For this repository, a requested "red team agent" means a fresh local subagent in a
-  new context. A main-thread validation pass does **not** satisfy that request.
+- For this repository, a red-team round is a fresh local subagent reviewing from an
+  inline brief. Verifying a fix is not a round: the reviewer that reported the finding
+  checks the repair. A main-thread validation pass is neither, and a phase or pull
+  request is red-teamed only when the subagent actually ran the validation work.
 
 ### Required Red-Team Behaviors
 
@@ -56,62 +58,81 @@ not drift.
 - Verify that inputs which should fail do fail, and with the right reason.
 - Verify that inputs which should pass do pass, with exact outputs where applicable.
 - Check docs and phase claims against the shipped behavior, not just intent.
-- Record the exact reviewed commit and the worktree's baseline status. A fresh reviewer
-  may reuse an existing exact-head worktree and its target build artifacts so the pass
-  does not require a cold rebuild; fresh context does not require a fresh checkout.
+- Stay inside the brief: its head, files, in-scope claims, and deadline bound the round.
+  Record the exact reviewed commit and the worktree's baseline status, and use the
+  worktree and warm target the brief hands you rather than rebuilding cold.
+- Report a P3 in one line, without reproduction. A construct no maintainer would write
+  is not a finding.
 
 ### Fresh-Context Enforcement
 
-- When asked to run a red team or "spawn a red team agent", first inventory subagent
-  handles created in your own current session. Stop or interrupt and retire only stale
-  or failed handles that will not be used again; do not disturb another developer's
-  handles or a handle reserved for follow-up work. Then spawn a new local subagent with
-  fresh context. A platform need not support deleting a retired handle from its listing.
+- A pull request gets at most two fresh rounds by default; a third needs the user's
+  explicit approval. A prose-only pull request, design documents included, gets one.
+  Rounds run from any platform count, and the pull request's round record is the
+  counter. Verification does not count against the cap; the end-of-pull-request round
+  does.
+- A confirmed in-scope P0 or P1 does not by itself earn a fresh round. The reviewer that
+  reported it stays alive and verifies the fix: it holds the context, and verification
+  is a few turns. A fresh round is owed only when the fix introduces a new mechanism or
+  touches files the standing reviewer did not read, or once at the end of a long pull
+  request before ready-for-review. A one-word or one-line repair never earns one.
+- Every round runs from an inline brief in the shape the `redteam-exec` skill carries:
+  exact head, changed files, the pull request's in-scope claims, the worktree and target
+  it may use and whether that target is free, the deadline (15 minutes unless the brief
+  says otherwise), and the delivery channel. The brief does not open with "read
+  `AGENTS.md`".
 - Freshness applies to the subagent's review context, not to the filesystem. Hand the
-  fresh subagent an existing worktree and its warm target cache when the worktree is at
-  the exact review head, has a known clean baseline, and has no concurrent writer or
-  build owner. Create a new worktree or target only when those reuse conditions do not
+  reviewer an existing worktree and its warm target cache when the worktree is at the
+  exact review head, has a known clean baseline, and has no concurrent writer or build
+  owner. The brief saying the target is free is the heavyweight-command handshake of
+  [Build Concurrency And Process Hygiene](#build-concurrency-and-process-hygiene) for
+  that target. Create a new worktree or target only when those reuse conditions do not
   hold.
-- If the first spawn attempt routes to remote infrastructure, errors, or comes back in a
-  broken state, stop or interrupt and retire that handle, then retry until you have
-  either:
-  1. a working fresh local subagent, or
-  2. an explicit statement that red-team validation is blocked because fresh local
-     subagent execution is unavailable.
-- Do not substitute main-thread validation and call it a red team.
-- Do not mark a phase as red-teamed unless the fresh-context subagent actually ran the
-  validation work.
+- Before spawning a fresh round, inventory subagent handles created in your own current
+  session. Retire only stale or failed handles that will not be used again; a standing
+  reviewer awaiting a fix is neither. Do not disturb another developer's handles. If the
+  spawn routes to remote infrastructure, errors, or comes back broken, retire that
+  handle and retry until you have a working fresh local subagent or can state that
+  red-team validation is blocked because fresh local subagent execution is unavailable.
 - A subagent that reuses a worktree must restore its temporary probes or mutations and
   report the final worktree status, unless the task explicitly asks to retain them.
 
 ### Pull Request Review Gate
 
-- Every pull request creation workflow, including documentation-only work, must include
-  at least one compliant red-team review of the PR before merge.
+- Every pull request, documentation-only work included, gets at least one compliant
+  red-team round before merge. Push first, after `python3 scripts/gate.py --fast`: the
+  round reviews the pushed head while CI runs on it. The full `--local` gate runs at
+  most once per pull request, on the committed candidate, immediately before
+  ready-for-review.
 - Classify every finding against the pull request's stated scope. A finding is in scope
   only when the pull request introduces it, worsens it, or claims to correct it. Mere
   discovery during review, including a pre-existing spec/implementation mismatch in an
   unrelated surface, does not bring a finding into scope.
+- State a pull request's or phase's claim at the granularity its oracle proves. An
+  unbounded universal claim invites sampling in every round and can never be closed.
 - For documentation and design reviews, assign severity by the contract impact rather
   than by the mere presence of an inaccurate sentence. A wrong normative rule, or a
   plan that cannot close a named in-scope instance or acceptance requirement, is P1. A
   design document that misdescribes current `main`, or exposes a sequencing seam between
   delivery slices while leaving the normative contract and named deliverable achievable,
   is P2 and must be recorded as residual work rather than promoted to a merge blocker.
-- If a review raises a confirmed in-scope P0 (critical) or P1 (high/major) finding,
-  another fresh-context red-team review must be run after the fix is made. Repeat the
-  fix-and-review cycle until the most recent red-team review reports no in-scope P0 or
-  P1 findings. This holds however small the fix is: a one-word repair of a P1 still
-  earns a round.
+  Staleness against a sibling pull request's moving head, wording, line-level accuracy
+  of the pull request body, and anything whose fix would add text without a necessity
+  sentence are out of scope.
+- A confirmed in-scope P0 (critical) or P1 (high/major) finding blocks merge until the
+  reviewer that reported it verifies the fix. Repeat fix and verification until that
+  reviewer reports no in-scope P0 or P1;
+  [Fresh-Context Enforcement](#fresh-context-enforcement) names the cases that owe a
+  fresh round instead.
 - Absent an in-scope P0 or P1 finding, scale rounds to the change. Minor updates, bug
   fixes, and textual changes do not inherently merit another round. A rebase whose
   overlap with your work is significant, either in changed lines or in semantics, may
-  merit a fresh-context red-team review of the intersection; a rebase that only picks up
-  an atom clearly consistent with, or irrelevant to, the files you are working on does
-  not. Use your best judgement.
-- When several red-team reviews find issues in the same area of your build or design,
-  stop and consider whether the approach is right, rather than filling the gaps each
-  review raises.
+  merit a fresh round on the intersection. A rebase that only picks up an atom clearly
+  consistent with, or irrelevant to, the files you are working on does not, and neither
+  does one whose only hand-resolved conflicts are generated or digest lines that the
+  owning script resolves (see
+  [Worktree And Branch Discipline](#worktree-and-branch-discipline)). Use your best
+  judgement.
 - A non-major finding does not block merge, but if you are already rebasing or fixing
   something else, fold in the other relevant issues reviewers raised.
 - Repairs under this gate may correct, remove, or narrow the pull request's existing
@@ -119,17 +140,23 @@ not drift.
   inventories, mechanisms, or promises merely to absorb a finding. When a correction
   would require that expansion, reduce the claim and track the additional work outside
   the pull request.
+- Keep a pull request under about 1,000 hand-written changed lines; regenerated
+  artifacts, such as embedded skill copies and generated registries, do not count.
+  Slices that ship together are commits inside one pull request; slices that can ship
+  apart are separate pull requests.
 - A finding class is the underlying defect category or unmet obligation, not its file,
-  line, or wording instance. If consecutive review rounds replace a repaired finding
-  with a different class of finding, stop the repair loop and correct or narrow the
-  review brief before running another round. Do not keep expanding the pull request to
-  satisfy a moving brief.
+  line, or wording instance. Every round record names the class of each finding; when a
+  report leaves one unlabeled, the orchestrator assigns it while recording the round.
+  When two consecutive rounds report the same class, or replace a repaired finding with
+  a different class, stop patching witnesses: change the representation, the oracle,
+  the claim, or the brief before running another round. Do not keep expanding the pull
+  request to satisfy a moving brief.
 - Route confirmed in-scope findings back to the original implementation agent when it
   is still available so the fix retains its build context. Do not fix out-of-scope
   findings in the pull request; link an existing issue or file one if the defect is not
-  already tracked. Record every round's exact head, verdict, commands, finding-scope
-  classifications, accepted-no-action observations, linked issues, and residual scope
-  in the pull request.
+  already tracked. Record every round's exact head, verdict, deadline, commands, finding
+  classes and scope classifications, accepted-no-action observations, linked issues,
+  and residual scope in the pull request.
 
 ## Documentation And Spec Sync
 
@@ -560,11 +587,16 @@ When a public surface has an implicit invariant, make it explicit and test it.
   evidence. Rebase only when that result differs, is unsafe or unclear, or another
   identified semantic or structural issue requires a changed head.
 - A non-trivial rebase or hand-resolved conflict requires review of the resolution
-  before any history rewrite is published. Run `python3 scripts/gate.py --local` for a
-  non-documentation change or the focused documentation checks for a docs-only change.
-  Never force-push a red gate. Obtain approval, then use an exact-head
-  `--force-with-lease`; clean mechanical rebases do not need the additional resolution
-  review.
+  before any history rewrite is published. Run `python3 scripts/gate.py --fast` on the
+  result for a non-documentation change or the focused documentation checks for a
+  docs-only change; the once-per-pull-request `--local` run is not repeated for a
+  rebase. Never force-push a red gate. Obtain approval, then use an exact-head
+  `--force-with-lease`. A clean mechanical rebase needs no resolution review, and
+  neither does one whose only hand-resolved conflicts are generated or digest lines:
+  regenerate `rejection_registry_generated.rs` with
+  `scripts/generate_rejection_registries.py --write`, take the digest that
+  `scripts/dtype_phase4b_oracle.py` reports for a `FROZEN_ATOM_DIGESTS` or
+  `FROZEN_REGION_DIGESTS` line, and treat the result as mechanical.
 
 ## Build Toolchain
 
@@ -790,8 +822,9 @@ not replace these shared-agent-skill checks.
 
 Default-gate discipline:
 
-- Use focused `cargo nextest run -p <crate> --test <file>` commands for the inner
-  development loop: that compiles only the one test target. Do not substitute a
+- Run `cargo check -p <crate> --tests` before the first nextest of a change, then use
+  focused `cargo nextest run -p <crate> --test <file>` commands for the inner
+  development loop: each compiles only what it names. Do not substitute a
   workspace-wide `cargo test` run for the canonical gate.
 - tests that are slow or require heavyweight local prerequisites should be
   `#[ignore]` by default and invoked through a documented manual gate
@@ -883,10 +916,14 @@ output. That failure looks like a code regression and is not one.
 - Every subagent prompt must name the delivery mechanism and the complete expected
   report. A locally written or plain-text report that is not sent through the platform's
   parent-message/final-report channel has not been delivered.
-- A subagent must not end its turn merely to wait for a background build, monitor, CI,
-  or notification that cannot wake it. Keep ownership of a long command through the
+- A subagent must not end its turn merely to wait for a background build, monitor, or
+  notification that cannot wake it. Keep ownership of a long command through the
   platform's synchronous wait/poll mechanism, or return the honest partial result and
-  unfinished work.
+  unfinished work. A reviewer that has delivered its round report is not waiting: it
+  stays available, and the orchestrator resumes it with the fix to verify.
+- CI is watched by at most one background waiter whose exit wakes the session, or by
+  nobody, in which case the turn ends and the result arrives later. Never watch CI from
+  a foreground sleep or poll loop.
 - If an agent returns "waiting" or goes idle without the deliverable, the orchestrator
   resumes it immediately with the exact missing items. Prefer a clearly labelled partial
   report over silence or an overstated completion claim, and deduplicate repeated reports
@@ -919,7 +956,7 @@ the built-in gate.
 
 When writing new code or fixtures, run `chelis fmt --inplace <file>`
 and `chelis lint --check` before pushing. The gate replaces the older
-manual checklist of "remember to run fmt". Run `python3 scripts/gate.py --local`
+manual checklist of "remember to run fmt". Run `python3 scripts/gate.py --fast`
 before pushing a non-documentation change, use focused nextest commands during
 development, and leave routine workspace execution to hosted CI.
 
@@ -1081,12 +1118,12 @@ Project-local skills live in `agent-skills/`.
 `.claude/skills` and `.codex/skills` should resolve to that same directory so both tool
 surfaces load the same skill library.
 Command wrappers should stay mirrored too: `.claude/commands/` and `.codex/commands/`
-should stay behaviorally aligned so slash-command access does not drift between tool
-surfaces. Keep a `red-team` alias wired to `redteam-exec`, and make that wrapper enforce
-retirement of your own current-session stale or failed handles that will not be reused,
-plus a fresh local subagent before any validation is counted as a red team. Fresh context
-is an agent property: the wrapper should reuse a clean, exact-head, idle worktree and its
-warm target artifacts when available instead of forcing a cold checkout and rebuild.
+should stay byte-identical so slash-command access does not drift between tool
+surfaces. Keep a `red-team` alias wired to `redteam-exec` with two entry modes. A fresh
+round retires your own stale or failed current-session handles, spawns a fresh local
+subagent, and hands it the inline brief; `verify` sends the fix to the standing reviewer.
+Fresh context is an agent property: the wrapper reuses a clean, exact-head, idle worktree
+and its warm target artifacts instead of forcing a cold checkout and rebuild.
 
 Current shared skill set:
 
