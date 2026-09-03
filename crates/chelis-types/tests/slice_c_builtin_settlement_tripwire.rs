@@ -1,6 +1,18 @@
 //! Slice C c7: every builtin declares what it does with a deferred positional
 //! `expand` result, and the declaration is proved rather than trusted.
 //!
+//! Every value in the registry was established by execution rather than by
+//! reading the builtin's inference route. What this file proves about those
+//! values is narrower, and the limit is structural rather than an oversight.
+//!
+//! A family whose declared result binds nothing accepts mutually incompatible
+//! declarations from one body, so no declared result can move the operand and
+//! no probe of this shape can separate `Constrains` from `Propagates` there.
+//!
+//! Those families are named in `UNDISCRIMINATED` with that reason, alongside
+//! the declarations no probe could reach at all. What makes them unprovable is
+//! chelis#1512 rather than anything the `tensor_settlement` field describes.
+//!
 //! Two obligations, kept separate on purpose.
 //!
 //! **Coverage** is total and runs in both directions. Every builtin declaring
@@ -9,12 +21,10 @@
 //! disposition. A new builtin that declares a disposition without a family
 //! fails, which is the case `spec/design/runtime_extents.md` C3 names.
 //!
-//! **Behaviour** is proved once per family, by executing that family's
-//! representative against a real one-def program whose tensor operand is
-//! `expand(x, 0, 3i64)`. A representative proves its own row and stands for
-//! its family; it does not prove every member. Members no probe can reach are
-//! named in `UNDISCRIMINATED` with the reason, rather than absorbed into a
-//! family boundary drawn to make the coverage claim come out clean.
+//! **Behaviour** is proved once per family by executing that family's
+//! representative, after a precondition establishes that the probe can say
+//! anything at all. A representative proves its own row and stands for its
+//! family; it does not prove every member.
 
 use chelis_deep::printer::print_canonical;
 use chelis_surf::desugar::desugar_program;
@@ -36,9 +46,14 @@ struct Family {
     /// Extra parameters the call needs, appended to the def's parameter list.
     extra_params: &'static str,
     /// The call's own result type when the operand takes its insertion form.
-    /// `None` where no spelling discriminates, which forces the family into
-    /// `UNDISCRIMINATED`.
-    insertion_result: Option<&'static str>,
+    /// `None` for the `Freezes` and `RejectsUnresolved` arms, which probe the
+    /// call directly rather than through a declared result.
+    declared_result: Option<&'static str>,
+    /// A well-formed but incorrect result type. The precondition requires this
+    /// to be REJECTED: a family that accepts it accepts anything, so its
+    /// declared result reaches nothing and the probe measures the freeze
+    /// default rather than the call.
+    wrong_result: Option<&'static str>,
     members: &'static [&'static str],
 }
 
@@ -50,7 +65,8 @@ const FAMILIES: &[Family] = &[
         dtype: "f32",
         call: "add(e, e)",
         extra_params: "",
-        insertion_result: Some("tensor[3, 2, f32]"),
+        declared_result: Some("tensor[3, 2, f32]"),
+        wrong_result: Some("tensor[9, 9, f32]"),
         members: &[
             "add",
             "mul",
@@ -69,7 +85,8 @@ const FAMILIES: &[Family] = &[
         dtype: "f32",
         call: "neg(e)",
         extra_params: "",
-        insertion_result: Some("tensor[3, 2, f32]"),
+        declared_result: Some("tensor[3, 2, f32]"),
+        wrong_result: Some("tensor[9, 9, f32]"),
         members: &[
             "neg",
             "recip",
@@ -99,7 +116,8 @@ const FAMILIES: &[Family] = &[
         dtype: "f32",
         call: "eq(e, e)",
         extra_params: "",
-        insertion_result: Some("tensor[3, 2, bool]"),
+        declared_result: Some("tensor[3, 2, bool]"),
+        wrong_result: Some("tensor[9, 9, bool]"),
         members: &["cmplt", "eq", "neq", "lt", "gt", "lte", "gte"],
     },
     Family {
@@ -109,7 +127,8 @@ const FAMILIES: &[Family] = &[
         dtype: "int32",
         call: "bitand(e, e)",
         extra_params: "",
-        insertion_result: Some("tensor[3, 2, int32]"),
+        declared_result: Some("tensor[3, 2, int32]"),
+        wrong_result: Some("tensor[9, 9, int32]"),
         members: &["mod", "bitand", "bitor", "bitxor", "shl", "shr"],
     },
     Family {
@@ -119,17 +138,21 @@ const FAMILIES: &[Family] = &[
         dtype: "bool",
         call: "and(e, e)",
         extra_params: "",
-        insertion_result: Some("tensor[3, 2, bool]"),
+        declared_result: Some("tensor[3, 2, bool]"),
+        wrong_result: Some("tensor[9, 9, bool]"),
         members: &["and", "or", "not"],
     },
     Family {
         name: "shape preserving",
         settlement: TensorSettlement::Constrains,
-        representative: "clamp",
+        // `clamp` binds nothing, so the family is represented by a member
+        // whose declared result does bind. Measured, not chosen for tidiness.
+        representative: "softmax",
         dtype: "f32",
-        call: "clamp(e, 0.0f32, 1.0f32)",
+        call: "softmax(e, 0)",
         extra_params: "",
-        insertion_result: Some("tensor[3, 2, f32]"),
+        declared_result: Some("tensor[3, 2, f32]"),
+        wrong_result: Some("tensor[9, 9, f32]"),
         members: &[
             "where",
             "clamp",
@@ -149,11 +172,10 @@ const FAMILIES: &[Family] = &[
         dtype: "f32",
         call: "reshape(e, [6i64])",
         extra_params: "",
-        insertion_result: Some("tensor[6, f32]"),
+        declared_result: Some("tensor[6, f32]"),
+        wrong_result: Some("tensor[9, f32]"),
         members: &["reshape"],
     },
-    // Split from the scatter family because measurement disagreed with family
-    // membership: its siblings refuse an unresolved operand and it does not.
     Family {
         name: "scatter elements",
         settlement: TensorSettlement::Constrains,
@@ -161,7 +183,8 @@ const FAMILIES: &[Family] = &[
         dtype: "f32",
         call: "scatter_elements(e, i, e, 0)",
         extra_params: ", i: tensor[3, 2, int32]",
-        insertion_result: Some("tensor[3, 2, f32]"),
+        declared_result: Some("tensor[3, 2, f32]"),
+        wrong_result: Some("tensor[9, 9, f32]"),
         members: &["scatter_elements"],
     },
     Family {
@@ -171,7 +194,8 @@ const FAMILIES: &[Family] = &[
         dtype: "f32",
         call: "matmul(e, b)",
         extra_params: ", b: tensor[2, 7, f32]",
-        insertion_result: Some("tensor[3, 7, f32]"),
+        declared_result: Some("tensor[3, 7, f32]"),
+        wrong_result: Some("tensor[9, 9, f32]"),
         members: &["matmul"],
     },
     Family {
@@ -181,7 +205,8 @@ const FAMILIES: &[Family] = &[
         dtype: "f32",
         call: "sum(e, 0)",
         extra_params: "",
-        insertion_result: None,
+        declared_result: Some("tensor[2, f32]"),
+        wrong_result: Some("tensor[9, 9, f32]"),
         members: &[
             "mean",
             "sum",
@@ -195,12 +220,13 @@ const FAMILIES: &[Family] = &[
     },
     Family {
         name: "windowed reduction",
-        settlement: TensorSettlement::Propagates,
+        settlement: TensorSettlement::Constrains,
         representative: "reduce_window_sum",
         dtype: "f32",
         call: "reduce_window_sum(e, [2i64, 2i64], [1i64, 1i64])",
         extra_params: "",
-        insertion_result: None,
+        declared_result: Some("tensor[3, 2, f32]"),
+        wrong_result: Some("tensor[9, 9, f32]"),
         members: &[
             "reduce_window_max",
             "reduce_window_min",
@@ -209,14 +235,29 @@ const FAMILIES: &[Family] = &[
         ],
     },
     Family {
-        name: "rank changing movement",
-        settlement: TensorSettlement::Propagates,
+        name: "shape carrying movement",
+        settlement: TensorSettlement::Constrains,
         representative: "permute",
         dtype: "f32",
         call: "permute(e, 1, 0)",
         extra_params: "",
-        insertion_result: None,
-        members: &["permute", "expand", "pad", "shrink", "conv2d"],
+        declared_result: Some("tensor[3, 2, f32]"),
+        wrong_result: Some("tensor[9, 9, f32]"),
+        members: &["permute", "pad", "shrink"],
+    },
+    // `expand` and `conv2d` measure as `Propagates` and neither can be proved
+    // here, so they are their own family rather than riding on a
+    // `Constrains` representative that does not describe them.
+    Family {
+        name: "unprovable movement",
+        settlement: TensorSettlement::Propagates,
+        representative: "expand",
+        dtype: "f32",
+        call: "expand(e, 0, 2i64)",
+        extra_params: "",
+        declared_result: Some("tensor[3, 2, f32]"),
+        wrong_result: Some("tensor[9, 9, f32]"),
+        members: &["expand", "conv2d"],
     },
     Family {
         name: "shape query",
@@ -225,7 +266,8 @@ const FAMILIES: &[Family] = &[
         dtype: "f32",
         call: "rank(e)",
         extra_params: "",
-        insertion_result: None,
+        declared_result: Some("int32"),
+        wrong_result: Some("string"),
         members: &["rank", "numel", "tensor_to_scalar"],
     },
     Family {
@@ -235,7 +277,8 @@ const FAMILIES: &[Family] = &[
         dtype: "f32",
         call: "print(e)",
         extra_params: "",
-        insertion_result: None,
+        declared_result: Some("unit"),
+        wrong_result: Some("string"),
         members: &[
             "print",
             "to_string",
@@ -245,8 +288,6 @@ const FAMILIES: &[Family] = &[
             "test_assert_eq_tensor",
         ],
     },
-    // No member of this family has a call spelling that discriminates, so the
-    // whole family is covered-by-coverage-only. See UNDISCRIMINATED.
     Family {
         name: "container producing",
         settlement: TensorSettlement::Propagates,
@@ -254,8 +295,72 @@ const FAMILIES: &[Family] = &[
         dtype: "f32",
         call: "to_list(e)",
         extra_params: "",
-        insertion_result: None,
+        declared_result: Some("List[f32]"),
+        wrong_result: Some("string"),
         members: &["split", "to_list", "einsum", "tensor_scan"],
+    },
+    Family {
+        name: "io passthrough",
+        settlement: TensorSettlement::Propagates,
+        representative: "file_exists",
+        dtype: "f32",
+        call: "file_exists(e)",
+        extra_params: "",
+        declared_result: Some("bool"),
+        wrong_result: Some("string"),
+        members: &[
+            "file_exists",
+            "list_dir",
+            "mmap_file",
+            "mmap_len",
+            "mmap_read",
+            "process_run",
+            "read_bytes",
+            "read_file",
+            "read_lines",
+            "write_file",
+        ],
+    },
+    Family {
+        name: "positive test skipped",
+        settlement: TensorSettlement::Propagates,
+        representative: "len",
+        dtype: "f32",
+        call: "len(e)",
+        extra_params: "",
+        declared_result: Some("int64"),
+        wrong_result: Some("string"),
+        members: &[
+            "append",
+            "chunk",
+            "dict_contains",
+            "dict_entries",
+            "dict_get",
+            "dict_insert",
+            "dict_keys",
+            "dict_merge",
+            "dict_of",
+            "dict_remove",
+            "dict_values",
+            "drop",
+            "enumerate",
+            "flatten",
+            "index",
+            "len",
+            "pad_sequences",
+            "pad_sequences_to",
+            "range",
+            "scalar_to_tensor",
+            "string_concat",
+            "string_len",
+            "string_slice",
+            "string_trim",
+            "take",
+            "to_float",
+            "to_int",
+            "to_tensor",
+            "zip",
+        ],
     },
     Family {
         name: "shape neutral freeze",
@@ -264,7 +369,8 @@ const FAMILIES: &[Family] = &[
         dtype: "f32",
         call: "shape(e, 0)",
         extra_params: "",
-        insertion_result: None,
+        declared_result: None,
+        wrong_result: None,
         members: &["shape", "test_assert_close_tensor"],
     },
     Family {
@@ -274,7 +380,8 @@ const FAMILIES: &[Family] = &[
         dtype: "f32",
         call: "gather(e, idx, 0)",
         extra_params: ", idx: tensor[1, int32]",
-        insertion_result: None,
+        declared_result: None,
+        wrong_result: None,
         members: &[
             "gather",
             "concat",
@@ -285,11 +392,37 @@ const FAMILIES: &[Family] = &[
             "round_to",
         ],
     },
+    Family {
+        name: "csv ingest",
+        settlement: TensorSettlement::RejectsUnresolved,
+        representative: "to_csv",
+        dtype: "f32",
+        call: "to_csv(e)",
+        extra_params: "",
+        declared_result: None,
+        wrong_result: None,
+        members: &[
+            "csv_cols",
+            "csv_f64",
+            "csv_f64s",
+            "csv_int",
+            "csv_ints",
+            "csv_nrows",
+            "csv_str",
+            "csv_strs",
+            "parse_csv",
+            "to_csv",
+        ],
+    },
 ];
 
-/// Declarations no probe in this file reaches, with the reason each resists
-/// one. These are declared from their signature family and are NOT proved by
-/// a representative; the coverage tests still bind them.
+/// Declarations and families these probes cannot prove, each with the reason.
+///
+/// Two different kinds, and the difference decides who can fix them. A row
+/// whose call has no discriminating spelling will not yield to a better
+/// assertion; a row nobody could spell is simply unfinished. A family whose
+/// declared result binds nothing is a third kind, and it is not fixable here
+/// at all: the obstacle is chelis#1512.
 const UNDISCRIMINATED: &[(&str, &str)] = &[
     (
         "split",
@@ -304,12 +437,34 @@ const UNDISCRIMINATED: &[(&str, &str)] = &[
         "both candidate forms appear in the rendered program",
     ),
     (
+        "conv2d",
+        "needs a rank-4 producer and four arguments the shared probe shape cannot express",
+    ),
+    (
         "tensor_scan",
         "no well-typed call could be constructed for its (T, int64) -> T callback",
     ),
     (
-        "conv2d",
-        "needs a rank-4 producer and four arguments, which the shared probe shape cannot express",
+        "drop",
+        "its declared result binds nothing: measured to accept a wrong result type, chelis#1512",
+    ),
+    (
+        "sum",
+        "its declared result binds nothing: one body accepts -> f32, -> tensor[1, f32], \
+         -> tensor[2, f32] and -> tensor[3, f32] alike, chelis#1512",
+    ),
+    (
+        "expand",
+        "its declared result binds nothing: a wrong result type is accepted, chelis#1512",
+    ),
+    ("where", "its declared result binds nothing, chelis#1512"),
+    ("clamp", "its declared result binds nothing, chelis#1512"),
+    ("cumsum", "its declared result binds nothing, chelis#1512"),
+    ("sort", "its declared result binds nothing, chelis#1512"),
+    (
+        "scatter_elements",
+        "its declared result binds nothing, and it is the sole member of its \
+         family, so nothing else can stand for it, chelis#1512",
     ),
 ];
 
@@ -334,6 +489,43 @@ fn declared(name: &str) -> TensorSettlement {
         .find(|decl| decl.name == name)
         .unwrap_or_else(|| panic!("`{name}` is not a registered builtin"))
         .tensor_settlement
+}
+
+/// The one program shape both settlement arms use: a declared result on the
+/// call and no other consumer, so the only thing that can move the operand off
+/// its §4.7.2 freeze default is the call itself.
+fn declared_result_program(family: &Family, result: &str) -> String {
+    format!(
+        "def f(a: tensor[2, {dtype}]{extra}) -> {result} = {{\n  \
+         e = expand(a, 0, 3i64)\n  {call}\n}}\n",
+        dtype = family.dtype,
+        extra = family.extra_params,
+        call = family.call,
+    )
+}
+
+/// Does the call leave the operand selectable afterwards?
+fn survives_the_call(family: &Family) -> Result<String, String> {
+    check(&format!(
+        "def sink(x: tensor[3, 2, {dtype}]) -> int32 = 0\n\
+         def f(a: tensor[2, {dtype}]{extra}) -> int32 = {{\n  \
+         e = expand(a, 0, 3i64)\n  u = {call}\n  sink(e)\n}}\n",
+        dtype = family.dtype,
+        extra = family.extra_params,
+        call = family.call,
+    ))
+}
+
+fn insertion_form(dtype: &str) -> String {
+    collapse(&format!(
+        "(t-tensor {{}} (d-lit {{}} 3) (d-lit {{}} 2) (t-prim {{}} {dtype}))"
+    ))
+}
+
+fn replacement_form(dtype: &str) -> String {
+    collapse(&format!(
+        "(t-tensor {{}} (d-lit {{}} 3) (t-prim {{}} {dtype}))"
+    ))
 }
 
 // ---------------------------------------------------------------------
@@ -386,7 +578,7 @@ fn every_family_member_declares_its_family_disposition() {
 }
 
 #[test]
-fn undiscriminated_declarations_are_named_and_are_a_strict_subset() {
+fn undiscriminated_declarations_are_named_with_a_reason() {
     for (name, reason) in UNDISCRIMINATED {
         assert!(
             !reason.trim().is_empty(),
@@ -399,19 +591,55 @@ fn undiscriminated_declarations_are_named_and_are_a_strict_subset() {
              disposition; a builtin with no tensor operand needs no probe"
         );
     }
+}
+
+// ---------------------------------------------------------------------
+// The precondition: can the probe say anything at all?
+// ---------------------------------------------------------------------
+
+/// A settlement family's declared result must actually bind before its stamp
+/// is evidence about the call.
+///
+/// A family that accepts a wrong result type accepts anything, so the operand's
+/// stamp is the §4.7.2 freeze default rather than a consequence of the call,
+/// and reading it would measure nothing. Such a family cannot be proved by a
+/// probe whose only channel is the declared result, and it must say so in
+/// `UNDISCRIMINATED` rather than assert through the gap.
+#[test]
+fn every_settlement_family_declared_result_binds() {
     let named = UNDISCRIMINATED
         .iter()
         .map(|(name, _)| *name)
         .collect::<BTreeSet<_>>();
-    let representatives = FAMILIES
+    let mut unprovable = Vec::new();
+    for family in FAMILIES {
+        let (Some(declared_result), Some(wrong_result)) =
+            (family.declared_result, family.wrong_result)
+        else {
+            continue;
+        };
+        let correct = check(&declared_result_program(family, declared_result));
+        assert!(
+            correct.is_ok(),
+            "family `{}`: its own declared result `{declared_result}` is \
+             rejected, so the probe is misspelled rather than the family being \
+             unprovable: {}",
+            family.name,
+            correct.unwrap_err()
+        );
+        if check(&declared_result_program(family, wrong_result)).is_ok() {
+            unprovable.push((family.name, family.representative));
+        }
+    }
+    let unnamed = unprovable
         .iter()
-        .map(|family| family.representative)
-        .collect::<BTreeSet<_>>();
-    let both = named.intersection(&representatives).collect::<Vec<_>>();
+        .filter(|(_, representative)| !named.contains(representative))
+        .collect::<Vec<_>>();
     assert!(
-        both.len() <= 1,
-        "a family whose representative is undiscriminated proves nothing, and \
-         only the container-producing family is allowed to be in that state: {both:?}"
+        unnamed.is_empty(),
+        "these families accept a wrong declared result, so their declared \
+         result binds nothing and no probe of this shape can prove them. Each \
+         must be named in UNDISCRIMINATED with that reason: {unnamed:?}"
     );
 }
 
@@ -419,66 +647,72 @@ fn undiscriminated_declarations_are_named_and_are_a_strict_subset() {
 // Behaviour, once per family.
 // ---------------------------------------------------------------------
 
-/// Does the call leave the operand selectable afterwards?
-fn survives_the_call(family: &Family) -> Result<String, String> {
-    check(&format!(
-        "def sink(x: tensor[3, 2, {dtype}]) -> int32 = 0\n\
-         def f(a: tensor[2, {dtype}]{extra}) -> int32 = {{\n  \
-         e = expand(a, 0, 3i64)\n  u = {call}\n  sink(e)\n}}\n",
-        dtype = family.dtype,
-        extra = family.extra_params,
-        call = family.call,
-    ))
-}
-
+/// What this proves, and what it does not.
+///
+/// The `Constrains` arm proves the call transmits *an* equation and that the
+/// equation lands on the insertion form. It does not prove the call would
+/// transmit a *different* equation to the replacement form, because each
+/// family carries one declared result. §4.7.2's own sentence allows a consumer
+/// that "supplies no complete shape equation" to eliminate candidates by its
+/// typing rule alone, so a family could eliminate by rank and still be
+/// `Constrains`; this arm does not separate that from a full shape equation,
+/// and it does not need to.
+///
+/// The `Propagates` arm is the mirror and asserts the operand stayed at its
+/// freeze default. The two are mutually exclusive on the same program, which
+/// is what makes the mutation in either direction go red.
 #[test]
 fn each_family_representative_behaves_as_its_family_declares() {
+    let named = UNDISCRIMINATED
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<BTreeSet<_>>();
     for family in FAMILIES {
-        let survived = survives_the_call(family);
         match family.settlement {
-            TensorSettlement::Constrains => {
-                let result = family
-                    .insertion_result
-                    .expect("a Constrains family states its insertion result");
-                let rendered = check(&format!(
-                    "def f(a: tensor[2, {dtype}]{extra}) -> {result} = {{\n  \
-                     e = expand(a, 0, 3i64)\n  {call}\n}}\n",
-                    dtype = family.dtype,
-                    extra = family.extra_params,
-                    call = family.call,
-                ))
-                .unwrap_or_else(|error| {
-                    panic!("{}: expected acceptance, got {error}", family.name)
-                });
-                let insertion = collapse(&format!(
-                    "(t-tensor {{}} (d-lit {{}} 3) (d-lit {{}} 2) (t-prim {{}} {}))",
-                    family.dtype
-                ));
-                assert!(
-                    collapse(&rendered).contains(&insertion),
-                    "{}: a declared result must reach the operand and select \
-                     its insertion form:\n{rendered}",
-                    family.name
-                );
-                assert!(
-                    !rendered.contains("(t-var {} t"),
-                    "{}: a consumer that fixes its operand publishes no \
-                     unresolved variable:\n{rendered}",
-                    family.name
-                );
-            }
-            TensorSettlement::Propagates => {
-                survived.unwrap_or_else(|error| {
-                    panic!(
-                        "{}: propagation leaves the choice open, so a later \
-                         consumer must still select the insertion form, got \
-                         {error}",
+            TensorSettlement::Constrains | TensorSettlement::Propagates => {
+                let (Some(declared_result), Some(wrong_result)) =
+                    (family.declared_result, family.wrong_result)
+                else {
+                    panic!("family `{}` needs a declared result", family.name)
+                };
+                // A family whose declared result binds nothing is proved by
+                // nothing here; the precondition test owns that verdict.
+                if check(&declared_result_program(family, wrong_result)).is_ok() {
+                    assert!(
+                        named.contains(&family.representative),
+                        "family `{}` binds nothing and is not named in \
+                         UNDISCRIMINATED",
                         family.name
-                    )
-                });
+                    );
+                    continue;
+                }
+                let rendered = check(&declared_result_program(family, declared_result))
+                    .unwrap_or_else(|error| {
+                        panic!("{}: expected acceptance, got {error}", family.name)
+                    });
+                let rendered = collapse(&rendered);
+                let insertion = rendered.contains(&insertion_form(family.dtype));
+                let replacement = rendered.contains(&replacement_form(family.dtype));
+                if family.settlement == TensorSettlement::Constrains {
+                    assert!(
+                        insertion && !replacement,
+                        "{}: a constraining call must carry the declared result \
+                         onto the operand and select the insertion form; got \
+                         insertion={insertion} replacement={replacement}",
+                        family.name
+                    );
+                } else {
+                    assert!(
+                        replacement && !insertion,
+                        "{}: a propagating call adds no evidence, so the operand \
+                         must stay at its freeze default; got \
+                         insertion={insertion} replacement={replacement}",
+                        family.name
+                    );
+                }
             }
             TensorSettlement::Freezes => {
-                let error = survived.expect_err(&format!(
+                let error = survives_the_call(family).expect_err(&format!(
                     "{}: freezing fixes the operand at the replacement form, \
                      so the later insertion-form consumer must be rejected",
                     family.name
@@ -490,13 +724,21 @@ fn each_family_representative_behaves_as_its_family_declares() {
                 );
             }
             TensorSettlement::RejectsUnresolved => {
-                let error = survived.expect_err(&format!(
+                let error = survives_the_call(family).expect_err(&format!(
                     "{}: this family refuses an unresolved operand outright",
                     family.name
                 ));
+                // The message must name an unresolved inference variable. The
+                // number is allocation-order dependent and is deliberately not
+                // pinned: a rebase that shifts allocation must not turn this red.
+                let names_a_variable = error
+                    .match_indices('?')
+                    .any(|(at, _)| error[at + 1..].starts_with(|c: char| c.is_ascii_digit()));
                 assert!(
-                    error.contains('?'),
-                    "{}: the rejection must name the unresolved operand, got {error}",
+                    names_a_variable,
+                    "{}: the rejection must name an unresolved variable, which \
+                     is what distinguishes refusing the operand from admitting \
+                     neither of its candidate forms; got {error}",
                     family.name
                 );
             }

@@ -404,7 +404,17 @@ pub(crate) fn has_registered_inference_route(name: &str, rule: BuiltinInferenceR
 /// operand, which is chelis#1512 rather than anything this field describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TensorSettlement {
-    /// No operand slot admits a tensor, so no deferred result can reach it.
+    /// No operand slot admits a tensor, in either form.
+    ///
+    /// A deferred result does reach these routes and is rejected there; the
+    /// earlier wording, that no deferred result could reach them, was false
+    /// and measurement is what corrected it. The rejection is §4.7.2's own
+    /// route: the consumer admits neither candidate form, so the program is
+    /// rejected. That is what distinguishes this from [`Self::RejectsUnresolved`],
+    /// which refuses before the forms are considered at all.
+    ///
+    /// Nine rows, each measured twice: a concrete `tensor[3, 2, f32]` in the
+    /// data slot is rejected, and so is a deferred positional-`expand` result.
     NoTensorOperand,
     /// The call supplies an independently fixed rank or shape equation and
     /// selects the unique candidate satisfying it (§4.7.2 `Constrain`).
@@ -426,6 +436,12 @@ pub enum TensorSettlement {
     /// tests the dtype rather than the shape and fails the same way. Tracked
     /// as chelis#1489. This variant empties and is deleted if that issue is
     /// resolved by making these routes defer.
+    ///
+    /// Seventeen rows, and the membership is measured rather than argued: the
+    /// deferred rejection names the unresolved variable itself, as in
+    /// "expects List[Dict[string,string]] as the first argument, got ?N",
+    /// where a route that considered the forms names a type instead. chelis#1489
+    /// names four of the seventeen.
     RejectsUnresolved,
 }
 
@@ -957,7 +973,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::Propagates,
+        tensor_settlement: TensorSettlement::Constrains,
     },
     BuiltinDecl {
         name: "reduce_window_min",
@@ -965,7 +981,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::Propagates,
+        tensor_settlement: TensorSettlement::Constrains,
     },
     BuiltinDecl {
         name: "reduce_window_sum",
@@ -973,7 +989,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::Propagates,
+        tensor_settlement: TensorSettlement::Constrains,
     },
     BuiltinDecl {
         name: "reduce_window_mean",
@@ -981,7 +997,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::Propagates,
+        tensor_settlement: TensorSettlement::Constrains,
     },
     // ─── Shape ops (Universal, Rewriting) ────────────────────────────
     BuiltinDecl {
@@ -1022,7 +1038,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::VariadicFrom(1),
-        tensor_settlement: TensorSettlement::Propagates,
+        tensor_settlement: TensorSettlement::Constrains,
     },
     BuiltinDecl {
         name: "expand",
@@ -1038,7 +1054,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::Propagates,
+        tensor_settlement: TensorSettlement::Constrains,
     },
     BuiltinDecl {
         name: "shrink",
@@ -1046,7 +1062,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::Propagates,
+        tensor_settlement: TensorSettlement::Constrains,
     },
     BuiltinDecl {
         name: "stride",
@@ -1167,7 +1183,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "write_file",
@@ -1175,7 +1191,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "read_lines",
@@ -1183,7 +1199,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "read_bytes",
@@ -1191,7 +1207,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "file_exists",
@@ -1199,7 +1215,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "list_dir",
@@ -1207,7 +1223,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "mmap_file",
@@ -1215,7 +1231,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "mmap_read",
@@ -1223,7 +1239,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "mmap_len",
@@ -1231,7 +1247,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "process_run",
@@ -1239,7 +1255,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "round_to",
@@ -1256,7 +1272,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::RejectsUnresolved,
     },
     BuiltinDecl {
         name: "to_csv",
@@ -1264,7 +1280,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::RejectsUnresolved,
     },
     BuiltinDecl {
         name: "csv_f64s",
@@ -1272,7 +1288,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::RejectsUnresolved,
     },
     BuiltinDecl {
         name: "csv_ints",
@@ -1280,7 +1296,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::RejectsUnresolved,
     },
     BuiltinDecl {
         name: "csv_strs",
@@ -1288,7 +1304,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::RejectsUnresolved,
     },
     BuiltinDecl {
         name: "csv_nrows",
@@ -1296,7 +1312,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::RejectsUnresolved,
     },
     BuiltinDecl {
         name: "csv_cols",
@@ -1304,7 +1320,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::RejectsUnresolved,
     },
     BuiltinDecl {
         name: "csv_f64",
@@ -1312,7 +1328,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::RejectsUnresolved,
     },
     BuiltinDecl {
         name: "csv_int",
@@ -1320,7 +1336,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::RejectsUnresolved,
     },
     BuiltinDecl {
         name: "csv_str",
@@ -1328,7 +1344,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::RejectsUnresolved,
     },
     // ─── String ops (HostOnly) ───────────────────────────────────────
     BuiltinDecl {
@@ -1337,7 +1353,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "string_concat",
@@ -1345,7 +1361,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "string_slice",
@@ -1353,7 +1369,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "string_contains",
@@ -1385,7 +1401,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "to_string",
@@ -1401,7 +1417,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "to_float",
@@ -1409,7 +1425,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     // ─── Tensor introspection (HostOnly at scalar type) ──────────────
     BuiltinDecl {
@@ -1450,7 +1466,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     // ─── List ops (HostOnly) ─────────────────────────────────────────
     BuiltinDecl {
@@ -1459,7 +1475,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "index",
@@ -1467,7 +1483,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "append",
@@ -1475,7 +1491,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "concat",
@@ -1491,7 +1507,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "drop",
@@ -1499,7 +1515,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "chunk",
@@ -1507,7 +1523,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "range",
@@ -1515,7 +1531,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "map",
@@ -1579,7 +1595,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "zip",
@@ -1587,7 +1603,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "enumerate",
@@ -1595,7 +1611,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     // ─── Dict ops (HostOnly) ─────────────────────────────────────────
     BuiltinDecl {
@@ -1604,7 +1620,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "dict_get",
@@ -1612,7 +1628,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "dict_contains",
@@ -1620,7 +1636,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "dict_remove",
@@ -1628,7 +1644,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "dict_insert",
@@ -1636,7 +1652,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "dict_merge",
@@ -1644,7 +1660,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "dict_keys",
@@ -1652,7 +1668,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "dict_values",
@@ -1660,7 +1676,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "dict_entries",
@@ -1668,7 +1684,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     // ─── Tensor conversion (HostOnly) ────────────────────────────────
     BuiltinDecl {
@@ -1677,7 +1693,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "to_list",
@@ -1693,7 +1709,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
         name: "pad_sequences_to",
@@ -1701,7 +1717,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
-        tensor_settlement: TensorSettlement::NoTensorOperand,
+        tensor_settlement: TensorSettlement::Propagates,
     },
     // ─── Test builtins (HostOnly) ────────────────────────────────────
     BuiltinDecl {
