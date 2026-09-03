@@ -817,6 +817,7 @@ class ListOutputTests(unittest.TestCase):
         # too (chelis#875 and chelis#959).
         rendered = [gate.render(c) for c in gate.LOCAL_STATIC_COMMANDS]
         self.assertIn("cargo test -p chelis-types --doc", rendered)
+        self.assertIn("cargo test -p chelis-ir --doc", rendered)
         self.assertIn("cargo test -p chelis-compiler-api --doc", rendered)
 
     def test_pipeline_compile_fail_contracts_are_in_the_lint_and_unit_stage(self):
@@ -824,6 +825,7 @@ class ListOutputTests(unittest.TestCase):
             gate.render(command) for command in gate.STAGES["lint-and-unit"]
         ]
         for command in (
+            "cargo test -p chelis-ir --doc",
             "cargo test -p chelis-compiler-api --doc",
             "cargo test -p chelis-pipeline-core --doc",
             "<managed-python> scripts/check_checkpoint_compile_fail.py",
@@ -833,6 +835,7 @@ class ListOutputTests(unittest.TestCase):
     def test_pipeline_compile_fail_contracts_are_in_the_local_subset(self):
         rendered = [gate.render(command) for command in gate.LOCAL_STATIC_COMMANDS]
         for command in (
+            "cargo test -p chelis-ir --doc",
             "cargo test -p chelis-compiler-api --doc",
             "cargo test -p chelis-pipeline-core --doc",
             "<managed-python> scripts/check_checkpoint_compile_fail.py",
