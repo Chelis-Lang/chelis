@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "0ba37fd76d38ab9d2d000a518add7e01e159d722f5d5361a491f5cba891ebdcb",
+  "corpus_sha256": "0cec7d07423bbde833a560f38a35832da9b27512c07bafcaedd48aacce7c83b3",
   "rows": [
     {
       "id": "class.load_load",
@@ -155,7 +155,7 @@
     {
       "id": "shrink.to_end.nonzero_start",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "rejects_exactly",
       "receipt": "ir_sources.to_end_shrink_end_requires_a_literal_zero_start"
     }
   ]

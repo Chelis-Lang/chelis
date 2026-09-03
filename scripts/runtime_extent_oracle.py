@@ -467,7 +467,7 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "shrink.to_end.nonzero_start",
             "silent_unguarded",
-            "silent_unguarded",
+            TERMINAL_CONTROL,
             "ir_sources.to_end_shrink_end_requires_a_literal_zero_start",
         ),
     )
@@ -608,6 +608,7 @@ def phase_a_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
                 "v7_input_axis_round_trips_as_typed_structure",
                 "v7_movement_ops_reject_unowned_runtime_extent_inputs",
                 "v7_node_extent_round_trips_only_from_rank_zero_int64",
+                "v7_shrink_rejects_a_to_end_end_over_a_non_zero_start",
             ),
         ),
         TestTarget(
@@ -684,6 +685,7 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
             ),
             (
                 "every_risc_op_yields_exactly_one_source_per_output_axis",
+                "binding_a_to_end_bound_rejects_a_start_that_is_not_literal_zero",
                 "expand_insert_maps_later_output_axes_to_input_minus_one",
                 "external_axis_names_the_exact_load_not_a_string_match",
                 "full_axis_symbolic_shrink_is_op_computed_not_pass_through",

@@ -241,3 +241,58 @@ fn v6_display_string_expand_payload_is_rejected_before_op_decode() {
         Err(WireDagDecodeError::Parse(_))
     ));
 }
+
+/// chelis#1480 / `spec/05` section 2.4.1: a `to_end` end is well formed only
+/// beside a literal zero start, and the decoder is one of the stages that
+/// validates a bound. The per-carrier check sees one bound at a time and
+/// cannot see the pairing, so a `(Lit(1), ToEnd)` shrink decoded cleanly
+/// before this.
+#[test]
+fn v7_shrink_rejects_a_to_end_end_over_a_non_zero_start() {
+    let shrink_dag = |start: WireRtDim| WireDag {
+        schema_version: WIRE_DAG_SCHEMA_VERSION,
+        nodes: vec![
+            load(0, "value", &[4], "f32"),
+            WireDagNode {
+                id: 1,
+                op: WireRiscOp::Shrink {
+                    bounds: vec![(start, WireRtDim::ToEnd)],
+                },
+                inputs: vec![0],
+                output_type: ty(&[4], "f32"),
+            },
+        ],
+        roots: vec![1],
+    };
+
+    // The one well-formed spelling still round trips.
+    let valid = shrink_dag(WireRtDim::Lit { value: 0 });
+    let raw = serde_json::to_string(&valid).expect("the identity slice encodes");
+    let decoded = WireDag::from_validated_json(&raw).expect("the identity slice decodes");
+    assert_eq!(decoded.nodes.len(), 2);
+
+    assert_contract_rejects(
+        &shrink_dag(WireRtDim::Lit { value: 1 }),
+        "pairs the to_end carrier with a start that is not literal 0",
+    );
+
+    // A `to_end` START keeps its own rejection: the two rules are separate.
+    assert_contract_rejects(
+        &WireDag {
+            schema_version: WIRE_DAG_SCHEMA_VERSION,
+            nodes: vec![
+                load(0, "value", &[4], "f32"),
+                WireDagNode {
+                    id: 1,
+                    op: WireRiscOp::Shrink {
+                        bounds: vec![(WireRtDim::ToEnd, WireRtDim::Lit { value: 4 })],
+                    },
+                    inputs: vec![0],
+                    output_type: ty(&[4], "f32"),
+                },
+            ],
+            roots: vec![1],
+        },
+        "forbids the to_end carrier",
+    );
+}

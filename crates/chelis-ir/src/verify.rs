@@ -1162,6 +1162,18 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                                 node.id.0, axis
                             ));
                         }
+                        // chelis#1480, `spec/05` section 2.4.1: a `ToEnd` end
+                        // is well formed only when the start paired with it is
+                        // `Lit(0)`. A `ToEnd` end over any other start is a
+                        // malformed bound, rejected rather than resolved to a
+                        // slice.
+                        if matches!(end, RtDim::ToEnd) && start.as_lit() != Some(0) {
+                            errors.push(format!(
+                                "shrink at node {}: axis {} pairs the ToEnd sentinel with a \
+                                 start that is not Lit(0), which is a malformed bound",
+                                node.id.0, axis
+                            ));
+                        }
                         if matches!(start, RtDim::Sym(_)) || matches!(end, RtDim::Sym(_)) {
                             errors.push(format!(
                                 "shrink at node {}: axis {} uses a symbolic dim, which is \

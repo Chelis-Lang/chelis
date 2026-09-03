@@ -1066,30 +1066,75 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
     assert!(check_axis_sources(&dag, Stage::Lowering).is_ok());
 }
 
-/// chelis#1480: `verify` rejects a `ToEnd` START, and `dag.rs`'s own
-/// comment assumes a `ToEnd` END is paired with a literal zero start, but
-/// nothing enforces the pairing. This records the state on `main`; the
-/// rejection is the second half of PR B1.
+/// chelis#1480 / `spec/05` section 2.4.1: a `ToEnd` end is well formed only
+/// when the start paired with it is `Lit(0)`. A `ToEnd` end over any other
+/// start is a malformed bound that every stage validating a bound rejects
+/// rather than resolving to a slice.
 #[test]
 fn to_end_shrink_end_requires_a_literal_zero_start() {
-    let mut dag = Dag::new();
-    let operand = load(&mut dag, "x", vec![named("n")]);
-    let full_axis = dag.add_node(
-        RiscOp::Shrink {
-            bounds: vec![(RtDim::Lit(0), RtDim::ToEnd)],
-        },
-        vec![operand],
-        ty(vec![named("m")], Prim::F32),
-        None,
-    );
-    dag.add_root(full_axis);
+    let full_axis = |start: RtDim| {
+        let mut dag = Dag::new();
+        let operand = load(&mut dag, "x", vec![named("n")]);
+        let sliced = dag.add_node(
+            RiscOp::Shrink {
+                bounds: vec![(start, RtDim::ToEnd)],
+            },
+            vec![operand],
+            ty(vec![named("m")], Prim::F32),
+            None,
+        );
+        dag.add_root(sliced);
+        dag
+    };
+
+    // The one well-formed spelling: the identity slice of a symbolic
+    // bystander axis.
     assert!(
-        chelis_ir::verify::verify(&dag).is_empty(),
+        chelis_ir::verify::verify(&full_axis(RtDim::Lit(0))).is_empty(),
         "the full-axis sentinel is the legal ToEnd spelling"
     );
 
-    // A `ToEnd` START is already rejected, which is the control proving the
-    // verifier does look at the carrier.
+    // A nonzero literal start is malformed. Before chelis#1480 nothing
+    // rejected it: `verify` constrained only the START carrier, and
+    // `bind_symbolic_dims` resolved `(Lit(1), ToEnd)` into `(Lit(1),
+    // Lit(1 + size))`, a slice the spec says does not exist.
+    let errors = chelis_ir::verify::verify(&full_axis(RtDim::Lit(1)));
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("pairs the ToEnd sentinel with a start that is not Lit(0)")),
+        "a nonzero start must be rejected: {errors:?}"
+    );
+
+    // A runtime start is malformed for the same reason: the sentinel means
+    // the whole axis, and only a literal zero says so.
+    let mut runtime_start = Dag::new();
+    let operand = load(&mut runtime_start, "x", vec![named("n")]);
+    let offset = runtime_start.add_node(
+        RiscOp::Shape { axis: 0 },
+        vec![operand],
+        scalar(Prim::Int64),
+        None,
+    );
+    let sliced = runtime_start.add_node(
+        RiscOp::Shrink {
+            bounds: vec![(RtDim::Node(1), RtDim::ToEnd)],
+        },
+        vec![operand, offset],
+        ty(vec![named("m")], Prim::F32),
+        None,
+    );
+    runtime_start.add_root(sliced);
+    let errors = chelis_ir::verify::verify(&runtime_start);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("pairs the ToEnd sentinel with a start that is not Lit(0)")),
+        "a runtime start must be rejected: {errors:?}"
+    );
+
+    // The existing control, unchanged: a `ToEnd` START was already rejected,
+    // which is what proved the verifier looks at the carrier at all.
     let mut start_sentinel = Dag::new();
     let operand = load(&mut start_sentinel, "x", vec![named("n")]);
     let sliced = start_sentinel.add_node(
@@ -1104,7 +1149,43 @@ fn to_end_shrink_end_requires_a_literal_zero_start() {
     assert!(
         chelis_ir::verify::verify(&start_sentinel)
             .iter()
-            .any(|error| error.contains("ToEnd")),
+            .any(|error| error.contains("only valid as an end")),
         "a ToEnd start is rejected"
     );
+}
+
+/// The resolution stage rejects the same malformed bound rather than
+/// resolving it. `bind_symbolic_dims` is the stage eval reaches for every
+/// `ToEnd` bound, so this is what keeps the eval lane from computing a
+/// slice the spec says is not one.
+#[test]
+fn binding_a_to_end_bound_rejects_a_start_that_is_not_literal_zero() {
+    let bound = |start: RtDim| {
+        let mut dag = Dag::new();
+        let operand = load(&mut dag, "x", vec![named("n")]);
+        let sliced = dag.add_node(
+            RiscOp::Shrink {
+                bounds: vec![(start, RtDim::ToEnd)],
+            },
+            vec![operand],
+            ty(vec![named("n")], Prim::F32),
+            None,
+        );
+        dag.add_root(sliced);
+        dag
+    };
+    let mut bindings = chelis_unord::UnordMap::new();
+    bindings.insert("n".to_string(), 4usize);
+
+    let resolved = chelis_ir::dag::bind_symbolic_dims(&bound(RtDim::Lit(0)), &bindings)
+        .expect("the identity slice binds");
+    assert!(matches!(
+        &resolved.get(NodeId(1)).expect("shrink").op,
+        RiscOp::Shrink { bounds }
+            if bounds == &vec![(RtDim::Lit(0), RtDim::Lit(4))]
+    ));
+
+    let error = chelis_ir::dag::bind_symbolic_dims(&bound(RtDim::Lit(1)), &bindings)
+        .expect_err("a nonzero start is a malformed bound, not a slice");
+    assert!(error.contains("requires a literal zero start"), "{error}");
 }
