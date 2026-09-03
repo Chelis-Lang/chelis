@@ -198,7 +198,7 @@ Later sections cite the clause labels.
 |---|---|---|
 | C1.1 | Admissibility is typing, not provenance: any `int64` expression is an `expand` size; a `reshape` target is a `List[int64]` of static arity | `spec/04` §4.7.2, §4.7.3, §4.7.4, §4.7.6 |
 | C1.2 | Identity is proof-gated and equality is guarded; an unproved claim over a runtime extent adds a guard, never a rejection; every symbolic `shrink` axis is fresh | `spec/04` §4.7, §4.7.2, §4.7.3, §4.7.6 |
-| C1.3 | Guard placement is a partial order: once, after operands, before the first dependent allocation or access; interface guards at entry in signature order; local guards at the introducing operation's source position; an equality guard traps `Domain` under the introducing operation, a non-negativity guard under the owning movement operation, and both render as [04-NUM-9] typed operation-precondition guards at `int64` | `spec/04` §4.7, the runtime extent guard paragraph |
+| C1.3 | Guard placement is a partial order: once, after operands, before the first dependent allocation or access; interface guards at entry in signature order; local guards at the introducing operation's source position; an equality guard traps `Domain` under the introducing operation, a non-negativity guard under the owning movement operation, the same-rank `expand` form's unit-source-extent guard is a local guard at the `expand` site whose `<op>` is `expand`, and all three render as [04-NUM-9] typed operation-precondition guards at `int64` | `spec/04` §4.7, the runtime extent guard paragraph; `spec/05` §2.4.1 |
 | C1.4 | Coupled positional defaults settle in the order their results are introduced into the checked program | `spec/04` §4.7.2 |
 | C1.5 | Zero is legal; a static negative is a type error; a runtime negative traps `Domain` | `spec/04` §4.7.2 |
 | C1.6 | Extents are `int64`, axes are `int32` | [05-DIM-1..3] |
@@ -761,9 +761,10 @@ slice does not wait for them.
 (C4.1-C4.3 as a typed ratchet first, then C4.4); `derive_runtime_dim_classes`
 with the four C2.4 rules; removal of lowering's `fallback_expand_type`
 override of the stamped result type so the declared claim survives to
-derivation (what closes [#1374] and [#1376]); guard placement per C1.3 on
-Eval, C, and HIP (and on Metal once [#1383] lands); replacement of
-`symbolic_occurrences`,
+derivation (what closes [#1374] and [#1376]), with the same-rank `expand`
+form's unit-source-extent guard placed in that same change and before any
+widening, per C2.7; guard placement per C1.3 on Eval, C, and HIP (and on
+Metal once [#1383] lands); replacement of `symbolic_occurrences`,
 `op_declared_output_axes`, `shape_source_for_axis`, and `symbolic_bindings`
 by the two derivations; then, in the same change, deletion of `SizeClass`,
 `classify_expand_size`, `classify_arith_app`,

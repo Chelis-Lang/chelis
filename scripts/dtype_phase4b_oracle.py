@@ -2554,6 +2554,14 @@ def validate_normative_contract(
                 "ToEnd shrink end requires a zero start",
             ),
             (
+                "is well formed only\nwhen the operand's extent at `axis` is 1",
+                "expand same-rank form requires a unit source extent",
+            ),
+            (
+                "other than 1 under the same-rank\nform traps `Domain` under `expand`",
+                "expand same-rank non-unit source extent traps Domain",
+            ),
+            (
                 "| `cmplt(a, b)` | `cmplt(a, b)` | "
                 "`and(not(nan), cmplt(a, b))` |",
                 "ordered cmplt lowering",
