@@ -808,6 +808,28 @@ fn every_settlement_family_declared_result_binds() {
 /// therefore requires the rejection under both producers and the acceptance
 /// under producer B.
 ///
+/// **What neither producer can separate, and the repair that creates it.** A
+/// call that eliminates a candidate when its own rule can and freezes cleanly
+/// when it cannot passes both producers. `to_list` is the registry's one
+/// rank-upper-bound builtin (`to_list expects a rank-1 tensor, got rank 2
+/// tensor`), and on a deferred operand that rule is skipped, which is
+/// chelis#1512. So `to_list` accepts the insertion-form consumer today and
+/// fails the rejection column rather than passing it. Repair chelis#1512 and
+/// `to_list` begins eliminating by rank on a deferred operand, at which point
+/// its two columns are identical to a freeze under both producers and nothing
+/// here goes red. No producer built from a positional `expand` separates them,
+/// because the insertion form always carries exactly one more dimension than
+/// the replacement form. The sentinel
+/// `to_list_accepts_the_insertion_consumer_until_chelis_1512_is_repaired`
+/// turns that silent day into a red one.
+///
+/// Search scope, as run: 94 builtins, the operand in first argument position,
+/// one of six argument fillers, the first spelling that was not an arity error
+/// at both rank 1 and rank 2. Not covered: spellings with the tensor in a later
+/// argument position, builtins needing a rank-4 producer or a callback, and
+/// fillers beyond the six. A rank upper bound reachable only through one of
+/// those was not found.
+///
 #[test]
 fn each_family_representative_behaves_as_its_family_declares() {
     let named = UNDISCRIMINATED_FAMILIES
@@ -933,6 +955,41 @@ fn each_family_representative_behaves_as_its_family_declares() {
             TensorSettlement::NoTensorOperand => {
                 panic!("{}: a family cannot be NoTensorOperand", family.name)
             }
+        }
+    }
+}
+
+/// A labelled sentinel for the `Freezes` arm's documented pass-through, in the
+/// shape of the chelis#1512 artifact labels above.
+///
+/// `to_list` accepts the insertion-form consumer on a deferred operand because
+/// its rank rule is skipped while the operand is pending. Repairing
+/// chelis#1512 makes that rule apply, `to_list` starts eliminating the
+/// insertion candidate by rank, and its two columns become indistinguishable
+/// from a freeze under both producers.
+///
+/// A red here after that repair means the `Freezes` arm has acquired the
+/// pass-through its doc comment describes. It does not mean `to_list` broke and
+/// this is not a test to restore: what the red asks for is a discriminator the
+/// arm does not have, not a change to this assertion.
+#[test]
+fn to_list_accepts_the_insertion_consumer_until_chelis_1512_is_repaired() {
+    let family = FAMILIES
+        .iter()
+        .find(|family| family.representative == "to_list")
+        .expect("`to_list` is a family representative");
+    for (producer, probe) in [
+        ("producer A", survives_the_call(family)),
+        ("producer B", under_producer_b(family, "tensor[6, 1, f32]")),
+    ] {
+        if let Err(error) = probe {
+            panic!(
+                "under {producer}, `to_list` on a deferred operand still \
+                 accepts the insertion-form consumer. A rejection here means \
+                 its rank rule now applies to a pending operand, so \
+                 chelis#1512 has been repaired and the `Freezes` arm has \
+                 acquired the pass-through its doc comment describes: {error}"
+            )
         }
     }
 }
