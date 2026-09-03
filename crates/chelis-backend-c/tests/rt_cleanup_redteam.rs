@@ -1251,11 +1251,11 @@ fn sibling_sweep_host_emit_carries_the_elementwise_rank_guard() {
     let host = read_host_emit_src();
     assert!(
         host.contains("elementwise operand rank mismatch"),
-        "host_emit.rs must emit the chelis#1484 positive-rank operand guard;          a regression has removed it"
+        "host_emit.rs must emit the chelis#1484 positive-rank operand guard; a regression has removed it"
     );
     assert!(
         host.contains("elementwise operand shape mismatch"),
-        "host_emit.rs must emit the chelis#1484 equal-rank operand shape guard;          a regression has removed it"
+        "host_emit.rs must emit the chelis#1484 equal-rank operand shape guard; a regression has removed it"
     );
 }
 
