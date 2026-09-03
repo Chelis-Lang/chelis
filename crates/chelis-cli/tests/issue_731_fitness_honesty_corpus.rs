@@ -46,6 +46,14 @@
 //! chelis#850's unbacked `defsig`, chelis#1131's contradictory literal atom,
 //! and chelis#1147's four `scatter_elements` admission holes. Each class also
 //! has a well-typed score-1 control below.
+//!
+//! Membership (chelis#1494): a `match` arm whose literal pattern cannot denote
+//! the scrutinee's primitive. `pattern_bindings` did nothing at `pat-lit`, so
+//! `spec/04-type-system.md` [04-PAT-1]'s constraint went unchecked and an
+//! `f32` pattern against an `int32` scrutinee scored 1.0 with an empty error
+//! list while the arm could never match. The paired positive control is the
+//! same program with a matching literal family, which must stay at 1.0 so the
+//! rejection cannot creep into a well-formed match.
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -226,6 +234,18 @@ fn surf_known_bad_programs_score_below_one() {
         (
             "scatter_elements_string_data",
             "def f(indices: tensor[2, 2, int32], updates: tensor[2, 2, f32]) = scatter_elements(\"bad\", indices, updates, 0)\n".to_string(),
+            ".ch",
+        ),
+        (
+            "literal_pattern_float_vs_int_scrutinee",
+            "module ScrutineeSigned\n\ndef g(n: int32) -> int32 = add(1, n)\n\n             r: f32 = match g(2) with {\n  | 1.5 => 1.5\n  | _ => 2.5\n}\n"
+                .to_string(),
+            ".ch",
+        ),
+        (
+            "literal_pattern_out_of_range_vs_int8_scrutinee",
+            "def g(n: int8) -> int8 = add(0i8, n)\n\n             r: int32 = match g(1i8) with {\n  | 300 => 10\n  | _ => 20\n}\n"
+                .to_string(),
             ".ch",
         ),
     ];
@@ -572,6 +592,11 @@ fn post_phase_checker_controls_still_score_one() {
         (
             "valid_scatter_elements",
             "def f(data: tensor[2, 3, f32], indices: tensor[2, 2, int32], updates: tensor[2, 2, f32]) -> tensor[2, 3, f32] = scatter_elements(data, indices, updates, 1)\n",
+            ".ch",
+        ),
+        (
+            "matching_literal_pattern_family",
+            "module ScrutineeSigned\n\ndef g(n: int32) -> int32 = add(1, n)\n\n             r: f32 = match g(2) with {\n  | 1 => 1.5\n  | _ => 2.5\n}\n",
             ".ch",
         ),
     ];

@@ -450,6 +450,33 @@ A top-level irrefutable arm covers the match: a bare variable pattern
 only; a variable pattern NESTED inside a constructor or record pattern
 does not cover the other variants.
 
+Coverage is a separate question from whether a pattern is admissible at the
+scrutinee type at all.
+
+> **[04-PAT-1]** A literal pattern is a typing constraint on the scrutinee, at
+> every depth a pattern may occur. Its value atom SHALL agree with the
+> scrutinee's primitive type under [04-LIT-1]'s closed pairing: an integer atom
+> matches only an integer primitive, a float atom only a float primitive, a
+> boolean atom only `bool`, and a string atom only `string`. [04-LIT-1]'s one
+> cross-family form, an Int atom marked `literal_source: integer` under a float
+> primitive, requires `lit` metadata that a `pat-lit` cannot carry and therefore
+> does not arise in pattern position. A literal pattern SHALL NOT be admitted
+> against a non-primitive scrutinee: a tensor, nominal, tuple, record, or
+> function scrutinee admits no literal pattern. A numeric literal pattern whose
+> value lies outside the range of the scrutinee's primitive type SHALL be
+> rejected, under the same range rule §5.3 and §5.6 apply to a literal bound at
+> that type; a float primitive has no such range, because finalization at a
+> float width is total under [04-NUM-1]. Each violation SHALL be a
+> `TypeMismatch` located at the offending pattern, at every checker ingress and
+> before any evaluation or lowering lane runs; an implementation SHALL NOT admit
+> the arm as merely unreachable, drop it, or defer the diagnostic to a lane. A
+> literal pattern selects no width: a Deep `pat-lit` carries only its raw value,
+> with no precision slot and no admissible suffix
+> (`spec/03-deep-syntax.md` §6.4, `spec/02-surf-syntax.md` §P10a), so an
+> unsuffixed integer pattern is admissible against every integer primitive and
+> an unsuffixed float pattern against every float primitive, and §5.3's literal
+> default does not apply in pattern position.
+
 ### 2.5 Opaque Types
 
 A `deftype` carrying `opaque: true` metadata (Surf: the `@opaque`
@@ -839,6 +866,11 @@ Standard notation: Γ ⊢ e : τ means "in environment Γ, expression e has type
     ──────────────────────────────────────
     Γ ⊢ (match {} e arm₁ ... armₙ) : τᵣ
 ```
+
+`bindings(p, τₛ)` is defined only when `p` is admissible at the scrutinee type
+`τₛ`. An inadmissible pattern is a type error at its own arm, not an arm that
+contributes no bindings. A `pat-lit` binds nothing and contributes exactly one
+constraint on `τₛ`, which [04-PAT-1] states.
 
 **Pipe:**
 ```
