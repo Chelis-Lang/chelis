@@ -1,28 +1,32 @@
 //! C compile/run and layout oracle for [05-OP-31]'s exact declarations.
 
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEMP_DIR_NONCE: AtomicU64 = AtomicU64::new(0);
 
 struct TempDir(PathBuf);
 
 impl TempDir {
     fn new() -> Self {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        // The process id, not the clock alone: `cargo nextest` gives every
-        // test its own process, and two spawned back to back can read the
-        // same coarse `as_nanos` value. This helper is the one #1479's probe
-        // directory was copied from, so the omission propagated once already.
-        let path = std::env::temp_dir().join(format!(
-            "chelis-exact-tagged-abi-{}-{nonce}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&path).expect("create probe directory");
-        Self(path)
+        loop {
+            // Concurrent tests share a process, so PID plus wall-clock time is
+            // not a unique identity. The monotonic nonce separates those
+            // threads; create_dir also rejects residue from a reused PID.
+            let nonce = TEMP_DIR_NONCE.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "chelis-exact-tagged-abi-{}-{nonce}",
+                std::process::id()
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => return Self(path),
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("create probe directory {}: {error}", path.display()),
+            }
+        }
     }
 }
 
@@ -38,6 +42,28 @@ fn include_dir() -> PathBuf {
 
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+#[test]
+fn concurrent_probe_directories_have_distinct_live_paths() {
+    let handles = (0..4)
+        .map(|_| std::thread::spawn(TempDir::new))
+        .collect::<Vec<_>>();
+    let directories = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("create probe directory thread"))
+        .collect::<Vec<_>>();
+    let mut paths = directories
+        .iter()
+        .map(|directory| directory.0.clone())
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    assert_eq!(paths.len(), directories.len(), "probe paths collided");
+    assert!(
+        directories.iter().all(|directory| directory.0.is_dir()),
+        "a live probe directory was removed by another TempDir"
+    );
 }
 
 #[test]
