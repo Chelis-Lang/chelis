@@ -35,6 +35,9 @@ thread_local! {
         RefCell::new(UnordMap::new());
     static PROGRAM_DEFS_CACHE: RefCell<UnordMap<usize, Arc<BTreeMap<String, Expr>>>> =
         RefCell::new(UnordMap::new());
+    static DEF_EFFECT_ROWS_CACHE:
+        RefCell<UnordMap<usize, Arc<BTreeMap<String, chelis_types::types::EffectSet>>>> =
+        RefCell::new(UnordMap::new());
     static SUBEXPR_LOWERING_CONTEXT_CACHE:
         RefCell<UnordMap<usize, crate::lower::SubexprLoweringContext>> =
         RefCell::new(UnordMap::new());
@@ -259,6 +262,7 @@ impl HostLoweringCacheGuard {
         TYPE_POLYMORPHIC_FN_CACHE.with(|cache| cache.borrow_mut().clear());
         TOP_LEVEL_FN_CALL_GRAPH_CACHE.with(|cache| cache.borrow_mut().clear());
         PROGRAM_DEFS_CACHE.with(|cache| cache.borrow_mut().clear());
+        DEF_EFFECT_ROWS_CACHE.with(|cache| cache.borrow_mut().clear());
         SUBEXPR_LOWERING_CONTEXT_CACHE.with(|cache| cache.borrow_mut().clear());
         HELPER_SUMMARY_REJECTS_CACHE.with(|cache| cache.borrow_mut().clear());
         DYNAMIC_TO_TENSOR_DEF_SUMMARIES_CACHE.with(|cache| cache.borrow_mut().clear());
@@ -274,6 +278,7 @@ impl Drop for HostLoweringCacheGuard {
         TYPE_POLYMORPHIC_FN_CACHE.with(|cache| cache.borrow_mut().clear());
         TOP_LEVEL_FN_CALL_GRAPH_CACHE.with(|cache| cache.borrow_mut().clear());
         PROGRAM_DEFS_CACHE.with(|cache| cache.borrow_mut().clear());
+        DEF_EFFECT_ROWS_CACHE.with(|cache| cache.borrow_mut().clear());
         SUBEXPR_LOWERING_CONTEXT_CACHE.with(|cache| cache.borrow_mut().clear());
         HELPER_SUMMARY_REJECTS_CACHE.with(|cache| cache.borrow_mut().clear());
         DYNAMIC_TO_TENSOR_DEF_SUMMARIES_CACHE.with(|cache| cache.borrow_mut().clear());
@@ -3068,6 +3073,7 @@ pub struct HostDefKernel {
 
 /// What `lower_host_function` and [`host_def_kernel`] both start from.
 struct HostDefSignature {
+    name: String,
     params: Vec<HostParam>,
     scope: UnordMap<String, HostTypeTerm>,
     ret_ty: HostTypeTerm,
@@ -3141,6 +3147,42 @@ pub fn host_def_kernel(
     }))
 }
 
+/// Whether `name`'s checked effect row carries an effect with no DAG form
+/// (`IO`, `Test`, `Resource`). Read off the same effect inference the root
+/// manifest uses, cached per program like the other host-lowering facts.
+fn def_effect_row_forbids_kernel(program: &CheckedProgram, name: &str) -> bool {
+    cached_def_effect_rows(program)
+        .get(name)
+        .is_some_and(|row| {
+            row.iter().any(|effect| {
+                matches!(
+                    effect,
+                    chelis_types::types::Effect::Io
+                        | chelis_types::types::Effect::Test
+                        | chelis_types::types::Effect::Resource(_)
+                )
+            })
+        })
+}
+
+fn cached_def_effect_rows(
+    program: &CheckedProgram,
+) -> Arc<BTreeMap<String, chelis_types::types::EffectSet>> {
+    let key = program as *const CheckedProgram as usize;
+    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get)
+        && let Some(cached) = DEF_EFFECT_ROWS_CACHE.with(|cache| cache.borrow().get(&key).cloned())
+    {
+        return cached;
+    }
+    let rows = Arc::new(chelis_effects::def_effect_rows(program));
+    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get) {
+        DEF_EFFECT_ROWS_CACHE.with(|cache| {
+            cache.borrow_mut().insert(key, rows.clone());
+        });
+    }
+    rows
+}
+
 /// The predicate list `lower_host_function` has always applied, evaluated
 /// before lowering: declared tensor result, no callable parameter, no
 /// recursive, callable-parameter or summary-rejecting callee reached, root
@@ -3164,6 +3206,17 @@ fn def_body_decision(
     let HostTypeTerm::Tensor(expected) = signature.ret_ty.clone() else {
         return Ok(DefBodyDecision::Host);
     };
+    // chelis#1528: a body whose checked effect row carries an effect the DAG
+    // cannot represent stays in host code on both lanes. `spec/04-type-system.md`
+    // section 7.1 makes `IO` the host-side observable interaction effect,
+    // `Test` the test runner's, and `Resource(Device)` a placement region;
+    // [05-HOST-2] forbids representing "a device-only kernel may not perform
+    // IO" as an inert stub, which is what a kernel that drops `print` is.
+    // `Random` (`UniformLike`) and `Accum` (gradient accumulation) are carried
+    // by the DAG.
+    if def_effect_row_forbids_kernel(program, &signature.name) {
+        return Ok(DefBodyDecision::Host);
+    }
     if any_callable_param
         || expr_needs_host_lane_tensor_lowering(body_expr, program)
         || expr_calls_top_level_fn_with_callable_param(body_expr, program)
@@ -3342,9 +3395,7 @@ fn host_def_signature(
     let body_expr = if let Expr::List(list, _) = body {
         if tag(list) == Some(DeepTag::Fn) {
             let kids = children(list);
-            let Some(params_list) = kids.first().and_then(as_list) else {
-                return None;
-            };
+            let params_list = kids.first().and_then(as_list)?;
             if tag(params_list) != Some(DeepTag::Params) {
                 return None;
             }
@@ -3368,10 +3419,7 @@ fn host_def_signature(
                     ty: pty,
                 });
             }
-            let Some(body) = kids.get(1) else {
-                return None;
-            };
-            body.clone()
+            kids.get(1)?.clone()
         } else {
             if param_tys.is_empty() && ret_ty.is_unresolved() {
                 return None;
@@ -3403,6 +3451,7 @@ fn host_def_signature(
     // (`HOST_UNRESOLVED_CALLABLE_MARKER`), which ABI projection rejects
     // pre-emission.
     Some(HostDefSignature {
+        name: name.to_string(),
         params,
         scope,
         ret_ty,
