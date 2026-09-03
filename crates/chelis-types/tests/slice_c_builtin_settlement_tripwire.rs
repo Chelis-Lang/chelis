@@ -253,7 +253,11 @@ const FAMILIES: &[Family] = &[
         // family's declared result becomes tensor[2, 3, f32]; a red here after
         // that repair is the tripwire working, not a test to restore.
         // pad and shrink share the defect: their resolved-correct results are
-        // tensor[5, 2, f32] and tensor[1, 1, f32].
+        // tensor[5, 2, f32] and tensor[1, 1, f32]. Those shapes are properties
+        // of a spelling rather than of the builtin, so the spellings they
+        // assume are pad(a, [[1i64, 1i64], [0i64, 0i64]], 0.0f32) and
+        // shrink(a, [[0i64, 1i64], [0i64, 1i64]]) over a resolved
+        // tensor[3, 2, f32]. Both are accepted at those declarations today.
         declared_result: Some("tensor[3, 2, f32]"),
         wrong_result: Some("tensor[9, 9, f32]"),
         members: &["permute", "pad", "shrink"],
