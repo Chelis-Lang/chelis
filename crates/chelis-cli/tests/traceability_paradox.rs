@@ -10,8 +10,8 @@
 //! recorded measurements are: number of span comments, share that are
 //! synthesized markers vs Surf parser byte-range spans, number of fused
 //! kernels, number of BLAS specializations actually fired, and the buffer
-//! allocation footprint in bytes (peak helper-side slot footprint under the
-//! C backend's M2a slot planner).
+//! allocation footprint in bytes (peak helper-side owned storage under the
+//! Phase 1 no-reuse baseline).
 //!
 //! Findings (locked here as assertions):
 //!   * Emitted `// span:` lines include Surf parser byte-range IDs of the
@@ -26,28 +26,29 @@
 //!
 //! ## Cost profile (computed from emitted C, parameterised by `seq`)
 //!
-//! Empirically the helper-side slot footprint is a polynomial in `seq` whose
+//! Empirically the helper-side owned-allocation footprint is a polynomial in `seq` whose
 //! coefficients are read directly off `chelis_alloc(N, (int64_t[]){...})` calls:
 //!
 //! | term | bytes | dominant source |
 //! |---|---|---|
-//! | `c2` (× seq²) | 264 B | attention score/probs buffers that remain live together |
-//! | `c1` (× seq) | 16,140 B | Q/K/V/O, residual/LN, and FFN intermediates after symbolic BLAS removes generic matmul product buffers |
+//! | `c2` (× seq²) | 788 B | attention score/probs and unfused per-head intermediates |
+//! | `c1` (× seq) | 34,104 B | Q/K/V/O, residual/LN, and FFN intermediates after symbolic BLAS removes generic matmul product buffers |
 //! | `c0` | 0 | none — every allocation has at least one `seq` factor |
 //!
 //! Projected peak working set:
 //!
 //! | seq | peak | dominant term |
 //! |---|---|---|
-//! | 128 | 6.1 MiB | `c2 × seq²` |
-//! | 512 | 73.9 MiB | `c2 × seq²` |
-//! | 2048 | **1.06 GiB** | `c2 × seq²` |
-//! | 4096 | 4.19 GiB | `c2 × seq²` |
+//! | 128 | 16.5 MiB | owned Phase 1 intermediates |
+//! | 512 | 213.7 MiB | `c2 × seq²` |
+//! | 2048 | **3.14 GiB** | `c2 × seq²` |
+//! | 4096 | 12.44 GiB | `c2 × seq²` |
 //!
 //! **Why this is still high:** symbolic BLAS removes the cubic generic matmul
-//! product buffers, but vanilla attention still materializes `seq × seq`
-//! score/probability tensors. M2a's C memory planner reuses non-overlapping
-//! buffers, but it cannot make real attention intermediates smaller.
+//! product buffers, but Phase 1 deliberately keeps all 50 produced tensors as
+//! independent owners until epilogue. Shared-storage reuse returns only after
+//! Phase 3's cross-backend proof. Vanilla attention also materializes
+//! `seq × seq` score/probability tensors.
 //!
 //! A follow-on FlashAttention-style pass would shrink this further by avoiding
 //! materialized score/probability tensors.
@@ -62,8 +63,30 @@ use std::process::Command;
 use assert_cmd::cargo::CommandCargoExt;
 use tempfile::tempdir;
 
-/// Parse `chelis_alloc` calls and compute a polynomial in `seq` describing
-/// the working set. Returns (constant_bytes, seq1_bytes, seq2_bytes) such
+fn is_owned_tensor_allocation(line: &str) -> bool {
+    let Some(after_prefix) = line.trim_start().strip_prefix("chelis_tensor *t") else {
+        return false;
+    };
+    let Some((name_suffix, _arguments)) = after_prefix.split_once(" = chelis_alloc(") else {
+        return false;
+    };
+    !name_suffix.is_empty() && name_suffix.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn is_owned_tensor_release(line: &str) -> bool {
+    let Some(name_suffix) = line
+        .trim()
+        .strip_prefix("chelis_tensor_release(t")
+        .and_then(|suffix| suffix.strip_suffix(");"))
+    else {
+        return false;
+    };
+    !name_suffix.is_empty() && name_suffix.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Parse owned `tN = chelis_alloc(...)` calls and compute a polynomial in
+/// `seq` describing the Phase 1 peak. Returns
+/// (allocation_count, constant_bytes, seq1_bytes, seq2_bytes) such
 /// that total ≈ constant + seq * seq1 + seq * seq * seq2.
 ///
 /// Unhandled allocations (e.g. `chelis_alloc(0, NULL, ...)`) contribute
@@ -74,9 +97,10 @@ fn measure_seq_polynomial(c_source: &str) -> (usize, usize, usize, usize) {
     let mut seq1_bytes = 0usize;
     let mut seq2_bytes = 0usize;
 
-    for line in c_source.lines().filter(|line| {
-        line.contains("chelis_tensor *chelis_slot") && line.contains(" = chelis_alloc(")
-    }) {
+    for line in c_source
+        .lines()
+        .filter(|line| is_owned_tensor_allocation(line))
+    {
         let pos = line
             .find("chelis_alloc(")
             .expect("filtered allocation line");
@@ -178,13 +202,12 @@ fn transformer_block_traceability_state_is_locked() {
         .filter(|l| l.contains("// span: surf:"))
         .count();
     let fused_kernels = source.matches("parallel for simd").count();
-    let planned_allocations = source
+    let owned_allocations = source
         .lines()
-        .filter(|line| {
-            line.contains("chelis_tensor *chelis_slot") && line.contains(" = chelis_alloc(")
-        })
+        .filter(|line| is_owned_tensor_allocation(line))
         .count();
     let slot_allocations = source.matches("chelis_tensor *chelis_slot").count();
+    let legacy_view_allocations = source.matches("chelis_alloc_view").count();
     let blas_calls = source.matches("cblas_sgemm").count()
         + source.matches("chelis_blas_matmul").count()
         + source.matches("chelis_blas_sgemm").count();
@@ -211,20 +234,15 @@ fn transformer_block_traceability_state_is_locked() {
          MHA+FFN block; got {fused_kernels}"
     );
     assert_eq!(
-        planned_allocations, slot_allocations,
-        "expected every C memory-planner backing allocation to be a planned \
-         chelis_slot after M2a; host-boundary allocations use the same runtime \
-         primitive but are outside the planner. Got {planned_allocations} planned \
-         chelis_alloc calls and \
-         {slot_allocations} slot declarations"
+        owned_allocations, 50,
+        "expected 50 independently owned tN allocations in the Phase 1 \
+         transformer baseline; got {owned_allocations}"
     );
     assert_eq!(
-        slot_allocations, 15,
-        "expected the current symbolic-BLAS + M2a slot plan for \
-         transformer_block.ch to use 15 backing slots. If this drops, memory \
-         planning/fusion improved and \
-         the cost profile in this test should be updated; if it rises, slot \
-         reuse regressed."
+        (slot_allocations, legacy_view_allocations),
+        (0, 0),
+        "Phase 1 must not synthesize borrowed chelis_slot wrappers or the \
+         removed chelis_alloc_view path; Phase 3 owns reuse"
     );
     assert_eq!(
         blas_calls, 7,
@@ -275,8 +293,24 @@ fn transformer_block_traceability_state_is_locked() {
     );
     assert_eq!(
         (alloc_count, c0, c1, c2),
-        (15, 0, 16_140, 264),
+        (50, 0, 34_104, 788),
         "unexpected transformer_block working-set polynomial; update the \
          locked cost profile only after inspecting the emitted C"
+    );
+
+    let final_owned_allocation = source
+        .lines()
+        .enumerate()
+        .filter_map(|(line_number, line)| is_owned_tensor_allocation(line).then_some(line_number))
+        .last()
+        .expect("owned tensor allocation");
+    let first_owned_release = source
+        .lines()
+        .position(is_owned_tensor_release)
+        .expect("owned tensor release");
+    assert!(
+        first_owned_release > final_owned_allocation,
+        "the summed owned-allocation polynomial is a peak only while every \
+         temporary survives through the final allocation"
     );
 }
