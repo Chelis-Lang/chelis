@@ -188,6 +188,12 @@ pub enum RuntimeValue {
         /// fresh specialization from checked argument/result types and lets
         /// the callee's own binders shadow same-spelled outer binders.
         precision_env: UnordMap<String, Prim>,
+        /// chelis#1277 B2h: the top-level def this closure is the body of,
+        /// when it is one. Stamped where a def body resolves to its closure
+        /// (`stamp_def_closure`), never on a local `fn` literal, so applying
+        /// the closure can consult the kernel decision the C lane makes for
+        /// that def (`chelis_ir::host::host_def_kernel`).
+        def_name: Option<String>,
     },
     /// A captured `grad(f)` / `vmap(f)` waiting to be applied to args. The
     /// `transform_expr` holds the original `(grad ...)` or `(vmap ...)`
@@ -522,6 +528,8 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         type_env,
         adt_fields,
         tensor_bindings,
+        program: Some(program),
+        def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         resolving_top_levels: Vec::new(),
         random_seed: None,
@@ -617,12 +625,10 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         // closure, not its result. Reuse that closure but still apply it: an
         // owed [05-OBS-7] root can never be represented by `<closure>`, and
         // the effect-row guard above proves the automatic application pure.
-        let callable = ctx
-            .bindings
-            .get(name)
-            .cloned()
-            .map(Ok)
-            .unwrap_or_else(|| ctx.eval_expr(body));
+        let callable = ctx.bindings.get(name).cloned().map(Ok).unwrap_or_else(|| {
+            ctx.eval_expr(body)
+                .map(|value| stamp_def_closure(value, name, body))
+        });
         let applied = callable.and_then(|closure| {
             let args = match &closure {
                 RuntimeValue::Closure { params, .. } => params
@@ -667,6 +673,34 @@ fn register_declared_signatures(exprs: &[Expr], signatures: &mut UnordMap<String
             continue;
         };
         signatures.insert(name.to_string(), signature.clone());
+    }
+}
+
+/// chelis#1277 B2h: a def whose body is a `(fn ...)` literal resolves to a
+/// closure that IS the def; record its name so an application can take the
+/// kernel the C lane emits for that def. A local `fn` literal inside a body
+/// never passes through here and keeps `def_name: None`.
+fn stamp_def_closure(value: RuntimeValue, name: &str, body: &Expr) -> RuntimeValue {
+    let body_is_fn = tagged_expr_children(body).is_some_and(|(tag, _)| tag == DeepTag::Fn);
+    match value {
+        RuntimeValue::Closure {
+            params,
+            param_types,
+            return_type,
+            body: closure_body,
+            env,
+            precision_env,
+            def_name: None,
+        } if body_is_fn => RuntimeValue::Closure {
+            params,
+            param_types,
+            return_type,
+            body: closure_body,
+            env,
+            precision_env,
+            def_name: Some(name.to_string()),
+        },
+        other => other,
     }
 }
 
@@ -935,6 +969,17 @@ struct EvalContext<'a> {
     type_env: UnordMap<String, Expr>,
     adt_fields: UnordMap<String, Vec<String>>,
     tensor_bindings: &'a UnordMap<String, RuntimeTensorValue>,
+    /// The checked program under evaluation. The kernel decision for a def
+    /// application is read off it through `chelis_ir::host::host_def_kernel`
+    /// (chelis#1277 B2h), so eval and C answer "is this def a kernel" from one
+    /// function. `None` only for the invariant-predicate evaluator, which has
+    /// no program and therefore no kernels: it interprets every application.
+    program: Option<&'a CheckedProgram>,
+    /// Per-def kernel decision: `None` is the host lane, `Some` a kernel whose
+    /// DAG draws no Random and is reused across applications. A Random-drawing
+    /// kernel is re-lowered per application and never cached (see
+    /// `EvalContext::def_kernel`).
+    def_kernels: UnordMap<String, Option<std::sync::Arc<chelis_ir::host::HostDefKernel>>>,
     transcript: Vec<String>,
     resolving_top_levels: Vec<String>,
     random_seed: Option<u64>,

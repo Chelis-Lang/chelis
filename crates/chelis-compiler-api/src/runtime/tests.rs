@@ -3085,6 +3085,7 @@ fn fo_diag_bools_strings_and_nonnumeric_controls() {
             ),
             env: UnordMap::new(),
             precision_env: UnordMap::new(),
+            def_name: None,
         }),
         "<closure>"
     );

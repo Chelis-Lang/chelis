@@ -1298,7 +1298,7 @@ pub(crate) fn try_lower_subexpr_program_with_context_and_controls(
     })
 }
 
-fn try_lower_subexpr_program_with_context_and_random_state(
+pub(crate) fn try_lower_subexpr_program_with_context_and_random_state(
     expr: &Expr,
     scoped_tensor_types: UnordMap<String, TensorType>,
     context: &SubexprLoweringContext,

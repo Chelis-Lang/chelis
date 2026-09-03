@@ -4,13 +4,15 @@ use std::fs;
 
 use chelis_deep::ast::{Atom, Expr, List};
 use chelis_deep::{Span, decode_effect_kind};
-use chelis_ir::dag::DimInfo;
+use chelis_ir::dag::{DimInfo, NodeId, RiscOp};
 use chelis_ir::eval::TensorValue as IrTensorValue;
+use chelis_ir::host::{HostDefKernel, RandomLoweringState, host_def_kernel};
 use chelis_ir::tier2;
 use chelis_types::{
     CompareOp, ElementRef, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, StorageView, types::Prim,
 };
 use chelis_vocab::EffectKind;
+use std::sync::Arc;
 
 use super::host_ops::*;
 use super::named_axis::*;
@@ -246,13 +248,129 @@ impl<'a> EvalContext<'a> {
             return Err(format!("cyclic top-level runtime definition `{name}`"));
         }
         self.resolving_top_levels.push(resolved_name.clone());
-        let value = self.eval_expr(&expr)?;
+        let value = self.eval_expr(&expr);
         self.resolving_top_levels.pop();
+        let value = stamp_def_closure(value?, &resolved_name, &expr);
         self.bindings.insert(resolved_name.clone(), value.clone());
         if resolved_name != name {
             self.bindings.insert(name.to_string(), value.clone());
         }
         Ok(value)
+    }
+
+    /// chelis#1277 B2h: the kernel the C lane emits for def `name`, or `None`
+    /// for the host lane. The decision is `chelis_ir::host::host_def_kernel`,
+    /// the function `lower_host_function` itself uses, so the two lanes cannot
+    /// disagree about which defs are kernels. A kernel whose DAG draws no
+    /// Random is cached per def; one that draws is re-lowered on every
+    /// application so its ordinals start at the current stream position, as
+    /// the transforms re-lower per application. A kernel decision whose
+    /// lowering fails is the evaluation's error, never a fall-through to the
+    /// interpreter (the C lane's fall-through is chelis#1515 and is not
+    /// inherited here).
+    pub(super) fn def_kernel(&mut self, name: &str) -> Result<Option<Arc<HostDefKernel>>, String> {
+        if let Some(cached) = self.def_kernels.get(name) {
+            return Ok(cached.clone());
+        }
+        let Some(program) = self.program else {
+            return Ok(None);
+        };
+        let random = RandomLoweringState {
+            seed: self.random_seed,
+            counter: self.random_counter,
+        };
+        let kernel = host_def_kernel(program, name, Some(random))
+            .map_err(|diagnostic| diagnostic.to_string())?
+            .map(Arc::new);
+        if !kernel
+            .as_ref()
+            .is_some_and(|kernel| kernel_draws_random(kernel))
+        {
+            self.def_kernels.insert(name.to_string(), kernel.clone());
+        }
+        Ok(kernel)
+    }
+
+    /// Apply def `name` through its kernel: the evaluated arguments become the
+    /// kernel's `Load`s by declared parameter name (an unreferenced parameter
+    /// is dropped, as the C wrapper drops it), a captured top-level tensor is
+    /// served through `resolve_top_level`, the DAG evaluator runs with the
+    /// Random stream threaded as `apply_transform` threads it, and the roots
+    /// pack back into a runtime value. The evaluator's error text passes
+    /// through unchanged: a [04-NUM-9] trap line takes no prefix.
+    fn apply_def_kernel(
+        &mut self,
+        name: &str,
+        kernel: &HostDefKernel,
+        params: &[String],
+        args: Vec<RuntimeValue>,
+    ) -> Result<RuntimeValue, String> {
+        if params.len() != args.len() {
+            return Err(format!(
+                "closure expected {} args, got {}",
+                params.len(),
+                args.len()
+            ));
+        }
+        let mut staged: UnordMap<String, IrTensorValue> = UnordMap::new();
+        for input in &kernel.inputs {
+            let value = match kernel
+                .params
+                .iter()
+                .position(|param| param.name == input.name)
+            {
+                Some(index) => {
+                    stage_kernel_argument(name, &input.name, &args[index], input.ty.precision)?
+                }
+                // A captured top-level binding: served through the same
+                // resolution a plain reference takes (the transforms'
+                // chelis#377 rule) and staged like a parameter, so a captured
+                // scalar becomes the rank-0 input the C wrapper passes.
+                None => {
+                    let captured = self.resolve_top_level(&input.name)?;
+                    stage_kernel_argument(name, &input.name, &captured, input.ty.precision)?
+                }
+            };
+            staged.insert(input.name.clone(), value);
+        }
+        let roots: Vec<NodeId> = kernel.dag.roots().to_vec();
+        if roots.is_empty() {
+            return Err(format!(
+                "host runtime: kernel `{name}` lowering produced no roots"
+            ));
+        }
+        let draws_random = kernel_draws_random(kernel);
+        let path_sensitive_random =
+            kernel.dag.nodes().iter().any(|node| {
+                matches!(node.op, RiscOp::UniformLike { .. }) && node.inputs.len() == 2
+            });
+        let starting_counter = self.random_counter;
+        let tensor_bindings = self.tensor_bindings;
+        let host_bindings = &self.bindings;
+        let (values, executed_counter) =
+            chelis_ir::eval::eval_tensor_roots_with_strict_random_progress(
+                &kernel.dag,
+                &roots,
+                starting_counter,
+                |load| {
+                    staged
+                        .get(load)
+                        .cloned()
+                        .or_else(|| tensor_bindings.get(load).map(|t| t.value.clone()))
+                        .or_else(|| match host_bindings.get(load) {
+                            Some(RuntimeValue::Tensor(t)) => Some(t.value.clone()),
+                            _ => None,
+                        })
+                },
+            )?;
+        if draws_random {
+            self.random_counter = if path_sensitive_random {
+                executed_counter
+            } else {
+                kernel.next_random_counter.unwrap_or(executed_counter)
+            };
+        }
+        pack_dag_roots(&kernel.dag, &roots, &values, name)
     }
 
     pub(super) fn lookup_top_level_def(&self, name: &str) -> Option<(String, Expr)> {
@@ -732,6 +850,7 @@ impl<'a> EvalContext<'a> {
                 .map(|(name, value)| (name.clone(), value.clone()))
                 .collect(),
             precision_env: self.precision_bindings.clone(),
+            def_name: None,
         })
     }
 
@@ -852,6 +971,10 @@ impl<'a> EvalContext<'a> {
             && let Some((resolved, def_expr)) = self.lookup_top_level_def(callee)
             && matches!(&def_expr, Expr::List(def_list, _) if tag(def_list) == Some(DeepTag::Fn))
             && self.def_requires_named_axis_routing(&resolved)
+            // chelis#1277 B2h: a def the C lane lowers as a kernel takes that
+            // kernel at application; site B keeps only the defs C also
+            // handles per call (rank- and precision-polymorphic ones).
+            && self.def_kernel(&resolved)?.is_none()
             && let Some(routed) = self.try_named_axis_def_call(&resolved, &def_expr, kids, &args)?
         {
             return Ok(routed);
@@ -1138,7 +1261,19 @@ impl<'a> EvalContext<'a> {
                 body,
                 env,
                 precision_env,
+                def_name,
             } => {
+                // chelis#1277 B2h: a def the C lane lowers as a kernel is
+                // applied through that kernel, so eval runs the DAG C emits
+                // for it and the runtime-extent classes and guards derived
+                // from that DAG fire on both lanes ([05-MOV-1],
+                // runtime_extents.md C2.7). The host-lane decision for the
+                // same def interprets the body below, exactly as before.
+                if let Some(name) = def_name.as_deref()
+                    && let Some(kernel) = self.def_kernel(name)?
+                {
+                    return self.apply_def_kernel(name, &kernel, &params, args);
+                }
                 if params.len() != args.len() {
                     return Err(format!(
                         "closure expected {} args, got {}",
@@ -2989,5 +3124,57 @@ fn runtime_values_equal(lhs: &RuntimeValue, rhs: &RuntimeValue) -> Result<bool, 
             Err("assert_eq does not admit functions or resource handles".to_string())
         }
         _ => Ok(false),
+    }
+}
+
+/// Whether a kernel's DAG draws from the Random stream; such a kernel is
+/// lowered per application and advances `random_counter` when applied.
+fn kernel_draws_random(kernel: &HostDefKernel) -> bool {
+    kernel
+        .dag
+        .nodes()
+        .iter()
+        .any(|node| matches!(node.op, RiscOp::UniformLike { .. } | RiscOp::Dropout { .. }))
+}
+
+/// One evaluated argument as the kernel `Load` its declared parameter names.
+/// A tensor finalizes at the declared element dtype, the same ingress the
+/// interpreter applies to its own frame (chelis#729); a scalar becomes an
+/// exact rank-0 tensor at the declared prim, the way `scalar_to_tensor` builds
+/// one and the way the C wrapper boxes a scalar parameter.
+fn stage_kernel_argument(
+    def: &str,
+    param: &str,
+    value: &RuntimeValue,
+    prim: Prim,
+) -> Result<IrTensorValue, String> {
+    match value {
+        RuntimeValue::Tensor(tensor) => Ok(ingress_tensor_to_declared(tensor.clone(), prim)?.value),
+        RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
+            Ok(RuntimeTensorValue::from_wide_int(
+                "kernel argument",
+                prim,
+                vec![],
+                vec![payload.as_i64()],
+            )?
+            .value)
+        }
+        RuntimeValue::Scalar(payload) => Ok(RuntimeTensorValue::from_wide(
+            "kernel argument",
+            prim,
+            vec![],
+            vec![payload.as_f64_lossy()],
+        )?
+        .value),
+        RuntimeValue::Bool(flag) => Ok(RuntimeTensorValue::from_wide_int(
+            "kernel argument",
+            prim,
+            vec![],
+            vec![i64::from(*flag)],
+        )?
+        .value),
+        other => Err(format!(
+            "kernel `{def}` parameter `{param}` expects a tensor or scalar argument, got {other:?}"
+        )),
     }
 }
