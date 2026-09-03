@@ -827,30 +827,36 @@ lowering map, and evaluates `expand`, `pad`, `shrink`, `stride` and `reshape`
 through direct implementations (`host_ops.rs:1425`, `1564`, `1617`, `1667`,
 `2150`) that build no DAG and, in `tensor_expand_host`'s own words, "have no
 access to user annotations". A `def main() = f(...)` program - the form of
-every [#1374], [#1376] and [#1377] reproducer - takes the second route, so on
-that route the declared signature's binders never exist and there is nothing
-to guard with. That is why those rows are `silent_unguarded` on eval, and a
-guard placed in `chelis_ir::eval` alone leaves them so. No fixture form
-reaches the DAG evaluator through `chelis eval --file` today: a value binding
-keeps the strict lowering classification and a zero-argument fn root is
-host-applied, while the CLI supplies no input bindings for a parameterized
-tensor entry.
-
-The repair is routing, not a second guard: when the host interpreter applies a
-`def` the lowering map classifies as lowered, it lowers the application
-through `chelis_ir::lower`'s subexpression-program entry - the one `grad`,
-`vmap` and `realize` already use (`runtime/transforms.rs:321`) - and evaluates
-it through `chelis_ir::eval`, so the eval lane has one tensor evaluator and
-one derivation point (C2.7) and the same guard fires on eval as on C. A guard
-inside `tensor_expand_host` would be a second derivation that can disagree
-with the first, which is the defect class this document exists to remove, and
-is rejected. The same routing closes a second divergence: the host lane today
-always picks the insertion form, so the same-rank replacement that Slice B
-makes execute would execute on C and not on eval.
+every [#1374], [#1376] and [#1377] reproducer - takes the second route. On that
+route the binders are recovered: `apply_resolved_callable_with_arg_types`
+(`runtime/eval.rs:1115`, chelis#1382) binds `n` and `m` from the actual
+argument shapes, and `eval_fn` (`runtime/eval.rs:678`) stores the declared
+result type on the closure. What the route lacks is the comparison: nothing
+checks the produced value's shape against that declared result, and the
+movement ops that produce it build no DAG, so no class is derived and no guard
+exists. That is why those rows are `silent_unguarded` on eval, and a guard
+placed in `chelis_ir::eval` alone leaves them so. No `.ch` form carrying a
+claim reaches the DAG evaluator through `chelis eval --file` today: a nullary
+def is an owed root the host applies (`realizability.rs:138-145`,
+`fn(nullary-root)`); a top-level binding or a def-free expression over
+`to_tensor` inputs is Host because `to_tensor` is `Realizability::HostOnly`
+(`builtins.rs:1480`) and the classification is transitive; and every
+reproducer's callee reads `shape(...)` in its `expand` size, which is
+`HostOnly` too (`builtins.rs:1260`; `realizability.rs:466-476`;
+`lower.rs:2749`), so the callee is Host under both the manifest's and the
+lowerer's classification. A claim-free `Universal`-only binding such as
+`x = expand(scalar_to_tensor(cast(1.0, f32)), 0, 2i64)` does manifest a
+`Lane::Tensor` root, so through the CLI the DAG evaluator serves claim-free
+tensor bindings only, and host-lane application is the primary eval path for
+user tensor code that carries a claim. The CLI supplies no input bindings for
+a parameterized tensor entry.
 
 This lands as its own pull request, **B2h**, after B2a and before B2b: B2a
-places the conforming guard in the DAG evaluator and moves the C rows; B2h
-makes the host lane reach it and moves the eval rows; B2b widens acceptance
+places the conforming guard in the DAG evaluator, which today has no guard at
+all for a cross-tensor `InputAxis` claim, and moves the C rows; B2h makes the
+host lane reach it and moves the eval rows, and B2h's pull request carries the
+routing-mechanism paragraph of this section, whose gate criterion its own
+measurement pins; B2b widens acceptance
 only once both guards are in place. B2h's claim is byte-identical `chelis
 eval` output for every program that evaluates today, proved by total capture
 over the executable corpus, plus the eval-lane rows of [#1374], [#1376] and
