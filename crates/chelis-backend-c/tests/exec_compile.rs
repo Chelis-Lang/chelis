@@ -3389,14 +3389,13 @@ const HOST_GUARD_HARNESS: &str = r#"
 #include <math.h>
 #include "chelis_runtime.h"
 
-static chelis_tensor make_ranked_view(
+static chelis_tensor *make_ranked_view(
     float *data, int32_t rank, const int64_t *shape, const int64_t *strides, int64_t size
 ) {
-    return (chelis_tensor){
-        .data = data, .shape = shape, .strides = strides, .size = size,
-        .byte_capacity = size * (int64_t)sizeof(float), .rank = rank,
-        .dtype = CHELIS_DTYPE_F32, .owns_data = 0, .reserved = {0, 0},
-    };
+    (void)strides;
+    return chelis_tensor_entry_borrow(
+        rank, shape, CHELIS_DTYPE_F32, data, size * (int64_t)sizeof(float)
+    );
 }
 
 extern chelis_tensor *the_fn(chelis_tensor *, chelis_tensor *);
@@ -3414,6 +3413,14 @@ fn host_lane_positive_rank_mismatch_traps_before_indexing() {
         src.contains("elementwise operand rank mismatch"),
         "host-lane codegen omitted the positive-rank mismatch guard:\n{src}"
     );
+    assert!(
+        src.contains("chelis_tensor_rank(__arg0_"),
+        "host-lane rank guard must use the opaque tensor accessor:\n{src}"
+    );
+    assert!(
+        !src.contains("->rank"),
+        "host-lane rank guard must not reopen the opaque tensor descriptor:\n{src}"
+    );
 
     let harness = format!(
         r#"{HOST_GUARD_HARNESS}
@@ -3422,9 +3429,9 @@ int main(void) {{
     float b_data[6] = {{1, 2, 3, 4, 5, 6}};
     static const int64_t a_shape[1] = {{3}}, a_strides[1] = {{1}};
     static const int64_t b_shape[2] = {{2, 3}}, b_strides[2] = {{3, 1}};
-    chelis_tensor a = make_ranked_view(a_data, 1, a_shape, a_strides, 3);
-    chelis_tensor b = make_ranked_view(b_data, 2, b_shape, b_strides, 6);
-    the_fn(&a, &b);
+    chelis_tensor *a = make_ranked_view(a_data, 1, a_shape, a_strides, 3);
+    chelis_tensor *b = make_ranked_view(b_data, 2, b_shape, b_strides, 6);
+    the_fn(a, b);
     puts("UNREACHABLE");
     return 0;
 }}
@@ -3464,9 +3471,9 @@ int main(void) {{
     float b_data[6] = {{6, 5, 4, 3, 2, 1}};
     static const int64_t a_shape[1] = {{3}}, a_strides[1] = {{1}};
     static const int64_t b_shape[2] = {{2, 3}}, b_strides[2] = {{3, 1}};
-    chelis_tensor a = make_ranked_view(a_data, 1, a_shape, a_strides, 3);
-    chelis_tensor b = make_ranked_view(b_data, 2, b_shape, b_strides, 6);
-    the_fn(&a, &b);
+    chelis_tensor *a = make_ranked_view(a_data, 1, a_shape, a_strides, 3);
+    chelis_tensor *b = make_ranked_view(b_data, 2, b_shape, b_strides, 6);
+    the_fn(a, b);
     puts("UNREACHABLE");
     return 0;
 }}
@@ -3498,6 +3505,14 @@ fn host_lane_equal_rank_shape_mismatch_traps_before_indexing() {
         src.contains("elementwise operand shape mismatch"),
         "host-lane codegen omitted the equal-rank shape guard:\n{src}"
     );
+    assert!(
+        src.contains("chelis_tensor_shape(__arg0_") && src.contains(", __axis)"),
+        "host-lane shape guard must use the opaque tensor accessor:\n{src}"
+    );
+    assert!(
+        !src.contains("->shape"),
+        "host-lane shape guard must not reopen the opaque tensor descriptor:\n{src}"
+    );
 
     let harness = format!(
         r#"{HOST_GUARD_HARNESS}
@@ -3506,9 +3521,9 @@ int main(void) {{
     float b_data[6] = {{1, 2, 3, 4, 5, 6}};
     static const int64_t a_shape[1] = {{3}}, a_strides[1] = {{1}};
     static const int64_t b_shape[1] = {{2}}, b_strides[1] = {{1}};
-    chelis_tensor a = make_ranked_view(a_data, 1, a_shape, a_strides, 3);
-    chelis_tensor b = make_ranked_view(b_data, 1, b_shape, b_strides, 2);
-    the_fn(&a, &b);
+    chelis_tensor *a = make_ranked_view(a_data, 1, a_shape, a_strides, 3);
+    chelis_tensor *b = make_ranked_view(b_data, 1, b_shape, b_strides, 2);
+    the_fn(a, b);
     puts("UNREACHABLE");
     return 0;
 }}
@@ -3544,13 +3559,16 @@ int main(void) {{
     float a_data[6] = {{1, 2, 3, 4, 5, 6}};
     float b_data[6] = {{10, 20, 30, 40, 50, 60}};
     static const int64_t shape[2] = {{2, 3}}, strides[2] = {{3, 1}};
-    chelis_tensor a = make_ranked_view(a_data, 2, shape, strides, 6);
-    chelis_tensor b = make_ranked_view(b_data, 2, shape, strides, 6);
-    chelis_tensor *out = the_fn(&a, &b);
-    const float *values = (const float *)out->data;
-    for (int64_t i = 0; i < out->size; i++) {{
+    chelis_tensor *a = make_ranked_view(a_data, 2, shape, strides, 6);
+    chelis_tensor *b = make_ranked_view(b_data, 2, shape, strides, 6);
+    chelis_tensor *out = the_fn(a, b);
+    const float *values = (const float *)chelis_tensor_read_view(out).data;
+    for (int64_t i = 0; i < chelis_tensor_numel(out); i++) {{
         printf("%.1f\n", (double)values[i]);
     }}
+    chelis_tensor_release(a);
+    chelis_tensor_release(b);
+    chelis_tensor_release(out);
     return 0;
 }}
 "#

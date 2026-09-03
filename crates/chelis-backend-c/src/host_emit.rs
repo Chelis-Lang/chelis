@@ -4954,21 +4954,22 @@ impl<'a> HostEmitter<'a> {
     fn emit_elementwise_operand_guard(&mut self, target: &str, lhs: &str, rhs: &str) {
         let ind = &self.indent;
         self.lines.push(format!(
-            "{ind}if ({lhs}->rank > 0 && {rhs}->rank > 0 && {lhs}->rank != {rhs}->rank) {{"
+            "{ind}if (chelis_tensor_rank({lhs}) > 0 && chelis_tensor_rank({rhs}) > 0 && chelis_tensor_rank({lhs}) != chelis_tensor_rank({rhs})) {{"
         ));
         self.lines.push(format!(
             "{ind}    fprintf(stderr, \"chelis: elementwise operand rank mismatch at host \
-             value {target} ({lhs} vs {rhs}): %d vs %d\\n\", {lhs}->rank, {rhs}->rank);"
+             value {target} ({lhs} vs {rhs}): %d vs %d\\n\", chelis_tensor_rank({lhs}), chelis_tensor_rank({rhs}));"
         ));
         self.lines.push(format!("{ind}    abort();"));
         self.lines.push(format!("{ind}}}"));
-        self.lines
-            .push(format!("{ind}if ({lhs}->rank == {rhs}->rank) {{"));
         self.lines.push(format!(
-            "{ind}    for (int __axis = 0; __axis < {lhs}->rank; __axis++) {{"
+            "{ind}if (chelis_tensor_rank({lhs}) == chelis_tensor_rank({rhs})) {{"
         ));
         self.lines.push(format!(
-            "{ind}        if ({lhs}->shape[__axis] != {rhs}->shape[__axis]) {{"
+            "{ind}    for (int32_t __axis = 0; __axis < chelis_tensor_rank({lhs}); __axis++) {{"
+        ));
+        self.lines.push(format!(
+            "{ind}        if (chelis_tensor_shape({lhs}, __axis) != chelis_tensor_shape({rhs}, __axis)) {{"
         ));
         self.lines.push(format!(
             "{ind}            fprintf(stderr, \"chelis: elementwise operand shape mismatch \
