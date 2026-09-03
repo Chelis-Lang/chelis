@@ -751,20 +751,221 @@ pub struct RuntimeDimClass {
 
 impl RuntimeDimClass {
     /// C1.3's placement for this class.
+    ///
+    /// `spec/04-type-system.md` section 4.7: "A guard whose operands are all
+    /// interface values (an input tensor's axis, a scalar parameter, or a
+    /// literal) is evaluated at function entry". Every other class compares
+    /// at least one locally computed value and takes the source position of
+    /// the operation that introduces the guarded extent.
     pub fn placement(&self) -> GuardPlacement {
-        // b2.2 replaces this. An unconditioned `Local` is the conservative
-        // shell answer: it never claims a guard may be hoisted to entry.
-        GuardPlacement::Local
+        if self
+            .members
+            .iter()
+            .all(|member| matches!(member.source, AxisSource::ExternalAxis { .. }))
+        {
+            GuardPlacement::Entry
+        } else {
+            GuardPlacement::Local
+        }
+    }
+}
+
+/// The ABI input slot of each `Load` name, assigned by first occurrence in
+/// node order.
+///
+/// This is the key `spec/04-type-system.md` section 4.7 names: "an entry that
+/// declares no signature orders those guards by its ABI input-slot order
+/// instead", closing with "Whatever rule assigns the slots, the guard order
+/// follows the assigned slots, and never a separate traversal by binding
+/// name, hash iteration, or node identity."
+///
+/// Both lowering paths land on this one key. `lower_fn` registers parameter
+/// `Load`s in declared order, so first occurrence IS declared signature
+/// order there; the subexpression path pre-creates them in a deliberately
+/// name-sorted order and declares no signature, so the ABI branch governs and
+/// that order is the assigned one. It is also exactly what the C emitter's
+/// `input_labels` assigns, so a guard's order here and its slot there cannot
+/// disagree.
+fn abi_input_slot(dag: &Dag, load: NodeId) -> Option<usize> {
+    let name = match &dag.get(load)?.op {
+        RiscOp::Load { name } => name.as_str(),
+        _ => return None,
+    };
+    let mut slot = 0usize;
+    let mut seen: Vec<&str> = Vec::new();
+    for node in dag.nodes() {
+        if let RiscOp::Load { name: other } = &node.op {
+            if other.as_str() == name {
+                return Some(slot);
+            }
+            if !seen.contains(&other.as_str()) {
+                seen.push(other.as_str());
+                slot += 1;
+            }
+        }
+    }
+    None
+}
+
+/// The claim stamped on one output axis, or `None` when the axis carries no
+/// referenceable claim.
+///
+/// An ANONYMOUS dimension is not a claim: nothing renders it, distinct
+/// runtime extents share the spelling, and grouping by it would identify
+/// unrelated axes, which is the string-matching defect this module removes.
+fn axis_claim(dim: &DimInfo) -> Option<DimClaim> {
+    match dim {
+        DimInfo::Lit(value) => Some(DimClaim::Literal(*value)),
+        DimInfo::Named(name, _) if !is_anonymous(name) => Some(DimClaim::Name(name.clone())),
+        DimInfo::Named(_, _) => None,
+    }
+}
+
+/// Whether the operation SETS this output axis rather than forwarding an
+/// input axis through it.
+///
+/// C2.4: "Only an output axis that C4.2 maps to an unchanged input axis is
+/// pass-through and not a member; the axis an operation sets or inserts is a
+/// member whatever slot its `InputAxis` names."
+///
+/// A set axis and a pass-through axis can both carry `AxisSource::InputAxis`,
+/// because a folded `shape()` read is exactly "this axis's extent is that
+/// tensor's axis". They are distinguished here rather than by inspecting the
+/// variant, and the match is deliberately small: `Expand` and `Reshape` are
+/// the only owners whose `RtDim` may be `InputAxis` (C1.7's owner matrix), so
+/// every other `InputAxis` source is a forwarded axis.
+fn sets_axis(op: &RiscOp, axis: usize) -> bool {
+    match op {
+        RiscOp::Expand { axis: set, .. } => axis == *set,
+        RiscOp::Reshape { .. } => true,
+        _ => false,
+    }
+}
+
+/// Whether this axis is a member of its claim's class.
+///
+/// Three rules, each from a normative sentence:
+///
+/// - A pass-through axis is not a member (C2.4, above). Its extent IS the
+///   input's, so there is nothing to compare.
+/// - An axis whose source is the literal its claim states is statically
+///   proved, and section 4.7.2 conditions the guard on a claim "that is not
+///   statically proven equal to `size`". No claim survives, so no member.
+/// - Under a LITERAL claim an external `Load` axis is not a member. A
+///   declared literal input extent is validated against the caller at the C
+///   ABI boundary by the input shape preamble, which is a different
+///   obligation from an extent class and covers programs containing no
+///   runtime extent at all. Treating it as a member would mint a class for
+///   every literal-shaped input.
+fn is_member(op: &RiscOp, axis: usize, claim: &DimClaim, source: &AxisSource) -> bool {
+    match source {
+        AxisSource::InputAxis { .. } if !sets_axis(op, axis) => false,
+        AxisSource::Literal { value } => !matches!(
+            claim,
+            DimClaim::Literal(claimed) if i64::try_from(*claimed) == Ok(*value)
+        ),
+        AxisSource::ExternalAxis { .. } => matches!(claim, DimClaim::Name(_)),
+        _ => true,
     }
 }
 
 /// The equality classes of `dag`, in guard-evaluation order.
 ///
-/// b2.2 implements this; the shell returns no class so the b2.1 stubs in
-/// `crates/chelis-ir/tests/runtime_extent_slice_b_classes.rs` fail against a
-/// derivation that exists rather than against a missing symbol.
-pub fn derive_runtime_dim_classes(_dag: &Dag) -> Vec<RuntimeDimClass> {
-    Vec::new()
+/// Derived, never stored (C4.5): computed from the DAG a lane actually
+/// consumes, after the last rewrite, at the same point as
+/// [`output_axis_sources`], so a stale [`NodeId`] cannot outlive a mutation.
+///
+/// A `Name` class needs at least two members, because one witness has nothing
+/// to disagree with. A `Literal` class needs only one: C2.4 makes the literal
+/// the canonical VALUE rather than a first member, so a single runtime-sourced
+/// axis claiming a literal already owes a guard.
+/// The sort key C2.4 rule 1 defines: interface members before local ones,
+/// interface members by assigned ABI input slot, every remaining tie by node
+/// position.
+type OrderKey = (bool, Option<usize>, usize);
+
+/// A member together with the key that orders it.
+///
+/// `slot` is the declaring `Load`'s assigned ABI input slot for an interface
+/// member and `None` for a local one, so sorting on `(slot.is_none(), slot,
+/// node)` puts every interface member ahead of every local one, orders the
+/// interface group by assigned slot, and breaks every remaining tie by node
+/// position. That is C2.4 rule 1 in one key.
+struct OrderedMember {
+    slot: Option<usize>,
+    node: usize,
+    member: ClassMember,
+}
+
+impl OrderedMember {
+    fn key(&self) -> OrderKey {
+        (self.slot.is_none(), self.slot, self.node)
+    }
+}
+
+pub fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass> {
+    let mut grouped: Vec<(DimClaim, Vec<OrderedMember>)> = Vec::new();
+
+    for node in dag.nodes() {
+        let sources = output_axis_sources(dag, node.id);
+        for (axis, dim) in node.output_type.dims.iter().enumerate() {
+            let Some(claim) = axis_claim(dim) else {
+                continue;
+            };
+            // A cardinality failure is `check_axis_sources`' typed receipt to
+            // report (C4.1), not this derivation's to guess at.
+            let Some(source) = sources.get(axis) else {
+                continue;
+            };
+            if !is_member(&node.op, axis, &claim, source) {
+                continue;
+            }
+            let entry = OrderedMember {
+                slot: match source {
+                    AxisSource::ExternalAxis { load, .. } => abi_input_slot(dag, *load),
+                    _ => None,
+                },
+                node: node.id.0,
+                member: ClassMember {
+                    node: node.id,
+                    axis,
+                    source: source.clone(),
+                },
+            };
+            match grouped.iter_mut().find(|(existing, _)| *existing == claim) {
+                Some((_, members)) => members.push(entry),
+                None => grouped.push((claim, vec![entry])),
+            }
+        }
+    }
+
+    let mut classes: Vec<(OrderKey, RuntimeDimClass)> = Vec::new();
+    for (claim, mut members) in grouped {
+        members.sort_by_key(OrderedMember::key);
+        // A `Name` class needs two witnesses: one has nothing to disagree
+        // with. A `Literal` class needs one, because C2.4 makes the literal
+        // the canonical VALUE rather than a first member, so a single
+        // runtime-sourced axis claiming a literal already owes a guard.
+        let needed = match claim {
+            DimClaim::Name(_) => 2,
+            DimClaim::Literal(_) => 1,
+        };
+        if members.len() < needed {
+            continue;
+        }
+        let order = members[0].key();
+        classes.push((
+            order,
+            RuntimeDimClass {
+                claim,
+                members: members.into_iter().map(|entry| entry.member).collect(),
+            },
+        ));
+    }
+    // Classes run in their canonical members' order, so an all-interface
+    // class's entry guards fire in assigned-slot order.
+    classes.sort_by_key(|(order, _)| *order);
+    classes.into_iter().map(|(_, class)| class).collect()
 }
 
 #[cfg(test)]

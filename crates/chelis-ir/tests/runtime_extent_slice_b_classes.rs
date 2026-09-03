@@ -257,32 +257,34 @@ fn a_member_names_its_declaring_load_by_node_id() {
 
 /// "two classes may share a node, each with its own guard" (design C2.4
 /// rule 3).
+///
+/// `Reshape` sets every target axis, so one node carries a member of two
+/// different classes. Each claim needs a second witness of its own, because
+/// C2.4 makes a class out of a claim "the checker attached to more than one
+/// witness" and a lone witness has nothing to disagree with.
 #[test]
 fn two_classes_sharing_one_node_each_keep_their_own_member() {
     let mut dag = Dag::new();
     let x = f32_load(&mut dag, "x", vec![named("n")]);
     let y = f32_load(&mut dag, "y", vec![named("m")]);
-    let size = f32_load(&mut dag, "k", vec![]);
-    // One node whose two output axes carry two different claims.
-    let expanded = dag.add_node(
-        RiscOp::Expand {
-            axis: 1,
-            size: RtDim::Node(1),
+    let rows = f32_load(&mut dag, "r", vec![]);
+    let cols = f32_load(&mut dag, "c", vec![]);
+    let reshaped = dag.add_node(
+        RiscOp::Reshape {
+            new_shape: vec![RtDim::Node(1), RtDim::Node(2)],
         },
-        vec![x, size],
+        vec![x, rows, cols],
         ty(vec![named("n"), named("m")], Prim::F32),
         None,
     );
     let classes = derive_runtime_dim_classes(&dag);
     assert_eq!(
         members_of(&classes, DimClaim::Name("n".into())),
-        vec![(x, 0)],
-        "axis 0 passes the input axis through, so it is not a member",
+        vec![(x, 0), (reshaped, 0)],
     );
     assert_eq!(
         members_of(&classes, DimClaim::Name("m".into())),
-        vec![(y, 0), (expanded, 1)],
-        "the axis the operation sets is a member of the claim stamped on it",
+        vec![(y, 0), (reshaped, 1)],
     );
 }
 
@@ -347,12 +349,19 @@ fn a_member_referencing_an_rtdim_slot_reads_that_slot() {
 }
 
 /// The negative twin. A slot index past the node's inputs is malformed IR.
-/// Derivation must report no member rather than panic: `symbolic_occurrences`
-/// raises an internal compiler error on this shape today
-/// (`chelis_ir::dag`, the no-declaring-`Load` panic), and C4.3 requires a
-/// typed outcome instead of an ICE on every production path.
+///
+/// C2.4 rule 4 puts slot validation on C2.1, not on this derivation: "a node
+/// an `RtDim::Node` slot or a member references must survive as a node, which
+/// C2.1's slot validation already enforces". So the contract here is that
+/// derivation does not PANIC, and that the malformed node is caught by
+/// [`check_axis_sources`] with the registered typed receipt rather than by an
+/// internal compiler error, which is C4.3.
+///
+/// An earlier draft of this test additionally required the derivation to drop
+/// the member. That over-specified the rule: it would have moved slot
+/// validation into a second place, where it could disagree with the first.
 #[test]
-fn a_member_whose_rtdim_slot_is_absent_does_not_panic() {
+fn a_member_whose_rtdim_slot_is_absent_is_a_typed_receipt_not_a_panic() {
     let mut dag = Dag::new();
     let base = f32_load(&mut dag, "b", vec![]);
     let declaring = f32_load(&mut dag, "x", vec![named("n")]);
@@ -366,15 +375,29 @@ fn a_member_whose_rtdim_slot_is_absent_does_not_panic() {
         ty(vec![named("n")], Prim::F32),
         None,
     );
+    dag.add_root(expanded);
+
+    // Derivation is total on this graph rather than panicking.
     let classes = derive_runtime_dim_classes(&dag);
-    let members = members_of(&classes, DimClaim::Name("n".into()));
     assert!(
-        members.contains(&(declaring, 0)),
-        "the declaring Load is still a member: {members:?}",
+        members_of(&classes, DimClaim::Name("n".into())).contains(&(declaring, 0)),
+        "the declaring Load is still a member",
+    );
+
+    // And the malformed slot is reported where the rule puts it.
+    let receipt = chelis_ir::axis_sources::check_axis_sources(
+        &dag,
+        chelis_types::unsupported::Stage::Runtime,
+    )
+    .expect_err("an absent bound slot is a checked cardinality failure");
+    let text = receipt.to_string();
+    assert!(
+        text.contains("reads input slot 1") && text.contains("has 1 input(s)"),
+        "the receipt names the absent slot: {text}",
     );
     assert!(
-        !members.contains(&(expanded, 0)),
-        "a member cannot be built from an absent slot: {members:?}",
+        text.contains("chelis#1277"),
+        "the receipt cites its owning issue: {text}",
     );
 }
 
