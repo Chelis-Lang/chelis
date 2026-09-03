@@ -737,7 +737,10 @@ A movement bound (`pad` before/after, `shrink` start/end, `stride` step), an
 
 - `Lit(n)` — a compile-time-constant extent.
 - `ToEnd` — the full-axis sentinel; legal only as a `shrink` end (the identity
-  slice of a symbolic bystander axis).
+  slice of a symbolic bystander axis), and well formed only when the start
+  paired with it is `Lit(0)`. A `ToEnd` end over any other start is a
+  malformed bound: every stage that validates a bound rejects it rather than
+  resolving it to a slice.
 - `Node(i)` — a **runtime** extent read from the owning node's `inputs[i]`, a
   rank-0 integer scalar. The index is absolute: `inputs[0]` is always the
   tensor operand, and `inputs[1..]` are the bound scalars, any rank-0 `int32`
