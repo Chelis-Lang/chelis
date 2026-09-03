@@ -505,10 +505,12 @@ pub(super) fn infer_reshape_app(
                 if let Err(error) = validate_reshape_target_dims(&dims, subst) {
                     return report(errors, error.into());
                 }
-                match subst.resolve_deferred_expand_for_reshape(
+                match subst.settle_deferred_tensor(
                     input_var,
-                    product.source_ordinal_for_list(list),
-                    dims,
+                    DeferralAction::Constrain(ShapeEvidence::ElementCount {
+                        target_dims: &dims,
+                        ordinal: product.source_ordinal_for_list(list),
+                    }),
                 ) {
                     Ok(Some(output)) => return output,
                     Ok(None) => {}

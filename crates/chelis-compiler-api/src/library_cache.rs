@@ -102,7 +102,10 @@ use crate::stdlib_cache::{StdLibContext, cache_disabled, typecheck_cache_dir};
 /// and compiled-context caches). The wire `CheckedProgram` also grew the
 /// library-proof-identity fields. A V1 `chelis-lib-*.tc` written by a
 /// pre-extraction binary at the same compiler version is a clean miss.
-const LIBRARY_CACHE_FORMAT_VERSION: u32 = 7;
+///
+/// V8: the serialized positional-expand ledger grew the
+/// `DeferredShapeObligation` enum for comparison shape mirrors.
+const LIBRARY_CACHE_FORMAT_VERSION: u32 = 8;
 
 /// The typechecked composed `chelis-std ++ dependency-packages`
 /// sub-context.
@@ -600,7 +603,7 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
-        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 7);
+        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 8);
     }
 
     #[test]

@@ -88,8 +88,10 @@ use crate::schema::{Diagnostic, GeneralKind};
 /// bumps: the pipeline-core `CheckedLibrary`/proof-identity products
 /// (branch) and chelis#942's serialized positional-expand obligations
 /// inside `TypeEnv` (main). Bincode is positional, so a V4 entry from
-/// either side is a clean miss.
-const STDLIB_CACHE_FORMAT_VERSION: u32 = 11;
+/// either side is a clean miss. V12 adds the `DeferredShapeObligation`
+/// enum to that same ledger, so a V11 entry would decode a bare expand
+/// constraint where a variant tag is now expected.
+const STDLIB_CACHE_FORMAT_VERSION: u32 = 12;
 
 /// The typechecked + lowered chelis-std library sub-context.
 ///
@@ -543,12 +545,12 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 11);
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 12);
     }
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 11);
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 12);
     }
 
     #[test]
