@@ -6,6 +6,7 @@
 
 use std::ffi::c_void;
 
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
     Tensor,
@@ -15,12 +16,12 @@ pub(crate) enum Kind {
     Tuple,
     Dict,
     Adt,
+    Option,
     MappedFile,
 }
 
 impl Kind {
-    #[cfg(feature = "ownership-ledger")]
-    const fn name(self) -> &'static str {
+    pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Tensor => "Tensor",
             Self::TensorStorage => "TensorStorage",
@@ -29,6 +30,7 @@ impl Kind {
             Self::Tuple => "Tuple",
             Self::Dict => "Dict",
             Self::Adt => "Adt",
+            Self::Option => "Option",
             Self::MappedFile => "MappedFile",
         }
     }
