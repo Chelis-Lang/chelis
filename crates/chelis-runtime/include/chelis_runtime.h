@@ -16,19 +16,21 @@ typedef struct {
 } chelis_string;
 
 typedef struct chelis_list chelis_list;
+typedef struct chelis_tensor chelis_tensor;
+typedef struct chelis_tensor_write chelis_tensor_write;
 typedef struct chelis_tuple chelis_tuple;
 typedef struct chelis_dict chelis_dict;
 typedef struct chelis_adt chelis_adt;
+typedef struct chelis_option chelis_option;
 typedef struct chelis_mapped_file chelis_mapped_file;
 
 typedef struct { chelis_dtype dtype; uint8_t reserved[7]; uint64_t bits; } chelis_scalar;
-typedef struct { uint8_t is_some; uint8_t reserved[7]; chelis_scalar value; } chelis_option_scalar;
 typedef uint8_t chelis_value_tag;
-enum { CHELIS_VALUE_UNIT = 0, CHELIS_VALUE_SCALAR = 1, CHELIS_VALUE_STRING = 2, CHELIS_VALUE_TENSOR = 3, CHELIS_VALUE_LIST = 4, CHELIS_VALUE_TUPLE = 5, CHELIS_VALUE_DICT = 6, CHELIS_VALUE_ADT = 7 };
+enum { CHELIS_VALUE_UNIT = 0, CHELIS_VALUE_SCALAR = 1, CHELIS_VALUE_STRING = 2, CHELIS_VALUE_TENSOR = 3, CHELIS_VALUE_LIST = 4, CHELIS_VALUE_TUPLE = 5, CHELIS_VALUE_DICT = 6, CHELIS_VALUE_ADT = 7, CHELIS_VALUE_OPTION = 8, CHELIS_VALUE_MAPPED_FILE = 9 };
 typedef union { chelis_scalar scalar; void *handle; } chelis_value_payload;
 typedef struct { chelis_value_tag tag; uint8_t reserved[7]; chelis_value_payload payload; } chelis_value;
-typedef struct { uint8_t is_some; uint8_t reserved[7]; chelis_value value; } chelis_option_value;
-typedef struct { void *data; const int64_t *shape; const int64_t *strides; int64_t size; int64_t byte_capacity; int32_t rank; chelis_dtype dtype; uint8_t owns_data; uint8_t reserved[2]; } chelis_tensor;
+typedef struct { const void *data; int64_t count; chelis_dtype dtype; uint8_t reserved[7]; } chelis_read_view;
+typedef struct { void *data; int64_t count; chelis_dtype dtype; uint8_t reserved[7]; } chelis_write_view;
 typedef struct { chelis_value key; chelis_value value; } chelis_dict_entry;
 
 #ifdef __cplusplus
@@ -36,7 +38,13 @@ extern "C" {
 #endif
 
 chelis_tensor *chelis_alloc(int32_t rank, const int64_t *shape, chelis_dtype dtype);
-chelis_tensor *chelis_alloc_view(int32_t rank, const int64_t *shape, chelis_dtype dtype, void *data, int64_t byte_capacity);
+chelis_tensor *chelis_tensor_entry_borrow(int32_t rank, const int64_t *shape, chelis_dtype dtype, const void *data, int64_t byte_capacity);
+void chelis_tensor_retain(const chelis_tensor *tensor);
+void chelis_tensor_release(const chelis_tensor *tensor);
+chelis_read_view chelis_tensor_read_view(const chelis_tensor *tensor);
+chelis_tensor_write *chelis_tensor_begin_write(chelis_tensor *tensor);
+chelis_write_view chelis_tensor_write_view(const chelis_tensor_write *guard);
+void chelis_tensor_end_write(chelis_tensor_write *guard);
 /* Element size in bytes for the given CHELIS_* dtype tag. Mirrors the
  * per-dtype dispatch inside `chelis_alloc` and the GPU-side
  * `chelis_gpu_dtype_size`. Generated C code calls this when sizing
@@ -44,7 +52,6 @@ chelis_tensor *chelis_alloc_view(int32_t rank, const int64_t *shape, chelis_dtyp
  * layout. RT-4 F2/F3 fix: replaces hardcoded `sizeof(float)` in the C
  * backend's reshape and cast emitters. */
 int64_t chelis_dtype_size(chelis_dtype dtype);
-void chelis_free(chelis_tensor *t);
 /* Issue #248: scalar bit-pattern reconstruction helpers. The C backend
  * emits `chelis_uniform_sample_f32(..., chelis_f32_from_bits(0xXXXXXXXXu),
  * chelis_f32_from_bits(0xYYYYYYYYu))` so the runtime sees the byte-identical
@@ -301,14 +308,14 @@ static inline int64_t chelis_int_shr(int64_t value, int64_t amount, int bits) {
     return chelis_int_from_twos(shifted, bits);
 }
 chelis_scalar chelis_scalar_from_bits(chelis_dtype dtype, uint64_t bits);
-chelis_value chelis_value_from_scalar(chelis_scalar value);
-chelis_scalar chelis_value_as_scalar(chelis_value value);
+chelis_value chelis_value_box_scalar(chelis_scalar value);
+chelis_scalar chelis_value_unbox_scalar(chelis_value value);
 chelis_tensor *chelis_scalar_tensor(chelis_scalar value);
 chelis_scalar chelis_tensor_to_scalar(const chelis_tensor *tensor);
-void chelis_fill_scalar(chelis_tensor *tensor, chelis_scalar value);
+void chelis_fill_scalar(chelis_tensor_write *guard, chelis_scalar value);
 chelis_string chelis_string_from_scalar(chelis_scalar value);
-chelis_option_scalar chelis_parse_scalar(chelis_string text, chelis_dtype dtype);
-chelis_option_scalar chelis_dict_get_scalar(const chelis_dict *dict, chelis_value key, chelis_dtype dtype);
+chelis_option *chelis_parse_scalar(chelis_string text, chelis_dtype dtype);
+chelis_option *chelis_dict_get_scalar(const chelis_dict *dict, chelis_value key, chelis_dtype dtype);
 int32_t chelis_tensor_rank(const chelis_tensor *tensor);
 int64_t chelis_tensor_shape(const chelis_tensor *tensor, int32_t axis);
 int64_t chelis_tensor_numel(const chelis_tensor *tensor);
@@ -337,27 +344,48 @@ void chelis_dict_release(const chelis_dict *dict);
 int64_t chelis_dict_len(const chelis_dict *dict);
 void chelis_adt_retain(const chelis_adt *adt);
 void chelis_adt_release(const chelis_adt *adt);
+void chelis_option_retain(const chelis_option *option);
+void chelis_option_release(const chelis_option *option);
+void chelis_mapped_file_retain(const chelis_mapped_file *mapped);
+void chelis_mapped_file_release(const chelis_mapped_file *mapped);
 chelis_adt *chelis_adt_construct(chelis_string ctor, const chelis_value *fields, int64_t len);
 chelis_string chelis_adt_get_tag(const chelis_adt *adt);
 bool chelis_adt_tag_equals(const chelis_adt *adt, chelis_string ctor);
 int64_t chelis_adt_field_count(const chelis_adt *adt);
 chelis_value chelis_adt_get_field(const chelis_adt *adt, int64_t index);
 
-chelis_value chelis_value_from_string(chelis_string value);
-chelis_value chelis_value_from_tensor(chelis_tensor *value);
-chelis_value chelis_value_from_list(chelis_list *value);
-chelis_value chelis_value_from_tuple(chelis_tuple *value);
-chelis_value chelis_value_from_dict(chelis_dict *value);
-chelis_value chelis_value_from_adt(chelis_adt *value);
-void chelis_value_retain(chelis_value value);
+chelis_value chelis_value_take_string(chelis_string value);
+chelis_value chelis_value_take_tensor(chelis_tensor *tensor);
+chelis_value chelis_value_take_list(chelis_list *list);
+chelis_value chelis_value_take_tuple(chelis_tuple *tuple);
+chelis_value chelis_value_take_dict(chelis_dict *dict);
+chelis_value chelis_value_take_adt(chelis_adt *adt);
+chelis_value chelis_value_take_option(chelis_option *option);
+chelis_value chelis_value_take_mapped_file(chelis_mapped_file *mapped);
+chelis_value chelis_value_clone(chelis_value value);
 void chelis_value_release(chelis_value value);
 
-chelis_string chelis_value_as_string(chelis_value value);
-chelis_tensor *chelis_value_as_tensor(chelis_value value);
-chelis_list *chelis_value_as_list(chelis_value value);
-chelis_tuple *chelis_value_as_tuple(chelis_value value);
-chelis_dict *chelis_value_as_dict(chelis_value value);
-chelis_adt *chelis_value_as_adt(chelis_value value);
+chelis_string chelis_string_take_value(chelis_value value);
+chelis_string chelis_string_borrow_value(chelis_value value);
+chelis_tensor *chelis_tensor_take_value(chelis_value value);
+const chelis_tensor *chelis_tensor_borrow_value(chelis_value value);
+chelis_list *chelis_list_take_value(chelis_value value);
+const chelis_list *chelis_list_borrow_value(chelis_value value);
+chelis_tuple *chelis_tuple_take_value(chelis_value value);
+const chelis_tuple *chelis_tuple_borrow_value(chelis_value value);
+chelis_dict *chelis_dict_take_value(chelis_value value);
+const chelis_dict *chelis_dict_borrow_value(chelis_value value);
+chelis_adt *chelis_adt_take_value(chelis_value value);
+const chelis_adt *chelis_adt_borrow_value(chelis_value value);
+chelis_option *chelis_option_take_value(chelis_value value);
+const chelis_option *chelis_option_borrow_value(chelis_value value);
+chelis_mapped_file *chelis_mapped_file_take_value(chelis_value value);
+const chelis_mapped_file *chelis_mapped_file_borrow_value(chelis_value value);
+
+chelis_option *chelis_option_none(void);
+chelis_option *chelis_option_some(chelis_value value);
+bool chelis_option_is_some(const chelis_option *option);
+chelis_value chelis_option_unwrap(const chelis_option *option);
 
 chelis_list *chelis_list_empty(void);
 chelis_list *chelis_list_from_values(const chelis_value *items, int64_t len);
@@ -375,7 +403,7 @@ chelis_tuple *chelis_tuple_from_values(const chelis_value *items, int64_t len);
 chelis_value chelis_tuple_get(const chelis_tuple *tuple, int64_t index);
 chelis_dict *chelis_dict_from_pairs(const chelis_list *pairs);
 bool chelis_dict_contains(const chelis_dict *dict, chelis_value key);
-chelis_option_value chelis_dict_get(const chelis_dict *dict, chelis_value key);
+chelis_option *chelis_dict_get(const chelis_dict *dict, chelis_value key);
 chelis_dict *chelis_dict_remove(const chelis_dict *dict, chelis_value key);
 chelis_dict *chelis_dict_insert(const chelis_dict *dict, chelis_value key, chelis_value value);
 chelis_dict *chelis_dict_merge(const chelis_dict *left, const chelis_dict *right);
@@ -564,15 +592,6 @@ static inline int64_t chelis_indices_to_flat(const int64_t *indices, const int64
         flat += indices[d] * strides[d];
     }
     return flat;
-}
-
-static inline int chelis_is_contiguous(const chelis_tensor *t) {
-    int64_t expected = 1;
-    for (int d = t->rank - 1; d >= 0; d--) {
-        if (t->strides[d] != expected) return 0;
-        expected *= t->shape[d];
-    }
-    return 1;
 }
 
 chelis_tensor *chelis_contiguous(const chelis_tensor *tensor);

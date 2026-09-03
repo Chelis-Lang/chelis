@@ -1,16 +1,18 @@
 //! Executable contract for the v0.19 exact tagged public C ABI.
 //!
 //! These tests are derived from `spec/05-risc-primitives.md`
-//! [05-OP-31] and [05-OP-33].  The child-process cases exercise malformed
+//! [05-OP-31], [05-OP-33], and [05-OP-44]. The child-process cases exercise malformed
 //! foreign carriers because the C boundary must reject them before sizing,
 //! allocation, access, or observation.
 
 use chelis_runtime::{
-    chelis_alloc, chelis_alloc_view, chelis_dtype, chelis_dtype_size, chelis_fill_scalar,
-    chelis_free, chelis_parse_scalar, chelis_scalar, chelis_scalar_from_bits, chelis_scalar_tensor,
-    chelis_string_from_cstr, chelis_string_release, chelis_tensor_numel, chelis_tensor_rank,
-    chelis_tensor_shape, chelis_tensor_to_scalar, chelis_value, chelis_value_as_scalar,
-    chelis_value_from_scalar, CHELIS_DTYPE_BF16, CHELIS_DTYPE_BOOL, CHELIS_DTYPE_F16,
+    chelis_alloc, chelis_dtype, chelis_dtype_size, chelis_fill_scalar, chelis_option_is_some,
+    chelis_option_release, chelis_option_unwrap, chelis_parse_scalar, chelis_scalar,
+    chelis_scalar_from_bits, chelis_scalar_tensor, chelis_string_from_cstr, chelis_string_release,
+    chelis_tensor_begin_write, chelis_tensor_end_write, chelis_tensor_entry_borrow,
+    chelis_tensor_numel, chelis_tensor_rank, chelis_tensor_read_view, chelis_tensor_release,
+    chelis_tensor_shape, chelis_tensor_to_scalar, chelis_value, chelis_value_box_scalar,
+    chelis_value_unbox_scalar, CHELIS_DTYPE_BF16, CHELIS_DTYPE_BOOL, CHELIS_DTYPE_F16,
     CHELIS_DTYPE_F32, CHELIS_DTYPE_F64, CHELIS_DTYPE_I16, CHELIS_DTYPE_I32, CHELIS_DTYPE_I64,
     CHELIS_DTYPE_I8, CHELIS_VALUE_SCALAR,
 };
@@ -31,7 +33,13 @@ fn parse_scalar(text: &str, dtype: chelis_dtype) -> Option<chelis_scalar> {
         let runtime_text = chelis_string_from_cstr(c_text.as_ptr());
         let parsed = chelis_parse_scalar(runtime_text, dtype);
         chelis_string_release(runtime_text);
-        (parsed.is_some != 0).then_some(parsed.value)
+        let value = if chelis_option_is_some(parsed) {
+            Some(chelis_value_unbox_scalar(chelis_option_unwrap(parsed)))
+        } else {
+            None
+        };
+        chelis_option_release(parsed);
+        value
     }
 }
 
@@ -124,16 +132,16 @@ fn every_active_dtype_round_trips_exact_stored_bits() {
             assert_eq!(value.reserved, [0; 7]);
             assert_eq!(value.bits, bits);
 
-            let boxed = chelis_value_from_scalar(value);
+            let boxed = chelis_value_box_scalar(value);
             assert_eq!(boxed.tag, CHELIS_VALUE_SCALAR);
             assert_eq!(boxed.reserved, [0; 7]);
-            assert_eq!(chelis_value_as_scalar(boxed).bits, bits);
+            assert_eq!(chelis_value_unbox_scalar(boxed).bits, bits);
 
             let tensor = chelis_scalar_tensor(value);
             assert_eq!(chelis_tensor_rank(tensor), 0);
             assert_eq!(chelis_tensor_numel(tensor), 1);
             assert_eq!(chelis_tensor_to_scalar(tensor).bits, bits);
-            chelis_free(tensor);
+            chelis_tensor_release(tensor);
         }
     }
 }
@@ -144,10 +152,13 @@ fn bool_is_one_byte_and_fill_preserves_the_canonical_bit() {
         assert_eq!(chelis_dtype_size(CHELIS_DTYPE_BOOL), 1);
         let shape = [4_i64];
         let tensor = chelis_alloc(1, shape.as_ptr(), CHELIS_DTYPE_BOOL);
-        chelis_fill_scalar(tensor, scalar(CHELIS_DTYPE_BOOL, 1));
-        let bytes = std::slice::from_raw_parts((*tensor).data.cast::<u8>(), 4);
+        let guard = chelis_tensor_begin_write(tensor);
+        chelis_fill_scalar(guard, scalar(CHELIS_DTYPE_BOOL, 1));
+        chelis_tensor_end_write(guard);
+        let view = chelis_tensor_read_view(tensor);
+        let bytes = std::slice::from_raw_parts(view.data.cast::<u8>(), view.count as usize);
         assert_eq!(bytes, &[1, 1, 1, 1]);
-        chelis_free(tensor);
+        chelis_tensor_release(tensor);
     }
 }
 
@@ -169,16 +180,9 @@ fn dynamic_rank_layout_covers_zero_one_eight_and_greater_than_eight() {
             assert_eq!(chelis_tensor_numel(tensor), 1);
             for axis in 0..rank {
                 assert_eq!(chelis_tensor_shape(tensor, axis), 1);
-                assert_eq!(*(*tensor).strides.add(axis as usize), 1);
             }
-            if rank == 0 {
-                assert!((*tensor).shape.is_null());
-                assert!((*tensor).strides.is_null());
-            } else {
-                assert!(!(*tensor).shape.is_null());
-                assert!(!(*tensor).strides.is_null());
-            }
-            chelis_free(tensor);
+            assert_eq!(chelis_tensor_read_view(tensor).count, 1);
+            chelis_tensor_release(tensor);
         }
     }
 }
@@ -188,7 +192,7 @@ fn borrowed_view_copies_shape_and_honors_declared_capacity() {
     let mut backing = vec![0_u64; 6];
     let mut shape = [2_i64, 3];
     unsafe {
-        let tensor = chelis_alloc_view(
+        let tensor = chelis_tensor_entry_borrow(
             2,
             shape.as_ptr(),
             CHELIS_DTYPE_I64,
@@ -199,9 +203,10 @@ fn borrowed_view_copies_shape_and_honors_declared_capacity() {
         assert_eq!(shape[0], 99, "the caller-side mutation must take effect");
         assert_eq!(chelis_tensor_shape(tensor, 0), 2);
         assert_eq!(chelis_tensor_shape(tensor, 1), 3);
-        assert_eq!((*tensor).byte_capacity, 48);
-        assert_eq!((*tensor).owns_data, 0);
-        chelis_free(tensor);
+        let view = chelis_tensor_read_view(tensor);
+        assert_eq!(view.count, 6);
+        assert_eq!(view.data, backing.as_ptr().cast());
+        chelis_tensor_release(tensor);
     }
     backing[0] = 7;
     assert_eq!(
@@ -222,29 +227,35 @@ fn borrowed_view_copies_shape_and_honors_declared_capacity() {
 fn zero_size_and_offset_views_are_accepted_at_their_exact_capacity() {
     let mut backing = [1_i64, 2, 3, 4];
     unsafe {
-        // Zero elements: null data with zero declared capacity is the accepted
-        // form, and the reported count must be a genuine zero.
+        // Zero elements admit caller storage and excess declared capacity, but
+        // the published view canonicalizes that empty range to null data.
         let shape = [0_i64, 4];
-        let empty = chelis_alloc_view(2, shape.as_ptr(), CHELIS_DTYPE_I64, ptr::null_mut(), 0);
+        let empty = chelis_tensor_entry_borrow(
+            2,
+            shape.as_ptr(),
+            CHELIS_DTYPE_I64,
+            backing.as_ptr().cast(),
+            8,
+        );
         assert_eq!(chelis_tensor_numel(empty), 0);
-        assert_eq!((*empty).byte_capacity, 0);
-        assert!((*empty).data.is_null());
-        chelis_free(empty);
+        let empty_view = chelis_tensor_read_view(empty);
+        assert_eq!(empty_view.count, 0);
+        assert!(empty_view.data.is_null());
+        chelis_tensor_release(empty);
 
         // An element-aligned base inside a larger backing buffer, declared at
         // exactly the remaining capacity, is legal and reads from the offset
         // onward rather than from the start of the allocation.
         let base = backing.as_mut_ptr().add(1);
         let shape = [3_i64];
-        let view = chelis_alloc_view(1, shape.as_ptr(), CHELIS_DTYPE_I64, base.cast(), 24);
+        let view = chelis_tensor_entry_borrow(1, shape.as_ptr(), CHELIS_DTYPE_I64, base.cast(), 24);
         assert_eq!(chelis_tensor_numel(view), 3);
-        assert_eq!((*view).byte_capacity, 24);
-        assert_eq!((*view).owns_data, 0);
+        let read = chelis_tensor_read_view(view);
         assert_eq!(
-            std::slice::from_raw_parts((*view).data.cast::<i64>(), 3),
+            std::slice::from_raw_parts(read.data.cast::<i64>(), read.count as usize),
             &[2, 3, 4]
         );
-        chelis_free(view);
+        chelis_tensor_release(view);
     }
     assert_eq!(
         backing,
@@ -271,7 +282,7 @@ fn run_invalid_case(case: &str) -> ! {
                     reserved: [0, 0, 0, 0, 0, 0, 1],
                     bits: 0,
                 };
-                chelis_value_from_scalar(malformed);
+                chelis_value_box_scalar(malformed);
             }
             "value-tag" => {
                 let malformed: chelis_value = std::mem::zeroed();
@@ -279,15 +290,15 @@ fn run_invalid_case(case: &str) -> ! {
                     tag: chelis_runtime::chelis_value_tag(255),
                     ..malformed
                 };
-                chelis_value_as_scalar(malformed);
+                chelis_value_unbox_scalar(malformed);
             }
             "value-reserved" => {
-                let good = chelis_value_from_scalar(scalar(CHELIS_DTYPE_I64, 1));
+                let good = chelis_value_box_scalar(scalar(CHELIS_DTYPE_I64, 1));
                 let malformed = chelis_value {
                     reserved: [1; 7],
                     ..good
                 };
-                chelis_value_as_scalar(malformed);
+                chelis_value_unbox_scalar(malformed);
             }
             "rank-negative" => {
                 chelis_alloc(-1, ptr::null(), CHELIS_DTYPE_F32);
@@ -301,7 +312,7 @@ fn run_invalid_case(case: &str) -> ! {
             }
             "shape-overflow" => {
                 let shape = [i64::MAX, 2];
-                chelis_alloc_view(
+                chelis_tensor_entry_borrow(
                     2,
                     shape.as_ptr(),
                     CHELIS_DTYPE_I64,
@@ -314,7 +325,7 @@ fn run_invalid_case(case: &str) -> ! {
                 // does not. This is distinct from the product overflow above
                 // and must fail before inspecting the placeholder data.
                 let shape = [(i64::MAX / 2) + 1];
-                chelis_alloc_view(
+                chelis_tensor_entry_borrow(
                     1,
                     shape.as_ptr(),
                     CHELIS_DTYPE_I16,
@@ -336,14 +347,14 @@ fn run_invalid_case(case: &str) -> ! {
             // through the same checked metadata rather than trusting the rank
             // it was handed.
             "view-rank-negative" => {
-                chelis_alloc_view(-1, ptr::null(), CHELIS_DTYPE_F32, ptr::null_mut(), 0);
+                chelis_tensor_entry_borrow(-1, ptr::null(), CHELIS_DTYPE_F32, ptr::null_mut(), 0);
             }
             // chelis#889 view leg of the negative-extent control, the
             // counterpart of `extent-negative` on the borrowed-data path.
             "view-extent-negative" => {
                 let mut backing = [0_u64; 2];
                 let shape = [-1_i64];
-                chelis_alloc_view(
+                chelis_tensor_entry_borrow(
                     1,
                     shape.as_ptr(),
                     CHELIS_DTYPE_I64,
@@ -358,7 +369,7 @@ fn run_invalid_case(case: &str) -> ! {
             "view-capacity-negative" => {
                 let mut backing = [0_u64; 2];
                 let shape = [2_i64];
-                chelis_alloc_view(
+                chelis_tensor_entry_borrow(
                     1,
                     shape.as_ptr(),
                     CHELIS_DTYPE_I64,
@@ -369,7 +380,7 @@ fn run_invalid_case(case: &str) -> ! {
             "view-capacity" => {
                 let mut backing = [0_u64; 2];
                 let shape = [2_i64];
-                chelis_alloc_view(
+                chelis_tensor_entry_borrow(
                     1,
                     shape.as_ptr(),
                     CHELIS_DTYPE_I64,
@@ -379,28 +390,19 @@ fn run_invalid_case(case: &str) -> ! {
             }
             "view-null" => {
                 let shape = [1_i64];
-                chelis_alloc_view(1, shape.as_ptr(), CHELIS_DTYPE_I64, ptr::null_mut(), 8);
+                chelis_tensor_entry_borrow(1, shape.as_ptr(), CHELIS_DTYPE_I64, ptr::null_mut(), 8);
             }
             "view-alignment" => {
                 let mut backing = [0_u64; 3];
                 let shape = [2_i64];
                 let misaligned = backing.as_mut_ptr().cast::<u8>().add(1);
-                chelis_alloc_view(1, shape.as_ptr(), CHELIS_DTYPE_I64, misaligned.cast(), 16);
-            }
-            "zero-view-data" => {
-                let mut byte = 0_u8;
-                let shape = [0_i64];
-                chelis_alloc_view(
+                chelis_tensor_entry_borrow(
                     1,
                     shape.as_ptr(),
-                    CHELIS_DTYPE_I8,
-                    (&mut byte as *mut u8).cast(),
-                    0,
+                    CHELIS_DTYPE_I64,
+                    misaligned.cast(),
+                    16,
                 );
-            }
-            "zero-view-capacity" => {
-                let shape = [0_i64];
-                chelis_alloc_view(1, shape.as_ptr(), CHELIS_DTYPE_I8, ptr::null_mut(), 1);
             }
             other => panic!("unknown invalid ABI case: {other}"),
         }
@@ -416,13 +418,13 @@ fn run_invalid_case(case: &str) -> ! {
 /// checked capacity types cannot quietly relocate a control's meaning. The
 /// rows cover the five controls #889's Phase 1 exit names: negative, zero,
 /// product overflow, byte overflow, and declared capacity, on both the owned
-/// (`chelis_alloc`) and borrowed (`chelis_alloc_view`) paths.
+/// (`chelis_alloc`) and borrowed (`chelis_tensor_entry_borrow`) paths.
 const CAPACITY_CONTROL_DIAGNOSTICS: &[(&str, &str)] = &[
     // negative
     ("rank-negative", "Domain: chelis_alloc has negative rank -1"),
     (
         "view-rank-negative",
-        "Domain: chelis_alloc_view has negative rank -1",
+        "Domain: chelis_tensor_entry_borrow has negative rank -1",
     ),
     (
         "extent-negative",
@@ -430,30 +432,21 @@ const CAPACITY_CONTROL_DIAGNOSTICS: &[(&str, &str)] = &[
     ),
     (
         "view-extent-negative",
-        "Domain: chelis_alloc_view has negative extent -1 at axis 0",
+        "Domain: chelis_tensor_entry_borrow has negative extent -1 at axis 0",
     ),
     (
         "view-capacity-negative",
-        "Domain: chelis_alloc_view has negative byte capacity -1",
-    ),
-    // zero
-    (
-        "zero-view-data",
-        "Domain: chelis_alloc_view zero-size tensor requires null data and zero capacity",
-    ),
-    (
-        "zero-view-capacity",
-        "Domain: chelis_alloc_view zero-size tensor requires null data and zero capacity",
+        "Domain: chelis_tensor_entry_borrow has negative byte capacity -1",
     ),
     // product overflow
     (
         "shape-overflow",
-        "Overflow: chelis_alloc_view extent product exceeds int64",
+        "Overflow: chelis_tensor_entry_borrow extent product exceeds int64",
     ),
     // byte overflow
     (
         "byte-overflow",
-        "Overflow: chelis_alloc_view byte size exceeds int64",
+        "Overflow: chelis_tensor_entry_borrow byte size exceeds int64",
     ),
     (
         "alloc-byte-overflow",
@@ -462,15 +455,15 @@ const CAPACITY_CONTROL_DIAGNOSTICS: &[(&str, &str)] = &[
     // declared capacity and base pointer
     (
         "view-capacity",
-        "Domain: chelis_alloc_view byte capacity 15 is smaller than required 16",
+        "Domain: chelis_tensor_entry_borrow byte capacity 15 is smaller than required 16",
     ),
     (
         "view-null",
-        "Domain: chelis_alloc_view nonempty tensor has null data",
+        "Domain: chelis_tensor_entry_borrow nonempty tensor has null data",
     ),
     (
         "view-alignment",
-        "Domain: chelis_alloc_view data pointer is not aligned for int64",
+        "Domain: chelis_tensor_entry_borrow data pointer is not aligned for int64",
     ),
 ];
 
@@ -499,8 +492,6 @@ fn malformed_foreign_carriers_and_tensor_metadata_fail_loudly() {
         "view-capacity",
         "view-null",
         "view-alignment",
-        "zero-view-data",
-        "zero-view-capacity",
     ];
     for case in cases {
         let output = Command::new(&test_binary)

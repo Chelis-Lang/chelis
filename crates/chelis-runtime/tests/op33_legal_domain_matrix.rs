@@ -7,12 +7,13 @@
 //! forbidden-domain controls.
 
 use chelis_runtime::{
-    chelis_alloc, chelis_free, chelis_string_from_cstr, chelis_tensor, chelis_tensor_clamp,
-    chelis_tensor_cmplt, chelis_tensor_cumsum, chelis_tensor_einsum, chelis_tensor_scatter_add,
-    chelis_tensor_sort, chelis_tensor_trace, chelis_tuple_get, chelis_tuple_release,
-    chelis_value_as_tensor, chelis_value_release, CHELIS_DTYPE_BF16, CHELIS_DTYPE_BOOL,
-    CHELIS_DTYPE_F16, CHELIS_DTYPE_F32, CHELIS_DTYPE_F64, CHELIS_DTYPE_I16, CHELIS_DTYPE_I32,
-    CHELIS_DTYPE_I64, CHELIS_DTYPE_I8,
+    chelis_alloc, chelis_string_from_cstr, chelis_tensor, chelis_tensor_begin_write,
+    chelis_tensor_borrow_value, chelis_tensor_clamp, chelis_tensor_cmplt, chelis_tensor_cumsum,
+    chelis_tensor_einsum, chelis_tensor_end_write, chelis_tensor_read_view, chelis_tensor_release,
+    chelis_tensor_scatter_add, chelis_tensor_sort, chelis_tensor_trace, chelis_tensor_write_view,
+    chelis_tuple_get, chelis_tuple_release, chelis_value_release, CHELIS_DTYPE_BF16,
+    CHELIS_DTYPE_BOOL, CHELIS_DTYPE_F16, CHELIS_DTYPE_F32, CHELIS_DTYPE_F64, CHELIS_DTYPE_I16,
+    CHELIS_DTYPE_I32, CHELIS_DTYPE_I64, CHELIS_DTYPE_I8,
 };
 use std::env;
 use std::process::Command;
@@ -112,7 +113,7 @@ unsafe fn tensor(dtype: u8, shape: &[i64], values: &[i64]) -> *mut chelis_tensor
         shape.as_ptr()
     };
     let tensor = chelis_alloc(shape.len() as i32, shape_ptr, dtype);
-    assert_eq!((*tensor).size as usize, values.len());
+    assert_eq!(chelis_tensor_read_view(tensor).count as usize, values.len());
     match dtype {
         CHELIS_DTYPE_I8 => write_values::<i8>(tensor, values, |value| value as i8),
         CHELIS_DTYPE_I16 => write_values::<i16>(tensor, values, |value| value as i16),
@@ -136,15 +137,19 @@ unsafe fn write_values<T: Copy>(
     values: &[i64],
     convert: impl Fn(i64) -> T,
 ) {
-    let data = (*tensor).data.cast::<T>();
+    let guard = chelis_tensor_begin_write(tensor);
+    let view = chelis_tensor_write_view(guard);
+    let data = view.data.cast::<T>();
     for (index, value) in values.iter().copied().enumerate() {
         *data.add(index) = convert(value);
     }
+    chelis_tensor_end_write(guard);
 }
 
 unsafe fn assert_values(tensor: *const chelis_tensor, dtype: u8, expected: &[i64]) {
-    assert_eq!((*tensor).dtype, dtype, "unexpected result dtype");
-    assert_eq!((*tensor).size as usize, expected.len());
+    let view = chelis_tensor_read_view(tensor);
+    assert_eq!(view.dtype, dtype, "unexpected result dtype");
+    assert_eq!(view.count as usize, expected.len());
     match dtype {
         CHELIS_DTYPE_I8 => assert_storage::<i8>(tensor, expected, |value| value as i8),
         CHELIS_DTYPE_I16 => assert_storage::<i16>(tensor, expected, |value| value as i16),
@@ -171,7 +176,7 @@ unsafe fn assert_storage<T: Copy + std::fmt::Debug + PartialEq>(
     expected: &[i64],
     convert: impl Fn(i64) -> T,
 ) {
-    let data = (*tensor).data.cast::<T>();
+    let data = chelis_tensor_read_view(tensor).data.cast::<T>();
     let actual = (0..expected.len())
         .map(|index| *data.add(index))
         .collect::<Vec<_>>();
@@ -185,11 +190,15 @@ unsafe fn run_case(op: &str, dtype: u8) {
             let lhs = tensor(dtype, &[3], &[-2, 1, 3]);
             let rhs = tensor(dtype, &[3], &[-1, 1, 2]);
             let output = chelis_tensor_cmplt(lhs, rhs);
-            assert_eq!((*output).dtype, CHELIS_DTYPE_BOOL);
-            assert_eq!(std::slice::from_raw_parts((*output).data, 3), &[1, 0, 0]);
-            chelis_free(output);
-            chelis_free(rhs);
-            chelis_free(lhs);
+            let view = chelis_tensor_read_view(output);
+            assert_eq!(view.dtype, CHELIS_DTYPE_BOOL);
+            assert_eq!(
+                std::slice::from_raw_parts(view.data.cast::<u8>(), 3),
+                &[1, 0, 0]
+            );
+            chelis_tensor_release(output);
+            chelis_tensor_release(rhs);
+            chelis_tensor_release(lhs);
         }
         "cumsum" => {
             let (input_values, expected) = reduced_float_accumulation_probe(dtype)
@@ -199,22 +208,22 @@ unsafe fn run_case(op: &str, dtype: u8) {
             let input = tensor(dtype, &[3], &input_values);
             let output = chelis_tensor_cumsum(input, 0);
             assert_values(output, default_sum_dtype(dtype), &expected);
-            chelis_free(output);
-            chelis_free(input);
+            chelis_tensor_release(output);
+            chelis_tensor_release(input);
         }
         "sort" => {
             let input = tensor(dtype, &[4], &[3, -1, 2, -1]);
             let output = chelis_tensor_sort(input, 0);
             let values_value = chelis_tuple_get(output, 0);
             let indices_value = chelis_tuple_get(output, 1);
-            let values = chelis_value_as_tensor(values_value);
-            let indices = chelis_value_as_tensor(indices_value);
+            let values = chelis_tensor_borrow_value(values_value);
+            let indices = chelis_tensor_borrow_value(indices_value);
             assert_values(values, dtype, &[-1, -1, 2, 3]);
             assert_values(indices, CHELIS_DTYPE_I64, &[1, 3, 2, 0]);
             chelis_value_release(indices_value);
             chelis_value_release(values_value);
             chelis_tuple_release(output);
-            chelis_free(input);
+            chelis_tensor_release(input);
         }
         "trace" => {
             let (shape, values, expected) = reduced_float_accumulation_probe(dtype)
@@ -224,8 +233,8 @@ unsafe fn run_case(op: &str, dtype: u8) {
             let input = tensor(dtype, &shape, &values);
             let output = chelis_tensor_trace(input, 0, 1);
             assert_values(output, default_sum_dtype(dtype), &[expected]);
-            chelis_free(output);
-            chelis_free(input);
+            chelis_tensor_release(output);
+            chelis_tensor_release(input);
         }
         "clamp" => {
             let input = tensor(dtype, &[3], &[-3, 0, 4]);
@@ -233,10 +242,10 @@ unsafe fn run_case(op: &str, dtype: u8) {
             let upper = tensor(dtype, &[], &[2]);
             let output = chelis_tensor_clamp(input, lower, upper);
             assert_values(output, dtype, &[-1, 0, 2]);
-            chelis_free(output);
-            chelis_free(upper);
-            chelis_free(lower);
-            chelis_free(input);
+            chelis_tensor_release(output);
+            chelis_tensor_release(upper);
+            chelis_tensor_release(lower);
+            chelis_tensor_release(input);
         }
         "einsum" => {
             let (lhs_values, rhs_values, expected) = reduced_float_accumulation_probe(dtype)
@@ -252,9 +261,9 @@ unsafe fn run_case(op: &str, dtype: u8) {
                 default_accumulator_dtype(dtype),
             );
             assert_values(output, default_sum_dtype(dtype), &[expected]);
-            chelis_free(output);
-            chelis_free(rhs);
-            chelis_free(lhs);
+            chelis_tensor_release(output);
+            chelis_tensor_release(rhs);
+            chelis_tensor_release(lhs);
         }
         "scatter_add" => {
             let (base_values, index_values, update_values, expected) =
@@ -267,10 +276,10 @@ unsafe fn run_case(op: &str, dtype: u8) {
             let updates = tensor(dtype, &[update_values.len() as i64], &update_values);
             let output = chelis_tensor_scatter_add(base, indices, updates, 0);
             assert_values(output, dtype, &expected);
-            chelis_free(output);
-            chelis_free(updates);
-            chelis_free(indices);
-            chelis_free(base);
+            chelis_tensor_release(output);
+            chelis_tensor_release(updates);
+            chelis_tensor_release(indices);
+            chelis_tensor_release(base);
         }
         other => panic!("unknown OP33 legal-domain operation {other}"),
     }
@@ -286,9 +295,9 @@ unsafe fn run_einsum_accumulator_case(dtype: u8, accumulator: u8, result_dtype: 
         accumulator,
     );
     assert_values(output, result_dtype, &[11]);
-    chelis_free(output);
-    chelis_free(rhs);
-    chelis_free(lhs);
+    chelis_tensor_release(output);
+    chelis_tensor_release(rhs);
+    chelis_tensor_release(lhs);
 }
 
 #[test]

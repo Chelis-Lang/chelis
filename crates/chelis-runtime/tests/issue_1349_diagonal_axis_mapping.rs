@@ -20,8 +20,10 @@ use std::ffi::c_int;
 use std::process::Command;
 
 use chelis_runtime::{
-    chelis_alloc, chelis_free, chelis_tensor, chelis_tensor_diagonal, chelis_tensor_trace,
-    TensorElement, CHELIS_DTYPE_F32,
+    chelis_alloc, chelis_tensor, chelis_tensor_begin_write, chelis_tensor_diagonal,
+    chelis_tensor_end_write, chelis_tensor_numel, chelis_tensor_rank, chelis_tensor_read_view,
+    chelis_tensor_release, chelis_tensor_shape, chelis_tensor_trace, chelis_tensor_write_view,
+    CHELIS_DTYPE_F32,
 };
 
 const CHILD_CASE_ENV: &str = "CHELIS_ISSUE_1349_CHILD_CASE";
@@ -32,11 +34,14 @@ const CHILD_CASE_ENV: &str = "CHELIS_ISSUE_1349_CHILD_CASE";
 unsafe fn ramp_tensor_f32(shape: &[i64]) -> *mut chelis_tensor {
     unsafe {
         let tensor = chelis_alloc(shape.len() as c_int, shape.as_ptr(), CHELIS_DTYPE_F32);
-        let data = f32::data_ptr_unchecked(tensor);
+        let guard = chelis_tensor_begin_write(tensor);
+        let view = chelis_tensor_write_view(guard);
+        let data = view.data.cast::<f32>();
         let numel: i64 = shape.iter().product();
         for flat in 0..numel {
             *data.add(flat as usize) = flat as f32;
         }
+        chelis_tensor_end_write(guard);
         tensor
     }
 }
@@ -115,16 +120,17 @@ unsafe fn observed_shape(tensor: *const chelis_tensor) -> Vec<i64> {
     // [05-OP-31]: rank zero has a null shape pointer, so read extents
     // through the pointer only for the declared rank.
     unsafe {
-        (0..(*tensor).rank as usize)
-            .map(|axis| *(*tensor).shape.as_ptr().add(axis))
+        (0..chelis_tensor_rank(tensor) as usize)
+            .map(|axis| chelis_tensor_shape(tensor, axis as i32))
             .collect()
     }
 }
 
 unsafe fn observed_values(tensor: *mut chelis_tensor) -> Vec<f32> {
     unsafe {
-        let data = f32::data_ptr_unchecked(tensor);
-        (0..(*tensor).size as usize)
+        let view = chelis_tensor_read_view(tensor);
+        let data = view.data.cast::<f32>();
+        (0..view.count as usize)
             .map(|index| *data.add(index))
             .collect()
     }
@@ -168,8 +174,8 @@ fn sweep(shape: &[i64], trace: bool) {
                      want shape {want_shape:?} values {want_values:?}"
                 ));
             }
-            chelis_free(out);
-            chelis_free(input);
+            chelis_tensor_release(out);
+            chelis_tensor_release(input);
         }
     }
     let op = if trace { "trace" } else { "diagonal" };
@@ -229,9 +235,9 @@ fn diagonal_and_trace_cube_axes_0_1_match_pinned_values() {
         let trace = chelis_tensor_trace(cube, 0, 1);
         assert_eq!(observed_shape(trace), vec![2]);
         assert_eq!(observed_values(trace), vec![6.0, 8.0]);
-        chelis_free(trace);
-        chelis_free(diag);
-        chelis_free(cube);
+        chelis_tensor_release(trace);
+        chelis_tensor_release(diag);
+        chelis_tensor_release(cube);
     }
 }
 
@@ -244,9 +250,9 @@ fn diagonal_zero_extent_retained_axis_is_empty_with_declared_shape() {
         let input = ramp_tensor_f32(&[3, 0, 4]);
         let out = chelis_tensor_diagonal(input, 2, 0);
         assert_eq!(observed_shape(out), vec![0, 3]);
-        assert_eq!((*out).size, 0);
-        chelis_free(out);
-        chelis_free(input);
+        assert_eq!(chelis_tensor_numel(out), 0);
+        chelis_tensor_release(out);
+        chelis_tensor_release(input);
     }
 }
 

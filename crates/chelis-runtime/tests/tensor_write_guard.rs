@@ -12,8 +12,8 @@ use std::process::{Command, Output};
 
 use chelis_runtime::{
     chelis_alloc, chelis_tensor_begin_write, chelis_tensor_end_write, chelis_tensor_entry_borrow,
-    chelis_tensor_read_view, chelis_tensor_release, chelis_tensor_retain, chelis_tensor_write_view,
-    CHELIS_DTYPE_F32,
+    chelis_tensor_numel, chelis_tensor_rank, chelis_tensor_read_view, chelis_tensor_release,
+    chelis_tensor_retain, chelis_tensor_shape, chelis_tensor_write_view, CHELIS_DTYPE_F32,
 };
 
 const CHILD_CASE: &str = "CHELIS_TENSOR_WRITE_CHILD_CASE";
@@ -52,6 +52,9 @@ fn tensor_write_contract_child() {
                 assert_eq!(view.dtype, CHELIS_DTYPE_F32);
                 assert!(!view.data.is_null());
                 *(view.data as *mut f32) = 3.5;
+                assert_eq!(chelis_tensor_rank(tensor), 1);
+                assert_eq!(chelis_tensor_shape(tensor, 0), 2);
+                assert_eq!(chelis_tensor_numel(tensor), 2);
                 chelis_tensor_end_write(guard);
 
                 let read = chelis_tensor_read_view(tensor);
@@ -101,6 +104,20 @@ fn tensor_write_contract_child() {
                 let _guard = chelis_tensor_begin_write(tensor);
                 chelis_tensor_release(tensor);
                 panic!("release accepted a descriptor under a write guard");
+            }
+            "view-after-end" => {
+                let tensor = chelis_alloc(1, shape.as_ptr(), CHELIS_DTYPE_F32);
+                let guard = chelis_tensor_begin_write(tensor);
+                chelis_tensor_end_write(guard);
+                let _ = chelis_tensor_write_view(guard);
+                panic!("write_view accepted an ended guard");
+            }
+            "second-end" => {
+                let tensor = chelis_alloc(1, shape.as_ptr(), CHELIS_DTYPE_F32);
+                let guard = chelis_tensor_begin_write(tensor);
+                chelis_tensor_end_write(guard);
+                chelis_tensor_end_write(guard);
+                panic!("end_write accepted an ended guard");
             }
             other => panic!("unknown tensor-write child case `{other}`"),
         }
@@ -158,6 +175,22 @@ fn live_write_guard_blocks_every_other_descriptor_operation() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("Domain:"), "{case}: {stderr}");
         assert!(stderr.contains("write guard"), "{case}: {stderr}");
+        let _ = fs::remove_file(path);
+    }
+}
+
+#[test]
+fn ended_write_guard_has_no_view_and_cannot_be_consumed_twice() {
+    for case in ["view-after-end", "second-end"] {
+        let path = ledger_path(case);
+        let output = run_child(case, &path);
+        assert!(
+            !output.status.success(),
+            "ended guard case `{case}` returned"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("Domain:"), "{case}: {stderr}");
+        assert!(stderr.contains("has ended"), "{case}: {stderr}");
         let _ = fs::remove_file(path);
     }
 }

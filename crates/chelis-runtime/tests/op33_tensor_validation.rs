@@ -6,12 +6,12 @@
 //! carriers without narrowing the signed-integer/float families they admit.
 
 use chelis_runtime::{
-    chelis_alloc, chelis_dims, chelis_free, chelis_list_from_values, chelis_string_from_cstr,
-    chelis_tensor, chelis_tensor_clamp, chelis_tensor_cmplt, chelis_tensor_concat,
-    chelis_tensor_cumsum, chelis_tensor_einsum, chelis_tensor_gather, chelis_tensor_scatter_add,
-    chelis_tensor_scatter_replace, chelis_tensor_sort, chelis_tensor_trace, chelis_tensor_where,
-    chelis_value_from_tensor, CHELIS_DTYPE_BOOL, CHELIS_DTYPE_F32, CHELIS_DTYPE_I16,
-    CHELIS_DTYPE_I32, CHELIS_DTYPE_I64, CHELIS_DTYPE_I8,
+    chelis_alloc, chelis_string_from_cstr, chelis_tensor, chelis_tensor_begin_write,
+    chelis_tensor_clamp, chelis_tensor_cmplt, chelis_tensor_cumsum, chelis_tensor_einsum,
+    chelis_tensor_end_write, chelis_tensor_gather, chelis_tensor_read_view, chelis_tensor_release,
+    chelis_tensor_scatter_add, chelis_tensor_scatter_replace, chelis_tensor_sort,
+    chelis_tensor_trace, chelis_tensor_where, chelis_tensor_write_view, CHELIS_DTYPE_BOOL,
+    CHELIS_DTYPE_F32, CHELIS_DTYPE_I16, CHELIS_DTYPE_I32, CHELIS_DTYPE_I64, CHELIS_DTYPE_I8,
 };
 use std::env;
 use std::ffi::CString;
@@ -24,18 +24,19 @@ unsafe fn tensor(dtype: u8, shape: &[i64]) -> *mut chelis_tensor {
     chelis_alloc(shape.len() as i32, shape.as_ptr(), dtype)
 }
 
-unsafe fn malformed_positive_rank(dtype: u8, data: *mut u8) -> chelis_tensor {
-    chelis_tensor {
-        data,
-        shape: chelis_dims(ptr::null()),
-        strides: chelis_dims(ptr::null()),
-        size: 1,
-        byte_capacity: 8,
-        rank: 1,
-        dtype,
-        owns_data: 0,
-        reserved: [0; 2],
-    }
+unsafe fn write<T: Copy>(tensor: *mut chelis_tensor, values: &[T]) {
+    let guard = chelis_tensor_begin_write(tensor);
+    let view = chelis_tensor_write_view(guard);
+    assert_eq!(view.count as usize, values.len());
+    view.data
+        .cast::<T>()
+        .copy_from(values.as_ptr(), values.len());
+    chelis_tensor_end_write(guard);
+}
+
+unsafe fn read<T: Copy>(tensor: *const chelis_tensor) -> Vec<T> {
+    let view = chelis_tensor_read_view(tensor);
+    std::slice::from_raw_parts(view.data.cast::<T>(), view.count as usize).to_vec()
 }
 
 fn run_invalid_case(case: &str) -> ! {
@@ -45,52 +46,11 @@ fn run_invalid_case(case: &str) -> ! {
             "cmplt-null" => {
                 chelis_tensor_cmplt(ptr::null(), ptr::null());
             }
-            "cmplt-malformed-shape" => {
-                let mut data = 0_i64;
-                let malformed =
-                    malformed_positive_rank(CHELIS_DTYPE_I64, (&mut data as *mut i64).cast::<u8>());
-                let rhs = tensor(CHELIS_DTYPE_I64, &shape);
-                chelis_tensor_cmplt(&malformed, rhs);
-            }
             "where-null" => {
                 chelis_tensor_where(ptr::null(), ptr::null(), ptr::null());
             }
-            "where-malformed-shape" => {
-                let mut data = 0_u8;
-                let malformed = malformed_positive_rank(CHELIS_DTYPE_BOOL, &mut data);
-                let branch = tensor(CHELIS_DTYPE_I32, &shape);
-                chelis_tensor_where(&malformed, branch, branch);
-            }
             "clamp-null" => {
                 chelis_tensor_clamp(ptr::null(), ptr::null(), ptr::null());
-            }
-            "clamp-malformed-bound" => {
-                let input = tensor(CHELIS_DTYPE_I64, &shape);
-                let mut data = 0_i64;
-                let malformed =
-                    malformed_positive_rank(CHELIS_DTYPE_I64, (&mut data as *mut i64).cast::<u8>());
-                chelis_tensor_clamp(input, &malformed, input);
-            }
-            "scatter-malformed-updates" => {
-                let base = tensor(CHELIS_DTYPE_I32, &shape);
-                let indices = tensor(CHELIS_DTYPE_I8, &shape);
-                let mut data = 0_i32;
-                let malformed =
-                    malformed_positive_rank(CHELIS_DTYPE_I32, (&mut data as *mut i32).cast::<u8>());
-                chelis_tensor_scatter_replace(base, indices, &malformed, 0);
-            }
-            "concat-malformed-second-part" => {
-                let first = tensor(CHELIS_DTYPE_I32, &shape);
-                let second = tensor(CHELIS_DTYPE_I32, &shape);
-                let parts = [
-                    chelis_value_from_tensor(first),
-                    chelis_value_from_tensor(second),
-                ];
-                let list = chelis_list_from_values(parts.as_ptr(), parts.len() as i64);
-                (*second).rank = 2;
-                (*second).shape = chelis_dims(ptr::null());
-                (*second).strides = chelis_dims(ptr::null());
-                chelis_tensor_concat(list, 0);
             }
             "cmplt-bool" => {
                 let lhs = tensor(CHELIS_DTYPE_BOOL, &shape);
@@ -106,12 +66,7 @@ fn run_invalid_case(case: &str) -> ! {
             "gather-f32-indices" => {
                 let base = tensor(CHELIS_DTYPE_I32, &shape);
                 let indices = tensor(CHELIS_DTYPE_F32, &shape);
-                *(indices
-                    .cast::<chelis_tensor>()
-                    .as_mut()
-                    .unwrap()
-                    .data
-                    .cast::<f32>()) = 0.0;
+                write(indices, &[0.0_f32]);
                 chelis_tensor_gather(base, indices, 0);
             }
             "scatter-replace-bool-indices" => {
@@ -124,7 +79,7 @@ fn run_invalid_case(case: &str) -> ! {
                 let base = tensor(CHELIS_DTYPE_I32, &shape);
                 let indices = tensor(chelis_runtime::CHELIS_DTYPE_F64, &shape);
                 let updates = tensor(CHELIS_DTYPE_I32, &shape);
-                *(*indices).data.cast::<f64>() = 0.0;
+                write(indices, &[0.0_f64]);
                 chelis_tensor_scatter_add(base, indices, updates, 0);
             }
             "scatter-add-bool-base" => {
@@ -172,13 +127,8 @@ fn malformed_carriers_and_forbidden_dtypes_trap_domain_at_operation_entry() {
     let test_binary = env::current_exe().expect("current test binary");
     for case in [
         "cmplt-null",
-        "cmplt-malformed-shape",
         "where-null",
-        "where-malformed-shape",
         "clamp-null",
-        "clamp-malformed-bound",
-        "scatter-malformed-updates",
-        "concat-malformed-second-part",
         "cmplt-bool",
         "where-f32-condition",
         "gather-f32-indices",
@@ -217,67 +167,37 @@ fn admitted_dtypes_still_execute_across_comparison_selection_and_sparse_ops() {
 
         let lhs = tensor(CHELIS_DTYPE_I64, &pair);
         let rhs = tensor(CHELIS_DTYPE_I64, &pair);
-        (*lhs).data.cast::<i64>().copy_from([1_i64, 4].as_ptr(), 2);
-        (*rhs).data.cast::<i64>().copy_from([2_i64, 3].as_ptr(), 2);
+        write(lhs, &[1_i64, 4]);
+        write(rhs, &[2_i64, 3]);
         let compared = chelis_tensor_cmplt(lhs, rhs);
-        assert_eq!(std::slice::from_raw_parts((*compared).data, 2), &[1, 0]);
+        assert_eq!(read::<u8>(compared), [1, 0]);
 
         let condition = tensor(CHELIS_DTYPE_BOOL, &pair);
-        (*condition).data.copy_from([1_u8, 0].as_ptr(), 2);
+        write(condition, &[1_u8, 0]);
         let then_tensor = tensor(CHELIS_DTYPE_I16, &pair);
         let else_tensor = tensor(CHELIS_DTYPE_I16, &pair);
-        (*then_tensor)
-            .data
-            .cast::<i16>()
-            .copy_from([11_i16, 12].as_ptr(), 2);
-        (*else_tensor)
-            .data
-            .cast::<i16>()
-            .copy_from([21_i16, 22].as_ptr(), 2);
+        write(then_tensor, &[11_i16, 12]);
+        write(else_tensor, &[21_i16, 22]);
         let selected = chelis_tensor_where(condition, then_tensor, else_tensor);
-        assert_eq!(
-            std::slice::from_raw_parts((*selected).data.cast::<i16>(), 2),
-            &[11, 22]
-        );
+        assert_eq!(read::<i16>(selected), [11, 22]);
 
         let base_shape = [3_i64];
         let base = tensor(CHELIS_DTYPE_I32, &base_shape);
-        (*base)
-            .data
-            .cast::<i32>()
-            .copy_from([10_i32, 20, 30].as_ptr(), 3);
+        write(base, &[10_i32, 20, 30]);
         let indices = tensor(CHELIS_DTYPE_I8, &pair);
-        (*indices)
-            .data
-            .cast::<i8>()
-            .copy_from([2_i8, 0].as_ptr(), 2);
+        write(indices, &[2_i8, 0]);
         let gathered = chelis_tensor_gather(base, indices, 0);
-        assert_eq!(
-            std::slice::from_raw_parts((*gathered).data.cast::<i32>(), 2),
-            &[30, 10]
-        );
+        assert_eq!(read::<i32>(gathered), [30, 10]);
 
         let updates = tensor(CHELIS_DTYPE_I32, &pair);
-        (*updates)
-            .data
-            .cast::<i32>()
-            .copy_from([7_i32, 8].as_ptr(), 2);
+        write(updates, &[7_i32, 8]);
         let replaced = chelis_tensor_scatter_replace(base, indices, updates, 0);
-        assert_eq!(
-            std::slice::from_raw_parts((*replaced).data.cast::<i32>(), 3),
-            &[8, 20, 7]
-        );
+        assert_eq!(read::<i32>(replaced), [8, 20, 7]);
 
         let indices_i16 = tensor(CHELIS_DTYPE_I16, &pair);
-        (*indices_i16)
-            .data
-            .cast::<i16>()
-            .copy_from([1_i16, 1].as_ptr(), 2);
+        write(indices_i16, &[1_i16, 1]);
         let added = chelis_tensor_scatter_add(base, indices_i16, updates, 0);
-        assert_eq!(
-            std::slice::from_raw_parts((*added).data.cast::<i32>(), 3),
-            &[10, 35, 30]
-        );
+        assert_eq!(read::<i32>(added), [10, 35, 30]);
 
         for tensor in [
             compared,
@@ -295,7 +215,7 @@ fn admitted_dtypes_still_execute_across_comparison_selection_and_sparse_ops() {
             updates,
             indices_i16,
         ] {
-            chelis_free(tensor);
+            chelis_tensor_release(tensor);
         }
     }
 }
