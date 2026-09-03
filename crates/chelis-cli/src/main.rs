@@ -5,8 +5,8 @@ mod style_gate;
 
 use chelis_compiler_api::compiler::BuildTarget;
 use chelis_compiler_api::schema::{
-    EvalRequest, SourceKind, WireInferredAdtArg, WireInferredDim, WireInferredDimensionArg,
-    WireInferredEffect, WireInferredPrecision, WireInferredType,
+    Diagnostic, EvalRequest, SourceKind, WireInferredAdtArg, WireInferredDim,
+    WireInferredDimensionArg, WireInferredEffect, WireInferredPrecision, WireInferredType,
 };
 use chelis_deep::DeepTag;
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr};
@@ -2131,7 +2131,22 @@ const EMPTY_PROGRAM_MESSAGE: &str = "empty program: no declarations found";
 /// supplied message; the rest of the report shape mirrors a zero-
 /// node program with score 0.
 fn synthetic_check_report_with_error(message: &str) -> String {
-    let message_json = serde_json::to_string(message).unwrap_or_else(|_| "\"\"".to_string());
+    // chelis#886: the early-failure path builds its error object from the
+    // same typed producer as the checker's, rather than a fourth `format!`
+    // template. Byte-preserving: an `Other` diagnostic with no location
+    // serializes to exactly the object this used to spell by hand.
+    let error = chelis_types::errors::CheckError {
+        kind: chelis_types::errors::CheckErrorKind::Other,
+        message: message.to_string(),
+        severity: 0.5,
+        expected: None,
+        got: None,
+        span_offset: None,
+        span_id: None,
+        suggestions: Vec::new(),
+    };
+    let error_json = serde_json::to_string(&Diagnostic::from_check_error(&error))
+        .unwrap_or_else(|_| "{\"kind\":\"Other\",\"message\":\"\",\"severity\":0.5}".to_string());
     format!(
         concat!(
             "{{\n",
@@ -2146,10 +2161,10 @@ fn synthetic_check_report_with_error(message: &str) -> String {
             "  \"untyped_nodes\": 0,\n",
             "  \"total_nodes\": 0,\n",
             "  \"unresolved_names\": [],\n",
-            "  \"errors\": [{{\"kind\":\"Other\",\"message\":{},\"severity\":0.5}}]\n",
+            "  \"errors\": [{}]\n",
             "}}"
         ),
-        message_json,
+        error_json,
     )
 }
 
@@ -2556,65 +2571,31 @@ fn assemble_check_json(
     if !linearity_errors.is_empty() {
         report.score = (report.score - 0.2 * linearity_errors.len() as f64).max(0.0);
     }
-    // Format as JSON manually
-    let mut errors_json: Vec<String> = report
-        .errors
-        .iter()
-        .map(|e| {
-            format!(
-                "{{\"kind\":\"{}\",\"message\":{},\"severity\":{}{}{}{}{}}}",
-                e.kind.diagnostic_name(),
-                serde_json::to_string(&e.message).unwrap_or_default(),
-                e.severity,
-                e.expected
-                    .as_ref()
-                    .map(|s| format!(
-                        ",\"expected\":{}",
-                        serde_json::to_string(s).unwrap_or_default()
-                    ))
-                    .unwrap_or_default(),
-                e.got
-                    .as_ref()
-                    .map(|s| format!(",\"got\":{}", serde_json::to_string(s).unwrap_or_default()))
-                    .unwrap_or_default(),
-                e.span_offset
-                    .map(|o| format!(",\"span_offset\":{o}"))
-                    .unwrap_or_default(),
-                e.span_id
-                    .as_ref()
-                    .map(|s| format!(
-                        ",\"span_id\":{}",
-                        serde_json::to_string(s).unwrap_or_default()
-                    ))
-                    .unwrap_or_default(),
-            )
-        })
-        .collect();
-    errors_json.extend(effect_errors.iter().map(|e| {
-        format!(
-            "{{\"kind\":\"{:?}\",\"message\":{},\"severity\":0.8}}",
-            e.kind,
-            serde_json::to_string(&e.message).unwrap_or_default(),
-        )
-    }));
-    errors_json.extend(linearity_errors.iter().map(|e| {
-        format!(
-            "{{\"kind\":\"{}\",\"message\":{},\"severity\":{}{}{}}}",
-            e.kind.diagnostic_name(),
-            serde_json::to_string(&e.message).unwrap_or_default(),
-            e.severity,
-            e.span_offset
-                .map(|o| format!(",\"span_offset\":{o}"))
-                .unwrap_or_default(),
-            e.span_id
-                .as_ref()
-                .map(|s| format!(
-                    ",\"span_id\":{}",
-                    serde_json::to_string(s).unwrap_or_default()
-                ))
-                .unwrap_or_default(),
-        )
-    }));
+    // chelis#886: one typed producer per diagnostic list. These were three
+    // hand-written `format!` templates spelling the kind with `{:?}`, which
+    // left no place for a structured payload and coupled a published wire
+    // spelling to a Rust variant name with nothing asserting the mapping.
+    //
+    // The carrier is `schema::Diagnostic`, not the checker's own error
+    // types. Serializing `CheckError` directly would make a `chelis-types`
+    // struct a numeric wire root outside the §C6 census, and would spell the
+    // kind from a Rust identifier; projecting onto the schema type keeps the
+    // census rooted where it is and takes the spelling from the sealed
+    // `DiagnosticKind` vocabulary.
+    let mut errors_json: Vec<String> = Vec::new();
+    for error in &report.errors {
+        errors_json.push(serde_json::to_string(&Diagnostic::from_check_error(error))?);
+    }
+    for error in effect_errors {
+        // `EffectError` carries no severity of its own; 0.8 was a constant
+        // in the template this replaces.
+        errors_json.push(serde_json::to_string(&Diagnostic::from_effect_error(
+            error, 0.8,
+        ))?);
+    }
+    for error in linearity_errors {
+        errors_json.push(serde_json::to_string(&Diagnostic::from_check_error(error))?);
+    }
 
     let json = format!(
         concat!(

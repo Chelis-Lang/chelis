@@ -195,6 +195,16 @@ pub struct Diagnostic {
     /// byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deep_path: Option<WireDeepErrorPath>,
+    /// Opaque producer-supplied identity for the reported location, when the
+    /// producer has one (chelis#886). Carried beside `span` rather than
+    /// inside it because a producer may hold an identity without a resolved
+    /// range, and [04-FIT-17] forbids inventing the range to fit.
+    ///
+    /// A `String`, so it adds no row to the §C6 wire numeric census.
+    /// `skip_serializing_if` keeps every existing producer's bytes
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span_id: Option<String>,
 }
 
 impl Diagnostic {
@@ -223,7 +233,153 @@ impl Diagnostic {
             suggestions: Vec::new(),
             span: None,
             deep_path: None,
+            span_id: None,
         }
+    }
+}
+
+/// Projections of the checker's own diagnostic types onto this wire carrier
+/// (chelis#886).
+///
+/// The `chelis check` report used to serialize `chelis_types::CheckError`
+/// directly. That made a checker-internal type a numeric wire root -- its
+/// public `severity: f64` sat outside the §C6 census, which is rooted here
+/// -- and it spelled the kind from a Rust variant name, re-coupling the wire
+/// to an identifier the sealed vocabulary exists to decouple it from.
+///
+/// Projecting instead of deriving fixes both at once. The carrier is this
+/// already-enumerated type, so the census gains no numeric row; the kind is
+/// `DiagnosticKind`'s governed spelling, so renaming a checker variant
+/// cannot move the wire.
+impl Diagnostic {
+    /// Project a check diagnostic onto the wire carrier.
+    pub fn from_check_error(error: &chelis_types::errors::CheckError) -> Self {
+        Self {
+            kind: check_error_kind(&error.kind).as_str().to_owned(),
+            message: error.message.clone(),
+            severity: error.severity,
+            expected: error.expected.clone(),
+            got: error.got.clone(),
+            // [04-FIT-15]: the field set does not vary by producing stage.
+            // The embedding API's projection has always carried these; the
+            // CLI report dropping them was the divergence, not this.
+            suggestions: error.suggestions.clone(),
+            span: check_error_span(error),
+            deep_path: None,
+            span_id: error.span_id.clone(),
+        }
+    }
+
+    /// Project an effect diagnostic onto the wire carrier.
+    ///
+    /// `EffectError` carries no severity of its own; the constant was
+    /// inlined in the template this replaces.
+    ///
+    /// `suggestions` is carried across because [04-FIT-15] requires the field
+    /// set not to vary by producing stage: the effect checker populates
+    /// repair hints at six sites, and the template this replaces had no slot
+    /// for them, so dropping them here would keep the very stage-dependence
+    /// the atom forbids.
+    pub fn from_effect_error(error: &chelis_effects::EffectError, severity: f64) -> Self {
+        Self {
+            kind: effect_error_kind(&error.kind).as_str().to_owned(),
+            message: error.message.clone(),
+            severity,
+            expected: None,
+            got: None,
+            suggestions: error.suggestions.clone(),
+            span: None,
+            deep_path: None,
+            span_id: None,
+        }
+    }
+}
+
+/// The reported range, ONLY when the producer genuinely has one.
+///
+/// spec/04 [04-FIT-17]: where a producer holds a point or an opaque identity,
+/// the serializer does not invent a length or a `0..0` range. `CheckError`
+/// carries a byte offset and an opaque `span_id`; the id's canonical
+/// `<source>:<start>..<end>` rendering is the only place a real end offset
+/// exists, so the range is DERIVED from it and omitted when it cannot be.
+///
+/// Where the identity IS present, omitting the range loses nothing: the
+/// identity carries the coordinate. Where it is absent, this drops a
+/// coordinate the producer held and the previous hand-assembled document
+/// published as `span_offset` -- 17 of 219 diagnostics across the repo
+/// corpus. That is a real regression against [04-FIT-16], which requires a
+/// coordinate to travel without an identity. It cannot be repaired here:
+/// `Span`'s two fields are non-optional, and making the extent optional adds
+/// a successor row the §C6 census cannot disposition. chelis#1395 owns it.
+fn check_error_span(error: &chelis_types::errors::CheckError) -> Option<Span> {
+    let offset = error.span_offset?;
+    let (start, end) = error
+        .span_id
+        .as_deref()
+        .and_then(|id| {
+            id.rsplit_once(':')
+                .map(|(_, range)| range)
+                .unwrap_or(id)
+                .split_once("..")
+        })
+        .and_then(|(start, end)| {
+            Some((start.parse::<usize>().ok()?, end.parse::<usize>().ok()?))
+        })?;
+    // `end <= start`, not `end < start`: [04-FIT-17] rules out a zero-width
+    // range as well as an inverted one. A degenerate `start..start` identity
+    // is a coordinate the producer never measured an extent for, and a
+    // consumer cannot tell an emitted `len: 0` from a measured empty range.
+    if start != offset || end <= start {
+        return None;
+    }
+    Some(Span {
+        offset,
+        len: end - start,
+    })
+}
+
+/// Total map from the checker's kind to its governed vocabulary identity.
+///
+/// Exhaustive by construction: adding a `CheckErrorKind` variant does not
+/// compile until its wire identity is chosen here.
+fn check_error_kind(kind: &chelis_types::errors::CheckErrorKind) -> DiagnosticKind {
+    use chelis_types::errors::CheckErrorKind as K;
+    match kind {
+        K::TypeMismatch => DiagnosticKind::TypeMismatch,
+        K::PrecisionMismatch => DiagnosticKind::PrecisionMismatch,
+        K::DimensionMismatch => DiagnosticKind::DimensionMismatch,
+        K::ArityMismatch => DiagnosticKind::ArityMismatch,
+        K::UnboundVariable { .. } => DiagnosticKind::UnboundVariable,
+        K::UnknownConstructor { .. } => DiagnosticKind::UnknownConstructor,
+        K::NotAFunction => DiagnosticKind::NotAFunction,
+        K::NonExhaustiveMatch => DiagnosticKind::NonExhaustiveMatch,
+        K::OccursCheck => DiagnosticKind::OccursCheck,
+        K::CastNonTensor => DiagnosticKind::CastNonTensor,
+        K::TupleIndexOutOfBounds => DiagnosticKind::TupleIndexOutOfBounds,
+        K::UseAfterConsume => DiagnosticKind::UseAfterConsume,
+        K::UnconsumedLinear => DiagnosticKind::UnconsumedLinear,
+        K::InvalidBorrow => DiagnosticKind::InvalidBorrow,
+        K::CycleDetected => DiagnosticKind::CycleDetected,
+        K::UnsupportedTensorPrecision => DiagnosticKind::UnsupportedTensorPrecision,
+        K::DuplicateDefinition => DiagnosticKind::DuplicateDefinition,
+        K::DuplicateModule => DiagnosticKind::DuplicateModule,
+        K::OpaqueTypeViolation => DiagnosticKind::OpaqueTypeViolation,
+        K::ReservedLinkerName => DiagnosticKind::ReservedLinkerName,
+        K::BuiltinShadowing => DiagnosticKind::BuiltinShadowing,
+        K::UnknownForm => DiagnosticKind::UnknownForm,
+        K::MalformedForm => DiagnosticKind::MalformedForm,
+        K::Other => DiagnosticKind::CheckOther,
+    }
+}
+
+/// Total map from the effect checker's kind to its governed identity.
+fn effect_error_kind(kind: &chelis_effects::EffectErrorKind) -> DiagnosticKind {
+    use chelis_effects::EffectErrorKind as K;
+    match kind {
+        K::UnhandledEffect => DiagnosticKind::UnhandledEffect,
+        K::InvalidHandler => DiagnosticKind::InvalidHandler,
+        K::BuildTargetMismatch => DiagnosticKind::BuildTargetMismatch,
+        K::TypeTotality => DiagnosticKind::TypeTotality,
     }
 }
 
@@ -243,6 +399,8 @@ pub struct WireDiagnostic {
     pub suggestions: Vec<String>,
     pub span: Option<Span>,
     pub deep_path: Option<WireDeepErrorPath>,
+    #[serde(default)]
+    pub span_id: Option<String>,
 }
 
 /// The producer projection of [`DiagnosticKind`]. It intentionally has no
@@ -303,6 +461,15 @@ impl GeneralKind {
     const fn project(kind: DiagnosticKind) -> Option<Self> {
         match kind {
             DiagnosticKind::UnsupportedFeature => None,
+            // chelis#886: the effect checker's kinds are not general-producer
+            // kinds. They reach the wire only through
+            // `Diagnostic::from_effect_error`, for the same reason
+            // `UnsupportedFeature` is excluded above: a general producer
+            // cannot spell a rejection it has no standing to make.
+            DiagnosticKind::UnhandledEffect
+            | DiagnosticKind::InvalidHandler
+            | DiagnosticKind::BuildTargetMismatch
+            | DiagnosticKind::TypeTotality => None,
             DiagnosticKind::SurfParseError => Some(Self::SurfParseError),
             DiagnosticKind::DeepParseError => Some(Self::DeepParseError),
             DiagnosticKind::MacroError => Some(Self::MacroError),
@@ -2671,13 +2838,28 @@ fn default_true() -> bool {
 mod tests {
     use super::*;
     use chelis_types::types::Prim;
+    /// The kinds a general producer has no standing to spell.
+    ///
+    /// `UnsupportedFeature` is the original member. chelis#886 adds the
+    /// effect checker's four, which reach the wire only through
+    /// `Diagnostic::from_effect_error`. Stated as a list so that adding a
+    /// governed identity and quietly excluding it from general production
+    /// has to be written down here.
+    const NON_GENERAL_KINDS: [DiagnosticKind; 5] = [
+        DiagnosticKind::UnsupportedFeature,
+        DiagnosticKind::UnhandledEffect,
+        DiagnosticKind::InvalidHandler,
+        DiagnosticKind::BuildTargetMismatch,
+        DiagnosticKind::TypeTotality,
+    ];
+
     #[test]
-    fn general_kind_projection_excludes_exactly_unsupported_feature() {
+    fn general_kind_projection_excludes_exactly_the_non_general_kinds() {
         for kind in DiagnosticKind::ALL {
             let projected = GeneralKind::project(kind);
             assert_eq!(
                 projected.is_none(),
-                kind == DiagnosticKind::UnsupportedFeature,
+                NON_GENERAL_KINDS.contains(&kind),
                 "unexpected projection decision for {kind:?}"
             );
             if let Some(general) = projected {
@@ -3175,5 +3357,210 @@ mod tests {
                 other => panic!("expected reduce_window_grad wire op, got {other:?}"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_projection_contract {
+    use super::{Diagnostic, check_error_kind, effect_error_kind};
+    use chelis_effects::EffectErrorKind as E;
+    use chelis_types::errors::{CheckError, CheckErrorKind as K};
+
+    /// Every check kind, so the pin below covers the whole enum rather than
+    /// the three a CLI fixture happens to provoke. Adding a variant does not
+    /// compile until `check_error_kind` gains an arm, which lands the author
+    /// here.
+    const ALL_CHECK_KINDS: [K; 24] = [
+        K::TypeMismatch,
+        K::PrecisionMismatch,
+        K::DimensionMismatch,
+        K::ArityMismatch,
+        K::UnboundVariable {
+            identifier: String::new(),
+        },
+        K::UnknownConstructor {
+            identifier: String::new(),
+        },
+        K::NotAFunction,
+        K::NonExhaustiveMatch,
+        K::OccursCheck,
+        K::CastNonTensor,
+        K::TupleIndexOutOfBounds,
+        K::UseAfterConsume,
+        K::UnconsumedLinear,
+        K::InvalidBorrow,
+        K::CycleDetected,
+        K::UnsupportedTensorPrecision,
+        K::DuplicateDefinition,
+        K::DuplicateModule,
+        K::OpaqueTypeViolation,
+        K::ReservedLinkerName,
+        K::BuiltinShadowing,
+        K::UnknownForm,
+        K::MalformedForm,
+        K::Other,
+    ];
+
+    /// The published spellings, restated independently of the projection.
+    ///
+    /// Reading them back through `check_error_kind` would agree with any
+    /// edit to it, including a wrong one. Two tables disagree exactly when
+    /// one moved without the other, which is what an accidental wire change
+    /// looks like.
+    fn expected_spelling(kind: &K) -> &'static str {
+        match kind {
+            K::TypeMismatch => "TypeMismatch",
+            K::PrecisionMismatch => "PrecisionMismatch",
+            K::DimensionMismatch => "DimensionMismatch",
+            K::ArityMismatch => "ArityMismatch",
+            K::UnboundVariable { .. } => "UnboundVariable",
+            K::UnknownConstructor { .. } => "UnknownConstructor",
+            K::NotAFunction => "NotAFunction",
+            K::NonExhaustiveMatch => "NonExhaustiveMatch",
+            K::OccursCheck => "OccursCheck",
+            K::CastNonTensor => "CastNonTensor",
+            K::TupleIndexOutOfBounds => "TupleIndexOutOfBounds",
+            K::UseAfterConsume => "UseAfterConsume",
+            K::UnconsumedLinear => "UnconsumedLinear",
+            K::InvalidBorrow => "InvalidBorrow",
+            K::CycleDetected => "CycleDetected",
+            K::UnsupportedTensorPrecision => "UnsupportedTensorPrecision",
+            K::DuplicateDefinition => "DuplicateDefinition",
+            K::DuplicateModule => "DuplicateModule",
+            K::OpaqueTypeViolation => "OpaqueTypeViolation",
+            K::ReservedLinkerName => "ReservedLinkerName",
+            K::BuiltinShadowing => "BuiltinShadowing",
+            K::UnknownForm => "UnknownForm",
+            K::MalformedForm => "MalformedForm",
+            K::Other => "Other",
+        }
+    }
+
+    fn check_error(kind: K, span_offset: Option<usize>, span_id: Option<&str>) -> CheckError {
+        CheckError {
+            kind,
+            message: "m".to_string(),
+            suggestions: Vec::new(),
+            severity: 0.5,
+            expected: None,
+            got: None,
+            span_offset,
+            span_id: span_id.map(str::to_string),
+        }
+    }
+
+    /// chelis#886: every check kind reaches the wire through its governed
+    /// vocabulary identity, at the spelling the report has always published.
+    #[test]
+    fn every_check_kind_projects_to_its_pinned_governed_spelling() {
+        for kind in &ALL_CHECK_KINDS {
+            assert_eq!(
+                check_error_kind(kind).as_str(),
+                expected_spelling(kind),
+                "published spelling changed for {kind:?}"
+            );
+        }
+    }
+
+    /// `CheckErrorKind::diagnostic_name` (chelis#1399) is a second published
+    /// spelling of the same kind: it is what `chelis-e2e`'s snippet checker
+    /// still emits, and what the CLI report emitted before this change. Two
+    /// spellings of one wire field is the drift chelis#886 exists to remove,
+    /// and until the remaining producer is converted the honest defence is to
+    /// pin them equal. If this fails, one of the two moved alone and a
+    /// consumer reading both surfaces now sees two names for one kind.
+    #[test]
+    fn the_governed_identity_agrees_with_the_checkers_own_spelling() {
+        for kind in &ALL_CHECK_KINDS {
+            assert_eq!(
+                check_error_kind(kind).as_str(),
+                kind.diagnostic_name(),
+                "the governed identity and `diagnostic_name` disagree for {kind:?}"
+            );
+        }
+    }
+
+    /// Two check kinds sharing one identity would silently merge them on the
+    /// wire, which is information loss a consumer cannot detect.
+    #[test]
+    fn the_projection_does_not_collapse_two_kinds_onto_one_identity() {
+        let mut identities: Vec<&str> = ALL_CHECK_KINDS
+            .iter()
+            .map(|kind| check_error_kind(kind).as_str())
+            .collect();
+        let total = identities.len();
+        identities.sort_unstable();
+        identities.dedup();
+        assert_eq!(identities.len(), total, "two check kinds share an identity");
+    }
+
+    #[test]
+    fn every_effect_kind_projects_to_its_pinned_governed_spelling() {
+        for (kind, spelling) in [
+            (E::UnhandledEffect, "UnhandledEffect"),
+            (E::InvalidHandler, "InvalidHandler"),
+            (E::BuildTargetMismatch, "BuildTargetMismatch"),
+            (E::TypeTotality, "TypeTotality"),
+        ] {
+            assert_eq!(effect_error_kind(&kind).as_str(), spelling);
+        }
+    }
+
+    /// spec/04 [04-FIT-17]: a producer holding only a point or an opaque
+    /// identity gets neither an invented length nor a `0..0` range.
+    #[test]
+    fn a_span_is_emitted_only_when_its_range_is_derivable() {
+        let derived = Diagnostic::from_check_error(&check_error(
+            K::UnboundVariable {
+                identifier: "x".to_string(),
+            },
+            Some(30),
+            Some("surf:30..34"),
+        ));
+        assert_eq!(
+            derived.span.map(|span| (span.offset, span.len)),
+            Some((30, 4))
+        );
+
+        // [04-FIT-17]: a degenerate `start..start` identity is a coordinate,
+        // not a measured empty range. Absent from the natural corpus, so it
+        // needs an explicit case or the guard regresses unnoticed.
+        assert!(
+            Diagnostic::from_check_error(&check_error(K::Other, Some(77), Some("surf:77..77")))
+                .span
+                .is_none(),
+            "a zero-width identity must not become a zero-width range"
+        );
+
+        for (label, error) in [
+            ("no location at all", check_error(K::Other, None, None)),
+            ("a point with no id", check_error(K::Other, Some(30), None)),
+            (
+                "an opaque id carrying no range",
+                check_error(K::Other, Some(30), Some("octant:theorem-7")),
+            ),
+            (
+                "an id whose range contradicts the offset",
+                check_error(K::Other, Some(30), Some("surf:99..104")),
+            ),
+        ] {
+            assert!(
+                Diagnostic::from_check_error(&error).span.is_none(),
+                "{label} must not synthesize a range"
+            );
+        }
+    }
+
+    /// The identity survives even when the range does not, so omitting the
+    /// range loses nothing a consumer previously had.
+    #[test]
+    fn an_opaque_identity_travels_without_a_range() {
+        let projected = Diagnostic::from_check_error(&check_error(
+            K::Other,
+            Some(30),
+            Some("octant:theorem-7"),
+        ));
+        assert_eq!(projected.span_id.as_deref(), Some("octant:theorem-7"));
+        assert!(projected.span.is_none());
     }
 }

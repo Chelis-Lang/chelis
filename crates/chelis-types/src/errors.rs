@@ -163,10 +163,31 @@ pub(crate) fn error_sentinel_for_test() -> Type {
     Type::Error(ErrorWitness(()))
 }
 
+/// A check-time diagnostic.
+///
+/// This is checker-internal state, NOT a wire type (chelis#886).
+///
+/// It briefly derived `Serialize` so the CLI could emit it directly. That
+/// made a `chelis-types` struct a numeric wire root: its public
+/// `severity: f64` became published surface while the §C6 wire census is
+/// rooted in `chelis-compiler-api`'s schema, so the field was exposed with
+/// no census row and no final authority class. The wire projection now lives
+/// at `chelis_compiler_api::schema::Diagnostic::from_check_error`, on a
+/// carrier the census already enumerates.
+///
+/// Field order is still load-bearing: `chelis-reef` baselines the derived
+/// `Debug` string byte-for-byte in its rejection-path parity contract, and
+/// `Debug` honours declaration order. See the guard test below.
 #[derive(Debug, Clone)]
 pub struct CheckError {
     pub kind: CheckErrorKind,
     pub message: String,
+    /// Repair hints. The hand-assembled document never carried them, so
+    /// emitting them through the typed carrier is a deliberate field-set
+    /// change under [04-FIT-15], not a side effect of typing the producer.
+    /// This struct is not itself serialized; the change is visible only
+    /// where `Diagnostic::from_check_error` copies the field across.
+    /// Position here is load-bearing for `Debug`; see the type docs.
     pub suggestions: Vec<String>,
     pub severity: f64,
     /// Expected type (for structured error reports).
@@ -179,6 +200,11 @@ pub struct CheckError {
     pub span_id: Option<String>,
 }
 
+/// A check diagnostic's kind.
+///
+/// Its published spelling is the governed `chelis_vocab::DiagnosticKind`
+/// identity that `Diagnostic::from_check_error` maps it to, not this Rust
+/// identifier, so renaming a variant here cannot move the wire.
 #[derive(Clone)]
 pub enum CheckErrorKind {
     TypeMismatch,
@@ -558,4 +584,46 @@ fn to_snake_case(s: &str) -> String {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod check_error_debug_contract {
+    use super::{CheckError, CheckErrorKind};
+
+    /// `CheckError`'s DERIVED `Debug` string is a consumed contract, not
+    /// incidental output: `chelis-reef` baselines it byte-for-byte in its
+    /// rejection-path parity fixtures. Nothing in this crate recorded that,
+    /// so reordering fields for the wire broke Reef while every JSON
+    /// assertion here stayed green.
+    ///
+    /// This pins the field ORDER independently of the serialization order,
+    /// because the two are now deliberately different: `suggestions` is
+    /// skipped on the wire but sits third in `Debug`. A reorder for wire
+    /// reasons must fail here rather than in a downstream crate's fixture.
+    #[test]
+    fn the_derived_debug_field_order_is_the_reef_parity_order() {
+        let rendered = format!(
+            "{:?}",
+            CheckError {
+                kind: CheckErrorKind::UnboundVariable {
+                    identifier: "x".to_string(),
+                },
+                message: "m".to_string(),
+                suggestions: vec!["s".to_string()],
+                severity: 0.6,
+                expected: None,
+                got: None,
+                span_offset: Some(52),
+                span_id: Some("surf:52..65".to_string()),
+            }
+        );
+        assert_eq!(
+            rendered,
+            "CheckError { kind: UnboundVariable, message: \"m\", suggestions: [\"s\"], \
+             severity: 0.6, expected: None, got: None, span_offset: Some(52), \
+             span_id: Some(\"surf:52..65\") }",
+            "the derived Debug order is baselined by chelis-reef's pipeline_parity \
+             fixtures; changing it is a downstream-visible break"
+        );
+    }
 }

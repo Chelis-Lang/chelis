@@ -16,7 +16,7 @@ use chelis_surf::ast::{
 };
 use chelis_types::{
     CheckedProgram,
-    errors::{CheckError, CheckErrorKind},
+    errors::CheckError,
     manifest::{ManifestedProgram, RootEntry, RootManifest},
     types::{Lane, Target},
 };
@@ -5120,38 +5120,15 @@ fn parse_error_span_deep(err: &chelis_deep::parser::ParseError) -> Option<Span> 
     Some(Span { offset, len: 0 })
 }
 
+/// Project a check diagnostic onto the wire carrier.
+///
+/// chelis#886 consolidated this with the CLI report's producer: there were
+/// two independent 24-arm projections of the same type onto the same
+/// carrier, which is the drift the issue exists to remove. The one
+/// implementation lives beside `Diagnostic`; this keeps the name its callers
+/// already use.
 pub(crate) fn check_error_diagnostic(error: &CheckError) -> Diagnostic {
-    let kind = match error.kind {
-        CheckErrorKind::TypeMismatch => GeneralKind::TypeMismatch,
-        CheckErrorKind::PrecisionMismatch => GeneralKind::PrecisionMismatch,
-        CheckErrorKind::DimensionMismatch => GeneralKind::DimensionMismatch,
-        CheckErrorKind::ArityMismatch => GeneralKind::ArityMismatch,
-        CheckErrorKind::UnboundVariable { .. } => GeneralKind::UnboundVariable,
-        CheckErrorKind::UnknownConstructor { .. } => GeneralKind::UnknownConstructor,
-        CheckErrorKind::NotAFunction => GeneralKind::NotAFunction,
-        CheckErrorKind::NonExhaustiveMatch => GeneralKind::NonExhaustiveMatch,
-        CheckErrorKind::OccursCheck => GeneralKind::OccursCheck,
-        CheckErrorKind::CastNonTensor => GeneralKind::CastNonTensor,
-        CheckErrorKind::TupleIndexOutOfBounds => GeneralKind::TupleIndexOutOfBounds,
-        CheckErrorKind::UseAfterConsume => GeneralKind::UseAfterConsume,
-        CheckErrorKind::UnconsumedLinear => GeneralKind::UnconsumedLinear,
-        CheckErrorKind::InvalidBorrow => GeneralKind::InvalidBorrow,
-        CheckErrorKind::CycleDetected => GeneralKind::CycleDetected,
-        CheckErrorKind::UnsupportedTensorPrecision => GeneralKind::UnsupportedTensorPrecision,
-        CheckErrorKind::DuplicateDefinition => GeneralKind::DuplicateDefinition,
-        CheckErrorKind::DuplicateModule => GeneralKind::DuplicateModule,
-        CheckErrorKind::OpaqueTypeViolation => GeneralKind::OpaqueTypeViolation,
-        CheckErrorKind::ReservedLinkerName => GeneralKind::ReservedLinkerName,
-        CheckErrorKind::BuiltinShadowing => GeneralKind::BuiltinShadowing,
-        CheckErrorKind::UnknownForm => GeneralKind::UnknownForm,
-        CheckErrorKind::MalformedForm => GeneralKind::MalformedForm,
-        CheckErrorKind::Other => GeneralKind::CheckOther,
-    };
-    let mut diagnostic = Diagnostic::general(kind, error.message.clone(), error.severity);
-    diagnostic.expected = error.expected.clone();
-    diagnostic.got = error.got.clone();
-    diagnostic.suggestions = error.suggestions.clone();
-    diagnostic
+    Diagnostic::from_check_error(error)
 }
 
 fn span(span: chelis_deep::Span) -> Span {

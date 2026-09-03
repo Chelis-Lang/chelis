@@ -68,10 +68,18 @@ pub enum DiagnosticKind {
     UnknownForm,
     MalformedForm,
     CheckOther,
+    // chelis#886: the effect checker's kinds. The `chelis check` report has
+    // always published these spellings; they become governed identities here
+    // so the wire stops being spelled from `chelis_effects`' Rust variant
+    // names.
+    UnhandledEffect,
+    InvalidHandler,
+    BuildTargetMismatch,
+    TypeTotality,
 }
 
 impl DiagnosticKind {
-    pub const ALL: [Self; 48] = [
+    pub const ALL: [Self; 52] = [
         Self::SurfParseError,
         Self::DeepParseError,
         Self::MacroError,
@@ -120,6 +128,10 @@ impl DiagnosticKind {
         Self::UnknownForm,
         Self::MalformedForm,
         Self::CheckOther,
+        Self::UnhandledEffect,
+        Self::InvalidHandler,
+        Self::BuildTargetMismatch,
+        Self::TypeTotality,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -172,6 +184,10 @@ impl DiagnosticKind {
             Self::UnknownForm => "UnknownForm",
             Self::MalformedForm => "MalformedForm",
             Self::CheckOther => "Other",
+            Self::UnhandledEffect => "UnhandledEffect",
+            Self::InvalidHandler => "InvalidHandler",
+            Self::BuildTargetMismatch => "BuildTargetMismatch",
+            Self::TypeTotality => "TypeTotality",
         }
     }
 
