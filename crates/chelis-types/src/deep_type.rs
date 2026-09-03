@@ -388,6 +388,24 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
     /// PRE-generalization variables: a consumer that reports on an
     /// instantiated signature must compose this with the instantiation's
     /// original-to-fresh mapping.
+    /// The source spelling of each type variable this resolution minted
+    /// (chelis#260 Site 2).
+    ///
+    /// `type_vars` above answers "which variable is `t`"; this answers the
+    /// inverse, "which source name is `?N`", which is what a diagnostic
+    /// reporting on an inference identity needs. These are the
+    /// PRE-generalization variables, so a consumer reporting on an
+    /// instantiated signature must compose this with the instantiation's
+    /// original-to-fresh mapping, exactly as `dim_var_names` requires.
+    pub(crate) fn type_var_names(&self) -> UnordMap<TypeVar, String> {
+        // Deterministic walk for the same reason as `dim_var_names`.
+        self.type_vars
+            .to_sorted()
+            .into_iter()
+            .map(|(name, tv)| (*tv, name.clone()))
+            .collect()
+    }
+
     pub(crate) fn dim_var_names(&self) -> UnordMap<DimVar, String> {
         // `to_sorted` rather than an unordered walk: `UnordMap` deliberately
         // offers no `iter`, because hash order must not reach observable

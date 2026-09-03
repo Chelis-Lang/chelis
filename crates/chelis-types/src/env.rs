@@ -142,6 +142,21 @@ pub struct Env {
     /// serialized.
     #[serde(skip)]
     declared_dim_names: UnordMap<String, UnordMap<DimVar, String>>,
+    /// chelis#260 Site 2: the same provenance for TYPE parameters. Kept
+    /// separate from `declared_dim_names` because the two are consumed by
+    /// different diagnostics and a signature may declare either alone.
+    #[serde(skip)]
+    declared_type_names: UnordMap<String, UnordMap<TypeVar, String>>,
+    /// The composed `fresh TypeVar -> source name` map for the definition
+    /// currently being inferred.
+    ///
+    /// The borrow diagnostic that needs it (`validate_deferred_borrow_vars`)
+    /// runs at the per-def drain, after body inference, and never sees the
+    /// instantiation that minted the fresh variables. Composing at the
+    /// instantiation site and parking the result here is what carries a
+    /// source name across that gap.
+    #[serde(skip)]
+    active_declared_type_names: UnordMap<TypeVar, String>,
     /// chelis#397/#469: provenance of `let`-bound `int`-valued names, so a
     /// runtime `expand` size built from a `let` binding can be checked for
     /// materializability. Cloned at every lexical scope boundary along with
@@ -470,6 +485,56 @@ impl Env {
             .iter()
             .filter_map(|(from, to)| original.get(from).map(|n| (*to, n.clone())))
             .collect()
+    }
+
+    /// chelis#260 Site 2: record the source names of a signature's declared
+    /// TYPE parameters, the analogue of [`Self::record_declared_dim_names`].
+    pub(crate) fn record_declared_type_names(
+        &mut self,
+        name: &str,
+        names: UnordMap<TypeVar, String>,
+    ) {
+        if !names.is_empty() {
+            self.declared_type_names.insert(name.to_string(), names);
+        }
+    }
+
+    /// Resolve a definition's declared type-parameter names against the fresh
+    /// variables a given instantiation minted (chelis#260 Site 2).
+    ///
+    /// `tvar_mapping` is the original-to-fresh pairing from
+    /// [`Self::instantiate_scheme`]. It maps to a `Type` rather than a
+    /// `TypeVar`, so a quantifier instantiated to anything but a bare
+    /// variable simply has no fresh variable to name and is skipped: a
+    /// concrete type renders itself and needs no provenance.
+    pub(crate) fn declared_type_names_for(
+        &self,
+        name: &str,
+        tvar_mapping: &[(TypeVar, Type)],
+    ) -> UnordMap<TypeVar, String> {
+        let Some(original) = self.declared_type_names.get(name) else {
+            return UnordMap::new();
+        };
+        tvar_mapping
+            .iter()
+            .filter_map(|(from, to)| match to {
+                Type::Var(fresh) => original.get(from).map(|n| (*fresh, n.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Park the composed map for the definition now being inferred, so the
+    /// per-def deferred-borrow drain can name what it reports on.
+    pub(crate) fn set_active_declared_type_names(&mut self, names: UnordMap<TypeVar, String>) {
+        self.active_declared_type_names = names;
+    }
+
+    /// The parked map. Empty when the definition declared no type parameters
+    /// or none was recorded; callers fall back to the internal id rather than
+    /// inventing a name (spec/04 [04-FIT-10]).
+    pub(crate) fn active_declared_type_names(&self) -> &UnordMap<TypeVar, String> {
+        &self.active_declared_type_names
     }
 
     /// Instantiate a scheme into the caller's inference substitution so
