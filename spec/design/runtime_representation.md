@@ -5,8 +5,8 @@ authoritative oracle; Phases 1-5 remain planned. Tracking issue: [#893]. Code
 evidence was rechecked on `main` at `8190b6d8` unless a later receipt is named.
 **Owning specs:** `spec/04-type-system.md` [04-NUM-4], [04-NUM-8],
 [04-NUM-10], [04-NUM-11], and [04-SHAPE-1], plus
-`spec/05-risc-primitives.md` [05-DIM-1], [05-DIM-2], [05-OP-31], and
-[05-OP-33]. Those atoms decide language and ABI behavior. This document owns
+`spec/05-risc-primitives.md` [05-DIM-1], [05-DIM-2], [05-OP-31], [05-OP-33],
+and [05-OP-44]. Those atoms decide language and ABI behavior. This document owns
 only the implementation structure and delivery order. Where they disagree, the
 numbered specs win and this document has a bug.
 **Class fixed:** a tensor's dtype, stored representation, shape, capacity, and
@@ -45,16 +45,19 @@ their source and destination representations. The final seal is module privacy,
 backed by compile-fail and source-completeness tests, not a helper that callers
 are expected to remember.
 
-The public C layout in [05-OP-31] remains source- and ABI-compatible. C can always
+The public C carrier is [05-OP-31]'s tagged value and view layouts over
+[05-OP-44]'s opaque handles: the layout-visible `chelis_tensor` that PR #1400
+froze was superseded by [#1286]'s Phase 1 entry amendment, and the seal now
+rides the opaque handle rather than a public field set. C can always
 forge bytes, so "unrepresentable" has a precise boundary here:
 
 1. repository-owned Rust, generated C, HIP, Metal, and Python code cannot obtain
    an element view without a matching representation proof; and
-2. an arbitrary foreign `chelis_tensor` is treated as untrusted: every
+2. an arbitrary foreign entry borrow is treated as untrusted: every
    observable descriptor invariant is checked before access, while physical
    allocation size, lifetime, overlap, and cross-call synchronization remain
-   the foreign caller preconditions stated by [05-OP-31]. No Rust reference or
-   slice is formed from that carrier.
+   the foreign caller preconditions stated by [05-OP-44]. No Rust reference or
+   slice is formed from that storage.
 
 ## Why a structural plan and not another patch
 
@@ -80,9 +83,10 @@ the tree to compile.
 
 ## Non-goals
 
-- No public C layout change. `chelis_tensor`, `chelis_scalar`, the dtype tags,
-  and the callables governed by [05-OP-31]/[05-OP-33] retain their exact fields,
-  widths, order, and meanings.
+- No second public C carrier. `chelis_scalar`, the dtype tags, the read and
+  write views, and the callables governed by [05-OP-31]/[05-OP-33]/[05-OP-44]
+  keep their exact declarations, widths, order, and meanings; this plan adds no
+  field, flag, or layout beside the opaque handle.
 - No new dtype, arithmetic rule, implicit cast, compatibility fallback, or
   versionless carrier. [04-NUM-8] remains the sole semantic table.
 - No transfer of [#892]. Metal Bool8 storage remains owned by [#729]; this plan
@@ -299,8 +303,8 @@ standard library. It owns a declarative field schema and renderers; it does not
 allocate, free, or interpret tensor values. The schema generates:
 
 1. the Rust raw host descriptor used by the runtime owner module;
-2. the existing public C `chelis_tensor` declaration, with [05-OP-31]'s exact
-   layout unchanged;
+2. the private host descriptor behind [05-OP-44]'s opaque `chelis_tensor`
+   handle and [05-OP-31]'s exact read/write view layouts;
 3. a Rust raw device descriptor used by Python's private device-entry module;
    and
 4. the corresponding internal C/HIP device declaration.
@@ -373,8 +377,8 @@ the owner module. That wrapper retains a typed `NonNull<T>`, checked metadata,
 and the foreign disposition, but exposes only narrow indexed raw-pointer
 operations inside the audited unsafe core. It does not claim to prove physical
 allocation size, lifetime, overlap with another descriptor, or synchronization
-between foreign calls; [05-OP-31]'s caller preconditions continue to own those
-facts. This preserves the public boundary without manufacturing a Rust
+between foreign calls; [05-OP-44]'s entry-borrow caller preconditions continue
+to own those facts. This preserves the public boundary without manufacturing a Rust
 exclusivity guarantee it cannot establish.
 
 Raw operations remain only where the operation is semantically byte-based:
@@ -599,8 +603,8 @@ execution tests prove its sanctioned replacements work.
   and checked finite-count types. Later phases consume them without parallel
   tables.
 - Phase 2 freezes the generated host/device schema and public-layout parity.
-  Later field changes amend [05-OP-31] first when public, regenerate every
-  consumer, and move the freeze in one change.
+  Later field changes amend [05-OP-31] or [05-OP-44] first when public,
+  regenerate every consumer, and move the freeze in one change.
 - Phase 3 freezes typed runtime ingress and the private data field. Reopening a
   raw accessor is a design change, not a local optimization.
 - Phase 4 freezes the typed lane renderer and all-lanes representation probes.
@@ -614,7 +618,8 @@ accepted the forbidden behavior.
 
 ## B2. Invariants at every phase boundary
 
-1. The public C ABI remains [05-OP-31]-exact and configuration-invariant.
+1. The public C ABI remains [05-OP-31]/[05-OP-44]-exact and
+   configuration-invariant; the seal rides the opaque handle.
 2. A correct landed receipt does not regress while its structural replacement
    is being built.
 3. No phase introduces a second width, arithmetic, dtype-tag, or ABI field
@@ -624,7 +629,7 @@ accepted the forbidden behavior.
 6. Equal capacity never authorizes reuse across unequal `Repr` values.
 7. Observable foreign metadata validation happens before the first read,
    write, copy, render, or ownership action; no Rust reference is formed from
-   a foreign carrier, and [05-OP-31]'s allocation/lifetime/synchronization
+   a foreign carrier, and [05-OP-44]'s allocation/lifetime/synchronization
    preconditions are not reclassified as validated facts.
 8. Unsupported typed cells remain loud under [#730]; this plan never replaces
    an unsupported operation with a default value.
@@ -935,7 +940,7 @@ a new exact identity until classified by final authority.
 
 | question | decision | reason |
 |---|---|---|
-| public C carrier | preserve [05-OP-31], validate before access | external C is inherently forgeable; an ABI break does not make it typed |
+| public C carrier | [05-OP-44]'s opaque handle with [05-OP-31]'s views, validate before access | external C is inherently forgeable; opacity removes forgeable ownership fields but does not make foreign bytes typed |
 | Rust raw field visibility | private to one owner module | `pub(crate)` leaves every runtime site able to repeat the defect |
 | raw byte accessor | no general accessor | it recreates arbitrary typed casts; exact-bit operations are named narrowly |
 | capacity canonicalization | arbitrary-precision reduced product key | saturation is the #888 mechanism; conservative non-reuse remains available |

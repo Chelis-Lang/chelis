@@ -6,9 +6,11 @@ Phase 0's executable detectors are implemented and enforced by the dedicated
 unimplemented.
 
 **Owning specs:** `spec/04-type-system.md` [04-LIN-1..8],
-`spec/05-risc-primitives.md` [05-OP-31..33], and `spec/11-ffi.md` §2.1.
-The exact target heap and C-callable contract described below becomes normative
-only through Phase 1's atomic numbered-spec entry amendment.
+`spec/05-risc-primitives.md` [05-OP-31..33] and [05-OP-44] with the four
+`spec/registry/c_*.md` registries, and `spec/11-ffi.md` §2.1.
+The exact target heap and C-callable contract described below is normative in
+[05-OP-44] and the amended [05-OP-31..33]; this document records only how it
+is implemented and sequenced.
 
 **Class fixed when:** an invalid compiled ownership state cannot be constructed
 at the backend boundary; every ownership-bearing host carrier maps totally to
@@ -40,7 +42,7 @@ form. The runtime uses one closed heap-kind and strong-owner model for tensors,
 storage, strings, aggregates including `Option`, and the existing mapped-file
 resource. Storage reuse requires one unforgeable proof
 created by the shared ownership/memory planner. The selected target C ABI exposes
-opaque handles, not ownership fields. Phase 1 may not edit the runtime until its
+opaque heap objects, not ownership fields. Phase 1 may not edit the runtime until its
 first change amends the numbered primitive atoms and exact registries for that
 ABI, updates the numeric-surface census, and adds the spec-derived tests.
 
@@ -239,9 +241,10 @@ an artifact is owned by the caller. Non-root top-level owners receive a drop.
 
 ## C4. One runtime heap
 
-[04-LIN-3..8] and `spec/11-ffi.md` §2.1 own the already-decided owner and entry
-semantics. This section selects the implementation architecture that Phase 1
-must lift into a numbered primitive atom before changing the runtime. Internally
+[04-LIN-3..8], [05-OP-44], and `spec/11-ffi.md` §2.1 own the already-decided
+owner, heap-kind, and entry semantics. This section records the implementation
+architecture behind [05-OP-44]; where the two disagree, the atom and its
+registry decide and this section has a bug. Internally
 every heap allocation begins with the same private header:
 
 ```rust
@@ -267,7 +270,7 @@ The final universe is exact:
 
 | compiled/runtime identity | `HeapKind` | public ownership carrier |
 |---|---|---|
-| `string` | `String` | opaque `chelis_string` handle and `CHELIS_VALUE_STRING` |
+| `string` | `String` | fixed `chelis_string` wrapper with an opaque target and `CHELIS_VALUE_STRING` |
 | tensor value or internal tensor view | `Tensor` | opaque `chelis_tensor *` handle and `CHELIS_VALUE_TENSOR` |
 | tensor bytes | `TensorStorage` | private; reached only through a tensor descriptor |
 | `List` | `List` | opaque `chelis_list *` handle and `CHELIS_VALUE_LIST` |
@@ -319,7 +322,9 @@ split the kind, count, and finalizer authorities. Retain uses checked relaxed
 increment; final release uses release/acquire synchronization before the
 kind-specific finalizer. Overflow traps. All clone/release/finalize matches are
 wildcard-free, and adding `HeapKind` fails compilation until every consumer is
-updated.
+updated. The runtime validates null and live wrong-kind handles, but it does not
+retain freed allocations as tombstones: using a pointer after its owner or guard
+has been consumed is outside [05-OP-44]'s C caller precondition.
 
 `MappedFile` is included even though no current [#1286] child names it. It is
 already a refcounted compiled heap value; leaving it on a separate counter with
@@ -343,13 +348,14 @@ cycle through a later update.
 
 ## C5. Target opaque C ownership ABI
 
-The existing exact ABI remains [05-OP-31..33] and all three registries
-until Phase 1. The Phase 1 entry amendment must re-check the highest current
-`[05-OP-N]`, author the exact lifetime/heap semantics and identity registry,
-replace affected carrier, container, and tensor identities throughout
-[05-OP-31..33], and update every numeric-capacity authority artifact atomically.
-Only then does implementation begin. That amendment must encode this selected
-target:
+The exact ABI is [05-OP-31..33], [05-OP-44], and all four registries:
+`c_scalar_carrier.md`, `c_container_boundary.md`, `c_tensor_runtime.md`, and
+`c_heap_lifetime.md`. The Phase 1 entry amendment authored [05-OP-44] as the
+exact lifetime/heap atom with its identity registry, replaced the affected
+carrier, container, and tensor identities throughout [05-OP-31..33], and
+updated the numeric-capacity authority artifacts in the same change;
+implementation begins only after that amendment. The amended atoms encode
+this selected target:
 
 - `chelis_tensor` and `chelis_tensor_write` are opaque;
 - `chelis_tensor_retain` and `chelis_tensor_release` are the sole public
@@ -365,8 +371,11 @@ target:
 - `chelis_tensor_read_view` and `chelis_tensor_write_view` pair the pointer
   with its exact dtype and element count;
 - `chelis_tensor_begin_write` succeeds only for unique runtime storage and
-  returns an opaque exclusive guard;
-- `chelis_tensor_end_write` consumes the guard and invalidates the write view;
+  activates and returns an opaque exclusive non-owning guard embedded in the
+  descriptor, borrowing the descriptor owner without allocating a guard;
+- `chelis_tensor_write_view` borrows that guard, while
+  `chelis_tensor_end_write` consumes and deactivates it without freeing an
+  allocation or consuming the descriptor owner, and invalidates the write view;
 - `chelis_value_clone`, `chelis_value_release`, explicit `take`, and explicit
   `borrow` conversions carry heap ownership; and
 - `chelis_free`, `chelis_alloc_view`, public tensor fields,
@@ -551,8 +560,8 @@ accept current behavior. The final manifest contains zero expected failures.
 | contract | frozen when | later change protocol |
 |---|---|---|
 | [04-LIN-1..8] owner/call/join/root/entry semantics | this design/spec change merges | amend `spec/04`, this document, and [#1286] together before implementation changes meaning |
-| heap, transport, aggregate, and reuse architecture | this design change merges | Phase 1 first lifts it into `spec/05`, an exact normative registry, this document, and the dtype/C-surface interlock together |
-| opaque tensor and tagged guarded-access ABI target | this design change merges | Phase 1 first freezes exact identities in the numbered spec and numeric-capacity authority; no compatibility alias |
+| heap, transport, aggregate, and reuse architecture | [05-OP-44] and `spec/registry/c_heap_lifetime.md` merge | amend [05-OP-44], its registry, this document, and the dtype/C-surface interlock together |
+| opaque tensor and tagged guarded-access ABI target | the amended [05-OP-31..33] and [05-OP-44] merge | amend the exact identities in the numbered spec and the numeric-capacity authority together; no compatibility alias |
 | `OwnershipProgram`/verified-backend boundary | Phase 2 | change the verifier, all backend signatures, mutations, and oracle manifest together |
 | `ReusableOwnedStorage` proof domain | Phase 3 | change the shared planner, every backend consumer, runtime defense, and C/HIP negative controls together |
 | complete issue/corpus manifest | Phase 4 | new class member is added to [#1286] and the typed manifest before its fix |
@@ -586,7 +595,7 @@ with a controlling spec stops the phase and amends the controlling document firs
 
 ## B3. How to pick up a phase
 
-1. Read this document, [04-LIN-1..8], [05-OP-31..33], `spec/11-ffi.md` §2.1,
+1. Read this document, [04-LIN-1..8], [05-OP-31..33], [05-OP-44], `spec/11-ffi.md` §2.1,
    the complete [#1286] thread, and every issue assigned to the phase.
 2. Run the phase oracle before editing and record the exact red/expected-failure
    set in the PR.
@@ -658,8 +667,8 @@ test only when `--require-hip` becomes mandatory in Phase 3.
 ## Phase 1 — unified heap and atomic ABI cutover
 
 **You inherit:** Phase 0's detectors, the frozen [04-LIN]/FFI contract, and the
-selected heap/ABI architecture. The exact heap and callable atoms do not yet
-exist.
+selected heap/ABI architecture. This phase's entry amendment establishes the
+exact heap and callable atoms before any production implementation changes.
 
 **You deliver:**
 
@@ -677,10 +686,13 @@ exist.
 - deletion of `owns_data`, `chelis_free`, `chelis_alloc_view`, public field
   reads, and ambiguous conversion aliases.
 
-This phase makes [#544] green and the aggregate-tensor half of [#543] green.
-It coordinates the typed runtime seal with [#893] but does not claim that issue
-unless its own complete oracle is satisfied. [#543] remains open until its
-function-internal tensor-literal temporary is green in Phase 2.
+This phase promotes exactly twenty-three oracle rows: the five [#543]
+aggregate-tensor rows (including the function-internal tensor-literal
+temporary), the eight [#544] size/nesting rows, the five direct/nested
+`Option` and mapped-file rows, and the five [#879] Metal rejection rows. It
+therefore makes [#543] and [#544] green in full. It coordinates the typed
+runtime seal with [#893] but does not claim that issue unless its own complete
+oracle is satisfied.
 
 **Not this phase:** backend-local alias inference, final last-use scheduling,
 or the general closure ABI owned by [#879].
@@ -704,8 +716,9 @@ exit zero and final line `COMPILED VALUE OWNERSHIP PHASE 1: PASS`.
 - ownership-directed releases for heap-valued host code; and
 - deletion of C emitter ownership inference for converted forms.
 
-This phase makes [#1346], [#1352], [#1356], and the remaining [#543]
-temporary leak green. It preserves [#1222] and [#1344] as ordinary regressions.
+This phase promotes exactly five oracle rows: the [#1346] fold row, the two
+[#1352] mixed fresh-arm rows, and the two [#1356] fresh-argument rows. It
+preserves [#1222] and [#1344] as ordinary regressions.
 
 **Not this phase:** moving terminal operations earlier than the verifier's
 initial correct placement or enabling in-place reuse.
@@ -775,7 +788,7 @@ exit zero and final line `COMPILED VALUE OWNERSHIP ORACLE: PASS`.
 
 | issue | phase and exact disposition |
 |---|---|
-| [#543] | Phase 1 adds tensor heap cloning/finalization; Phase 2 closes the function-internal tensor-literal temporary. The top-level tuple missing-`main` observation is [#545], not an ownership-oracle row |
+| [#543] | Phase 1 adds tensor heap cloning/finalization and closes all five aggregate-tensor rows, including the function-internal tensor-literal temporary. The top-level tuple missing-`main` observation is [#545], not an ownership-oracle row |
 | [#544] | Phase 1 makes aggregate child clone/release balance independent of count, capacity growth, and nesting |
 | [#1206] | Phase 3 moves dead frame releases before tail calls and proves peak live bytes independent of recursion depth. Runtime-valued `with seed` remains [#735] syntax/semantics work; recursive-host operation support remains [#729]/[#730] capability work |
 | [#1214] | Phase 3 removes backend-local eligibility and executes the shared caller-storage negative on HIP hardware. [#1172] owns the span-key cause that can over-broaden hints; Surf reachability is exposure evidence, not another ownership mechanism |

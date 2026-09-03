@@ -1106,10 +1106,11 @@ class ContractValidationTests(unittest.TestCase):
         for declaration in (
             "typedef uint8_t chelis_dtype;",
             "typedef struct { chelis_dtype dtype; uint8_t reserved[7]; uint64_t bits; } chelis_scalar;",
-            "typedef struct { uint8_t is_some; uint8_t reserved[7]; chelis_scalar value; } chelis_option_scalar;",
+            "enum { CHELIS_VALUE_UNIT = 0, CHELIS_VALUE_SCALAR = 1, CHELIS_VALUE_STRING = 2, CHELIS_VALUE_TENSOR = 3, CHELIS_VALUE_LIST = 4, CHELIS_VALUE_TUPLE = 5, CHELIS_VALUE_DICT = 6, CHELIS_VALUE_ADT = 7, CHELIS_VALUE_OPTION = 8, CHELIS_VALUE_MAPPED_FILE = 9 };",
             "typedef union { chelis_scalar scalar; void *handle; } chelis_value_payload;",
             "typedef struct { chelis_value_tag tag; uint8_t reserved[7]; chelis_value_payload payload; } chelis_value;",
-            "typedef struct { void *data; const int64_t *shape; const int64_t *strides; int64_t size; int64_t byte_capacity; int32_t rank; chelis_dtype dtype; uint8_t owns_data; uint8_t reserved[2]; } chelis_tensor;",
+            "typedef struct { const void *data; int64_t count; chelis_dtype dtype; uint8_t reserved[7]; } chelis_read_view;",
+            "typedef struct { void *data; int64_t count; chelis_dtype dtype; uint8_t reserved[7]; } chelis_write_view;",
             "typedef struct { chelis_value key; chelis_value value; } chelis_dict_entry;",
         ):
             with self.subTest(declaration=declaration):
@@ -1118,12 +1119,12 @@ class ContractValidationTests(unittest.TestCase):
     def test_scalar_carrier_layout_mutation_fails(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "const int64_t *shape; const int64_t *strides; int64_t size; "
-            "int64_t byte_capacity; int32_t rank",
-            "int64_t shape[8]; int64_t strides[8]; int64_t size; "
-            "int64_t byte_capacity; int32_t rank",
+            "typedef struct { const void *data; int64_t count; chelis_dtype dtype; "
+            "uint8_t reserved[7]; } chelis_read_view;",
+            "typedef struct { const void *data; int32_t count; chelis_dtype dtype; "
+            "uint8_t reserved[3]; } chelis_read_view;",
         )
-        self.assert_contract_fails("OP-31.*chelis_tensor")
+        self.assert_contract_fails("OP-31.*chelis_read_view")
 
     def test_compiled_owner_atoms_are_frozen(self) -> None:
         mutations = (
@@ -1386,9 +1387,10 @@ class ContractValidationTests(unittest.TestCase):
     def test_compiled_ownership_cannot_omit_string_or_tensor_tags(self) -> None:
         mutations = (
             (
-                "| `string` | `String` | opaque `chelis_string` handle and "
-                "`CHELIS_VALUE_STRING` |",
-                "| `string` | `String` | opaque `chelis_string` handle |",
+                "| `string` | `String` | fixed `chelis_string` wrapper with an "
+                "opaque target and `CHELIS_VALUE_STRING` |",
+                "| `string` | `String` | fixed `chelis_string` wrapper with an "
+                "opaque target |",
                 "string carrier mapping",
             ),
             (
@@ -1581,10 +1583,35 @@ class ContractValidationTests(unittest.TestCase):
     def test_compiled_ownership_phase_one_cannot_skip_container_authority(self) -> None:
         self.replace(
             Path("spec/design/compiled_value_ownership.md"),
-            "The existing exact ABI remains [05-OP-31..33] and all three registries",
-            "The existing exact ABI remains [05-OP-31] and [05-OP-33]",
+            "The exact ABI is [05-OP-31..33], [05-OP-44], and all four registries",
+            "The exact ABI is [05-OP-31..33] and the three carrier registries",
         )
         self.assert_contract_fails("complete C ABI authority chain")
+
+    def test_compiled_ownership_phase_row_maps_are_exact(self) -> None:
+        path = Path("spec/design/compiled_value_ownership.md")
+        mutations = (
+            (
+                "This phase promotes exactly twenty-three oracle rows: the five [#543]",
+                "This phase promotes exactly twenty-two oracle rows: four [#543] rows",
+                "Phase 1 exact ownership row map",
+            ),
+            (
+                "This phase promotes exactly five oracle rows: the [#1346] fold row",
+                "This phase promotes six oracle rows, including a [#543] temporary",
+                "Phase 2 exact ownership row map",
+            ),
+        )
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                contract = self.root / path
+                original = contract.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                contract.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    contract.write_text(original, encoding="utf-8")
 
     def test_backend_cannot_accept_unverified_ownership(self) -> None:
         self.replace(
@@ -2080,6 +2107,10 @@ class ContractValidationTests(unittest.TestCase):
             "05-OP-34": (
                 "JsonArray(List[Json]) | JsonObject(Dict[string,Json])",
                 "JsonArray(List[Json])",
+            ),
+            "05-OP-44": (
+                "chelis_tensor_write *chelis_tensor_begin_write(chelis_tensor *tensor)",
+                "chelis_write_view chelis_tensor_begin_write(chelis_tensor *tensor)",
             ),
             "05-OP-35": ("(p_float)->p_float", "(f32)->f32"),
             "05-OP-38": (
@@ -4303,14 +4334,14 @@ class FrozenContractChangeTests(unittest.TestCase):
 
     def test_unchanged_tree_passes(self) -> None:
         report = self.check()
-        self.assertIn("0 of 28 contract files changed", report[0])
+        self.assertIn("0 of 29 contract files changed", report[0])
 
     def test_every_contract_file_is_watched(self) -> None:
         # The converted whole-file-digest test. Contradictory prose prepended
         # to any contract file must fail, and the failure must name the file.
-        # The watched set is now all 28 CONTRACT_FILES, a superset of the 22
+        # The watched set is now all 29 CONTRACT_FILES, a superset of the 22
         # that carried a whole-file digest.
-        self.assertEqual(len(CONTRACT_FILES), 28)
+        self.assertEqual(len(CONTRACT_FILES), 29)
         for relative in oracle.CONTRACT_FILES:
             with self.subTest(relative=relative):
                 path = self.root / relative
@@ -4377,7 +4408,7 @@ class FrozenContractChangeTests(unittest.TestCase):
     def test_an_acknowledged_change_passes(self) -> None:
         self.append("spec/11-ffi.md", "\nA reviewed sentence.\n")
         report = self.check(acknowledgements=("spec/11-ffi.md",))
-        self.assertIn("1 of 28 contract files changed", report[0])
+        self.assertIn("1 of 29 contract files changed", report[0])
         self.assertIn("  ok  Frozen-contract-change: spec/11-ffi.md", report)
 
     def test_a_body_line_acknowledges_the_change(self) -> None:
@@ -4482,7 +4513,7 @@ class FrozenContractChangeTests(unittest.TestCase):
         report = self.check(
             acknowledgements=("spec/10-serialization.md",)
         )
-        self.assertIn("1 of 28 contract files changed", report[0])
+        self.assertIn("1 of 29 contract files changed", report[0])
 
     def test_an_unreadable_baseline_blob_is_an_error_not_an_absence(self) -> None:
         # Round 1 F3. Reading a failed `git show` as "absent at the merge base"

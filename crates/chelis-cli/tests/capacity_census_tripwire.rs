@@ -2098,7 +2098,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
             &["numeric-op"],
         ),
         atom: "[05-OP-33]",
-        authority_anchor: "A view is non-owning contiguous storage whose declared\n> capacity covers its checked byte size",
+        authority_anchor: "Foreign storage enters only through [05-OP-44]'s entry",
     },
     FinalNumericOperationRegistration {
         surface: StaticSurfaceDescriptor::new(
@@ -2138,7 +2138,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
             &[],
         ),
         atom: "[05-OP-31]",
-        authority_anchor: "rank zero has null `shape` and `strides` pointers",
+        authority_anchor: "empty product equal to one",
     },
     FinalNumericOperationRegistration {
         surface: StaticSurfaceDescriptor::new(

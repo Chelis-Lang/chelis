@@ -92,7 +92,9 @@ one owned runtime value for every owned result, following [04-LIN-7]. The callee
 releases or mutates an input's storage, including when a result is value-equal to that
 input. Two returned roots that denote the same value are independently owned and may
 be released in either order. Exact public C carrier and callable identities remain the
-ones governed by [05-OP-31..33]. (The compiled ownership requirement is not
+ones governed by [05-OP-31..33], and the heap-kind, strong-owner, tagged-value
+conversion, option-node, entry-borrow, and guarded-access identities are the ones
+governed by [05-OP-44]. (The compiled ownership requirement is not
 fully implemented; see chelis#1286.)
 
 The compiler-api pipeline behind this surface serves two products with different
