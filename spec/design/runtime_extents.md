@@ -478,11 +478,11 @@ updated field only when its resolved schema is independent.
 
 One tripwire test walks the builtin registry and asserts that every builtin
 consuming a tensor declares which of the dispositions below it takes, and that
-the declaration matches executed behavior; a builtin without a disposition
-fails that test. The declared set is larger than the three actions above,
-because enumerating the surface found behavior they do not describe. Beyond
-`Constrains`, `Propagates` and `Freezes`, a builtin may declare
-`NoTensorOperand`, meaning no operand slot admits a tensor, or
+one representative per inference family behaves as its family declares; a
+builtin without a disposition fails that test. The declared set is larger than
+the three actions above, because enumerating the surface found behavior they do
+not describe. Beyond `Constrains`, `Propagates` and `Freezes`, a builtin may
+declare `NoTensorOperand`, meaning no operand slot admits a tensor, or
 `RejectsUnresolved`, meaning it refuses an unresolved operand outright rather
 than considering its candidate forms. `RejectsUnresolved` is not conforming:
 §4.7.2 enumerates rejection as the outcome of admitting no candidate form,

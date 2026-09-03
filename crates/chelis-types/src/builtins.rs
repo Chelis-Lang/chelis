@@ -413,8 +413,14 @@ pub enum TensorSettlement {
     /// rejected. That is what distinguishes this from [`Self::RejectsUnresolved`],
     /// which refuses before the forms are considered at all.
     ///
-    /// Nine rows, each measured twice: a concrete `tensor[3, 2, f32]` in the
-    /// data slot is rejected, and so is a deferred positional-`expand` result.
+    /// Nine rows. The coverage partition in
+    /// `slice_c_builtin_settlement_tripwire.rs` excludes them by construction:
+    /// no family may claim a row declaring this disposition, so a test does
+    /// prove that they sit outside the behavioural set. What no test in this
+    /// tree executes is their rejections. Those were measured during authoring,
+    /// a concrete `tensor[3, 2, f32]` in the data slot and a deferred
+    /// positional-`expand` result, and the sweep table in the pull request body
+    /// is the record of it.
     NoTensorOperand,
     /// The call supplies an independently fixed rank or shape equation and
     /// selects the unique candidate satisfying it (§4.7.2 `Constrain`).
