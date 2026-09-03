@@ -895,9 +895,18 @@ fn each_family_representative_behaves_as_its_family_declares() {
                      so the later insertion-form consumer must be rejected",
                     family.name
                 ));
+                // Both halves. A shape disagreement alone is too coarse: a
+                // route that refuses an unresolved operand could in principle
+                // do so with a `DimensionMismatch` and pass. None of the seven
+                // does today, all refuse with `TypeMismatch`, but the clause
+                // costs less than the round that would find it.
+                let names_a_shape_disagreement =
+                    error.contains("rank mismatch") || error.contains("DimensionMismatch");
                 assert!(
-                    error.contains("rank mismatch") || error.contains("DimensionMismatch"),
-                    "{}: the rejection must name the shape disagreement, got {error}",
+                    names_a_shape_disagreement && !names_an_unresolved_variable(&error),
+                    "{}: the rejection must name a shape disagreement and must \
+                     not name an unresolved variable, which is what separates \
+                     freezing the operand from refusing it; got {error}",
                     family.name
                 );
             }
