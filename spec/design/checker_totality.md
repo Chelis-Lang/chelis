@@ -1,8 +1,9 @@
 # Checker Totality: every construct is checked or loudly rejected
 
 **Status:** Phases 0-3 and PP1-PP4 are delivered. PP5 is partial: it delivers
-the three results listed in its own section under [#668] and makes no claim
-beyond them. PR [#1406] delivered the
+the four results listed in its own section, three under [#668] and the C
+host-value lane's operand guard under [#1484], and makes no claim beyond
+them. PR [#1406] delivered the
 separately owned [#1247] kinded nominal-application residue; the bounded
 [#1125] nominal-rank ingress repair and [#1134] forward-reference parity are
 also delivered residue rather than additional phases. Phase 3 first shipped
@@ -1280,7 +1281,7 @@ review found the subtraction incomplete, because a sentence of the form
 "closed except X" is only as true as the enumeration behind it. Nothing here
 is written in that shape. What is not listed is absent, not qualified.
 
-#### The three results
+#### The four results
 
 **R1. Where the checker has derived a rank fact for BOTH operands of a
 `ShapeClass::Identity` call, a positive-rank disagreement is rejected.**
@@ -1334,17 +1335,45 @@ This covers operations lowered through the tensor-DAG emitter
 rank-divergent `Dag` directly and asserts both that the guard appears in the
 emitted C and that the compiled binary aborts.
 
-**The host-value emitter is a different lane and has no such guard.**
-`chelis-backend-c/src/host_emit.rs` computes `idx_lhs` and `idx_rhs` by feeding
-the target's indices into each operand's strides, with no rank comparison;
-`grep -c 'rank mismatch' crates/chelis-backend-c/src/host_emit.rs` returns 0.
-PP5 does not change that file and makes no claim about it. A program whose
-elementwise operation carries an IO effect routes to that lane: `add(debug(e),
-s)` for a rank-2 `e` and a rank-1 `s` emits C containing no rank guard,
-compiles, exits 0, and prints a `[2, 6]` result invented from a `[2, 6]` and a
-`[3]` operand, deterministically. `chelis eval` rejects the same program. That
-gap is pre-existing, is owned separately, and is recorded here so no reader
-takes R3 for a statement about generated C as a whole.
+**R4. The host-value C emitter compares the operands of its six binary
+elementwise builtins and aborts before the result allocation ([#1484]).**
+
+`chelis-backend-c/src/host_emit.rs` is a different lane from R3's, and an
+elementwise call one of whose operands carries an IO effect is lowered there.
+It allocated the result at the LHS rank and then computed `idx_lhs` and
+`idx_rhs` by feeding the target's indices into each operand's strides, with no
+comparison of any kind: `add(debug(e), s)` for a rank-2 `e` and a rank-1 `s`
+compiled, exited 0, and printed a `[2, 6]` result invented from a `[2, 6]` and
+a `[3]` operand, deterministically, while `chelis eval` rejected it.
+
+The guard now runs at the top of both of that file's two-tensor elementwise
+emitters, which between them carry six builtins: `add`, `sub`, `mul`, and
+`div` through `assign_tensor_binary_elementwise`, and `max_elem` and
+`min_elem` through `assign_tensor_binary_func_elementwise`. Two positive
+operand ranks that differ abort; at equal positive rank the shapes are
+compared axis by axis, which is what `spec/05-risc-primitives.md` §2.4 already
+requires of R3's lane. A rank-0 operand keeps the backend's scalar-input
+meaning and is not reinterpreted as source-level broadcasting. Nothing else in
+the file is claimed: the unary, movement, gather/scatter, and summary emitters
+are untouched.
+
+R4 is a loud-failure backstop and changes no checker verdict. `add(debug(e),
+s)` still scores 1 with an empty error list; the checker half of that program
+is R1's subject and is unchanged.
+
+*Evidence:* four `chelis-backend-c` tests that drive `emit_host_program`
+directly, `host_lane_positive_rank_mismatch_traps_before_indexing`,
+`host_lane_max_elem_positive_rank_mismatch_traps_before_indexing`,
+`host_lane_equal_rank_shape_mismatch_traps_before_indexing`, and the
+`host_lane_matching_shapes_still_compute` control; and four `chelis-cli` tests
+in `issue_1484_host_lane_rank_guard`, which run the three programs recorded in
+[#1484] through `chelis build --target c` and the host linker and assert that
+each aborts with the guard text where `chelis eval` reports a shape mismatch,
+plus the `issue_1484_matching_rank_host_lane_still_runs` control. Each of the
+six rejection tests was confirmed red on the pre-fix tree, three of them by the
+compiled binary printing values instead of aborting. `grep -c 'rank mismatch'
+crates/chelis-backend-c/src/host_emit.rs` now returns non-zero, locked by
+`sibling_sweep_host_emit_carries_the_elementwise_rank_guard`.
 
 #### What PP5 does not establish
 
@@ -1384,10 +1413,13 @@ the claim.
 ```sh
 cargo nextest run -p chelis-cli --test issue_668_elementwise_rank_honesty --no-fail-fast
 cargo nextest run -p chelis-backend-c --test exec_compile direct_positive_rank_mismatch_traps_before_indexing
+cargo nextest run -p chelis-backend-c --test exec_compile host_lane --no-fail-fast
+cargo nextest run -p chelis-cli --test issue_1484_host_lane_rank_guard --no-fail-fast
 ```
 
-The first is the oracle for R1 and R2, the second for R3. Neither covers the
-host-value lane or the operations named above.
+The first is the oracle for R1 and R2, the second for R3, and the last two for
+R4. None of them covers the operations named above, and the last two are about
+generated C, not about a checker verdict.
 
 ### Later residue: kinded nominal applications ([#1247], with [#1258])
 
@@ -1768,7 +1800,7 @@ vacuity, or [#1076]/[#672]'s independently owned name-precedence work.
 | PP2 | [#1147] and the future supply of registered builtins with no inference disposition |
 | PP3 | [#1209]/[#1211]/[#1212]'s name-keyed binding-identity channel |
 | PP4 | [#1264] and [#1261]'s raw-flat-test-scope residue; exact module scope in every checker/test entry |
-| PP5 (partial) | [#668]; the checker derives a rank fact for `ShapeClass::Identity` plus `conv2d`/`stride`/`expand`/`softmax` and rejects a positive-rank disagreement where it has one, on unforgeable rank-only facts; the tensor-DAG C emitter aborts on a positive-rank operand disagreement. No claim is made for operations outside that set or for the host-value emitter; see PP5 |
+| PP5 (partial) | [#668]; the checker derives a rank fact for `ShapeClass::Identity` plus `conv2d`/`stride`/`expand`/`softmax` and rejects a positive-rank disagreement where it has one, on unforgeable rank-only facts; the tensor-DAG C emitter aborts on a positive-rank operand disagreement, and under [#1484] so does the host-value emitter for its six binary elementwise builtins. No claim is made for operations outside that set, nor for any checker verdict on the host-lane programs; see PP5 |
 | [#1247] residue | integer nominal arguments are kind-checked and concrete dimensions constrain every checker/test/compiler lane; [#1258] round trips the same representation |
 | [#1125] nominal-rank ingress residual | ordinary `.dp` ingress, `surf`, and `validate --deep` reject `d-rank` in nominal argument slots while preserving legal dimension arguments and tensor rank spreads; the broader reader-audit/lint issue remains open |
 | [#1134] forward-reference residual | both checker ingresses reject eager forward values, accept backward values from value initializers and from function bodies wherever the schedule places them except the [#1485] shape, accept declaration-local explicitly typed external inputs, retain sequential local scope, and reject bare self-reference/eager value cycles identically; the schedule's order invariants are asserted directly |
@@ -1803,9 +1835,10 @@ constructor as fully resolved. PP5 preserves declared parameter ranks and
 rank-only movement facts through the validator, on a carrier source cannot
 forge, so an elementwise rank mismatch the resolver derives a fact for does not
 receive a perfect checker verdict. Where the resolver derives no fact the
-checker raises nothing, and the tensor-DAG emitter's abort does not extend to
-the host-value lane; PP5 states which results are demonstrated and which are
-not.
+checker raises nothing; the generated C aborts in both emitter lanes, the
+tensor-DAG one under [#668] and the host-value one under [#1484], but neither
+abort makes such a program checkable. PP5 states which results are
+demonstrated and which are not.
 The separately owned [#1247] residue applies the same honesty rule to
 nominal arguments: integer syntax is either an exact checked dimension or a
 kind error, never an inference wildcard, and every downstream checker/test
@@ -1868,3 +1901,4 @@ cycles remain errors.
 [#1487]: https://github.com/Chelis-Lang/chelis/issues/1487
 [#1355]: https://github.com/Chelis-Lang/chelis/issues/1355
 [#219]: https://github.com/Chelis-Lang/chelis/issues/219
+[#1484]: https://github.com/Chelis-Lang/chelis/issues/1484

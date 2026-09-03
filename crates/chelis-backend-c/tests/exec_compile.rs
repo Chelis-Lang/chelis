@@ -6,11 +6,18 @@
 //! The kernel allocates output tensors internally via chelis_alloc.
 //! We link against the chelis_runtime .a to resolve those symbols.
 
+use chelis_backend_c::host_emit::emit_host_program;
 use chelis_backend_c::{CodegenOptions, MathLib, codegen_with_options};
+use chelis_ir::ConcreteHostType as HostType;
 use chelis_ir::dag::{
     Dag, DimInfo, ExtremaKind, ExtremaOperand, ReduceWindowKind, RiscOp, TensorType,
 };
 use chelis_ir::fuse::fuse;
+use chelis_ir::host::{
+    ConcreteHostExpr as HostExpr, ConcreteHostExprKind as HostExprKind,
+    ConcreteHostFunction as HostFunction, ConcreteHostParam as HostParam,
+    ConcreteHostProgram as HostProgram, HostFunctionOrigin,
+};
 use chelis_types::types::Prim;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -3346,6 +3353,264 @@ int main(void) {{
         String::from_utf8_lossy(&run.stderr).contains("elementwise operand rank mismatch"),
         "rank guard emitted the wrong diagnostic: {}",
         String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+// ---- chelis#1484: the HOST-VALUE lane's elementwise operand guard -------
+//
+// `direct_positive_rank_mismatch_traps_before_indexing` above covers the
+// tensor-DAG emitter (`src/emit.rs`). An elementwise call whose operand
+// carries an IO effect (`debug(...)`) is lowered by a different emitter,
+// `src/host_emit.rs`, which allocated the result at the LHS rank and then
+// fed the TARGET's index vector into each operand's strides with no rank
+// comparison at all. The four tests below drive that emitter directly
+// through `emit_host_program`, the same entry the CLI's `chelis build`
+// uses for host-lane functions.
+
+fn host_tensor(dims: Vec<usize>) -> TensorType {
+    TensorType {
+        dims: dims.into_iter().map(DimInfo::Lit).collect(),
+        precision: Prim::F32,
+    }
+}
+
+/// A two-parameter host function `the_fn(a, b) = <builtin>(a, b)` whose
+/// operands carry the given (possibly divergent) static shapes. `globals`
+/// is empty, so `emit_host_program` emits an object-mode translation unit
+/// with no `main` and the harness below supplies its own.
+fn host_binary_program(builtin: &str, lhs: Vec<usize>, rhs: Vec<usize>) -> HostProgram {
+    let lhs_ty = host_tensor(lhs);
+    let rhs_ty = host_tensor(rhs);
+    let body = HostExpr::new(HostExprKind::Builtin {
+        name: builtin.to_string(),
+        args: vec![
+            HostExpr::new(HostExprKind::Var(
+                "a".to_string(),
+                HostType::Tensor(lhs_ty.clone()),
+            )),
+            HostExpr::new(HostExprKind::Var(
+                "b".to_string(),
+                HostType::Tensor(rhs_ty.clone()),
+            )),
+        ],
+        ty: HostType::Tensor(lhs_ty.clone()),
+    });
+    HostProgram {
+        globals: Vec::new(),
+        global_tensor_helpers: Vec::new(),
+        functions: vec![HostFunction {
+            name: "the_fn".to_string(),
+            params: vec![
+                HostParam {
+                    name: "a".to_string(),
+                    ty: HostType::Tensor(lhs_ty.clone()),
+                },
+                HostParam {
+                    name: "b".to_string(),
+                    ty: HostType::Tensor(rhs_ty),
+                },
+            ],
+            ret_ty: HostType::Tensor(lhs_ty),
+            body,
+            tensor_helpers: Vec::new(),
+            origin: HostFunctionOrigin::Authored,
+            specialization: None,
+            summary_rejections: Vec::new(),
+        }],
+        summary_rejections: Vec::new(),
+    }
+}
+
+/// A `main` that hands `the_fn` two descriptors with the exact ranks,
+/// shapes, and strides given, then prints `UNREACHABLE` if the call
+/// returns. Both operands are backed by six floats so that a guard-free
+/// build reads in bounds and exits 0 rather than crashing: the failure
+/// this pins is the silent wrong answer, not the segfault.
+const HOST_GUARD_HARNESS: &str = r#"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include "chelis_runtime.h"
+
+static chelis_tensor make_ranked_view(
+    float *data, int32_t rank, const int64_t *shape, const int64_t *strides, int64_t size
+) {
+    return (chelis_tensor){
+        .data = data, .shape = shape, .strides = strides, .size = size,
+        .byte_capacity = size * (int64_t)sizeof(float), .rank = rank,
+        .dtype = CHELIS_DTYPE_F32, .owns_data = 0, .reserved = {0, 0},
+    };
+}
+
+extern chelis_tensor *the_fn(chelis_tensor *, chelis_tensor *);
+"#;
+
+/// chelis#1484 REGRESSION TEST: red on the pre-fix tree (the emitted C
+/// carried no rank guard and the binary exited 0), green after. A rank-1
+/// LHS beside a rank-2 RHS must abort before the result allocation.
+#[test]
+fn host_lane_positive_rank_mismatch_traps_before_indexing() {
+    let program = host_binary_program("add", vec![3], vec![2, 3]);
+    let function = "host_positive_rank_guard";
+    let src = emit_host_program(&program, function).expect("host-lane codegen");
+    assert!(
+        src.contains("elementwise operand rank mismatch"),
+        "host-lane codegen omitted the positive-rank mismatch guard:\n{src}"
+    );
+
+    let harness = format!(
+        r#"{HOST_GUARD_HARNESS}
+int main(void) {{
+    float a_data[6] = {{1, 2, 3, 4, 5, 6}};
+    float b_data[6] = {{1, 2, 3, 4, 5, 6}};
+    static const int64_t a_shape[1] = {{3}}, a_strides[1] = {{1}};
+    static const int64_t b_shape[2] = {{2, 3}}, b_strides[2] = {{3, 1}};
+    chelis_tensor a = make_ranked_view(a_data, 1, a_shape, a_strides, 3);
+    chelis_tensor b = make_ranked_view(b_data, 2, b_shape, b_strides, 6);
+    the_fn(&a, &b);
+    puts("UNREACHABLE");
+    return 0;
+}}
+"#
+    );
+    let run = compile_and_capture_run(function, &src, &harness);
+    assert!(
+        !run.status.success(),
+        "host-lane positive-rank mismatch reached indexing; stdout={}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains("elementwise operand rank mismatch"),
+        "host-lane rank guard emitted the wrong diagnostic: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+/// chelis#1484 REGRESSION TEST: red before, green after. `max_elem` and
+/// `min_elem` are emitted by `assign_tensor_binary_func_elementwise`, a
+/// different function from the `+`/`-`/`*`/`/` one above, and needed its
+/// own guard call.
+#[test]
+fn host_lane_max_elem_positive_rank_mismatch_traps_before_indexing() {
+    let program = host_binary_program("max_elem", vec![3], vec![2, 3]);
+    let function = "host_positive_rank_guard_max_elem";
+    let src = emit_host_program(&program, function).expect("host-lane codegen");
+    assert!(
+        src.contains("elementwise operand rank mismatch"),
+        "host-lane max_elem codegen omitted the positive-rank guard:\n{src}"
+    );
+
+    let harness = format!(
+        r#"{HOST_GUARD_HARNESS}
+int main(void) {{
+    float a_data[6] = {{1, 2, 3, 4, 5, 6}};
+    float b_data[6] = {{6, 5, 4, 3, 2, 1}};
+    static const int64_t a_shape[1] = {{3}}, a_strides[1] = {{1}};
+    static const int64_t b_shape[2] = {{2, 3}}, b_strides[2] = {{3, 1}};
+    chelis_tensor a = make_ranked_view(a_data, 1, a_shape, a_strides, 3);
+    chelis_tensor b = make_ranked_view(b_data, 2, b_shape, b_strides, 6);
+    the_fn(&a, &b);
+    puts("UNREACHABLE");
+    return 0;
+}}
+"#
+    );
+    let run = compile_and_capture_run(function, &src, &harness);
+    assert!(
+        !run.status.success(),
+        "host-lane max_elem rank mismatch reached indexing; stdout={}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains("elementwise operand rank mismatch"),
+        "host-lane max_elem guard emitted the wrong diagnostic: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+/// chelis#1484 REGRESSION TEST: red before, green after. At EQUAL positive
+/// rank the host lane compared nothing either, so a `[3]` operand beside a
+/// `[2]` one read past the shorter operand. The DAG lane has compared
+/// shapes axis by axis since chelis#664; this is the host-lane sibling.
+#[test]
+fn host_lane_equal_rank_shape_mismatch_traps_before_indexing() {
+    let program = host_binary_program("add", vec![3], vec![2]);
+    let function = "host_equal_rank_shape_guard";
+    let src = emit_host_program(&program, function).expect("host-lane codegen");
+    assert!(
+        src.contains("elementwise operand shape mismatch"),
+        "host-lane codegen omitted the equal-rank shape guard:\n{src}"
+    );
+
+    let harness = format!(
+        r#"{HOST_GUARD_HARNESS}
+int main(void) {{
+    float a_data[6] = {{1, 2, 3, 4, 5, 6}};
+    float b_data[6] = {{1, 2, 3, 4, 5, 6}};
+    static const int64_t a_shape[1] = {{3}}, a_strides[1] = {{1}};
+    static const int64_t b_shape[1] = {{2}}, b_strides[1] = {{1}};
+    chelis_tensor a = make_ranked_view(a_data, 1, a_shape, a_strides, 3);
+    chelis_tensor b = make_ranked_view(b_data, 1, b_shape, b_strides, 2);
+    the_fn(&a, &b);
+    puts("UNREACHABLE");
+    return 0;
+}}
+"#
+    );
+    let run = compile_and_capture_run(function, &src, &harness);
+    assert!(
+        !run.status.success(),
+        "host-lane equal-rank shape mismatch reached indexing; stdout={}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains("elementwise operand shape mismatch"),
+        "host-lane shape guard emitted the wrong diagnostic: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+/// chelis#1484 DISPOSITION LOCK: green before the fix and green after. Its
+/// job is to pin that the new guard does not false-abort the agreeing case
+/// the host lane is actually for, and that it leaves the computed values
+/// alone. Without it, "abort on every binary elementwise op" would pass
+/// the three regression tests above.
+#[test]
+fn host_lane_matching_shapes_still_compute() {
+    let program = host_binary_program("add", vec![2, 3], vec![2, 3]);
+    let function = "host_matching_shape_control";
+    let src = emit_host_program(&program, function).expect("host-lane codegen");
+
+    let harness = format!(
+        r#"{HOST_GUARD_HARNESS}
+int main(void) {{
+    float a_data[6] = {{1, 2, 3, 4, 5, 6}};
+    float b_data[6] = {{10, 20, 30, 40, 50, 60}};
+    static const int64_t shape[2] = {{2, 3}}, strides[2] = {{3, 1}};
+    chelis_tensor a = make_ranked_view(a_data, 2, shape, strides, 6);
+    chelis_tensor b = make_ranked_view(b_data, 2, shape, strides, 6);
+    chelis_tensor *out = the_fn(&a, &b);
+    const float *values = (const float *)out->data;
+    for (int64_t i = 0; i < out->size; i++) {{
+        printf("%.1f\n", (double)values[i]);
+    }}
+    return 0;
+}}
+"#
+    );
+    let run = compile_and_capture_run(function, &src, &harness);
+    assert!(
+        run.status.success(),
+        "matching host-lane shapes must not abort; stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let got: Vec<String> = stdout.split_whitespace().map(str::to_string).collect();
+    assert_eq!(
+        got,
+        vec!["11.0", "22.0", "33.0", "44.0", "55.0", "66.0"],
+        "host-lane add over matching shapes returned the wrong values: {stdout}"
     );
 }
 
