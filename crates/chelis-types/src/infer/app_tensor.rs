@@ -351,14 +351,29 @@ const MATMUL_MIN_RANK: usize = 2;
 
 /// Whether a contracted-extent pair can still agree.
 ///
-/// Deliberately conservative: only two known literals can definitely
-/// disagree. Anything symbolic stays admissible, so candidate elimination
-/// never discards a form that ordinary unification would have accepted.
+/// Conservative on the value: only two known literals can definitely
+/// disagree, so anything symbolic stays admissible. That is not sufficient on
+/// its own; the caller must also compare the correct pair of axes, which is
+/// what [`right_operand_contracted_axis`] exists to get right.
 fn contraction_may_agree(contracted: Option<&Dim>, against: Option<&Dim>) -> bool {
     match (contracted, against) {
         (Some(Dim::Lit(left)), Some(Dim::Lit(right))) => left == right,
         _ => true,
     }
+}
+
+/// The axis a right-hand `matmul` operand contracts on: its second-to-last,
+/// not its first.
+///
+/// Those coincide exactly when the operand has rank two, which is why a suite
+/// whose siblings are all rank two cannot tell the two readings apart. At rank
+/// three or more the first axis is a batch axis, and comparing against it
+/// eliminates forms `matmul` admits and can leave the one form it rejects.
+/// `checked_sub` because nothing here establishes the operand has rank two or
+/// more: a rank-1 or rank-0 shape yields no contracted axis, and
+/// [`contraction_may_agree`] then admits rather than guessing.
+fn right_operand_contracted_axis(shape: &[Dim]) -> Option<&Dim> {
+    shape.len().checked_sub(2).and_then(|axis| shape.get(axis))
 }
 
 pub(super) fn check_matmul_signature(
@@ -398,9 +413,13 @@ pub(super) fn check_matmul_signature(
                 return true;
             };
             if slot == 0 {
-                contraction_may_agree(dims.last(), sibling_dims.first())
+                // The candidate is the left operand: its last axis contracts
+                // against the sibling's second-to-last.
+                contraction_may_agree(dims.last(), right_operand_contracted_axis(sibling_dims))
             } else {
-                contraction_may_agree(sibling_dims.last(), dims.first())
+                // The candidate is the right operand: the sibling's last axis
+                // contracts against the candidate's second-to-last.
+                contraction_may_agree(sibling_dims.last(), right_operand_contracted_axis(dims))
             }
         };
         if let Err(error) = subst.settle_deferred_tensor(

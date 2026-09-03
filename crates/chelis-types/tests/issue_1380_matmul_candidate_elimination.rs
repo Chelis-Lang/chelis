@@ -68,6 +68,19 @@ fn escaping_type_variables(rendered: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whitespace-insensitive containment.
+///
+/// The canonical printer wraps a long type across several lines, so a
+/// single-line needle can silently never match and an assertion built on one
+/// passes or fails for the wrong reason. Both sides are collapsed to single
+/// spaces before comparing.
+fn contains_type(rendered: &str, needle: &str) -> bool {
+    fn collapse(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+    collapse(rendered).contains(&collapse(needle))
+}
+
 fn summary(errors: &[CheckError]) -> String {
     errors
         .iter()
@@ -222,4 +235,105 @@ fn matmul_rejects_when_the_contraction_admits_neither_form() {
         "a consumer admitting neither candidate rejects the program:\n{}",
         summary(&errors)
     );
+}
+
+// ---------------------------------------------------------------------
+// Batched siblings.
+//
+// `matmul` contracts the left operand's last axis against the right operand's
+// second-to-last, and those are the same index only when the right operand has
+// rank exactly two. Every other row in this file uses a rank-2 sibling, so the
+// two readings agree and none of them can tell a correct accessor from one
+// that reads the sibling's first axis instead.
+//
+// Each row below therefore uses a rank-3 sibling whose batch extent differs
+// from its contracted extent. If the two were equal the row would pass under
+// either accessor and the defect would return invisibly.
+// ---------------------------------------------------------------------
+
+/// The candidate is the left operand, so its last axis contracts against the
+/// sibling's second-to-last. Sibling `tensor[5, 4, 7]` batches at 5 and
+/// contracts at 4, so reading its first axis compares against 5 and eliminates
+/// both candidate forms.
+#[test]
+fn a_batched_right_sibling_does_not_eliminate_the_left_operand() {
+    let rendered = check(
+        "def f(xa: tensor[3, 4, f32], xb: tensor[5, 4, 7, f32]) = matmul(expand(xa, 0, 5i64), xb)\n",
+    )
+    .unwrap_or_else(|errors| {
+        panic!(
+            "both candidate forms contract against the sibling's second-to-last \
+             axis, so elimination must not reject:\n{}",
+            summary(&errors)
+        )
+    });
+    // Both candidate forms end in 4 and the sibling contracts at 4, so both
+    // are admissible and elimination correctly decides nothing. The freeze
+    // default then supplies the same-rank replacement form, which is what
+    // `6b60742cd` produces for this program too.
+    assert!(
+        contains_type(
+            &rendered,
+            "(t-tensor {} (d-lit {} 5) (d-lit {} 4) (t-prim {} f32))"
+        ),
+        "elimination must leave a choice both forms satisfy to the freeze \
+         default:\n{rendered}"
+    );
+}
+
+/// The candidate is the right operand, so the sibling's last axis contracts
+/// against the candidate's second-to-last. Sibling `tensor[5, 3, 4]` ends in 4;
+/// only the insertion form `tensor[5, 4, 7]` carries 4 in that position.
+#[test]
+fn a_batched_left_sibling_selects_the_right_operand_form() {
+    let rendered = check(
+        "def f(xa: tensor[5, 3, 4, f32], xb: tensor[4, 7, f32]) = matmul(xa, expand(xb, 0, 5i64))\n",
+    )
+    .unwrap_or_else(|errors| {
+        panic!(
+            "the insertion form contracts against the sibling's last axis:\n{}",
+            summary(&errors)
+        )
+    });
+    assert!(
+        contains_type(
+            &rendered,
+            "(t-tensor {} (d-lit {} 5) (d-lit {} 4) (d-lit {} 7) (t-prim {} f32))"
+        ),
+        "elimination must select the form whose second-to-last axis is 4:\n{rendered}"
+    );
+}
+
+/// The sharpest row: reading the sibling's first axis does not merely
+/// over-reject here, it admits exactly one form and admits the wrong one.
+/// Candidates are `tensor[5, 5]` and `tensor[5, 5, 4]`; the sibling contracts
+/// at 4, so only the second is admissible, while its first axis is 5, so only
+/// the first would be.
+#[test]
+fn a_batched_sibling_selects_the_form_matmul_actually_admits() {
+    let rendered = check(
+        "def f(xa: tensor[5, 4, f32], xb: tensor[5, 4, 7, f32]) = matmul(expand(xa, 1, 5i64), xb)\n",
+    )
+    .unwrap_or_else(|errors| {
+        panic!(
+            "the admissible form is the rank-3 one, not the rank-2 one:\n{}",
+            summary(&errors)
+        )
+    });
+    assert!(
+        contains_type(
+            &rendered,
+            "(t-tensor {} (d-lit {} 5) (d-lit {} 5) (d-lit {} 4) (t-prim {} f32))"
+        ),
+        "elimination must not select the form whose contracted extent is 5:\n{rendered}"
+    );
+}
+
+/// Control: the same batched shapes with no deferral type cleanly, so these
+/// rows are testing candidate elimination rather than `matmul`'s own support
+/// for batched operands.
+#[test]
+fn batched_matmul_without_a_deferred_operand_is_supported() {
+    check("def f(xa: tensor[5, 3, 4, f32], xb: tensor[5, 4, 7, f32]) = matmul(xa, xb)\n")
+        .expect("batched matmul is supported independently of any deferral");
 }
