@@ -35,6 +35,7 @@ module.exports = grammar({
     $._whitespace,
     $._canonical_declaration_end,
     $._canonical_block_binding_end,
+    $._canonical_block_expression_end,
   ],
 
   extras: ($) => [$._whitespace, $.line_comment, $.block_comment],
@@ -308,14 +309,27 @@ module.exports = grammar({
       seq(
         "{",
         choice(
-          prec.dynamic(1, $.expression),
-          seq(repeat1($.let_binding), field("result", prec.dynamic(1, $.expression))),
+          seq(
+            prec.dynamic(1, $.expression),
+            optional($._canonical_block_expression_end),
+          ),
+          seq(
+            repeat1($.let_binding),
+            field("result", prec.dynamic(1, $.expression)),
+            optional($._canonical_block_expression_end),
+          ),
         ),
         "}",
       ),
 
     block_expression: ($) =>
-      seq("{", repeat1($.let_binding), field("result", prec.dynamic(1, $.expression)), "}"),
+      seq(
+        "{",
+        repeat1($.let_binding),
+        field("result", prec.dynamic(1, $.expression)),
+        optional($._canonical_block_expression_end),
+        "}",
+      ),
     let_binding: ($) =>
       seq(
         field("pattern", $.let_pattern),
@@ -332,8 +346,8 @@ module.exports = grammar({
         seq("(", $.let_pattern, ",", optional(commaSep1($.let_pattern)), ")"),
       ),
 
-    par_expression: ($) => seq("par", "{", semicolonSep1($.expression), "}"),
-    do_expression: ($) => seq("do", "{", semicolonSep1($.expression), "}"),
+    par_expression: ($) => seq("par", "{", blockExpressionSep1($, $.expression), "}"),
+    do_expression: ($) => seq("do", "{", blockExpressionSep1($, $.expression), "}"),
 
     record_update_expression: ($) =>
       prec.right(
@@ -738,6 +752,11 @@ function commaSep1(rule) {
 
 function semicolonSep1(rule) {
   return seq(rule, repeat(seq(";", rule)), optional(";"));
+}
+
+function blockExpressionSep1($, rule) {
+  const bounded = seq(rule, optional($._canonical_block_expression_end));
+  return seq(bounded, repeat(seq(";", bounded)), optional(";"));
 }
 
 function commaSepNoTrail1(rule) {

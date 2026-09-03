@@ -1466,8 +1466,9 @@ closed `|>`/`then`/`else` continuation set governs the block sequencing
 contexts (`block_expr_end`), while a declaration body and a property predicate
 bound permissively at a declaration start (and, for a predicate, at `with`).
 It also admits `then` and `else` in the closed set, which is the 0.17
-regression the issue reports. This deliberately moves the tamper-evident
-complete-file digests for `spec/02-surf-syntax.md` and this document. It does not touch either
+regression the issue reports. Under the current merge-base acknowledgement
+gate, this contract edit requires explicit pull-request-body acknowledgements
+for `spec/02-surf-syntax.md` and this document. It does not touch either
 statement the Phase 4B oracle anchors in that file -- the Surf literal
 exclusion and `count`'s multi-axis lowering -- nor any dtype, capability,
 numeric-surface, or observation contract; the change is a surface-syntax

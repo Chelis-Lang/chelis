@@ -435,7 +435,7 @@ impl Parser {
         }
     }
 
-    /// Tokens that can only CONTINUE an expression, never begin one.
+    /// Exact newline continuations for a block sequencing expression.
     ///
     /// chelis#849. A top-level newline inside a sequencing context ends the
     /// expression being parsed unless the next significant token is one of these:
@@ -444,12 +444,14 @@ impl Parser {
     /// * `then` / `else` -- an `if` is not a legal expression without both, so
     ///   neither can begin one.
     ///
-    /// Membership is the structural property "cannot head an expression", not a
-    /// convenience list. A token that CAN head one (`with`, `match`, an
-    /// identifier) must not be added: after a newline it is genuinely ambiguous
-    /// between a continuation and a new statement, and admitting it would
-    /// re-open the juxtaposition defect chelis#706 closed.
-    fn is_expression_continuation(kind: &TokenKind) -> bool {
+    /// Each member is safe because it cannot head an expression, but that is a
+    /// necessary condition rather than the membership rule: other infix tokens
+    /// (`+`, `*`, `==`, `&&`, ...) remain outside this deliberately closed set.
+    /// A token that CAN head an expression (`with`, `match`, an identifier) must
+    /// not be added: after a newline it is genuinely ambiguous between a
+    /// continuation and a new statement, and admitting it would re-open the
+    /// juxtaposition defect chelis#706 closed.
+    fn is_block_expression_continuation(kind: &TokenKind) -> bool {
         matches!(kind, TokenKind::Pipe | TokenKind::Then | TokenKind::Else)
     }
 
@@ -464,12 +466,12 @@ impl Parser {
                     if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 =>
                 {
                     // A top-level newline does not end the expression when
-                    // the next significant token CANNOT begin one (chelis#849).
-                    // That is the whole rule, and it is structural rather than
-                    // a list of special cases: `|>` is an infix continuation,
-                    // and `then` / `else` are the mandatory continuations of an
-                    // `if` -- none of the three can head a statement, so seeing
-                    // one after a newline is unambiguous.
+                    // the next significant token is in P12's exact closed set
+                    // (chelis#849): `|>` is an infix continuation, and `then` /
+                    // `else` are the mandatory continuations of an `if`. None
+                    // can head a statement, so each selected continuation is
+                    // unambiguous; that safety property does not admit every
+                    // other infix token.
                     //
                     // This helper is the only one of the three boundary
                     // rules that is CLOSED. `decl_expr_end` and
@@ -490,7 +492,7 @@ impl Parser {
                             .iter()
                             .skip(pos + 1)
                             .find(|next| !matches!(next.kind, TokenKind::Newline))
-                            .is_some_and(|next| Self::is_expression_continuation(&next.kind))
+                            .is_some_and(|next| Self::is_block_expression_continuation(&next.kind))
                     {
                         pos += 1;
                         continue;
@@ -6261,16 +6263,25 @@ mod tests {
     }
 
     #[test]
-    fn a_token_that_can_head_an_expression_is_not_a_continuation() {
-        // The rule is "cannot begin an expression", not a convenience list.
-        // `with` heads one, so it stays out -- admitting it would re-open the
-        // juxtaposition defect chelis#706 closed.
-        assert!(Parser::is_expression_continuation(&TokenKind::Pipe));
-        assert!(Parser::is_expression_continuation(&TokenKind::Then));
-        assert!(Parser::is_expression_continuation(&TokenKind::Else));
-        assert!(!Parser::is_expression_continuation(&TokenKind::With));
-        assert!(!Parser::is_expression_continuation(&TokenKind::Match));
-        assert!(!Parser::is_expression_continuation(&TokenKind::If));
+    fn block_expression_continuation_set_is_exact() {
+        // P12 selects exactly three safe continuations. Tokens that can head
+        // an expression stay out, and so do non-selected infix operators: the
+        // inability to begin an expression is necessary but not sufficient.
+        assert!(Parser::is_block_expression_continuation(&TokenKind::Pipe));
+        assert!(Parser::is_block_expression_continuation(&TokenKind::Then));
+        assert!(Parser::is_block_expression_continuation(&TokenKind::Else));
+        for excluded in [
+            TokenKind::With,
+            TokenKind::Match,
+            TokenKind::If,
+            TokenKind::Plus,
+            TokenKind::Star,
+            TokenKind::EqEq,
+            TokenKind::AmpAmp,
+            TokenKind::PipePipe,
+        ] {
+            assert!(!Parser::is_block_expression_continuation(&excluded));
+        }
     }
 
     #[test]

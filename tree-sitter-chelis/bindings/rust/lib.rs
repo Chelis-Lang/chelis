@@ -188,6 +188,45 @@ mod tests {
         }
     }
 
+    /// spec/02 P12's block continuation set is closed. Infix tokens other
+    /// than `|>` remain separators when they lead the next physical line,
+    /// even though they cannot begin a standalone expression. Cover every
+    /// `block_expr_end` consumer so the editor grammar cannot silently widen
+    /// a boundary the Rust parser keeps closed.
+    #[test]
+    fn surf_v019_tree_sitter_rejects_newline_led_non_continuations() {
+        for source in [
+            // block binding value
+            "def f() -> int32 = {\n  x = 1i32\n  + 2i32\n  x\n}\n",
+            // block tail
+            "def f() -> int32 = {\n  x = 1i32\n  x\n  * 2i32\n}\n",
+            // `do` item
+            "def f() -> bool = {\n  x = do {\n    true\n    == false\n  }\n  x\n}\n",
+            // `par` item
+            "def f() -> bool = {\n  x = par {\n    true\n    && false\n  }\n  x\n}\n",
+            // property option value
+            "@property p forall(): true\n  with samples = 1i32\n  + 1i32\n  with seed = 1i64\n",
+        ] {
+            assert_surf_parser_parity(source, false);
+        }
+    }
+
+    /// Representative excluded infix families at the block-tail boundary.
+    /// Non-prefix status is a safety argument for a selected continuation;
+    /// it does not itself admit every infix token after a separator.
+    #[test]
+    fn surf_v019_tree_sitter_keeps_the_exact_block_continuation_set() {
+        for source in [
+            "def f() -> int32 = {\n  x = 1i32\n  x\n  + 2i32\n}\n",
+            "def f() -> int32 = {\n  x = 1i32\n  x\n  * 2i32\n}\n",
+            "def f() -> bool = {\n  x = 1i32\n  x\n  == 2i32\n}\n",
+            "def f() -> bool = {\n  x = true\n  x\n  && false\n}\n",
+            "def f() -> bool = {\n  x = true\n  x\n  || false\n}\n",
+        ] {
+            assert_surf_parser_parity(source, false);
+        }
+    }
+
     #[test]
     fn surf_v019_tree_sitter_accepts_multiline_pipeline_chains() {
         for source in [
