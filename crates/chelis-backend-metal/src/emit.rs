@@ -268,6 +268,14 @@ pub struct EmitResult {
 /// rank > 1 with non-trivial layout, partial-axis reductions outside the
 /// matmul subgraph, RNG).
 pub fn emit_dag(dag: &Dag, func_name: &str) -> Result<EmitResult, String> {
+    // chelis#1277 C4.1: the Metal codegen entry has no typed error channel
+    // (`codegen_metal` falls back to an aborting stub), so a sourceless
+    // mapping is rendered into the stub's reason here rather than returned
+    // as a typed receipt. Metal device-path rows sit at their recorded
+    // `lane_divergent` baseline until chelis#1383, per runtime_extents.md
+    // C2.5.
+    chelis_ir::axis_sources::check_axis_sources(dag, Stage::Codegen("metal"))
+        .map_err(|unsupported| unsupported.to_string())?;
     reject_integer_abs(dag)?;
     let mut e = Emitter::new(func_name);
     e.emit(dag)?;

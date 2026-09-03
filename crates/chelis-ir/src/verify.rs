@@ -1358,6 +1358,17 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             ));
         }
     }
+
+    // chelis#1277 C4.1: every realized output axis has one checked extent
+    // source. `verify` is one of the production paths this runs on, not the
+    // only one: it runs in tests and at the end of `grad_dag`, while eval
+    // and the three codegen entries call `check_axis_sources` themselves.
+    if let Err(unsupported) =
+        crate::axis_sources::check_axis_sources(dag, chelis_types::unsupported::Stage::Lowering)
+    {
+        errors.push(unsupported.to_string());
+    }
+
     errors
 }
 

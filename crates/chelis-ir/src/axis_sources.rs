@@ -99,14 +99,36 @@ fn literal(value: usize) -> AxisSource {
 }
 
 /// The rank of the tensor in absolute input slot `slot`, or `None` when the
-/// slot is absent. A missing operand is a structural defect the verifier
-/// owns; the arms below fall back to the operation's own rule so this
-/// derivation reports cardinality rather than a second copy of that error.
+/// slot is absent.
 fn input_rank(dag: &Dag, node: &DagNode, slot: usize) -> Option<usize> {
     node.inputs
         .get(slot)
         .and_then(|id| dag.get(*id))
         .map(|source| source.output_type.dims.len())
+}
+
+/// Degrade an operand-derived mapping that does not fit the declared output
+/// rank to the operation's own rule.
+///
+/// The arms that read an operand's rank - the reductions, `Count`, the
+/// windowed pair, `OneHot`, `Gather`, and the scatter family - can disagree
+/// with the declared output rank only when the node is already malformed: a
+/// reduced axis past the operand's rank, a window arity above it, an absent
+/// operand. Each of those is an arity rule that `verify` and the evaluator
+/// already reject with their own diagnostic, so reporting cardinality here
+/// would replace a specific error with a vaguer one on a lane that used to
+/// give the specific one.
+///
+/// The cardinality check keeps its teeth where the defect is genuinely a
+/// missing flow: the operations whose own declared fields fix the source
+/// count (`Reshape`, `Permute`, `Pad`, `Shrink`, `Stride`) and the
+/// input-less nodes that declare a shape they cannot supply.
+fn or_op_computed(sources: Vec<AxisSource>, node: NodeId, rank: usize) -> Vec<AxisSource> {
+    if sources.len() == rank {
+        sources
+    } else {
+        op_computed(node, rank)
+    }
 }
 
 /// The source a typed [`RtDim`] carrier denotes.
@@ -242,19 +264,27 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         | RiscOp::ProdReduce { axis: reduced }
         | RiscOp::Argmax { axis: reduced }
         | RiscOp::Argmin { axis: reduced } => match input_rank(dag, node, 0) {
-            Some(operand_rank) => (0..operand_rank)
-                .filter(|axis| axis != reduced)
-                .map(|axis| pass_through(id, 0, axis))
-                .collect(),
+            Some(operand_rank) => or_op_computed(
+                (0..operand_rank)
+                    .filter(|axis| axis != reduced)
+                    .map(|axis| pass_through(id, 0, axis))
+                    .collect(),
+                id,
+                rank,
+            ),
             None => op_computed(id, rank),
         },
 
         // `Count` removes every axis it names; the kept axes stay in order.
         RiscOp::Count { axes } => match input_rank(dag, node, 0) {
-            Some(operand_rank) => (0..operand_rank)
-                .filter(|axis| !axes.contains(axis))
-                .map(|axis| pass_through(id, 0, axis))
-                .collect(),
+            Some(operand_rank) => or_op_computed(
+                (0..operand_rank)
+                    .filter(|axis| !axes.contains(axis))
+                    .map(|axis| pass_through(id, 0, axis))
+                    .collect(),
+                id,
+                rank,
+            ),
             None => op_computed(id, rank),
         },
 
@@ -264,15 +294,19 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         RiscOp::ReduceWindow { window_shape, .. } => match input_rank(dag, node, 0) {
             Some(operand_rank) => {
                 let leading = operand_rank.saturating_sub(window_shape.len());
-                (0..operand_rank)
-                    .map(|axis| {
-                        if axis < leading {
-                            pass_through(id, 0, axis)
-                        } else {
-                            AxisSource::OpComputed { op: id, axis }
-                        }
-                    })
-                    .collect()
+                or_op_computed(
+                    (0..operand_rank)
+                        .map(|axis| {
+                            if axis < leading {
+                                pass_through(id, 0, axis)
+                            } else {
+                                AxisSource::OpComputed { op: id, axis }
+                            }
+                        })
+                        .collect(),
+                    id,
+                    rank,
+                )
             }
             None => op_computed(id, rank),
         },
@@ -280,9 +314,13 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         // The adjoint's output is the forward INPUT's shape, which is its
         // own first operand.
         RiscOp::ReduceWindowGrad { .. } => match input_rank(dag, node, 0) {
-            Some(operand_rank) => (0..operand_rank)
-                .map(|axis| pass_through(id, 0, axis))
-                .collect(),
+            Some(operand_rank) => or_op_computed(
+                (0..operand_rank)
+                    .map(|axis| pass_through(id, 0, axis))
+                    .collect(),
+                id,
+                rank,
+            ),
             None => op_computed(id, rank),
         },
 
@@ -326,10 +364,14 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
 
         // `indices.dims ++ [vocab]`.
         RiscOp::OneHot { vocab } => match input_rank(dag, node, 0) {
-            Some(operand_rank) => (0..operand_rank)
-                .map(|axis| pass_through(id, 0, axis))
-                .chain(std::iter::once(literal(*vocab)))
-                .collect(),
+            Some(operand_rank) => or_op_computed(
+                (0..operand_rank)
+                    .map(|axis| pass_through(id, 0, axis))
+                    .chain(std::iter::once(literal(*vocab)))
+                    .collect(),
+                id,
+                rank,
+            ),
             None => op_computed(id, rank),
         },
 
@@ -391,11 +433,15 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         // (`spec/05` section 3.5): every output axis is an input axis of one
         // of the two operands.
         RiscOp::Gather { axis } => match (input_rank(dag, node, 0), input_rank(dag, node, 1)) {
-            (Some(values_rank), Some(indices_rank)) if *axis < values_rank => (0..*axis)
-                .map(|leading| pass_through(id, 0, leading))
-                .chain((0..indices_rank).map(|index| pass_through(id, 1, index)))
-                .chain((*axis + 1..values_rank).map(|trailing| pass_through(id, 0, trailing)))
-                .collect(),
+            (Some(values_rank), Some(indices_rank)) if *axis < values_rank => or_op_computed(
+                (0..*axis)
+                    .map(|leading| pass_through(id, 0, leading))
+                    .chain((0..indices_rank).map(|index| pass_through(id, 1, index)))
+                    .chain((*axis + 1..values_rank).map(|trailing| pass_through(id, 0, trailing)))
+                    .collect(),
+                id,
+                rank,
+            ),
             _ => op_computed(id, rank),
         },
 
@@ -403,9 +449,13 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         // output shape is the target's shape.
         RiscOp::ScatterAdd { .. } | RiscOp::Scatter { .. } | RiscOp::ScatterElements { .. } => {
             match input_rank(dag, node, 0) {
-                Some(target_rank) => (0..target_rank)
-                    .map(|axis| pass_through(id, 0, axis))
-                    .collect(),
+                Some(target_rank) => or_op_computed(
+                    (0..target_rank)
+                        .map(|axis| pass_through(id, 0, axis))
+                        .collect(),
+                    id,
+                    rank,
+                ),
                 None => op_computed(id, rank),
             }
         }
@@ -783,13 +833,13 @@ mod tests {
         };
 
         assert!(
-            check_node_axis_sources(&dag, node, &[one.clone()], Stage::Lowering).is_ok(),
+            check_node_axis_sources(&dag, node, std::slice::from_ref(&one), Stage::Lowering)
+                .is_ok(),
             "exactly one source per output axis is the accepted cardinality"
         );
 
-        let duplicated =
-            check_node_axis_sources(&dag, node, &[one.clone(), one], Stage::Lowering)
-                .expect_err("two sources for a rank 1 output must fail");
+        let duplicated = check_node_axis_sources(&dag, node, &[one.clone(), one], Stage::Lowering)
+            .expect_err("two sources for a rank 1 output must fail");
         assert!(duplicated.to_string().starts_with("unsupported: "));
         assert!(duplicated.to_string().contains("chelis#1277"));
 
@@ -903,9 +953,8 @@ mod tests {
                 "of a rank 1 tensor",
             ),
         ] {
-            let error =
-                check_node_axis_sources(&dag, node, &[source_vector], Stage::Lowering)
-                    .expect_err("an invalid InputAxis must fail");
+            let error = check_node_axis_sources(&dag, node, &[source_vector], Stage::Lowering)
+                .expect_err("an invalid InputAxis must fail");
             assert!(error.to_string().contains(needle), "{error}");
         }
     }

@@ -1871,6 +1871,13 @@ fn eval_tensor_internal<F>(
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
+    // chelis#1277 C4.1: eval is a production path, so the source check runs
+    // here too, before `bind_symbolic_dims` resolves any extent.
+    if let Err(unsupported) =
+        crate::axis_sources::check_axis_sources(dag, chelis_types::unsupported::Stage::Runtime)
+    {
+        return Err(unsupported.to_string());
+    }
     let mut path_random_counter = random_counter;
     let required_symbols = required_symbolic_dims(dag, live);
     let needs_symbolic_binding = !required_symbols.is_empty()
