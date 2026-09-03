@@ -396,8 +396,11 @@ const FAMILIES: &[Family] = &[
         dtype: "f32",
         call: "gather(e, idx, 0)",
         extra_params: ", idx: tensor[1, int32]",
-        declared_result: None,
-        wrong_result: None,
+        // Present so the mutation matrix can declare this family a settlement
+        // value and exercise those arms. The `RejectsUnresolved` arm does not
+        // read them, and the precondition skips this family for that reason.
+        declared_result: Some("tensor[3, 2, f32]"),
+        wrong_result: Some("tensor[9, 9, f32]"),
         members: &[
             "gather",
             "concat",
@@ -415,8 +418,9 @@ const FAMILIES: &[Family] = &[
         dtype: "f32",
         call: "to_csv(e)",
         extra_params: "",
-        declared_result: None,
-        wrong_result: None,
+        // As above: for the matrix, not for this family's own arm.
+        declared_result: Some("string"),
+        wrong_result: Some("int64"),
         members: &[
             "csv_cols",
             "csv_f64",
@@ -492,6 +496,18 @@ fn check(source: &str) -> Result<String, String> {
 
 fn collapse(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Does a diagnostic name an unresolved inference variable?
+///
+/// The number is allocation-order dependent and is deliberately not pinned: a
+/// rebase that shifts allocation must not turn a test red. This is the property
+/// that separates a route refusing the operand from one that considered its
+/// candidate forms and admitted neither.
+fn names_an_unresolved_variable(message: &str) -> bool {
+    message
+        .match_indices('?')
+        .any(|(at, _)| message[at + 1..].starts_with(|c: char| c.is_ascii_digit()))
 }
 
 fn declared(name: &str) -> TensorSettlement {
@@ -679,19 +695,43 @@ fn every_settlement_family_declared_result_binds() {
         .collect::<BTreeSet<_>>();
     let mut unprovable = Vec::new();
     for family in FAMILIES {
+        // Only the two arms that read a declared result have a precondition;
+        // `Freezes` and `RejectsUnresolved` probe the call directly and carry
+        // declared results solely so the mutation matrix can exercise the other
+        // arms on them.
+        if !matches!(
+            family.settlement,
+            TensorSettlement::Constrains | TensorSettlement::Propagates
+        ) {
+            continue;
+        }
         let (Some(declared_result), Some(wrong_result)) =
             (family.declared_result, family.wrong_result)
         else {
             continue;
         };
         let correct = check(&declared_result_program(family, declared_result));
+        if let Err(error) = &correct {
+            // A rejection naming an unresolved variable is not a misspelled
+            // probe. It is the call refusing the operand before considering its
+            // candidate forms, which is `RejectsUnresolved` and cannot be either
+            // settlement value. Saying that is the discrimination; saying
+            // "misspelled" would describe the fixture instead.
+            assert!(
+                !names_an_unresolved_variable(error),
+                "family `{}` refuses an unresolved operand, so it cannot be \
+                 {:?}: {error}",
+                family.name,
+                family.settlement
+            );
+        }
         assert!(
             correct.is_ok(),
             "family `{}`: its own declared result `{declared_result}` is \
              rejected, so the probe is misspelled rather than the family being \
              unprovable: {}",
             family.name,
-            correct.unwrap_err()
+            correct.clone().unwrap_err()
         );
         if check(&declared_result_program(family, wrong_result)).is_ok() {
             unprovable.push(family.name);
@@ -706,6 +746,42 @@ fn every_settlement_family_declared_result_binds() {
         "these families accept a wrong declared result, so their declared \
          result binds nothing and no probe of this shape can prove them. Each \
          must be named in UNDISCRIMINATED with that reason: {unnamed:?}"
+    );
+}
+
+/// The condition under which the `Freezes` arm's narrowed claim is safe.
+///
+/// That arm cannot separate a genuine freeze from a `Constrains` call whose own
+/// typing rule eliminates the insertion candidate, because both leave the
+/// operand on the replacement form and the arm reads only that. The narrowing
+/// is therefore honest but conditional, and this is the condition: no
+/// `Constrains` family's own probe call may be rejected by the freeze probe.
+///
+/// This is an assertion about the registry rather than a fourth assertion on
+/// the arm. It holds today, measured: `reshape(e, [6i64])` selects the
+/// insertion form and is accepted, as are `pad` and `stride` with rank-1
+/// argument lists. It fires the day a `Constrains` family whose call eliminates
+/// to the replacement form is added, and whoever adds it then inherits the
+/// decision with the evidence in front of them rather than a silent regression.
+#[test]
+fn no_constraining_family_is_rejected_by_the_freeze_probe() {
+    let mut exploits = Vec::new();
+    for family in FAMILIES {
+        if family.settlement != TensorSettlement::Constrains {
+            continue;
+        }
+        if let Err(error) = survives_the_call(family) {
+            exploits.push(format!("{} via `{}`: {error}", family.name, family.call));
+        }
+    }
+    assert!(
+        exploits.is_empty(),
+        "a constraining family whose call is rejected by the freeze probe is \
+         indistinguishable from a freezing one under the `Freezes` arm, so the \
+         arm's narrowed claim no longer holds. Either the family's probe call \
+         changes, or the arm needs the second producer its doc comment \
+         describes: {}",
+        exploits.join("; ")
     );
 }
 
@@ -725,8 +801,31 @@ fn every_settlement_family_declared_result_binds() {
 /// and it does not need to.
 ///
 /// The `Propagates` arm is the mirror and asserts the operand stayed at its
-/// freeze default. The two are mutually exclusive on the same program, which
-/// is what makes the mutation in either direction go red.
+/// freeze default, and additionally that the operand is still selectable after
+/// the call, which a freezing call destroys. The two are mutually exclusive on
+/// the same program, which is what makes the mutation in either direction go
+/// red.
+///
+/// **What the `Freezes` arm does not prove.** It asserts that a later
+/// insertion-form consumer is rejected. That follows from the operand resting
+/// on the replacement form, however it got there, so the arm does not separate
+/// a genuine freeze from a `Constrains` call whose own typing rule eliminates
+/// the insertion candidate and therefore lands on the same form. The witness is
+/// `reshape(e, [3i64])`: §4.7.3's element-count rule admits only the
+/// replacement form, and the freeze probe then rejects with
+/// "tensor rank mismatch: 2 dims vs 1 dims", byte-identical to `shape(e, 0)`.
+///
+/// A second producer per family would separate them, and it was measured
+/// working: with `expand(b, 0, 6i64)` on `tensor[1, f32]` both candidate forms
+/// hold six elements, so `reshape` cannot select and the program is accepted,
+/// while `shape` still freezes. It was not adopted because it is a `Family`
+/// change across all 21 families, with a producer authored per family, to
+/// repair an arm covering two rows of 152.
+///
+/// What makes the narrowed claim safe instead is
+/// [`no_constraining_family_is_rejected_by_the_freeze_probe`]: today no
+/// `Constrains` family's own call exploits the gap, and that test fires the day
+/// one is added, with this comment in front of whoever added it.
 #[test]
 fn each_family_representative_behaves_as_its_family_declares() {
     let named = UNDISCRIMINATED_FAMILIES
@@ -807,14 +906,8 @@ fn each_family_representative_behaves_as_its_family_declares() {
                     "{}: this family refuses an unresolved operand outright",
                     family.name
                 ));
-                // The message must name an unresolved inference variable. The
-                // number is allocation-order dependent and is deliberately not
-                // pinned: a rebase that shifts allocation must not turn this red.
-                let names_a_variable = error
-                    .match_indices('?')
-                    .any(|(at, _)| error[at + 1..].starts_with(|c: char| c.is_ascii_digit()));
                 assert!(
-                    names_a_variable,
+                    names_an_unresolved_variable(&error),
                     "{}: the rejection must name an unresolved variable, which \
                      is what distinguishes refusing the operand from admitting \
                      neither of its candidate forms; got {error}",
