@@ -627,9 +627,14 @@ fn check_literal_pattern(
             pat,
             errors,
             format!(
-                "{} literal pattern `{}` cannot match an `{}` scrutinee: a literal pattern \
-                 denotes only {} (integer to integer, float to float, boolean to `bool`, \
-                 string to `string`), so this arm could never match \
+                // No indefinite article before the dtype: the correct one is
+                // pronunciation-dependent rather than spelling-dependent
+                // ("an f32", "a bf16", "a bool"), so the phrasing avoids the
+                // choice instead of encoding a pronunciation table. It also
+                // matches the non-primitive arm above.
+                "{} literal pattern `{}` cannot match a scrutinee of type `{}`: a literal \
+                 pattern denotes only {} (integer to integer, float to float, boolean to \
+                 `bool`, string to `string`), so this arm could never match \
                  (spec/04-type-system.md [04-PAT-1], [04-LIT-1])",
                 atom.family(),
                 atom.rendered(),

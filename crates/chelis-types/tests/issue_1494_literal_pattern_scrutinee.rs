@@ -562,6 +562,44 @@ fn non_literal_patterns_are_untouched() {
     );
 }
 
+/// DISPOSITION LOCK. The family diagnostic names the scrutinee dtype the same
+/// way for every primitive it can report. Round 1 of the red team found it
+/// rendering "an `bool`" and "an `string`", because the article was a fixed
+/// `an ` and the correct choice is pronunciation-dependent rather than
+/// spelling-dependent ("an f32", "a bf16", "a bool"). The phrasing now carries
+/// no article at all, so this sweep is what keeps the whole class closed rather
+/// than the two witnesses that were reported.
+#[test]
+fn the_family_diagnostic_names_every_scrutinee_dtype_uniformly() {
+    for (scrutinee, sample, pattern, dtype) in [
+        ("bool", "true", "1", "bool"),
+        ("string", "\"a\"", "1", "string"),
+        ("int32", "2", "1.5", "int32"),
+        ("int8", "1i8", "1.5", "int8"),
+        ("f32", "2.0", "1", "f32"),
+        ("f64", "2.0f64", "1", "f64"),
+        ("bf16", "2.0bf16", "1", "bf16"),
+        ("f16", "2.0f16", "1", "f16"),
+    ] {
+        let message = sole_pattern_rejection(
+            &format!(
+                "def g(v: {scrutinee}) -> {scrutinee} = v\n\
+                 \n\
+                 r: int32 = match g({sample}) with {{\n\
+                 \x20 | {pattern} => 10\n\
+                 \x20 | _ => 20\n\
+                 }}\n"
+            ),
+            &format!("{pattern} pattern vs {scrutinee} scrutinee"),
+        );
+        assert!(
+            message.contains(&format!("cannot match a scrutinee of type `{dtype}`")),
+            "the diagnostic must name the {dtype} scrutinee in the one uniform \
+             phrasing, got {message}"
+        );
+    }
+}
+
 /// DISPOSITION LOCK. A `TypeMismatch` upstream of the match must not gain a
 /// second, invented [04-PAT-1] rejection off the failed scrutinee type. The
 /// check declines on an unresolved or already-failed scrutinee, so the root
