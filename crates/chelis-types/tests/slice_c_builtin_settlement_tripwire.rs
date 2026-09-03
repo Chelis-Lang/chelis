@@ -225,6 +225,10 @@ const FAMILIES: &[Family] = &[
         dtype: "f32",
         call: "reduce_window_sum(e, [2i64, 2i64], [1i64, 1i64])",
         extra_params: "",
+        // Same chelis#1512 artifact as the movement family above. With a
+        // resolved tensor[3, 2, f32] operand this declaration is REJECTED and
+        // tensor[2, 1, f32] is accepted, for all four members. After the repair
+        // this family's declared result becomes tensor[2, 1, f32].
         declared_result: Some("tensor[3, 2, f32]"),
         wrong_result: Some("tensor[9, 9, f32]"),
         members: &[
@@ -241,6 +245,15 @@ const FAMILIES: &[Family] = &[
         dtype: "f32",
         call: "permute(e, 1, 0)",
         extra_params: "",
+        // Accepted only because chelis#1512 skips `permute`'s own transpose
+        // rule while the operand is pending, unifying the declared result with
+        // the operand's type instead. The resolved control proves it: with a
+        // resolved tensor[3, 2, f32] operand this declaration is REJECTED and
+        // tensor[2, 3, f32] is accepted. When chelis#1512 is repaired this
+        // family's declared result becomes tensor[2, 3, f32]; a red here after
+        // that repair is the tripwire working, not a test to restore.
+        // pad and shrink share the defect: their resolved-correct results are
+        // tensor[5, 2, f32] and tensor[1, 1, f32].
         declared_result: Some("tensor[3, 2, f32]"),
         wrong_result: Some("tensor[9, 9, f32]"),
         members: &["permute", "pad", "shrink"],
