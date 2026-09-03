@@ -2395,6 +2395,24 @@ class ContractValidationTests(unittest.TestCase):
                 "ToEnd shrink end requires a zero start",
             ),
             (
+                Path("spec/05-risc-primitives.md"),
+                "is well formed only\nwhen the operand's extent at `axis` is 1",
+                "is well formed for any operand extent",
+                "expand same-rank form requires a unit source extent",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "the form is a claim that the operand's extent at `axis` is "
+                "1. A\nruntime operand extent at `axis` other than 1 under "
+                "the same-rank form fails\nthat claim's runtime extent guard "
+                "and traps `Domain`, placed and rendered per\n"
+                "`spec/04-type-system.md` §4.7 and [04-NUM-9].",
+                "the form makes no claim about the operand. A\n"
+                "runtime operand extent at `axis` other than 1 under the "
+                "same-rank form is accepted.",
+                "expand same-rank non-unit source extent traps Domain",
+            ),
+            (
                 Path("spec/06-transformations.md"),
                 "over these) is not batched",
                 "over these) is batched",

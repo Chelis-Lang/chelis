@@ -1491,14 +1491,15 @@ or access.
 
 For a positional three-argument call, a declared result tensor or the first
 shape-bearing consumer fixes which of the two shapes applies: a same-rank
-result replaces the extent at `axis`, while a result of rank `rank(x) + 1`
-inserts the new extent at `axis`. The result remains one monomorphic value
-while that choice is deferred; separate uses cannot choose different shapes
-for the same binding. If a shape-neutral consumer such as `cast` requires the
-tensor type before any shape-bearing context fixes it, an axis within the
-input rank selects the established same-rank replacement form. `axis ==
-rank(x)` has no replacement form and therefore selects trailing insertion.
-An axis greater than `rank(x)` is a type error.
+result sets the extent at `axis`, a form `spec/05-risc-primitives.md` §2.4.1
+admits only over a unit operand extent at `axis`, while a result of rank
+`rank(x) + 1` inserts the new extent at `axis`. The result remains one
+monomorphic value while that choice is deferred; separate uses cannot choose
+different shapes for the same binding. If a shape-neutral consumer such as
+`cast` requires the tensor type before any shape-bearing context fixes it, an
+axis within the input rank selects the established same-rank replacement
+form. `axis == rank(x)` has no replacement form and therefore selects
+trailing insertion. An axis greater than `rank(x)` is a type error.
 
 When no consumer in the complete program fixes the shape, the same default is
 materialized once every consumer in the complete program, a reusable library
