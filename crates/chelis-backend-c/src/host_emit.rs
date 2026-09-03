@@ -2601,10 +2601,12 @@ impl<'a> HostEmitter<'a> {
     /// [`HostEmitter::resolve_alias_key`] pass. Only heap-owning types are
     /// recorded, matching the `Var` arm: a scalar copy owns nothing.
     ///
-    /// Recording is right whether or not the argument was itself borrowed.
-    /// A fresh argument's temp has no outgoing edge, so the chain ends at a
-    /// variable this scope allocated and never tracked and `target` is still
-    /// claimed; a borrowed one reaches its owner and is not. Without this,
+    /// An unretained copy records provenance whether or not the argument was
+    /// itself borrowed. A fresh argument's temp has no outgoing edge, so the
+    /// chain ends at a variable this scope allocated and never tracked and
+    /// `target` is still claimed; a borrowed one reaches its owner and is not.
+    /// A retained destination instead owns its reference and must not also be
+    /// marked borrowed. Without this distinction,
     /// `b = debug(a)` freed `a`'s tensor twice -- the reported chelis#1222
     /// shape, through a builtin instead of a bare name.
     ///
@@ -2615,10 +2617,15 @@ impl<'a> HostEmitter<'a> {
     /// released at the block close like any other, and without the retain
     /// `b = { c = [1i64]  debug(c) }` released one allocation twice.
     fn record_pointer_copy(&mut self, target: &str, source: &str, arg: &HostExpr, ty: &HostType) {
-        if let HostExprKind::Var(name, _) = &arg.kind {
-            self.retain_transferred_result(target, name, ty);
-        }
-        if release_call(target, ty).is_some() {
+        let retained = if let HostExprKind::Var(name, _) = &arg.kind {
+            self.retain_transferred_result(target, name, ty)
+        } else {
+            false
+        };
+        // A retained pointer is an independently owned reference. Recording
+        // borrowed provenance as well would suppress its eventual release and
+        // strand the retain, the same split judgement assign_call avoids.
+        if !retained && release_call(target, ty).is_some() {
             self.record_alias(target, source);
         }
     }
@@ -2812,7 +2819,9 @@ impl<'a> HostEmitter<'a> {
     /// `__arg0 = p` feeding `chelis_tuple_get`) is neither class and is
     /// left alone: `chelis_tuple_get` does its own element retain and the
     /// binding's single release still balances its construction.
-    fn retain_transferred_result(&mut self, target: &str, source: &str, ty: &HostType) {
+    /// Returns whether it emitted a retain. A retained destination is an
+    /// independent owner, so callers must not also attach borrow provenance.
+    fn retain_transferred_result(&mut self, target: &str, source: &str, ty: &HostType) -> bool {
         let target_is_value_temp = self
             .let_scopes
             .iter()
@@ -2835,11 +2844,13 @@ impl<'a> HostEmitter<'a> {
             target_is_owned && source_is_binding
         };
         if !retains {
-            return;
+            return false;
         }
         if let Some(call) = retain_call(target, ty) {
             self.lines.push(format!("{}{call}", self.indent));
+            return true;
         }
+        false
     }
 
     fn emit_expr_to_var(
@@ -2948,12 +2959,16 @@ impl<'a> HostEmitter<'a> {
                     // the same mangled identifier its declaration used.
                     self.lines
                         .push(format!("{}{target} = {};", self.indent, c_ident(name)));
-                    self.retain_transferred_result(target, name, ty);
+                    let retained = self.retain_transferred_result(target, name, ty);
                     // chelis#1222: `target` now holds `name`'s pointer. Only
                     // a heap-owning type can be released twice, so only
                     // those are recorded -- and the link is to the key that
                     // currently means `name`, never to the spelling.
-                    if release_call(target, ty).is_some() {
+                    // Retaining gives `target` an independent owner whose
+                    // enclosing scope must release it. Preserve an alias edge
+                    // only for an unretained pointer copy; otherwise the
+                    // alias-aware cleanup would suppress that matching release.
+                    if !retained && release_call(target, ty).is_some() {
                         let source = self.resolve_alias_key(name);
                         self.record_alias(target, &source);
                     }

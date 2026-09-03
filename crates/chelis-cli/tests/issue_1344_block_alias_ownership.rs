@@ -301,9 +301,14 @@ fn fresh_binding_takes_no_alias_retain() {
          would leak once per call:\n{body}"
     );
     assert_eq!(
-        count_in(body, "chelis_string_release("),
+        count_in(body, "chelis_string_release(y);"),
         1,
         "the block releases its fresh binding exactly once:\n{body}"
+    );
+    assert_eq!(
+        count_in(body, "chelis_string_release("),
+        3,
+        "the owned literal arguments and the fresh binding are each released once:\n{body}"
     );
 }
 
@@ -362,10 +367,17 @@ fn binding_mediated_parameter_return_composes_exactly_once() {
          and must NOT add a call-escape compensation - that third retain \
          was the round-2 per-call leak:\n{g2_body}"
     );
+    for owner in ["out", "raw"] {
+        assert_eq!(
+            count_in(g2_body, &format!("chelis_string_release({owner});")),
+            1,
+            "the caller releases `{owner}` exactly once:\n{g2_body}"
+        );
+    }
     assert_eq!(
         count_in(g2_body, "chelis_string_release("),
-        2,
-        "the caller releases `out` and `raw` exactly once each:\n{g2_body}"
+        4,
+        "the two literal argument owners plus `out` and `raw` are each released once:\n{g2_body}"
     );
 }
 

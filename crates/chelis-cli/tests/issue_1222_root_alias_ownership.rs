@@ -17,15 +17,17 @@
 //! returns a captured top-level binding, and a `let` binding that copies a
 //! captured binding inside a compiled function body.
 //!
-//! Tensors abort in `chelis_tensor_release` because they carry no refcount; the
-//! refcounted containers instead take an unearned release, wrapping the
-//! count past zero into a use-after-free that does not announce itself.
+//! Every heap value, tensors included, now carries a strong count: an
+//! unearned release finalizes a live value early or drives the count past
+//! zero into a use-after-free that does not announce itself. The emitted-C
+//! counts below therefore pin releases against allocations PLUS retains, so
+//! a balanced retain/release pair cannot mask a second release of one owner.
 //! Both directions are covered.
 //!
 //! Oracle: each program is built to C, linked, and RUN, and the emitted-C
-//! assertions pin *why* it passes -- exactly one release per allocation --
-//! so a future change cannot restore the crash by making the value
-//! fresh-but-leaked.
+//! assertions pin *why* it passes -- releases equal allocations plus
+//! retains -- so a future change cannot restore the crash by making the
+//! value fresh-but-leaked or by dropping a retain.
 //!
 //! The tests do not all fail the same way before the fix, and it is worth
 //! being exact about which do what:
@@ -228,6 +230,7 @@ fn strip_span_comments(body: &str) -> String {
 fn ownership_calls(body: &str) -> Vec<(&'static str, usize)> {
     [
         "chelis_tensor_release(",
+        "chelis_tensor_retain(",
         "chelis_list_release(",
         "chelis_tuple_release(",
         "chelis_dict_release(",
@@ -566,9 +569,16 @@ fn block_result_aliasing_an_outer_binding_claims_no_second_allocation() {
     let (stdout, emitted) = build_run_and_emit(source, "alias_block_result");
     assert_eq!(release_count(&emitted, "chelis_tensor_from_values("), 1);
     assert_eq!(
-        release_count(&emitted, "chelis_tensor_release("),
+        release_count(&emitted, "chelis_tensor_retain("),
         2,
-        "the block hands back `a`: one paired transfer release plus the one owner release:\n{}",
+        "the block hands back `a` through one value-temp retain and one result-owner retain:\n{}",
+        emitted_main(&emitted)
+    );
+    assert_eq!(
+        release_count(&emitted, "chelis_tensor_release("),
+        3,
+        "one allocation plus two retained owners requires three releases; fewer \
+         strands an owner and more restores the double release:\n{}",
         emitted_main(&emitted)
     );
     assert_line_matches_eval(source, "alias_block_result", &stdout, "b");
@@ -699,6 +709,12 @@ fn nested_block_shadowing_a_binding_name_does_not_reclaim_it_twice() {
     // Two allocations (the outer tensor and the shadowing inner one), plus
     // one retain/release pair for the inner block transfer.
     assert_eq!(release_count(&emitted, "chelis_tensor_from_values("), 2);
+    assert_eq!(
+        release_count(&emitted, "chelis_tensor_retain("),
+        1,
+        "the inner block transfers its allocation through exactly one retain:\n{}",
+        emitted_main(&emitted)
+    );
     assert_eq!(
         release_count(&emitted, "chelis_tensor_release("),
         3,
@@ -973,6 +989,12 @@ fn a_root_spelled_like_a_binder_key_is_freed_once() {
                     c = zzq_root\n";
     let (_stdout, emitted) = build_run_and_emit(colliding, "binder_key_root");
     assert_eq!(release_count(&emitted, "chelis_tensor_from_values("), 2);
+    assert_eq!(
+        release_count(&emitted, "chelis_tensor_retain("),
+        1,
+        "the inner block transfers its allocation through exactly one retain:\n{}",
+        emitted_main(&emitted)
+    );
     assert_eq!(
         release_count(&emitted, "chelis_tensor_release("),
         3,
