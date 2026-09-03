@@ -563,22 +563,6 @@ impl Env {
         (ty, tvar_mapping)
     }
 
-    /// Instantiate a scheme and return the fresh dimension variable minted for
-    /// each quantified dim variable, in quantifier order (chelis#260).
-    ///
-    /// The dim analogue of [`Self::instantiate_with_tvar_mapping`]. Declared
-    /// dim diagnostics run against the instantiated signature, so they need
-    /// this hop to get back to the names the source wrote.
-    pub(crate) fn instantiate_with_dvar_mapping(
-        &self,
-        scheme: &Scheme,
-        var_gen: &mut VarGen,
-        inference_subst: &Subst,
-    ) -> (Type, Vec<(DimVar, DimVar)>) {
-        let (ty, _, dvar_mapping) = self.instantiate_scheme(scheme, var_gen, inference_subst);
-        (ty, dvar_mapping)
-    }
-
     /// The one instantiation mechanism (chelis#260 / chelis#1292).
     ///
     /// Every quantifier is renamed here and nowhere else, so the two jobs the
@@ -1070,10 +1054,11 @@ mod tests {
         }
     }
 
-    /// chelis#260: `instantiate_with_dvar_mapping` replaced a plain
-    /// `instantiate` call at the annotated-def site. It must therefore mint
-    /// the SAME variables in the SAME order, or the substitution the checker
-    /// runs on would change and this diagnostic-only fix would perturb
+    /// chelis#260: `instantiate_scheme` replaced a plain `instantiate` call
+    /// at the annotated-def site — first for the dim mapping (Site 1) and
+    /// then for the type mapping too (Site 2). It must therefore mint the
+    /// SAME variables in the SAME order, or the substitution the checker runs
+    /// on would change and these diagnostic-only fixes would perturb
     /// inference. Locking the equivalence rather than assuming it.
     ///
     /// The scheme carries a chelis#1292 restriction, so this also pins that
@@ -1090,8 +1075,8 @@ mod tests {
 
         let mapped_subst = Subst::new();
         let mut mapped_gen = VarGen::default();
-        let (mapped, mapping) =
-            env.instantiate_with_dvar_mapping(&scheme, &mut mapped_gen, &mapped_subst);
+        let (mapped, _tvar_mapping, mapping) =
+            env.instantiate_scheme(&scheme, &mut mapped_gen, &mapped_subst);
 
         assert_eq!(
             plain, mapped,
@@ -1150,7 +1135,7 @@ mod tests {
             env.instantiate_with_tvar_mapping(&scheme, var_gen, subst);
         });
         let via_dvar_mapping = restrictions_after(&|subst, var_gen| {
-            env.instantiate_with_dvar_mapping(&scheme, var_gen, subst);
+            env.instantiate_scheme(&scheme, var_gen, subst);
         });
 
         assert_eq!(

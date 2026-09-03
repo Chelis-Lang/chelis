@@ -1785,9 +1785,7 @@ pub(super) fn collect_declarations(
                     errors,
                 );
                 let installed = match &resolved {
-                    Ok(resolved) => {
-                        install_declared_bounds(&resolved.bounds, subst, name, errors)
-                    }
+                    Ok(resolved) => install_declared_bounds(&resolved.bounds, subst, name, errors),
                     Err(_) => Ok(()),
                 };
                 subst.leave_level(signature_level, vg);
