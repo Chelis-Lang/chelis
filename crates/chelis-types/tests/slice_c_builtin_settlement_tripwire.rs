@@ -992,4 +992,13 @@ fn to_list_accepts_the_insertion_consumer_until_chelis_1512_is_repaired() {
             )
         }
     }
+    // The control: the rule already rejects a RESOLVED rank-2 operand, so a red
+    // above is that rule reaching a pending operand rather than an inference.
+    let resolved = check("def f(a: tensor[3, 2, f32]) -> int32 = {\n  u = to_list(a)\n  0\n}\n");
+    assert!(
+        matches!(&resolved, Err(error) if error.contains("rank-1 tensor")),
+        "control: `to_list` must already reject a resolved rank-2 operand with \
+         its own rank rule, so a red above is that rule reaching a pending \
+         operand rather than an inference; got {resolved:?}"
+    );
 }
