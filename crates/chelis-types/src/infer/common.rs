@@ -623,8 +623,26 @@ pub(super) fn infer_diagonal_result_type(
             dims.len()
         ));
     }
+    // chelis#1355 / [05-OP-33]: `diagonal` "replaces the retained first axis
+    // extent with the smaller selected extent". Declare that minimum wherever it
+    // is statically known; a wildcard admits every declared extent, which is how
+    // a return type the runtime cannot produce was still type-checking.
+    //
+    // Two literal extents: the minimum is the smaller value, and the former
+    // equal-literals case is subsumed by `min`.
+    //
+    // Two occurrences of one named extent: they denote a single runtime value
+    // (`spec/04-type-system.md` §4.1, two `d-name` unify only when equal), so the
+    // minimum is that name. `tensor[hidden, hidden]` diagonalises to
+    // `tensor[hidden]`, not to a wildcard that also admits `tensor[width]` and
+    // `tensor[3]`.
+    //
+    // Everything else keeps the wildcard - distinct names, a mixed
+    // literal/symbolic pair, a dimension variable, a rank spread - because there
+    // the minimum genuinely is not known at check time.
     let diag_dim = match (&dims[axis1], &dims[axis2]) {
-        (Dim::Lit(lhs), Dim::Lit(rhs)) if lhs == rhs => Dim::Lit(*lhs),
+        (Dim::Lit(lhs), Dim::Lit(rhs)) => Dim::Lit(*lhs.min(rhs)),
+        (Dim::Name(lhs), Dim::Name(rhs)) if lhs == rhs => Dim::Name(lhs.clone()),
         _ => Dim::Wildcard,
     };
     let mut out_dims = Vec::with_capacity(dims.len() - 1);
