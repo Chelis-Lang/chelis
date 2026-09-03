@@ -13,8 +13,22 @@
 //! types its own result from the fixed form and does not publish an
 //! unresolved candidate as its checked result type."
 //!
-//! These are regression tests. On `6b60742cd` every accepting row below
-//! publishes `(t-var ...)` into the checked program with an empty error list.
+//! Evidentiary status is per row, and it was established by execution: the two
+//! source files were reverted to `6b60742cd` and the file rerun.
+//!
+//! Five rows are regression tests and fail on that base. The filed reproducer,
+//! the single-pending-operand row, and the contraction row all publish
+//! `(t-var ...)` into the checked program with an empty error list, and the
+//! two rejecting rows accept a program `matmul` admits no operand form of.
+//!
+//! Two rows are disposition locks and pass on that base.
+//! `a_declared_result_still_selects_without_the_rank_rule` passes because a
+//! declared result already reached the settlement transaction through
+//! `bind_tvar`, which is what shows the machinery was present and only the
+//! early return was in the way.
+//! `residual_a_rank_two_input_leaves_both_candidates_and_still_escapes` passes
+//! because it asserts the escape rather than its absence; it records a defect
+//! this change does not close.
 
 use chelis_deep::printer::print_canonical;
 use chelis_surf::desugar::desugar_program;
