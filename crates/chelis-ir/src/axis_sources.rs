@@ -291,9 +291,16 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         // The leading axes pass through; each windowed axis has extent
         // `floor((input - window) / stride) + 1`, a value the operation
         // computes (`spec/05` section 2.3.1).
+        //
+        // The window arity above the operand's rank is a malformed node, and
+        // it takes the fallback arm rather than a saturating fold. Clamping
+        // `operand_rank - window_shape.len()` to zero would be a silent
+        // saturation in the IR, which is chelis#888's class and which the
+        // runtime-representation inventory records as deletion debt; the
+        // explicit guard is behaviorally identical and adds no seam.
         RiscOp::ReduceWindow { window_shape, .. } => match input_rank(dag, node, 0) {
-            Some(operand_rank) => {
-                let leading = operand_rank.saturating_sub(window_shape.len());
+            Some(operand_rank) if window_shape.len() <= operand_rank => {
+                let leading = operand_rank - window_shape.len();
                 or_op_computed(
                     (0..operand_rank)
                         .map(|axis| {
@@ -308,7 +315,7 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
                     rank,
                 )
             }
-            None => op_computed(id, rank),
+            _ => op_computed(id, rank),
         },
 
         // The adjoint's output is the forward INPUT's shape, which is its
