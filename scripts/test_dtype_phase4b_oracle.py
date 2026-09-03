@@ -2402,8 +2402,13 @@ class ContractValidationTests(unittest.TestCase):
             ),
             (
                 Path("spec/05-risc-primitives.md"),
-                "other than 1 under the same-rank\nform traps `Domain` under `expand`",
-                "other than 1 under the same-rank\nform is accepted",
+                "the form is a claim that the operand's extent at `axis` is "
+                "1. A\nruntime operand extent at `axis` other than 1 under "
+                "the same-rank form fails\nthat claim's runtime extent guard "
+                "and traps `Domain`",
+                "the form makes no claim about the operand. A\n"
+                "runtime operand extent at `axis` other than 1 under the "
+                "same-rank form is accepted",
                 "expand same-rank non-unit source extent traps Domain",
             ),
             (

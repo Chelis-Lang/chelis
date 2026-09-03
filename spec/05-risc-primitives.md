@@ -770,10 +770,10 @@ plus `ToEnd` for a `shrink` end.
 
 `expand`'s same-rank form sets the extent at `axis` and is well formed only
 when the operand's extent at `axis` is 1 (the size-1 broadcast of §2.4's
-table). A runtime operand extent at `axis` other than 1 under the same-rank
-form traps `Domain` under `expand`, rendered per `spec/04-type-system.md`
-§4.7 and [04-NUM-9], before any allocation or access whose shape depends on
-the result.
+table); the form is a claim that the operand's extent at `axis` is 1. A
+runtime operand extent at `axis` other than 1 under the same-rank form fails
+that claim's runtime extent guard and traps `Domain`, placed and rendered per
+`spec/04-type-system.md` §4.7 and [04-NUM-9].
 
 Runtime bounds are validated in every execution mode with matching language
 errors: a negative bound, a shrink range overshoot, a non-positive stride

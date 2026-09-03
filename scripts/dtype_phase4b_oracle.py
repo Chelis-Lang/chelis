@@ -2558,7 +2558,10 @@ def validate_normative_contract(
                 "expand same-rank form requires a unit source extent",
             ),
             (
-                "other than 1 under the same-rank\nform traps `Domain` under `expand`",
+                "the form is a claim that the operand's extent at `axis` is "
+                "1. A\nruntime operand extent at `axis` other than 1 under "
+                "the same-rank form fails\nthat claim's runtime extent guard "
+                "and traps `Domain`",
                 "expand same-rank non-unit source extent traps Domain",
             ),
             (
