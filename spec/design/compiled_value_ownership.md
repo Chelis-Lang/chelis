@@ -1,9 +1,9 @@
 # Compiled Value Ownership
 
 **Status:** Design freeze and source/FFI ownership-contract freeze for [#1286].
-Phase 0's executable detectors are implemented and enforced by the dedicated
-`compiled-value-ownership-phase0-oracle` CI job. Phases 1 through 4 remain
-unimplemented.
+Phase 0's detector baseline and Phase 1's unified heap/ABI cutover are
+implemented. The stable `compiled-value-ownership-phase0-oracle` CI job now
+enforces the Phase 1 oracle. Phases 2 through 4 remain unimplemented.
 
 **Owning specs:** `spec/04-type-system.md` [04-LIN-1..8],
 `spec/05-risc-primitives.md` [05-OP-31..33] and [05-OP-44] with the four
