@@ -425,11 +425,14 @@ pub enum TensorSettlement {
     /// Probe the right slot. On the six list routes (`map`, `filter`,
     /// `flat_map`, `partition`, `fold`, `scan`) the data slot is the LAST
     /// argument. A first-position probe lands in the callback slot instead,
-    /// where the rejection reads `expand expects tensor output, got (?350) ->
-    /// ?351` and names an unresolved variable, which flips the very
-    /// discriminator that separates this disposition from
-    /// [`Self::RejectsUnresolved`]. At the correct slot the same route rejects
-    /// with `expand expects tensor output, got List f32`, a concrete type.
+    /// where the rejection reads `expand expects tensor output, got (?a) -> ?b`
+    /// and names an unresolved variable, which flips the very discriminator
+    /// that separates this disposition from [`Self::RejectsUnresolved`]. At the
+    /// correct slot the same route rejects with `expand expects tensor output,
+    /// got List f32`, a concrete type. The `?a` and `?b` stand for whatever
+    /// inference variables the run allocates; the numbers are allocation-order
+    /// dependent and are deliberately not pinned anywhere, so quoting them here
+    /// would go stale on a rebase without anything going red.
     NoTensorOperand,
     /// The call supplies an independently fixed rank or shape equation and
     /// selects the unique candidate satisfying it (§4.7.2 `Constrain`).
