@@ -4767,7 +4767,62 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!("{}}}", self.indent));
     }
 
+    /// chelis#1484: the host-value lane's runtime operand-agreement guard for
+    /// binary elementwise ops, and the sibling of `emit.rs`'s
+    /// `emit_elementwise_operand_guard` (chelis#664, chelis#668).
+    ///
+    /// The emitters below allocate the result at the LHS rank and then read
+    /// every operand through the TARGET's index vector applied to that
+    /// operand's strides. An operand whose runtime rank or shape disagrees is
+    /// therefore read partially or out of bounds, SILENTLY, where the
+    /// evaluator rejects with "tensor shapes must match for elementwise op".
+    /// An elementwise call one of whose operands carries an IO effect is
+    /// lowered here rather than through the tensor DAG, so before this guard
+    /// existed such a call reached codegen with no operand comparison in
+    /// either lane.
+    ///
+    /// Scope, and the reason it is not simply "ranks must be equal":
+    /// `spec/05-risc-primitives.md` §1.2 forbids implicit rank extension, so
+    /// two positive ranks that differ are always a defect and abort. A rank-0
+    /// operand is the backend's own scalar-input representation, not source
+    /// broadcasting, and keeps its established meaning. At equal positive
+    /// rank the shapes are compared axis by axis, which is what §2.4 already
+    /// requires of the tensor-DAG lane.
+    ///
+    /// The message wording is the DAG guard's, so one grep over the emitted C
+    /// finds either lane; the emitted result and operand variable names
+    /// locate the site inside a generated translation unit.
+    fn emit_elementwise_operand_guard(&mut self, target: &str, lhs: &str, rhs: &str) {
+        let ind = &self.indent;
+        self.lines.push(format!(
+            "{ind}if ({lhs}->rank > 0 && {rhs}->rank > 0 && {lhs}->rank != {rhs}->rank) {{"
+        ));
+        self.lines.push(format!(
+            "{ind}    fprintf(stderr, \"chelis: elementwise operand rank mismatch at host \
+             value {target} ({lhs} vs {rhs}): %d vs %d\\n\", {lhs}->rank, {rhs}->rank);"
+        ));
+        self.lines.push(format!("{ind}    abort();"));
+        self.lines.push(format!("{ind}}}"));
+        self.lines
+            .push(format!("{ind}if ({lhs}->rank == {rhs}->rank) {{"));
+        self.lines.push(format!(
+            "{ind}    for (int __axis = 0; __axis < {lhs}->rank; __axis++) {{"
+        ));
+        self.lines.push(format!(
+            "{ind}        if ({lhs}->shape[__axis] != {rhs}->shape[__axis]) {{"
+        ));
+        self.lines.push(format!(
+            "{ind}            fprintf(stderr, \"chelis: elementwise operand shape mismatch \
+             at host value {target} ({lhs} vs {rhs}) axis %d\\n\", __axis);"
+        ));
+        self.lines.push(format!("{ind}            abort();"));
+        self.lines.push(format!("{ind}        }}"));
+        self.lines.push(format!("{ind}    }}"));
+        self.lines.push(format!("{ind}}}"));
+    }
+
     fn assign_tensor_binary_elementwise(&mut self, target: &str, lhs: &str, rhs: &str, op: &str) {
+        self.emit_elementwise_operand_guard(target, lhs, rhs);
         self.lines.push(format!(
             "{}{target} = chelis_alloc({lhs}->rank, {lhs}->shape, {lhs}->dtype);",
             self.indent
@@ -4788,6 +4843,7 @@ impl<'a> HostEmitter<'a> {
         rhs: &str,
         func: BinaryElementwiseFunc,
     ) {
+        self.emit_elementwise_operand_guard(target, lhs, rhs);
         self.lines.push(format!(
             "{}{target} = chelis_alloc({lhs}->rank, {lhs}->shape, {lhs}->dtype);",
             self.indent

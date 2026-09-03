@@ -1238,6 +1238,27 @@ fn sibling_sweep_no_bf16_f16_panic_in_production_emit() {
     }
 }
 
+/// chelis#1484 REGRESSION TEST (source contract): red before, green after.
+/// The issue and `spec/design/checker_totality.md` PP5 both cite
+/// `grep -c 'rank mismatch' crates/chelis-backend-c/src/host_emit.rs`
+/// returning 0 as the shape of the gap. This locks the grep, so a later
+/// refactor cannot delete the host-lane guard and leave the doc's claim
+/// standing. The behavioral proof is `exec_compile`'s `host_lane_*` tests
+/// and `chelis-cli`'s `issue_1484_host_lane_rank_guard`; this assertion
+/// only pins that the string the doc cites is present.
+#[test]
+fn sibling_sweep_host_emit_carries_the_elementwise_rank_guard() {
+    let host = read_host_emit_src();
+    assert!(
+        host.contains("elementwise operand rank mismatch"),
+        "host_emit.rs must emit the chelis#1484 positive-rank operand guard;          a regression has removed it"
+    );
+    assert!(
+        host.contains("elementwise operand shape mismatch"),
+        "host_emit.rs must emit the chelis#1484 equal-rank operand shape guard;          a regression has removed it"
+    );
+}
+
 /// Em-dash sibling sweep. Per CLAUDE.md §8.6 and the lint-rule history
 /// (`feedback_em_dash_in_test_strings`), em dashes in user-facing
 /// string literals trip the lint gate. Em dashes inside Rust comments
