@@ -819,3 +819,62 @@ fn dropping_a_stamped_name_changes_the_derived_classes() {
         claims(&after),
     );
 }
+
+// ---------------------------------------------------------------------------
+// An axis SIZED BY the claim is not a witness of it.
+//
+// A `Const` declares a shape it does not compute: its named dimension is
+// supplied by whatever the class resolves to. `declared_shape_sources` said as
+// much in prose before there was a kind for it - "supplied by the equality
+// class that name groups, which is the operation's own extent as far as this
+// derivation is concerned" - and returned `OpComputed` only because
+// `AxisSource` had no claim-supplied variant. Guarding such an axis against
+// the class's canonical member would compare a value with itself.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_const_sized_by_its_claim_is_neither_a_member_nor_a_class() {
+    let mut dag = Dag::new();
+    let x = f32_load(&mut dag, "x", vec![named("n")]);
+    let fill = dag.add_node(
+        RiscOp::synth_const(Prim::F32, 0.0),
+        vec![],
+        ty(vec![named("n")], Prim::F32),
+        None,
+    );
+    let sum = dag.add_node(
+        RiscOp::Add,
+        vec![x, fill],
+        ty(vec![named("n")], Prim::F32),
+        None,
+    );
+    dag.add_root(sum);
+
+    let classes = derive_runtime_dim_classes(&dag);
+    assert!(
+        classes.is_empty(),
+        "the Load declares `n` and the Const consumes it, so there is nothing \
+         to guard: {:?}",
+        claims(&classes),
+    );
+}
+
+/// The discriminating twin: the `Const`'s axis carries the claim-supplied
+/// source kind rather than `OpComputed`, so the rule above is decided on the
+/// SOURCE and not by a second list of operations. Without this, an
+/// implementation that excluded `Const` by matching the op would pass the row
+/// above while leaving "what is a witness" decided in two places.
+#[test]
+fn a_const_named_axis_reports_the_claim_supplied_source_kind() {
+    let mut dag = Dag::new();
+    let fill = dag.add_node(
+        RiscOp::synth_const(Prim::F32, 0.0),
+        vec![],
+        ty(vec![named("n")], Prim::F32),
+        None,
+    );
+    assert_eq!(
+        chelis_ir::axis_sources::output_axis_sources(&dag, fill),
+        vec![AxisSource::ClassSupplied { op: fill, axis: 0 }],
+    );
+}

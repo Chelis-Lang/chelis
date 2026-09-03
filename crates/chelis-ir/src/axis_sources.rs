@@ -64,6 +64,18 @@ pub enum AxisSource {
     /// The operation computes this extent by its own output-shape rule, so
     /// it is a fresh extent rather than any input's runtime dimension.
     OpComputed { op: NodeId, axis: usize },
+    /// The extent is supplied BY the claim this axis carries, rather than
+    /// determined by the operation: a `Const`'s declared named dimension, or
+    /// a chelis#616 sibling-shaped fill, is sized by whatever the class
+    /// resolves to.
+    ///
+    /// This kind exists because the axis is neither a witness of its claim
+    /// nor a fresh extent. Guarding it against the class's canonical member
+    /// would compare a value with itself, and calling it `OpComputed` says
+    /// the operation decided an extent it actually consumed - which is what
+    /// [`declared_shape_sources`] meant by "as far as this derivation is
+    /// concerned" before there was a kind for it.
+    ClassSupplied { op: NodeId, axis: usize },
 }
 
 /// An anonymous output dimension is not a referenceable symbol: nothing
@@ -199,7 +211,7 @@ fn declared_shape_sources(dag: &Dag, node: &DagNode) -> Vec<AxisSource> {
         .filter_map(|(axis, dim)| match dim {
             DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => Some(literal(*value)),
             DimInfo::Named(name, None) if !is_anonymous(name) || sibling_shaped => {
-                Some(AxisSource::OpComputed { op: node.id, axis })
+                Some(AxisSource::ClassSupplied { op: node.id, axis })
             }
             DimInfo::Named(_, None) => None,
         })
@@ -675,7 +687,12 @@ pub(crate) fn check_node_axis_sources(
                     ));
                 }
             }
-            AxisSource::OpComputed { op, axis: computed } => {
+            // `ClassSupplied` carries the same self-reference contract as
+            // `OpComputed`: both name this node and this axis, and differ
+            // only in whether the operation decided the extent or consumed
+            // one the claim supplies.
+            AxisSource::OpComputed { op, axis: computed }
+            | AxisSource::ClassSupplied { op, axis: computed } => {
                 if *op != node.id || *computed != axis {
                     return Err(receipt(
                         format!(
@@ -837,7 +854,16 @@ fn axis_claim(dim: &DimInfo) -> Option<DimClaim> {
 fn sets_axis(op: &RiscOp, axis: usize) -> bool {
     match op {
         RiscOp::Expand { axis: set, .. } => axis == *set,
-        RiscOp::Reshape { .. } => true,
+        // A `Reshape` target mints a fresh extent only when it computes one.
+        // C4.2 lists the four target carriers, and C2.4 says a reshape-only
+        // `Sym` target "keeps binding to its class's canonical value exactly
+        // as it does today" - it RESTATES a symbol declared elsewhere rather
+        // than declaring one, so it is no more a witness than a passed-through
+        // axis. A `Lit` target is static and equally not a witness.
+        RiscOp::Reshape { new_shape } => matches!(
+            new_shape.get(axis),
+            Some(RtDim::Node(_) | RtDim::InputAxis { .. })
+        ),
         _ => false,
     }
 }
@@ -865,8 +891,88 @@ fn is_member(op: &RiscOp, axis: usize, claim: &DimClaim, source: &AxisSource) ->
             DimClaim::Literal(claimed) if i64::try_from(*claimed) == Ok(*value)
         ),
         AxisSource::ExternalAxis { .. } => matches!(claim, DimClaim::Name(_)),
+        // Sized by the claim, so there is nothing to compare it against.
+        AxisSource::ClassSupplied { .. } => false,
         _ => true,
     }
+}
+
+/// Every stamped claim witness in `dag`, before the guard rule filters it.
+///
+/// [`derive_runtime_dim_classes`] is this list filtered to the claims that owe
+/// a guard. Consumers that need the DECLARATION rather than the guard - the C
+/// prologue's `int64_t n = inputs[s]->shape[a];`, `symbolic_params`, and
+/// `bind_symbolic_dims`' exemption - need the unfiltered list, because a claim
+/// with one witness still has to be declared even though it has nothing to
+/// disagree with.
+///
+/// Unlike [`derive_runtime_dim_classes`] this keeps a name whose extent is
+/// already statically bound, since the legacy occurrence pass distinguishes
+/// `Named(n, None)` from `Named(n, Some(k))` and the C prologue declares only
+/// the former.
+pub fn derive_dim_witnesses(dag: &Dag) -> Vec<RuntimeDimClass> {
+    let mut grouped: Vec<(DimClaim, Vec<OrderedMember>)> = Vec::new();
+    for node in dag.nodes() {
+        let sources = output_axis_sources(dag, node.id);
+        for (axis, dim) in node.output_type.dims.iter().enumerate() {
+            let DimInfo::Named(name, None) = dim else {
+                continue;
+            };
+            if is_anonymous(name) {
+                continue;
+            }
+            let Some(source) = sources.get(axis) else {
+                continue;
+            };
+            // A pass-through axis is not a witness: its extent IS the input's,
+            // so it neither declares nor disagrees. Same rule as `is_member`;
+            // the two derivations differ only in the guard filter and in
+            // whether a statically bound name counts.
+            if matches!(source, AxisSource::InputAxis { .. }) && !sets_axis(&node.op, axis) {
+                continue;
+            }
+            // An axis sized BY the claim consumes it rather than witnessing
+            // it, so it is neither a declaration site nor a guard site. The
+            // rule is on the SOURCE kind, so "what is a witness" is decided in
+            // one place rather than by a second list of operations.
+            if matches!(source, AxisSource::ClassSupplied { .. }) {
+                continue;
+            }
+            let claim = DimClaim::Name(name.clone());
+            let entry = OrderedMember {
+                slot: match source {
+                    AxisSource::ExternalAxis { load, .. } => abi_input_slot(dag, *load),
+                    _ => None,
+                },
+                node: node.id.0,
+                member: ClassMember {
+                    node: node.id,
+                    axis,
+                    source: source.clone(),
+                },
+            };
+            match grouped.iter_mut().find(|(existing, _)| *existing == claim) {
+                Some((_, members)) => members.push(entry),
+                None => grouped.push((claim, vec![entry])),
+            }
+        }
+    }
+    let mut out: Vec<(OrderKey, RuntimeDimClass)> = grouped
+        .into_iter()
+        .map(|(claim, mut members)| {
+            members.sort_by_key(OrderedMember::key);
+            let order = members[0].key();
+            (
+                order,
+                RuntimeDimClass {
+                    claim,
+                    members: members.into_iter().map(|entry| entry.member).collect(),
+                },
+            )
+        })
+        .collect();
+    out.sort_by_key(|(order, _)| *order);
+    out.into_iter().map(|(_, class)| class).collect()
 }
 
 /// The equality classes of `dag`, in guard-evaluation order.
@@ -1202,8 +1308,8 @@ mod tests {
         dag.add_shape_dep(mask, sibling);
         assert_eq!(
             output_axis_sources(&dag, mask),
-            vec![AxisSource::OpComputed { op: mask, axis: 0 }],
-            "the recorded sibling relation supplies the axis"
+            vec![AxisSource::ClassSupplied { op: mask, axis: 0 }],
+            "the recorded sibling relation SUPPLIES the axis, so it is              class-supplied rather than computed by this node"
         );
     }
 
