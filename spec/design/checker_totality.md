@@ -3,7 +3,8 @@
 **Status:** Phases 0-3 and PP1-PP4 are delivered. PP5 is partial: it delivers
 the four results listed in its own section, three under [#668] and the C
 host-value lane's operand guard under [#1484], and makes no claim beyond
-them. PR [#1406] delivered the
+them. PP6 is decided in its own section and not delivered; its three
+issues remain open until its oracle is green. PR [#1406] delivered the
 separately owned [#1247] kinded nominal-application residue; the bounded
 [#1125] nominal-rank ingress repair and [#1134] forward-reference parity are
 also delivered residue rather than additional phases. Phase 3 first shipped
@@ -1421,6 +1422,325 @@ The first is the oracle for R1 and R2, the second for R3, and the last two for
 R4. None of them covers the operations named above, and the last two are about
 generated C, not about a checker verdict.
 
+### PP6. Schedule and header honesty ([#1486], [#1487], [#1485]; closes [#1134])
+
+**Opened 2026-09-03; decided below, not delivered.** PR [#1457] delivered
+[04-INF-4] and recorded three defects as ratcheted residue. They share one
+mechanism: the checker lets a top-level reference observe a declaration
+before that declaration's own body has been checked, or fails to see that a
+reference will run while a value is being initialized. Each was confirmed
+from the code and, where the prebuilt binary predating [#1457] could reach
+it, by execution; the PP6 pull request body carries the probe transcript.
+
+- [#1486], a compiled wrong answer. `def f(n: int32) = add(1, n)` desugars
+  to a `defsig` whose result slot is `(t-var {} _)`
+  (`crates/chelis-surf/src/desugar.rs`, the `None => node(DeepTag::TVar,
+  vec![sym("_")])` arms of the synthesized signature). At
+  `TypeUseSite::Defsig` the resolver mints a fresh variable for `_`
+  (`crates/chelis-types/src/deep_type.rs`, `resolve_type_var`: `if name ==
+  "_" { ... self.vg.fresh_tvar() }`), and `collect_declarations`
+  (`crates/chelis-types/src/infer/common.rs`, the `DeepTag::Defsig` arm)
+  resolves the signature inside `subst.enter_level`, leaves the level, and
+  calls `env.generalize(&ty, subst)`, which quantifies every variable minted
+  above the current level, the hole included: the header becomes
+  `forall a. (int32) -> a`. `infer_top_level` later instantiates that scheme
+  for the body, unifies the body against the instance, and rebinds the name
+  to the narrowed, regeneralized result, so the environment scheme is
+  `(int32) -> int32` only after the body is inferred. A reader scheduled
+  before the body (`infer_var`, `crates/chelis-types/src/infer/expr.rs`,
+  `env.instantiate(&scheme, vg, subst)`) instantiates the quantified hole at
+  a fresh variable, accepts `r: f32 = f(2)`, and is never revisited. The
+  schedule places a value below the hoist floor, and every value in a bare
+  unit, before every function body, so the verdict depends on layout:
+  measured on the prebuilt binary, `chelis check` scores 1 with the reader
+  first, `chelis eval` prints `r = 3`, and the compiled C prints `r = 3.0`,
+  while the same reader after an anchor function rejects with
+  `TypeMismatch`. The issue's diagnosis is exact. Its second half is the
+  same mechanism through an authored binder: `def f[a](x: a) -> a =
+  add(x, 1)` and the implicit `def f(x: a) -> a = add(x, v)` both check
+  clean, the body instance of `a` is bound to `int32`, and the registered
+  scheme is the narrowed `(int32) -> int32`; the only rigidity check today is
+  `check_declared_dvars_rigid`, for dimensions. Measured: a reader after the
+  function sees the narrowed scheme (`s = f(1.5f64)` rejects with
+  `PrecisionMismatch`), a reader before it is accepted and evaluates to a
+  numeric-op error.
+- [#1487], a compiled wrong answer of the [#1339] class.
+  `detect_top_level_binding_cycles` (`crates/chelis-types/src/infer/
+  declarations.rs`) collects each value's eager references with
+  `collect_eager_refs`, whose `Some(DeepTag::Fn) => {}` arm skips every
+  lambda body ("only its application at this site (if any) is eager; the
+  body itself is deferred"). The schedule's own walker,
+  `collect_top_level_calls`, does descend into lambdas, so the two walkers
+  disagree about the same reference. The detector is also asymmetric in a
+  second way, measured on the prebuilt binary: `carried = pick(f)` with
+  `f` reading `carried` is `CycleDetected` (a bare function reference is
+  followed into the function's body), while `carried = pick(fn (x: int32)
+  -> f(x))` with the same `f` is not. A third blind spot is in the DFS: a
+  `call_edges` step onto a value that is on the value stack is skipped as
+  recursion rather than reported, so a value that applies a closure held
+  by an enclosing value's initializer is never a cycle. The issue's
+  diagnosis of the lambda skip is exact; the accidental rejection it
+  describes is the [#1485] stall, and the annotated spelling is accepted
+  with score 1, fails under `chelis eval` with `cyclic top-level runtime
+  definition carried`, and prints `carried = [1, 2]` from the compiled C.
+  The issue's candidate fix (eager only in argument position of an eager
+  application) is not adopted, for the reason given under the decision.
+- [#1485], an over-rejection and an ingress split. `primary_inference_
+  schedule` (`crates/chelis-types/src/infer/program.rs`) builds a mirror
+  edge from a module function to every item at or after the floor that
+  references it and a read edge from a value to every later item that reads
+  it. `carried = wrap(f)` with `f` reading `carried` closes a two-cycle;
+  Kahn's algorithm stalls and the release `ready.first().or_else(||
+  pending.first())` emits the hoist-order-least remaining vertex, the
+  function, whose body then reads a value that has no binding yet at the
+  typed ingress and a body-stamp binding at the serialized-IR ingress. The
+  issue's diagnosis of the stall is exact. Its claim that the shape is legal
+  rests on [04-INF-4] alone; under [04-INF-7] below, every one of its three
+  spellings is an eager value cycle, so the disposition is a different
+  rejection reported identically, not an acceptance.
+
+**Decision (2026-09-03).** `spec/04-type-system.md` §3.1.3 and §3.1.4 now
+carry the language rules; this section only implements them.
+
+- [04-INF-5]: a wildcard slot is an inference hole, not a binder. It is
+  never quantified, and every reference to the declaration is typed at the
+  body-determined signature wherever the reference sits. The alternative
+  considered, one monomorphic variable shared by header, body, and readers,
+  was rejected because a hole that the body resolves to a type mentioning
+  the declaration's own binders (`def f(x: tensor[n, f32]) = x`) would tie
+  the body instance of `n` to an outer-level variable and make the function
+  monomorphic in `n` for the whole unit, a regression on a common partial
+  header. [04-INF-5] instead keeps today's post-body scheme and forbids
+  observing the hole early.
+- [04-INF-6]: an authored type binder, explicit or implicit, is rigid in the
+  body. This is the type-variable form of §4.4's dimension rule, follows
+  §5.8.1's `forall` quantification and [04-INF-2]'s strict treatment of
+  authored binders, and closes [#1486]'s second half at the declaration
+  rather than by scheduling: a reader that instantiates an honest header
+  early is sound. The alternative, ordering readers after the body and
+  letting the body narrow the binder, would make an authored `[p: Float]`
+  silently mean `f32`, which contradicts the promise the author wrote.
+- [04-INF-7]: the eager reference set follows into lambda bodies and treats
+  applying a value as requiring it. The rule is deliberately the syntactic
+  over-approximation. The finer rule the issue proposed (eager only for a
+  lambda in argument position of an eager application, or only for callees
+  that apply their argument) is not sound: a closure stored in a list or
+  returned from a helper and applied by a later value's initializer
+  (measured: `def mk() = fn (x: int32) -> f(x)`, `b: int32 = (mk())(1)`,
+  `f` reading `b` checks clean and fails under `eval` with a runtime cycle)
+  escapes it, and deciding whether a user-defined callee applies its
+  parameter is a higher-order flow question the checker cannot answer at
+  the cycle detector. The over-rejection is accepted under the repository's
+  explicit-over-inference bias, and it adds no new class: the detector
+  already treats a bare function reference this way, so the rule removes an
+  asymmetry rather than introducing a policy. The escape hatch is to pass
+  the value as an argument.
+- [#1485]'s three spellings under these rules: `carried = wrap(f)` with a
+  signed `f` that applies `carried`, `carried = pick(fn (x: int32) -> f(x))`
+  with `f` reading `carried`, and `carried = wrap(g)` with a `defsig`-less
+  `g` that applies `carried` are each an eager value cycle under [04-INF-7]
+  (the value's initializer names the function, the function's body reads or
+  applies the value). Expected verdict at both ingresses, Surf and stamped
+  IR alike: `CycleDetected` naming the path, no `UnboundVariable`, no
+  split. Inference stays total on them through the mixed group below, and
+  the design does not depend on their acceptance.
+
+**Mechanism.** The [#1134] invariant is unchanged: visibility is a function
+of source position and body-inference order is a function of dependency.
+PP6 adds a third clause: **a header is available to a reference only when
+it is honest**, where a complete or authored-binder header is honest by
+[04-INF-6] and a header with a hole is honest only after its body.
+
+1. *Rigid authored binders.* After the post-body signature unification in
+   `infer_top_level`, every authored type binder's body instance must still
+   be an unbound variable, and the instances must be pairwise distinct;
+   otherwise a `TypeMismatch` at the declaration names the binder and the
+   type it was narrowed to, in the shape of `check_declared_dvars_rigid`.
+   The resolver already keys binder names to variables for dimensions
+   (`record_declared_dim_names`); the same recording is added for type
+   binders so implicit binders (`def f(x: a) -> a`, no binder list) are
+   covered as well as `DeclaredSigMetadata.binders`. The registered scheme
+   is unchanged when the check passes, since an unnarrowed instance
+   generalizes back to the declared signature.
+2. *Hole edge.* The schedule gains one edge kind: an item is inferred after
+   every function it references whose signature contains a wildcard slot,
+   in every region, below the hoist floor and in bare units included. The
+   set of such functions is a syntactic scan of the unit's `defsig`
+   expressions for `_` in a type, dimension, or rank position. Kahn's
+   priority keeps the displacement minimal: the function keeps its hoist
+   position, and only its readers slide after it. The existing mirror edge
+   stays unconditional and floor-bounded; its soundness role ends with
+   [04-INF-6] and the hole edge, and it remains as the ordering that
+   attributes a mismatch to the reader rather than to the function body.
+   The `defsig`-less floor bound (a value below the floor reading a
+   `defsig`-less later function is unbound) is function visibility, owned
+   by [04-INF-2]/[04-INF-3], and PP6 does not move it.
+3. *Eager references.* `collect_eager_refs` descends into `fn` bodies with
+   the lambda's parameters bound, in the initializer walk and in the
+   function-body walk that `detect_top_level_binding_cycles` chains through
+   `fn_body_refs`. In the DFS, a `call_edges` step onto a member of the
+   value stack reports the cycle exactly as a `value_edges` step does. The
+   external-input exemption and the function-application chaining are
+   unchanged.
+4. *Mixed groups.* `primary_inference_schedule` contracts every strongly
+   connected component of the full reference graph (call, read, mirror, and
+   hole edges), not only the planner's recursive function components, and
+   `primary_inference_groups_for_schedule` emits each component as one
+   group. `prebind_recursive_function_schemes` additionally prebinds a
+   value member with a monomorphic fresh variable when the value has no
+   declared signature and no metadata prebind; `infer_top_level`'s
+   provisional path already unifies a member's body with its provisional
+   type and defers generalization to the group, and needs no change for a
+   value. The stall release (`or_else(|| pending.first())`) is deleted: a
+   DAG of components never stalls, and the schedule is total by
+   construction. Under [04-INF-7] a mixed group is always part of a
+   rejected program; the group exists so that inference on that program is
+   total and reports the same diagnostics at both ingresses, and so that a
+   future refinement of [04-INF-7] would not reopen the stall.
+
+**You deliver:**
+
+1. **Slice A ([#1486]).** Items 1 and 2 above. Ratchets that invert:
+   `a_partial_or_generic_header_is_not_instantiated_before_its_body_narrows_it`
+   (`crates/chelis-types/tests/issue_1134_forward_reference_parity.rs`)
+   keeps its two programs and gains their below-floor and bare-unit
+   layouts, each rejecting identically; the generic program's expected kind
+   moves from the reader's `PrecisionMismatch` to the declaration's
+   `TypeMismatch`, because [04-INF-6] rejects `f` itself.
+   `check_rejects_a_mismatched_read_of_a_partial_header_deferred_by_a_barrier`
+   (`crates/chelis-cli/tests/issue_1134_forward_reference_cli.rs`) gains the
+   reader-first layout at `check`, `eval`, and `build`. New regressions:
+   `def f[a](x: a) -> a = add(x, 1)` and `def f(x: a) -> a = add(x, 1)`
+   reject at the declaration with no reader present, a binder collapse
+   `def g[a, b](x: a, y: b) -> a = y` rejects, and `def id(x: a) -> a = x`,
+   `def k(x: a) = x`, and a bounded `[p: Float]` body written with
+   `cast(0.0, p)` stay accepted. `schedule_invariants.rs`'s generator
+   declares whether a function's signature has a hole, `reference()` emits
+   the hole edge for every reader position, and a named regression pins
+   that a below-floor reader of a hole-signature function is scheduled
+   after it while a complete-header function's reader is not moved.
+2. **Slice B ([#1487]).** Item 3. `an_initialization_cycle_leaves_the_
+   schedule_total_at_both_ingresses` gains the lambda-mediated spellings
+   from the issue, annotated and unannotated, each `CycleDetected`
+   identically; a CLI test rejects them at `check`, `eval`, and `build`; the
+   returned-lambda shape and a closure applied by a later value are
+   negatives; the stored lambda `carried = fn (x: int32) -> f(x)` (a
+   function `def` to the planner), a lambda reading an earlier value
+   through a callee, and every program in `examples/iter_foundation.ch` are
+   positive controls.
+3. **Slice C ([#1485]).** Item 4. The three ratchets invert:
+   `a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall` in the
+   parity suite asserts `CycleDetected` and the absence of
+   `UnboundVariable` for all three Surf spellings and asserts that the
+   stamped spelling rejects identically at both ingresses; the CLI ratchet
+   of the same name asserts `CycleDetected`; the schedule-oracle ratchet
+   asserts that the reference graph is cyclic, that the schedule emits the
+   component contiguously, and that no `UnboundVariable` reaches the
+   verdict. `a_genuine_binding_cycle_stays_total_with_callees_first` is
+   restated over component contiguity. The `--lib` oracle's stall
+   mutations (release by lowest ordinal) become inexpressible and are
+   deleted from the receipt table; a new receipt restores the stall
+   release and shows the ratchet reddening.
+4. **Closing [#1134].** After Slice C the parity suite carries no residual
+   predicate, `[04-INF-4]`'s parenthetical is removed together with the
+   three new atoms' parentheticals, the `[#1134]` residue section above is
+   updated to name PP6 as the owner of the mirror edge's remaining role, and
+   the issue map row below turns green. "Dispositioned" means, per issue:
+   [#1486] rejects at both ingresses and at `check`/`eval`/`build` for the
+   reader-first, at-floor, and bare layouts of both programs, and the
+   rigid-binder negatives above reject; [#1487] rejects its annotated and
+   unannotated programs as `CycleDetected` at both ingresses and at the CLI,
+   with the stored-lambda control accepted; [#1485] reports identical
+   diagnostics at both ingresses for all three spellings and the stamped
+   one, with no `UnboundVariable`.
+5. **Stdlib migration under [04-INF-6].** Ten stdlib declarations narrow a
+   bounded binder with an unsuffixed float literal and are rejected once
+   the binder is rigid: `abs_float`, `erf_approx`, and `normal_cdf` in
+   `packages/chelis-std/src/contracts.ch`; `validate_fan_in` and
+   `finite_float` in `init/kaiming.ch`; `validate_normal_params` and
+   `finite_float` in `init/random.ch`; `validate_xavier_params`,
+   `validate_trunc_params`, and `finite_float` in `init/xavierext.ch`. Each
+   repair is the §P10 `cast(<literal>, p)` override the same package already
+   uses in `arange_values`. The count was taken by inspection of every
+   binder-list declaration in `packages/chelis-std/` and `examples/`; the
+   implementer's first Slice A step is to run the rigid check over the
+   stdlib and confirm exactly that list reddens. A stdlib source change
+   regenerates the bundle and commits `reef.lock` and the tracked `dist/`
+   artifacts. No stdlib or example source declares a partial header (a
+   `def` with an annotated parameter and no result type): zero in both
+   trees, so item 2 changes no shipped schedule, and no top-level value in
+   either tree nests a lambda that names a top-level `def`, so item 3
+   changes no shipped verdict.
+6. **Slices.** Hand-written estimate: Slice A 300-400 lines including
+   tests and the stdlib repair, Slice B 120-180, Slice C 200-300. Land as
+   one pull request with one commit per slice in the order A, B, C; A does
+   not shrink C (the mirror edge stays, so the two-cycle remains), but C
+   is only sound after A, because a mixed group lets a value instantiate a
+   partial header before the function's body. If the total exceeds about
+   800 hand-written lines, split as A alone, then B and C together.
+
+**Prove-fails-first.** Every new rejection is shown red against the base
+tree by reverting the owning source paths to the base commit, rebuilding the
+one test target, and watching the assertion fail, then restoring and
+watching it pass; every inverted ratchet is shown red against the base tree
+by the same procedure. Each new assertion's doc comment is labeled
+"regression test" or "disposition lock". The mutation receipts are: quantify
+the hole again (drop the hole edge) and watch the reader-first [#1486]
+programs accept; skip the rigid check and watch the binder negatives accept;
+restore the `Fn` skip in `collect_eager_refs` and watch the [#1487] programs
+accept; skip the value-stack test on `call_edges` and watch the signed
+[#1485] spelling lose its `CycleDetected`; restore the stall release and
+watch the stamped [#1485] spelling split again.
+
+**Oracle:**
+
+```sh
+cargo nextest run -p chelis-types --test issue_1134_forward_reference_parity --no-fail-fast
+cargo nextest run -p chelis-types --lib infer::tests::schedule_invariants
+cargo nextest run -p chelis-cli --test issue_1134_forward_reference_cli --no-fail-fast
+```
+
+The first is the verdict oracle for all three issues at both ingresses, the
+second the order oracle, the third the public-surface oracle. Before
+pushing, the implementer also runs the complete `chelis-types` corpus,
+`issue_1124_ir_defsig_unification_parity`,
+`rt800_append_only_cycle_resolution`, `recursive_generic_monomorphization`,
+the `issue_1339_*` CLI tests, `scripts/compiled_value_ownership_oracle.py
+--phase 0`, `scripts/unrepresentable_domain_oracle.py`,
+`scripts/dtype_phase4b_oracle.py`, and a differential `chelis check` over
+every tracked `.ch` and `.dp` file against a control binary built from the
+base, expecting the stdlib list above and no other score change.
+
+**Exclusions.** PP6 does not absorb [#1512] (an early return on an
+unresolved `expand` operand skipping validation, owned by the [#1277]
+stream; PP6 touches header-versus-body typing in the schedule, not deferral
+settlement); [#1339]'s indirect shape (an earlier initializer that calls a
+function reading a later-assigned value obeys [04-INF-4] and [04-INF-7]
+alike and stays with the compiled-value ownership plan); [#874]/[#887]'s
+tag-keyed vacuity; [#1125]'s reader audit; the `defsig`-less floor bound on
+function visibility; and any change to `spec/02` §P10's literal rule.
+
+**Risks.**
+
+- *PP1 obligations.* A mixed group runs `finish_deferred_shape_checks` per
+  member exactly as a recursive function component does; [04-INF-1]'s
+  bind-on-first-use lambdas are unaffected because the group boundary is
+  the declaration boundary. Verify with the PP1 suites in the corpus run.
+- *Typecheck cache.* `CACHE_FORMAT_VERSION` (`crates/chelis-compiler-api/
+  src/context.rs`) need not move: `Scheme` gains no field and the cache key
+  already includes the compiler identity. A cached context written by an
+  older compiler cannot hold a stdlib scheme the new compiler rejects,
+  because the stdlib is repaired in the same change set.
+- *Compiled-lane prerequisite.* The C emitter assigns statics in source
+  order and has no runtime cycle check; the detector is the only guard
+  between an accepted program and a wrong answer of the [#1339] class,
+  which is why [04-INF-7] over-approximates rather than refines.
+- *Diagnostic order.* Readers of hole-signature functions move after the
+  function, so their diagnostics move with them; the parity suite compares
+  ordered diagnostics between ingresses, never against source order.
+- *Stdlib exposure* is item 5; the census is by inspection until the rigid
+  check runs.
+
 ### Later residue: kinded nominal applications ([#1247], with [#1258])
 
 **Delivered by PR [#1406].** This is a separately landable #731 residue
@@ -1623,11 +1943,12 @@ first, its backward read reports unbound in Surf, and on stamped IR the
 serialized-IR ingress accepts from the body stamp while the typed ingress
 rejects. For a `defsig`-less function this is a genuine two-way inference
 dependency that no edge choice can order; for a signed one the edge cannot be
-dropped ([#1486]). The candidate repair, inferring a value/function reference
-cycle as one provisional group the way function SCCs are, is new mechanism
-and stays with [#1485]. Either way the schedule stays total by releasing the
-hoist-order-least remaining vertex, so a callee is still inferred before its
-caller.
+dropped while a hole is quantified ([#1486]). PP6 decides all three: the
+hole is never quantified and readers wait for its body ([04-INF-5]), the
+cycle is an eager value cycle under [04-INF-7], and the component is
+inferred as one group so the rejection is identical at both ingresses.
+Until PP6 lands, the schedule stays total by releasing the hoist-order-least
+remaining vertex, so a callee is still inferred before its caller.
 
 Two properties follow and are the reason this design is trusted where the
 chained ones were not. First, the hoist order is itself a linear extension of
@@ -1827,6 +2148,7 @@ vacuity, or [#1076]/[#672]'s independently owned name-precedence work.
 | PP5 (partial) | [#668]; the checker derives a rank fact for `ShapeClass::Identity` plus `conv2d`/`stride`/`expand`/`softmax` and rejects a positive-rank disagreement where it has one, on unforgeable rank-only facts; the tensor-DAG C emitter aborts on a positive-rank operand disagreement, and under [#1484] so does the host-value emitter for its six binary elementwise builtins. No claim is made for operations outside that set, nor for any checker verdict on the host-lane programs; see PP5 |
 | [#1247] residue | integer nominal arguments are kind-checked and concrete dimensions constrain every checker/test/compiler lane; [#1258] round trips the same representation |
 | [#1125] nominal-rank ingress residual | ordinary `.dp` ingress, `surf`, and `validate --deep` reject `d-rank` in nominal argument slots while preserving legal dimension arguments and tensor rank spreads; the broader reader-audit/lint issue remains open |
+| PP6 (decided, not delivered) | [#1486] (a hole is never quantified and no reference observes it before the body; an authored binder is rigid), [#1487] (lambda bodies and applied values are eager references), [#1485] (every reference-graph component is inferred as one group; the three spellings reject as `CycleDetected` identically at both ingresses); [#1134] closes when all three are dispositioned as PP6 states |
 | [#1134] forward-reference residual | both checker ingresses reject eager forward values, accept backward values from value initializers and from function bodies wherever the schedule places them except the [#1485] shape, accept declaration-local explicitly typed external inputs, retain sequential local scope, and reject bare self-reference/eager value cycles identically; the schedule's order invariants are asserted directly |
 
 ## Decisions and remaining questions
@@ -1842,6 +2164,9 @@ vacuity, or [#1076]/[#672]'s independently owned name-precedence work.
 | 7 | whether one linked module's uniquely matching terminal name or one batched test file's declaration can confer unimported scope on another file | DECIDED 2026-08-31: no. Value lookup is exact-only after reef rewriting; batch entries are independently module-rewritten before combination; terminal matching is diagnostic-only | spec/02 P2 + [04-FIT-2] + PP4 |
 | 8 | whether an unannotated nominal parameter is a type, a dimension, or contextually reinterpreted per application | DECIDED 2026-08-31: one checker-owned header kind is fixed before body resolution. Dimension-only evidence selects `Dimension`; mixed use rejects; unused defaults to `Type`; transitive nominal uses propagate by least fixed point | [04-ADT-3]/[04-ADT-4] + [#1247] residue |
 | 9 | whether a top-level eager value may refer to a later value, and whether the two checker ingresses may differ | DECIDED 2026-09-01: no. Both ingresses reject a later eager value as unbound; serialized body metadata cannot create scope. Scope is read from declaration position, never from a binding timeline the inference schedule advances, and the schedule infers an eager value before any function that legally reads it, using only reference edges over the hoist order so a program without such a read keeps its previous grouped order. Only an explicitly typed self-reference receives a declaration-local external-input type; bare self-reference remains an eager cycle. Function inference groups remain separately governed by [04-INF-2]/[04-INF-3] | [04-INF-4] + [#1134] residue |
+| 10 | whether a wildcard slot in a signature is a polymorphic binder, and what a reference sees before the declaration's body is inferred | DECIDED 2026-09-03: a hole, never quantified; every reference is typed at the body-determined signature wherever it sits, so readers of a hole-signature function are scheduled after its body in every region. A shared monomorphic hole was rejected because it makes a partial header monomorphic in its own dimension binders | [04-INF-5] + PP6 |
+| 11 | whether a body may narrow an authored type binder | DECIDED 2026-09-03: no. Explicit and implicit binders are rigid in the body, as dimension parameters already are under §4.4; the scheme is the declared signature. Ten stdlib declarations that narrow a bounded binder with an unsuffixed literal migrate to `cast(literal, p)` | [04-INF-6] + PP6 |
+| 12 | which references inside a top-level value's initializer are eager for cycle detection | DECIDED 2026-09-03: all of them, lambda bodies included, transitively through every referenced top-level declaration, with an applied value required like a read one. The argument-position refinement was rejected as unsound for stored and returned closures; the over-rejection is accepted and is already the detector's treatment of a bare function reference | [04-INF-7] + PP6 |
 
 ## Contract summary
 
@@ -1928,3 +2253,7 @@ cycles remain errors.
 [#1484]: https://github.com/Chelis-Lang/chelis/issues/1484
 [#1494]: https://github.com/Chelis-Lang/chelis/issues/1494
 [#1525]: https://github.com/Chelis-Lang/chelis/issues/1525
+[#1457]: https://github.com/Chelis-Lang/chelis/pull/1457
+[#1512]: https://github.com/Chelis-Lang/chelis/issues/1512
+[#1339]: https://github.com/Chelis-Lang/chelis/issues/1339
+[#1277]: https://github.com/Chelis-Lang/chelis/issues/1277
