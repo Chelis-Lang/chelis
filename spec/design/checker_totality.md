@@ -1542,8 +1542,10 @@ carry the language rules; this section only implements them.
   (the value's initializer names the function, the function's body reads or
   applies the value). Expected verdict at both ingresses, Surf and stamped
   IR alike: `CycleDetected` naming the path, no `UnboundVariable`, no
-  split. Inference stays total on them through the mixed group below, and
-  the design does not depend on their acceptance.
+  split. With the mirror edge narrowed, the two signed spellings no longer
+  cycle in the schedule; the `defsig`-less spelling still does and stays
+  total through the mixed group below. The design does not depend on
+  their acceptance.
 
 **Mechanism.** The [#1134] invariant is unchanged: visibility is a function
 of source position and body-inference order is a function of dependency.
@@ -1568,11 +1570,14 @@ it is honest**, where a complete or authored-binder header is honest by
    set of such functions is a syntactic scan of the unit's `defsig`
    expressions for `_` in a type, dimension, or rank position. Kahn's
    priority keeps the displacement minimal: the function keeps its hoist
-   position, and only its readers slide after it. The existing mirror edge
-   stays unconditional and floor-bounded; its soundness role ends with
-   [04-INF-6] and the hole edge, and it remains as the ordering that
-   attributes a mismatch to the reader rather than to the function body.
-   The `defsig`-less floor bound (a value below the floor reading a
+   position, and only its readers slide after it. The mirror edge narrows
+   to `defsig`-less module functions, [#1457] round 10's mechanism: a
+   complete or authored-binder header is honest before its body under
+   [04-INF-6], a hole header is covered by the hole edge, and only a
+   `defsig`-less function has no header for a reader to use, so the edge
+   keeps exactly the availability role round 7's class needs. Round 11's
+   counterexample to round 10 was a quantified hole, which [04-INF-5]
+   removes. The `defsig`-less floor bound (a value below the floor reading a
    `defsig`-less later function is unbound) is function visibility, owned
    by [04-INF-2]/[04-INF-3], and PP6 does not move it.
 3. *Eager references.* `collect_eager_refs` descends into `fn` bodies with
@@ -1581,7 +1586,9 @@ it is honest**, where a complete or authored-binder header is honest by
    `fn_body_refs`. In the DFS, a `call_edges` step onto a member of the
    value stack reports the cycle exactly as a `value_edges` step does. The
    external-input exemption and the function-application chaining are
-   unchanged.
+   unchanged, and so is the value/function line: [04-INF-7] now states
+   what `is_value` in `detect_top_level_binding_cycles` already decides, a
+   `def` whose initializer is a lambda is a function.
 4. *Mixed groups.* `primary_inference_schedule` contracts every strongly
    connected component of the full reference graph (call, read, mirror, and
    hole edges), not only the planner's recursive function components, and
@@ -1618,7 +1625,11 @@ it is honest**, where a complete or authored-binder header is honest by
    declares whether a function's signature has a hole, `reference()` emits
    the hole edge for every reader position, and a named regression pins
    that a below-floor reader of a hole-signature function is scheduled
-   after it while a complete-header function's reader is not moved.
+   after it while a complete-header function's reader is not moved;
+   `reference()`'s mirror rule becomes `defsig`-less-only, and the signed
+   spelling leaves `a_value_naming_a_function_that_reads_it_back_is_a_
+   recorded_stall`, whose graph must stay cyclic only for the `defsig`-less
+   one.
 2. **Slice B ([#1487]).** Item 3. `an_initialization_cycle_leaves_the_
    schedule_total_at_both_ingresses` gains the lambda-mediated spellings
    from the issue, annotated and unannotated, each `CycleDetected`
@@ -1633,7 +1644,8 @@ it is honest**, where a complete or authored-binder header is honest by
    parity suite asserts `CycleDetected` and the absence of
    `UnboundVariable` for all three Surf spellings and asserts that the
    stamped spelling rejects identically at both ingresses; the CLI ratchet
-   of the same name asserts `CycleDetected`; the schedule-oracle ratchet
+   `a_value_that_names_a_function_reading_it_back_is_a_recorded_stall`
+   asserts `CycleDetected`; the schedule-oracle ratchet
    asserts that the reference graph is cyclic, that the schedule emits the
    component contiguously, and that no `UnboundVariable` reaches the
    verdict. `a_genuine_binding_cycle_stays_total_with_callees_first` is
@@ -1660,8 +1672,9 @@ it is honest**, where a complete or authored-binder header is honest by
    `finite_float` in `init/kaiming.ch`; `validate_normal_params` and
    `finite_float` in `init/random.ch`; `validate_xavier_params`,
    `validate_trunc_params`, and `finite_float` in `init/xavierext.ch`. Each
-   repair is the §P10 `cast(<literal>, p)` override the same package already
-   uses in `arange_values`. The count was taken by inspection of every
+   repair is the §P10 `cast(<literal>, p)` override; the only in-tree
+   precedent is the Int form `cast(1, p)` in `arange_values`, and no float
+   spelling exists in the tree yet. The count was taken by inspection of every
    binder-list declaration in `packages/chelis-std/` and `examples/`; the
    implementer's first Slice A step is to run the rigid check over the
    stdlib and confirm exactly that list reddens. A stdlib source change
@@ -1673,11 +1686,16 @@ it is honest**, where a complete or authored-binder header is honest by
    changes no shipped verdict.
 6. **Slices.** Hand-written estimate: Slice A 300-400 lines including
    tests and the stdlib repair, Slice B 120-180, Slice C 200-300. Land as
-   one pull request with one commit per slice in the order A, B, C; A does
-   not shrink C (the mirror edge stays, so the two-cycle remains), but C
-   is only sound after A, because a mixed group lets a value instantiate a
-   partial header before the function's body. If the total exceeds about
-   800 hand-written lines, split as A alone, then B and C together.
+   one pull request with one commit per slice in the order A, B, C. A
+   shrinks C's cyclic class to two-cycles through a `defsig`-less mirror
+   edge or through a hole edge (`r = f(2)` with `def f(n: int32) =
+   add(r, n)`), and C is still needed for those; C is only sound after A,
+   because a mixed group lets a value instantiate a partial header before
+   the function's body. If A lands alone, the two signed [#1485] spellings
+   stop stalling at A and their ratchets invert to acceptance there, then
+   to `CycleDetected` at B; in one pull request they invert once, at B. If
+   the total exceeds about 800 hand-written lines, split as A alone, then
+   B and C together.
 
 **Prove-fails-first.** Every new rejection is shown red against the base
 tree by reverting the owning source paths to the base commit, rebuilding the
@@ -1944,9 +1962,11 @@ serialized-IR ingress accepts from the body stamp while the typed ingress
 rejects. For a `defsig`-less function this is a genuine two-way inference
 dependency that no edge choice can order; for a signed one the edge cannot be
 dropped while a hole is quantified ([#1486]). PP6 decides all three: the
-hole is never quantified and readers wait for its body ([04-INF-5]), the
-cycle is an eager value cycle under [04-INF-7], and the component is
-inferred as one group so the rejection is identical at both ingresses.
+hole is never quantified and readers wait for its body ([04-INF-5]), so the
+mirror edge returns to round 10's `defsig`-less form; the cycle is an eager
+value cycle under [04-INF-7]; and a component the reference graph still
+closes is inferred as one group so the rejection is identical at both
+ingresses.
 Until PP6 lands, the schedule stays total by releasing the hoist-order-least
 remaining vertex, so a callee is still inferred before its caller.
 

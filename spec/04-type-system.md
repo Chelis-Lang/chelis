@@ -829,8 +829,11 @@ differently.
 > sits relative to the declaration, so no reference can observe the hole
 > before the body has filled it. A reference whose use disagrees with the
 > body-determined slot is a type error at the reference; a body is never
-> narrowed to satisfy a reference. Inside a recursive binding group,
-> in-group references remain governed by [04-INF-2].
+> narrowed to satisfy a reference. Inside a group of declarations inferred
+> as one unit, whether a recursive binding group of §3.1.1 or a component
+> that the reference graph closes through a top-level value, an in-group
+> reference is typed at the member's provisional monomorphic type, as
+> [04-INF-2] provides for a recursive call.
 
 (Not fully implemented; see chelis#1486.)
 
@@ -861,8 +864,11 @@ spelling is the `cast(0.0, p)` override that §P10 names.
 > least set that contains every free reference in the value's initializer,
 > including a reference inside a lambda body nested anywhere in the
 > initializer, and, for every top-level `def` whose name is in the set,
-> every free reference in that declaration's body or initializer, likewise
-> including references inside nested lambda bodies. A reference is free when
+> every free reference in that `def` (a function's body or a value's
+> initializer), likewise including references inside nested lambda bodies.
+> For this rule and for [04-INF-4], a top-level `def` whose initializer is
+> a lambda expression is a function declaration, not an eager value. A
+> reference is free when
 > it names a top-level declaration rather than a parameter, `let` binding,
 > or pattern binder in scope at the reference. The eager value cycle that
 > [04-INF-4] reports as `CycleDetected` exists exactly when the value's own
