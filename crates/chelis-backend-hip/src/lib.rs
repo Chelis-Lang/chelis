@@ -86,6 +86,12 @@ pub fn codegen_hip(
 ) -> Result<HipCodegenResult, chelis_types::unsupported::Unsupported> {
     let specialized = chelis_ir::specialize::specialize_for_blas(dag);
     let dag = &specialized;
+    // chelis#1277 C4.1/C4.5: derived after the last rewrite, so this runs on
+    // the specialized DAG the emitter actually consumes.
+    chelis_ir::axis_sources::check_axis_sources(
+        dag,
+        chelis_types::unsupported::Stage::Codegen("hip"),
+    )?;
     let (c_source, peak_device_bytes) = emit::HipEmitter::emit_dag(dag, func_name)?;
     let h_header = format!(
         "extern \"C\" void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"

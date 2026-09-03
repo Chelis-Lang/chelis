@@ -2067,6 +2067,20 @@ impl WireDag {
                             false,
                             "Shrink end",
                         )?;
+                        // chelis#1480, `spec/05` section 2.4.1: a `ToEnd` end
+                        // is well formed only beside a `Lit(0)` start. The
+                        // per-carrier validation above sees one bound at a
+                        // time and cannot see the pairing, so the decoder
+                        // checks it here, where both halves are in hand.
+                        if matches!(end, WireRtDim::ToEnd)
+                            && !matches!(start, WireRtDim::Lit { value: 0 })
+                        {
+                            return Err(WireDagContractError::new(format!(
+                                "WireDag Shrink node {} pairs the to_end carrier with a start \
+                                 that is not literal 0, which is a malformed bound",
+                                node.id
+                            )));
+                        }
                     }
                     validate_exact_wire_rt_dim_inputs(
                         node,

@@ -10333,19 +10333,37 @@ fn actualize_tensor_helper_types(
                             Some(input_dim.clone())
                         }
                         // A sentinel under a nonzero or runtime start is
-                        // malformed, and two other production components
-                        // already reject it by name: `grad`'s Shrink adjoint
-                        // panics with "malformed ToEnd sentinel in shrink
-                        // adjoint" on a nonzero start, and `bind_symbolic_dims`
-                        // errors with "shrink-to-end sentinel with non-literal
-                        // start". `grad`'s committed
+                        // malformed, and since chelis#1480 every stage that
+                        // validates a bound rejects it by name: `verify`'s
+                        // Shrink arm, the WireDag decoder's Shrink arm, and
+                        // `bind_symbolic_dims`, which errors with
+                        // "shrink-to-end sentinel requires a literal zero
+                        // start". `grad`'s Shrink adjoint also panics with
+                        // "malformed ToEnd sentinel in shrink adjoint" at the
+                        // producer. `grad`'s committed
                         // `shrink_adjoint_malformed_sentinel_fails_loud` is a
                         // `#[should_panic]` control over exactly this shape.
-                        // Nothing builds one either: `lower::lower_one_bound`
-                        // yields only `Lit`/`Node`, so no Surf or Deep `shrink`
-                        // can spell `ToEnd`, and every production construction
-                        // of the sentinel (the Pad, ProdReduce, and Stride
-                        // adjoints in `grad`) pairs it with `Lit(0)`. Declining
+                        // Nothing builds a malformed one either. The list
+                        // below was established by searching every
+                        // `RtDim::ToEnd` construction across `chelis-ir`,
+                        // `chelis-compiler-api` and the three backends,
+                        // separating production from test by each file's
+                        // `cfg(test)` line, rather than by recall; an
+                        // enumeration this argument rests on has to be
+                        // complete, because the next person to add a
+                        // constructor will check it instead of re-deriving it.
+                        // `lower::lower_one_bound` yields only `Lit`/`Node`,
+                        // so no Surf or Deep `shrink` can spell `ToEnd` at
+                        // all. The production constructors are the Pad,
+                        // ProdReduce and Stride adjoints in `grad`, each
+                        // pairing it with `Lit(0)`, and `vmap`'s prepended
+                        // batch axis (`batch_shrink_end` in `vmap.rs`), which
+                        // is a sentinel only while the mapped batch stays
+                        // symbolic and is paired with `Lit(0)` at its
+                        // construction site. `vmap` rewrites every node's
+                        // axes, and `shift_input_axis` clones every
+                        // non-`InputAxis` variant unchanged, so an incoming
+                        // pair keeps its pairing through the shift. Declining
                         // here is consistency with a rule enforced elsewhere,
                         // not a gap being papered over.
                         (crate::dag::RtDim::Lit(_), crate::dag::RtDim::ToEnd)

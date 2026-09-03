@@ -2433,11 +2433,21 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &UnordMap<String, usize>) -> Resu
                     .zip(output_type.dims.iter())
                     .map(|((start, end), dim)| {
                         if matches!(end, RtDim::ToEnd) {
-                            // The sentinel is always emitted as `(Lit(0), ToEnd)`;
-                            // a non-literal start is malformed.
-                            let start_lit = start.as_lit().ok_or_else(|| {
-                                "shrink-to-end sentinel with non-literal start".to_string()
-                            })?;
+                            // chelis#1480, `spec/05` section 2.4.1: the
+                            // sentinel is well formed only beside a `Lit(0)`
+                            // start. This used to accept any literal and
+                            // resolve `(Lit(1), ToEnd)` to `(Lit(1), Lit(1 +
+                            // size))`, which is a slice the spec says is a
+                            // malformed bound rather than a slice at all.
+                            let start_lit = match start.as_lit() {
+                                Some(0) => 0usize,
+                                _ => {
+                                    return Err(
+                                        "shrink-to-end sentinel requires a literal zero start"
+                                            .to_string(),
+                                    );
+                                }
+                            };
                             match dim {
                                 DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => {
                                     Ok((RtDim::Lit(start_lit), RtDim::Lit(start_lit + *size)))

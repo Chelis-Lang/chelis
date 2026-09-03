@@ -81,6 +81,17 @@ impl CEmitter {
         func_name: &str,
         options: crate::CodegenOptions,
     ) -> Result<String, Unsupported> {
+        // chelis#1277 C4.1/C4.3: before anything reads a shape, every
+        // realized output axis must have one checked extent source. This
+        // runs here rather than in `codegen_with_options` because the host
+        // program's tensor helpers reach the emitter through
+        // `host_emit::append_helper`, which does not go through that entry,
+        // and because it must precede `symbolic_occurrences`, whose
+        // fallback for an unrecoverable axis is a panic (chelis#1482).
+        chelis_ir::axis_sources::check_axis_sources(
+            dag,
+            chelis_types::unsupported::Stage::Codegen("c"),
+        )?;
         Self::reject_fused_integer_abs(dag)?;
         Self::validate_supported_precisions(dag);
         Self::validate_load_abi(dag);
