@@ -404,10 +404,13 @@ the defect class this slice removes.
     at `lane_divergent` (the M1 abort stub) and stays there until [#1383]
     lands `expand` emission and symbolic-dim `Load` support under the
     Metal backend plan. This plan adds no Metal emission.
-  - Host path: a program the CLI routes to the host lane (evidence item 4:
-    host-rooted or root-free on HIP, root-free only on Metal) already
-    executes `Node` bounds through the C emitter, and those rows keep
-    executing.
+  - Host path on `build`: a program the CLI routes to the host lane
+    (evidence item 4: host-rooted or root-free on HIP, root-free only on
+    Metal) already executes `Node` bounds through the C emitter, and those
+    rows keep executing. This bullet is about the C-emitted host program and
+    says nothing about `chelis eval`, whose host lane is the interpreter in
+    `crates/chelis-compiler-api/src/runtime/eval.rs` and is treated in the
+    Slice B section below.
   - Wire: `Expand.size` changes from a display string to `WireRtDim`, which
     gains an `input_axis { tensor, axis }` variant; nothing is serialized
     for classes, since every consumer derives them from the names and
@@ -813,6 +816,45 @@ two rejection sites, and, once nothing reads it, of `shape_deps`. Close
 and any residue of [#592]. [#1397]'s declared-result-dimension erasure closes
 here; its general wildcard-root boundary remains tracked by that issue and is
 not absorbed into this resolver.
+
+**The eval lane is two evaluators, and Slice B's eval guard reaches only one
+of them today.** `chelis eval` routes a `Lane::Tensor` root through
+`chelis_ir::eval` (`compiler.rs:2567`), which is where C1.3's eval placement
+and the class derivation live. It routes every other root through the host
+interpreter (`runtime/mod.rs:419`, `runtime/eval.rs:727 eval_app`), which
+applies a user `def` by interpreting its body directly, never consults the
+lowering map, and evaluates `expand`, `pad`, `shrink`, `stride` and `reshape`
+through direct implementations (`host_ops.rs:1425`, `1564`, `1617`, `1667`,
+`2150`) that build no DAG and, in `tensor_expand_host`'s own words, "have no
+access to user annotations". A `def main() = f(...)` program - the form of
+every [#1374], [#1376] and [#1377] reproducer - takes the second route, so on
+that route the declared signature's binders never exist and there is nothing
+to guard with. That is why those rows are `silent_unguarded` on eval, and a
+guard placed in `chelis_ir::eval` alone leaves them so. No fixture form
+reaches the DAG evaluator through `chelis eval --file` today: a value binding
+keeps the strict lowering classification and a zero-argument fn root is
+host-applied, while the CLI supplies no input bindings for a parameterized
+tensor entry.
+
+The repair is routing, not a second guard: when the host interpreter applies a
+`def` the lowering map classifies as lowered, it lowers the application
+through `chelis_ir::lower`'s subexpression-program entry - the one `grad`,
+`vmap` and `realize` already use (`runtime/transforms.rs:321`) - and evaluates
+it through `chelis_ir::eval`, so the eval lane has one tensor evaluator and
+one derivation point (C2.7) and the same guard fires on eval as on C. A guard
+inside `tensor_expand_host` would be a second derivation that can disagree
+with the first, which is the defect class this document exists to remove, and
+is rejected. The same routing closes a second divergence: the host lane today
+always picks the insertion form, so the same-rank replacement that Slice B
+makes execute would execute on C and not on eval.
+
+This lands as its own pull request, **B2h**, after B2a and before B2b: B2a
+places the conforming guard in the DAG evaluator and moves the C rows; B2h
+makes the host lane reach it and moves the eval rows; B2b widens acceptance
+only once both guards are in place. B2h's claim is byte-identical `chelis
+eval` output for every program that evaluates today, proved by total capture
+over the executable corpus, plus the eval-lane rows of [#1374], [#1376] and
+[#1377] moving to `executes_exactly`.
 
 **Frozen at exit:** the `RuntimeDimClass` shape, canonical class and member
 order, the guard placement realization per lane, the `AxisSource` variant

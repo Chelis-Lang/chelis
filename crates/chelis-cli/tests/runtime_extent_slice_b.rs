@@ -360,6 +360,18 @@ const AGREEING: u32 = 5;
 /// already reports the division here, on both lanes, because it has no local
 /// extent guard at all. What this row defends is that b2.4's new guard does
 /// not get hoisted ahead of the `expand`.
+/// OWNER: B2h, not this pull request. `chelis eval --file` routes every root
+/// of this form to the host interpreter, which carries no claims, so no guard
+/// placed in `chelis_ir::eval` can make this row green. Measured on
+/// `801f92c02`: a `def main()` root, a top-level value binding and a def-free
+/// top-level tensor expression all yield ZERO `Lane::Tensor` roots, because a
+/// value binding keeps the strict lowering classification (chelis#218's
+/// `to_tensor` exemption is fn-def-bodies-only, `lower.rs:3040`), a
+/// zero-argument fn root is host-applied, and the CLI supplies no input
+/// bindings for a parameterized tensor entry (`main.rs:9876`). B2h routes
+/// lowered-def application through the DAG evaluator and takes this row on
+/// rebase. Left RED deliberately: a red row with a named owner is the honest
+/// record, a deleted row is a hole.
 #[test]
 fn eval_independent_trap_before_a_mismatch_wins() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -380,6 +392,18 @@ fn eval_independent_trap_before_a_mismatch_wins() {
 /// EVIDENTIARY STATUS: regression test. `main` reports the division here, on
 /// both lanes, which is the wrong answer: the mismatching extent precedes it
 /// in source order and owes a trap first. Watched failing at b2.1.
+/// OWNER: B2h, not this pull request. `chelis eval --file` routes every root
+/// of this form to the host interpreter, which carries no claims, so no guard
+/// placed in `chelis_ir::eval` can make this row green. Measured on
+/// `801f92c02`: a `def main()` root, a top-level value binding and a def-free
+/// top-level tensor expression all yield ZERO `Lane::Tensor` roots, because a
+/// value binding keeps the strict lowering classification (chelis#218's
+/// `to_tensor` exemption is fn-def-bodies-only, `lower.rs:3040`), a
+/// zero-argument fn root is host-applied, and the CLI supplies no input
+/// bindings for a parameterized tensor entry (`main.rs:9876`). B2h routes
+/// lowered-def application through the DAG evaluator and takes this row on
+/// rebase. Left RED deliberately: a red row with a named owner is the honest
+/// record, a deleted row is a hole.
 #[test]
 fn eval_independent_trap_after_a_mismatch_loses() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -449,6 +473,18 @@ fn c_independent_trap_after_a_mismatch_loses() {
 /// directions above.
 ///
 /// EVIDENTIARY STATUS: disposition lock.
+/// OWNER: B2h, not this pull request. `chelis eval --file` routes every root
+/// of this form to the host interpreter, which carries no claims, so no guard
+/// placed in `chelis_ir::eval` can make this row green. Measured on
+/// `801f92c02`: a `def main()` root, a top-level value binding and a def-free
+/// top-level tensor expression all yield ZERO `Lane::Tensor` roots, because a
+/// value binding keeps the strict lowering classification (chelis#218's
+/// `to_tensor` exemption is fn-def-bodies-only, `lower.rs:3040`), a
+/// zero-argument fn root is host-applied, and the CLI supplies no input
+/// bindings for a parameterized tensor entry (`main.rs:9876`). B2h routes
+/// lowered-def application through the DAG evaluator and takes this row on
+/// rebase. Left RED deliberately: a red row with a named owner is the honest
+/// record, a deleted row is a hole.
 #[test]
 fn eval_the_guard_order_fixture_reaches_its_later_trap_when_the_claim_agrees() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -492,6 +528,18 @@ fn eval_the_guard_order_fixture_reaches_its_later_trap_when_the_claim_agrees() {
 const TWO_ENTRY_CLASSES: &str = "def f(zz: tensor[zdim, f32], aa: tensor[adim, f32], p: tensor[zdim, f32], q: tensor[adim, f32]) -> tensor[zdim, f32] = add(zz, p)\n\
 def main() = f(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([1.0f32]))\n";
 
+/// OWNER: B2h, not this pull request. `chelis eval --file` routes every root
+/// of this form to the host interpreter, which carries no claims, so no guard
+/// placed in `chelis_ir::eval` can make this row green. Measured on
+/// `801f92c02`: a `def main()` root, a top-level value binding and a def-free
+/// top-level tensor expression all yield ZERO `Lane::Tensor` roots, because a
+/// value binding keeps the strict lowering classification (chelis#218's
+/// `to_tensor` exemption is fn-def-bodies-only, `lower.rs:3040`), a
+/// zero-argument fn root is host-applied, and the CLI supplies no input
+/// bindings for a parameterized tensor entry (`main.rs:9876`). B2h routes
+/// lowered-def application through the DAG evaluator and takes this row on
+/// rebase. Left RED deliberately: a red row with a named owner is the honest
+/// record, a deleted row is a hole.
 #[test]
 fn eval_entry_guards_run_in_slot_order_not_name_order() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -549,6 +597,18 @@ fn c_entry_guards_run_in_slot_order_not_name_order() {
 const REPRO_1374: &str = "def f(b: tensor[f32], x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = expand(b, 0, shape(y, 0))\n\
 def main() = f(sum(to_tensor([1.0f32]), 0), to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
 
+/// OWNER: B2h, not this pull request. `chelis eval --file` routes every root
+/// of this form to the host interpreter, which carries no claims, so no guard
+/// placed in `chelis_ir::eval` can make this row green. Measured on
+/// `801f92c02`: a `def main()` root, a top-level value binding and a def-free
+/// top-level tensor expression all yield ZERO `Lane::Tensor` roots, because a
+/// value binding keeps the strict lowering classification (chelis#218's
+/// `to_tensor` exemption is fn-def-bodies-only, `lower.rs:3040`), a
+/// zero-argument fn root is host-applied, and the CLI supplies no input
+/// bindings for a parameterized tensor entry (`main.rs:9876`). B2h routes
+/// lowered-def application through the DAG evaluator and takes this row on
+/// rebase. Left RED deliberately: a red row with a named owner is the honest
+/// record, a deleted row is a hole.
 #[test]
 fn issue_1374_cross_tensor_read_traps_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -593,6 +653,18 @@ fn issue_1374_agreeing_extents_execute_on_eval() {
 const REPRO_1375: &str = "def f(x: tensor[n, f32]) -> tensor[n, 2, f32] = reshape(x, [floor_div(shape(x, 0), 2i64), 2i64])\n\
 def main() = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]))\n";
 
+/// OWNER: B2h, not this pull request. `chelis eval --file` routes every root
+/// of this form to the host interpreter, which carries no claims, so no guard
+/// placed in `chelis_ir::eval` can make this row green. Measured on
+/// `801f92c02`: a `def main()` root, a top-level value binding and a def-free
+/// top-level tensor expression all yield ZERO `Lane::Tensor` roots, because a
+/// value binding keeps the strict lowering classification (chelis#218's
+/// `to_tensor` exemption is fn-def-bodies-only, `lower.rs:3040`), a
+/// zero-argument fn root is host-applied, and the CLI supplies no input
+/// bindings for a parameterized tensor entry (`main.rs:9876`). B2h routes
+/// lowered-def application through the DAG evaluator and takes this row on
+/// rebase. Left RED deliberately: a red row with a named owner is the honest
+/// record, a deleted row is a hole.
 #[test]
 fn issue_1375_reshape_target_under_a_named_claim_traps_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -617,6 +689,18 @@ fn issue_1375_reshape_target_under_a_named_claim_traps_on_c() {
 const REPRO_1376: &str = "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, m, f32] = expand(x, 1, shape(x, 0))\n\
 def main() = f(to_tensor([1.0f32, 2.0f32]), to_tensor([3.0f32, 4.0f32, 5.0f32]))\n";
 
+/// OWNER: B2h, not this pull request. `chelis eval --file` routes every root
+/// of this form to the host interpreter, which carries no claims, so no guard
+/// placed in `chelis_ir::eval` can make this row green. Measured on
+/// `801f92c02`: a `def main()` root, a top-level value binding and a def-free
+/// top-level tensor expression all yield ZERO `Lane::Tensor` roots, because a
+/// value binding keeps the strict lowering classification (chelis#218's
+/// `to_tensor` exemption is fn-def-bodies-only, `lower.rs:3040`), a
+/// zero-argument fn root is host-applied, and the CLI supplies no input
+/// bindings for a parameterized tensor entry (`main.rs:9876`). B2h routes
+/// lowered-def application through the DAG evaluator and takes this row on
+/// rebase. Left RED deliberately: a red row with a named owner is the honest
+/// record, a deleted row is a hole.
 #[test]
 fn issue_1376_same_tensor_read_under_a_foreign_claim_traps_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -644,6 +728,18 @@ fn issue_1376_same_tensor_read_under_a_foreign_claim_traps_on_c() {
 const REPRO_1377: &str = "def f(b: tensor[f32], x: tensor[n, f32]) -> tensor[4, f32] = expand(b, 0, shape(x, 0))\n\
 def main() = f(sum(to_tensor([1.0f32]), 0), to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32]))\n";
 
+/// OWNER: B2h, not this pull request. `chelis eval --file` routes every root
+/// of this form to the host interpreter, which carries no claims, so no guard
+/// placed in `chelis_ir::eval` can make this row green. Measured on
+/// `801f92c02`: a `def main()` root, a top-level value binding and a def-free
+/// top-level tensor expression all yield ZERO `Lane::Tensor` roots, because a
+/// value binding keeps the strict lowering classification (chelis#218's
+/// `to_tensor` exemption is fn-def-bodies-only, `lower.rs:3040`), a
+/// zero-argument fn root is host-applied, and the CLI supplies no input
+/// bindings for a parameterized tensor entry (`main.rs:9876`). B2h routes
+/// lowered-def application through the DAG evaluator and takes this row on
+/// rebase. Left RED deliberately: a red row with a named owner is the honest
+/// record, a deleted row is a hole.
 #[test]
 fn issue_1377_literal_claim_traps_at_the_inlined_root_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -681,6 +777,18 @@ fn issue_1377_agreeing_literal_claim_executes_on_eval() {
 const REPRO_1379: &str = "def f(b: tensor[f32], x: tensor[n, f32]) -> tensor[n, f32] = expand(b, 0, mul(shape(x, 0), 2i64))\n\
 def main() = f(sum(to_tensor([1.0f32]), 0), to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
 
+/// OWNER: B2h, not this pull request. `chelis eval --file` routes every root
+/// of this form to the host interpreter, which carries no claims, so no guard
+/// placed in `chelis_ir::eval` can make this row green. Measured on
+/// `801f92c02`: a `def main()` root, a top-level value binding and a def-free
+/// top-level tensor expression all yield ZERO `Lane::Tensor` roots, because a
+/// value binding keeps the strict lowering classification (chelis#218's
+/// `to_tensor` exemption is fn-def-bodies-only, `lower.rs:3040`), a
+/// zero-argument fn root is host-applied, and the CLI supplies no input
+/// bindings for a parameterized tensor entry (`main.rs:9876`). B2h routes
+/// lowered-def application through the DAG evaluator and takes this row on
+/// rebase. Left RED deliberately: a red row with a named owner is the honest
+/// record, a deleted row is a hole.
 #[test]
 fn issue_1379_arithmetic_size_under_a_named_claim_traps_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -746,6 +854,18 @@ a = expand(x1, 0, 3i64)\n\
 b = expand(y2, 0, 3i64)\n\
 out = cmplt(a, b)\n";
 
+/// OWNER: B2h, not this pull request. `chelis eval --file` routes every root
+/// of this form to the host interpreter, which carries no claims, so no guard
+/// placed in `chelis_ir::eval` can make this row green. Measured on
+/// `801f92c02`: a `def main()` root, a top-level value binding and a def-free
+/// top-level tensor expression all yield ZERO `Lane::Tensor` roots, because a
+/// value binding keeps the strict lowering classification (chelis#218's
+/// `to_tensor` exemption is fn-def-bodies-only, `lower.rs:3040`), a
+/// zero-argument fn root is host-applied, and the CLI supplies no input
+/// bindings for a parameterized tensor entry (`main.rs:9876`). B2h routes
+/// lowered-def application through the DAG evaluator and takes this row on
+/// rebase. Left RED deliberately: a red row with a named owner is the honest
+/// record, a deleted row is a hole.
 #[test]
 fn issue_597_positional_same_rank_replacement_executes_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
