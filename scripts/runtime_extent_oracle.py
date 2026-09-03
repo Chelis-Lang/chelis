@@ -306,85 +306,183 @@ def generated_phase_a_corpus() -> tuple[CorpusRow, ...]:
 def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
     """Generate Slice B rows from C4's source, class, and guard properties.
 
-    Every row is declared at its recorded `main` baseline. Slice B's first
-    half (PR B1) moves only the axis-source rows; the remaining rows are
-    declared here so the second half changes exit states rather than the
-    corpus shape. A receipt names the test that records the row; the tests
-    for rows still at a start state are Slice B's second half to author.
+    Every row is declared at its recorded `main` baseline.
+
+    **One row per lane, where a guard lands per lane.** A guard is placed on
+    each lane separately, and Slice B ships as three pull requests whose lanes
+    move at different times: B2a places the C and HIP guards, B2h routes the
+    host interpreter so the eval lane reaches the DAG evaluator at all, and
+    B2b widens acceptance. A single-valued row cannot express one lane at its
+    exit state while another still waits on B2h, so a row whose receipt
+    EXECUTES a program is split into `.c` and `.eval` (and `.hip` where a HIP
+    guard is emitted). Rows whose receipt is a chelis-ir unit test, or a
+    checker verdict that no lane varies, stay single.
+
+    Rows-per-lane rather than lane-valued exit states keeps the oracle's row
+    machinery untouched: one id, one state, one receipt, one lattice
+    transition. The phase-b digest is not frozen - only `FROZEN_PHASE_A_DIGEST`
+    exists - so the shape change costs nothing the oracle protects, and it is
+    made deliberately rather than as a side effect.
+
+    A receipt names the test that records the row. Receipts on rows still at a
+    start state are NOT enforced: `validate_receipt_coverage` runs over
+    `rows_at_exit` only, because those are the rows whose tests already exist.
+    The names Slice B's first half wrote for the unmoved rows were therefore
+    aspirational, and this split reconciles them with the tests that exist
+    rather than renaming tests to match. A row's receipt must name a test
+    registered in `phase_b_targets` before that row may reach an exit state.
     """
 
     rows = (
         _row(
-            "class.load_load",
+            "class.load_load.c",
             "silent_unguarded",
             "silent_unguarded",
-            "cli_slice_b.load_load_named_class_guards_every_non_canonical_member",
+            "cli_slice_b.load_load_named_class_guards_every_non_canonical_member_on_c",
         ),
         _row(
-            "class.load_op_output",
+            "class.load_load.eval",
             "silent_unguarded",
             "silent_unguarded",
-            "cli_slice_b.load_and_op_output_members_share_one_guarded_class",
+            "cli_slice_b.load_load_named_class_guards_every_non_canonical_member_on_eval",
         ),
         _row(
-            "class.no_movement_consumer",
+            "class.load_op_output.c",
             "silent_unguarded",
             "silent_unguarded",
-            "cli_slice_b.a_class_with_no_movement_bound_consumer_still_guards",
+            "cli_slice_b.load_and_op_output_members_share_one_guarded_class_on_c",
         ),
         _row(
-            "class.op_output_op_output",
+            "class.load_op_output.eval",
             "silent_unguarded",
             "silent_unguarded",
-            "cli_slice_b.two_op_output_members_guard_against_the_canonical_member",
+            "cli_slice_b.load_and_op_output_members_share_one_guarded_class_on_eval",
         ),
         _row(
-            "class.shared_member_node",
+            "class.no_movement_consumer.c",
             "silent_unguarded",
             "silent_unguarded",
-            "cli_slice_b.two_classes_sharing_one_node_keep_separate_guards",
+            "cli_slice_b.a_class_with_no_movement_bound_consumer_still_guards_on_c",
         ),
         _row(
-            "class.splice_f_of_n_n",
+            "class.no_movement_consumer.eval",
             "silent_unguarded",
             "silent_unguarded",
-            "cli_slice_b.splicing_f_of_n_n_yields_one_member_per_output_axis",
+            "cli_slice_b.a_class_with_no_movement_bound_consumer_still_guards_on_eval",
         ),
         _row(
-            "expand.arith_size.named_claim",
+            "class.op_output_op_output.c",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.two_op_output_members_guard_against_the_canonical_member_on_c",
+        ),
+        _row(
+            "class.op_output_op_output.eval",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.two_op_output_members_guard_against_the_canonical_member_on_eval",
+        ),
+        _row(
+            "class.shared_member_node.c",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.two_classes_sharing_one_node_keep_separate_guards_on_c",
+        ),
+        _row(
+            "class.shared_member_node.eval",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.two_classes_sharing_one_node_keep_separate_guards_on_eval",
+        ),
+        _row(
+            "class.splice_f_of_n_n.c",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.splicing_f_of_n_n_yields_one_member_per_output_axis_on_c",
+        ),
+        _row(
+            "class.splice_f_of_n_n.eval",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.splicing_f_of_n_n_yields_one_member_per_output_axis_on_eval",
+        ),
+        _row(
+            "expand.arith_size.named_claim.c",
             "lane_divergent",
             "lane_divergent",
-            "cli_slice_b.checked_arithmetic_expand_size_under_a_named_claim_agrees_on_every_lane",
+            "cli_slice_b.checked_arithmetic_expand_size_under_a_named_claim_agrees_on_every_lane_on_c",
         ),
         _row(
-            "expand.foreign_claim.same_tensor_set_axis",
-            "silent_unguarded",
-            "silent_unguarded",
-            "cli_slice_b.a_same_tensor_read_under_a_foreign_claim_is_guarded",
+            "expand.arith_size.named_claim.eval",
+            "lane_divergent",
+            "lane_divergent",
+            "cli_slice_b.checked_arithmetic_expand_size_under_a_named_claim_agrees_on_every_lane_on_eval",
         ),
         _row(
-            "expand.kept_axis.op_declared_source",
+            "expand.foreign_claim.same_tensor_set_axis.c",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.a_same_tensor_read_under_a_foreign_claim_is_guarded_on_c",
+        ),
+        _row(
+            "expand.foreign_claim.same_tensor_set_axis.eval",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.a_same_tensor_read_under_a_foreign_claim_is_guarded_on_eval",
+        ),
+        _row(
+            "expand.kept_axis.op_declared_source.c",
             "ice",
             "ice",
-            "cli_slice_b.an_op_declared_axis_on_an_expand_input_flows_through_the_kept_output_axis",
+            "cli_slice_b.issue_665_expand_over_stride_builds_and_runs",
         ),
         _row(
-            "expand.literal_claim.cross_tensor_read",
-            "lane_divergent",
-            "lane_divergent",
-            "cli_slice_b.a_literal_claim_over_a_cross_tensor_read_guards_on_every_lane",
+            "expand.kept_axis.op_declared_source.eval",
+            "ice",
+            "ice",
+            "cli_slice_b.an_op_declared_axis_on_an_expand_input_flows_through_the_kept_output_axis_on_eval",
         ),
         _row(
-            "expand.literal_claim.inlined_root",
+            "expand.literal_claim.cross_tensor_read.c",
             "lane_divergent",
             "lane_divergent",
-            "cli_slice_b.a_literal_claim_survives_root_inlining_with_its_guard",
+            "cli_slice_b.issue_1374_cross_tensor_read_traps_on_c",
         ),
         _row(
-            "expand.named_claim.cross_tensor_read",
+            "expand.literal_claim.cross_tensor_read.eval",
+            "lane_divergent",
+            "lane_divergent",
+            "cli_slice_b.a_literal_claim_over_a_cross_tensor_read_guards_on_every_lane_on_eval",
+        ),
+        _row(
+            "expand.literal_claim.inlined_root.c",
+            "lane_divergent",
+            "lane_divergent",
+            "cli_slice_b.issue_1377_literal_claim_traps_at_the_inlined_root_on_c",
+        ),
+        _row(
+            "expand.literal_claim.inlined_root.eval",
+            "lane_divergent",
+            "lane_divergent",
+            "cli_slice_b.a_literal_claim_survives_root_inlining_with_its_guard_on_eval",
+        ),
+        _row(
+            "expand.named_claim.cross_tensor_read.c",
             "silent_unguarded",
             "silent_unguarded",
-            "cli_slice_b.a_cross_tensor_read_under_a_named_claim_is_guarded",
+            "cli_slice_b.issue_1376_same_tensor_read_under_a_foreign_claim_traps_on_c",
+        ),
+        _row(
+            "expand.named_claim.cross_tensor_read.eval",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.a_cross_tensor_read_under_a_named_claim_is_guarded_on_eval",
+        ),
+        _row(
+            "expand.op_declared_source.hip_prologue",
+            "ice",
+            "ice",
+            "cli_slice_b.an_op_declared_witness_reaches_the_hip_prologue_without_panicking",
         ),
         _row(
             "expand.piped_shape_read.lint_fix",
@@ -393,22 +491,46 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "cli_slice_b.the_canonical_piped_shape_read_checks_evaluates_and_builds",
         ),
         _row(
-            "expand.positional.replacement",
+            "expand.positional.replacement.c",
             "silent_unguarded",
             "silent_unguarded",
-            "cli_slice_b.a_positional_expand_replaces_a_unit_axis_instead_of_inserting",
+            "cli_slice_b.issue_597_positional_same_rank_replacement_executes_on_c",
         ),
         _row(
-            "expand.positional.replacement_zero",
+            "expand.positional.replacement.eval",
             "silent_unguarded",
             "silent_unguarded",
-            "cli_slice_b.a_zero_positional_replacement_declares_an_empty_axis",
+            "cli_slice_b.a_positional_expand_replaces_a_unit_axis_instead_of_inserting_on_eval",
         ),
         _row(
-            "expand.shape_derived.declared_result_survives",
+            "expand.positional.replacement.non_unit_source_static",
             "silent_unguarded",
             "silent_unguarded",
-            "cli_slice_b.a_shape_derived_bound_keeps_its_declared_result_dimension",
+            "cli_slice_b.a_static_non_unit_source_under_a_same_rank_claim_is_a_type_error",
+        ),
+        _row(
+            "expand.positional.replacement.non_unit_source_traps.c",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_c",
+        ),
+        _row(
+            "expand.positional.replacement.non_unit_source_traps.eval",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval",
+        ),
+        _row(
+            "expand.positional.replacement_zero.c",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.a_zero_positional_replacement_declares_an_empty_axis_on_c",
+        ),
+        _row(
+            "expand.positional.replacement_zero.eval",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.a_zero_positional_replacement_declares_an_empty_axis_on_eval",
         ),
         _row(
             "expand.record_projection.size",
@@ -417,33 +539,69 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "cli_slice_b.a_record_projection_is_an_admissible_expand_size",
         ),
         _row(
-            "guard_order.effect_after",
+            "expand.shape_derived.declared_result_survives.c",
             "silent_unguarded",
             "silent_unguarded",
-            "cli_slice_b.an_effect_after_the_guard_does_not_run_when_the_guard_traps",
+            "cli_slice_b.a_shape_derived_bound_keeps_its_declared_result_dimension_on_c",
         ),
         _row(
-            "guard_order.effect_before",
+            "expand.shape_derived.declared_result_survives.eval",
             "silent_unguarded",
             "silent_unguarded",
-            "cli_slice_b.an_effect_before_the_guard_runs_when_the_guard_traps",
+            "cli_slice_b.a_shape_derived_bound_keeps_its_declared_result_dimension_on_eval",
         ),
         _row(
-            "guard_order.trap_after",
+            "guard_order.effect_after.c",
             "silent_unguarded",
             "silent_unguarded",
-            "cli_slice_b.a_later_trap_is_preempted_by_the_extent_guard",
+            "cli_slice_b.an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_c",
         ),
         _row(
-            "guard_order.trap_before",
+            "guard_order.effect_after.eval",
             "silent_unguarded",
             "silent_unguarded",
-            "cli_slice_b.an_earlier_trap_preempts_the_extent_guard",
+            "cli_slice_b.an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_eval",
+        ),
+        _row(
+            "guard_order.effect_before.c",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.an_effect_before_the_guard_runs_when_the_guard_traps_on_c",
+        ),
+        _row(
+            "guard_order.effect_before.eval",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.an_effect_before_the_guard_runs_when_the_guard_traps_on_eval",
+        ),
+        _row(
+            "guard_order.trap_after.c",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.c_independent_trap_after_a_mismatch_loses",
+        ),
+        _row(
+            "guard_order.trap_after.eval",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.a_later_trap_is_preempted_by_the_extent_guard_on_eval",
+        ),
+        _row(
+            "guard_order.trap_before.c",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.c_independent_trap_before_a_mismatch_wins",
+        ),
+        _row(
+            "guard_order.trap_before.eval",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.an_earlier_trap_preempts_the_extent_guard_on_eval",
         ),
         _row(
             "ir.axis_source.cardinality",
             "silent_unguarded",
-            EXECUTES,
+            "executes_exactly",
             "ir_sources.omitted_or_duplicated_output_axis_source_fails_before_emission",
         ),
         _row(
@@ -453,10 +611,16 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "cli_slice_b.every_rebuild_pass_preserves_the_derived_classes",
         ),
         _row(
-            "reshape.named_claim.node_target",
+            "reshape.named_claim.node_target.c",
             "silent_unguarded",
             "silent_unguarded",
-            "cli_slice_b.a_node_valued_reshape_target_under_a_named_claim_is_guarded",
+            "cli_slice_b.a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_c",
+        ),
+        _row(
+            "reshape.named_claim.node_target.eval",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval",
         ),
         # Chelis#1313 removes the synthesized zero only from ReLU. Sigmoid
         # retains the same sourceless-Const class and therefore keeps #1482's
@@ -470,7 +634,7 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "shrink.to_end.nonzero_start",
             "silent_unguarded",
-            TERMINAL_CONTROL,
+            "rejects_exactly",
             "ir_sources.to_end_shrink_end_requires_a_literal_zero_start",
         ),
     )
