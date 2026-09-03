@@ -382,8 +382,11 @@ const FAMILIES: &[Family] = &[
         dtype: "f32",
         call: "shape(e, 0)",
         extra_params: "",
-        declared_result: None,
-        wrong_result: None,
+        // Present so the mutation matrix can declare this family `Constrains`
+        // or `Propagates` and exercise those arms. The `Freezes` arm itself
+        // does not read them.
+        declared_result: Some("int64"),
+        wrong_result: Some("string"),
         members: &["shape", "test_assert_close_tensor"],
     },
     Family {
@@ -429,57 +432,52 @@ const FAMILIES: &[Family] = &[
     },
 ];
 
-/// Declarations and families these probes cannot prove, each with the reason.
+/// Families whose representative these probes cannot discriminate, with the
+/// reason each resists one.
 ///
-/// Two different kinds, and the difference decides who can fix them. A row
-/// whose call has no discriminating spelling will not yield to a better
-/// assertion; a row nobody could spell is simply unfinished. A family whose
-/// declared result binds nothing is a third kind, and it is not fixable here
-/// at all: the obstacle is chelis#1512.
-const UNDISCRIMINATED: &[(&str, &str)] = &[
+/// **This list is per family, not per row, and that is the whole rule.** A
+/// representative stands for its family: a family whose representative can be
+/// discriminated proves every member to the same degree, and one whose
+/// representative cannot proves none of them. Mixing the two granularities is
+/// how a count of proved rows goes wrong in both directions at once.
+///
+/// Three kinds, and the difference decides who can fix them. A representative
+/// with no discriminating spelling will not yield to a better assertion; one
+/// nobody could spell is simply unfinished; one whose declared result binds
+/// nothing is chelis#1512 and no probe of this shape reaches it.
+const UNDISCRIMINATED_FAMILIES: &[(&str, &str)] = &[
     (
-        "split",
-        "returns a list of tensors; no declared result discriminates",
+        "container producing",
+        "its representative `to_list` returns a container, so no declared result \
+         discriminates; `split` and `einsum` share that and `tensor_scan` could \
+         not be spelled at all",
     ),
     (
-        "to_list",
-        "returns a list; no declared result discriminates",
+        "reduction",
+        "its representative `sum` binds nothing: one body accepts -> f32, \
+         -> tensor[1, f32], -> tensor[2, f32] and -> tensor[3, f32] alike, \
+         chelis#1512",
     ),
     (
-        "einsum",
-        "both candidate forms appear in the rendered program",
+        "unprovable movement",
+        "its representative `expand` binds nothing, and `conv2d` needs a rank-4 \
+         producer and four arguments the shared probe shape cannot express",
     ),
     (
-        "conv2d",
-        "needs a rank-4 producer and four arguments the shared probe shape cannot express",
-    ),
-    (
-        "tensor_scan",
-        "no well-typed call could be constructed for its (T, int64) -> T callback",
-    ),
-    (
-        "drop",
-        "its declared result binds nothing: measured to accept a wrong result type, chelis#1512",
-    ),
-    (
-        "sum",
-        "its declared result binds nothing: one body accepts -> f32, -> tensor[1, f32], \
-         -> tensor[2, f32] and -> tensor[3, f32] alike, chelis#1512",
-    ),
-    (
-        "expand",
-        "its declared result binds nothing: a wrong result type is accepted, chelis#1512",
-    ),
-    ("where", "its declared result binds nothing, chelis#1512"),
-    ("clamp", "its declared result binds nothing, chelis#1512"),
-    ("cumsum", "its declared result binds nothing, chelis#1512"),
-    ("sort", "its declared result binds nothing, chelis#1512"),
-    (
-        "scatter_elements",
-        "its declared result binds nothing, and it is the sole member of its \
-         family, so nothing else can stand for it, chelis#1512",
+        "scatter elements",
+        "its representative binds nothing and is the family's only member, so \
+         nothing else can stand for it, chelis#1512",
     ),
 ];
+
+/// Rows that individually accept any declared result, though their family's
+/// representative binds and therefore carries the proof.
+///
+/// These are counted as proved, because the family is what the mechanism
+/// proves. Recorded anyway: a reader who sees `clamp` among the proved rows
+/// deserves to know that `clamp` on its own binds nothing, and that what proves
+/// it is `softmax` standing for the family. Each is chelis#1512.
+const BINDS_NOTHING_BUT_COVERED: &[&str] = &["where", "clamp", "cumsum", "sort", "drop"];
 
 fn check(source: &str) -> Result<String, String> {
     let decls = parse_surf(source).map_err(|error| format!("parse: {error:?}"))?;
@@ -591,19 +589,74 @@ fn every_family_member_declares_its_family_disposition() {
 }
 
 #[test]
-fn undiscriminated_declarations_are_named_with_a_reason() {
-    for (name, reason) in UNDISCRIMINATED {
+fn undiscriminated_families_are_named_with_a_reason() {
+    let family_names = FAMILIES
+        .iter()
+        .map(|family| family.name)
+        .collect::<BTreeSet<_>>();
+    for (name, reason) in UNDISCRIMINATED_FAMILIES {
         assert!(
             !reason.trim().is_empty(),
-            "`{name}` needs a reason no probe reaches it"
+            "family `{name}` needs a reason no probe discriminates it"
         );
-        assert_ne!(
-            declared(name),
-            TensorSettlement::NoTensorOperand,
-            "`{name}` is listed as undiscriminated, so it must declare a \
-             disposition; a builtin with no tensor operand needs no probe"
+        assert!(
+            family_names.contains(name),
+            "`{name}` is named as an undiscriminated family but is not a family"
         );
     }
+    // The row-level note is about rows that ARE proved, by their family, so
+    // every entry must sit in a family that is not itself undiscriminated.
+    let unprovable = UNDISCRIMINATED_FAMILIES
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<BTreeSet<_>>();
+    for row in BINDS_NOTHING_BUT_COVERED {
+        let family = FAMILIES
+            .iter()
+            .find(|family| family.members.contains(row))
+            .unwrap_or_else(|| panic!("`{row}` belongs to no family"));
+        assert!(
+            !unprovable.contains(family.name),
+            "`{row}` is noted as covered by its family, but family `{}` is \
+             itself undiscriminated, so nothing proves it",
+            family.name
+        );
+        assert_ne!(
+            declared(row),
+            TensorSettlement::NoTensorOperand,
+            "`{row}` needs no probe if it admits no tensor"
+        );
+    }
+}
+
+/// The proved / covered-not-proved split, computed from the tables rather than
+/// asserted, so the number in the pull request body cannot drift from the code.
+#[test]
+fn the_proved_and_unproved_counts_partition_every_covered_row() {
+    let unprovable = UNDISCRIMINATED_FAMILIES
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<BTreeSet<_>>();
+    let mut proved = 0usize;
+    let mut not_proved = 0usize;
+    for family in FAMILIES {
+        if unprovable.contains(family.name) {
+            not_proved += family.members.len();
+        } else {
+            proved += family.members.len();
+        }
+    }
+    let covered = BUILTINS
+        .iter()
+        .filter(|decl| decl.tensor_settlement != TensorSettlement::NoTensorOperand)
+        .count();
+    assert_eq!(
+        proved + not_proved,
+        covered,
+        "every covered row is either proved by its family or not"
+    );
+    assert_eq!((proved, not_proved), (128, 15), "the split the body states");
+    assert_eq!(BUILTINS.len() - covered, 9, "rows outside the coverage set");
 }
 
 // ---------------------------------------------------------------------
@@ -620,7 +673,7 @@ fn undiscriminated_declarations_are_named_with_a_reason() {
 /// `UNDISCRIMINATED` rather than assert through the gap.
 #[test]
 fn every_settlement_family_declared_result_binds() {
-    let named = UNDISCRIMINATED
+    let named = UNDISCRIMINATED_FAMILIES
         .iter()
         .map(|(name, _)| *name)
         .collect::<BTreeSet<_>>();
@@ -641,12 +694,12 @@ fn every_settlement_family_declared_result_binds() {
             correct.unwrap_err()
         );
         if check(&declared_result_program(family, wrong_result)).is_ok() {
-            unprovable.push((family.name, family.representative));
+            unprovable.push(family.name);
         }
     }
     let unnamed = unprovable
         .iter()
-        .filter(|(_, representative)| !named.contains(representative))
+        .filter(|name| !named.contains(*name))
         .collect::<Vec<_>>();
     assert!(
         unnamed.is_empty(),
@@ -676,7 +729,7 @@ fn every_settlement_family_declared_result_binds() {
 /// is what makes the mutation in either direction go red.
 #[test]
 fn each_family_representative_behaves_as_its_family_declares() {
-    let named = UNDISCRIMINATED
+    let named = UNDISCRIMINATED_FAMILIES
         .iter()
         .map(|(name, _)| *name)
         .collect::<BTreeSet<_>>();
@@ -692,9 +745,9 @@ fn each_family_representative_behaves_as_its_family_declares() {
                 // nothing here; the precondition test owns that verdict.
                 if check(&declared_result_program(family, wrong_result)).is_ok() {
                     assert!(
-                        named.contains(&family.representative),
+                        named.contains(&family.name),
                         "family `{}` binds nothing and is not named in \
-                         UNDISCRIMINATED",
+                         UNDISCRIMINATED_FAMILIES",
                         family.name
                     );
                     continue;
@@ -722,6 +775,19 @@ fn each_family_representative_behaves_as_its_family_declares() {
                          insertion={insertion} replacement={replacement}",
                         family.name
                     );
+                    // The stamp alone cannot separate propagation from freezing:
+                    // the freeze default IS the replacement form, so both read
+                    // identically. Propagation additionally leaves the operand
+                    // selectable, which is the property a freezing call destroys.
+                    survives_the_call(family).unwrap_or_else(|error| {
+                        panic!(
+                            "{}: a propagating call leaves the operand selectable, \
+                             so a later insertion-form consumer must still be \
+                             accepted; a freezing call is what makes this fail: \
+                             {error}",
+                            family.name
+                        )
+                    });
                 }
             }
             TensorSettlement::Freezes => {
