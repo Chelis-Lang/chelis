@@ -1162,6 +1162,18 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                                 node.id.0, axis
                             ));
                         }
+                        // chelis#1480, `spec/05` section 2.4.1: a `ToEnd` end
+                        // is well formed only when the start paired with it is
+                        // `Lit(0)`. A `ToEnd` end over any other start is a
+                        // malformed bound, rejected rather than resolved to a
+                        // slice.
+                        if matches!(end, RtDim::ToEnd) && start.as_lit() != Some(0) {
+                            errors.push(format!(
+                                "shrink at node {}: axis {} pairs the ToEnd sentinel with a \
+                                 start that is not Lit(0), which is a malformed bound",
+                                node.id.0, axis
+                            ));
+                        }
                         if matches!(start, RtDim::Sym(_)) || matches!(end, RtDim::Sym(_)) {
                             errors.push(format!(
                                 "shrink at node {}: axis {} uses a symbolic dim, which is \
@@ -1358,6 +1370,17 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             ));
         }
     }
+
+    // chelis#1277 C4.1: every realized output axis has one checked extent
+    // source. `verify` is one of the production paths this runs on, not the
+    // only one: it runs in tests and at the end of `grad_dag`, while eval
+    // and the three codegen entries call `check_axis_sources` themselves.
+    if let Err(unsupported) =
+        crate::axis_sources::check_axis_sources(dag, chelis_types::unsupported::Stage::Lowering)
+    {
+        errors.push(unsupported.to_string());
+    }
+
     errors
 }
 

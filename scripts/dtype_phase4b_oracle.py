@@ -408,7 +408,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/04-type-system.md",
         "## 9. Numeric Value Semantics",
         "## 10. Checker Totality",
-        "cd8beb14a6a9763ae9bd9409035e04a44726da35fd94185748ce8c042b215215",
+        "edb150de60effbadeaff33f02ba39929dbde7ae61db4bdedaa8f4bfb3e334086",
     ),
     "numeric primitive contracts": (
         "spec/05-risc-primitives.md",
@@ -1663,6 +1663,18 @@ def validate_normative_contract(
                 "runtime extent guard placement in every execution mode",
             ),
             (
+                "and the dtype of the quantity that guard\n> finalizes",
+                "precondition guard finalized-quantity dtype",
+            ),
+            (
+                "`numeric trap: domain in <op> at int64`",
+                "runtime extent guard trap line",
+            ),
+            (
+                "the result keeps only the forms that consumer admits",
+                "deferred expand candidate elimination",
+            ),
+            (
                 "their defaults settle in source order",
                 "positional expand settlement order",
             ),
@@ -2536,6 +2548,10 @@ def validate_normative_contract(
             (
                 "`reshape` admits `Lit`, `Node`, `InputAxis`, and `Sym`",
                 "runtime extent owner admission",
+            ),
+            (
+                "well formed only when the start\n  paired with it is `Lit(0)`",
+                "ToEnd shrink end requires a zero start",
             ),
             (
                 "| `cmplt(a, b)` | `cmplt(a, b)` | "

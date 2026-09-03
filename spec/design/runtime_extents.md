@@ -1,7 +1,7 @@
 # Runtime Extents: one resolver for non-literal tensor extents
 
-**Status:** IN PROGRESS. Slice A is implemented in the current review change;
-Slices B and C remain proposed. Tracking issue: [#1277].
+**Status:** IN PROGRESS. Slice A merged as PR [#1467] (`627313120`); Slices B
+and C are in flight. Tracking issue: [#1277].
 The Slice A implementation is based on `main` at `0d6673a5`; earlier code
 evidence in this document was rechecked on `main` at `53607a64`;
 function and type names are the durable anchors and line numbers are a
@@ -198,7 +198,7 @@ Later sections cite the clause labels.
 |---|---|---|
 | C1.1 | Admissibility is typing, not provenance: any `int64` expression is an `expand` size; a `reshape` target is a `List[int64]` of static arity | `spec/04` §4.7.2, §4.7.3, §4.7.4, §4.7.6 |
 | C1.2 | Identity is proof-gated and equality is guarded; an unproved claim over a runtime extent adds a guard, never a rejection; every symbolic `shrink` axis is fresh | `spec/04` §4.7, §4.7.2, §4.7.3, §4.7.6 |
-| C1.3 | Guard placement is a partial order: once, after operands, before the first dependent allocation or access; interface guards at entry in signature order; local guards at the introducing operation's source position; an equality guard traps `Domain` under the introducing operation, a non-negativity guard under the owning movement operation | `spec/04` §4.7, the runtime extent guard paragraph |
+| C1.3 | Guard placement is a partial order: once, after operands, before the first dependent allocation or access; interface guards at entry in signature order; local guards at the introducing operation's source position; an equality guard traps `Domain` under the introducing operation, a non-negativity guard under the owning movement operation, and both render as [04-NUM-9] typed operation-precondition guards at `int64` | `spec/04` §4.7, the runtime extent guard paragraph |
 | C1.4 | Coupled positional defaults settle in the order their results are introduced into the checked program | `spec/04` §4.7.2 |
 | C1.5 | Zero is legal; a static negative is a type error; a runtime negative traps `Domain` | `spec/04` §4.7.2 |
 | C1.6 | Extents are `int64`, axes are `int32` | [05-DIM-1..3] |
@@ -325,8 +325,12 @@ fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
     members order by declared signature index (node position is name order
     on the subexpression-program path, `lower.rs:1341`, and declared order on
     the `lower_fn` path, `lower.rs:12100-12108`, so it is not a reliable
-    key); local members follow node position; nothing orders by hash
-    iteration or display name;
+    key). That rule orders interface members only: a class with no interface
+    member takes its canonical member by node position, which is also how
+    local members order inside a class that has both. Nothing orders by hash
+    iteration or display name. `spec/04` §4.7 decides the order the entry
+    guards of a class with interface members run in, and gives an entry that
+    declares no signature its ABI input-slot order;
   - no guard is ever discharged: an all-interface class runs its guard at
     entry regardless of data use, and a local member's producer is an
     observable root under `spec/06` §5.2 because the guard can trap, so DCE
@@ -876,7 +880,10 @@ class completion oracle and ends with `RUNTIME EXTENT ORACLE: PASS`.
 | [#1379] | arithmetic size under a named claim: eval unguarded, compiled lanes reject | B |
 | [#1382] | bare binder as an `expand` size: no witness in eval, compiled lanes ICE | A |
 | [#1397] | shape-derived bound erases a declared result; wildcard root masks #1378 | B (claim erasure); separately tracked root boundary |
+| [#1480] | a `ToEnd` shrink end is never checked against a `Lit(0)` start | B |
+| [#1482] | runtime-bound `shrink` consumed elementwise: the `Const` operand's axis has no declared dim source and C build ICEs | B |
 | [#1265] | comparison consumer never selects the deferred shape | C |
+| [#1380] | `matmul` over two deferred positional `expand` results publishes `?0` as the checked result type | C |
 | [#1338] | coupled defaults settle nondeterministically | C / [#1341] Phase A |
 | [#578] | mechanism evidence only; full rank-polymorphic repro stays open | external rank-polymorphism work |
 | [#1112] | HIP metadata-carrier width; Slice B HIP guard rows | [#729] |
@@ -892,8 +899,10 @@ rebuild integrity class ([#1372]), exact `i64` internal carriers ([#1373]),
 Metal `expand` emission and symbolic-dim `Load` support ([#1383]), sibling
 symbolic-dim defects not yet parented to [#1277], capacity and reuse equality
 over typed extent expressions
-([`runtime_representation.md`](runtime_representation.md), [#888]), and
-dtype-semantics decisions.
+([`runtime_representation.md`](runtime_representation.md), [#888]), the four
+checker tensor gates that reject a not-yet-resolved type variable where the
+other ~71 defer ([#1489], related to Slice C's deferral totality but owned
+separately), and dtype-semantics decisions.
 
 ## Considered and rejected
 
@@ -1060,6 +1069,11 @@ decides the underlying rule, and what replaces it.
 [#1377]: https://github.com/Chelis-Lang/chelis/issues/1377
 [#1378]: https://github.com/Chelis-Lang/chelis/issues/1378
 [#1379]: https://github.com/Chelis-Lang/chelis/issues/1379
+[#1380]: https://github.com/Chelis-Lang/chelis/issues/1380
 [#1382]: https://github.com/Chelis-Lang/chelis/issues/1382
 [#1383]: https://github.com/Chelis-Lang/chelis/issues/1383
 [#1397]: https://github.com/Chelis-Lang/chelis/issues/1397
+[#1467]: https://github.com/Chelis-Lang/chelis/pull/1467
+[#1480]: https://github.com/Chelis-Lang/chelis/issues/1480
+[#1482]: https://github.com/Chelis-Lang/chelis/issues/1482
+[#1489]: https://github.com/Chelis-Lang/chelis/issues/1489

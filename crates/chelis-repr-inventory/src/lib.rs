@@ -9,7 +9,7 @@
 //! # One real parser per language
 //!
 //! The inventory's universe is a frozen list of repository files, not a
-//! language. Forty-nine of them are Rust, six are C headers, and one
+//! language. Fifty of them are Rust, six are C headers, and one
 //! (`chelis_metal_runtime.h`) is Objective-C. Rust is read with `syn`, a
 //! total parser for the language. The headers are read through clang's front
 //! end by the [`c_ast`] module: the compiler supplies every declaration and

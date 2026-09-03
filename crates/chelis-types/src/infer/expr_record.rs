@@ -21,6 +21,21 @@ pub(super) fn infer_tuple(
         .iter()
         .map(|e| infer_expr(e, env, vg, subst, adt_reg, errors, product))
         .collect();
+    for elem in &elems {
+        // C3 `Propagate` (`spec/04-type-system.md` §4.7.2): an anonymous tuple
+        // field carries the unresolved monomorphic candidate and adds no
+        // evidence. Only a variable field can resolve to a deferred result, so
+        // the pre-filter keeps every other field free of a substitution walk.
+        //
+        // The action cannot fail: it inspects nothing and mutates nothing, so
+        // the result is deliberately discarded rather than given an error arm
+        // no input can reach.
+        if matches!(elem, Type::Var(_))
+            && let Type::Var(v) = subst.apply(elem)
+        {
+            let _ = subst.settle_deferred_tensor(v, DeferralAction::Propagate);
+        }
+    }
     Type::Tuple(elems)
 }
 
@@ -783,7 +798,7 @@ pub(super) fn infer_cast(
 
     let expr_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     let resolved = match subst.apply(&expr_ty) {
-        Type::Var(v) => match subst.materialize_deferred_expand_default(v) {
+        Type::Var(v) => match subst.settle_deferred_tensor(v, DeferralAction::Freeze) {
             Ok(Some(ty)) => ty,
             Ok(None) => Type::Var(v),
             Err(error) => return report(errors, error.into()),

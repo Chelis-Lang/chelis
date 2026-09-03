@@ -330,7 +330,7 @@ pub fn grad_dag_checked(
 /// Canonical snake-case name for a `RiscOp` for use in `AdError`'s
 /// `op` field. Mirrors the user-facing Surf builtin name where one
 /// exists.
-fn risc_op_name(op: &RiscOp) -> &'static str {
+pub(crate) fn risc_op_name(op: &RiscOp) -> &'static str {
     match op {
         RiscOp::Add => "add",
         RiscOp::Sub => "sub",

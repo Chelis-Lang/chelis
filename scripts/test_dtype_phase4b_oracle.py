@@ -2371,6 +2371,30 @@ class ContractValidationTests(unittest.TestCase):
                 "runtime extent owner admission",
             ),
             (
+                Path("spec/04-type-system.md"),
+                "and the dtype of the quantity that guard\n> finalizes",
+                "and declared result dtype\n> ",
+                "precondition guard finalized-quantity dtype",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "`numeric trap: domain in <op> at int64`",
+                "`numeric trap: domain in <op> at <prim>`",
+                "runtime extent guard trap line",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "the result keeps only the forms that consumer admits",
+                "the result keeps every form",
+                "deferred expand candidate elimination",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "well formed only when the start\n  paired with it is `Lit(0)`",
+                "well formed with any start",
+                "ToEnd shrink end requires a zero start",
+            ),
+            (
                 Path("spec/06-transformations.md"),
                 "over these) is not batched",
                 "over these) is batched",

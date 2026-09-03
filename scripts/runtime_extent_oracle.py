@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
 """Authoritative runtime-extent class oracle for chelis#1277.
 
-The checked-in baseline records the pre-slice disposition and required exit
+The checked-in baselines record the pre-slice disposition and current exit
 state of every generated corpus row. The runner validates the one-way status
-lattice, proves that each named Rust receipt actually executed and passed,
-and binds the result to a clean Git commit plus a canonical corpus digest.
+lattice across the whole recorded chain, proves that each named Rust receipt
+actually executed and passed, and binds the result to a clean Git commit plus
+a canonical corpus digest.
 
-Acceptance for every supported phase ends with::
+Acceptance for every registered phase ends with::
 
     RUNTIME EXTENT ORACLE: PASS
+
+Each slice registers its own corpus, baseline file, and test targets in
+``PHASE_REGISTRY``. A phase that is not registered refuses to report success.
+A registered phase reports PASS only when every row it owns has reached an
+exit state (``executes_exactly``, ``rejects_exactly``, or a
+``typed_unsupported(#N)`` receipt) or is recorded as deferred with the reason
+its owning design-doc clause states; otherwise the run exits nonzero and
+lists the rows still short of exit.
 
 Slice A also has a documented HIP hardware gate. This automatic runner checks
 that the two exact ignored tests still exist; the hardware command printed in
@@ -18,7 +27,7 @@ the receipt must be run on the same commit and corpus digest.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 from pathlib import Path
@@ -30,7 +39,9 @@ from typing import Callable, Mapping, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_PATH = REPO_ROOT / "scripts/runtime_extent_oracle_baseline.json"
+BASELINE_PATH_PHASE_B = REPO_ROOT / "scripts/runtime_extent_oracle_baseline_phase_b.json"
 PHASES = ("a", "b", "c", "final")
+SLICE_PHASES = ("a", "b", "c")
 PASS_MARKER = "RUNTIME EXTENT ORACLE: PASS"
 HIP_HARDWARE_COMMAND = (
     "scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness -- "
@@ -43,6 +54,7 @@ START_STATES = frozenset(
 TERMINAL_CONTROL = "rejects_exactly"
 EXECUTES = "executes_exactly"
 TYPED_UNSUPPORTED = re.compile(r"^typed_unsupported\(#(?P<issue>[1-9][0-9]*)\)$")
+EXIT_CLASSES = frozenset({EXECUTES, TERMINAL_CONTROL, "typed_unsupported"})
 
 
 class OracleFailure(RuntimeError):
@@ -51,9 +63,15 @@ class OracleFailure(RuntimeError):
 
 @dataclass(frozen=True)
 class CorpusRow:
+    """One corpus row: its recorded `main` state and its state in one phase.
+
+    ``exit_state`` is serialized under the owning phase's ``phase_<p>`` key,
+    so phase A's canonical bytes are unchanged by this multi-phase plumbing.
+    """
+
     id: str
     baseline: str
-    phase_a: str
+    exit_state: str
     receipt: str
 
 
@@ -65,8 +83,24 @@ class TestTarget:
     list_only: bool = False
 
 
-def _row(id: str, baseline: str, phase_a: str, receipt: str) -> CorpusRow:
-    return CorpusRow(id, baseline, phase_a, receipt)
+@dataclass(frozen=True)
+class PhaseSpec:
+    """Everything one slice registers: rows, baseline file, and targets.
+
+    ``deferred`` maps a row id to the documented reason it is recorded short
+    of an exit state. Only a row named here may sit at a start state without
+    failing its phase.
+    """
+
+    phase: str
+    corpus: tuple[CorpusRow, ...]
+    baseline_path: Path
+    targets: Callable[[], tuple[TestTarget, ...]]
+    deferred: Mapping[str, str] = field(default_factory=dict)
+
+
+def _row(id: str, baseline: str, exit_state: str, receipt: str) -> CorpusRow:
+    return CorpusRow(id, baseline, exit_state, receipt)
 
 
 def generated_phase_a_corpus() -> tuple[CorpusRow, ...]:
@@ -269,12 +303,183 @@ def generated_phase_a_corpus() -> tuple[CorpusRow, ...]:
     return tuple(sorted(rows, key=lambda row: row.id))
 
 
-def canonical_corpus_bytes(rows: Sequence[CorpusRow]) -> bytes:
+def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
+    """Generate Slice B rows from C4's source, class, and guard properties.
+
+    Every row is declared at its recorded `main` baseline. Slice B's first
+    half (PR B1) moves only the axis-source rows; the remaining rows are
+    declared here so the second half changes exit states rather than the
+    corpus shape. A receipt names the test that records the row; the tests
+    for rows still at a start state are Slice B's second half to author.
+    """
+
+    rows = (
+        _row(
+            "class.load_load",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.load_load_named_class_guards_every_non_canonical_member",
+        ),
+        _row(
+            "class.load_op_output",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.load_and_op_output_members_share_one_guarded_class",
+        ),
+        _row(
+            "class.no_movement_consumer",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.a_class_with_no_movement_bound_consumer_still_guards",
+        ),
+        _row(
+            "class.op_output_op_output",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.two_op_output_members_guard_against_the_canonical_member",
+        ),
+        _row(
+            "class.shared_member_node",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.two_classes_sharing_one_node_keep_separate_guards",
+        ),
+        _row(
+            "class.splice_f_of_n_n",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.splicing_f_of_n_n_yields_one_member_per_output_axis",
+        ),
+        _row(
+            "expand.arith_size.named_claim",
+            "lane_divergent",
+            "lane_divergent",
+            "cli_slice_b.checked_arithmetic_expand_size_under_a_named_claim_agrees_on_every_lane",
+        ),
+        _row(
+            "expand.foreign_claim.same_tensor_set_axis",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.a_same_tensor_read_under_a_foreign_claim_is_guarded",
+        ),
+        _row(
+            "expand.kept_axis.op_declared_source",
+            "ice",
+            "ice",
+            "cli_slice_b.an_op_declared_axis_on_an_expand_input_flows_through_the_kept_output_axis",
+        ),
+        _row(
+            "expand.literal_claim.cross_tensor_read",
+            "lane_divergent",
+            "lane_divergent",
+            "cli_slice_b.a_literal_claim_over_a_cross_tensor_read_guards_on_every_lane",
+        ),
+        _row(
+            "expand.literal_claim.inlined_root",
+            "lane_divergent",
+            "lane_divergent",
+            "cli_slice_b.a_literal_claim_survives_root_inlining_with_its_guard",
+        ),
+        _row(
+            "expand.named_claim.cross_tensor_read",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.a_cross_tensor_read_under_a_named_claim_is_guarded",
+        ),
+        _row(
+            "expand.piped_shape_read.lint_fix",
+            "nonconforming_rejection",
+            "nonconforming_rejection",
+            "cli_slice_b.the_canonical_piped_shape_read_checks_evaluates_and_builds",
+        ),
+        _row(
+            "expand.positional.replacement",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.a_positional_expand_replaces_a_unit_axis_instead_of_inserting",
+        ),
+        _row(
+            "expand.positional.replacement_zero",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.a_zero_positional_replacement_declares_an_empty_axis",
+        ),
+        _row(
+            "expand.shape_derived.declared_result_survives",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.a_shape_derived_bound_keeps_its_declared_result_dimension",
+        ),
+        _row(
+            "expand.record_projection.size",
+            "nonconforming_rejection",
+            "nonconforming_rejection",
+            "cli_slice_b.a_record_projection_is_an_admissible_expand_size",
+        ),
+        _row(
+            "guard_order.effect_after",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.an_effect_after_the_guard_does_not_run_when_the_guard_traps",
+        ),
+        _row(
+            "guard_order.effect_before",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.an_effect_before_the_guard_runs_when_the_guard_traps",
+        ),
+        _row(
+            "guard_order.trap_after",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.a_later_trap_is_preempted_by_the_extent_guard",
+        ),
+        _row(
+            "guard_order.trap_before",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.an_earlier_trap_preempts_the_extent_guard",
+        ),
+        _row(
+            "ir.axis_source.cardinality",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_sources.omitted_or_duplicated_output_axis_source_fails_before_emission",
+        ),
+        _row(
+            "rebuild.classes_after_each_pass",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.every_rebuild_pass_preserves_the_derived_classes",
+        ),
+        _row(
+            "reshape.named_claim.node_target",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.a_node_valued_reshape_target_under_a_named_claim_is_guarded",
+        ),
+        _row(
+            "shrink.elementwise_const.build",
+            "ice",
+            "typed_unsupported(#1482)",
+            "cli_slice_b.runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt",
+        ),
+        _row(
+            "shrink.to_end.nonzero_start",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "ir_sources.to_end_shrink_end_requires_a_literal_zero_start",
+        ),
+    )
+    return tuple(sorted(rows, key=lambda row: row.id))
+
+
+def canonical_corpus_bytes(rows: Sequence[CorpusRow], phase: str) -> bytes:
     payload = [
         {
             "baseline": row.baseline,
             "id": row.id,
-            "phase_a": row.phase_a,
+            f"phase_{phase}": row.exit_state,
             "receipt": row.receipt,
         }
         for row in rows
@@ -282,8 +487,8 @@ def canonical_corpus_bytes(rows: Sequence[CorpusRow]) -> bytes:
     return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
-def corpus_digest(rows: Sequence[CorpusRow]) -> str:
-    return hashlib.sha256(canonical_corpus_bytes(rows)).hexdigest()
+def corpus_digest(rows: Sequence[CorpusRow], phase: str) -> str:
+    return hashlib.sha256(canonical_corpus_bytes(rows, phase)).hexdigest()
 
 
 def _capacity_tests() -> tuple[str, ...]:
@@ -308,9 +513,15 @@ def _capacity_tests() -> tuple[str, ...]:
     )
 
 
-def automatic_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
+def self_test_target(python: str = sys.executable) -> TestTarget:
+    """The oracle's own unit suite. Shared by every phase, so run once."""
+
+    return TestTarget("self_tests", (python, "scripts/test_runtime_extent_oracle.py"))
+
+
+def phase_a_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
     return (
-        TestTarget("self_tests", (python, "scripts/test_runtime_extent_oracle.py")),
+        self_test_target(python),
         TestTarget(
             "ir",
             ("cargo", "test", "-p", "chelis-ir", "--test", "runtime_extent_slice_a", "--", "--nocapture"),
@@ -397,6 +608,7 @@ def automatic_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
                 "v7_input_axis_round_trips_as_typed_structure",
                 "v7_movement_ops_reject_unowned_runtime_extent_inputs",
                 "v7_node_extent_round_trips_only_from_rank_zero_int64",
+                "v7_shrink_rejects_a_to_end_end_over_a_non_zero_start",
             ),
         ),
         TestTarget(
@@ -462,6 +674,71 @@ def automatic_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
     )
 
 
+def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
+    return (
+        self_test_target(python),
+        TestTarget(
+            "ir_sources",
+            (
+                "cargo", "test", "-p", "chelis-ir", "--test",
+                "runtime_extent_slice_b_sources", "--", "--nocapture",
+            ),
+            (
+                "every_risc_op_yields_exactly_one_source_per_output_axis",
+                "binding_a_to_end_bound_rejects_a_start_that_is_not_literal_zero",
+                "expand_insert_maps_later_output_axes_to_input_minus_one",
+                "external_axis_names_the_exact_load_not_a_string_match",
+                "full_axis_symbolic_shrink_is_op_computed_not_pass_through",
+                "identity_stride_one_and_zero_pad_pass_the_input_axis_through",
+                "input_axis_and_scalar_input_sources_validate_their_slots",
+                "omitted_or_duplicated_output_axis_source_fails_before_emission",
+                "op_declared_axis_on_an_expand_input_flows_through_the_kept_output_axis",
+                "reduction_and_count_shift_kept_output_axes_back_to_their_input_axis",
+                "to_end_shrink_end_requires_a_literal_zero_start",
+                "unsupported_but_well_typed_mapping_yields_the_registered_receipt_not_an_ice",
+            ),
+        ),
+        TestTarget(
+            "cli_slice_b",
+            (
+                "cargo", "test", "-p", "chelis-cli", "--test",
+                "runtime_extent_slice_b", "--", "--nocapture",
+            ),
+            ("runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt",),
+        ),
+    )
+
+
+PHASE_A_DEFERRED: Mapping[str, str] = {
+    "expand.input_axis.metal_device": (
+        "runtime_extents.md C2.5: no Metal device-path expand row executes until "
+        "chelis#1383 lands expand emission and symbolic-dim Load support"
+    ),
+    "vmap.shared_shape_bound.concrete_c_emit": (
+        "runtime_extents.md C2.7: the guard this row waits on is Slice B's, so "
+        "Slice A records it at its main baseline"
+    ),
+}
+
+
+PHASE_REGISTRY: Mapping[str, PhaseSpec] = {
+    "a": PhaseSpec(
+        phase="a",
+        corpus=generated_phase_a_corpus(),
+        baseline_path=BASELINE_PATH,
+        targets=phase_a_targets,
+        deferred=PHASE_A_DEFERRED,
+    ),
+    "b": PhaseSpec(
+        phase="b",
+        corpus=generated_phase_b_corpus(),
+        baseline_path=BASELINE_PATH_PHASE_B,
+        targets=phase_b_targets,
+        deferred={},
+    ),
+}
+
+
 def _status_class(status: str) -> str:
     if status in START_STATES or status in {TERMINAL_CONTROL, EXECUTES}:
         return status
@@ -486,14 +763,81 @@ def validate_transition(before: str, after: str) -> None:
     raise OracleFailure(f"forbidden status transition {before!r} -> {after!r}")
 
 
+def registered_specs(
+    registry: Mapping[str, PhaseSpec] | None = None,
+) -> tuple[PhaseSpec, ...]:
+    """Every registered slice phase, in lattice order."""
+
+    active = PHASE_REGISTRY if registry is None else registry
+    return tuple(active[phase] for phase in SLICE_PHASES if phase in active)
+
+
+def validate_phase_chain(specs: Sequence[PhaseSpec]) -> None:
+    """Enforce the one-way lattice across the whole recorded chain.
+
+    A row declared by more than one phase records one `main` baseline and
+    moves only rightward through the phases in order, so a leftward move
+    anywhere in the chain fails every invocation, not only the owning
+    phase's.
+    """
+
+    baselines: dict[str, str] = {}
+    chain: dict[str, list[str]] = {}
+    for spec in specs:
+        for row in spec.corpus:
+            recorded = baselines.setdefault(row.id, row.baseline)
+            if recorded != row.baseline:
+                raise OracleFailure(
+                    f"row {row.id!r} records two different baselines: "
+                    f"{recorded!r} and {row.baseline!r}"
+                )
+            chain.setdefault(row.id, []).append(row.exit_state)
+    for row_id in sorted(chain):
+        previous = baselines[row_id]
+        for state in chain[row_id]:
+            try:
+                validate_transition(previous, state)
+            except OracleFailure as error:
+                raise OracleFailure(f"row {row_id!r}: {error}") from error
+            previous = state
+
+
+def rows_at_exit(spec: PhaseSpec) -> tuple[CorpusRow, ...]:
+    """Rows whose recorded state is an exit state or a documented deferral.
+
+    These rows' receipts name tests that already exist, so these are the rows
+    receipt coverage is enforced over. A row still at a start state is listed
+    by `exit_shortfall` instead, which is what fails the phase.
+    """
+
+    return tuple(
+        row
+        for row in spec.corpus
+        if _status_class(row.exit_state) in EXIT_CLASSES or row.id in spec.deferred
+    )
+
+
+def exit_shortfall(spec: PhaseSpec) -> tuple[str, ...]:
+    """Row ids the phase owns that are neither at an exit state nor deferred."""
+
+    return tuple(
+        row.id
+        for row in spec.corpus
+        if _status_class(row.exit_state) not in EXIT_CLASSES
+        and row.id not in spec.deferred
+    )
+
+
 def load_and_validate_baseline(
-    path: Path = BASELINE_PATH, rows: Sequence[CorpusRow] | None = None
+    spec: PhaseSpec, path: Path | None = None
 ) -> Mapping[str, object]:
-    generated = tuple(rows if rows is not None else generated_phase_a_corpus())
+    generated = tuple(spec.corpus)
+    baseline_path = path if path is not None else spec.baseline_path
+    exit_key = f"phase_{spec.phase}"
     try:
-        payload = json.loads(path.read_text())
+        payload = json.loads(baseline_path.read_text())
     except (OSError, json.JSONDecodeError) as error:
-        raise OracleFailure(f"cannot read baseline {path}: {error}") from error
+        raise OracleFailure(f"cannot read baseline {baseline_path}: {error}") from error
     if not isinstance(payload, dict) or set(payload) != {
         "schema_version",
         "corpus_sha256",
@@ -502,7 +846,7 @@ def load_and_validate_baseline(
         raise OracleFailure("baseline must contain exactly schema_version, corpus_sha256, rows")
     if payload["schema_version"] != 1:
         raise OracleFailure(f"unsupported baseline schema {payload['schema_version']!r}")
-    expected_digest = corpus_digest(generated)
+    expected_digest = corpus_digest(generated, spec.phase)
     if payload["corpus_sha256"] != expected_digest:
         raise OracleFailure(
             "baseline corpus digest drift: "
@@ -516,17 +860,19 @@ def load_and_validate_baseline(
         if not isinstance(entry, dict) or set(entry) != {
             "id",
             "baseline",
-            "phase_a",
+            exit_key,
             "receipt",
         }:
             raise OracleFailure(f"baseline row {index} has the wrong fields")
-        try:
-            row = CorpusRow(**entry)
-        except TypeError as error:
-            raise OracleFailure(f"baseline row {index} is malformed: {error}") from error
+        row = CorpusRow(
+            id=entry["id"],
+            baseline=entry["baseline"],
+            exit_state=entry[exit_key],
+            receipt=entry["receipt"],
+        )
         _status_class(row.baseline)
-        _status_class(row.phase_a)
-        validate_transition(row.baseline, row.phase_a)
+        _status_class(row.exit_state)
+        validate_transition(row.baseline, row.exit_state)
         observed.append(row)
     if tuple(observed) != generated:
         raise OracleFailure("baseline rows differ from the generated corpus")
@@ -611,30 +957,96 @@ def exact_head_receipt(
     return head.stdout.strip()
 
 
+def dedupe_targets(targets: Sequence[TestTarget]) -> tuple[TestTarget, ...]:
+    """One run per distinct command, so phases sharing a target run it once."""
+
+    seen: set[tuple[str, ...]] = set()
+    unique: list[TestTarget] = []
+    for target in targets:
+        if target.argv in seen:
+            continue
+        seen.add(target.argv)
+        unique.append(target)
+    return tuple(unique)
+
+
+def selected_specs(
+    phase: str, registry: Mapping[str, PhaseSpec] | None = None
+) -> tuple[PhaseSpec, ...]:
+    active = PHASE_REGISTRY if registry is None else registry
+    if phase == "final":
+        missing = [p for p in SLICE_PHASES if p not in active]
+        if missing:
+            raise OracleFailure(
+                "phase 'final' requires every slice phase to be registered; "
+                f"missing {missing}"
+            )
+        return registered_specs(active)
+    spec = active.get(phase)
+    if spec is None:
+        registered = ", ".join(sorted(active)) or "none"
+        raise OracleFailure(
+            f"phase {phase!r} corpus is not implemented; "
+            f"registered phases are {registered}"
+        )
+    return (spec,)
+
+
 def validate(
     phase: str,
     *,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-    baseline_path: Path = BASELINE_PATH,
+    registry: Mapping[str, PhaseSpec] | None = None,
     targets: Sequence[TestTarget] | None = None,
     require_clean: bool = True,
 ) -> tuple[str, str]:
     if phase not in PHASES:
         raise OracleFailure(f"unsupported phase {phase!r}")
-    if phase != "a":
-        raise OracleFailure(
-            f"phase {phase!r} corpus is not implemented; only Slice A can report PASS"
+
+    # The lattice binds the whole recorded chain on every invocation, so a
+    # leftward move in a later phase fails an earlier phase's run too.
+    validate_phase_chain(registered_specs(registry))
+
+    selected = selected_specs(phase, registry)
+    for spec in selected:
+        load_and_validate_baseline(spec)
+
+    if targets is None:
+        selected_targets = dedupe_targets(
+            tuple(target for spec in selected for target in spec.targets())
         )
-    rows = generated_phase_a_corpus()
-    load_and_validate_baseline(baseline_path, rows)
-    selected_targets = tuple(targets if targets is not None else automatic_targets())
-    validate_receipt_coverage(rows, selected_targets)
+        for spec in selected:
+            validate_receipt_coverage(rows_at_exit(spec), spec.targets())
+    else:
+        selected_targets = dedupe_targets(tuple(targets))
+        for spec in selected:
+            validate_receipt_coverage(rows_at_exit(spec), selected_targets)
+
     head = exact_head_receipt(runner, require_clean=require_clean)
     for target in selected_targets:
         completed = _run_text(runner, target.argv)
         validate_target_receipt(target, completed)
-    digest = corpus_digest(rows)
+
+    shortfall = [
+        (spec.phase, row_id) for spec in selected for row_id in exit_shortfall(spec)
+    ]
+    if shortfall:
+        listed = ", ".join(f"{p}:{row}" for p, row in shortfall)
+        raise OracleFailure(
+            f"phase {phase!r} has {len(shortfall)} row(s) short of an exit state: {listed}"
+        )
+
+    digests = [corpus_digest(spec.corpus, spec.phase) for spec in selected]
+    digest = (
+        digests[0]
+        if len(digests) == 1
+        else hashlib.sha256("".join(digests).encode()).hexdigest()
+    )
     print(f"runtime_extent_head={head}", flush=True)
+    for spec, phase_digest in zip(selected, digests):
+        print(
+            f"runtime_extent_corpus_sha256_phase_{spec.phase}={phase_digest}", flush=True
+        )
     print(f"runtime_extent_corpus_sha256={digest}", flush=True)
     print(f"runtime_extent_hip_manual_gate={HIP_HARDWARE_COMMAND}", flush=True)
     print(PASS_MARKER, flush=True)

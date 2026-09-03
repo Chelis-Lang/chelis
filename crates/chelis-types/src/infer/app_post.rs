@@ -334,13 +334,61 @@ pub(super) fn finish_unified_app(
             _ => None,
         });
         if let Some(dims) = tensor_dims {
-            return Type::Tensor(dims, TensorPrec::Concrete(Prim::Bool));
+            // chelis#1265: route the result through unification rather than
+            // constructing it out of band. A consumer that supplies a shape
+            // must reach this call's result variable, or a declared shape
+            // simply binds a free variable and selects nothing.
+            let result = Type::Tensor(dims, TensorPrec::Concrete(Prim::Bool));
+            if let Err(error) = unify(&ret_tv, &result, subst) {
+                return report(errors, error.into());
+            }
+            return subst.apply(&ret_tv);
+        }
+        // Every operand is still open. [05-OP-36] makes the operand shape,
+        // the result shape, and the bool result dtype one equation, so the
+        // result carries the operand's open choice instead of a fabricated
+        // shape, and a shape later supplied to the result fixes the operand.
+        // Two deferred operands are already one variable here, because the
+        // comparison's own `(&tv, &tv)` signature unified them.
+        let pending_operand =
+            arg_tys
+                .iter()
+                .find_map(|arg| match type_for_readonly_check(arg, subst) {
+                    Type::Var(var) if subst.has_deferred_expand_constraint(var) => Some(var),
+                    _ => None,
+                });
+        if let Some(source) = pending_operand {
+            let prec = subst
+                .deferred_tensor_precision(source)
+                .unwrap_or(TensorPrec::Concrete(Prim::Bool));
+            match subst.apply(&ret_tv) {
+                Type::Var(result_var) => subst.record_deferred_shape_mirror(
+                    result_var,
+                    product.source_ordinal_for_list(list),
+                    source,
+                    prec,
+                ),
+                Type::Tensor(dims, _) => {
+                    // The result already carries a shape, which is the
+                    // operand's shape under the same equation.
+                    if let Err(error) = unify(&Type::Var(source), &Type::Tensor(dims, prec), subst)
+                    {
+                        return report(errors, error.into());
+                    }
+                }
+                _ => {}
+            }
+            return subst.apply(&ret_tv);
         }
         // No tensor arg → scalar comparison, returns scalar bool.
         if let Some(first_arg) = arg_tys.first() {
             let resolved_arg = type_for_readonly_check(first_arg, subst);
             if matches!(resolved_arg, Type::Prim(_)) {
-                return Type::Prim(Prim::Bool);
+                let result = Type::Prim(Prim::Bool);
+                if let Err(error) = unify(&ret_tv, &result, subst) {
+                    return report(errors, error.into());
+                }
+                return subst.apply(&ret_tv);
             }
         }
     }
@@ -584,7 +632,8 @@ pub(super) fn finish_unified_app(
                     // context-free shape so borrowed and unborrowed reads use
                     // the same rule before axis validation.
                     if let Type::Var(var) = type_for_readonly_check(first_arg, subst)
-                        && let Err(error) = subst.materialize_deferred_expand_default(var)
+                        && let Err(error) =
+                            subst.settle_deferred_tensor(var, DeferralAction::Freeze)
                     {
                         return report(errors, error.into());
                     }
