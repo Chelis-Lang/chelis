@@ -344,6 +344,38 @@ pub(super) fn check_conv2d_signature(
     subst.apply(&output_template)
 }
 
+/// `spec/05-risc-primitives.md` §4.1: `matmul` contracts the last axis of its
+/// left operand against the first axis of its right operand, so neither
+/// operand can have rank below two.
+const MATMUL_MIN_RANK: usize = 2;
+
+/// Whether a contracted-extent pair can still agree.
+///
+/// Conservative on the value: only two known literals can definitely
+/// disagree, so anything symbolic stays admissible. That is not sufficient on
+/// its own; the caller must also compare the correct pair of axes, which is
+/// what [`right_operand_contracted_axis`] exists to get right.
+fn contraction_may_agree(contracted: Option<&Dim>, against: Option<&Dim>) -> bool {
+    match (contracted, against) {
+        (Some(Dim::Lit(left)), Some(Dim::Lit(right))) => left == right,
+        _ => true,
+    }
+}
+
+/// The axis a right-hand `matmul` operand contracts on: its second-to-last,
+/// not its first.
+///
+/// Those coincide exactly when the operand has rank two, which is why a suite
+/// whose siblings are all rank two cannot tell the two readings apart. At rank
+/// three or more the first axis is a batch axis, and comparing against it
+/// eliminates forms `matmul` admits and can leave the one form it rejects.
+/// `checked_sub` because nothing here establishes the operand has rank two or
+/// more: a rank-1 or rank-0 shape yields no contracted axis, and
+/// [`contraction_may_agree`] then admits rather than guessing.
+fn right_operand_contracted_axis(shape: &[Dim]) -> Option<&Dim> {
+    shape.len().checked_sub(2).and_then(|axis| shape.get(axis))
+}
+
 pub(super) fn check_matmul_signature(
     arg_tys: &[Type],
     result_ty: &Type,
@@ -352,6 +384,54 @@ pub(super) fn check_matmul_signature(
 ) -> Type {
     if arg_tys.len() != 2 {
         return report_builtin_arity_bare(errors, "matmul", "2 arguments", arg_tys.len());
+    }
+
+    // §4.7.2 candidate elimination by the consumer's own typing rule: a
+    // positional `expand` result keeps only the forms `matmul` admits at all.
+    // That is rank at least two, and, when the other operand is already
+    // resolved, a contracted extent that can still agree with it. Exactly one
+    // survivor fixes the result; several leave the choice open; none rejects
+    // the program. Without this the result variable was never bound and an
+    // inference variable escaped into the checked signature (chelis#1380).
+    //
+    // Each slot is settled in turn so that fixing one operand can supply the
+    // sibling evidence for the other. The `Type::Error` arms below stay as
+    // they are: they are chelis#731 cascade suppression rather than deferral.
+    for slot in 0..2 {
+        let sibling_dims = match type_for_readonly_check(&arg_tys[1 - slot], subst) {
+            Type::Tensor(dims, _) => Some(dims),
+            _ => None,
+        };
+        let Type::Var(var) = type_for_readonly_check(&arg_tys[slot], subst) else {
+            continue;
+        };
+        let rule = |dims: &[Dim]| -> bool {
+            if dims.len() < MATMUL_MIN_RANK {
+                return false;
+            }
+            let Some(sibling_dims) = sibling_dims.as_deref() else {
+                return true;
+            };
+            if slot == 0 {
+                // The candidate is the left operand: its last axis contracts
+                // against the sibling's second-to-last.
+                contraction_may_agree(dims.last(), right_operand_contracted_axis(sibling_dims))
+            } else {
+                // The candidate is the right operand: the sibling's last axis
+                // contracts against the candidate's second-to-last.
+                contraction_may_agree(sibling_dims.last(), right_operand_contracted_axis(dims))
+            }
+        };
+        if let Err(error) = subst.settle_deferred_tensor(
+            var,
+            DeferralAction::Constrain(ShapeEvidence::Admits {
+                rule: &rule,
+                requirement: "a tensor of rank two or more whose contracted extent agrees \
+                              with the other operand",
+            }),
+        ) {
+            return report(errors, error.into());
+        }
     }
 
     let lhs = type_for_readonly_check(&arg_tys[0], subst);

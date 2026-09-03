@@ -495,13 +495,30 @@ use deferred_order::{
 
 /// Independently resolved shape evidence a rule supplies about a deferred
 /// positional-`expand` result (`spec/04-type-system.md` §4.7.2).
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub(crate) enum ShapeEvidence<'a> {
     /// A formed expected tensor type: a declared result, an ascription, an
     /// already-instantiated parameter or generic field, a branch join with
     /// independently resolved shape evidence, or a builtin relation with an
     /// independently resolved operand equation.
     Type(&'a Type),
+    /// The consumer's own typing rule, as a test on a candidate's resolved
+    /// dimensions, plus a phrase naming the requirement for the diagnostic.
+    ///
+    /// §4.7.2 keeps only the forms the consumer admits, whatever the
+    /// consumer's rule happens to be. A rank requirement alone can decide it,
+    /// but it is an instance of this rule rather than its limit: `matmul`
+    /// also relates the contracted extents, and a candidate the contraction
+    /// cannot satisfy is eliminated the same way.
+    ///
+    /// The rule must be conservative. It sees dimensions already resolved
+    /// through the substitution, and it must admit anything it cannot
+    /// definitely refute, so elimination never rejects a form that ordinary
+    /// unification would have accepted.
+    Admits {
+        rule: &'a dyn Fn(&[Dim]) -> bool,
+        requirement: &'a str,
+    },
     /// A `reshape` target list. §4.7.3's element-count relation keeps only
     /// the candidate forms that list admits, and the ordinal records where
     /// the relation was written for source-ordered settlement.
@@ -509,6 +526,26 @@ pub(crate) enum ShapeEvidence<'a> {
         target_dims: &'a [Dim],
         ordinal: SourceOrdinal,
     },
+}
+
+impl std::fmt::Debug for ShapeEvidence<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Type(ty) => f.debug_tuple("Type").field(ty).finish(),
+            Self::Admits { requirement, .. } => f
+                .debug_struct("Admits")
+                .field("requirement", requirement)
+                .finish_non_exhaustive(),
+            Self::ElementCount {
+                target_dims,
+                ordinal,
+            } => f
+                .debug_struct("ElementCount")
+                .field("target_dims", target_dims)
+                .field("ordinal", ordinal)
+                .finish(),
+        }
+    }
 }
 
 /// The disposition an inference rule that consumes a tensor takes on a
@@ -1005,6 +1042,9 @@ impl Subst {
             DeferralAction::Constrain(ShapeEvidence::Type(expected)) => {
                 self.constrain_deferred_tensor(v, expected)
             }
+            DeferralAction::Constrain(ShapeEvidence::Admits { rule, requirement }) => {
+                self.constrain_deferred_tensor_by_admissibility(v, rule, requirement)
+            }
             DeferralAction::Constrain(ShapeEvidence::ElementCount {
                 target_dims,
                 ordinal,
@@ -1015,6 +1055,63 @@ impl Subst {
             // undecided.
             DeferralAction::Propagate => Ok(None),
             DeferralAction::Freeze => self.materialize_deferred_expand_default(v),
+        }
+    }
+
+    /// Eliminate the candidate forms a consumer's own typing rule does not
+    /// admit (`spec/04-type-system.md` §4.7.2).
+    ///
+    /// Exactly one surviving form fixes the result, several surviving leaves
+    /// the choice open, and none surviving rejects the program. The consumer
+    /// supplies no complete shape equation here; it only says which forms it
+    /// can accept at all.
+    fn constrain_deferred_tensor_by_admissibility(
+        &mut self,
+        v: TypeVar,
+        rule: &dyn Fn(&[Dim]) -> bool,
+        requirement: &str,
+    ) -> Result<Option<Type>, TypeError> {
+        let obligations = self
+            .deferred_expand_constraints
+            .lock()
+            .expect("subst.deferred_expand_constraints poisoned")
+            .get(v);
+        let Some(obligations) = obligations else {
+            return Ok(None);
+        };
+        let Some(earliest) = obligations
+            .iter()
+            .find_map(|entry| entry.obligation.positional_expand())
+        else {
+            return Ok(None);
+        };
+        let mut admitted = earliest
+            .candidate_types()?
+            .into_iter()
+            .map(|candidate| self.apply(&candidate))
+            .filter(|candidate| match candidate {
+                Type::Tensor(dims, _) => rule(dims),
+                _ => false,
+            })
+            .collect::<Vec<_>>();
+        match admitted.len() {
+            0 => Err(TypeError {
+                kind: TypeErrorKind::DimensionMismatch,
+                message: format!(
+                    "this operation requires {requirement}, and neither shape the \
+                     positional `expand` can take satisfies it"
+                ),
+            }),
+            1 => {
+                let candidate = admitted.pop().expect("one admitted candidate");
+                // Selecting through `unify` keeps every other obligation on
+                // this result in force and reuses the trial transaction.
+                unify(&Type::Var(v), &candidate, self)?;
+                Ok(Some(self.apply(&candidate)))
+            }
+            // Both forms survive the rank rule, so it decides nothing and the
+            // choice stays open for a later consumer or the freeze point.
+            _ => Ok(None),
         }
     }
 
