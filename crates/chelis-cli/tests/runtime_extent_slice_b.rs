@@ -543,30 +543,30 @@ fn issue_597_positional_same_rank_replacement_executes_on_c() {
     );
 }
 
-/// The same-rank set form is well formed only over a UNIT source extent.
-///
-/// Selecting the same-rank form IS a claim that the operand's extent at `axis`
-/// is 1, so it is an equality guard on a claimed extent and section 4.7's
-/// existing rule places and names it - it is NOT a guard "under `expand`".
-/// The operand's axis extent and the literal 1 are both interface values when
-/// the operand is an input, so the guard runs at entry with `<op>` = `load`;
-/// an op-produced operand extent gets a local guard at its producer instead
-/// (`expand(stride(x, 2i64), 0i32, 3i64)` traps `domain in stride`). It is
-/// implemented as a `DimClaim::Literal(1)` witness on the operand's axis fed
-/// into the SAME class derivation, never a separate check at the `Expand`
-/// site, so there is one derivation point per C2.7.
-///
-/// Section 4.7 splits this into TWO rows, and the split is not cosmetic:
-/// "A violation proven from literals is a type error. A constraint that
-/// depends on runtime values is checked before allocation or element access
-/// and traps `Domain`" (`spec/04-type-system.md:1404-1407`). A
-/// literal-extent operand disproves `extent == 1` at compile time, so it is a
-/// TYPE ERROR and never reaches a guard; only a runtime extent traps.
-///
-/// MEASURED BASELINE for all three rows: `check` reports 0 errors and both
-/// eval and compiled C produce `shape=[2, 6]` under a declared rank-1
-/// `tensor[2, f32]`. Silent on both lanes, for both the literal-operand and
-/// the symbolic-operand spelling.
+// The same-rank set form is well formed only over a UNIT source extent.
+//
+// Selecting the same-rank form IS a claim that the operand's extent at `axis`
+// is 1, so it is an equality guard on a claimed extent and section 4.7's
+// existing rule places and names it - it is NOT a guard "under `expand`".
+// The operand's axis extent and the literal 1 are both interface values when
+// the operand is an input, so the guard runs at entry with `<op>` = `load`;
+// an op-produced operand extent gets a local guard at its producer instead
+// (`expand(stride(x, 2i64), 0i32, 3i64)` traps `domain in stride`). It is
+// implemented as a `DimClaim::Literal(1)` witness on the operand's axis fed
+// into the SAME class derivation, never a separate check at the `Expand`
+// site, so there is one derivation point per C2.7.
+//
+// Section 4.7 splits this into TWO rows, and the split is not cosmetic:
+// "A violation proven from literals is a type error. A constraint that
+// depends on runtime values is checked before allocation or element access
+// and traps `Domain`" (`spec/04-type-system.md:1404-1407`). A
+// literal-extent operand disproves `extent == 1` at compile time, so it is a
+// TYPE ERROR and never reaches a guard; only a runtime extent traps.
+//
+// MEASURED BASELINE for all three rows: `check` reports 0 errors and both
+// eval and compiled C produce `shape=[2, 6]` under a declared rank-1
+// `tensor[2, f32]`. Silent on both lanes, for both the literal-operand and
+// the symbolic-operand spelling.
 
 /// A RUNTIME non-unit source: the operand's extent is symbolic, so the claim
 /// is checked at entry and traps.
