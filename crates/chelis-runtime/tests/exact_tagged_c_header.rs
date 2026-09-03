@@ -36,6 +36,10 @@ fn include_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("include")
 }
 
+fn repository_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
 #[test]
 fn header_has_only_the_exact_tagged_dynamic_rank_abi() {
     let mut header = fs::read_to_string(include_dir().join("chelis_runtime.h")).expect("header");
@@ -154,6 +158,57 @@ int main(void) {
         .status()
         .expect("run layout probe")
         .success());
+}
+
+#[test]
+fn repository_runtime_consumer_compiles_against_the_published_header() {
+    let source = repository_root().join("nix/tests/runtime-consumer.c");
+    let compile = Command::new("cc")
+        .arg("-std=c11")
+        .arg("-Wall")
+        .arg("-Wextra")
+        .arg("-Werror")
+        .arg("-I")
+        .arg(include_dir())
+        .arg("-fsyntax-only")
+        .arg(&source)
+        .output()
+        .expect("compile repository runtime consumer");
+    assert!(
+        compile.status.success(),
+        "{} did not compile against the published runtime headers:\n{}",
+        source.display(),
+        String::from_utf8_lossy(&compile.stderr)
+    );
+}
+
+#[test]
+fn repository_runtime_consumer_cannot_regress_to_the_removed_free_api() {
+    let temp = TempDir::new();
+    let source = repository_root().join("nix/tests/runtime-consumer.c");
+    let current = fs::read_to_string(&source).expect("repository runtime consumer");
+    let obsolete = current.replace("chelis_tensor_release(tensor);", "chelis_free(tensor);");
+    assert_ne!(
+        obsolete, current,
+        "runtime consumer does not exercise tensor release"
+    );
+    let probe = temp.0.join("obsolete-runtime-consumer.c");
+    fs::write(&probe, obsolete).expect("write obsolete runtime consumer probe");
+    let compile = Command::new("cc")
+        .arg("-std=c11")
+        .arg("-Wall")
+        .arg("-Wextra")
+        .arg("-Werror")
+        .arg("-I")
+        .arg(include_dir())
+        .arg("-fsyntax-only")
+        .arg(&probe)
+        .output()
+        .expect("compile obsolete runtime consumer probe");
+    assert!(
+        !compile.status.success(),
+        "repository runtime consumer compiled after restoring removed chelis_free"
+    );
 }
 
 #[test]
