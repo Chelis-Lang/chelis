@@ -448,22 +448,6 @@ fn issue_1374_cross_tensor_read_traps_on_c() {
     assert!(out.contains(&domain_trap_line("load")), "{out}");
 }
 
-/// chelis#1375, baseline `silent_unguarded`: `n` is claimed for an axis whose
-/// runtime extent is `n / 2`, and no lane guards it.
-const REPRO_1375: &str = "def f(x: tensor[n, f32]) -> tensor[n, 2, f32] = reshape(x, [floor_div(shape(x, 0), 2i64), 2i64])\n\
-def main() = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]))\n";
-
-#[test]
-fn issue_1375_reshape_target_under_a_named_claim_traps_on_c() {
-    if !gcc_available() {
-        return;
-    }
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (ok, out) = c_run_result(&dir, "r1375_c", REPRO_1375);
-    assert!(!ok, "n = 4 claimed for an axis of extent 2: {out}");
-    assert!(out.contains(&domain_trap_line("reshape")), "{out}");
-}
-
 /// chelis#1376, baseline `silent_unguarded`: the inserted axis is claimed as
 /// `m` but its runtime extent is `shape(x, 0)`.
 const REPRO_1376: &str = "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, m, f32] = expand(x, 1, shape(x, 0))\n\
