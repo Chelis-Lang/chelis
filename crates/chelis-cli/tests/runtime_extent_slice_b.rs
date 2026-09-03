@@ -272,6 +272,20 @@ fn domain_trap_line(op: &str) -> String {
 
 const DIV_ZERO_TRAP: &str = "numeric trap: division by zero in floor_div at int64";
 
+/// Combined output of `chelis build --target c`, plus whether it exited zero.
+/// Used where the expected outcome is a REJECTION rather than a run: section
+/// 4.7 makes a violation proven from literals a type error, so the row that
+/// checks one must observe the build, not a binary.
+fn build_result(dir: &TempDir, name: &str, source: &str) -> (bool, String) {
+    let out = build_c(
+        &fixture(dir, &format!("{name}.ch"), source),
+        &dir.path().join(format!("{name}-out")),
+    );
+    let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    (out.status.success(), text)
+}
+
 /// Build to C, link, run, and return whether the binary exited zero plus its
 /// combined output. A build or link failure panics: those are defects in the
 /// fixture or the emitter, never the behaviour under test.
@@ -531,55 +545,73 @@ fn issue_597_positional_same_rank_replacement_executes_on_c() {
 
 /// The same-rank set form is well formed only over a UNIT source extent.
 ///
-/// `spec/04-type-system.md` section 4.7.2's same-rank replacement clause is
-/// unconditional, and `spec/05`'s `expand` row carries "(size-1 broadcast)"
-/// only as a parenthetical. Once b2.5 makes the stamped replacement form
-/// execute, a non-unit source would run with no loud outcome, because the
-/// claimed extent equals the size and nothing compares the SOURCE. B0-bis
-/// states the rule normatively in `spec/05` section 2.4.1; this row is its
-/// executable half and lands in the same commit as the
-/// `fallback_expand_type` deletion, so the guard precedes the widening as
-/// C2.7 requires.
+/// Selecting the same-rank form IS a claim that the operand's extent at `axis`
+/// is 1, so it is an equality guard on a claimed extent and section 4.7's
+/// existing rule places and names it - it is NOT a guard "under `expand`".
+/// The operand's axis extent and the literal 1 are both interface values when
+/// the operand is an input, so the guard runs at entry with `<op>` = `load`;
+/// an op-produced operand extent gets a local guard at its producer instead
+/// (`expand(stride(x, 2i64), 0i32, 3i64)` traps `domain in stride`). It is
+/// implemented as a `DimClaim::Literal(1)` witness on the operand's axis fed
+/// into the SAME class derivation, never a separate check at the `Expand`
+/// site, so there is one derivation point per C2.7.
 ///
-/// MEASURED BASELINE, which differs from the one I was briefed. Both
-/// spellings I tried are SILENT on both lanes today, not loud:
+/// Section 4.7 splits this into TWO rows, and the split is not cosmetic:
+/// "A violation proven from literals is a type error. A constraint that
+/// depends on runtime values is checked before allocation or element access
+/// and traps `Domain`" (`spec/04-type-system.md:1404-1407`). A
+/// literal-extent operand disproves `extent == 1` at compile time, so it is a
+/// TYPE ERROR and never reaches a guard; only a runtime extent traps.
 ///
-/// ```text
-/// sig f: tensor[6, f32] -> tensor[2, f32]
-/// def f(x) = expand(x, 0, 2i64)
-/// ```
-///
-/// checks with 0 errors, and eval AND compiled C both produce
-/// `shape=[2, 6]` - the insertion form - under a declared rank-1 result. So
-/// the row's baseline is `silent_unguarded` on both lanes rather than
-/// `lane_divergent`, and nothing today is loud by accident.
-const REPRO_NON_UNIT_SOURCE: &str = "module P.NonUnit\n\
-sig f: tensor[6, f32] -> tensor[2, f32]\n\
-def f(x) = expand(x, 0, 2i64)\n\
-out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))\n";
+/// MEASURED BASELINE for all three rows: `check` reports 0 errors and both
+/// eval and compiled C produce `shape=[2, 6]` under a declared rank-1
+/// `tensor[2, f32]`. Silent on both lanes, for both the literal-operand and
+/// the symbolic-operand spelling.
+
+/// A RUNTIME non-unit source: the operand's extent is symbolic, so the claim
+/// is checked at entry and traps.
+const REPRO_RUNTIME_NON_UNIT: &str = "module P.SymSrc\nsig f: tensor[n, f32] -> tensor[2, f32]\ndef f(x) = expand(x, 0, 2i64)\nout = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))\n";
+
+/// A STATIC non-unit source: the operand's extent is the literal 6, so
+/// `extent == 1` is disproved from literals and the program is rejected.
+const REPRO_STATIC_NON_UNIT: &str = "module P.NonUnit\nsig f: tensor[6, f32] -> tensor[2, f32]\ndef f(x) = expand(x, 0, 2i64)\nout = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))\n";
 
 /// A unit source extent is the well-formed case and must keep executing.
-const REPRO_UNIT_SOURCE: &str = "module P.Unit\n\
-sig f: tensor[1, f32] -> tensor[4, f32]\n\
-def f(x) = expand(x, 0, 4i64)\n\
-out = f(to_tensor([7.0f32]))\n";
+const REPRO_UNIT_SOURCE: &str = "module P.Unit\nsig f: tensor[1, f32] -> tensor[4, f32]\ndef f(x) = expand(x, 0, 4i64)\nout = f(to_tensor([7.0f32]))\n";
 
 #[test]
-fn a_non_unit_source_under_a_same_rank_claim_traps_on_c() {
+fn a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_c() {
     if !gcc_available() {
         return;
     }
     let dir = tempfile::tempdir().expect("tempdir");
-    let (ok, out) = c_run_result(&dir, "nonunit_c", REPRO_NON_UNIT_SOURCE);
-    assert!(!ok, "a 6-extent source cannot be set to 2: {out}");
+    let (ok, out) = c_run_result(&dir, "rt_nonunit_c", REPRO_RUNTIME_NON_UNIT);
     assert!(
-        out.contains(&domain_trap_line("expand")),
-        "the source guard is an [04-NUM-9] precondition guard: {out}"
+        !ok,
+        "a runtime extent of 6 cannot satisfy the unit claim: {out}"
+    );
+    assert!(
+        out.contains(&domain_trap_line("load")),
+        "the operand axis and the literal 1 are both interface values, so \
+         section 4.7 runs this at entry and names the later witness's `load`: {out}"
+    );
+}
+
+/// The static twin. Not a trap: section 4.7 makes a violation proven from
+/// literals a TYPE ERROR, so this must never reach a guard at all.
+#[test]
+fn a_static_non_unit_source_under_a_same_rank_claim_is_a_type_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = build_result(&dir, "static_nonunit", REPRO_STATIC_NON_UNIT);
+    assert!(!ok, "a literal extent of 6 disproves the unit claim: {out}");
+    assert!(
+        !out.contains("numeric trap"),
+        "a literal violation is rejected, not trapped: {out}"
     );
 }
 
 /// The positive twin: without it, a guard that rejected every same-rank set
-/// form would satisfy the row above and delete the feature b2.5 exists to
+/// form would satisfy both rows above and delete the feature b2.5 exists to
 /// make executable.
 #[test]
 fn a_unit_source_under_a_same_rank_claim_executes_on_c() {
