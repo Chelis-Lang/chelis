@@ -878,3 +878,34 @@ fn a_const_named_axis_reports_the_claim_supplied_source_kind() {
         vec![AxisSource::ClassSupplied { op: fill, axis: 0 }],
     );
 }
+
+// ---------------------------------------------------------------------------
+// Symbolic-parameter ORDER.
+//
+// `symbolic_params` feeds `CodegenResult.symbolic_dims`, which three CLI sites
+// print verbatim as `Symbolic dims: <joined>` and two compiler-api sites
+// publish on a public result field. Its order is therefore observable, and
+// NOTHING in the tree covered it: the only two assertions on `symbolic_dims`
+// are single-element vectors, which cannot fail on a reordering.
+//
+// `spec/04-type-system.md` section 4.7 is the authority for what the order
+// must be: "Whatever rule assigns the slots, the guard order follows the
+// assigned slots, and never a separate traversal by binding name, hash
+// iteration, or node identity." Grouping in a `BTreeMap<String, _>` is a
+// traversal by binding name.
+// ---------------------------------------------------------------------------
+
+/// Two symbols on ONE input, whose axis order is the reverse of their name
+/// order, so the two rules give different answers and the row can fail.
+#[test]
+fn symbolic_params_follow_assigned_slots_not_binding_names() {
+    let mut dag = Dag::new();
+    let x = f32_load(&mut dag, "x", vec![named("n"), named("m")]);
+    dag.add_root(x);
+    assert_eq!(
+        chelis_ir::dag::symbolic_params(&dag),
+        vec!["n".to_string(), "m".to_string()],
+        "`n` is axis 0 of the only input, so it comes first; name order would \
+         report `m` first, which is the traversal section 4.7 forbids",
+    );
+}
