@@ -14,8 +14,9 @@
 //! survived: every checked-in `diagonal`/`trace` case was square.
 //!
 //! This suite covers the rank-2 and rank-3 f32 literal-extent forms named in
-//! each test plus the one symbolic-operand form; it is not evidence for the
-//! full per-dtype [05-OP-33] runtime contract.
+//! each test, the identical-named-extent form, and the distinct-name and
+//! mixed literal/symbolic forms that keep the wildcard; it is not evidence for
+//! the full per-dtype [05-OP-33] runtime contract.
 
 use chelis_deep::Expr;
 use chelis_surf::desugar::desugar_program;
@@ -121,6 +122,25 @@ fn rank_three_retained_axis_rejects_the_larger_selected_extent() {
     );
 }
 
+/// REGRESSION TEST. `[05-OP-33]`'s smaller selected extent for two occurrences
+/// of ONE named extent is that name: `spec/04-type-system.md` §4.1 makes two
+/// `d-name` unify only when equal, so both axes of `tensor[hidden, hidden]`
+/// denote a single runtime value. Declaring a DIFFERENT rigid name is therefore
+/// a type error. Before the fix the result extent was `Dim::Wildcard`, which
+/// unified with `width` and scored a clean check.
+#[test]
+fn identical_named_extents_reject_a_different_declared_name() {
+    let message = sole_dimension_mismatch(
+        "def f(x: tensor[hidden, hidden, f32]) -> tensor[width, f32] = diagonal(x, 0, 1)\n",
+        "diagonal on tensor[hidden, hidden] declared as tensor[width]",
+    );
+    assert!(
+        message.contains("tensor[hidden, f32]") && message.contains("tensor[width, f32]"),
+        "the rejection must name the inferred tensor[hidden, f32] against the \
+         declared tensor[width, f32], got {message}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Positive controls (green before and after; they lock that the narrowing is
 // not over-applied).
@@ -189,6 +209,64 @@ fn symbolic_selected_extent_stays_wildcard_compatible() {
     accepts(
         "def f(x: tensor[n, 4, f32]) -> tensor[4, f32] = diagonal(x, 0, 1)\n",
         "diagonal on tensor[n, 4] declared as tensor[4]",
+    );
+}
+
+/// DISPOSITION LOCK. The positive twin of the two named-extent rejections:
+/// `tensor[hidden, hidden]` declared `tensor[hidden]` is the correct program
+/// and keeps type-checking. Green before the fix too (a wildcard unified with
+/// `hidden`), so this proves only that the narrowing did not turn the correct
+/// program into a rejection.
+#[test]
+fn identical_named_extents_accept_that_name() {
+    accepts(
+        "def f(x: tensor[hidden, hidden, f32]) -> tensor[hidden, f32] = diagonal(x, 0, 1)\n",
+        "diagonal on tensor[hidden, hidden] declared as tensor[hidden]",
+    );
+}
+
+/// DISPOSITION LOCK, recording a boundary this change does NOT move. The named
+/// arm does not make a declared LITERAL extent reject: `unify_dim` accepts
+/// `Name` against `Lit` without binding a substitution, by the chelis#219
+/// Option A rule that lets `def f(x: tensor[batch, hidden, f32])` be called with
+/// concrete-shaped inputs. So `tensor[hidden, hidden]` declared `tensor[3, f32]`
+/// is still admitted, before and after. That is dimension-unification policy,
+/// not diagonal's extent rule, and #1355 does not touch it.
+#[test]
+fn identical_named_extents_still_admit_a_declared_literal() {
+    accepts(
+        "def f(x: tensor[hidden, hidden, f32]) -> tensor[3, f32] = diagonal(x, 0, 1)\n",
+        "diagonal on tensor[hidden, hidden] declared as tensor[3]",
+    );
+}
+
+/// DISPOSITION LOCK. Two DISTINCT named extents keep the wildcard: the minimum
+/// of `hidden` and `width` is genuinely unknown at check time, so every
+/// declaration must keep type-checking, including a literal one. Green in both
+/// states; it is the control that the named arm fires only on equal names.
+#[test]
+fn distinct_named_extents_stay_wildcard_compatible() {
+    accepts(
+        "def f(x: tensor[hidden, width, f32]) -> tensor[hidden, f32] = diagonal(x, 0, 1)\n",
+        "diagonal on tensor[hidden, width] declared as tensor[hidden]",
+    );
+    accepts(
+        "def f(x: tensor[hidden, width, f32]) -> tensor[width, f32] = diagonal(x, 0, 1)\n",
+        "diagonal on tensor[hidden, width] declared as tensor[width]",
+    );
+    accepts(
+        "def f(x: tensor[hidden, width, f32]) -> tensor[3, f32] = diagonal(x, 0, 1)\n",
+        "diagonal on tensor[hidden, width] declared as tensor[3]",
+    );
+}
+
+/// DISPOSITION LOCK. `trace` on identical named extents removes both axes and
+/// is unaffected by the named arm, exactly as it is by the literal one.
+#[test]
+fn trace_on_identical_named_extents_is_rank_zero() {
+    accepts(
+        "def f(x: tensor[hidden, hidden, f32]) -> tensor[f32] = trace(x, 0, 1)\n",
+        "trace on tensor[hidden, hidden]",
     );
 }
 

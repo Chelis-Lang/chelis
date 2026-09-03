@@ -1705,16 +1705,23 @@ vacuity, or [#1076]/[#672]'s independently owned name-precedence work.
   malformed-marker, cross-family, and producer paths are regression-tested;
   the former score-1 input is also in §C4.4.
 - **[#1355].** `diagonal` now declares [05-OP-33]'s smaller selected extent
-  whenever both selected extents are literal, instead of the wildcard that
+  wherever that minimum is statically known, instead of the wildcard that
   unified with any declared return type and let `def f(x: tensor[3, 4, f32])
-  -> tensor[4, f32] = diagonal(x, 0, 1)` score 1.0. The wildcard survives only
-  when a selected extent is symbolic, where the minimum genuinely is not known
-  at check time. The evidence is the non-square rank-2 and rank-3 f32 forms in
+  -> tensor[4, f32] = diagonal(x, 0, 1)` score 1.0. Two literal extents give the
+  smaller value; two occurrences of one named extent give that name, because
+  spec/04 §4.1 makes two `d-name` unify only when equal, so both axes denote a
+  single runtime value. The wildcard survives for distinct names, a mixed
+  literal/symbolic pair, a dimension variable, and a rank spread, where the
+  minimum genuinely is not known at check time. The evidence is the non-square
+  rank-2 and rank-3 f32 forms plus the identical-name form in
   `crates/chelis-types/tests/issue_1355_diagonal_extent.rs` and
-  `crates/chelis-cli/tests/issue_1355_diagonal_extent_cli.rs`, whose three
-  rejections were proved red on the pre-fix tree; `trace` routes through
-  `infer_trace_result_type`, which removes both selected axes and never reads
-  their extents, and is covered there as an unchanged control.
+  `crates/chelis-cli/tests/issue_1355_diagonal_extent_cli.rs`, whose five
+  rejections were proved red on the pre-fix tree. Two boundaries are recorded
+  there rather than moved: `trace` routes through `infer_trace_result_type`,
+  which removes both selected axes and never reads their extents; and a declared
+  literal extent is still admitted against a named one, because `unify_dim`
+  accepts `Name` against `Lit` under [#219]'s Option A, which is
+  dimension-unification policy rather than diagonal's extent rule.
 
 ---
 
@@ -1860,3 +1867,4 @@ cycles remain errors.
 [#1486]: https://github.com/Chelis-Lang/chelis/issues/1486
 [#1487]: https://github.com/Chelis-Lang/chelis/issues/1487
 [#1355]: https://github.com/Chelis-Lang/chelis/issues/1355
+[#219]: https://github.com/Chelis-Lang/chelis/issues/219
