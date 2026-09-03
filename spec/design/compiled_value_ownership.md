@@ -703,6 +703,19 @@ or the general closure ABI owned by [#879].
 `.venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 1`;
 exit zero and final line `COMPILED VALUE OWNERSHIP PHASE 1: PASS`.
 
+**Phase 1 delivery receipt (2026-09-03):** the committed transition removes
+the twenty-three Phase 1 expected-failure receipts and executes their exact
+positive/rejection behavior. The runtime proof also runs the four ownership
+semantic suites under `--features ownership-ledger`, with frozen test listings
+and per-test execution receipts; zero matches, ignored/skipped outcomes,
+listing-only evidence, and forged supervisor transcripts fail closed. The
+separate forged `__main__` and forged import-transcript controls prove that
+only the oracle-owned callback receipt can certify Python test execution. The
+blocking `compiled-value-ownership-phase0-oracle` job retains its stable
+identity while invoking the Phase 1 oracle. The receipt is valid only when the
+Phase 1 oracle and all supporting representation, dtype, rejection, capacity,
+and fast-gate checks pass on the same committed head.
+
 ## Phase 2 — verified ownership lowering
 
 **You inherit:** the unified heap and Phase 0 call/branch/fold/root fixtures.

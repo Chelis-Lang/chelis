@@ -2021,18 +2021,18 @@ class CiParityTests(unittest.TestCase):
             aggregate_block,
         )
 
-    def test_compiled_value_ownership_phase0_oracle_is_a_dedicated_blocking_job(self):
+    def test_compiled_value_ownership_stable_job_invokes_phase1_oracle(self):
         workspace_block = _ci_job_block("workspace-tests")
         dtype_block = _ci_job_block("dtype-phase3-oracle")
         faithful_block = _ci_job_block("faithful-observation-phase2-oracle")
         oracle_block = _ci_job_block("compiled-value-ownership-phase0-oracle")
         aggregate_block = _ci_job_block("integration")
         command = (
-            ".venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 0"
+            ".venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 1"
         )
 
         self.assertIn(
-            "name: Compiled Value Ownership Phase 0 Oracle",
+            "name: Compiled Value Ownership Phase 1 Oracle",
             oracle_block,
         )
         self.assertIn("needs: [changes]", oracle_block)
