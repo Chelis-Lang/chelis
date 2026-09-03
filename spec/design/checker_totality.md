@@ -1704,6 +1704,17 @@ vacuity, or [#1076]/[#672]'s independently owned name-precedence work.
   and scalar host-eval constructors. The full positive,
   malformed-marker, cross-family, and producer paths are regression-tested;
   the former score-1 input is also in §C4.4.
+- **[#1355].** `diagonal` now declares [05-OP-33]'s smaller selected extent
+  whenever both selected extents are literal, instead of the wildcard that
+  unified with any declared return type and let `def f(x: tensor[3, 4, f32])
+  -> tensor[4, f32] = diagonal(x, 0, 1)` score 1.0. The wildcard survives only
+  when a selected extent is symbolic, where the minimum genuinely is not known
+  at check time. The evidence is the non-square rank-2 and rank-3 f32 forms in
+  `crates/chelis-types/tests/issue_1355_diagonal_extent.rs` and
+  `crates/chelis-cli/tests/issue_1355_diagonal_extent_cli.rs`, whose three
+  rejections were proved red on the pre-fix tree; `trace` routes through
+  `infer_trace_result_type`, which removes both selected axes and never reads
+  their extents, and is covered there as an unchanged control.
 
 ---
 
@@ -1848,3 +1859,4 @@ cycles remain errors.
 [#1485]: https://github.com/Chelis-Lang/chelis/issues/1485
 [#1486]: https://github.com/Chelis-Lang/chelis/issues/1486
 [#1487]: https://github.com/Chelis-Lang/chelis/issues/1487
+[#1355]: https://github.com/Chelis-Lang/chelis/issues/1355

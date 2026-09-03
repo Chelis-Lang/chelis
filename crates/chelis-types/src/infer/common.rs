@@ -623,8 +623,15 @@ pub(super) fn infer_diagonal_result_type(
             dims.len()
         ));
     }
+    // chelis#1355 / [05-OP-33]: `diagonal` "replaces the retained first axis
+    // extent with the smaller selected extent". When BOTH selected extents are
+    // literal that minimum is statically known, so declare it. The equal-literals
+    // case is subsumed by `min`. A wildcard is only defensible when at least one
+    // extent is symbolic, where the minimum genuinely is not known at check time;
+    // widening the unequal-literal pair too let a declared return type the runtime
+    // cannot produce still type-check.
     let diag_dim = match (&dims[axis1], &dims[axis2]) {
-        (Dim::Lit(lhs), Dim::Lit(rhs)) if lhs == rhs => Dim::Lit(*lhs),
+        (Dim::Lit(lhs), Dim::Lit(rhs)) => Dim::Lit(*lhs.min(rhs)),
         _ => Dim::Wildcard,
     };
     let mut out_dims = Vec::with_capacity(dims.len() - 1);
