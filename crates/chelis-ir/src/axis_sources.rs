@@ -425,9 +425,26 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
             .collect(),
 
         // --- Backend specialization ---
-        // The output shape is `batch_dims ++ [m, n]`, computed from the
-        // operands' dimension expressions rather than read off an axis.
-        RiscOp::BlasMatmul { .. } => op_computed(id, rank),
+        // The output shape is `batch_dims ++ [m, n]`. Only `m` and `n` are
+        // computed by the contraction: the batch axes are the operands' own
+        // leading axes, because `specialize.rs`'s `matmul_dims` admits the
+        // pattern only when BOTH operands have rank `batch_dims.len() + 2`
+        // and their leading dims equal `batch_dims`. Calling them
+        // `OpComputed` would say they are fresh extents no input supplies,
+        // which is false and would cost them their equality-class guard.
+        RiscOp::BlasMatmul { batch_dims, .. } => {
+            let batch = batch_dims.len();
+            let operand = [0usize, 1]
+                .into_iter()
+                .find(|slot| input_rank(dag, node, *slot) == Some(rank));
+            match operand {
+                Some(slot) if rank >= 2 && batch == rank - 2 => (0..batch)
+                    .map(|axis| pass_through(id, slot, axis))
+                    .chain((batch..rank).map(|axis| AxisSource::OpComputed { op: id, axis }))
+                    .collect(),
+                _ => op_computed(id, rank),
+            }
+        }
 
         // `values.dims[..axis] ++ indices.dims ++ values.dims[axis + 1..]`
         // (`spec/05` section 3.5): every output axis is an input axis of one
@@ -780,6 +797,105 @@ mod tests {
     }
 
     #[test]
+    fn a_blas_matmul_reads_its_batch_axes_off_the_operands() {
+        use crate::dag::DimExpr;
+
+        let mut dag = Dag::new();
+        let lhs = dag.add_node(
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            ty(
+                vec![DimInfo::Lit(2), DimInfo::Lit(4), DimInfo::Lit(3)],
+                Prim::F32,
+            ),
+            None,
+        );
+        let rhs = dag.add_node(
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            ty(
+                vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(5)],
+                Prim::F32,
+            ),
+            None,
+        );
+        let product = dag.add_node(
+            RiscOp::BlasMatmul {
+                batch_dims: vec![DimExpr::Concrete(2)],
+                m: DimExpr::Concrete(4),
+                n: DimExpr::Concrete(5),
+                k: DimExpr::Concrete(3),
+                accumulator: Prim::F32,
+            },
+            vec![lhs, rhs],
+            ty(
+                vec![DimInfo::Lit(2), DimInfo::Lit(4), DimInfo::Lit(5)],
+                Prim::F32,
+            ),
+            None,
+        );
+        assert_eq!(
+            output_axis_sources(&dag, product),
+            vec![
+                AxisSource::InputAxis {
+                    input: 0,
+                    axis: RtAxis::Lit(0)
+                },
+                AxisSource::OpComputed {
+                    op: product,
+                    axis: 1
+                },
+                AxisSource::OpComputed {
+                    op: product,
+                    axis: 2
+                },
+            ],
+            "the batch axis is the operand's axis; only m and n are contracted"
+        );
+        assert!(check_axis_sources(&dag, Stage::Lowering).is_ok());
+
+        // Negative parity: an unbatched matmul has no pass-through axis.
+        let mut flat = Dag::new();
+        let lhs = flat.add_node(
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            ty(vec![DimInfo::Lit(4), DimInfo::Lit(3)], Prim::F32),
+            None,
+        );
+        let rhs = flat.add_node(
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            ty(vec![DimInfo::Lit(3), DimInfo::Lit(5)], Prim::F32),
+            None,
+        );
+        let product = flat.add_node(
+            RiscOp::BlasMatmul {
+                batch_dims: Vec::new(),
+                m: DimExpr::Concrete(4),
+                n: DimExpr::Concrete(5),
+                k: DimExpr::Concrete(3),
+                accumulator: Prim::F32,
+            },
+            vec![lhs, rhs],
+            ty(vec![DimInfo::Lit(4), DimInfo::Lit(5)], Prim::F32),
+            None,
+        );
+        assert_eq!(
+            output_axis_sources(&flat, product),
+            vec![
+                AxisSource::OpComputed {
+                    op: product,
+                    axis: 0
+                },
+                AxisSource::OpComputed {
+                    op: product,
+                    axis: 1
+                },
+            ],
+        );
+    }
+
+    #[test]
     fn a_shape_dep_sibling_supplies_an_input_less_nodes_wildcard_axis() {
         let mut dag = Dag::new();
         let sibling = dag.add_node(
@@ -1041,5 +1157,183 @@ mod tests {
         )
         .expect_err("a negative extent is a static type error, never a source");
         assert!(error.to_string().contains("negative literal extent"));
+    }
+
+    // The four exact-vector controls below close the coverage gap that
+    // `or_op_computed` opens. That helper normalizes any length mismatch to
+    // exactly `rank` sources, so the table-driven cardinality test in
+    // `runtime_extent_slice_b_sources.rs` structurally CANNOT see a wrong
+    // count in an arm it wraps. Every narrowed arm therefore needs a test
+    // that asserts the exact source vector, not just its length. The
+    // reductions arm, `Count`, and `Gather` already had one; these are the
+    // remaining four.
+
+    #[test]
+    fn a_reduce_window_passes_leading_axes_and_computes_the_windowed_ones() {
+        let mut dag = Dag::new();
+        let operand = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::F32),
+            None,
+        );
+        let windowed = dag.add_node(
+            RiscOp::ReduceWindow {
+                reducer: crate::dag::ReduceWindowKind::Sum,
+                window_shape: vec![2],
+                strides: vec![1],
+            },
+            vec![operand],
+            ty(vec![DimInfo::Lit(2), DimInfo::Lit(2)], Prim::F32),
+            None,
+        );
+        assert_eq!(
+            output_axis_sources(&dag, windowed),
+            vec![
+                AxisSource::InputAxis {
+                    input: 0,
+                    axis: RtAxis::Lit(0)
+                },
+                AxisSource::OpComputed {
+                    op: windowed,
+                    axis: 1
+                },
+            ],
+            "the leading axis passes through; the windowed extent is the op's own"
+        );
+        assert!(check_axis_sources(&dag, Stage::Lowering).is_ok());
+    }
+
+    #[test]
+    fn a_reduce_window_grad_restores_the_forward_inputs_shape() {
+        let mut dag = Dag::new();
+        let forward_input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::F32),
+            None,
+        );
+        let cotangent = dag.add_node(
+            RiscOp::Load { name: "g".into() },
+            vec![],
+            ty(vec![DimInfo::Lit(2), DimInfo::Lit(2)], Prim::F32),
+            None,
+        );
+        let adjoint = dag.add_node(
+            RiscOp::ReduceWindowGrad {
+                reducer: crate::dag::ReduceWindowKind::Sum,
+                window_shape: vec![2],
+                strides: vec![1],
+            },
+            vec![forward_input, cotangent],
+            ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::F32),
+            None,
+        );
+        assert_eq!(
+            output_axis_sources(&dag, adjoint),
+            vec![
+                AxisSource::InputAxis {
+                    input: 0,
+                    axis: RtAxis::Lit(0)
+                },
+                AxisSource::InputAxis {
+                    input: 0,
+                    axis: RtAxis::Lit(1)
+                },
+            ],
+            "the adjoint's output is the forward INPUT's shape, never the cotangent's"
+        );
+        assert!(check_axis_sources(&dag, Stage::Lowering).is_ok());
+    }
+
+    #[test]
+    fn a_one_hot_appends_the_vocab_literal_to_the_index_axes() {
+        let mut dag = Dag::new();
+        let indices = dag.add_node(
+            RiscOp::Load { name: "i".into() },
+            vec![],
+            ty(vec![DimInfo::Lit(4)], Prim::Int64),
+            None,
+        );
+        let dense = dag.add_node(
+            RiscOp::OneHot { vocab: 5 },
+            vec![indices],
+            ty(vec![DimInfo::Lit(4), DimInfo::Lit(5)], Prim::F32),
+            None,
+        );
+        assert_eq!(
+            output_axis_sources(&dag, dense),
+            vec![
+                AxisSource::InputAxis {
+                    input: 0,
+                    axis: RtAxis::Lit(0)
+                },
+                AxisSource::Literal { value: 5 },
+            ],
+        );
+        assert!(check_axis_sources(&dag, Stage::Lowering).is_ok());
+    }
+
+    #[test]
+    fn the_scatter_family_reads_its_output_axes_off_the_target() {
+        for op in [
+            RiscOp::ScatterAdd { axis: 1 },
+            RiscOp::Scatter { axis: 1 },
+            RiscOp::ScatterElements { axis: 1 },
+        ] {
+            let mut dag = Dag::new();
+            let target = dag.add_node(
+                RiscOp::Load { name: "t".into() },
+                vec![],
+                ty(
+                    vec![DimInfo::Lit(2), DimInfo::Lit(5), DimInfo::Lit(7)],
+                    Prim::F32,
+                ),
+                None,
+            );
+            let indices = dag.add_node(
+                RiscOp::Load { name: "i".into() },
+                vec![],
+                ty(vec![DimInfo::Lit(4)], Prim::Int64),
+                None,
+            );
+            let updates = dag.add_node(
+                RiscOp::Load { name: "u".into() },
+                vec![],
+                ty(
+                    vec![DimInfo::Lit(2), DimInfo::Lit(4), DimInfo::Lit(7)],
+                    Prim::F32,
+                ),
+                None,
+            );
+            let scattered = dag.add_node(
+                op.clone(),
+                vec![target, indices, updates],
+                ty(
+                    vec![DimInfo::Lit(2), DimInfo::Lit(5), DimInfo::Lit(7)],
+                    Prim::F32,
+                ),
+                None,
+            );
+            assert_eq!(
+                output_axis_sources(&dag, scattered),
+                vec![
+                    AxisSource::InputAxis {
+                        input: 0,
+                        axis: RtAxis::Lit(0)
+                    },
+                    AxisSource::InputAxis {
+                        input: 0,
+                        axis: RtAxis::Lit(1)
+                    },
+                    AxisSource::InputAxis {
+                        input: 0,
+                        axis: RtAxis::Lit(2)
+                    },
+                ],
+                "every scatter writes into a copy of its target, so the shape is the target's: {op:?}"
+            );
+            assert!(check_axis_sources(&dag, Stage::Lowering).is_ok());
+        }
     }
 }

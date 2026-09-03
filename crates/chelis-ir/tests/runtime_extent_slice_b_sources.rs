@@ -2,7 +2,10 @@
 //! realized output axis (`spec/design/runtime_extents.md` C4).
 
 use chelis_ir::axis_sources::{AxisSource, check_axis_sources, output_axis_sources};
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtAxis, RtDim, TensorType};
+use chelis_ir::dag::{
+    Dag, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep, FusedStepOp, NodeId,
+    ReduceWindowKind, RiscOp, RtAxis, RtDim, TensorType,
+};
 use chelis_types::types::Prim;
 use chelis_types::unsupported::Stage;
 
@@ -608,75 +611,428 @@ fn unsupported_but_well_typed_mapping_yields_the_registered_receipt_not_an_ice()
     assert!(check_axis_sources(&symbolic, Stage::Codegen("c")).is_ok());
 }
 
-/// C4.1: the match is exhaustive over `RiscOp`, so every node in a DAG that
-/// exercises the whole movement, reduction, memory, and sparse surface has
-/// exactly one source per output axis.
+/// The number of `RiscOp` variants the table below must construct. Bumping
+/// it without adding a row makes the coverage assertion fail.
+const RISC_OP_VARIANTS: usize = 57;
+
+/// Adding a `RiscOp` variant breaks this match, which is what forces the
+/// table in `every_risc_op_yields_exactly_one_source_per_output_axis` to
+/// grow with the vocabulary. Exhaustiveness in `output_axis_sources` proves
+/// only that an ARM exists for each variant; a constructed node is what
+/// proves the arm yields one source per output axis.
+fn variant_index(op: &RiscOp) -> usize {
+    match op {
+        RiscOp::Add => 0,
+        RiscOp::Sub => 1,
+        RiscOp::Mul => 2,
+        RiscOp::Div => 3,
+        RiscOp::FloorDiv => 4,
+        RiscOp::TruncDiv => 5,
+        RiscOp::CmpLt => 6,
+        RiscOp::MaxElem => 7,
+        RiscOp::MinElem => 8,
+        RiscOp::ExtremaAdjoint { .. } => 9,
+        RiscOp::Neg => 10,
+        RiscOp::Exp => 11,
+        RiscOp::Log => 12,
+        RiscOp::Sin => 13,
+        RiscOp::Sqrt => 14,
+        RiscOp::Cos => 15,
+        RiscOp::Tan => 16,
+        RiscOp::Atan => 17,
+        RiscOp::Abs => 18,
+        RiscOp::Floor => 19,
+        RiscOp::Ceil => 20,
+        RiscOp::Round => 21,
+        RiscOp::Recip => 22,
+        RiscOp::UniformLike { .. } => 23,
+        RiscOp::Dropout { .. } => 24,
+        RiscOp::Sum { .. } => 25,
+        RiscOp::Count { .. } => 26,
+        RiscOp::MaxReduce { .. } => 27,
+        RiscOp::MinReduce { .. } => 28,
+        RiscOp::ProdReduce { .. } => 29,
+        RiscOp::ReduceWindow { .. } => 30,
+        RiscOp::ReduceWindowGrad { .. } => 31,
+        RiscOp::Argmax { .. } => 32,
+        RiscOp::Argmin { .. } => 33,
+        RiscOp::Reshape { .. } => 34,
+        RiscOp::Permute { .. } => 35,
+        RiscOp::Expand { .. } => 36,
+        RiscOp::OneHot { .. } => 37,
+        RiscOp::Pad { .. } => 38,
+        RiscOp::Shrink { .. } => 39,
+        RiscOp::Stride { .. } => 40,
+        RiscOp::Shape { .. } => 41,
+        RiscOp::Const { .. } => 42,
+        RiscOp::ConstTensor { .. } => 43,
+        RiscOp::Load { .. } => 44,
+        RiscOp::Store { .. } => 45,
+        RiscOp::Copy => 46,
+        RiscOp::Drop => 47,
+        RiscOp::Realize => 48,
+        RiscOp::Cast { .. } => 49,
+        RiscOp::CastTrunc { .. } => 50,
+        RiscOp::FusedElem { .. } => 51,
+        RiscOp::BlasMatmul { .. } => 52,
+        RiscOp::Gather { .. } => 53,
+        RiscOp::ScatterAdd { .. } => 54,
+        RiscOp::Scatter { .. } => 55,
+        RiscOp::ScatterElements { .. } => 56,
+    }
+}
+
+/// C4.1: `output_axis_sources` yields exactly one source per output axis for
+/// every operation in the vocabulary, and every source it yields refers to a
+/// real edge.
+///
+/// One constructed node per `RiscOp` variant. An arm that returns the wrong
+/// count, or names a slot or axis that does not exist, fails here rather
+/// than surfacing later as a missing guard in a lane.
 #[test]
 fn every_risc_op_yields_exactly_one_source_per_output_axis() {
+    let f32_23 = || ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::F32);
     let mut dag = Dag::new();
-    let matrix = load(&mut dag, "m", vec![DimInfo::Lit(4), DimInfo::Lit(3)]);
-    let other = load(&mut dag, "o", vec![DimInfo::Lit(4), DimInfo::Lit(3)]);
 
-    let nodes = vec![
-        dag.add_node(
-            RiscOp::Add,
-            vec![matrix, other],
-            ty(vec![DimInfo::Lit(4), DimInfo::Lit(3)], Prim::F32),
-            None,
-        ),
-        dag.add_node(
-            RiscOp::Permute { axes: vec![1, 0] },
-            vec![matrix],
-            ty(vec![DimInfo::Lit(3), DimInfo::Lit(4)], Prim::F32),
-            None,
-        ),
-        dag.add_node(
-            RiscOp::Reshape {
-                new_shape: vec![RtDim::Lit(12)],
-            },
-            vec![matrix],
-            ty(vec![DimInfo::Lit(12)], Prim::F32),
-            None,
-        ),
-        dag.add_node(
-            RiscOp::Shrink {
-                bounds: vec![
-                    (RtDim::Lit(0), RtDim::Lit(2)),
-                    (RtDim::Lit(0), RtDim::Lit(3)),
-                ],
-            },
-            vec![matrix],
-            ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::F32),
-            None,
-        ),
-        dag.add_node(
-            RiscOp::Sum {
-                axis: 0,
-                accumulator: Prim::F32,
-            },
-            vec![matrix],
+    let f = load(&mut dag, "f", vec![DimInfo::Lit(2), DimInfo::Lit(3)]);
+    let g = load(&mut dag, "g", vec![DimInfo::Lit(2), DimInfo::Lit(3)]);
+    let ints = dag.add_node(
+        RiscOp::Load { name: "i".into() },
+        vec![],
+        ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::Int32),
+        None,
+    );
+    let more_ints = dag.add_node(
+        RiscOp::Load { name: "j".into() },
+        vec![],
+        ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::Int32),
+        None,
+    );
+    let flags = dag.add_node(
+        RiscOp::Load { name: "p".into() },
+        vec![],
+        ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::Bool),
+        None,
+    );
+    let indices = dag.add_node(
+        RiscOp::Load { name: "k".into() },
+        vec![],
+        ty(vec![DimInfo::Lit(4)], Prim::Int64),
+        None,
+    );
+    let cell_indices = dag.add_node(
+        RiscOp::Load { name: "c".into() },
+        vec![],
+        ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::Int64),
+        None,
+    );
+    let values = load(
+        &mut dag,
+        "v",
+        vec![DimInfo::Lit(2), DimInfo::Lit(5), DimInfo::Lit(7)],
+    );
+    let updates = load(
+        &mut dag,
+        "u",
+        vec![DimInfo::Lit(2), DimInfo::Lit(4), DimInfo::Lit(7)],
+    );
+    let cotangent = load(&mut dag, "w", vec![DimInfo::Lit(2), DimInfo::Lit(2)]);
+    let lhs = load(
+        &mut dag,
+        "a",
+        vec![DimInfo::Lit(2), DimInfo::Lit(4), DimInfo::Lit(3)],
+    );
+    let rhs = load(
+        &mut dag,
+        "b",
+        vec![DimInfo::Lit(2), DimInfo::Lit(3), DimInfo::Lit(5)],
+    );
+
+    let mut nodes = vec![f];
+    let add = |dag: &mut Dag, op: RiscOp, inputs: Vec<NodeId>, out: TensorType| {
+        dag.add_node(op, inputs, out, None)
+    };
+
+    // Binary elementwise.
+    for op in [
+        RiscOp::Add,
+        RiscOp::Sub,
+        RiscOp::Mul,
+        RiscOp::Div,
+        RiscOp::FloorDiv,
+        RiscOp::MaxElem,
+        RiscOp::MinElem,
+    ] {
+        nodes.push(add(&mut dag, op, vec![f, g], f32_23()));
+    }
+    nodes.push(add(
+        &mut dag,
+        RiscOp::TruncDiv,
+        vec![ints, more_ints],
+        ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::Int32),
+    ));
+    nodes.push(add(
+        &mut dag,
+        RiscOp::CmpLt,
+        vec![f, g],
+        ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::Bool),
+    ));
+    nodes.push(add(
+        &mut dag,
+        RiscOp::ExtremaAdjoint {
+            kind: ExtremaKind::Max,
+            operand: ExtremaOperand::Left,
+        },
+        vec![f, g, cotangent],
+        f32_23(),
+    ));
+
+    // Unary elementwise.
+    for op in [
+        RiscOp::Neg,
+        RiscOp::Exp,
+        RiscOp::Log,
+        RiscOp::Sin,
+        RiscOp::Sqrt,
+        RiscOp::Cos,
+        RiscOp::Tan,
+        RiscOp::Atan,
+        RiscOp::Abs,
+        RiscOp::Floor,
+        RiscOp::Ceil,
+        RiscOp::Round,
+        RiscOp::Recip,
+        RiscOp::Copy,
+        RiscOp::Drop,
+        RiscOp::Realize,
+        RiscOp::UniformLike {
+            low: 0.0,
+            high: 1.0,
+            seed: 7,
+        },
+        RiscOp::Dropout {
+            rate: 0.5,
+            seed: 11,
+        },
+        RiscOp::Store { name: "out".into() },
+    ] {
+        nodes.push(add(&mut dag, op, vec![f], f32_23()));
+    }
+    nodes.push(add(
+        &mut dag,
+        RiscOp::Cast {
+            new_precision: Prim::F64,
+        },
+        vec![f],
+        ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::F64),
+    ));
+    nodes.push(add(
+        &mut dag,
+        RiscOp::CastTrunc {
+            new_precision: Prim::Int32,
+        },
+        vec![f],
+        ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::Int32),
+    ));
+    nodes.push(add(
+        &mut dag,
+        RiscOp::FusedElem {
+            ops: vec![FusedStep {
+                op: FusedStepOp::Add,
+                input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+            }],
+        },
+        vec![f, g],
+        f32_23(),
+    ));
+
+    // Reductions: axis 0 of a rank 2 operand leaves rank 1.
+    for op in [
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
+        RiscOp::MaxReduce { axis: 0 },
+        RiscOp::MinReduce { axis: 0 },
+        RiscOp::ProdReduce { axis: 0 },
+    ] {
+        nodes.push(add(
+            &mut dag,
+            op,
+            vec![f],
             ty(vec![DimInfo::Lit(3)], Prim::F32),
-            None,
-        ),
-        dag.add_node(
-            RiscOp::Cast {
-                new_precision: Prim::F64,
-            },
-            vec![matrix],
-            ty(vec![DimInfo::Lit(4), DimInfo::Lit(3)], Prim::F64),
-            None,
-        ),
-        dag.add_node(
-            RiscOp::Shape { axis: 0 },
-            vec![matrix],
-            scalar(Prim::Int64),
-            None,
-        ),
-    ];
+        ));
+    }
+    for op in [RiscOp::Argmax { axis: 0 }, RiscOp::Argmin { axis: 0 }] {
+        nodes.push(add(
+            &mut dag,
+            op,
+            vec![f],
+            ty(vec![DimInfo::Lit(3)], Prim::Int64),
+        ));
+    }
+    nodes.push(add(
+        &mut dag,
+        RiscOp::Count { axes: vec![0] },
+        vec![flags],
+        ty(vec![DimInfo::Lit(3)], Prim::Int64),
+    ));
 
-    for id in nodes {
-        let node = dag.get(id).expect("node");
-        let sources = output_axis_sources(&dag, id);
+    // Windowed: the leading axis passes through, the windowed axis has
+    // extent floor((3 - 2) / 1) + 1 = 2.
+    nodes.push(add(
+        &mut dag,
+        RiscOp::ReduceWindow {
+            reducer: ReduceWindowKind::Sum,
+            window_shape: vec![2],
+            strides: vec![1],
+        },
+        vec![f],
+        ty(vec![DimInfo::Lit(2), DimInfo::Lit(2)], Prim::F32),
+    ));
+    nodes.push(add(
+        &mut dag,
+        RiscOp::ReduceWindowGrad {
+            reducer: ReduceWindowKind::Sum,
+            window_shape: vec![2],
+            strides: vec![1],
+        },
+        vec![f, cotangent],
+        f32_23(),
+    ));
+
+    // Movement.
+    nodes.push(add(
+        &mut dag,
+        RiscOp::Reshape {
+            new_shape: vec![RtDim::Lit(6)],
+        },
+        vec![f],
+        ty(vec![DimInfo::Lit(6)], Prim::F32),
+    ));
+    nodes.push(add(
+        &mut dag,
+        RiscOp::Permute { axes: vec![1, 0] },
+        vec![f],
+        ty(vec![DimInfo::Lit(3), DimInfo::Lit(2)], Prim::F32),
+    ));
+    nodes.push(add(
+        &mut dag,
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::Lit(4),
+        },
+        vec![f],
+        ty(
+            vec![DimInfo::Lit(4), DimInfo::Lit(2), DimInfo::Lit(3)],
+            Prim::F32,
+        ),
+    ));
+    nodes.push(add(
+        &mut dag,
+        RiscOp::OneHot { vocab: 5 },
+        vec![indices],
+        ty(vec![DimInfo::Lit(4), DimInfo::Lit(5)], Prim::F32),
+    ));
+    nodes.push(add(
+        &mut dag,
+        RiscOp::zero_pad(
+            Prim::F32,
+            vec![
+                (RtDim::Lit(0), RtDim::Lit(0)),
+                (RtDim::Lit(0), RtDim::Lit(0)),
+            ],
+        ),
+        vec![f],
+        f32_23(),
+    ));
+    nodes.push(add(
+        &mut dag,
+        RiscOp::Shrink {
+            bounds: vec![
+                (RtDim::Lit(0), RtDim::Lit(2)),
+                (RtDim::Lit(0), RtDim::Lit(3)),
+            ],
+        },
+        vec![f],
+        f32_23(),
+    ));
+    nodes.push(add(
+        &mut dag,
+        RiscOp::Stride {
+            strides: vec![RtDim::Lit(1), RtDim::Lit(1)],
+        },
+        vec![f],
+        f32_23(),
+    ));
+
+    // Shape query and memory.
+    nodes.push(add(
+        &mut dag,
+        RiscOp::Shape { axis: 0 },
+        vec![f],
+        scalar(Prim::Int64),
+    ));
+    nodes.push(add(
+        &mut dag,
+        RiscOp::synth_const(Prim::F32, 0.0),
+        vec![],
+        scalar(Prim::F32),
+    ));
+    nodes.push(add(
+        &mut dag,
+        RiscOp::synth_const_tensor(Prim::F32, vec![0.0; 6]),
+        vec![],
+        f32_23(),
+    ));
+
+    // Backend specialization and sparse.
+    nodes.push(add(
+        &mut dag,
+        RiscOp::BlasMatmul {
+            batch_dims: vec![DimExpr::Concrete(2)],
+            m: DimExpr::Concrete(4),
+            n: DimExpr::Concrete(5),
+            k: DimExpr::Concrete(3),
+            accumulator: Prim::F32,
+        },
+        vec![lhs, rhs],
+        ty(
+            vec![DimInfo::Lit(2), DimInfo::Lit(4), DimInfo::Lit(5)],
+            Prim::F32,
+        ),
+    ));
+    nodes.push(add(
+        &mut dag,
+        RiscOp::Gather { axis: 1 },
+        vec![values, indices],
+        ty(
+            vec![DimInfo::Lit(2), DimInfo::Lit(4), DimInfo::Lit(7)],
+            Prim::F32,
+        ),
+    ));
+    for op in [RiscOp::ScatterAdd { axis: 1 }, RiscOp::Scatter { axis: 1 }] {
+        nodes.push(add(
+            &mut dag,
+            op,
+            vec![values, indices, updates],
+            ty(
+                vec![DimInfo::Lit(2), DimInfo::Lit(5), DimInfo::Lit(7)],
+                Prim::F32,
+            ),
+        ));
+    }
+    nodes.push(add(
+        &mut dag,
+        RiscOp::ScatterElements { axis: 1 },
+        vec![f, cell_indices, g],
+        f32_23(),
+    ));
+
+    let mut covered = vec![0usize; RISC_OP_VARIANTS];
+    for id in &nodes {
+        let node = dag.get(*id).expect("node");
+        let sources = output_axis_sources(&dag, *id);
         assert_eq!(
             sources.len(),
             node.output_type.dims.len(),
@@ -686,7 +1042,27 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
             sources.len(),
             node.output_type.dims.len()
         );
+        covered[variant_index(&node.op)] += 1;
     }
+
+    let uncovered: Vec<usize> = covered
+        .iter()
+        .enumerate()
+        .filter(|(_, count)| **count == 0)
+        .map(|(index, _)| index)
+        .collect();
+    assert!(
+        uncovered.is_empty(),
+        "variant index(es) {uncovered:?} have no constructed node; \
+         every RiscOp arm must be exercised, not merely present"
+    );
+    assert_eq!(
+        nodes.len(),
+        RISC_OP_VARIANTS,
+        "one node per variant, so a duplicate row cannot mask a missing one"
+    );
+
+    // Every source the whole vocabulary produced refers to a real edge.
     assert!(check_axis_sources(&dag, Stage::Lowering).is_ok());
 }
 
