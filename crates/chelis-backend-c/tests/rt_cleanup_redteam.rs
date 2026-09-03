@@ -30,6 +30,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+mod common;
+
 const BF16_TOL: f64 = 1e-2;
 #[allow(dead_code)]
 const F16_TOL: f64 = 1e-3;
@@ -126,18 +128,18 @@ fn gcc_available() -> bool {
 
 #[allow(dead_code)]
 fn cblas_available() -> bool {
-    let dir = std::env::temp_dir().join("chelis_rtcleanup_cblas_probe");
-    let _ = fs::create_dir_all(&dir);
-    let probe = dir.join("probe.c");
+    let probe = common::probe_dir("rtcleanup_cblas_probe");
+    let dir = probe.path().to_path_buf();
+    let probe_source = dir.join("probe.c");
     fs::write(
-        &probe,
+        &probe_source,
         "extern void cblas_sgemm(); int main(void){(void)cblas_sgemm; return 0;}",
     )
     .unwrap();
     let out = dir.join("probe_bin");
     Command::new("gcc")
         .args([
-            probe.to_str().unwrap(),
+            probe_source.to_str().unwrap(),
             "-lcblas",
             "-o",
             out.to_str().unwrap(),
@@ -153,8 +155,8 @@ fn compile_and_run_kernel(
     main_c: &str,
     needs_cblas: bool,
 ) -> String {
-    let dir = std::env::temp_dir().join(format!("chelis_rtcleanup_{test_name}"));
-    fs::create_dir_all(&dir).unwrap();
+    let probe = common::probe_dir(&format!("rtcleanup_{test_name}"));
+    let dir = probe.path().to_path_buf();
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), main_c).unwrap();
 

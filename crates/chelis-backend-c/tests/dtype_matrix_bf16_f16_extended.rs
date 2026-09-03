@@ -29,6 +29,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+mod common;
+
 const BF16_TOL: f64 = 1e-2;
 const F16_TOL: f64 = 1e-3;
 
@@ -128,8 +130,8 @@ fn gcc_available() -> bool {
 }
 
 fn compile_and_run_kernel(test_name: &str, c_source: &str, main_c: &str) -> String {
-    let dir = std::env::temp_dir().join(format!("chelis_bf16_ext_{test_name}"));
-    fs::create_dir_all(&dir).unwrap();
+    let probe = common::probe_dir(&format!("bf16_ext_{test_name}"));
+    let dir = probe.path().to_path_buf();
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), main_c).unwrap();
 

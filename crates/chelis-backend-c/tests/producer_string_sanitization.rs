@@ -31,6 +31,8 @@ use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::load_store_name::LoadStoreName;
 use chelis_types::types::Prim;
 
+mod common;
+
 fn vec_f32(n: usize) -> TensorType {
     TensorType {
         dims: vec![DimInfo::Lit(n)],
@@ -245,8 +247,8 @@ fn c_sanitized_format_strings_still_compile_cleanly() {
     // sanitizer.
     let result = codegen(&dag, "test_sanitize").unwrap();
 
-    let dir = std::env::temp_dir().join("chelis_producer_sanitize_c_compile");
-    std::fs::create_dir_all(&dir).unwrap();
+    let probe = common::probe_dir("producer_sanitize_c_compile");
+    let dir = probe.path().to_path_buf();
     let src_path = dir.join("sanitized.c");
     std::fs::write(&src_path, &result.c_source).unwrap();
 
