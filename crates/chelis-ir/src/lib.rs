@@ -23,6 +23,7 @@ pub const EVAL_TENSOR_CAPABLE_PRIMS: &[chelis_types::types::Prim] = &[
 ];
 
 pub mod analysis;
+pub mod axis_sources;
 pub mod dag;
 pub mod eval;
 pub mod fuse;
@@ -43,6 +44,7 @@ pub mod vmap;
 pub use analysis::{
     CopyCostSummary, FunctionCopyCost, analyze_copy_costs, analyze_copy_costs_for_roots,
 };
+pub use axis_sources::{AxisSource, check_axis_sources, output_axis_sources};
 pub use dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, TensorType};
 pub use grad::{AdError, AdRejectionReason};
 pub use host::{
