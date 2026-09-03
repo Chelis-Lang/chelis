@@ -543,6 +543,25 @@ fn survives_the_call(family: &Family) -> Result<String, String> {
     ))
 }
 
+/// The `Freezes` arm's second producer, with the consumer's form as a
+/// parameter so both candidate forms can be read.
+///
+/// `expand(b, 0, 6i64)` on `tensor[1, f32]` has candidate forms
+/// `tensor[6, f32]` and `tensor[6, 1, f32]`, and **both hold six elements**, so
+/// a rule that eliminates by element count cannot select between them. The
+/// element type is fixed at `f32` rather than taken from the family, because
+/// the only family that reaches this producer is `f32`; a freeze family of
+/// another dtype would need its own.
+fn under_producer_b(family: &Family, consumer: &str) -> Result<String, String> {
+    check(&format!(
+        "def sink_b(x: {consumer}) -> int32 = 0\n\
+         def f(b: tensor[1, f32]{extra}) -> int32 = {{\n  \
+         e = expand(b, 0, 6i64)\n  u = {call}\n  sink_b(e)\n}}\n",
+        extra = family.extra_params,
+        call = family.call,
+    ))
+}
+
 fn insertion_form(dtype: &str) -> String {
     collapse(&format!(
         "(t-tensor {{}} (d-lit {{}} 3) (d-lit {{}} 2) (t-prim {{}} {dtype}))"
@@ -749,42 +768,6 @@ fn every_settlement_family_declared_result_binds() {
     );
 }
 
-/// The condition under which the `Freezes` arm's narrowed claim is safe.
-///
-/// That arm cannot separate a genuine freeze from a `Constrains` call whose own
-/// typing rule eliminates the insertion candidate, because both leave the
-/// operand on the replacement form and the arm reads only that. The narrowing
-/// is therefore honest but conditional, and this is the condition: no
-/// `Constrains` family's own probe call may be rejected by the freeze probe.
-///
-/// This is an assertion about the registry rather than a fourth assertion on
-/// the arm. It holds today, measured: `reshape(e, [6i64])` selects the
-/// insertion form and is accepted, as are `pad` and `stride` with rank-1
-/// argument lists. It fires the day a `Constrains` family whose call eliminates
-/// to the replacement form is added, and whoever adds it then inherits the
-/// decision with the evidence in front of them rather than a silent regression.
-#[test]
-fn no_constraining_family_is_rejected_by_the_freeze_probe() {
-    let mut exploits = Vec::new();
-    for family in FAMILIES {
-        if family.settlement != TensorSettlement::Constrains {
-            continue;
-        }
-        if let Err(error) = survives_the_call(family) {
-            exploits.push(format!("{} via `{}`: {error}", family.name, family.call));
-        }
-    }
-    assert!(
-        exploits.is_empty(),
-        "a constraining family whose call is rejected by the freeze probe is \
-         indistinguishable from a freezing one under the `Freezes` arm, so the \
-         arm's narrowed claim no longer holds. Either the family's probe call \
-         changes, or the arm needs the second producer its doc comment \
-         describes: {}",
-        exploits.join("; ")
-    );
-}
-
 // ---------------------------------------------------------------------
 // Behaviour, once per family.
 // ---------------------------------------------------------------------
@@ -806,26 +789,25 @@ fn no_constraining_family_is_rejected_by_the_freeze_probe() {
 /// the same program, which is what makes the mutation in either direction go
 /// red.
 ///
-/// **What the `Freezes` arm does not prove.** It asserts that a later
-/// insertion-form consumer is rejected. That follows from the operand resting
-/// on the replacement form, however it got there, so the arm does not separate
-/// a genuine freeze from a `Constrains` call whose own typing rule eliminates
-/// the insertion candidate and therefore lands on the same form. The witness is
-/// `reshape(e, [3i64])`: §4.7.3's element-count rule admits only the
-/// replacement form, and the freeze probe then rejects with
-/// "tensor rank mismatch: 2 dims vs 1 dims", byte-identical to `shape(e, 0)`.
+/// **Why the `Freezes` arm reads two producers and both consumers.** With one
+/// producer it asserts only that a later insertion-form consumer is rejected,
+/// and that follows from the operand resting on the replacement form however it
+/// got there. A `Constrains` call whose own typing rule eliminates the
+/// insertion candidate lands on the same form and is byte-identical:
+/// `reshape(e, [3i64])`, where §4.7.3's element-count rule admits only the
+/// replacement form, rejects with "tensor rank mismatch: 2 dims vs 1 dims",
+/// exactly as `shape(e, 0)` does.
 ///
-/// A second producer per family would separate them, and it was measured
-/// working: with `expand(b, 0, 6i64)` on `tensor[1, f32]` both candidate forms
-/// hold six elements, so `reshape` cannot select and the program is accepted,
-/// while `shape` still freezes. It was not adopted because it is a `Family`
-/// change across all 21 families, with a producer authored per family, to
-/// repair an arm covering two rows of 152.
+/// Producer B's candidate forms hold equal element counts, which is necessary
+/// and not sufficient. Its rejection column does not separate the two either:
+/// measured, `reshape(e, [3i64])` is rejected under producer B as well, with
+/// "reshape target has 3 elements but input tensor has 6". What separates them
+/// is the **acceptance**. A freeze leaves the operand on `tensor[6, f32]`, so a
+/// consumer of that form is accepted while the insertion-form consumer is
+/// rejected; a call whose own rule refused the operand rejects both. The arm
+/// therefore requires the rejection under both producers and the acceptance
+/// under producer B.
 ///
-/// What makes the narrowed claim safe instead is
-/// [`no_constraining_family_is_rejected_by_the_freeze_probe`]: today no
-/// `Constrains` family's own call exploits the gap, and that test fires the day
-/// one is added, with this comment in front of whoever added it.
 #[test]
 fn each_family_representative_behaves_as_its_family_declares() {
     let named = UNDISCRIMINATED_FAMILIES
@@ -890,25 +872,50 @@ fn each_family_representative_behaves_as_its_family_declares() {
                 }
             }
             TensorSettlement::Freezes => {
-                let error = survives_the_call(family).expect_err(&format!(
-                    "{}: freezing fixes the operand at the replacement form, \
-                     so the later insertion-form consumer must be rejected",
-                    family.name
-                ));
-                // Both halves. A shape disagreement alone is too coarse: a
-                // route that refuses an unresolved operand could in principle
-                // do so with a `DimensionMismatch` and pass. None of the seven
-                // does today, all refuse with `TypeMismatch`, but the clause
-                // costs less than the round that would find it.
-                let names_a_shape_disagreement =
-                    error.contains("rank mismatch") || error.contains("DimensionMismatch");
-                assert!(
-                    names_a_shape_disagreement && !names_an_unresolved_variable(&error),
-                    "{}: the rejection must name a shape disagreement and must \
-                     not name an unresolved variable, which is what separates \
-                     freezing the operand from refusing it; got {error}",
-                    family.name
-                );
+                // The rejection column, under both producers. It is necessary
+                // and on its own not sufficient: a call whose own typing rule
+                // eliminates the insertion candidate is rejected here too.
+                for (producer, probe) in [
+                    ("producer A", survives_the_call(family)),
+                    ("producer B", under_producer_b(family, "tensor[6, 1, f32]")),
+                ] {
+                    let error = probe.err().unwrap_or_else(|| {
+                        panic!(
+                            "{}: under {producer}, freezing fixes the operand at \
+                             the replacement form, so the later insertion-form \
+                             consumer must be rejected. A call accepted here \
+                             selected by its own typing rule rather than \
+                             freezing.",
+                            family.name
+                        )
+                    });
+                    // A shape disagreement alone is too coarse: a route that
+                    // refuses an unresolved operand could in principle do so
+                    // with a `DimensionMismatch` and pass.
+                    let names_a_shape_disagreement =
+                        error.contains("rank mismatch") || error.contains("DimensionMismatch");
+                    assert!(
+                        names_a_shape_disagreement && !names_an_unresolved_variable(&error),
+                        "{}: under {producer}, the rejection must name a shape \
+                         disagreement and must not name an unresolved variable, \
+                         which is what separates freezing the operand from \
+                         refusing it; got {error}",
+                        family.name
+                    );
+                }
+                // The acceptance column, which is where the two differ. A
+                // freeze leaves the operand on producer B's replacement form,
+                // so a consumer of that form is accepted. A call that refused
+                // the operand rejects this consumer as well.
+                under_producer_b(family, "tensor[6, f32]").unwrap_or_else(|error| {
+                    panic!(
+                        "{}: under producer B, freezing leaves the operand on \
+                         the replacement form, so a consumer of that form must \
+                         be accepted. A call rejected here refused the operand \
+                         rather than freezing it: {error}",
+                        family.name
+                    )
+                });
             }
             TensorSettlement::RejectsUnresolved => {
                 let error = survives_the_call(family).expect_err(&format!(
