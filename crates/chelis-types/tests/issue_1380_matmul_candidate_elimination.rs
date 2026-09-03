@@ -27,8 +27,12 @@
 //! `bind_tvar`, which is what shows the machinery was present and only the
 //! early return was in the way.
 //! `residual_a_rank_two_input_leaves_both_candidates_and_still_escapes` passes
-//! because it asserts the escape rather than its absence; it records a defect
-//! this change does not close.
+//! because it asserts the escape rather than its absence. It is the one row
+//! here that records a defect rather than a repair, and it is expected to keep
+//! asserting that escape until `matmul` carries a relation from its result
+//! back to its operands while the choice is open. When it starts failing, the
+//! remaining half of chelis#1380 has been fixed and the row should be deleted
+//! and the issue closed, never relaxed to keep it green.
 
 use chelis_deep::printer::print_canonical;
 use chelis_surf::desugar::desugar_program;
