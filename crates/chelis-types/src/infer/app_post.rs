@@ -584,7 +584,8 @@ pub(super) fn finish_unified_app(
                     // context-free shape so borrowed and unborrowed reads use
                     // the same rule before axis validation.
                     if let Type::Var(var) = type_for_readonly_check(first_arg, subst)
-                        && let Err(error) = subst.materialize_deferred_expand_default(var)
+                        && let Err(error) =
+                            subst.settle_deferred_tensor(var, DeferralAction::Freeze)
                     {
                         return report(errors, error.into());
                     }

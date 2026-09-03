@@ -458,6 +458,41 @@ use deferred_order::{
     DeferredExpandConstraints, DeferredReshapeConstraint, DeferredReshapeConstraints, Sourced,
 };
 
+/// Independently resolved shape evidence a rule supplies about a deferred
+/// positional-`expand` result (`spec/04-type-system.md` §4.7.2).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ShapeEvidence<'a> {
+    /// A formed expected tensor type: a declared result, an ascription, an
+    /// already-instantiated parameter or generic field, a branch join with
+    /// independently resolved shape evidence, or a builtin relation with an
+    /// independently resolved operand equation.
+    Type(&'a Type),
+    /// A `reshape` target list. §4.7.3's element-count relation keeps only
+    /// the candidate forms that list admits, and the ordinal records where
+    /// the relation was written for source-ordered settlement.
+    ElementCount {
+        target_dims: &'a [Dim],
+        ordinal: SourceOrdinal,
+    },
+}
+
+/// The disposition an inference rule that consumes a tensor takes on a
+/// deferred positional-`expand` result. Exactly one applies; C3 of
+/// `spec/design/runtime_extents.md` states which context takes which.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DeferralAction<'a> {
+    /// The context supplies an independently fixed rank or shape equation,
+    /// so it selects the unique candidate satisfying that equation.
+    Constrain(ShapeEvidence<'a>),
+    /// The context carries the same unresolved monomorphic candidate without
+    /// requiring either rank. It adds no evidence and cannot select or clone
+    /// the choice, so the obligation survives unchanged.
+    Propagate,
+    /// A freeze point §4.7.2 names: a concrete tensor type is required and
+    /// no independent constraint selected a candidate.
+    Freeze,
+}
+
 /// Which deferred use shape registered a ledger entry (determines the
 /// violation action text at validation time).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -867,11 +902,87 @@ impl Subst {
                 .contains(v)
     }
 
+    /// The one executor for the three C3 actions. Every inference rule that
+    /// consumes a tensor names its action here, so a rule that consumes one
+    /// without a disposition is visible rather than a silent fall-through.
+    ///
+    /// `Ok(None)` means `v` carried no positional-`expand` obligation, or the
+    /// action deliberately left the choice open; `Ok(Some(ty))` is the type
+    /// the action settled on.
+    pub(crate) fn settle_deferred_tensor(
+        &mut self,
+        v: TypeVar,
+        action: DeferralAction<'_>,
+    ) -> Result<Option<Type>, TypeError> {
+        match action {
+            DeferralAction::Constrain(ShapeEvidence::Type(expected)) => {
+                self.constrain_deferred_tensor(v, expected)
+            }
+            DeferralAction::Constrain(ShapeEvidence::ElementCount {
+                target_dims,
+                ordinal,
+            }) => self.resolve_deferred_expand_for_reshape(v, ordinal, target_dims.to_vec()),
+            // Propagation inspects nothing and mutates nothing: the obligation
+            // stays exactly where it was. The call exists so a reader can see
+            // that the rule chose this action rather than falling through
+            // undecided.
+            DeferralAction::Propagate => Ok(None),
+            DeferralAction::Freeze => self.materialize_deferred_expand_default(v),
+        }
+    }
+
+    /// Select the candidate an expected tensor type admits, as one
+    /// transaction across both deferred ledgers.
+    ///
+    /// The trial clone is required: a rejected candidate may already have
+    /// bound dimension variables or lowered levels before a later obligation
+    /// fails, so no part of a rejected trial may leak into `self`.
+    fn constrain_deferred_tensor(
+        &mut self,
+        v: TypeVar,
+        expected: &Type,
+    ) -> Result<Option<Type>, TypeError> {
+        if matches!(expected, Type::Var(_) | Type::Error(_)) {
+            // A variable supplies no independent equation, and a witnessed
+            // error already owns its diagnostic.
+            return Ok(None);
+        }
+        let has_expand = self.has_deferred_expand_constraint(v);
+        let has_reshape = self
+            .deferred_reshape_constraints
+            .lock()
+            .expect("subst.deferred_reshape_constraints poisoned")
+            .contains(v);
+        if !has_expand && !has_reshape {
+            return Ok(None);
+        }
+        let mut trial = self.clone();
+        let expand_constraints = trial
+            .deferred_expand_constraints
+            .lock()
+            .expect("subst.deferred_expand_constraints poisoned")
+            .take(v)
+            .unwrap_or_default();
+        for constraint in expand_constraints {
+            let canonical = constraint.obligation.canonical_for_output(expected)?;
+            unify(&canonical, expected, &mut trial)?;
+        }
+        let reshape_constraints = trial
+            .deferred_reshape_constraints
+            .lock()
+            .expect("subst.deferred_reshape_constraints poisoned")
+            .take(v);
+        trial.validate_deferred_reshape_constraints(expected, &reshape_constraints)?;
+        bind_tvar(v, expected, &mut trial)?;
+        *self = trial;
+        Ok(Some(self.apply(expected)))
+    }
+
     /// Materialize the context-free positional-expand default for `v`.
     /// Existing-axis calls choose same-rank replacement; `axis == rank` has
     /// no replacement form and therefore chooses trailing insertion. Every
     /// obligation attached through alias unification must agree.
-    pub(crate) fn materialize_deferred_expand_default(
+    fn materialize_deferred_expand_default(
         &mut self,
         v: TypeVar,
     ) -> Result<Option<Type>, TypeError> {
@@ -911,7 +1022,7 @@ impl Subst {
 
     /// Publish a `reshape` result immediately while retaining only its
     /// element-count relation to an unresolved positional-expand input.
-    pub(crate) fn resolve_deferred_expand_for_reshape(
+    fn resolve_deferred_expand_for_reshape(
         &mut self,
         input_var: TypeVar,
         ordinal: SourceOrdinal,
@@ -1085,7 +1196,7 @@ impl Subst {
             .settlement_order();
         for var in vars {
             if self.has_deferred_expand_constraint(var) {
-                self.materialize_deferred_expand_default(var)
+                self.settle_deferred_tensor(var, DeferralAction::Freeze)
                     .map_err(|error| TypeError {
                         kind: error.kind,
                         message: format!(
@@ -2185,6 +2296,9 @@ fn bind_tvar(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeError> 
     }
 
     if let Type::Var(target) = ty {
+        // Identifying two variables is the mechanism behind C3 `Propagate`:
+        // the surviving variable carries both obligations, no evidence is
+        // added, and neither choice is selected or cloned.
         subst
             .deferred_expand_constraints
             .lock()
@@ -2195,38 +2309,13 @@ fn bind_tvar(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeError> 
             .lock()
             .expect("subst.deferred_reshape_constraints poisoned")
             .merge_alias(v, *target);
-    } else if !matches!(ty, Type::Error(_)) {
-        let has_expand = subst.has_deferred_expand_constraint(v);
-        let has_reshape = subst
-            .deferred_reshape_constraints
-            .lock()
-            .expect("subst.deferred_reshape_constraints poisoned")
-            .contains(v);
-        if has_expand || has_reshape {
-            // Settlement is one transaction across both ledgers. A rejected
-            // candidate may have bound dimensions or lowered variables before
-            // a later obligation fails, so no part of the trial can leak.
-            let mut trial = subst.clone();
-            let expand_constraints = trial
-                .deferred_expand_constraints
-                .lock()
-                .expect("subst.deferred_expand_constraints poisoned")
-                .take(v)
-                .unwrap_or_default();
-            for constraint in expand_constraints {
-                let canonical = constraint.obligation.canonical_for_output(ty)?;
-                unify(&canonical, ty, &mut trial)?;
-            }
-            let reshape_constraints = trial
-                .deferred_reshape_constraints
-                .lock()
-                .expect("subst.deferred_reshape_constraints poisoned")
-                .take(v);
-            trial.validate_deferred_reshape_constraints(ty, &reshape_constraints)?;
-            bind_tvar(v, ty, &mut trial)?;
-            *subst = trial;
-            return Ok(());
-        }
+    } else if subst
+        .settle_deferred_tensor(v, DeferralAction::Constrain(ShapeEvidence::Type(ty)))?
+        .is_some()
+    {
+        // C3 `Constrain`: a concrete target is the independent shape
+        // equation, and the executor committed the whole transaction.
+        return Ok(());
     }
     // An older variable that becomes bound to a younger composite makes all
     // reachable variables part of the older scope. Deferred shape resolution
@@ -3781,7 +3870,13 @@ mod tests {
         );
 
         let output = s
-            .resolve_deferred_expand_for_reshape(result, SourceOrdinal::new(1), vec![Dim::Lit(6)])
+            .settle_deferred_tensor(
+                result,
+                DeferralAction::Constrain(ShapeEvidence::ElementCount {
+                    target_dims: &[Dim::Lit(6)],
+                    ordinal: SourceOrdinal::new(1),
+                }),
+            )
             .expect("a six-element reshape target must select insertion")
             .expect("the result carries a deferred expand constraint");
         assert_eq!(
@@ -3814,7 +3909,13 @@ mod tests {
         );
 
         let error = s
-            .resolve_deferred_expand_for_reshape(result, SourceOrdinal::new(1), vec![Dim::Lit(5)])
+            .settle_deferred_tensor(
+                result,
+                DeferralAction::Constrain(ShapeEvidence::ElementCount {
+                    target_dims: &[Dim::Lit(5)],
+                    ordinal: SourceOrdinal::new(1),
+                }),
+            )
             .expect_err("five elements match neither tensor[3] nor tensor[3, 2]");
         assert!(matches!(error.kind, TypeErrorKind::DimensionMismatch));
         assert!(error.message.contains("reshape target has 5 elements"));
@@ -3837,7 +3938,13 @@ mod tests {
         );
 
         let output = s
-            .resolve_deferred_expand_for_reshape(result, SourceOrdinal::new(1), vec![Dim::Wildcard])
+            .settle_deferred_tensor(
+                result,
+                DeferralAction::Constrain(ShapeEvidence::ElementCount {
+                    target_dims: &[Dim::Wildcard],
+                    ordinal: SourceOrdinal::new(1),
+                }),
+            )
             .expect("an unknown reshape target is compatible with either expand shape")
             .expect("the reshape still has its own output type");
         assert_eq!(
@@ -3865,10 +3972,12 @@ mod tests {
         );
 
         let output = s
-            .resolve_deferred_expand_for_reshape(
+            .settle_deferred_tensor(
                 result,
-                SourceOrdinal::new(1),
-                vec![Dim::Lit(3), Dim::Wildcard],
+                DeferralAction::Constrain(ShapeEvidence::ElementCount {
+                    target_dims: &[Dim::Lit(3), Dim::Wildcard],
+                    ordinal: SourceOrdinal::new(1),
+                }),
             )
             .expect("both expand candidates remain possible")
             .expect("the reshape still has its own output type");
@@ -3898,10 +4007,12 @@ mod tests {
                 size: Dim::Lit(3),
             },
         );
-        s.resolve_deferred_expand_for_reshape(
+        s.settle_deferred_tensor(
             input,
-            SourceOrdinal::new(1),
-            vec![Dim::Wildcard, Dim::Wildcard, Dim::Lit(3)],
+            DeferralAction::Constrain(ShapeEvidence::ElementCount {
+                target_dims: &[Dim::Wildcard, Dim::Wildcard, Dim::Lit(3)],
+                ordinal: SourceOrdinal::new(1),
+            }),
         )
         .expect("both expand candidates have legal reshape outputs")
         .expect("the input carries a deferred expand relation");
