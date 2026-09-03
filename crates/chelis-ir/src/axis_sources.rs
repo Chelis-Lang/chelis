@@ -693,6 +693,80 @@ pub(crate) fn check_node_axis_sources(
     Ok(())
 }
 
+/// The stamped extent claim a class groups by.
+///
+/// Grouping is by the CLAIM, "which is the output of the typed identity proof
+/// (C1.2) and is what `symbolic_bindings` groups by today for names"
+/// (`spec/design/runtime_extents.md` C2.4). A [`DimInfo`] is the wrong key
+/// because `Named("n", Some(4))` and `Named("n", None)` are one claim and a
+/// bare `Lit(4)` is a different one.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DimClaim {
+    /// A binder name, whether or not its extent is also statically known.
+    Name(String),
+    /// A literal extent. "A literal claim is the class's canonical value
+    /// itself" (C2.4), so a literal class guards every member against the
+    /// literal rather than against a first member.
+    Literal(usize),
+}
+
+/// One output axis carrying a class's claim.
+///
+/// `source` is the axis's [`output_axis_sources`] entry, carried rather than
+/// re-derived: the guard emitters need it to build the comparison expression,
+/// and re-deriving per member at emission would let the value a guard compares
+/// disagree with the source that grouping saw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassMember {
+    pub node: NodeId,
+    pub axis: usize,
+    pub source: AxisSource,
+}
+
+/// Where C1.3 places a class's guards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardPlacement {
+    /// Every operand is an interface value, so the guard runs at function
+    /// entry in assigned-slot order, before any other operation of the
+    /// function (`spec/04-type-system.md` section 4.7).
+    Entry,
+    /// At least one operand is locally computed, so the guard takes the
+    /// source position of the operation that introduces the guarded extent.
+    Local,
+}
+
+/// One derived runtime-dimension equality class.
+///
+/// Derived, never stored: computed from the DAG a lane consumes, after the
+/// last rewrite, at the same point as [`output_axis_sources`] (C4.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeDimClass {
+    pub claim: DimClaim,
+    /// The output axes carrying the claim. For a [`DimClaim::Name`] the first
+    /// member is canonical and every later member is one equality guard
+    /// against it; for a [`DimClaim::Literal`] the literal is the canonical
+    /// value and every member is one guard against it.
+    pub members: Vec<ClassMember>,
+}
+
+impl RuntimeDimClass {
+    /// C1.3's placement for this class.
+    pub fn placement(&self) -> GuardPlacement {
+        // b2.2 replaces this. An unconditioned `Local` is the conservative
+        // shell answer: it never claims a guard may be hoisted to entry.
+        GuardPlacement::Local
+    }
+}
+
+/// The equality classes of `dag`, in guard-evaluation order.
+///
+/// b2.2 implements this; the shell returns no class so the b2.1 stubs in
+/// `crates/chelis-ir/tests/runtime_extent_slice_b_classes.rs` fail against a
+/// derivation that exists rather than against a missing symbol.
+pub fn derive_runtime_dim_classes(_dag: &Dag) -> Vec<RuntimeDimClass> {
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

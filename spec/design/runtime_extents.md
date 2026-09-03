@@ -230,15 +230,39 @@ enum RtAxis {
     Node(usize),        // absolute input slot of a rank-0 int32 node (#1298)
 }
 
+enum DimClaim {
+    Name(String),       // a binder name, whatever extent is also known for it
+    Literal(usize),     // a literal extent; the class's canonical value itself
+}
+
+struct ClassMember {
+    node: NodeId,
+    axis: usize,
+    source: AxisSource, // this axis's `output_axis_sources` entry
+}
+
 struct RuntimeDimClass {
-    claim: Dim,                       // the stamped binder name or literal
-    members: Vec<(NodeId, usize)>,    // output axes carrying the claim; first canonical
+    claim: DimClaim,
+    members: Vec<ClassMember>,        // output axes carrying the claim; first canonical
 }
 
 // Derived, never stored: computed with `output_axis_sources` from the DAG a
 // lane consumes, after the last rewrite.
 fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
 ```
+
+Both fields are wider than a `Dim` and a `(NodeId, usize)` pair for reasons
+that are structural rather than convenient. The claim is its own two-variant
+type because the grouping key must not carry an extent beside the name: a type
+that does splits `Named("n", Some(4))` from `Named("n", None)`, which are one
+claim, so a program whose dimension is statically bound loses the guard
+between its two witnesses precisely when the extent is known. `DimClaim` also
+keeps the literal case distinct, which C2.4 needs because a literal claim is
+the canonical VALUE rather than a first member. A member carries the
+`AxisSource` that grouping read, so the quantity a guard compares is the one
+that put the member in the class; re-deriving it at emission would reintroduce
+the possibility of guarding a different value from the one grouped, which is
+the defect class this slice removes.
 
 - **C2.1 Exact representation invariant.** `inputs[0]` is the tensor operand.
   `RtDim::Node(i)` is an absolute slot in the same node's `inputs` with
@@ -414,14 +438,15 @@ fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
   decisions (only their wording changes under [#1367]), so
   every row keeps its `main` baseline through Slice A except the
   spec-conformance rows Slice A itself owns (zero extents, the `vmap` rule,
-  constructed results). Slice B deletes all of them in the same change that
-  places the guards on every lane and removes lowering's
-  `fallback_expand_type` override of the stamped result type
-  (`lower.rs:9139-9147`), so no intermediate commit may accept a value the
-  IR cannot carry or execute a claimed extent without its guard, and a row
-  `main` already executes without its guard ([#1374], [#1375], [#1376],
-  [#1377]) keeps that baseline, recorded as `silent_unguarded` or
-  `lane_divergent`, until that change. Slice B likewise replaces
+  constructed results). Slice B deletes all of them, and what the
+  invariant constrains is the order rather than the change boundary: the
+  guards land on every lane, and lowering's `fallback_expand_type` override
+  of the stamped result type (`lower.rs:9139-9147`) is removed, in a change
+  that precedes the one deleting the provenance walk, so no commit in either
+  may accept a value the IR cannot carry or execute a claimed extent without
+  its guard, and a row `main` already executes without its guard ([#1374],
+  [#1375], [#1376], [#1377]) keeps that baseline, recorded as
+  `silent_unguarded` or `lane_divergent`, until the guards land. Slice B likewise replaces
   `symbolic_occurrences`, `op_declared_output_axes`, and
   `shape_source_for_axis` with `output_axis_sources`, and
   `symbolic_bindings` with `derive_runtime_dim_classes`; a reshape `Sym`

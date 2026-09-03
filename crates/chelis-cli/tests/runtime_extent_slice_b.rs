@@ -1,12 +1,59 @@
 //! Public CLI acceptance rows for runtime-extent Slice B (chelis#1277).
+//!
+//! `crates/chelis-ir/tests/runtime_extent_slice_b_classes.rs` locks the
+//! DERIVATION: which output axes form one equality class, and in what order.
+//! This file locks the OBSERVABLE consequence: that each class's guard runs,
+//! in the position `spec/04-type-system.md` section 4.7 requires, rendering
+//! the trap [04-NUM-9] requires, on both the eval and the compiled C lane.
+//!
+//! ## Why the guard-order controls are shaped the way they are
+//!
+//! A test that only asks "does a mismatching extent trap" cannot tell a guard
+//! placed correctly from one hoisted to entry or deferred to the end of the
+//! computation. Section 4.7 fixes the position exactly:
+//!
+//! > A guard that compares a locally computed value ... takes the source
+//! > position of the operation that introduces the guarded extent: an
+//! > independent effect or trap that precedes that operation in source order
+//! > is observed first, and one that follows it is observed only if the guard
+//! > passes.
+//!
+//! So each control puts an INDEPENDENT trap on one side of a mismatching
+//! extent and asserts which of the two failures the lane reports. A guard
+//! hoisted too early fails the "trap before" row; one deferred too late fails
+//! the "trap after" row. Neither direction is detectable without the other,
+//! and correct placement is the only placement satisfying both.
+//!
+//! The independent trap divides by a RUNTIME zero rather than a literal
+//! `0i64`, so constant folding cannot turn it into a check-time rejection and
+//! remove the control's teeth. The extent under test is locally computed
+//! (chelis#1379's `mul(shape(x, 0), 2i64)`) rather than interface-valued: an
+//! all-interface class runs at ENTRY, before any other operation of the
+//! function, so ordering one against an in-body trap would make both controls
+//! pass wherever the local guards went.
+//!
+//! ## Trap rendering
+//!
+//! Section 4.7 makes a runtime extent guard a typed operation-precondition
+//! guard under [04-NUM-9], so the complete user-facing line is
+//! `numeric trap: domain in <op> at int64`, with no prefix and no suffix. The
+//! `<op>` slot names the operation introducing the guarded extent, which for
+//! an all-interface class is "the `load` primitive of the later witness in
+//! signature order". Section 4.7 also requires each lane to convey the
+//! disagreeing source names, the axis, and each observed value on separate
+//! accompanying lines, but binds "the information conveyed and not the bytes
+//! rendered", so the assertions below check the trap LINE byte-exactly and the
+//! context by content, never against an invented cross-lane format.
+
+mod common;
 
 use assert_cmd::Command;
 use std::fs;
 use std::path::Path;
+use std::process::Command as StdCommand;
 use tempfile::TempDir;
 
-#[path = "common/mod.rs"]
-mod common;
+use common::{gcc_available, link_generated};
 
 /// Chelis#1482's remaining reproducer: a runtime-bound `shrink` under a
 /// symbolic signature, consumed by a composite elementwise lowering that
@@ -204,5 +251,521 @@ fn runtime_bound_shrink_relu_builds_and_matches_eval_exactly() {
         compiled_stdout.contains("shape=[4]")
             && compiled_stdout.contains("data=[1.0, 0.0, 3.0, 4.0]"),
         "ReLU must retain the exact original result: {compiled_stdout}"
+    );
+}
+
+// ===========================================================================
+// b2.1: guard placement, guard order, and the row moves Slice B owns.
+//
+// Everything below reuses `fixture`, `build_c`, and `eval` above rather than
+// re-deriving them, so every row here passes the same `--allow-style-
+// violations` and `CHELIS_STYLE_GATE_DISABLE` handling as the row B1 landed.
+// ===========================================================================
+
+/// The exact [04-NUM-9] line an extent guard renders. `<op>` varies with the
+/// operation introducing the guarded extent; `<prim>` is always `int64`,
+/// because the guard finalizes an extent under [05-DIM-1] rather than a
+/// tensor element.
+fn domain_trap_line(op: &str) -> String {
+    format!("numeric trap: domain in {op} at int64")
+}
+
+const DIV_ZERO_TRAP: &str = "numeric trap: division by zero in floor_div at int64";
+
+/// Combined stdout and stderr of `eval`, plus whether it exited zero.
+/// [04-NUM-10] makes that exit the observable, so no row here asserts success
+/// up front.
+fn eval_result(dir: &TempDir, name: &str, source: &str) -> (bool, String) {
+    let out = eval(&fixture(dir, name, source));
+    let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    (out.status.success(), text)
+}
+
+/// Combined output of `chelis build --target c`, plus whether it exited zero.
+/// Used where the row's recorded baseline is a lowering rejection.
+fn build_result(dir: &TempDir, name: &str, source: &str) -> (bool, String) {
+    let out = build_c(
+        &fixture(dir, name, source),
+        &dir.path().join(format!("{name}-out")),
+    );
+    let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    (out.status.success(), text)
+}
+
+/// Build to C, link, run, and return whether the binary exited zero plus its
+/// combined output. A build or link failure panics: those are defects in the
+/// fixture or the emitter, never the behaviour under test.
+fn c_run_result(dir: &TempDir, stem: &str, source: &str) -> (bool, String) {
+    let out_dir = dir.path().join(format!("{stem}-out"));
+    let build = build_c(&fixture(dir, &format!("{stem}.ch"), source), &out_dir);
+    assert!(
+        build.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let status = link_generated(&out_dir, &format!("{stem}.c"), stem);
+    assert!(status.success(), "link failed: {status}");
+    let run = StdCommand::new(out_dir.join(stem))
+        .output()
+        .expect("run compiled binary");
+    let mut text = String::from_utf8_lossy(&run.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&run.stderr));
+    (run.status.success(), text)
+}
+
+// ---------------------------------------------------------------------------
+// Guard-order controls.
+// ---------------------------------------------------------------------------
+
+/// A LITERAL claim of 4 over a read that yields 5. The class has one
+/// `InputAxis`-sourced member, so `spec/04-type-system.md` section 4.7 places
+/// its guard LOCALLY, at the `expand` that introduces the extent, which is
+/// what makes it orderable against an in-body trap. chelis#1377's shape.
+///
+/// An all-interface class would not work here: section 4.7 runs those at
+/// entry, "before any other operation of the function", so both order
+/// controls would pass wherever the local guards went. chelis#1379's
+/// arithmetic form would not work either, because the C lane rejects it at
+/// lowering until b2.3 removes that rejection, and a control that fails at
+/// build time is not measuring order.
+fn guard_order_source(claim: u32, trap_first: bool) -> String {
+    let trap = "boom = floor_div(1i64, sub(shape(xb, 0), shape(xb, 0)))";
+    let widen = "widened = f(seed, x)";
+    let (first, second) = if trap_first {
+        (trap, widen)
+    } else {
+        (widen, trap)
+    };
+    format!(
+        "def f(b: tensor[f32], x: tensor[n, f32]) -> tensor[{claim}, f32] = expand(b, 0, shape(x, 0))\n\
+         x = to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32])\n\
+         xb = to_tensor([1.0f32, 2.0f32])\n\
+         seed = sum(to_tensor([1.0f32]), 0)\n\
+         {first}\n{second}\n"
+    )
+}
+
+/// The claim that disagrees with the read (4 against an extent of 5).
+const MISMATCHED: u32 = 4;
+/// The claim that agrees, so no guard is owed.
+const AGREEING: u32 = 5;
+
+/// Section 4.7: "an independent effect or trap that precedes that operation in
+/// source order is observed first". A guard hoisted ahead of its introducing
+/// operation reports the extent trap here instead.
+///
+/// EVIDENTIARY STATUS: disposition lock, not a regression test. `main`
+/// already reports the division here, on both lanes, because it has no local
+/// extent guard at all. What this row defends is that b2.4's new guard does
+/// not get hoisted ahead of the `expand`.
+#[test]
+fn eval_independent_trap_before_a_mismatch_wins() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(&dir, "before.ch", &guard_order_source(MISMATCHED, true));
+    assert!(!ok, "the program must fail: {out}");
+    assert!(
+        out.contains(DIV_ZERO_TRAP),
+        "the earlier independent trap must be observed first: {out}"
+    );
+    assert!(
+        !out.contains("numeric trap: domain in"),
+        "the extent guard must not have run yet: {out}"
+    );
+}
+
+/// Section 4.7: a trap that "follows it is observed only if the guard passes".
+///
+/// EVIDENTIARY STATUS: regression test. `main` reports the division here, on
+/// both lanes, which is the wrong answer: the mismatching extent precedes it
+/// in source order and owes a trap first. Watched failing at b2.1.
+#[test]
+fn eval_independent_trap_after_a_mismatch_loses() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(&dir, "after.ch", &guard_order_source(MISMATCHED, false));
+    assert!(!ok, "the program must fail: {out}");
+    assert!(
+        out.contains(&domain_trap_line("expand")),
+        "the extent guard introduces the extent and fires first: {out}"
+    );
+    assert!(
+        !out.contains(DIV_ZERO_TRAP),
+        "the later independent trap must not be reached: {out}"
+    );
+}
+
+/// EVIDENTIARY STATUS: disposition lock, as its eval twin.
+#[test]
+fn c_independent_trap_before_a_mismatch_wins() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "before_c", &guard_order_source(MISMATCHED, true));
+    assert!(!ok, "the binary must fail: {out}");
+    assert!(
+        out.contains(DIV_ZERO_TRAP),
+        "the earlier independent trap must be observed first: {out}"
+    );
+    assert!(
+        !out.contains("numeric trap: domain in"),
+        "the extent guard must not have run yet: {out}"
+    );
+}
+
+/// EVIDENTIARY STATUS: regression test, but it fails for a DIFFERENT reason
+/// from its eval twin, and the difference is chelis#1377's `lane_divergent`
+/// recording. `main`'s C lane already reports something first here, the input
+/// shape preamble's static-dim check (`emit.rs`, the `known_dim_size` arm):
+/// `f__tensor_0: input `x` axis 0 expected 4, got 5`, followed by `abort()`.
+/// So the C lane gets the ORDER right today by a mechanism that is not a
+/// runtime extent guard, at ENTRY rather than at the `expand`, in a rendering
+/// [04-NUM-9] does not permit, while eval has no check at all. Asserting the
+/// exact trap line is what makes this row fail on `main` rather than pass on
+/// the neighbouring behaviour.
+#[test]
+fn c_independent_trap_after_a_mismatch_loses() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "after_c", &guard_order_source(MISMATCHED, false));
+    assert!(!ok, "the binary must fail: {out}");
+    assert!(
+        out.contains(&domain_trap_line("expand")),
+        "the extent guard introduces the extent and fires first: {out}"
+    );
+    assert!(
+        !out.contains(DIV_ZERO_TRAP),
+        "the later independent trap must not be reached: {out}"
+    );
+}
+
+/// The two rows above prove nothing unless the SAME program with an AGREEING
+/// claim runs PAST the guard and reaches the later trap. Without this row, a
+/// lane that failed at the first trap for an unrelated reason, or one that
+/// trapped on every extent whether or not it disagreed, would satisfy both
+/// directions above.
+///
+/// EVIDENTIARY STATUS: disposition lock.
+#[test]
+fn eval_the_guard_order_fixture_reaches_its_later_trap_when_the_claim_agrees() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(&dir, "agree.ch", &guard_order_source(AGREEING, false));
+    assert!(!ok, "the independent trap still fails the program: {out}");
+    assert!(
+        out.contains(DIV_ZERO_TRAP),
+        "with an agreeing claim the later trap is reached: {out}"
+    );
+    assert!(
+        !out.contains("numeric trap: domain in"),
+        "an agreeing claim owes no trap: {out}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Entry-guard order.
+//
+// Section 4.7: interface guards run "at function entry, in declared signature
+// order, before any other operation of the function", and never "by binding
+// name, hash iteration, or node identity".
+// ---------------------------------------------------------------------------
+
+/// Two interface classes both mismatch. The class whose declaring witness sits
+/// in the earlier assigned slot must trap first. The claim names are chosen so
+/// alphabetical order is the OPPOSITE of slot order: today's
+/// `symbolic_bindings` groups in a `BTreeMap<String, _>` and would report the
+/// other one.
+///
+/// Both rows below assert the exact [04-NUM-9] line, and that is not
+/// decoration. Without it they PASS on `main` for a reason that has nothing
+/// to do with guard order: the nullary-root path already refuses this program
+/// with `unsupported: [05-UNS-1] unavailable root `main` ... dimension binder
+/// `zdim` has inconsistent runtime witnesses: 2 and 3 ... unimplemented
+/// chelis#912`, whose text satisfies "fails", "mentions zdim" and "does not
+/// mention adim" all at once. Asserting the trap line is what makes these
+/// rows measure the guard rather than the neighbouring receipt.
+///
+/// EVIDENTIARY STATUS: regression tests. Watched passing-for-the-wrong-reason
+/// at b2.1, then failing once the trap-line assertion was added.
+const TWO_ENTRY_CLASSES: &str = "def f(zz: tensor[zdim, f32], aa: tensor[adim, f32], p: tensor[zdim, f32], q: tensor[adim, f32]) -> tensor[zdim, f32] = add(zz, p)\n\
+def main() = f(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([1.0f32]))\n";
+
+#[test]
+fn eval_entry_guards_run_in_slot_order_not_name_order() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(&dir, "entry.ch", TWO_ENTRY_CLASSES);
+    assert!(
+        !ok,
+        "both classes mismatch, so the program must fail: {out}"
+    );
+    assert!(
+        out.contains(&domain_trap_line("load")),
+        "an all-interface class renders [04-NUM-9]'s line, not chelis#912's \
+         root receipt: {out}"
+    );
+    assert!(
+        out.contains("zdim"),
+        "`zdim` occupies the earlier slot and is reported first: {out}"
+    );
+    assert!(
+        !out.contains("adim"),
+        "`adim` sorts first by name but its guard runs second: {out}"
+    );
+}
+
+#[test]
+fn c_entry_guards_run_in_slot_order_not_name_order() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "entry_c", TWO_ENTRY_CLASSES);
+    assert!(!ok, "both classes mismatch, so the binary must fail: {out}");
+    assert!(
+        out.contains(&domain_trap_line("load")),
+        "an all-interface class renders [04-NUM-9]'s line, not chelis#912's \
+         root receipt: {out}"
+    );
+    assert!(
+        out.contains("zdim"),
+        "`zdim` occupies the earlier slot and is reported first: {out}"
+    );
+    assert!(
+        !out.contains("adim"),
+        "`adim` sorts first by name but its guard runs second: {out}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Row moves. Each fixture is one verified by execution against a current
+// reference binary, and its recorded `main` baseline is named beside it so a
+// reader can tell a regression test from a disposition lock.
+// ---------------------------------------------------------------------------
+
+/// chelis#1374, baseline `silent_unguarded`: the emitted kernel binds `m` from
+/// `y`, allocates at `{ m }`, and never compares it to `n`.
+const REPRO_1374: &str = "def f(b: tensor[f32], x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = expand(b, 0, shape(y, 0))\n\
+def main() = f(sum(to_tensor([1.0f32]), 0), to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
+
+#[test]
+fn issue_1374_cross_tensor_read_traps_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(&dir, "r1374.ch", REPRO_1374);
+    assert!(!ok, "n = 2 and m = 3 must not execute silently: {out}");
+    assert!(
+        out.contains(&domain_trap_line("load")),
+        "an all-interface class names the later witness's `load`: {out}"
+    );
+    assert!(
+        out.contains('n') && out.contains('m'),
+        "the disagreeing source names are conveyed: {out}"
+    );
+}
+
+#[test]
+fn issue_1374_cross_tensor_read_traps_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "r1374_c", REPRO_1374);
+    assert!(!ok, "n = 2 and m = 3 must not execute silently: {out}");
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+}
+
+/// The positive twin: agreeing extents execute and keep the declared shape.
+#[test]
+fn issue_1374_agreeing_extents_execute_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = REPRO_1374.replace(
+        "to_tensor([1.0f32, 2.0f32, 3.0f32]))",
+        "to_tensor([1.0f32, 2.0f32]))",
+    );
+    let (ok, out) = eval_result(&dir, "r1374_ok.ch", &source);
+    assert!(ok, "n = m = 2 must execute: {out}");
+    assert!(out.contains("shape=[2]"), "{out}");
+}
+
+/// chelis#1375, baseline `silent_unguarded`: `n` is claimed for an axis whose
+/// runtime extent is `n / 2`, and no lane guards it.
+const REPRO_1375: &str = "def f(x: tensor[n, f32]) -> tensor[n, 2, f32] = reshape(x, [floor_div(shape(x, 0), 2i64), 2i64])\n\
+def main() = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]))\n";
+
+#[test]
+fn issue_1375_reshape_target_under_a_named_claim_traps_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(&dir, "r1375.ch", REPRO_1375);
+    assert!(!ok, "n = 4 claimed for an axis of extent 2: {out}");
+    assert!(out.contains(&domain_trap_line("reshape")), "{out}");
+}
+
+#[test]
+fn issue_1375_reshape_target_under_a_named_claim_traps_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "r1375_c", REPRO_1375);
+    assert!(!ok, "n = 4 claimed for an axis of extent 2: {out}");
+    assert!(out.contains(&domain_trap_line("reshape")), "{out}");
+}
+
+/// chelis#1376, baseline `silent_unguarded`: the inserted axis is claimed as
+/// `m` but its runtime extent is `shape(x, 0)`.
+const REPRO_1376: &str = "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, m, f32] = expand(x, 1, shape(x, 0))\n\
+def main() = f(to_tensor([1.0f32, 2.0f32]), to_tensor([3.0f32, 4.0f32, 5.0f32]))\n";
+
+#[test]
+fn issue_1376_same_tensor_read_under_a_foreign_claim_traps_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(&dir, "r1376.ch", REPRO_1376);
+    assert!(!ok, "m = 3 claimed for an axis of extent 2: {out}");
+    assert!(out.contains(&domain_trap_line("expand")), "{out}");
+}
+
+#[test]
+fn issue_1376_same_tensor_read_under_a_foreign_claim_traps_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "r1376_c", REPRO_1376);
+    assert!(!ok, "m = 3 claimed for an axis of extent 2: {out}");
+    assert!(out.contains(&domain_trap_line("expand")), "{out}");
+}
+
+/// chelis#1377, baseline `lane_divergent` and silent on the ROOTED path: a
+/// literal claim of 4 over a read yielding 5. The class has one
+/// `InputAxis`-sourced member, so its guard is local at the `Expand` site,
+/// which the inlined kernel emits: this row fails if the guard reaches only
+/// the exported kernel.
+const REPRO_1377: &str = "def f(b: tensor[f32], x: tensor[n, f32]) -> tensor[4, f32] = expand(b, 0, shape(x, 0))\n\
+def main() = f(sum(to_tensor([1.0f32]), 0), to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32]))\n";
+
+#[test]
+fn issue_1377_literal_claim_traps_at_the_inlined_root_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(&dir, "r1377.ch", REPRO_1377);
+    assert!(!ok, "a declared tensor[4] over a read of 5: {out}");
+    assert!(out.contains(&domain_trap_line("expand")), "{out}");
+}
+
+#[test]
+fn issue_1377_literal_claim_traps_at_the_inlined_root_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "r1377_c", REPRO_1377);
+    assert!(!ok, "a declared tensor[4] over a read of 5: {out}");
+    assert!(out.contains(&domain_trap_line("expand")), "{out}");
+}
+
+/// The positive twin for chelis#1377: a matching literal executes.
+#[test]
+fn issue_1377_agreeing_literal_claim_executes_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = REPRO_1377.replace(", 5.0f32])", "])");
+    let (ok, out) = eval_result(&dir, "r1377_ok.ch", &source);
+    assert!(
+        ok,
+        "a declared tensor[4] over a read of 4 must execute: {out}"
+    );
+    assert!(out.contains("shape=[4]"), "{out}");
+}
+
+/// chelis#1379, baseline `lane_divergent`: eval executes `2n` under a declared
+/// `n` while C refuses to compile it at lowering. Slice B makes both trap.
+const REPRO_1379: &str = "def f(b: tensor[f32], x: tensor[n, f32]) -> tensor[n, f32] = expand(b, 0, mul(shape(x, 0), 2i64))\n\
+def main() = f(sum(to_tensor([1.0f32]), 0), to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
+
+#[test]
+fn issue_1379_arithmetic_size_under_a_named_claim_traps_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(&dir, "r1379.ch", REPRO_1379);
+    assert!(!ok, "2n claimed as n must not execute: {out}");
+    assert!(out.contains(&domain_trap_line("expand")), "{out}");
+}
+
+/// The lowering rejection this row starts at is deleted, so the program must
+/// COMPILE and trap at run time rather than being refused at build time.
+/// [05-MOV-1] forbids turning a backend gap into a language restriction.
+#[test]
+fn issue_1379_arithmetic_size_compiles_rather_than_being_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = build_result(&dir, "r1379_build", REPRO_1379);
+    assert!(
+        ok,
+        "an arithmetic extent is admissible typing, not a backend restriction: {out}"
+    );
+}
+
+#[test]
+fn issue_1379_arithmetic_size_under_a_named_claim_traps_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "r1379_c", REPRO_1379);
+    assert!(!ok, "2n claimed as n must not execute: {out}");
+    assert!(out.contains(&domain_trap_line("expand")), "{out}");
+}
+
+/// chelis#665, baseline `ice` in this modern spelling. The reproducer on the
+/// issue predates the [05-DIM] int64 extent migration and no longer type
+/// checks, so a reader re-running the filed one sees a type error and could
+/// wrongly conclude the ICE is fixed. Here an op-declared axis on the `stride`
+/// input must flow through the `expand`'s KEPT output axis with an index
+/// shift, which is C4.2's case exactly.
+const REPRO_665: &str = "module Repro.ExpandOverStride\n\
+sig f: tensor[n, f32] -> tensor[m, u, f32]\n\
+def f(x) = expand(stride(x, 2i64), cast(0, int32), shape(x, cast(0, int32)))\n\
+out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))\n";
+
+#[test]
+fn issue_665_expand_over_stride_builds_and_runs() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "r665_c", REPRO_665);
+    assert!(ok, "the kept axis has a source and must emit: {out}");
+}
+
+/// chelis#597. The checker is right and lowering is wrong:
+/// `fallback_expand_type` has no replacement branch at all, so a checked
+/// same-rank replacement always lowers as an insertion. The mixed-rank
+/// comparison makes the divergence observable, because the checker stamps
+/// `a : tensor[3, 2]` by INSERTION and `b : tensor[3, 2]` by REPLACEMENT,
+/// one shape as [05-OP-36] requires, while lowering turns `b` into [3, 1, 2].
+const REPRO_597: &str = "x1 = to_tensor([1.0f32, 2.0f32])\n\
+y2 = to_tensor([[1.0f32, 2.0f32]])\n\
+a = expand(x1, 0, 3i64)\n\
+b = expand(y2, 0, 3i64)\n\
+out = cmplt(a, b)\n";
+
+#[test]
+fn issue_597_positional_same_rank_replacement_executes_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(&dir, "r597.ch", REPRO_597);
+    assert!(
+        ok,
+        "the checker accepts both forms at one shape; lowering must agree: {out}"
+    );
+    assert!(out.contains("shape=[3, 2]"), "{out}");
+}
+
+#[test]
+fn issue_597_positional_same_rank_replacement_executes_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "r597_c", REPRO_597);
+    assert!(
+        ok,
+        "lowering must not insert an axis the checker replaced: {out}"
     );
 }
