@@ -169,6 +169,31 @@ pub struct DeferredExpandConstraint {
     pub size: Dim,
 }
 
+/// A deferred shape obligation attached to an unresolved result.
+///
+/// One ledger carries both kinds so they share the source ordinals, the alias
+/// merge, the settlement order, and the serialized form that chelis#1341's
+/// Phase A already established.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) enum DeferredShapeObligation {
+    /// The positional-`expand` two-shape choice of §4.7.2.
+    PositionalExpand(DeferredExpandConstraint),
+    /// A comparison result mirrors its operand's shape at `bool`
+    /// (`spec/05-risc-primitives.md` [05-OP-36] makes the operand and result
+    /// shapes one equation). The mirror supplies no evidence back to
+    /// `source`; a shape independently supplied to the result fixes it.
+    ShapeMirror { source: TypeVar, prec: TensorPrec },
+}
+
+impl DeferredShapeObligation {
+    fn positional_expand(&self) -> Option<&DeferredExpandConstraint> {
+        match self {
+            Self::PositionalExpand(constraint) => Some(constraint),
+            Self::ShapeMirror { .. } => None,
+        }
+    }
+}
+
 /// Preorder position in the canonical Deep program. This is deliberately
 /// distinct from `TypeVar`: inference allocates type variables in callee-first
 /// dependency order, while positional-expand settlement is source ordered.
@@ -316,7 +341,7 @@ mod deferred_order {
     #[derive(Debug, Clone, Default, Serialize, Deserialize)]
     #[serde(transparent)]
     pub(super) struct DeferredExpandConstraints(
-        UnordMap<TypeVar, Vec<Sourced<DeferredExpandConstraint>>>,
+        UnordMap<TypeVar, Vec<Sourced<DeferredShapeObligation>>>,
     );
 
     impl DeferredExpandConstraints {
@@ -324,10 +349,10 @@ mod deferred_order {
             &mut self,
             var: TypeVar,
             ordinal: SourceOrdinal,
-            constraint: DeferredExpandConstraint,
+            obligation: DeferredShapeObligation,
         ) {
             let obligations = self.0.entry(var).or_default();
-            obligations.push(Sourced::program(ordinal, constraint));
+            obligations.push(Sourced::program(ordinal, obligation));
             obligations.sort_by_key(|entry| entry.position.sort_key());
         }
 
@@ -335,14 +360,24 @@ mod deferred_order {
             self.0.contains_key(&var)
         }
 
-        pub(super) fn get(&self, var: TypeVar) -> Option<Vec<Sourced<DeferredExpandConstraint>>> {
+        /// Whether `var` still owes a positional-`expand` choice, as opposed
+        /// to owing only a mirror of some other result's choice.
+        pub(super) fn owes_positional_expand(&self, var: TypeVar) -> bool {
+            self.0.get(&var).is_some_and(|obligations| {
+                obligations
+                    .iter()
+                    .any(|entry| entry.obligation.positional_expand().is_some())
+            })
+        }
+
+        pub(super) fn get(&self, var: TypeVar) -> Option<Vec<Sourced<DeferredShapeObligation>>> {
             self.0.get(&var).cloned()
         }
 
         pub(super) fn take(
             &mut self,
             var: TypeVar,
-        ) -> Option<Vec<Sourced<DeferredExpandConstraint>>> {
+        ) -> Option<Vec<Sourced<DeferredShapeObligation>>> {
             self.0.remove(&var)
         }
 
@@ -877,7 +912,49 @@ impl Subst {
         self.deferred_expand_constraints
             .lock()
             .expect("subst.deferred_expand_constraints poisoned")
-            .insert(v, ordinal, constraint);
+            .insert(
+                v,
+                ordinal,
+                DeferredShapeObligation::PositionalExpand(constraint),
+            );
+    }
+
+    /// Attach a comparison result's shape mirror to its own result variable.
+    ///
+    /// The mirror is recorded only while `source` still owes a choice. A
+    /// comparison over resolved operands computes its result directly.
+    pub(crate) fn record_deferred_shape_mirror(
+        &self,
+        v: TypeVar,
+        ordinal: SourceOrdinal,
+        source: TypeVar,
+        prec: TensorPrec,
+    ) {
+        self.deferred_expand_constraints
+            .lock()
+            .expect("subst.deferred_expand_constraints poisoned")
+            .insert(
+                v,
+                ordinal,
+                DeferredShapeObligation::ShapeMirror { source, prec },
+            );
+    }
+
+    /// The tensor precision an unresolved result will settle at, read off the
+    /// obligation that will decide it. A mirror settles at `bool`.
+    pub(crate) fn deferred_tensor_precision(&self, v: TypeVar) -> Option<TensorPrec> {
+        let obligations = self
+            .deferred_expand_constraints
+            .lock()
+            .expect("subst.deferred_expand_constraints poisoned")
+            .get(v)?;
+        let expand_precision = obligations
+            .iter()
+            .find_map(|entry| entry.obligation.positional_expand())
+            .map(|constraint| constraint.input_prec.clone());
+        // A result owing only a mirror settles at `bool`, because that is what
+        // the comparison whose shape it mirrors produces.
+        Some(expand_precision.unwrap_or(TensorPrec::Concrete(Prim::Bool)))
     }
 
     /// Whether `v` is an unresolved output carrying a positional-expand
@@ -889,6 +966,16 @@ impl Subst {
             .lock()
             .expect("subst.deferred_expand_constraints poisoned")
             .contains(v)
+    }
+
+    /// Whether `v` still owes a positional-`expand` choice of its own. A
+    /// result that only mirrors another's choice settles after every expand
+    /// has, so the freeze loop separates the two.
+    fn owes_positional_expand(&self, v: TypeVar) -> bool {
+        self.deferred_expand_constraints
+            .lock()
+            .expect("subst.deferred_expand_constraints poisoned")
+            .owes_positional_expand(v)
     }
 
     /// Whether `v` carries any deferred shape relation and must therefore
@@ -963,9 +1050,37 @@ impl Subst {
             .expect("subst.deferred_expand_constraints poisoned")
             .take(v)
             .unwrap_or_default();
-        for constraint in expand_constraints {
-            let canonical = constraint.obligation.canonical_for_output(expected)?;
-            unify(&canonical, expected, &mut trial)?;
+        for entry in expand_constraints {
+            match entry.obligation {
+                DeferredShapeObligation::PositionalExpand(constraint) => {
+                    let canonical = constraint.canonical_for_output(expected)?;
+                    unify(&canonical, expected, &mut trial)?;
+                }
+                DeferredShapeObligation::ShapeMirror { source, prec } => {
+                    // [05-OP-36]: the operand shape, the result shape, and the
+                    // `bool` result dtype are one equation, so a shape supplied
+                    // to the result fixes the operand.
+                    let Type::Tensor(dims, _) = expected else {
+                        return Err(TypeError {
+                            kind: TypeErrorKind::TypeMismatch,
+                            message: format!(
+                                "a comparison over a tensor operand produces a tensor result, \
+                                 got {expected}"
+                            ),
+                        });
+                    };
+                    unify(
+                        expected,
+                        &Type::Tensor(dims.clone(), TensorPrec::Concrete(Prim::Bool)),
+                        &mut trial,
+                    )?;
+                    unify(
+                        &Type::Var(source),
+                        &Type::Tensor(dims.clone(), prec.clone()),
+                        &mut trial,
+                    )?;
+                }
+            }
         }
         let reshape_constraints = trial
             .deferred_reshape_constraints
@@ -1004,8 +1119,15 @@ impl Subst {
         // Probe on a clone because a failed tensor unification may have
         // already bound dimension variables before discovering a later
         // mismatch; rejected candidates must not mutate the real state.
+        let Some(earliest) = constraints
+            .iter()
+            .find_map(|entry| entry.obligation.positional_expand())
+        else {
+            // The result owes no choice of its own, only a mirror of one.
+            return self.settle_shape_mirror(v);
+        };
         let mut first_rejection = None;
-        for candidate in constraints[0].obligation.candidate_types()? {
+        for candidate in earliest.candidate_types()? {
             let mut trial = self.clone();
             match unify(&Type::Var(v), &candidate, &mut trial) {
                 Ok(()) => {
@@ -1018,6 +1140,46 @@ impl Subst {
             }
         }
         Err(first_rejection.expect("deferred expand constraint set has at least one candidate"))
+    }
+
+    /// Settle a result that only mirrors another result's shape.
+    ///
+    /// A mirror adds no evidence, so it has nothing to select: it reads the
+    /// shape its source settled on and reproduces it at `bool`. The freeze
+    /// loop runs this only after every positional-`expand` obligation has
+    /// settled, so an open source here is an internal ordering defect rather
+    /// than a program error.
+    fn settle_shape_mirror(&mut self, v: TypeVar) -> Result<Option<Type>, TypeError> {
+        let obligations = self
+            .deferred_expand_constraints
+            .lock()
+            .expect("subst.deferred_expand_constraints poisoned")
+            .get(v);
+        let Some(obligations) = obligations else {
+            return Ok(None);
+        };
+        let mut settled = None;
+        for entry in &obligations {
+            let DeferredShapeObligation::ShapeMirror { source, .. } = entry.obligation else {
+                continue;
+            };
+            let Type::Tensor(dims, _) = self.apply(&Type::Var(source)) else {
+                return Err(TypeError {
+                    kind: TypeErrorKind::TypeMismatch,
+                    message: format!(
+                        "internal: a comparison result's shape mirror settled before its \
+                         operand ?{} did",
+                        source.0
+                    ),
+                });
+            };
+            settled = Some(Type::Tensor(dims, TensorPrec::Concrete(Prim::Bool)));
+        }
+        let Some(result) = settled else {
+            return Ok(None);
+        };
+        unify(&Type::Var(v), &result, self)?;
+        Ok(Some(self.apply(&result)))
     }
 
     /// Publish a `reshape` result immediately while retaining only its
@@ -1037,10 +1199,16 @@ impl Subst {
             return Ok(None);
         };
 
-        let precision = constraints[0].obligation.input_prec.clone();
+        let Some(earliest) = constraints
+            .iter()
+            .find_map(|entry| entry.obligation.positional_expand())
+        else {
+            return Ok(None);
+        };
+        let precision = earliest.input_prec.clone();
         let mut first_rejection = None;
         let mut compatible_candidates = Vec::new();
-        for candidate in constraints[0].obligation.candidate_types()? {
+        for candidate in earliest.candidate_types()? {
             let mut trial = self.clone();
             trial.record_deferred_reshape_constraint(input_var, ordinal, target_dims.clone());
             match unify(&Type::Var(input_var), &candidate, &mut trial) {
@@ -1195,7 +1363,7 @@ impl Subst {
             .expect("subst.deferred_expand_constraints poisoned")
             .settlement_order();
         for var in vars {
-            if self.has_deferred_expand_constraint(var) {
+            if self.owes_positional_expand(var) {
                 self.settle_deferred_tensor(var, DeferralAction::Freeze)
                     .map_err(|error| TypeError {
                         kind: error.kind,
@@ -1207,6 +1375,20 @@ impl Subst {
                         ),
                     })?;
             }
+        }
+        // A result that only mirrors another's shape settles afterwards. It
+        // adds no evidence to its source, so resolving every mirror once every
+        // expand has settled cannot change an expand verdict, and it is the
+        // only order in which the source is guaranteed concrete: source
+        // ordinals are a preorder index, which puts an enclosing comparison
+        // ahead of the `expand` nested inside its own argument.
+        let mirrors = self
+            .deferred_expand_constraints
+            .lock()
+            .expect("subst.deferred_expand_constraints poisoned")
+            .settlement_order();
+        for var in mirrors {
+            self.settle_deferred_tensor(var, DeferralAction::Freeze)?;
         }
         Ok(())
     }

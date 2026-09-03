@@ -72,3 +72,162 @@ def above() -> tensor[3, bool] = gt(to_tensor([1.0, 2.0, 3.0]), 1.5)
         }
     }
 }
+
+// chelis#1265 and Slice C c3: a comparison relates its operands' shapes and
+// its result's dtype under [05-OP-36], so it must route its result through
+// unification instead of constructing it out of band. While a positional
+// `expand` operand's choice is open the result carries that same open choice
+// and supplies no evidence back to the operand; a shape independently
+// supplied to the result fixes the operand, because [05-OP-36] makes all
+// three shapes one equation.
+//
+// Every row below is a regression test, not a disposition lock. On
+// a5137d2c3 the checker fabricated `tensor[D, bool]` from whichever operand
+// already had a shape and never touched the call's result variable, so a
+// declared result shape bound a free variable and selected nothing.
+
+use chelis_deep::printer::print_canonical;
+use chelis_types::check_typed_program;
+use chelis_types::errors::CheckError;
+
+fn check_surf(source: &str) -> Result<String, Vec<CheckError>> {
+    let deep = surf_to_deep(source);
+    match check_typed_program(&deep) {
+        Ok(checked) => Ok(print_canonical(checked.annotated_exprs())),
+        Err(report) => Err(report.errors),
+    }
+}
+
+fn summary(errors: &[CheckError]) -> String {
+    errors
+        .iter()
+        .map(|error| format!("[{:?}] {}", error.kind, error.message))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn comparison_result_shape_selects_the_replacement_candidate() {
+    let rendered = check_surf(
+        r#"
+def f(a: tensor[2, f32]) -> tensor[3, bool] = {
+  e = expand(a, 0, 3i64)
+  eq(e, e)
+}
+"#,
+    )
+    .expect("the replacement candidate satisfies the declared result shape");
+    assert!(
+        rendered.contains("(t-tensor {} (d-lit {} 3) (t-prim {} f32))"),
+        "the declared rank-1 bool result must select the operand's \
+         same-rank replacement candidate:\n{rendered}"
+    );
+}
+
+#[test]
+fn comparison_result_shape_selects_the_insertion_candidate() {
+    let rendered = check_surf(
+        r#"
+def f(a: tensor[2, f32]) -> tensor[3, 2, bool] = {
+  e = expand(a, 0, 3i64)
+  eq(e, e)
+}
+"#,
+    )
+    .expect("the insertion candidate satisfies the declared result shape");
+    assert!(
+        rendered.contains("(t-tensor {} (d-lit {} 3) (d-lit {} 2) (t-prim {} f32))"),
+        "the declared rank-2 bool result must select the operand's insertion \
+         candidate; stamping the operand at the rank-1 freeze default beside a \
+         rank-2 result publishes an internally inconsistent program:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("(t-tensor {} (d-lit {} 3) (t-prim {} f32))"),
+        "the operand must not keep the rank-1 freeze default while the \
+         result is declared at rank 2:\n{rendered}"
+    );
+}
+
+#[test]
+fn comparison_rejects_a_result_shape_no_candidate_satisfies() {
+    let errors = check_surf(
+        r#"
+def f(a: tensor[2, f32]) -> tensor[9, 9, bool] = {
+  e = expand(a, 0, 3i64)
+  eq(e, e)
+}
+"#,
+    )
+    .expect_err("neither expand candidate has shape 9 by 9");
+    assert!(
+        !errors.is_empty(),
+        "a declared comparison result shape that no operand candidate \
+         satisfies must be rejected"
+    );
+    assert!(
+        errors.iter().any(|error| {
+            format!("{:?}", error.kind).contains("Dimension")
+                || format!("{:?}", error.kind).contains("TypeMismatch")
+        }),
+        "the rejection must name the shape disagreement:\n{}",
+        summary(&errors)
+    );
+}
+
+#[test]
+fn comparison_over_a_pending_operand_publishes_no_unresolved_variable() {
+    let rendered = check_surf(
+        "t = eq(expand(to_tensor([0.5f32]), 0, 3i64), expand(to_tensor([0.5f32]), 0, 3i64))\n",
+    )
+    .expect("an unconsumed comparison over pending operands still checks");
+    assert!(
+        !rendered.contains("(t-var"),
+        "a comparison result whose operands only freeze at the program \
+         freeze point must still settle to a concrete tensor rather than \
+         escaping as an inference variable:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("(t-tensor {} (d-lit {} 3) (t-prim {} bool))"),
+        "the result mirrors the operand's frozen shape at bool:\n{rendered}"
+    );
+}
+
+#[test]
+fn two_pending_operands_of_one_comparison_share_one_choice() {
+    let rendered = check_surf(
+        r#"
+def f(a: tensor[2, f32]) -> tensor[3, 2, bool] = {
+  x = expand(a, 0, 3i64)
+  y = expand(a, 0, 3i64)
+  eq(x, y)
+}
+"#,
+    )
+    .expect("both operands admit the insertion candidate");
+    let insertion = "(t-tensor {} (d-lit {} 3) (d-lit {} 2) (t-prim {} f32))";
+    assert_eq!(
+        rendered.matches(insertion).count(),
+        2,
+        "the comparison's own signature unifies its two operands, so both \
+         pending results must settle to the one selected shape:\n{rendered}"
+    );
+}
+
+#[test]
+fn issue1265_expand_then_add_then_comparison_selects_the_declared_shape() {
+    let rendered = check_surf(
+        r#"
+def h5(a: tensor[2, f32]) -> tensor[3, 2, bool] = {
+  e = expand(a, 0, 3i64)
+  s = add(e, e)
+  eq(s, s)
+}
+"#,
+    )
+    .expect("the dtype-preserving consumer carries the candidate to the comparison");
+    assert!(
+        rendered.contains("(t-tensor {} (d-lit {} 3) (d-lit {} 2) (t-prim {} f32))"),
+        "chelis#1265: an intervening `add` carries the candidate unselected, \
+         and the comparison must then select it:\n{rendered}"
+    );
+}

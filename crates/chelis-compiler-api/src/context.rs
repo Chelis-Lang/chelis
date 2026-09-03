@@ -800,13 +800,18 @@ fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
 /// bincode is positional and a V8 file of either lineage would decode to a
 /// wrong shape; the magic check rejects it before any decode. A V6, V7, or
 /// either V8 file is stale.
-const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V14\n";
+const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V15\n";
 
 /// On-disk format version for the cache envelope. Bumping this tells
 /// `load_if_fresh` to reject older cache files with
 /// [`CacheError::UnsupportedVersion`] rather than risk a "successful but
 /// wrong" decode.
-const CACHE_FORMAT_VERSION: u32 = 14;
+///
+/// V15: the serialized positional-expand ledger inside `TypeEnv` now carries
+/// a `DeferredShapeObligation` enum rather than a bare expand constraint, so
+/// that a comparison result can mirror its operand's open choice. Bincode is
+/// positional, so a V14 entry would decode into the wrong variant.
+const CACHE_FORMAT_VERSION: u32 = 15;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -1324,13 +1329,13 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
-        assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V14\n");
-        assert_eq!(CACHE_FORMAT_VERSION, 14);
+        assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V15\n");
+        assert_eq!(CACHE_FORMAT_VERSION, 15);
     }
 
     #[test]
     fn cache_format_version_tracks_ordered_deferred_constraints() {
-        assert_eq!(CACHE_FORMAT_VERSION, 14);
+        assert_eq!(CACHE_FORMAT_VERSION, 15);
     }
 
     /// chelis#1156: the cache identity must distinguish two BUILDS, not
