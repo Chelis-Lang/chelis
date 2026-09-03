@@ -3,9 +3,11 @@
 //! [05-OP-44] guarded tensor writes require unique runtime-owned storage.
 //!
 //! The positive child begins one guard, obtains the typed write view, ends the
-//! guard, and then observes the write through a read view. The negative matrix
-//! covers shared descriptors, caller-owned entry storage, and every descriptor
-//! operation forbidden while a guard is active.
+//! guard, and then obtains a fresh read view to observe the write. Passing the
+//! descriptor to `begin_write` invalidates its prior read views by caller
+//! precondition, so this suite never dereferences one afterward. The negative
+//! matrix covers shared descriptors, caller-owned entry storage, and every
+//! descriptor operation forbidden while a guard is active.
 
 use std::fs;
 use std::process::{Command, Output};

@@ -1099,6 +1099,41 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("OP-31.*unused high bits")
 
+    def test_tensor_read_view_lifetime_ends_before_a_write_begins(self) -> None:
+        mutations = (
+            (
+                Path("spec/05-risc-primitives.md"),
+                "until that descriptor is passed to\n> "
+                "`chelis_tensor_begin_write`, whichever comes first",
+                "for as long as any descriptor owner remains live",
+                "OP-31.*chelis_tensor_begin_write",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "A successful begin invalidates\n> every read view previously "
+                "returned for that descriptor",
+                "A successful begin preserves every prior read view",
+                "OP-44.*successful begin invalidates",
+            ),
+            (
+                Path("spec/design/compiled_value_ownership.md"),
+                "A successful begin invalidates every previously returned read view; "
+                "dereferencing\n  such a stale view violates the caller precondition",
+                "A successful begin preserves every previously returned read view",
+                "write-begin read-view invalidation",
+            ),
+        )
+        for path, old, new, message in mutations:
+            with self.subTest(message=message):
+                contract = self.root / path
+                original = contract.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                contract.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    contract.write_text(original, encoding="utf-8")
+
     def test_scalar_carrier_pins_exact_public_layouts(self) -> None:
         block = oracle.atom_blocks(
             (REPO_ROOT / "spec/05-risc-primitives.md").read_text(encoding="utf-8")

@@ -1698,8 +1698,12 @@ exact ADT identity by [05-OP-34].
 > byte size is the checked product `count * chelis_dtype_size(dtype)`. A view
 > with zero `count` has null `data`; a nonempty view has a non-null pointer
 > aligned for its validated dtype. A read view is valid only while an owner
-> of its descriptor is live and a write view only while its exclusive guard
-> is live; nothing is retained, released, or freed through a view pointer.
+> of its descriptor is live and until that descriptor is passed to
+> `chelis_tensor_begin_write`, whichever comes first. A successful begin
+> invalidates every read view previously returned for that descriptor;
+> dereferencing such a stale view violates the caller precondition. A write
+> view is valid only while its exclusive guard is live; nothing is retained,
+> released, or freed through a view pointer.
 > An internal noncontiguous view is materialized before it crosses a public
 > view. Foreign storage enters only through [05-OP-44]'s entry borrow, which
 > validates the declared metadata and bounds but cannot prove a foreign
@@ -2066,15 +2070,18 @@ exact ADT identity by [05-OP-34].
 > storage are views. `chelis_tensor_retain` and `chelis_tensor_release` are the
 > only public tensor lifetime operations, and no public callable frees,
 > adopts, or transfers storage bytes. `chelis_tensor_read_view` returns
-> [05-OP-31]'s read view of a descriptor's contiguous row-major elements and
-> is valid while an owner of that descriptor is live.
+> [05-OP-31]'s read view of a descriptor's contiguous row-major elements with
+> the owner-and-write-begin validity bound defined there.
 > `chelis_tensor_begin_write` succeeds only when the descriptor has exactly
 > one live owner, its storage has exactly one live descriptor, the storage is
 > runtime-owned, and no guard is active on it; it returns the one exclusive
-> non-owning guard embedded in that descriptor. Beginning a write activates
-> that guard and borrows, but neither consumes nor clones, the descriptor's
-> existing owner for the guard lifetime; it allocates no guard object. Every other begin,
-> read view, retain, clone, or release of that descriptor traps `Domain` until
+> non-owning guard embedded in that descriptor. A successful begin invalidates
+> every read view previously returned for that descriptor before it activates
+> the guard. Dereferencing one afterward violates the caller precondition; the
+> runtime does not promise to diagnose that stale pointer. The guard borrows,
+> but neither consumes nor clones, the descriptor's existing owner for the
+> guard lifetime; it allocates no guard object. Every other begin, read view,
+> retain, clone, or release of that descriptor traps `Domain` until
 > `chelis_tensor_end_write` consumes and deactivates the guard without freeing
 > an allocation or consuming the descriptor owner. `chelis_tensor_write_view` borrows its `const` guard and
 > is valid only while that guard is live; an ended guard has no view. Fill

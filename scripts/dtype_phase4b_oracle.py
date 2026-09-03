@@ -433,7 +433,7 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-28": "9eb81ed515be3e016371f951a75a3b65c4bae2cd8bfbc8de22c510f8e71be56b",
     "05-OP-29": "3fc46cb450b49244dfea8859a662190128420ab2565f7d18f5f97d7ffb27fd0a",
     "05-OP-30": "30c8c04f547161b7c40cbe5659a0c5fee34102f34a6fc605bcde8740221b461b",
-    "05-OP-31": "95af796e0d4df3b194bf440d1269d30b52cc6b28f5f9958487ed6166dc519120",
+    "05-OP-31": "20100b3524f8381469ea2a24d035da89be346f7809b70bfd6698aa94b6df9031",
     "05-OP-32": "fc45b2ef829aeebdb0d524059c63452cd2d9c733a5c2cdf85b5bfdd845bda8a1",
     "05-OP-33": "aed15eb38ef7af373b4ae96d9eb3ce182f1d55514a0c1759a6a270fdc2db5cf2",
     "05-OP-34": "0d2c7d4a051a43dc6b0c93b241434ff1d66bbd7a3e6d47e5c74b669d2fd687bf",
@@ -446,7 +446,7 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-41": "7bbbba7450bf89f9eac66a7f660f7352940a41e4baf6f7497873e46a29be41db",
     "05-OP-42": "d469e00652b7b9239f37532817b3c0f563bf22a66743c66dab66ce879be43ff4",
     "05-OP-43": "51dd3a7b7df5ecc20c7796a49f7a0122daf0f3a4b6538993964fea7a9f284ee7",
-    "05-OP-44": "9410d0fe57a2a016c4f0d638795acbc1db1c3ed32e0b6a625b6d38f7d1c4a337",
+    "05-OP-44": "8780fd73492c0289b4ed995891f72e43fcca4171ae0925ce9766117f5ff9ede1",
 }
 
 # The markers are part of the freeze contract: each must occur exactly once,
@@ -1322,6 +1322,11 @@ def validate_normative_contract(
                 "complete C ABI authority chain",
             ),
             (
+                "A successful begin invalidates every previously returned read view; "
+                "dereferencing\n  such a stale view violates the caller precondition",
+                "write-begin read-view invalidation",
+            ),
+            (
                 "This phase promotes exactly twenty-three oracle rows: the five [#543]\n"
                 "aggregate-tensor rows (including the function-internal tensor-literal\n"
                 "temporary), the eight [#544] size/nesting rows, the five direct/nested\n"
@@ -2129,7 +2134,12 @@ def validate_normative_contract(
             "byte size is the checked product `count * chelis_dtype_size(dtype)`",
             "A view with zero `count` has null `data`",
             "A read view is valid only while an owner of its descriptor is live "
-            "and a write view only while its exclusive guard is live",
+            "and until that descriptor is passed to "
+            "`chelis_tensor_begin_write`, whichever comes first",
+            "A successful begin invalidates every read view previously returned "
+            "for that descriptor",
+            "dereferencing such a stale view violates the caller precondition",
+            "A write view is valid only while its exclusive guard is live",
             "nothing is retained, released, or freed through a view pointer",
             "Foreign storage enters only through [05-OP-44]'s entry borrow",
             "through [05-OP-44]'s exclusive write guard",
@@ -2613,9 +2623,12 @@ def validate_normative_contract(
             "exactly one live owner, its storage has exactly one live descriptor, "
             "the storage is runtime-owned, and no guard is active on it",
             "non-owning guard embedded in that descriptor",
-            "Beginning a write activates\n> that guard and borrows, but neither "
-            "consumes nor clones, the descriptor's\n> existing owner for the guard "
-            "lifetime; it allocates no guard object",
+            "A successful begin invalidates\n> every read view previously returned "
+            "for that descriptor before it activates\n> the guard",
+            "Dereferencing one afterward violates the caller precondition; the\n> "
+            "runtime does not promise to diagnose that stale pointer",
+            "The guard borrows,\n> but neither consumes nor clones, the descriptor's "
+            "existing owner for the\n> guard lifetime; it allocates no guard object",
             "Every other begin,\n> read view, retain, clone, or release of that "
             "descriptor traps `Domain` until\n> `chelis_tensor_end_write` consumes "
             "and deactivates the guard without freeing\n> an allocation or consuming "

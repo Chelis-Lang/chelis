@@ -370,6 +370,10 @@ this selected target:
   `CHELIS_VALUE_MAPPED_FILE` is its only recursively embedded representation;
 - `chelis_tensor_read_view` and `chelis_tensor_write_view` pair the pointer
   with its exact dtype and element count;
+- a read view remains valid only until its descriptor owner ends or the
+  descriptor is passed to `chelis_tensor_begin_write`, whichever comes first.
+  A successful begin invalidates every previously returned read view; dereferencing
+  such a stale view violates the caller precondition;
 - `chelis_tensor_begin_write` succeeds only for unique runtime storage and
   activates and returns an opaque exclusive non-owning guard embedded in the
   descriptor, borrowing the descriptor owner without allocating a guard;

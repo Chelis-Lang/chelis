@@ -58,6 +58,7 @@ fn header_has_only_the_exact_tagged_dynamic_rank_abi() {
         "typedef struct { const void *data; int64_t count; chelis_dtype dtype; uint8_t reserved[7]; } chelis_read_view;",
         "typedef struct { void *data; int64_t count; chelis_dtype dtype; uint8_t reserved[7]; } chelis_write_view;",
         "chelis_tensor *chelis_tensor_entry_borrow(int32_t rank, const int64_t *shape, chelis_dtype dtype, const void *data, int64_t byte_capacity);",
+        "A successful chelis_tensor_begin_write invalidates every prior read view; dereferencing a stale view violates the caller precondition.",
         "chelis_read_view chelis_tensor_read_view(const chelis_tensor *tensor);",
         "chelis_tensor_write *chelis_tensor_begin_write(chelis_tensor *tensor);",
         "chelis_write_view chelis_tensor_write_view(const chelis_tensor_write *guard);",
