@@ -347,7 +347,12 @@ pub(super) fn infer_program_with_product_in_session(
             product.finish_root(&subst, errors);
             // Issue #256 round 2: re-check each deferred borrow against the
             // now-complete substitution (see `validate_deferred_borrow_vars`).
-            validate_deferred_borrow_vars(&subst, &adt_reg, errors);
+            validate_deferred_borrow_vars(
+                &subst,
+                &adt_reg,
+                env.active_declared_type_names(),
+                errors,
+            );
             // D-CHECK: drain the per-def deferred-access ledger (see
             // `validate_deferred_opaque_uses`).
             validate_deferred_opaque_uses(&subst, &adt_reg, errors);
@@ -1389,7 +1394,12 @@ pub(super) fn infer_ir_program_with_state(
             // def and re-check each recorded variable against the now-complete
             // substitution. Draining per-def keeps error attribution local and
             // prevents one def's deferrals from leaking into the next.
-            validate_deferred_borrow_vars(&state.subst, &state.adt_reg, errors);
+            validate_deferred_borrow_vars(
+                &state.subst,
+                &state.adt_reg,
+                state.env.active_declared_type_names(),
+                errors,
+            );
             // D-CHECK: drain the per-def deferred-access ledger (see
             // `validate_deferred_opaque_uses`).
             validate_deferred_opaque_uses(&state.subst, &state.adt_reg, errors);
