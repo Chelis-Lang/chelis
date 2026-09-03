@@ -17,7 +17,7 @@
 //! returns a captured top-level binding, and a `let` binding that copies a
 //! captured binding inside a compiled function body.
 //!
-//! Tensors abort in `chelis_free` because they carry no refcount; the
+//! Tensors abort in `chelis_tensor_release` because they carry no refcount; the
 //! refcounted containers instead take an unearned release, wrapping the
 //! count past zero into a use-after-free that does not announce itself.
 //! Both directions are covered.
@@ -116,7 +116,7 @@ fn build_run_and_emit(source: &str, stem: &str) -> (String, String) {
 }
 
 /// The body of the emitted `main`, where the scope-exit cleanup lives.
-/// Helper bodies and compiled functions are excluded so a `chelis_free`
+/// Helper bodies and compiled functions are excluded so a `chelis_tensor_release`
 /// inside a tensor kernel cannot be mistaken for a root release.
 fn emitted_main(emitted: &str) -> &str {
     let start = emitted
@@ -227,7 +227,7 @@ fn strip_span_comments(body: &str) -> String {
 /// Every release/retain call in `body`, tallied by kind.
 fn ownership_calls(body: &str) -> Vec<(&'static str, usize)> {
     [
-        "chelis_free(",
+        "chelis_tensor_release(",
         "chelis_list_release(",
         "chelis_tuple_release(",
         "chelis_dict_release(",
@@ -416,7 +416,7 @@ fn top_level_tensor_alias_frees_the_shared_allocation_once() {
     }
     let (stdout, emitted) = build_run_and_emit(ALIAS, "alias_tensor");
     assert_eq!(
-        release_count(&emitted, "chelis_free("),
+        release_count(&emitted, "chelis_tensor_release("),
         1,
         "one tensor allocation must be freed exactly once, not once per \
          name that refers to it (chelis#1222):\n{}",
@@ -434,7 +434,7 @@ fn top_level_tensor_alias_chain_frees_the_shared_allocation_once() {
     let source = "a = to_tensor([1.0f32, 2.0f32, 3.0f32])\nb = a\nc = b\n";
     let (stdout, emitted) = build_run_and_emit(source, "alias_chain");
     assert_eq!(
-        release_count(&emitted, "chelis_free("),
+        release_count(&emitted, "chelis_tensor_release("),
         1,
         "an alias chain still names one allocation:\n{}",
         emitted_main(&emitted)
@@ -455,7 +455,7 @@ fn distinct_top_level_tensors_are_each_freed() {
         "distinct_tensors",
     );
     assert_eq!(
-        release_count(&emitted, "chelis_free("),
+        release_count(&emitted, "chelis_tensor_release("),
         2,
         "two separately built tensors are two allocations:\n{}",
         emitted_main(&emitted)
@@ -476,7 +476,7 @@ fn conditional_over_existing_bindings_claims_no_third_allocation() {
                   c = if true then a else d\n";
     let (stdout, emitted) = build_run_and_emit(source, "alias_if");
     assert_eq!(
-        release_count(&emitted, "chelis_free("),
+        release_count(&emitted, "chelis_tensor_release("),
         2,
         "the branch result is whichever arm ran, so only the two arms own \
          allocations:\n{}",
@@ -499,7 +499,7 @@ fn identity_function_result_is_not_claimed_by_the_caller() {
                   b = echo_t(a)\n";
     let (stdout, emitted) = build_run_and_emit(source, "alias_identity_fn");
     assert_eq!(
-        release_count(&emitted, "chelis_free("),
+        release_count(&emitted, "chelis_tensor_release("),
         1,
         "a callee that hands back its argument returns no new \
          allocation:\n{}",
@@ -520,7 +520,7 @@ fn function_building_a_fresh_result_is_claimed_by_the_caller() {
                   b = doubled(a)\n";
     let (_stdout, emitted) = build_run_and_emit(source, "fresh_fn_result");
     assert_eq!(
-        release_count(&emitted, "chelis_free("),
+        release_count(&emitted, "chelis_tensor_release("),
         2,
         "a computed result is the caller's to free:\n{}",
         emitted_main(&emitted)
@@ -541,7 +541,7 @@ fn function_returning_a_captured_binding_is_not_claimed_by_the_caller() {
                   b = pass_g()\n";
     let (stdout, emitted) = build_run_and_emit(source, "alias_captured_return");
     assert_eq!(
-        release_count(&emitted, "chelis_free("),
+        release_count(&emitted, "chelis_tensor_release("),
         1,
         "`g` is the only allocation; the call result is `g`:\n{}",
         emitted_main(&emitted)
@@ -564,10 +564,11 @@ fn block_result_aliasing_an_outer_binding_claims_no_second_allocation() {
     }
     let source = "a = to_tensor([1.0f32, 2.0f32])\nb = {\n  x = a\n  x\n}\n";
     let (stdout, emitted) = build_run_and_emit(source, "alias_block_result");
+    assert_eq!(release_count(&emitted, "chelis_tensor_from_values("), 1);
     assert_eq!(
-        release_count(&emitted, "chelis_free("),
-        1,
-        "the block hands back `a`, it does not build a tensor:\n{}",
+        release_count(&emitted, "chelis_tensor_release("),
+        2,
+        "the block hands back `a`: one paired transfer release plus the one owner release:\n{}",
         emitted_main(&emitted)
     );
     assert_line_matches_eval(source, "alias_block_result", &stdout, "b");
@@ -581,7 +582,7 @@ fn seeded_block_returning_an_outer_binding_claims_no_second_allocation() {
     let source = "a = to_tensor([1.0f32, 2.0f32])\nb = with seed(1i64) { a }\n";
     let (stdout, emitted) = build_run_and_emit(source, "alias_with_seed");
     assert_eq!(
-        release_count(&emitted, "chelis_free("),
+        release_count(&emitted, "chelis_tensor_release("),
         1,
         "a seed scope changes the RNG, not the ownership of its body's \
          result:\n{}",
@@ -612,7 +613,7 @@ fn top_level_list_alias_releases_the_shared_allocation_once() {
     // A count alone would also pass if the one release named the wrong
     // pointer -- the list-of-values build temp, say -- and a refcount
     // underflow inside the runtime is not observable from the process
-    // exit status the way a bad `chelis_free` is.
+    // exit status the way a bad `chelis_tensor_release` is.
     assert!(
         emitted_main(&emitted).contains("chelis_list_release(__binding_0_value);"),
         "the surviving release must name the binding that owns the \
@@ -695,13 +696,12 @@ fn nested_block_shadowing_a_binding_name_does_not_reclaim_it_twice() {
                   b = {\n  a = to_tensor([9.0f32, 9.0f32])\n  a\n}\n\
                   c = a\n";
     let (stdout, emitted) = build_run_and_emit(source, "alias_shadowed_name");
-    // Two allocations (the outer tensor and the shadowing inner one), two
-    // frees. The count pins both directions at once: three would mean `c`
-    // was claimed as well and the double free is back, one would mean the
-    // inner allocation was orphaned when its name went out of scope.
+    // Two allocations (the outer tensor and the shadowing inner one), plus
+    // one retain/release pair for the inner block transfer.
+    assert_eq!(release_count(&emitted, "chelis_tensor_from_values("), 2);
     assert_eq!(
-        release_count(&emitted, "chelis_free("),
-        2,
+        release_count(&emitted, "chelis_tensor_release("),
+        3,
         "`c` names `a`'s allocation and the block built its own; the \
          shadowing inner binding must make neither look unowned:\n{}",
         emitted_main(&emitted)
@@ -929,17 +929,19 @@ fn file_fed_pipeline_with_an_alias_binding_runs_to_completion() {
         "both names must still be observable roots:\n{stdout}"
     );
     assert_line_matches_eval(&source, "alias_pipeline", &stdout, "total");
-    // `rho` names `rho_base`'s allocation, so the cleanup block carries one
-    // fewer `chelis_free` than it has tensor-typed roots.
-    let frees = release_count(&emitted, "chelis_free(");
+    // `rho` names `rho_base`'s allocation, so root cleanup carries one fewer
+    // `chelis_tensor_release` than it has tensor-typed roots. The complete
+    // `main` also releases the owned tensor passed through the first compiled
+    // block; keep that balanced scoped transfer distinct from the root count.
+    let frees = release_count(&emitted, "chelis_tensor_release(");
     let tensor_roots = stdout
         .lines()
         .filter(|line| line.contains(" = tensor("))
         .count();
     assert_eq!(
         frees,
-        tensor_roots - 1,
-        "exactly one tensor root is an alias:\n{}",
+        tensor_roots,
+        "one root is an alias and one scoped transfer is balanced:\n{}",
         emitted_main(&emitted)
     );
 }
@@ -970,11 +972,12 @@ fn a_root_spelled_like_a_binder_key_is_freed_once() {
                     b = {\n  q = to_tensor([3.0f32, 4.0f32])\n  q\n}\n\
                     c = zzq_root\n";
     let (_stdout, emitted) = build_run_and_emit(colliding, "binder_key_root");
+    assert_eq!(release_count(&emitted, "chelis_tensor_from_values("), 2);
     assert_eq!(
-        release_count(&emitted, "chelis_free("),
-        2,
+        release_count(&emitted, "chelis_tensor_release("),
+        3,
         "two tensors are built and `c` names the first one, so the cleanup \
-         frees two pointers however the root is spelled:\n{}",
+         balances both owners plus the block-transfer retain however the root is spelled:\n{}",
         emitted_main(&emitted)
     );
     assert_alpha_invariant_pair(
@@ -1090,7 +1093,7 @@ fn debug_hands_back_its_argument_and_is_not_claimed_again() {
     let source = "a = to_tensor([1.0f32, 2.0f32])\nb = debug(a)\n";
     let (_stdout, emitted) = build_run_and_emit(source, "debug_alias");
     assert_eq!(
-        release_count(&emitted, "chelis_free("),
+        release_count(&emitted, "chelis_tensor_release("),
         1,
         "`b` is `a`, so there is one tensor and one free:\n{}",
         emitted_main(&emitted)
@@ -1110,7 +1113,7 @@ fn debug_of_a_fresh_value_is_still_claimed() {
                   b = debug(to_tensor([3.0f32, 4.0f32]))\n";
     let (_stdout, emitted) = build_run_and_emit(source, "debug_fresh");
     assert_eq!(
-        release_count(&emitted, "chelis_free("),
+        release_count(&emitted, "chelis_tensor_release("),
         2,
         "two tensors were built and neither is the other, so both are \
          freed:\n{}",

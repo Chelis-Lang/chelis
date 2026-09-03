@@ -520,9 +520,17 @@ impl Emitter {
             ));
         }
         self.body.push(format!(
-            "chelis_metal_device_to_host(outputs[{idx}]->data, {}, {bytes});",
+            "chelis_tensor_write *root_guard_{idx} = chelis_tensor_begin_write(outputs[{idx}]);"
+        ));
+        self.body.push(format!(
+            "chelis_write_view root_view_{idx} = chelis_tensor_write_view(root_guard_{idx});"
+        ));
+        self.body.push(format!(
+            "chelis_metal_device_to_host(root_view_{idx}.data, {}, {bytes});",
             plan.buf
         ));
+        self.body
+            .push(format!("chelis_tensor_end_write(root_guard_{idx});"));
         Ok(())
     }
 
@@ -772,7 +780,7 @@ impl Emitter {
             "id<MTLBuffer> {buf} = chelis_metal_alloc({bytes});"
         ));
         self.body.push(format!(
-            "chelis_metal_host_to_device({buf}, inputs[{idx}]->data, {bytes});"
+            "chelis_metal_host_to_device({buf}, chelis_tensor_read_view(inputs[{idx}]).data, {bytes});"
         ));
         self.plans[node.id.0] = Some(TensorPlan {
             buf,
@@ -1613,9 +1621,17 @@ impl Emitter {
             ));
         }
         self.body.push(format!(
-            "chelis_metal_device_to_host(outputs[{idx}]->data, {}, {bytes});",
+            "chelis_tensor_write *store_guard_{idx} = chelis_tensor_begin_write(outputs[{idx}]);"
+        ));
+        self.body.push(format!(
+            "chelis_write_view store_view_{idx} = chelis_tensor_write_view(store_guard_{idx});"
+        ));
+        self.body.push(format!(
+            "chelis_metal_device_to_host(store_view_{idx}.data, {}, {bytes});",
             in_plan.buf
         ));
+        self.body
+            .push(format!("chelis_tensor_end_write(store_guard_{idx});"));
         Ok(())
     }
 

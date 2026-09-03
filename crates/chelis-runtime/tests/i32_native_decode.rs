@@ -181,10 +181,7 @@ fn typed_boundaries_separate_f32_and_bool8_payloads() {
             data_as_f32(f32_tensor),
             f32_view.data.cast_mut().cast::<f32>()
         );
-        assert_eq!(
-            data_as_f32_const(f32_tensor),
-            f32_view.data.cast_mut().cast::<f32>()
-        );
+        assert_eq!(data_as_f32_const(f32_tensor), f32_view.data.cast::<f32>());
         assert_eq!(
             Bool8::data_ptr(bool_tensor).expect("bool tensor uses Bool8 storage"),
             bool_view.data.cast_mut().cast::<Bool8>()

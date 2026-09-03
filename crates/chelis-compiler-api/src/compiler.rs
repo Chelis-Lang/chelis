@@ -930,9 +930,9 @@ enum EntryStrictness {
 /// characters -> `_`, and prefixes a digit-leading or empty name with
 /// `chelis_`, but guards NEITHER a libc collision (`free`, `malloc`, …)
 /// NOR the runtime's own `chelis_*` namespace (`chelis_runtime.h`
-/// declares `chelis_free`, `chelis_tuple_get`, …): a single-def program
+/// declares `chelis_tensor_release`, `chelis_tuple_get`, …): a single-def program
 /// whose def is named `free`, compiled via the free-form path, still
-/// emits `void free(...)`, and an `entry_name` of `chelis_free` emits
+/// emits `void free(...)`, and an `entry_name` of `chelis_tensor_release` emits
 /// verbatim. Both gaps are documented in `spec/11-ffi.md` §5a. The
 /// entry-scoped metadata lane — which claims multi-def tensor programs
 /// and single-def programs whose body needs host lowering (e.g. `concat`)
@@ -968,7 +968,7 @@ fn execution_c_symbol(entry_name: Option<&str>) -> String {
 /// `entry_name` is now a def *selector* the user must supply, so the selected
 /// name can be anything — `main` (collides with the reserved program entry),
 /// `free`/`malloc` (collide with libc), or a name in the runtime's own
-/// `chelis_*` namespace (`chelis_runtime.h` declares `chelis_free`,
+/// `chelis_*` namespace (`chelis_runtime.h` declares `chelis_tensor_release`,
 /// `chelis_tuple_get`, …). To be collision-free against ALL of those, the
 /// entry-scoped artifact ALWAYS emits the fixed symbol `chelis_main`. This is
 /// safe because each artifact is scoped to exactly one entry def, so there is

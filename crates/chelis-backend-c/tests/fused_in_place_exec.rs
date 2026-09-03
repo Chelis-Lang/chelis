@@ -116,9 +116,10 @@ fn compile_and_run(
 void fused_in_place_probe(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
 
 static void print_tensor(const char *label, chelis_tensor *t) {
+    chelis_read_view view = chelis_tensor_read_view(t);
     printf("%s", label);
-    for (int i = 0; i < t->size; i++) {
-        printf(" %.6f", ((float*)t->data)[i]);
+    for (int64_t i = 0; i < chelis_tensor_numel(t); i++) {
+        printf(" %.6f", ((const float*)view.data)[i]);
     }
     printf("\n");
 }
@@ -127,14 +128,17 @@ int main(void) {
     int64_t shape4[1] = { 4 };
 
     chelis_tensor *x = chelis_alloc(1, shape4, CHELIS_DTYPE_F32);
-    for (int i = 0; i < 4; i++) ((float*)x->data)[i] = (float)(i + 1);
+    chelis_tensor_write *x_guard = chelis_tensor_begin_write(x);
+    chelis_write_view x_view = chelis_tensor_write_view(x_guard);
+    for (int i = 0; i < 4; i++) ((float*)x_view.data)[i] = (float)(i + 1);
+    chelis_tensor_end_write(x_guard);
     chelis_tensor *inputs0[1] = { x };
     chelis_tensor *outputs0[1] = { 0 };
     fused_in_place_probe(inputs0, 1, outputs0, 1);
     print_tensor("contig_out", outputs0[0]);
     print_tensor("contig_input", x);
-    chelis_free(outputs0[0]);
-    chelis_free(x);
+    chelis_tensor_release(outputs0[0]);
+    chelis_tensor_release(x);
     return 0;
 }
 "#,

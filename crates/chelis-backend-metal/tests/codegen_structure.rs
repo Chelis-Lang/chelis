@@ -191,7 +191,8 @@ fn m2_simple_add_emits_raw_string_literal_and_dispatch_site() {
     );
     // Output is materialized via the host-side chelis_alloc + device->host copy.
     assert!(
-        src.contains("chelis_metal_device_to_host(outputs[0]->data,"),
+        src.contains("chelis_tensor_write *store_guard_0 = chelis_tensor_begin_write(outputs[0]);")
+            && src.contains("chelis_metal_device_to_host(store_view_0.data,"),
         "expected device->host copy into outputs[0]: {src}"
     );
 }
@@ -409,12 +410,16 @@ fn m2_root_without_store_writes_output_back() {
     // The function MUST write outputs[0]. Without this, the C ABI is
     // silently violated and downstream callers see uninitialized output.
     assert!(
-        src.contains("outputs[0] = chelis_alloc(") && src.contains("outputs[0]->data,"),
+        src.contains("outputs[0] = chelis_alloc(")
+            && src.contains(
+                "chelis_tensor_write *root_guard_0 = chelis_tensor_begin_write(outputs[0]);"
+            )
+            && src.contains("chelis_metal_device_to_host(root_view_0.data,"),
         "no-Store root must write outputs[0] via chelis_alloc + device->host. Source:\n{src}"
     );
     // And the chelis_metal_device_to_host call must reference outputs[0].
     assert!(
-        src.contains("chelis_metal_device_to_host(outputs[0]->data,"),
+        src.contains("chelis_metal_device_to_host(root_view_0.data,"),
         "no-Store root must call chelis_metal_device_to_host into outputs[0]: {src}"
     );
 }

@@ -79,8 +79,12 @@ pub unsafe trait TensorElement: Sized + Copy {
     ///
     /// # Safety
     ///
-    /// `tensor` must point to a live `chelis_tensor` and remain
-    /// valid for the lifetime of the returned pointer.
+    /// `tensor` must point to a live runtime-owned `chelis_tensor` and remain
+    /// valid for the lifetime of the returned pointer. The caller must hold
+    /// exclusive access to both descriptor and storage for that lifetime:
+    /// there may be no other strong owner, active C write lease, or concurrent
+    /// read/write. This Rust-only escape hatch is intentionally absent from
+    /// the published C header; C callers must use the guarded view API.
     #[inline]
     unsafe fn data_ptr(tensor: *mut chelis_tensor) -> Result<*mut Self, DtypeMismatch> {
         let actual = unsafe { tensor_dtype(tensor, "typed tensor data access") };
@@ -98,8 +102,8 @@ pub unsafe trait TensorElement: Sized + Copy {
     ///
     /// # Safety
     ///
-    /// As `data_ptr`, plus: caller asserts `(*tensor).dtype ==
-    /// Self::DTYPE`.
+    /// As `data_ptr`, plus: caller asserts the descriptor dtype is
+    /// `Self::DTYPE`.
     #[inline]
     unsafe fn data_ptr_unchecked(tensor: *mut chelis_tensor) -> *mut Self {
         debug_assert_eq!(
@@ -243,7 +247,10 @@ unsafe impl TensorElement for Bool8 {
 ///
 /// # Safety
 ///
-/// `tensor` must point to a live F32 tensor.
+/// `tensor` must point to a live runtime-owned F32 tensor. The caller must
+/// hold exclusive access to its descriptor and storage, with no other strong
+/// owner or active C write lease. This Rust-only escape hatch is intentionally
+/// absent from `chelis_runtime.h`.
 #[inline]
 pub unsafe fn data_as_f32(tensor: *mut chelis_tensor) -> *mut f32 {
     #[cfg(debug_assertions)]
@@ -258,9 +265,12 @@ pub unsafe fn data_as_f32(tensor: *mut chelis_tensor) -> *mut f32 {
 ///
 /// # Safety
 ///
-/// `tensor` must point to a live F32 tensor.
+/// `tensor` must point to a live F32 tensor and remain valid while the returned
+/// pointer is used. The caller must prevent concurrent mutation for that
+/// duration. This Rust-only escape hatch is intentionally absent from
+/// `chelis_runtime.h`.
 #[inline]
-pub unsafe fn data_as_f32_const(tensor: *const chelis_tensor) -> *mut f32 {
+pub unsafe fn data_as_f32_const(tensor: *const chelis_tensor) -> *const f32 {
     #[cfg(debug_assertions)]
     {
         let dtype = unsafe { tensor_dtype(tensor, "data_as_f32_const") };
@@ -270,7 +280,7 @@ pub unsafe fn data_as_f32_const(tensor: *const chelis_tensor) -> *mut f32 {
             "data_as_f32_const requires f32 storage"
         );
     }
-    unsafe { tensor_data(tensor) as *mut f32 }
+    unsafe { tensor_data(tensor) as *const f32 }
 }
 
 macro_rules! runtime_fail {
@@ -1839,7 +1849,7 @@ unsafe fn int_list_value(list: *const chelis_list, index: i64, op: &str) -> i64 
     if list.is_null() || index < 0 || index >= (*list).items.len() as i64 {
         runtime_fail!("{op} expects a list of int64 values");
     }
-    chelis_value_as_int64((*list).items[index as usize])
+    internal_value_as_i64((*list).items[index as usize])
 }
 
 #[no_mangle]
@@ -2701,37 +2711,37 @@ pub unsafe extern "C" fn chelis_adt_get_field(adt: *const chelis_adt, index: i64
     chelis_value_clone((*adt).fields[index as usize])
 }
 
-unsafe fn chelis_value_from_int64(value: i64) -> chelis_value {
-    chelis_value_from_scalar(chelis_scalar_from_bits(
+unsafe fn internal_value_from_i64(value: i64) -> chelis_value {
+    internal_value_from_scalar(chelis_scalar_from_bits(
         CHELIS_DTYPE_I64,
         u64::from_ne_bytes(value.to_ne_bytes()),
     ))
 }
 
-unsafe fn chelis_value_from_f64(value: f64) -> chelis_value {
-    chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_F64, value.to_bits()))
+unsafe fn internal_value_from_f64(value: f64) -> chelis_value {
+    internal_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_F64, value.to_bits()))
 }
 
 #[inline]
-unsafe fn chelis_value_from_f32(value: f32) -> chelis_value {
-    chelis_value_from_scalar(chelis_scalar_from_bits(
+unsafe fn internal_value_from_f32(value: f32) -> chelis_value {
+    internal_value_from_scalar(chelis_scalar_from_bits(
         CHELIS_DTYPE_F32,
         u64::from(value.to_bits()),
     ))
 }
 
 #[inline]
-unsafe fn chelis_value_from_f16_bits(value: u16) -> chelis_value {
-    chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_F16, u64::from(value)))
+unsafe fn internal_value_from_f16_bits(value: u16) -> chelis_value {
+    internal_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_F16, u64::from(value)))
 }
 
 #[inline]
-unsafe fn chelis_value_from_bf16_bits(value: u16) -> chelis_value {
-    chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_BF16, u64::from(value)))
+unsafe fn internal_value_from_bf16_bits(value: u16) -> chelis_value {
+    internal_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_BF16, u64::from(value)))
 }
 
-unsafe fn chelis_value_from_bool(value: bool) -> chelis_value {
-    chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_BOOL, u64::from(value)))
+unsafe fn internal_value_from_bool(value: bool) -> chelis_value {
+    internal_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_BOOL, u64::from(value)))
 }
 
 #[no_mangle]
@@ -2753,11 +2763,11 @@ pub unsafe extern "C" fn chelis_value_unbox_scalar(value: chelis_value) -> cheli
     value.payload.scalar
 }
 
-unsafe fn chelis_value_from_scalar(value: chelis_scalar) -> chelis_value {
+unsafe fn internal_value_from_scalar(value: chelis_scalar) -> chelis_value {
     chelis_value_box_scalar(value)
 }
 
-unsafe fn chelis_value_as_scalar(value: chelis_value) -> chelis_scalar {
+unsafe fn internal_value_as_scalar(value: chelis_value) -> chelis_scalar {
     chelis_value_unbox_scalar(value)
 }
 
@@ -2781,7 +2791,7 @@ pub unsafe extern "C" fn chelis_string_borrow_value(value: chelis_value) -> chel
     chelis_string_take_value(value)
 }
 
-unsafe fn chelis_value_from_string(value: chelis_string) -> chelis_value {
+unsafe fn internal_value_from_string(value: chelis_string) -> chelis_value {
     chelis_value_take_string(value)
 }
 
@@ -2959,8 +2969,8 @@ pub unsafe extern "C" fn chelis_value_release(value: chelis_value) {
     }
 }
 
-unsafe fn chelis_value_as_int64(value: chelis_value) -> i64 {
-    let scalar = chelis_value_as_scalar(value);
+unsafe fn internal_value_as_i64(value: chelis_value) -> i64 {
+    let scalar = internal_value_as_scalar(value);
     if validate_scalar(scalar, "internal int64 extraction") != RuntimeDType::I64 {
         runtime_fail!("Domain: expected int64 value");
     }
@@ -3157,7 +3167,7 @@ pub unsafe extern "C" fn chelis_list_flatten(list: *const chelis_list) -> *mut c
 pub unsafe extern "C" fn chelis_range_i64(start: i64, end: i64) -> *mut chelis_list {
     let mut items = Vec::new();
     for value in start..end {
-        items.push(chelis_value_from_int64(value));
+        items.push(internal_value_from_i64(value));
     }
     new_list(items, "chelis_range_i64")
 }
@@ -3212,7 +3222,7 @@ pub unsafe extern "C" fn chelis_list_enumerate(list: *const chelis_list) -> *mut
     let mut out = Vec::new();
     if !list.is_null() {
         for (index, item) in (*list).items.iter().enumerate() {
-            let pair = [chelis_value_from_int64(index as i64), *item];
+            let pair = [internal_value_from_i64(index as i64), *item];
             let tuple = chelis_tuple_from_values(pair.as_ptr(), 2);
             out.push(chelis_value_take_tuple(tuple));
         }
@@ -3514,39 +3524,48 @@ pub unsafe extern "C" fn chelis_tensor_elements(tensor: *const chelis_tensor) ->
         let value = match dtype {
             RuntimeDType::Bool => {
                 let raw = *Bool8::data_ptr_unchecked(tensor as *mut chelis_tensor).add(i);
-                chelis_value_from_bool(raw.get())
+                internal_value_from_bool(raw.get())
             }
             RuntimeDType::I64 => {
                 let v = *(tensor_data(tensor) as *const i64).add(i);
-                chelis_value_from_int64(v)
+                internal_value_from_i64(v)
             }
             RuntimeDType::I32 => {
                 let bits = *(tensor_data(tensor) as *const u32).add(i);
-                chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_I32, u64::from(bits)))
+                internal_value_from_scalar(chelis_scalar_from_bits(
+                    CHELIS_DTYPE_I32,
+                    u64::from(bits),
+                ))
             }
             RuntimeDType::I16 => {
                 let bits = *(tensor_data(tensor) as *const u16).add(i);
-                chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_I16, u64::from(bits)))
+                internal_value_from_scalar(chelis_scalar_from_bits(
+                    CHELIS_DTYPE_I16,
+                    u64::from(bits),
+                ))
             }
             RuntimeDType::I8 => {
                 let bits = *(tensor_data(tensor) as *const u8).add(i);
-                chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_I8, u64::from(bits)))
+                internal_value_from_scalar(chelis_scalar_from_bits(
+                    CHELIS_DTYPE_I8,
+                    u64::from(bits),
+                ))
             }
             RuntimeDType::F64 => {
                 let v = *(tensor_data(tensor) as *const f64).add(i);
-                chelis_value_from_f64(v)
+                internal_value_from_f64(v)
             }
             RuntimeDType::F32 => {
                 let raw = *(tensor_data(tensor) as *const f32).add(i);
-                chelis_value_from_f32(raw)
+                internal_value_from_f32(raw)
             }
             RuntimeDType::Bf16 => {
                 let bits = *(tensor_data(tensor) as *const u16).add(i);
-                chelis_value_from_bf16_bits(bits)
+                internal_value_from_bf16_bits(bits)
             }
             RuntimeDType::F16 => {
                 let bits = *(tensor_data(tensor) as *const u16).add(i);
-                chelis_value_from_f16_bits(bits)
+                internal_value_from_f16_bits(bits)
             }
         };
         items.push(value);
@@ -3586,7 +3605,7 @@ pub unsafe extern "C" fn chelis_pad_sequences(
                     if value.tag != CHELIS_VALUE_SCALAR {
                         runtime_fail!("Domain: chelis_pad_sequences elements must be scalars");
                     }
-                    let scalar = chelis_value_as_scalar(value);
+                    let scalar = internal_value_as_scalar(value);
                     if validate_scalar(scalar, "chelis_pad_sequences element") != dtype {
                         runtime_fail!("Domain: chelis_pad_sequences scalar dtype mismatch");
                     }
@@ -3629,7 +3648,7 @@ pub unsafe extern "C" fn chelis_pad_sequences_to(
                     if value.tag != CHELIS_VALUE_SCALAR {
                         runtime_fail!("Domain: chelis_pad_sequences_to elements must be scalars");
                     }
-                    let scalar = chelis_value_as_scalar(value);
+                    let scalar = internal_value_as_scalar(value);
                     if validate_scalar(scalar, "chelis_pad_sequences_to element") != dtype {
                         runtime_fail!("Domain: chelis_pad_sequences_to scalar dtype mismatch");
                     }
@@ -4992,7 +5011,7 @@ pub unsafe extern "C" fn chelis_fail(message: chelis_string) -> ! {
 fn bytes_to_value_list(bytes: &[u8]) -> *mut chelis_list {
     let items = bytes
         .iter()
-        .map(|byte| unsafe { chelis_value_from_int64(i64::from(*byte)) })
+        .map(|byte| unsafe { internal_value_from_i64(i64::from(*byte)) })
         .collect::<Vec<_>>();
     new_list(items, "bytes_to_value_list")
 }
@@ -5019,7 +5038,7 @@ pub unsafe extern "C" fn chelis_read_lines(path: chelis_string) -> *mut chelis_l
         .unwrap_or_else(|err| runtime_fail!("read_lines failed for `{path_text}`: {err}"));
     let items = contents
         .lines()
-        .map(|line| chelis_value_from_string(new_runtime_string(line.to_string())))
+        .map(|line| internal_value_from_string(new_runtime_string(line.to_string())))
         .collect::<Vec<_>>();
     new_list(items, "chelis_read_lines")
 }
@@ -5057,7 +5076,7 @@ pub unsafe extern "C" fn chelis_list_dir(path: chelis_string) -> *mut chelis_lis
     let items = names
         .into_iter()
         .map(|name| {
-            chelis_value_from_string(new_runtime_string(name.to_string_lossy().into_owned()))
+            internal_value_from_string(new_runtime_string(name.to_string_lossy().into_owned()))
         })
         .collect();
     new_list(items, "chelis_list_dir")
@@ -5344,10 +5363,10 @@ mod tests {
     fn list_append_and_index_round_trip() {
         unsafe {
             let base = chelis_list_empty();
-            let list = chelis_list_append(base, chelis_value_from_int64(41));
-            let list = chelis_list_append(list, chelis_value_from_int64(42));
+            let list = chelis_list_append(base, internal_value_from_i64(41));
+            let list = chelis_list_append(list, internal_value_from_i64(42));
             let item = chelis_list_index(list, 1);
-            assert_eq!(chelis_value_as_int64(item), 42);
+            assert_eq!(internal_value_as_i64(item), 42);
             chelis_value_release(item);
             chelis_list_release(list);
             chelis_list_release(base);
@@ -5359,13 +5378,13 @@ mod tests {
         unsafe {
             let list = chelis_list_with_capacity(2);
             assert!((*list).items.capacity() >= 2);
-            chelis_list_push(list, chelis_value_from_int64(1));
-            chelis_list_push(list, chelis_value_from_int64(2));
-            chelis_list_push(list, chelis_value_from_int64(3));
+            chelis_list_push(list, internal_value_from_i64(1));
+            chelis_list_push(list, internal_value_from_i64(2));
+            chelis_list_push(list, internal_value_from_i64(3));
             assert_eq!(chelis_list_len(list), 3);
             assert!((*list).items.capacity() >= 3);
             let item = chelis_list_index(list, 2);
-            assert_eq!(chelis_value_as_int64(item), 3);
+            assert_eq!(internal_value_as_i64(item), 3);
             chelis_value_release(item);
             chelis_list_release(list);
         }
@@ -5375,7 +5394,7 @@ mod tests {
     fn list_push_retains_heap_values_like_append() {
         unsafe {
             let list = chelis_list_with_capacity(1);
-            let value = chelis_value_from_string(runtime_str("owned"));
+            let value = internal_value_from_string(runtime_str("owned"));
             chelis_list_push(list, value);
             chelis_value_release(value);
             let item = chelis_list_index(list, 0);
@@ -5389,9 +5408,9 @@ mod tests {
     fn list_extend_appends_all_source_items() {
         unsafe {
             let dst = chelis_list_with_capacity(0);
-            chelis_list_push(dst, chelis_value_from_int64(1));
-            let value = chelis_value_from_string(runtime_str("retained"));
-            let items = [chelis_value_from_int64(7), value];
+            chelis_list_push(dst, internal_value_from_i64(1));
+            let value = internal_value_from_string(runtime_str("retained"));
+            let items = [internal_value_from_i64(7), value];
             let src = chelis_list_from_values(items.as_ptr(), 2);
             chelis_value_release(value);
             chelis_list_extend(dst, src);
@@ -5407,11 +5426,11 @@ mod tests {
     #[test]
     fn dict_insert_replaces_without_reordering() {
         unsafe {
-            let key_a = chelis_value_from_string(runtime_str("a"));
-            let key_b = chelis_value_from_string(runtime_str("b"));
-            let dict = chelis_dict_insert(std::ptr::null(), key_a, chelis_value_from_int64(1));
-            let dict = chelis_dict_insert(dict, key_b, chelis_value_from_int64(2));
-            let dict = chelis_dict_insert(dict, key_a, chelis_value_from_int64(3));
+            let key_a = internal_value_from_string(runtime_str("a"));
+            let key_b = internal_value_from_string(runtime_str("b"));
+            let dict = chelis_dict_insert(std::ptr::null(), key_a, internal_value_from_i64(1));
+            let dict = chelis_dict_insert(dict, key_b, internal_value_from_i64(2));
+            let dict = chelis_dict_insert(dict, key_a, internal_value_from_i64(3));
             let entries = chelis_dict_entries(dict);
             assert_eq!(chelis_list_len(entries), 2);
             let first = chelis_list_index(entries, 0);
@@ -5419,7 +5438,7 @@ mod tests {
             let first_key = chelis_tuple_get(pair, 0);
             let first_value = chelis_tuple_get(pair, 1);
             assert_eq!(string_text(chelis_string_borrow_value(first_key)), "a");
-            assert_eq!(chelis_value_as_int64(first_value), 3);
+            assert_eq!(internal_value_as_i64(first_value), 3);
             chelis_value_release(first_value);
             chelis_value_release(first_key);
             chelis_value_release(first);
@@ -5605,7 +5624,7 @@ mod tests {
             let mut list = chelis_list_empty();
             assert_eq!((*list).items.capacity(), 0, "empty list holds no buffer");
             for expected_len in 1..=8usize {
-                let grown = chelis_list_append(list, chelis_value_from_int64(1));
+                let grown = chelis_list_append(list, internal_value_from_i64(1));
                 chelis_list_release(list);
                 list = grown;
                 assert_eq!((*list).items.len(), expected_len);
@@ -5635,12 +5654,12 @@ mod tests {
     fn append_leaves_the_source_list_untouched() {
         unsafe {
             let source = chelis_list_empty();
-            chelis_list_push(source, chelis_value_from_int64(10));
-            chelis_list_push(source, chelis_value_from_int64(20));
+            chelis_list_push(source, internal_value_from_i64(10));
+            chelis_list_push(source, internal_value_from_i64(20));
             let source_len_before = chelis_list_len(source);
             let source_buffer_before = (*source).items.as_ptr();
 
-            let appended = chelis_list_append(source, chelis_value_from_int64(30));
+            let appended = chelis_list_append(source, internal_value_from_i64(30));
 
             assert_ne!(
                 appended as *const chelis_list, source,
@@ -5678,7 +5697,7 @@ mod tests {
     fn append_retains_elements_and_release_balances() {
         unsafe {
             let element = chelis_list_empty();
-            chelis_list_push(element, chelis_value_from_int64(7));
+            chelis_list_push(element, internal_value_from_i64(7));
             assert_eq!(
                 (*element).header.strong.load(Ordering::Relaxed),
                 1,
@@ -5692,7 +5711,7 @@ mod tests {
                 "append retains the value it stores; the caller still owns its reference"
             );
 
-            let grown = chelis_list_append(source, chelis_value_from_int64(1));
+            let grown = chelis_list_append(source, internal_value_from_i64(1));
             assert_eq!(
                 (*element).header.strong.load(Ordering::Relaxed),
                 3,

@@ -182,15 +182,22 @@ fn build_driver_mm(func_name: &str, input_labels: &[String], inputs: &[TestInput
                     "    input_storage[{slot}] = chelis_alloc({ndim}, shape_{slot}, CHELIS_DTYPE_F32);"
                 ));
             }
+            body.push(format!(
+                "    chelis_tensor_write *input_guard_{slot} = chelis_tensor_begin_write(input_storage[{slot}]);"
+            ));
+            body.push(format!(
+                "    chelis_write_view input_view_{slot} = chelis_tensor_write_view(input_guard_{slot});"
+            ));
             for (idx, value) in input.data.iter().enumerate() {
                 // Sibling of #250/#251/#252: exact f32 bit pattern via
                 // `chelis_f32_from_bits` (from the included
                 // `chelis_runtime.h`), not a lossy `{:.8}f` decimal.
                 let bits = value.to_bits();
                 body.push(format!(
-                    "    ((float *)input_storage[{slot}]->data)[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);"
+                    "    ((float *)input_view_{slot}.data)[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);"
                 ));
             }
+            body.push(format!("    chelis_tensor_end_write(input_guard_{slot});"));
         }
     }
 
@@ -203,14 +210,17 @@ fn build_driver_mm(func_name: &str, input_labels: &[String], inputs: &[TestInput
         "    if (outputs[0] == NULL) { fprintf(stderr, \"output 0 is NULL\\n\"); return 2; }"
             .to_string(),
     );
-    body.push("    for (int i = 0; i < outputs[0]->size; i++) {".to_string());
+    body.push(
+        "    chelis_read_view output_view = chelis_tensor_read_view(outputs[0]);".to_string(),
+    );
+    body.push("    for (int i = 0; i < chelis_tensor_numel(outputs[0]); i++) {".to_string());
     body.push("        if (i > 0) printf(\" \");".to_string());
-    body.push("        printf(\"%.6f\", ((float *)outputs[0]->data)[i]);".to_string());
+    body.push("        printf(\"%.6f\", ((const float *)output_view.data)[i]);".to_string());
     body.push("    }".to_string());
     body.push("    printf(\"\\n\");".to_string());
-    body.push("    chelis_free(outputs[0]);".to_string());
+    body.push("    chelis_tensor_release(outputs[0]);".to_string());
     for slot in 0..input_labels.len() {
-        body.push(format!("    chelis_free(input_storage[{slot}]);"));
+        body.push(format!("    chelis_tensor_release(input_storage[{slot}]);"));
     }
 
     format!(
@@ -773,13 +783,14 @@ int main(void) {{
         chelis_tensor *outputs[1] = {{0}};
         {func_name}(NULL, 0, outputs, 1);
         if (outputs[0] == NULL) {{ fprintf(stderr, "output 0 is NULL\n"); return 2; }}
-        uint16_t *bits = (uint16_t*)outputs[0]->data;
+        chelis_read_view output_view = chelis_tensor_read_view(outputs[0]);
+        const uint16_t *bits = (const uint16_t*)output_view.data;
         for (int i = 0; i < {n}; i++) {{
             if (i > 0) printf(" ");
             printf("0x%04X", bits[i]);
         }}
         printf("\n");
-        chelis_free(outputs[0]);
+        chelis_tensor_release(outputs[0]);
     }}
     return 0;
 }}

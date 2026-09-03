@@ -444,6 +444,12 @@ fn emit_input_setup(
             "    {prefix}_input_storage[{slot}] = chelis_alloc({ndim}, {prefix}_shape_{slot}, {dtype});",
             dtype = dtype_macro(dtype),
         ),
+        format!(
+            "    chelis_tensor_write *{prefix}_input_guard_{slot} = chelis_tensor_begin_write({prefix}_input_storage[{slot}]);"
+        ),
+        format!(
+            "    chelis_write_view {prefix}_input_view_{slot} = chelis_tensor_write_view({prefix}_input_guard_{slot});"
+        ),
     ];
     let elem_bytes = dtype_bytes(dtype);
     let elem_count = dims.iter().product::<usize>();
@@ -464,7 +470,7 @@ fn emit_input_setup(
                 // already emit exact `to_bits()` patterns.
                 let bits = value.to_bits();
                 lines.push(format!(
-                    "    ((float *){prefix}_input_storage[{slot}]->data)[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);"
+                    "    ((float *){prefix}_input_view_{slot}.data)[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);"
                 ));
             }
         }
@@ -472,7 +478,7 @@ fn emit_input_setup(
             for (idx, value) in data.iter().enumerate() {
                 let bits = half::bf16::from_f32(*value).to_bits();
                 lines.push(format!(
-                    "    ((uint16_t*){prefix}_input_storage[{slot}]->data)[{idx}] = (uint16_t)0x{bits:04x};"
+                    "    ((uint16_t*){prefix}_input_view_{slot}.data)[{idx}] = (uint16_t)0x{bits:04x};"
                 ));
             }
         }
@@ -480,12 +486,15 @@ fn emit_input_setup(
             for (idx, value) in data.iter().enumerate() {
                 let bits = half::f16::from_f32(*value).to_bits();
                 lines.push(format!(
-                    "    ((uint16_t*){prefix}_input_storage[{slot}]->data)[{idx}] = (uint16_t)0x{bits:04x};"
+                    "    ((uint16_t*){prefix}_input_view_{slot}.data)[{idx}] = (uint16_t)0x{bits:04x};"
                 ));
             }
         }
         other => panic!("ws_a3 harness cannot fill input dtype {}", other.name()),
     }
+    lines.push(format!(
+        "    chelis_tensor_end_write({prefix}_input_guard_{slot});"
+    ));
     let _ = elem_bytes;
     lines
 }
@@ -528,16 +537,22 @@ fn build_main_cpp(
         input_labels.len()
     ));
     lines.push("    for (int o = 0; o < ".to_string() + &n_out.to_string() + "; o++) {");
-    lines.push("        for (int i = 0; i < case0_outputs[o]->size; i++) {".to_string());
+    lines.push(
+        "        chelis_read_view case0_output_view = chelis_tensor_read_view(case0_outputs[o]);"
+            .to_string(),
+    );
+    lines.push(
+        "        for (int i = 0; i < chelis_tensor_numel(case0_outputs[o]); i++) {".to_string(),
+    );
     lines.push("            if (i > 0) printf(\" \");".to_string());
     let read_expr = match case.output_dtype {
-        Prim::F32 => "((float *)case0_outputs[o]->data)[i]".to_string(),
+        Prim::F32 => "((const float *)case0_output_view.data)[i]".to_string(),
         Prim::Bf16 => {
             // Reinterpret 2-byte slot as bf16 → f32 by left-shifting the
             // bf16 bit pattern into the upper half of a uint32 and
             // bit-casting to float (the standard bf16→f32 rule).
             "({\
-              uint16_t b = ((uint16_t*)case0_outputs[o]->data)[i]; \
+              uint16_t b = ((const uint16_t*)case0_output_view.data)[i]; \
               union { uint32_t u; float f; } cv; \
               cv.u = ((uint32_t)b) << 16; \
               cv.f; })"
@@ -549,7 +564,7 @@ fn build_main_cpp(
             // conversion via __half_as_float-compatible path.
             // Implementation: build a __half from the bit pattern and
             // convert with __half2float.
-            "__half2float(*(const __half*)((const uint16_t*)case0_outputs[o]->data + i))"
+            "__half2float(*(const __half*)((const uint16_t*)case0_output_view.data + i))"
                 .to_string()
         }
         other => panic!("ws_a3 harness cannot read output dtype {}", other.name()),
@@ -559,10 +574,12 @@ fn build_main_cpp(
     ));
     lines.push("        }".to_string());
     lines.push("        printf(\"\\n\");".to_string());
-    lines.push("        chelis_free(case0_outputs[o]);".to_string());
+    lines.push("        chelis_tensor_release(case0_outputs[o]);".to_string());
     lines.push("    }".to_string());
     for slot in 0..input_labels.len() {
-        lines.push(format!("    chelis_free(case0_input_storage[{slot}]);"));
+        lines.push(format!(
+            "    chelis_tensor_release(case0_input_storage[{slot}]);"
+        ));
     }
 
     let f16_include = if matches!(case.output_dtype, Prim::F16) {

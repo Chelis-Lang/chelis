@@ -261,10 +261,11 @@ fn run_driver_for_rows(build_dir: &Path, stem: &str, rows: &[usize]) -> Vec<Vec<
         .map(|r| {
             format!(
                 "    {{ int64_t shape[2] = {{{r}, 2}}; chelis_tensor* x = chelis_alloc(2, shape, CHELIS_DTYPE_F32); \
-                 for (int i = 0; i < {n}; i++) ((float *)x->data)[i] = (float)(i + 1); \
-                 chelis_tensor* g = out(x); \
-                 for (int i = 0; i < g->size; i++) printf(\"%.6f\\n\", ((float *)g->data)[i]); \
-                 printf(\"---\\n\"); }}",
+                 chelis_tensor_write* x_guard = chelis_tensor_begin_write(x); chelis_write_view x_view = chelis_tensor_write_view(x_guard); \
+                 for (int i = 0; i < {n}; i++) ((float *)x_view.data)[i] = (float)(i + 1); chelis_tensor_end_write(x_guard); \
+                 chelis_tensor* g = out(x); chelis_read_view g_view = chelis_tensor_read_view(g); \
+                 for (int64_t i = 0; i < g_view.count; i++) printf(\"%.6f\\n\", ((const float *)g_view.data)[i]); \
+                 printf(\"---\\n\"); chelis_tensor_release(g); chelis_tensor_release(x); }}",
                 n = r * 2
             )
         })

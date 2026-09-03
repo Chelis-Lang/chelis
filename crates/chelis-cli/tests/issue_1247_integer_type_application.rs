@@ -461,11 +461,11 @@ out = print(main())
 
     let generated = fs::read_to_string(out_dir.join("generic_alias.c")).expect("generated C");
     assert!(
-        generated.contains("int64_t batch = inputs[0]->shape[0];"),
+        generated.contains("int64_t batch = chelis_tensor_shape(inputs[0], 0);"),
         "alias expansion must preserve the authored dimension name:\n{generated}"
     );
     assert!(
-        !generated.contains("int64_t d0 = inputs[0]->shape[0];"),
+        !generated.contains("int64_t d0 = chelis_tensor_shape(inputs[0], 0);"),
         "checker-minted dimension identities must not replace authored symbols:\n{generated}"
     );
 
@@ -511,11 +511,11 @@ def main() -> f32 = cast(1.0, f32)
 
     let generated = fs::read_to_string(out_dir.join("reordered_alias.c")).expect("generated C");
     assert!(
-        generated.contains("int64_t batch = inputs[0]->shape[0];"),
+        generated.contains("int64_t batch = chelis_tensor_shape(inputs[0], 0);"),
         "the reordered row dimension must retain its authored name:\n{generated}"
     );
     assert!(
-        generated.contains("int64_t width = inputs[0]->shape[1];"),
+        generated.contains("int64_t width = chelis_tensor_shape(inputs[0], 1);"),
         "the reordered column dimension must retain its authored name:\n{generated}"
     );
     assert!(

@@ -65,7 +65,7 @@ fn c_backend_admits_f16_tensor_with_uint16_storage_post_ws_1() {
     );
     assert!(
         src.contains(
-            "chelis_fill_scalar(t0, chelis_scalar_from_bits(CHELIS_DTYPE_F16, UINT16_C(0x3C00)))"
+            "chelis_fill_scalar(t0_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_F16, UINT16_C(0x3C00)))"
         ),
         "C backend must preserve the exact f16 tag and bits through the single public fill API; got source:\n{src}"
     );
@@ -98,7 +98,7 @@ fn c_backend_admits_bf16_tensor_with_uint16_storage_post_ws_1() {
     );
     assert!(
         src.contains(
-            "chelis_fill_scalar(t0, chelis_scalar_from_bits(CHELIS_DTYPE_BF16, UINT16_C(0x3F80)))"
+            "chelis_fill_scalar(t0_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_BF16, UINT16_C(0x3F80)))"
         ),
         "C backend must preserve the exact bf16 tag and bits through the single public fill API; got source:\n{src}"
     );

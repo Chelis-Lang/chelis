@@ -114,10 +114,9 @@ fn tensor_storage_uses_portable_payload_bytes() {
     );
     assert!(ledger.contains(r#""kind":"Tensor","bytes":0"#));
     let _ = fs::remove_file(path);
-}
 
-#[test]
-fn entry_borrow_records_the_storage_wrapper_but_not_the_callers_bytes() {
+    // Negative parity: an entry borrow records the runtime-owned storage
+    // wrapper, but never counts the caller's bytes as runtime ownership.
     let path = child_path("borrowed-tensor-bytes");
     let output = run_child("borrowed-tensor-bytes", &path);
     assert!(

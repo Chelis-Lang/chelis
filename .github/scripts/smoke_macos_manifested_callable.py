@@ -63,27 +63,31 @@ int main(void) {
     chelis_tensor *inputs[2] = {a, b};
     chelis_tensor *outputs[1] = {0};
 
-    memcpy(a->data, a_bits, sizeof(a_bits));
-    memcpy(b->data, b_bits, sizeof(b_bits));
+    chelis_tensor_write *a_guard = chelis_tensor_begin_write(a);
+    chelis_write_view a_view = chelis_tensor_write_view(a_guard);
+    memcpy(a_view.data, a_bits, sizeof(a_bits));
+    chelis_tensor_end_write(a_guard);
+    chelis_tensor_write *b_guard = chelis_tensor_begin_write(b);
+    chelis_write_view b_view = chelis_tensor_write_view(b_guard);
+    memcpy(b_view.data, b_bits, sizeof(b_bits));
+    chelis_tensor_end_write(b_guard);
     manifested_callable(inputs, 2, outputs, 1);
 
     if (outputs[0] == NULL) {
         fprintf(stderr, "manifested callable did not populate outputs[0]\\n");
         return 1;
     }
-    if (outputs[0]->dtype != CHELIS_DTYPE_F32 || outputs[0]->rank != 2 ||
-        outputs[0]->shape == NULL || outputs[0]->strides == NULL ||
-        outputs[0]->shape[0] != 2 || outputs[0]->shape[1] != 4 ||
-        outputs[0]->strides[0] != 4 || outputs[0]->strides[1] != 1 ||
-        outputs[0]->size != 8 || outputs[0]->byte_capacity < 32 ||
-        outputs[0]->owns_data != 1 || outputs[0]->reserved[0] != 0 ||
-        outputs[0]->reserved[1] != 0) {
+    chelis_read_view output_view = chelis_tensor_read_view(outputs[0]);
+    if (output_view.dtype != CHELIS_DTYPE_F32 || output_view.count != 8 ||
+        chelis_tensor_rank(outputs[0]) != 2 ||
+        chelis_tensor_shape(outputs[0], 0) != 2 ||
+        chelis_tensor_shape(outputs[0], 1) != 4) {
         fprintf(stderr, "manifested callable returned the wrong output ABI\\n");
         return 1;
     }
-    if (memcmp(outputs[0]->data, expected_bits, sizeof(expected_bits)) != 0) {
+    if (memcmp(output_view.data, expected_bits, sizeof(expected_bits)) != 0) {
         uint32_t got_bits[8];
-        memcpy(got_bits, outputs[0]->data, sizeof(got_bits));
+        memcpy(got_bits, output_view.data, sizeof(got_bits));
         for (int i = 0; i < 8; ++i) {
             if (got_bits[i] != expected_bits[i]) {
                 fprintf(
@@ -98,9 +102,9 @@ int main(void) {
         return 1;
     }
 
-    chelis_free(outputs[0]);
-    chelis_free(a);
-    chelis_free(b);
+    chelis_tensor_release(outputs[0]);
+    chelis_tensor_release(a);
+    chelis_tensor_release(b);
     return 0;
 }
 """
