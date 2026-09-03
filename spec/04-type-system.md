@@ -1414,7 +1414,11 @@ value it compares is available and before the first allocation or element
 access whose shape depends on the guarded extent. A guard whose operands are
 all interface values (an input tensor's axis, a scalar parameter, or a
 literal) is evaluated at function entry, in declared signature order, before
-any other operation of the function runs. A guard that compares a locally
+any other operation of the function runs. An entry that declares no signature
+orders those guards by its ABI input-slot order instead: the order in which
+the caller supplies that entry's inputs. Whatever rule assigns the slots, the
+guard order follows the assigned slots, and never a separate traversal by
+binding name, hash iteration, or node identity. A guard that compares a locally
 computed value (checked integer arithmetic, a user-function result, or an
 extent an operation computes) is evaluated after its producers and takes the
 source position of the operation that introduces the guarded extent: an
@@ -1423,13 +1427,26 @@ observed first, and one that follows it is observed only if the guard passes.
 A `cast` takes the placement of the value it casts. Guards ready at the same
 source position are evaluated in declaration order. These constraints are the
 complete observable contract; a guard and an operation related by neither data
-dependence nor source order may be evaluated in either order. A failing
-equality guard traps `Domain` under the operation that introduces the guarded
-extent (for a guard whose operands are all interface values, the `load`
-primitive of the later witness in signature order, spec/05-risc-primitives.md
-§2.5) and names the disagreeing sources; a failing non-negativity guard traps
-`Domain` under the owning movement operation.
+dependence nor source order may be evaluated in either order.
 Every execution mode places guards by this rule.
+
+A runtime extent guard is a typed operation-precondition guard under
+[04-NUM-9] and is therefore itself the trap-producing primitive. A failing
+equality guard and a failing non-negativity guard both raise a `Domain` trap.
+Its `<op>` slot is the canonical name of the operation that introduces the
+guarded extent: for a guard whose operands are all interface values, the
+`load` primitive of the later witness in signature order
+(spec/05-risc-primitives.md §2.5); for a non-negativity guard, the owning
+movement operation. Its `<prim>` slot is `int64`, because the result this
+guard finalizes is an extent ([05-DIM-1]) and not a tensor element. The
+complete user-facing line is therefore
+`numeric trap: domain in <op> at int64`, and [04-NUM-9] permits it no prefix
+and no suffix. Every lane SHALL also convey, on separate lines accompanying
+that trap, the names of the disagreeing sources, the axis, and the value
+observed for each; that requirement binds the information conveyed and not
+the bytes rendered, and the context is not part of the trap line. The failure
+is a value inside its lane under [04-NUM-10] and becomes a process failure
+only at that lane's boundary.
 
 For the movement primitives, symbolic-dim pass-through is
 **identity-only**: a `stride` axis with literal
@@ -1507,12 +1524,23 @@ the position of the earliest of its `expand` expressions and settles to the
 first candidate shape that satisfies every one of its obligations, taking the
 obligations in the source order of their `expand` expressions and, within one
 obligation, the same-rank replacement form before the insertion form; when no
-candidate satisfies every obligation, the program is rejected. A `reshape`
-whose input is a deferred positional-`expand` result has the rank and extents
-that §4.7.3 assigns from its shape list and is therefore shape-bearing for its
-own consumers while its input's choice is open; that input keeps only the
-forms whose element count §4.7.3 admits, so the `reshape` fixes its input when
-exactly one form is admitted and rejects the program when neither is. A
+candidate satisfies every obligation, the program is rejected. A consumer
+that supplies no complete shape equation still eliminates candidates by its
+own typing rule: the result keeps only the forms that consumer admits, so a
+consumer admitting exactly one form fixes the result, a consumer admitting
+both leaves the choice open, and a consumer admitting neither rejects the
+program. A rank
+requirement alone can decide it: `matmul` admits only operands of rank at
+least two (`spec/05-risc-primitives.md` §4.1), so a positional `expand` over
+a rank-1 input is fixed to the insertion form even though `matmul` constrains
+none of its extents. A
+consumer that fixes its operand this way types its own result from the fixed
+form and does not publish an unresolved candidate as its checked result type.
+A `reshape` whose input is a deferred positional-`expand` result is one
+instance of that rule: it has the rank and extents that §4.7.3 assigns from
+its shape list and is therefore shape-bearing for its own consumers while its
+input's choice is open, and that input keeps only the forms whose element
+count §4.7.3 admits. A
 `shape` read of a result whose choice is open, inside a `reshape` shape list
 or anywhere else, requires the tensor type and therefore selects the form the
 shape-neutral rule above selects; an axis outside that form's rank is a type
@@ -1526,6 +1554,31 @@ storage, allocation, or iteration order, so the selected shapes and the
 resulting acceptance or rejection are the same across runs and
 implementations. A reusable library context carries the unresolved choice to
 its downstream program rather than deciding it early.
+
+A comparison relates its operands' and its result's shapes and the result's
+dtype under `spec/05-risc-primitives.md` [05-OP-36]. While a
+positional-`expand` operand's choice is open, the comparison result carries
+that same open choice and supplies no evidence back to the operand. An
+independently resolved shape on the other operand, or one independently
+supplied to the comparison result, fixes the operand, because [05-OP-36] makes
+all three shapes one equation. Two deferred operands of one comparison are
+solved together as one linked equation rather than settling separately;
+because [05-OP-36] constrains the dimensions they produce and not the forms
+that produce them, the forms they select need not be the same.
+
+A carrier of a deferred result either supplies an independent shape equation
+or does not. An anonymous tuple field, a closure capture, a fresh generic
+field or parameter, a singleton `List`, the seed element of an inferred
+`List`, and an undeclared closure return carry the unresolved choice unchanged
+and add no evidence; none of them may select a form, and none may split one
+result into two that settle differently. A concrete declared record or ADT
+field, an already-instantiated generic field, a declared `List` element type,
+and a later `List` element facing an independently resolved accumulated
+element shape each supply an independent equation and fix the result. Tuple,
+record, and ADT projection and pattern binding transfer whichever form the
+result has selected and add no evidence of their own. A record update fixes an
+updated field only when that field's resolved schema is independent of the
+result being carried.
 
 When a declared or inferred result dimension claims a literal or named extent
 that is not statically proven equal to `size`, execution checks equality and
@@ -2734,9 +2787,10 @@ refuses the default.
 > evaluator plumbing. No additional prefix or suffix is permitted on any
 > user-facing numeric-trap line. A typed operation-precondition guard is
 > itself the trap-producing primitive for this rule and carries the guarded
-> builtin's canonical name and declared result dtype. A failure raised by
-> such a guard therefore names the guarded builtin; it is not a renamed trap
-> from a later primitive in the successful lowering.
+> builtin's canonical name and the dtype of the quantity that guard
+> finalizes. A failure raised by such a guard therefore names the guarded
+> builtin; it is not a renamed trap from a later primitive in the successful
+> lowering.
 
 > **[04-NUM-10]** A numeric trap SHALL be a VALUE inside a lane and SHALL
 > become a process failure only at that lane's boundary: `chelis eval`
