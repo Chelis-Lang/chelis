@@ -167,6 +167,13 @@ impl<'a> VerifiedDagView<'a> {
         crate::dag::symbolic_bindings(self.dag)
     }
 
+    /// The INTERFACE bindings: the declaration and entry-guard set, derived
+    /// from the class witnesses rather than recovered by walking for a `Load`
+    /// that carries a matching string (chelis#1277).
+    pub fn symbolic_bindings_interface(self) -> Vec<SymbolicDimBinding> {
+        crate::dag::symbolic_bindings_interface(self.dag)
+    }
+
     pub fn symbolic_occurrences(self) -> Vec<SymbolicDimOccurrence> {
         crate::dag::symbolic_occurrences(self.dag)
     }

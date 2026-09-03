@@ -2324,6 +2324,59 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
     }
 }
 
+/// The INTERFACE bindings: one per claim with an external witness, canonical
+/// first, in assigned ABI input-slot order.
+///
+/// This is the declaration and entry-guard set, derived from
+/// [`crate::axis_sources::derive_dim_witnesses`] rather than recovered by
+/// walking for a `Load` that carries a matching string. Consumers that read
+/// only interface witnesses - the C and HIP prologues, which declare
+/// `int64_t n = inputs[s]->shape[a];` and guard each further witness at
+/// entry, and [`symbolic_params`], which reports what a caller must supply -
+/// read this.
+///
+/// The local half, an extent an operation computes at run time, is still
+/// [`symbolic_occurrences`]' to report until Slice B's guard commit places
+/// those guards at their introducing operations. Each consumer therefore
+/// reads one derivation or the other, never a mixture: two derivations that
+/// can disagree is the defect this work removes.
+///
+/// `spec/04-type-system.md` section 4.7 decides the order: "Whatever rule
+/// assigns the slots, the guard order follows the assigned slots, and never a
+/// separate traversal by binding name, hash iteration, or node identity."
+pub fn symbolic_bindings_interface(dag: &Dag) -> Vec<SymbolicDimBinding> {
+    crate::axis_sources::derive_dim_witnesses(dag)
+        .into_iter()
+        .filter_map(|class| {
+            let crate::axis_sources::DimClaim::Name(name) = class.claim else {
+                return None;
+            };
+            let mut occurrences = class
+                .members
+                .iter()
+                .filter_map(|member| {
+                    let crate::axis_sources::AxisSource::ExternalAxis { load, axis } =
+                        member.source
+                    else {
+                        return None;
+                    };
+                    let RiscOp::Load { name: label } = &dag.get(load)?.op else {
+                        return None;
+                    };
+                    Some(SymbolicDimOccurrence::load(&name, label.as_str(), axis))
+                })
+                .collect::<Vec<_>>()
+                .into_iter();
+            let canonical = occurrences.next()?;
+            Some(SymbolicDimBinding {
+                name,
+                canonical,
+                others: occurrences.collect(),
+            })
+        })
+        .collect()
+}
+
 pub fn symbolic_bindings(dag: &Dag) -> Vec<SymbolicDimBinding> {
     let mut grouped = std::collections::BTreeMap::<String, Vec<SymbolicDimOccurrence>>::new();
     for occurrence in symbolic_occurrences(dag) {
@@ -2357,7 +2410,7 @@ pub fn symbolic_bindings(dag: &Dag) -> Vec<SymbolicDimBinding> {
 /// shape metadata. chelis#616: op-declared dims are computed at run time by
 /// their owning op and are deliberately excluded; they are not parameters.
 pub fn symbolic_params(dag: &Dag) -> Vec<String> {
-    symbolic_bindings(dag)
+    symbolic_bindings_interface(dag)
         .into_iter()
         .filter(|binding| matches!(binding.canonical.source, SymbolicDimSource::Load { .. }))
         .map(|binding| binding.name)

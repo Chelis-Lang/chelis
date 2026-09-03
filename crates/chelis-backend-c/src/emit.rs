@@ -1360,7 +1360,7 @@ impl CEmitter {
             }
         }
 
-        for binding in dag.symbolic_bindings() {
+        for binding in dag.symbolic_bindings_interface() {
             // chelis#616: an op-declared dim is declared inline at its
             // owning op (the bound scalars are computed tensors that do not
             // exist here at prologue time); see `runtime_dim_sites`.
