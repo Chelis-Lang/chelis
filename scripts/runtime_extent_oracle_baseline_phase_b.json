@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "2e332fdfd3bd89366fab6f693db3be4a1b931b6a5e83a382dc922e6edc966fc2",
+  "corpus_sha256": "6f2733498c92be76dcdf5da9ee1ef931e085641d639152774af3dd921e9dcd91",
   "rows": [
     {
       "id": "class.load_load.c",
@@ -219,22 +219,10 @@
       "receipt": "cli_slice_b.a_shape_derived_bound_keeps_its_declared_result_dimension_on_eval"
     },
     {
-      "id": "guard_order.effect_after.c",
-      "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
-      "receipt": "cli_slice_b.an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_c"
-    },
-    {
       "id": "guard_order.effect_after.eval",
       "baseline": "silent_unguarded",
       "phase_b": "silent_unguarded",
       "receipt": "cli_slice_b.an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_eval"
-    },
-    {
-      "id": "guard_order.effect_before.c",
-      "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
-      "receipt": "cli_slice_b.an_effect_before_the_guard_runs_when_the_guard_traps_on_c"
     },
     {
       "id": "guard_order.effect_before.eval",

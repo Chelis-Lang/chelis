@@ -862,6 +862,34 @@ eval` output for every program that evaluates today, proved by total capture
 over the executable corpus, plus the eval-lane rows of [#1374], [#1376] and
 [#1377] moving to `executes_exactly`.
 
+**Row ownership across the three pull requests.** The phase-b corpus carries
+one row per lane wherever a guard lands per lane, because B2a, B2h and B2b
+move different lanes at different times and a single-valued row cannot record
+one lane at its exit state while another waits. Three consequences are worth
+naming here rather than leaving to the corpus file:
+
+- [#1375]'s two rows (`expand.foreign_claim.same_tensor_set_axis` and
+  `reshape.named_claim.node_target`) stay at their baseline on BOTH lanes and
+  belong to a later pull request, B2r, after B2h. `reshape` is on the shared
+  kernel keep-list (`chelis-ir/src/host.rs`'s
+  `should_keep_tensor_expr_in_host_lane`), stale since Slice A gave reshape
+  targets their `RtDim` carrier, so a reshape-rooted def is emitted into the
+  C host program rather than lowered to a kernel and no class-derived guard
+  reaches it; B2h's routing is blocked on the same list for the eval lane.
+  One pull request therefore closes [#1375] on both lanes rather than two
+  half-moves.
+- The `guard_order.effect_*` rows exist only on the eval lane. On C the
+  effect is not merely unorderable against a guard, it is ABSENT: a bound
+  `print` inside an `IO`-effect body emits no corresponding statement at all
+  (the string does not appear in the emitted translation unit), so a row
+  asserting that an effect runs before a guard would assert something the
+  lane never does at any guard placement. The trap-based controls cover both
+  ordering directions on C.
+- A row's receipt must name a test registered in the phase's targets before
+  that row may reach an exit state; receipts on rows still at a start state
+  are deliberately unchecked, so a receipt naming a not-yet-authored test is
+  a plan rather than a defect.
+
 **Frozen at exit:** the `RuntimeDimClass` shape, canonical class and member
 order, the guard placement realization per lane, the `AxisSource` variant
 set, the one derivation point for both, the removal of string searches for

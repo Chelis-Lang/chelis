@@ -551,22 +551,10 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "cli_slice_b.a_shape_derived_bound_keeps_its_declared_result_dimension_on_eval",
         ),
         _row(
-            "guard_order.effect_after.c",
-            "silent_unguarded",
-            "silent_unguarded",
-            "cli_slice_b.an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_c",
-        ),
-        _row(
             "guard_order.effect_after.eval",
             "silent_unguarded",
             "silent_unguarded",
             "cli_slice_b.an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_eval",
-        ),
-        _row(
-            "guard_order.effect_before.c",
-            "silent_unguarded",
-            "silent_unguarded",
-            "cli_slice_b.an_effect_before_the_guard_runs_when_the_guard_traps_on_c",
         ),
         _row(
             "guard_order.effect_before.eval",
