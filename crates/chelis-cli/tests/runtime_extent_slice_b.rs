@@ -528,3 +528,66 @@ fn issue_597_positional_same_rank_replacement_executes_on_c() {
         "lowering must not insert an axis the checker replaced: {out}"
     );
 }
+
+/// The same-rank set form is well formed only over a UNIT source extent.
+///
+/// `spec/04-type-system.md` section 4.7.2's same-rank replacement clause is
+/// unconditional, and `spec/05`'s `expand` row carries "(size-1 broadcast)"
+/// only as a parenthetical. Once b2.5 makes the stamped replacement form
+/// execute, a non-unit source would run with no loud outcome, because the
+/// claimed extent equals the size and nothing compares the SOURCE. B0-bis
+/// states the rule normatively in `spec/05` section 2.4.1; this row is its
+/// executable half and lands in the same commit as the
+/// `fallback_expand_type` deletion, so the guard precedes the widening as
+/// C2.7 requires.
+///
+/// MEASURED BASELINE, which differs from the one I was briefed. Both
+/// spellings I tried are SILENT on both lanes today, not loud:
+///
+/// ```text
+/// sig f: tensor[6, f32] -> tensor[2, f32]
+/// def f(x) = expand(x, 0, 2i64)
+/// ```
+///
+/// checks with 0 errors, and eval AND compiled C both produce
+/// `shape=[2, 6]` - the insertion form - under a declared rank-1 result. So
+/// the row's baseline is `silent_unguarded` on both lanes rather than
+/// `lane_divergent`, and nothing today is loud by accident.
+const REPRO_NON_UNIT_SOURCE: &str = "module P.NonUnit\n\
+sig f: tensor[6, f32] -> tensor[2, f32]\n\
+def f(x) = expand(x, 0, 2i64)\n\
+out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))\n";
+
+/// A unit source extent is the well-formed case and must keep executing.
+const REPRO_UNIT_SOURCE: &str = "module P.Unit\n\
+sig f: tensor[1, f32] -> tensor[4, f32]\n\
+def f(x) = expand(x, 0, 4i64)\n\
+out = f(to_tensor([7.0f32]))\n";
+
+#[test]
+fn a_non_unit_source_under_a_same_rank_claim_traps_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "nonunit_c", REPRO_NON_UNIT_SOURCE);
+    assert!(!ok, "a 6-extent source cannot be set to 2: {out}");
+    assert!(
+        out.contains(&domain_trap_line("expand")),
+        "the source guard is an [04-NUM-9] precondition guard: {out}"
+    );
+}
+
+/// The positive twin: without it, a guard that rejected every same-rank set
+/// form would satisfy the row above and delete the feature b2.5 exists to
+/// make executable.
+#[test]
+fn a_unit_source_under_a_same_rank_claim_executes_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "unit_c", REPRO_UNIT_SOURCE);
+    assert!(ok, "a unit source is the well-formed set form: {out}");
+    assert!(out.contains("shape=[4]"), "{out}");
+}
