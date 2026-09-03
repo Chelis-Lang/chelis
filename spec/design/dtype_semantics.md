@@ -1460,6 +1460,22 @@ and the generated rejection registry gains exactly the [04-FIT-9] and
 [04-FIT-10] atoms. The full Phase 4B oracle is rerun so the unchanged numeric
 matrix remains executable evidence rather than an inference from scope.
 
+[#849] restates spec/02 §P12's newline-continuation boundary so the numbered
+spec matches the three boundary rules the parser actually implements: the
+closed `|>`/`then`/`else` continuation set governs the block sequencing
+contexts (`block_expr_end`), while a declaration body and a property predicate
+bound permissively at a declaration start (and, for a predicate, at `with`).
+It also admits `then` and `else` in the closed set, which is the 0.17
+regression the issue reports. Under the current merge-base acknowledgement
+gate, this contract edit requires explicit pull-request-body acknowledgements
+for `spec/02-surf-syntax.md` and this document. It does not touch either
+statement the Phase 4B oracle anchors in that file -- the Surf literal
+exclusion and `count`'s multi-axis lowering -- nor any dtype, capability,
+numeric-surface, or observation contract; the change is a surface-syntax
+boundary rule with no numeric content. The full Phase 4B oracle is rerun so
+the unchanged matrix is executable evidence rather than an inference from
+scope.
+
 ## B2. Invariants that hold across every boundary
 
 1. **Controls never move.** Every green control in the audit test files
@@ -2312,6 +2328,7 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#1298]: https://github.com/Chelis-Lang/chelis/issues/1298
 [#1306]: https://github.com/Chelis-Lang/chelis/issues/1306
 [#1314]: https://github.com/Chelis-Lang/chelis/issues/1314
+[#849]: https://github.com/Chelis-Lang/chelis/issues/849
 [#1310]: https://github.com/Chelis-Lang/chelis/pull/1310
 [#1343]: https://github.com/Chelis-Lang/chelis/pull/1343
 [#1338]: https://github.com/Chelis-Lang/chelis/issues/1338

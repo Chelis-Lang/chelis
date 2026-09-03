@@ -559,7 +559,8 @@ Additional canonical style rules:
 Braces define binding blocks. Inside them, bindings are sequential and
 newlines are the only separators. The final expression is the block's value.
 That tail expression, like a binding value, is newline-bounded unless the next
-line begins `|>` or the break is inside `()`/`[]`/`{}`. A binding block has at
+line begins with one of the exact continuation tokens `|>`, `then`, or `else`,
+or the break is inside `()`/`[]`/`{}`. A binding block has at
 least one binding followed by exactly one tail expression. A bare non-tail
 expression statement and a one-expression binding block are rejected.
 
@@ -956,7 +957,18 @@ x
   |> transform_b
 ```
 
-The one qualification is at separator boundaries in a sequencing context (block bindings, block tail, declaration bodies): there, a top-level newline acts as a `Sep` and ends the expression being parsed unless the next line begins `|>` or the break is inside `()`/`[]`/`{}`. This is the same boundary rule that binding values and declaration bodies already follow (see P5 and `BlockBody`); it is what makes a bare non-tail statement a rejected juxtaposition rather than a silent application. The leading-`|>` continuation above is exactly the escape hatch that keeps a multi-line pipeline as one expression.
+The one qualification is at separator boundaries in a **block sequencing context**: block bindings, block tails, `do` and `par` items, and property option values. There a top-level newline acts as a `Sep` and ends the expression being parsed unless the break is inside `()`/`[]`/`{}` or the next line begins with one of the exact continuation tokens below. That is what makes a bare non-tail statement a rejected juxtaposition rather than a silent application.
+
+In those contexts the continuation set is exactly `|>`, `then`, and `else`. Each selected token is safe because it cannot head an expression: `|>` is an infix pipeline stage, and an `if` is not a legal expression without both `then` and `else`, so a newline before one is unambiguous. That safety property is necessary but does not itself define membership. Other infix tokens such as `+`, `*`, `==`, `&&`, and `||` are not selected and remain separators when they lead the next physical line. A token that CAN head an expression -- `with`, `match`, an identifier -- is likewise not a continuation there: after a newline it would be genuinely ambiguous, and admitting it would reintroduce the silent juxtaposition this boundary exists to reject. The leading-`|>` continuation above is one instance of the exact rule, not a special case.
+
+**A declaration body and a property predicate bound differently, and the closed set above does not govern them.** A declaration body runs to the next token that begins a declaration (or to end of input); a property predicate runs to the next `with`, the next declaration start, or end of input. Every other token continues the expression across a top-level newline, so a newline-led `with` continues a declaration body:
+
+```chelis
+def update(p: Point) -> Point = p
+  with { x: 1.0 }
+```
+
+Those two contexts are therefore permissive where a block sequencing context is closed. They never exhibited the missing-continuation defect the closed set fixes, because a leading `then` or `else` does not begin a declaration and so already continued.
 
 The parser accepts one trailing comma or semicolon in a nonempty delimited
 family, and the formatter removes it. This includes arguments, parameters,
@@ -1288,7 +1300,8 @@ WithHandler   <- 'with' S ('seed' / 'device') S '(' S Expr (S ',')? S ')'
                   S HandlerBlock
 HandlerBlock  <- '{' S (Expr / BlockBody) S '}'
 # The tail Expr, like a BlockBinding value, is Sep-bounded: a top-level
-# newline ends it unless the next line begins '|>' or the break is
+# newline ends it unless the next line begins with one of the exact
+# continuation tokens ('|>', 'then', 'else'), or the break is
 # inside ()/[]/{}. There is exactly one tail (no `Expr (Sep Expr)*`), so a
 # second top-level expression is a bare non-tail statement and is rejected
 # — bind it with `_ = <expr>` or move it to tail position.
