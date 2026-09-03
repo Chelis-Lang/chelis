@@ -830,6 +830,20 @@ fn every_settlement_family_declared_result_binds() {
 /// fillers beyond the six. A rank upper bound reachable only through one of
 /// those was not found.
 ///
+/// **Producer A is contingent, in the shape of the chelis#1512 labels above.**
+/// `spec/05` §2.4.1, landing in chelis#1523, makes the same-rank `expand` form
+/// well formed only over a unit operand extent. Producer A expands
+/// `tensor[2, f32]`, whose operand extent is 2, so once Slice B's b2.5 enforces
+/// that precondition, freezing producer A to the same-rank form is a type error
+/// and this fixture reds. That red reads as the precondition being enforced,
+/// not as the arm breaking and not as a test to restore. Producer B expands
+/// `tensor[1, f32]`, a unit extent, and is unaffected.
+///
+/// Under enforcement the rejection itself becomes the freeze discriminator,
+/// which is this arm's successor rather than a repair to it: a frozen same-rank
+/// `expand` over a non-unit operand extent rejects, while a propagating call
+/// leaves the operand open.
+///
 #[test]
 fn each_family_representative_behaves_as_its_family_declares() {
     let named = UNDISCRIMINATED_FAMILIES
