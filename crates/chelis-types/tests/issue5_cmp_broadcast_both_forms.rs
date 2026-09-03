@@ -193,7 +193,7 @@ fn comparison_over_a_pending_operand_publishes_no_unresolved_variable() {
 }
 
 #[test]
-fn two_pending_operands_of_one_comparison_share_one_choice() {
+fn two_pending_operands_of_one_comparison_are_solved_as_one_equation() {
     let rendered = check_surf(
         r#"
 def f(a: tensor[2, f32]) -> tensor[3, 2, bool] = {
@@ -209,7 +209,56 @@ def f(a: tensor[2, f32]) -> tensor[3, 2, bool] = {
         rendered.matches(insertion).count(),
         2,
         "the comparison's own signature unifies its two operands, so both \
-         pending results must settle to the one selected shape:\n{rendered}"
+         pending results must settle on one shape:\n{rendered}"
+    );
+}
+
+/// The coupling is on the dimensions, not on the forms.
+///
+/// [05-OP-36] constrains the dimensions a comparison's operands produce, not
+/// the forms that produce them, so two operands solved as one equation may
+/// select different forms. Here the left operand's candidates are rank 1 and
+/// rank 2 and the right operand's are rank 2 and rank 3, and exactly one pair
+/// lands at the same dimensions: insertion on the left, replacement on the
+/// right. A checker that required the same form would reject this program, and
+/// one that required nothing would accept a pair that cannot execute.
+///
+/// This row is a disposition lock, not a regression test: it passes on
+/// `a5137d2c3` too, because the selection was already right. It is here
+/// because the rule is easy to implement wrongly, not because it was broken.
+/// Note that the program still fails in `chelis eval`, for an unrelated reason
+/// this change does not touch: lowering's `fallback_expand_type` has no
+/// replacement branch, so the right operand lowers as an insertion. chelis#597
+/// and Slice B own that.
+#[test]
+fn two_pending_operands_may_select_different_forms_to_reach_one_shape() {
+    let rendered = check_surf(
+        "x1 = to_tensor([1.0f32, 2.0f32])\n\
+         y2 = to_tensor([[1.0f32, 2.0f32]])\n\
+         a = expand(x1, 0, 3i64)\n\
+         b = expand(y2, 0, 3i64)\n\
+         out = cmplt(a, b)\n",
+    )
+    .expect("one pair of forms satisfies the shared dimension equation");
+    let shared = "(t-tensor {} (d-lit {} 3) (d-lit {} 2) (t-prim {} f32))";
+    assert_eq!(
+        rendered.matches(shared).count(),
+        4,
+        "the rank-1 operand takes its insertion form and the rank-2 operand \
+         takes its replacement form, and both land at tensor[3, 2]; each is \
+         stamped on its own binding and on its expand application:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("(t-tensor {} (d-lit {} 3) (t-prim {} f32))"),
+        "the left operand must not take its replacement form:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("(d-lit {} 3) (d-lit {} 1) (d-lit {} 2)"),
+        "the right operand must not take its insertion form:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("(t-tensor {} (d-lit {} 3) (d-lit {} 2) (t-prim {} bool))"),
+        "the comparison result carries the shared dimensions at bool:\n{rendered}"
     );
 }
 

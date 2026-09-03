@@ -26,11 +26,14 @@ pub(super) fn infer_tuple(
         // field carries the unresolved monomorphic candidate and adds no
         // evidence. Only a variable field can resolve to a deferred result, so
         // the pre-filter keeps every other field free of a substitution walk.
+        //
+        // The action cannot fail: it inspects nothing and mutates nothing, so
+        // the result is deliberately discarded rather than given an error arm
+        // no input can reach.
         if matches!(elem, Type::Var(_))
             && let Type::Var(v) = subst.apply(elem)
-            && let Err(error) = subst.settle_deferred_tensor(v, DeferralAction::Propagate)
         {
-            return report(errors, error.into());
+            let _ = subst.settle_deferred_tensor(v, DeferralAction::Propagate);
         }
     }
     Type::Tuple(elems)
