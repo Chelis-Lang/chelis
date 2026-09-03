@@ -223,13 +223,24 @@ def f(a: tensor[2, f32]) -> tensor[3, 2, bool] = {
 /// right. A checker that required the same form would reject this program, and
 /// one that required nothing would accept a pair that cannot execute.
 ///
-/// This row is a disposition lock, not a regression test: it passes on
-/// `a5137d2c3` too, because the selection was already right. It is here
-/// because the rule is easy to implement wrongly, not because it was broken.
-/// Note that the program still fails in `chelis eval`, for an unrelated reason
-/// this change does not touch: lowering's `fallback_expand_type` has no
-/// replacement branch, so the right operand lowers as an insertion. chelis#597
-/// and Slice B own that.
+/// The evidentiary status here is per assertion, not per row, because the two
+/// halves of this row demonstrate different things.
+///
+/// The three form assertions are disposition locks. The shared `tensor[3, 2]`
+/// count and both negative form checks hold on `a5137d2c3` as well, because
+/// operand selection was already correct there. They are here because the rule
+/// is easy to implement wrongly, not because it was broken.
+///
+/// The final assertion, that the result carries those same dimensions at
+/// `bool`, is a regression assertion. On `a5137d2c3` the result is
+/// `(t-var {} t370)` and that assertion fails; it is the unresolved-variable
+/// defect this commit fixes, reached from the mixed-rank direction rather than
+/// from a declared result shape.
+///
+/// Separately, the program still fails in `chelis eval` for a reason this
+/// change does not touch: lowering's `fallback_expand_type` has no replacement
+/// branch, so the right operand lowers as an insertion. chelis#597 and Slice B
+/// own that.
 #[test]
 fn two_pending_operands_may_select_different_forms_to_reach_one_shape() {
     let rendered = check_surf(
