@@ -2561,7 +2561,8 @@ def validate_normative_contract(
                 "the form is a claim that the operand's extent at `axis` is "
                 "1. A\nruntime operand extent at `axis` other than 1 under "
                 "the same-rank form fails\nthat claim's runtime extent guard "
-                "and traps `Domain`",
+                "and traps `Domain`, placed and rendered per\n"
+                "`spec/04-type-system.md` §4.7 and [04-NUM-9].",
                 "expand same-rank non-unit source extent traps Domain",
             ),
             (
