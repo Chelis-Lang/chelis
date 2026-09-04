@@ -82,8 +82,12 @@ pub(super) fn infer_app(
     // check before the procedural arm. Dispatch it here (the
     // `infer_permute_app` pattern); 2-/3-arg expand keeps the generic path,
     // which reaches `check_expand_signature` with the scheme intact.
-    if matches!(func_name.as_deref(), Some("expand")) && kids.len() >= 5 {
-        return infer_expand_app(list, env, vg, subst, adt_reg, errors, product);
+    if let Some(callee @ ("expand" | "insert")) = func_name.as_deref()
+        && kids.len() >= 5
+    {
+        // `&'static str`, not the borrow, so the callee outlives `func_name`.
+        let callee = if callee == "insert" { "insert" } else { "expand" };
+        return infer_expand_app(callee, list, env, vg, subst, adt_reg, errors, product);
     }
 
     // chelis#339 Part 2: variadic named-axis reduction `sum(x, seq, head)`.

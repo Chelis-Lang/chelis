@@ -911,6 +911,7 @@ pub(super) fn check_reduction_signature(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_expand_signature(
+    builtin: &'static str,
     arg_exprs: &[deep::Expr],
     arg_tys: &[Type],
     result_ty: &Type,
@@ -921,8 +922,12 @@ pub(super) fn check_expand_signature(
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
+    // `insert` is this route with one result form instead of two. Everything
+    // before the result typing, including what happens to a pending operand,
+    // is shared byte for byte.
+    let inserts_only = builtin == "insert";
     if arg_tys.len() != 3 && arg_tys.len() != 4 {
-        return report_builtin_arity_bare(errors, "expand", "3 or 4 arguments", arg_tys.len());
+        return report_builtin_arity_bare(errors, builtin, "3 or 4 arguments", arg_tys.len());
     }
 
     let input_ty = type_for_readonly_check(&arg_tys[0], subst);
@@ -1117,7 +1122,7 @@ pub(super) fn check_expand_signature(
                     CheckError::new(
                         CheckErrorKind::PrecisionMismatch,
                         format!(
-                            "expand output precision {} does not match input precision {}",
+                            "{builtin} output precision {} does not match input precision {}",
                             out_prec.name(),
                             input_prec.name()
                         ),
@@ -1129,14 +1134,14 @@ pub(super) fn check_expand_signature(
                 let mut expected = input_dims.clone();
                 expected.insert(axis, size.clone());
                 Type::Tensor(expected, input_prec)
-            } else if out_dims.len() == input_dims.len() {
+            } else if out_dims.len() == input_dims.len() && !inserts_only {
                 if axis >= input_dims.len() {
                     return report(
                         errors,
                         CheckError::new(
                             CheckErrorKind::DimensionMismatch,
                             format!(
-                                "expand axis {axis} is out of bounds for rank {} tensor",
+                                "{builtin} axis {axis} is out of bounds for rank {} tensor",
                                 input_dims.len()
                             ),
                             vec![],
@@ -1151,16 +1156,31 @@ pub(super) fn check_expand_signature(
                     errors,
                     CheckError::new(
                         CheckErrorKind::DimensionMismatch,
-                        format!(
-                            "expand output rank {} must equal input rank {} or {}",
-                            out_dims.len(),
-                            input_dims.len(),
-                            input_dims.len() + 1
-                        ),
+                        if inserts_only {
+                            format!(
+                                "{builtin} output rank {} must equal input rank {} plus one",
+                                out_dims.len(),
+                                input_dims.len()
+                            )
+                        } else {
+                            format!(
+                                "{builtin} output rank {} must equal input rank {} or {}",
+                                out_dims.len(),
+                                input_dims.len(),
+                                input_dims.len() + 1
+                            )
+                        },
                         vec![],
                     ),
                 );
             }
+        }
+        Type::Var(_) if inserts_only => {
+            // `insert` has one legal shape, so there is nothing to defer: the
+            // result follows from the operand and the axis alone.
+            let mut expected = input_dims.clone();
+            expected.insert(axis, size.clone());
+            Type::Tensor(expected, input_prec)
         }
         Type::Var(result_var) => {
             // [04-TENSOR-EXPAND]: retain both legal shapes until ordinary
@@ -1187,7 +1207,7 @@ pub(super) fn check_expand_signature(
                 errors,
                 CheckError::new(
                     CheckErrorKind::TypeMismatch,
-                    format!("expand expects tensor output, got {other}"),
+                    format!("{builtin} expects tensor output, got {other}"),
                     vec![],
                 ),
             );

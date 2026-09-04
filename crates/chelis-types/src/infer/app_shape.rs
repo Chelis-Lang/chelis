@@ -83,6 +83,7 @@ pub(super) fn infer_reduction_app(
 /// exprs.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_expand_app(
+    callee: &'static str,
     list: &deep::List,
     env: &mut Env,
     vg: &mut VarGen,
@@ -187,6 +188,7 @@ pub(super) fn infer_expand_app(
         .unwrap_or(SizeClass::Unknown);
     let result_ty = Type::Var(vg.fresh_tvar());
     check_expand_signature(
+        callee,
         &kids[1..],
         &arg_tys,
         &result_ty,

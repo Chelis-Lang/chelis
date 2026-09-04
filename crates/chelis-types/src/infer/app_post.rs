@@ -162,7 +162,9 @@ pub(super) fn finish_unified_app(
                     errors,
                 );
             }
-            "expand" => {
+            name @ ("expand" | "insert") => {
+                // `&'static str`, not the borrow: the deferred rule outlives `fname`.
+                let callee = if name == "insert" { "insert" } else { "expand" };
                 checked_route_observed = true;
                 // chelis#339: the axis slot is a dim NAME (the
                 // named-axis insert form) only when it is not bound in
@@ -184,6 +186,7 @@ pub(super) fn finish_unified_app(
                 if owes_shape_replay {
                     product.defer_shape_check(
                         DeferredShapeRule::Expand {
+                            builtin: callee,
                             source_ordinal: product.source_ordinal_for_list(list),
                             axis_is_dim_name,
                             size_class,
@@ -196,6 +199,7 @@ pub(super) fn finish_unified_app(
                     retained_shape_obligation = true;
                 }
                 result_ty = check_expand_signature(
+                    callee,
                     &kids[1..],
                     &arg_tys,
                     &result_ty,
