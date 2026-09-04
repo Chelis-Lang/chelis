@@ -6,7 +6,7 @@
 //! layouts will be added incrementally.
 
 use chelis_ir::dag::{DagNode, DimInfo, NodeId, RiscOp, RtDim, TensorType};
-use chelis_ir::ownership::VerifiedDagView;
+use chelis_ir::ownership::{VerifiedDagAction, VerifiedDagView};
 use chelis_types::ScalarValue;
 
 /// chelis#616: the Metal lane requires compile-time movement bounds (it rejects
@@ -34,7 +34,8 @@ fn metal_bound_to_usize(b: &RtDim) -> usize {
 
 #[cfg(test)]
 mod rejection_authority_tests {
-    use super::Emitter;
+    use super::{Emitter, emit_verified_dag};
+    use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
     use chelis_types::types::Prim;
 
     #[test]
@@ -52,6 +53,56 @@ mod rejection_authority_tests {
             Emitter::host_scalar_literal(Prim::Int64, fill).unwrap(),
             "(-9223372036854775807LL - 1LL)"
         );
+    }
+
+    #[test]
+    fn verified_drop_is_typed_no_device_owner() {
+        let mut dag = Dag::new();
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(1)],
+            precision: Prim::F32,
+        };
+        let source = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            ty.clone(),
+            None,
+        );
+        dag.add_node(RiscOp::Drop, vec![source], ty, None);
+        let output = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 2.0),
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(1)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(output);
+        let verified = crate::testing::verified_dag(&dag).unwrap();
+        let emitted = emit_verified_dag(verified.emission(), "verified_drop").unwrap();
+
+        assert!(emitted.mm_source.contains("verified_drop"));
+        assert!(!emitted.mm_source.contains("chelis_tensor_release"));
+        assert!(!emitted.mm_source.contains("chelis_gpu_free_view"));
+    }
+
+    #[test]
+    fn verified_borrowed_drop_is_typed_no_device_owner() {
+        let mut dag = Dag::new();
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(1)],
+            precision: Prim::F32,
+        };
+        let borrowed = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        dag.add_node(RiscOp::Drop, vec![borrowed], ty, None);
+        dag.add_root(borrowed);
+        let verified = crate::testing::verified_dag(&dag).unwrap();
+        let emitted = emit_verified_dag(verified.emission(), "borrowed_drop").unwrap();
+
+        assert!(emitted.mm_source.contains("borrowed_drop"));
+        assert!(!emitted.mm_source.contains("chelis_tensor_release"));
+        assert!(!emitted.mm_source.contains("chelis_gpu_free_view"));
     }
 }
 
@@ -571,7 +622,35 @@ impl Emitter {
             RiscOp::Load { name } => self.emit_load(node, name.as_str(), inputs),
             RiscOp::Store { name } => self.emit_store(dag, node, name.as_str(), outputs),
             RiscOp::Const { value } => self.emit_const(node, value.as_f64_lossy()),
-            RiscOp::Copy | RiscOp::Drop => Ok(()),
+            RiscOp::Copy => Ok(()),
+            RiscOp::Drop => {
+                let Some(action) = dag.action_for_node(node.id) else {
+                    return Err(format!(
+                        "Metal verified ownership boundary: node {} has no typed Drop disposition",
+                        node.id.0
+                    ));
+                };
+                let (drop, source) = match action {
+                    VerifiedDagAction::BorrowedDrop { node, source }
+                    | VerifiedDagAction::OwnedDrop { node, source } => (node, source),
+                    _ => {
+                        return Err(format!(
+                            "Metal verified ownership boundary: node {} has a non-Drop disposition",
+                            node.id.0
+                        ));
+                    }
+                };
+                if drop != node.id || node.inputs.first() != Some(&source) {
+                    return Err(format!(
+                        "Metal verified ownership boundary: Drop node {} does not name its exact payload source",
+                        node.id.0
+                    ));
+                }
+                // Metal's DAG plan owns no C/HIP runtime descriptor. Consuming
+                // the verified Drop is therefore an intentional no-device-owner
+                // disposition, not a silently ignored ownership operation.
+                Ok(())
+            }
 
             // Lowering represents f16/bf16 matmul's required f32
             // accumulation followed by an explicit downcast. The existing

@@ -6,10 +6,22 @@
 use chelis_ir::dag::{
     DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, NodeId, RiscOp, RtDim, TensorType,
 };
-use chelis_ir::ownership::VerifiedDagView;
+use chelis_ir::ownership::{VerifiedDagAction, VerifiedDagView};
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_types::{ElementRef, ScalarValue};
+
+fn unsupported_verified_dag_action(node: NodeId, detail: &str) -> Unsupported {
+    Unsupported::new(
+        UnsupportedKind::Op("Drop".to_string()),
+        format!("verified DAG ownership action at node {}: {detail}", node.0),
+        Stage::Codegen("hip"),
+        chelis_types::deliberate_rejection!(
+            "[04-TOT-2]",
+            "verified ownership and the retained DAG payload must agree exactly; no backend-local ownership fallback is permitted"
+        ),
+    )
+}
 
 /// chelis#616: the HIP device-kernel lane does not support runtime (node-valued)
 /// movement bounds; `reject_unsupported_hip_ops` (compiler-api + CLI) rejects
@@ -417,7 +429,14 @@ impl HipEmitter {
         e.line("");
 
         // Cleanup: free GPU tensors (skip reduction-inlined FusedElems — never allocated)
-        let cleanup = e.plan.emit_cleanup();
+        let dropped_sources = dag
+            .actions()
+            .filter_map(|action| match action {
+                VerifiedDagAction::OwnedDrop { source, .. } => Some(source),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let cleanup = e.plan.emit_cleanup_with_drops(&dropped_sources);
         for line in cleanup {
             e.lines.push(line);
         }
@@ -537,7 +556,14 @@ impl HipEmitter {
         }
 
         self.line("");
-        let cleanup = self.plan.emit_cleanup();
+        let dropped_sources = dag
+            .actions()
+            .filter_map(|action| match action {
+                VerifiedDagAction::OwnedDrop { source, .. } => Some(source),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let cleanup = self.plan.emit_cleanup_with_drops(&dropped_sources);
         for line in cleanup {
             self.lines.push(line);
         }
@@ -1719,7 +1745,27 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
-            RiscOp::Drop => {}
+            RiscOp::Drop => {
+                let action = dag.action_for_node(node.id).ok_or_else(|| {
+                    unsupported_verified_dag_action(node.id, "missing Drop action")
+                })?;
+                match action {
+                    VerifiedDagAction::BorrowedDrop { node: drop, source }
+                    | VerifiedDagAction::OwnedDrop { node: drop, source }
+                        if drop == node.id && node.inputs.first() == Some(&source) =>
+                    {
+                        if matches!(action, VerifiedDagAction::OwnedDrop { .. }) {
+                            self.line(&format!("chelis_gpu_free_view(d_t{});", source.0));
+                        }
+                    }
+                    _ => {
+                        return Err(unsupported_verified_dag_action(
+                            node.id,
+                            "Drop action does not name the exact typed payload source",
+                        ));
+                    }
+                }
+            }
             // WS-A4: bind `accumulator` instead of `..` and thread it
             // through to `emit_reduce_launch` so the launch-side kernel
             // name agrees with the kernel-source-side name (otherwise
@@ -4119,6 +4165,46 @@ mod tests {
         let verified = crate::testing::verified_dag(dag)
             .expect("HIP emitter unit-test DAG must verify ownership");
         HipEmitter::emit_dag(verified.emission(), name)
+    }
+
+    #[test]
+    fn drop_releases_exact_device_descriptor_once() {
+        let mut dag = Dag::new();
+        let source = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            TensorType::scalar_f32(),
+            None,
+        );
+        dag.add_node(RiscOp::Drop, vec![source], TensorType::scalar_f32(), None);
+
+        let (source, _) = emit_test_dag(&dag, "verified_drop").unwrap();
+        assert_eq!(
+            source.matches("chelis_gpu_free_view(d_t0);").count(),
+            2,
+            "host and device entrypoints each consume the exact verified descriptor once:\n{source}"
+        );
+    }
+
+    #[test]
+    fn borrowed_drop_is_a_logical_discard_without_a_device_release() {
+        let mut dag = Dag::new();
+        let borrowed = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType::scalar_f32(),
+            None,
+        );
+        dag.add_node(RiscOp::Drop, vec![borrowed], TensorType::scalar_f32(), None);
+        let output = dag.add_node(RiscOp::Copy, vec![borrowed], TensorType::scalar_f32(), None);
+        dag.add_root(output);
+
+        let (source, _) = emit_test_dag(&dag, "borrowed_drop").unwrap();
+        assert_eq!(
+            source.matches("chelis_gpu_free_view(d_t0);").count(),
+            2,
+            "the borrowed descriptor may be cleaned up once per host/device entrypoint, but the logical Drop must not add a third release:\n{source}"
+        );
     }
 
     /// Width of a C type spelling this backend is allowed to emit.

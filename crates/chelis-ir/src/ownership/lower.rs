@@ -269,7 +269,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         kind: HostSiteKind,
         action: impl FnOnce(&mut Self) -> Result<T, OwnershipError>,
     ) -> Result<T, OwnershipError> {
-        let site = self.sites.add(kind);
+        let site = self.sites.add(self.unit_index, kind);
         let previous = self.active_site.replace(site);
         let result = action(self);
         self.active_site = previous;
@@ -294,7 +294,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
     }
 
     fn record_edge(&mut self, kind: HostSiteKind, target: BlockId) {
-        let site = self.sites.add(kind);
+        let site = self.sites.add(self.unit_index, kind);
         self.sites.record(
             site,
             HostSiteAction::ControlEdge {
@@ -494,6 +494,11 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
     fn bind(&mut self, name: &str, value: Value) -> Result<(), OwnershipError> {
         match value {
             Value::Fresh(owner) => {
+                // A fresh value returned from a nested scope was marked moved
+                // while crossing that scope edge. Binding it in the enclosing
+                // scope establishes the new live owner there; leaving the
+                // historical marker set would suppress its eventual terminal.
+                self.moved.remove(&owner);
                 self.register(owner)?;
                 self.name_owner(owner, name)
             }
@@ -571,6 +576,9 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                         .get(&owner)
                         .is_some_and(|info| info.origin == OwnerOrigin::Owned) =>
             {
+                self.emit(Op::Project {
+                    source: Operand::borrow(owner),
+                });
                 self.moved.insert(owner);
                 Value::Fresh(owner)
             }
@@ -653,17 +661,52 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 self.lower_call(function, values, ty, tail)
             }
             ConcreteHostExprKind::Builtin { name, args, ty } => {
+                if name == "copy" && args.len() == 1 {
+                    let value = self.with_site(HostSiteKind::Argument, |lowerer| {
+                        lowerer.lower_expr(&args[0], None)
+                    })?;
+                    let source = self.borrow(value)?;
+                    let dest = self.copy(source.owner)?;
+                    return Ok(Value::Fresh(dest));
+                }
+                if name == "debug" && args.len() == 1 {
+                    let value = self.with_site(HostSiteKind::Argument, |lowerer| {
+                        lowerer.lower_expr(&args[0], None)
+                    })?;
+                    let operand = self.borrow(value)?;
+                    self.emit(Op::Apply {
+                        dest: None,
+                        label: format!("builtin:{name}"),
+                        schema: OperationSchema::new(vec![super::ir::OwnershipUse::Borrow], None),
+                        args: vec![operand],
+                    });
+                    // `debug` observes and returns the same logical value. It
+                    // therefore differs from source `copy`, which lowers to
+                    // `Op::Copy` and mints a fresh owner above.
+                    return Ok(Value::Named(operand.owner));
+                }
                 let mut operands = Vec::with_capacity(args.len());
+                let use_ = if name == "Some" {
+                    super::ir::OwnershipUse::Move
+                } else {
+                    super::ir::OwnershipUse::Borrow
+                };
                 for arg in args {
                     let value = self.with_site(HostSiteKind::Argument, |lowerer| {
                         lowerer.lower_expr(arg, None)
                     })?;
-                    operands.push(self.borrow(value)?);
+                    operands.push(match use_ {
+                        super::ir::OwnershipUse::Move => self.consume(value, None)?,
+                        super::ir::OwnershipUse::Borrow => self.borrow(value)?,
+                        super::ir::OwnershipUse::Clone => {
+                            unreachable!("lowering chooses clone by consuming a named owner")
+                        }
+                    });
                 }
                 self.apply(
                     ty,
                     format!("builtin:{name}"),
-                    vec![super::ir::OwnershipUse::Borrow; operands.len()],
+                    vec![use_; operands.len()],
                     operands,
                 )
             }
@@ -901,6 +944,24 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         ty: &ConcreteHostType,
         tail: Option<usize>,
     ) -> Result<Value, OwnershipError> {
+        // These two unspellable placeholders are typed negative evidence for
+        // the target capability boundary. Ownership still has to account for
+        // their exact argument/result payload so the pre-emission verifier is
+        // total, but it must not turn any ordinary unknown callee into an
+        // admissible call. The C ABI projection rejects the retained marker
+        // before a raw call can be emitted.
+        if crate::host::is_host_unresolved_marker(function) {
+            let mut args = Vec::with_capacity(values.len());
+            for value in values {
+                args.push(self.borrow(value)?);
+            }
+            return self.apply(
+                ty,
+                "unresolved_call_placeholder".to_string(),
+                vec![super::ir::OwnershipUse::Borrow; args.len()],
+                args,
+            );
+        }
         let (label, specs) = match self.lookup(function) {
             Some(Place::Callback(owner)) => {
                 let params = match &self.info(owner)?.ty {
@@ -1091,7 +1152,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             OwnerOrigin::Owned,
             vec![bind_name.to_string()],
         )?;
-        self.sites.add(HostSiteKind::Binding);
+        self.sites.add(self.unit_index, HostSiteKind::Binding);
         self.emit(Op::Apply {
             dest: Some(payload),
             label: "option_payload".to_string(),
@@ -1158,7 +1219,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             self.current = block;
             self.push_scope();
             for binding in &arm.bindings {
-                self.sites.add(HostSiteKind::Binding);
+                self.sites.add(self.unit_index, HostSiteKind::Binding);
                 let owner = self.mint(
                     &binding.ty,
                     Placement::Value,
@@ -1257,7 +1318,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             args: vec![init],
         }))?;
         self.push_scope();
-        self.sites.add(HostSiteKind::Binding);
+        self.sites.add(self.unit_index, HostSiteKind::Binding);
         let acc = self.mint(
             ty,
             Placement::Value,
@@ -1298,15 +1359,10 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             OwnerOrigin::Owned,
             vec![names[1].clone()],
         )?;
-        self.sites.add(HostSiteKind::Binding);
-        self.emit(Op::Apply {
-            dest: Some(element),
-            label: "loop_item".to_string(),
-            schema: OperationSchema::new(
-                vec![super::ir::OwnershipUse::Borrow],
-                Some(self.info(element)?.class),
-            ),
-            args: vec![list],
+        self.sites.add(self.unit_index, HostSiteKind::Binding);
+        self.emit(Op::LoopItem {
+            dest: element,
+            list,
         });
         self.register(element)?;
         self.scope_mut()?
@@ -1399,15 +1455,10 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             OwnerOrigin::Owned,
             vec![names[0].clone()],
         )?;
-        self.sites.add(HostSiteKind::Binding);
-        self.emit(Op::Apply {
-            dest: Some(element),
-            label: "loop_item".to_string(),
-            schema: OperationSchema::new(
-                vec![super::ir::OwnershipUse::Borrow],
-                Some(self.info(element)?.class),
-            ),
-            args: vec![list],
+        self.sites.add(self.unit_index, HostSiteKind::Binding);
+        self.emit(Op::LoopItem {
+            dest: element,
+            list,
         });
         self.register(element)?;
         self.scope_mut()?
@@ -1503,16 +1554,10 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             OwnerOrigin::Owned,
             vec![names[0].clone()],
         )?;
-        self.sites.add(HostSiteKind::Binding);
-        let element_class = self.info(element)?.class;
-        self.emit(Op::Apply {
-            dest: Some(element),
-            label: "loop_item".to_string(),
-            schema: OperationSchema::new(
-                vec![super::ir::OwnershipUse::Borrow],
-                Some(element_class),
-            ),
-            args: vec![list],
+        self.sites.add(self.unit_index, HostSiteKind::Binding);
+        self.emit(Op::LoopItem {
+            dest: element,
+            list,
         });
         self.register(element)?;
         self.scope_mut()?
@@ -1610,7 +1655,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             OwnerOrigin::Owned,
             vec![names[0].clone()],
         )?;
-        self.sites.add(HostSiteKind::Binding);
+        self.sites.add(self.unit_index, HostSiteKind::Binding);
         let body_output = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
         self.register(body_state)?;
         self.register(body_output)?;
@@ -1660,16 +1705,10 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             OwnerOrigin::Owned,
             vec![names[1].clone()],
         )?;
-        self.sites.add(HostSiteKind::Binding);
-        let element_class = self.info(element)?.class;
-        self.emit(Op::Apply {
-            dest: Some(element),
-            label: "loop_item".to_string(),
-            schema: OperationSchema::new(
-                vec![super::ir::OwnershipUse::Borrow],
-                Some(element_class),
-            ),
-            args: vec![list],
+        self.sites.add(self.unit_index, HostSiteKind::Binding);
+        self.emit(Op::LoopItem {
+            dest: element,
+            list,
         });
         self.register(element)?;
         self.scope_mut()?
@@ -1945,23 +1984,67 @@ fn lower_roots(
             }
         }
     }
-    for (index, (manifest_index, root, owner)) in sinks.iter().enumerate() {
+    for (manifest_index, root, owner) in &sinks {
         lowerer.with_site(HostSiteKind::ManifestRoot, |lowerer| {
-            let owner = *owner;
-            let later = sinks[index + 1..]
-                .iter()
-                .any(|(_, _, other)| *other == owner);
-            let owner = if later { lowerer.copy(owner)? } else { owner };
+            let owner = lowerer.copy(*owner)?;
             lowerer.moved.insert(owner);
             lowerer.sites.record(
                 lowerer.active_site.expect("root site"),
                 HostSiteAction::Root {
-                    manifest_index: *manifest_index,
+                    unit: lowerer.unit_index,
+                    manifest_index: Some(*manifest_index),
                     owner,
                 },
             );
             lowerer.emit(Op::RootConsume {
                 root: root.name.clone(),
+                owner: Operand::move_(owner),
+            });
+            Ok(())
+        })?;
+    }
+    let mut unmanifested_displays = Vec::new();
+    for binding in &ctx.host.globals {
+        for display in &binding.display_roots {
+            let manifested = manifest.entries.iter().any(|root| {
+                let selected = binding.name == root.def_name
+                    || matches!(
+                        &binding.value.kind,
+                        ConcreteHostExprKind::Call { function, args, .. }
+                            if function == &root.def_name && args.is_empty()
+                    );
+                root.lane == Lane::Host && selected && display_root(root) == *display
+            });
+            if !manifested {
+                unmanifested_displays.push((binding.name.clone(), display.name.clone()));
+            }
+        }
+        if binding.display_roots.is_empty()
+            && let Some(display_name) = &binding.display_name
+        {
+            unmanifested_displays.push((binding.name.clone(), display_name.clone()));
+        }
+    }
+    for (binding_name, display_name) in unmanifested_displays {
+        let Some(Place::Owner(source)) = lowerer.lookup(&binding_name) else {
+            return Err(OwnershipError::ManifestRootWithoutBinding {
+                root: display_name.clone(),
+                def_name: binding_name,
+            });
+        };
+        lowerer.with_site(HostSiteKind::ManifestRoot, |lowerer| {
+            let owner = lowerer.copy(source)?;
+            lowerer.moved.insert(owner);
+            lowerer.sites.record(
+                lowerer.active_site.expect("display root site"),
+                HostSiteAction::Root {
+                    unit: lowerer.unit_index,
+                    manifest_index: None,
+                    owner,
+                },
+            );
+            lowerer.emit(Op::RootConsume {
+                root: display_name.clone(),
                 owner: Operand::move_(owner),
             });
             Ok(())
@@ -1997,7 +2080,7 @@ fn lower_function(
     let mut entry_params = Vec::with_capacity(function.params.len());
     let mut body_params = Vec::with_capacity(function.params.len());
     for (param, spec) in function.params.iter().zip(&signature.params) {
-        lowerer.sites.add(HostSiteKind::Binding);
+        lowerer.sites.add(lowerer.unit_index, HostSiteKind::Binding);
         let class =
             lowerer.classify_or_reject(&spec.ty, Placement::Parameter, Some(&param.name))?;
         let heap = class.is_heap();
@@ -2024,8 +2107,12 @@ fn lower_function(
         let body_mode = if heap { spec.mode } else { ParamMode::Owned };
         let body_origin = match body_mode {
             ParamMode::Owned => OwnerOrigin::Owned,
-            ParamMode::Borrowed | ParamMode::EntryBorrow if authored => OwnerOrigin::ExternalBorrow,
-            ParamMode::Borrowed | ParamMode::EntryBorrow => OwnerOrigin::InternalBorrow,
+            // A borrowed formal is external to the function unit whether the
+            // function has an authored ABI adapter or is a translation-unit
+            // internal specialization. Its borrow spans every control-flow
+            // block in that invocation. Shorter-lived projections use an
+            // explicit `BorrowedFrom` provenance edge.
+            ParamMode::Borrowed | ParamMode::EntryBorrow => OwnerOrigin::ExternalBorrow,
         };
         let body_owner = lowerer.mint(
             &spec.ty,
@@ -2049,7 +2136,9 @@ fn lower_function(
         lowerer.with_site(HostSiteKind::FunctionEntry, |lowerer| {
             let mut args = Vec::with_capacity(entry_params.len());
             for (entry_param, spec) in entry_params.iter().zip(&signature.params) {
-                lowerer.sites.add(HostSiteKind::Argument);
+                lowerer
+                    .sites
+                    .add(lowerer.unit_index, HostSiteKind::Argument);
                 args.push(match (entry_param.mode, spec.mode) {
                     (ParamMode::EntryBorrow, ParamMode::Owned) => {
                         let copy = lowerer.copy(entry_param.owner)?;
@@ -2068,7 +2157,9 @@ fn lower_function(
         (entry, body)
     } else {
         let body = lowerer.new_block(body_params.clone());
-        lowerer.sites.add(HostSiteKind::FunctionEntry);
+        lowerer
+            .sites
+            .add(lowerer.unit_index, HostSiteKind::FunctionEntry);
         (body, body)
     };
     lowerer.current = body;

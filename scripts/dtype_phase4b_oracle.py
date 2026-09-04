@@ -1335,9 +1335,9 @@ def validate_normative_contract(
                 "Phase 1 exact ownership row map",
             ),
             (
-                "This phase promotes exactly five oracle rows: the [#1346] fold row, "
-                "the two\n[#1352] mixed fresh-arm rows, and the two [#1356] "
-                "fresh-argument rows",
+                "This phase promotes exactly six oracle rows: the [#1346] fold row, "
+                "the two\n[#1352] mixed fresh-arm rows, the two [#1356] "
+                "fresh-argument rows, and\n`recursive-depth-1-control`",
                 "Phase 2 exact ownership row map",
             ),
             (
@@ -1438,14 +1438,14 @@ def validate_normative_contract(
         implicit_linearity,
         (
             (
-                "The current C/HIP emitters still\n"
-                "treat the IR node as an emission no-op and reconstruct host "
-                "releases from backend-local\nstate",
+                "The verified `OwnershipProgram` makes `RiscOp::Copy` and "
+                "`RiscOp::Drop` real\nownership operations",
                 "current Drop implementation status",
             ),
             (
-                "the successor verified-ownership lanes emit the matching heap "
-                "release at the\nterminal operation",
+                "C and HIP emit the exact\ndescriptor release selected by the "
+                "verified directive; Metal consumes the same\ndirective as a typed "
+                "no-device-owner disposition",
                 "successor Drop release",
             ),
         ),

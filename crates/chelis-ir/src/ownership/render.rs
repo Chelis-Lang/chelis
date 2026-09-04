@@ -62,6 +62,10 @@ fn render_op(unit: &Unit, op: &Op) -> String {
             )
         }
         Op::Copy { dest, source } => format!("%{} = copy {}", dest.0, operand(source)),
+        Op::Project { source } => format!("project {}", operand(source)),
+        Op::LoopItem { dest, list } => {
+            format!("%{} = loop-item {}", dest.0, operand(list))
+        }
         Op::Drop { owner } => format!("drop {}", operand(owner)),
         Op::RootConsume { root, owner } => format!("root {root} {}", operand(owner)),
     }

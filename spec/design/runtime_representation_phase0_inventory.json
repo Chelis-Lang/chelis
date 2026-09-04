@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "e677c4082bc74e1c73d027f78f642872a801b4aebc2ab1d519fc464b1defa49e",
+  "freeze_sha256": "bd1213b13aa1de1cb0b3f524c05bf200656f14838e63db3171548b69c5c12855",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -243,7 +243,7 @@
       "deletion_phase": 4
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_expr",
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_expr_at_site",
       "deletion_phase": 4
     },
     {
@@ -1163,7 +1163,7 @@
       "deletion_phase": 1
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/verify.rs|owner=verify",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/verify.rs|owner=verify_with_dangling_policy",
       "deletion_phase": 1
     },
     {
@@ -1653,7 +1653,7 @@
       "sample": "{}for (int64_t {flat_index} = 0; {flat_index} < {view}.count; {flat_index}++) {{"
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_expr",
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_expr_at_site",
       "sample": "{}chelis_rng_current.seed = (uint64_t){seed_var};"
     },
     {
@@ -2573,7 +2573,7 @@
       "sample": "x_ty . dims . len () . saturating_sub (1)"
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/verify.rs|owner=verify",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/verify.rs|owner=verify_with_dangling_policy",
       "sample": "input . output_type . dims . len () . saturating_sub (1)"
     },
     {

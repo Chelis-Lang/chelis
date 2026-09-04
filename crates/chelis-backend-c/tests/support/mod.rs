@@ -92,7 +92,7 @@ pub fn codegen_host_program(
         },
         chelis_types::types::Target::C,
     );
-    let selected = chelis_backend_c::prepare_host_program_for_codegen(program);
+    let selected = chelis_backend_c::prepare_host_program_for_codegen(program)?;
     let lowered = chelis_ir::ownership::lower_host_ownership(&manifested, selected)
         .expect("backend test host payload must lower ownership");
     let verified = chelis_ir::ownership::verify_ownership(lowered)

@@ -21,7 +21,7 @@ use chelis_ir::host::{
     HostTensorHelper,
 };
 use chelis_ir::ownership::{
-    HostSiteId, HostSiteKind, VerifiedHostEmission, VerifiedHostFunctionView,
+    HostSiteId, HostSiteKind, VerifiedHostAction, VerifiedHostEmission, VerifiedHostFunctionView,
     VerifiedHostSiteActionKind, VerifiedHostTensorHelperView,
 };
 use chelis_types::types::Prim;
@@ -79,19 +79,26 @@ pub(crate) type HostAbiMatchArm = HostMatchArm<HostAbiType>;
 pub(crate) struct ProjectedHostProgram<'a> {
     program: HostAbiProgram,
     emission: VerifiedHostEmission<'a>,
-    sites: Vec<ProjectedHostSite>,
+    sites: Vec<ProjectedHostSite<'a>>,
+    root_sites: Vec<ProjectedHostSite<'a>>,
+    function_sites: Vec<Vec<ProjectedHostSite<'a>>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ProjectedHostSite {
+#[derive(Debug, Clone)]
+pub(crate) struct ProjectedHostSite<'a> {
     pub(crate) id: HostSiteId,
     pub(crate) kind: HostSiteKind,
     pub(crate) actions: Vec<VerifiedHostSiteActionKind>,
+    pub(crate) directives: Vec<VerifiedHostAction<'a>>,
 }
 
 impl<'a> ProjectedHostProgram<'a> {
     pub(crate) fn program(&self) -> &HostAbiProgram {
         &self.program
+    }
+
+    pub(crate) fn manifest(&self) -> &chelis_types::manifest::RootManifest {
+        self.emission.manifest()
     }
 
     pub(crate) fn global_tensor_helper(
@@ -109,8 +116,16 @@ impl<'a> ProjectedHostProgram<'a> {
         self.emission.function(function)?.tensor_helper(helper)
     }
 
-    pub(crate) fn sites(&self) -> &[ProjectedHostSite] {
+    pub(crate) fn sites(&self) -> &[ProjectedHostSite<'a>] {
         &self.sites
+    }
+
+    pub(crate) fn root_sites(&self) -> &[ProjectedHostSite<'a>] {
+        &self.root_sites
+    }
+
+    pub(crate) fn function_sites(&self, index: usize) -> Option<&[ProjectedHostSite<'a>]> {
+        self.function_sites.get(index).map(Vec::as_slice)
     }
 }
 
@@ -257,19 +272,34 @@ pub(crate) fn project_program(
             .collect::<Result<Vec<_>, _>>()?,
         summary_rejections: emission.summary_rejections().to_vec(),
     };
-    let sites = emission
-        .sites()
-        .map(|site| ProjectedHostSite {
-            id: site.id(),
-            kind: site.kind(),
-            actions: site.actions().collect(),
+    let sites = emission.sites().map(project_site).collect();
+    let root_sites = emission.root_sites().map(project_site).collect();
+    let function_sites = (0..emission.function_count())
+        .map(|index| {
+            emission
+                .function(index)
+                .expect("verified function census")
+                .sites()
+                .map(project_site)
+                .collect()
         })
         .collect();
     Ok(ProjectedHostProgram {
         program,
         emission,
         sites,
+        root_sites,
+        function_sites,
     })
+}
+
+fn project_site<'a>(site: chelis_ir::ownership::VerifiedHostSiteView<'a>) -> ProjectedHostSite<'a> {
+    ProjectedHostSite {
+        id: site.id(),
+        kind: site.kind(),
+        actions: site.action_kinds().collect(),
+        directives: site.actions().collect(),
+    }
 }
 
 fn helper_metadata(helper: VerifiedHostTensorHelperView<'_>) -> HostTensorHelper {

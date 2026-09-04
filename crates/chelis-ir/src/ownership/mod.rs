@@ -109,6 +109,7 @@ pub use ir::{HostSiteId, HostSiteKind};
 #[derive(Clone, Copy)]
 pub struct VerifiedDagView<'a> {
     dag: &'a Dag,
+    plan: &'a DagOwnershipPlan,
 }
 
 impl<'a> VerifiedDagView<'a> {
@@ -170,12 +171,49 @@ impl<'a> VerifiedDagView<'a> {
     ) -> Result<(), chelis_types::unsupported::Unsupported> {
         crate::axis_sources::check_axis_sources(self.dag, stage)
     }
+
+    /// The exact verified ownership directive attached to `node`.
+    ///
+    /// Every retained DAG node has exactly one directive; backends use this
+    /// typed view instead of rediscovering terminal ownership from `RiscOp`.
+    pub fn action_for_node(self, node: NodeId) -> Option<VerifiedDagAction<'a>> {
+        self.plan
+            .directives
+            .iter()
+            .take(self.dag.len())
+            .find(|directive| directive.node() == Some(node))
+            .map(DagDirective::view)
+    }
+
+    /// All verified DAG actions, including root transfers and scope drops.
+    pub fn actions(self) -> impl ExactSizeIterator<Item = VerifiedDagAction<'a>> + 'a {
+        self.plan.directives.iter().map(DagDirective::view)
+    }
+}
+
+/// Closed backend view of a verified DAG ownership directive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifiedDagAction<'a> {
+    BorrowLoad { node: NodeId },
+    Produce { node: NodeId, borrows: &'a [NodeId] },
+    Clone { node: NodeId, source: NodeId },
+    CloneProduce { node: NodeId, source: NodeId },
+    MoveProduce { node: NodeId, source: NodeId },
+    CloneStore { node: NodeId, source: NodeId },
+    MoveStore { node: NodeId, source: NodeId },
+    StoreRoot { node: NodeId },
+    BorrowedDrop { node: NodeId, source: NodeId },
+    OwnedDrop { node: NodeId, source: NodeId },
+    Root { source: NodeId },
+    RootClone { source: NodeId },
+    ScopeDrop { source: NodeId },
 }
 
 /// One immutable record in the verified host payload/site bijection.
 #[derive(Clone, Copy)]
 pub struct VerifiedHostSiteView<'a> {
     record: &'a ir::HostSiteRecord,
+    program: &'a ir::OwnershipProgram,
 }
 
 /// Closed classification for a verified ownership directive attached to a
@@ -189,6 +227,184 @@ pub enum VerifiedHostSiteActionKind {
     ManifestRoot,
 }
 
+/// Opaque identity for one verified logical owner. Backends may associate an
+/// emitted value with this identity, but cannot manufacture an owner from an
+/// integer or infer ownership from a source spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VerifiedOwnerId {
+    key: u32,
+}
+
+/// Opaque identity for one verified ownership block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VerifiedBlockId {
+    key: u32,
+}
+
+/// Closed operand disposition exported by the verified boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifiedOwnershipUse {
+    Borrow,
+    Move,
+    Clone,
+}
+
+/// Read-only metadata for one verified logical owner.
+#[derive(Debug, Clone, Copy)]
+pub struct VerifiedOwnerView<'a> {
+    id: VerifiedOwnerId,
+    info: &'a ir::OwnerInfo,
+}
+
+impl<'a> VerifiedOwnerView<'a> {
+    pub fn id(self) -> VerifiedOwnerId {
+        self.id
+    }
+
+    pub fn ty(self) -> &'a crate::host_type_state::ConcreteHostType {
+        &self.info.ty
+    }
+
+    pub fn names(self) -> &'a [String] {
+        &self.info.names
+    }
+
+    pub fn is_heap(self) -> bool {
+        self.info.class.is_heap()
+    }
+}
+
+/// One typed use of a verified logical owner.
+#[derive(Debug, Clone, Copy)]
+pub struct VerifiedOperandView<'a> {
+    owner: VerifiedOwnerView<'a>,
+    use_: VerifiedOwnershipUse,
+}
+
+/// One verified control-flow edge, including the exact owned/borrowed values
+/// supplied to the target block parameters.
+#[derive(Debug, Clone)]
+pub struct VerifiedEdgeView<'a> {
+    target: VerifiedBlockId,
+    params: Vec<VerifiedOwnerView<'a>>,
+    args: Vec<VerifiedOperandView<'a>>,
+}
+
+impl<'a> VerifiedEdgeView<'a> {
+    pub fn target(&self) -> VerifiedBlockId {
+        self.target
+    }
+
+    pub fn params(&self) -> &[VerifiedOwnerView<'a>] {
+        &self.params
+    }
+
+    pub fn args(&self) -> &[VerifiedOperandView<'a>] {
+        &self.args
+    }
+}
+
+impl<'a> VerifiedOperandView<'a> {
+    pub fn owner(self) -> VerifiedOwnerView<'a> {
+        self.owner
+    }
+
+    pub fn use_(self) -> VerifiedOwnershipUse {
+        self.use_
+    }
+}
+
+/// Closed, typed operation directive. Labels are diagnostic renderings only;
+/// ownership behavior is selected exclusively by these variants and operand
+/// dispositions.
+#[derive(Debug, Clone)]
+pub enum VerifiedHostOperation<'a> {
+    Define {
+        block: VerifiedBlockId,
+        dest: VerifiedOwnerView<'a>,
+        label: &'a str,
+    },
+    Apply {
+        block: VerifiedBlockId,
+        dest: Option<VerifiedOwnerView<'a>>,
+        label: &'a str,
+        args: Vec<VerifiedOperandView<'a>>,
+    },
+    Clone {
+        block: VerifiedBlockId,
+        dest: VerifiedOwnerView<'a>,
+        source: VerifiedOperandView<'a>,
+    },
+    /// A non-owning projection of a logical owner into the host payload slot
+    /// at this exact site.
+    Project {
+        block: VerifiedBlockId,
+        source: VerifiedOperandView<'a>,
+    },
+    LoopItem {
+        block: VerifiedBlockId,
+        dest: VerifiedOwnerView<'a>,
+        list: VerifiedOperandView<'a>,
+    },
+    Drop {
+        block: VerifiedBlockId,
+        owner: VerifiedOperandView<'a>,
+    },
+    RootConsume {
+        block: VerifiedBlockId,
+        root: &'a str,
+        owner: VerifiedOperandView<'a>,
+    },
+}
+
+/// Closed, typed terminal directive for one verified ownership block.
+#[derive(Debug, Clone)]
+pub enum VerifiedHostTerminator<'a> {
+    Return {
+        block: VerifiedBlockId,
+        result: VerifiedOperandView<'a>,
+    },
+    Jump {
+        block: VerifiedBlockId,
+        edge: VerifiedEdgeView<'a>,
+    },
+    Branch {
+        block: VerifiedBlockId,
+        condition: VerifiedOperandView<'a>,
+        then_edge: VerifiedEdgeView<'a>,
+        else_edge: VerifiedEdgeView<'a>,
+    },
+    Match {
+        block: VerifiedBlockId,
+        scrutinee: VerifiedOperandView<'a>,
+        arms: Vec<VerifiedEdgeView<'a>>,
+    },
+    Loop {
+        block: VerifiedBlockId,
+        list: VerifiedOperandView<'a>,
+        body_edge: VerifiedEdgeView<'a>,
+        exit_edge: VerifiedEdgeView<'a>,
+    },
+    Exit {
+        block: VerifiedBlockId,
+    },
+}
+
+/// One exact semantic directive attached to a verified host-emission site.
+#[derive(Debug, Clone)]
+pub enum VerifiedHostAction<'a> {
+    Operation(VerifiedHostOperation<'a>),
+    Terminator(VerifiedHostTerminator<'a>),
+    ControlEdge {
+        source: VerifiedBlockId,
+        target: VerifiedBlockId,
+    },
+    ManifestRoot {
+        manifest_index: Option<usize>,
+        owner: VerifiedOwnerView<'a>,
+    },
+}
+
 impl<'a> VerifiedHostSiteView<'a> {
     pub fn id(self) -> HostSiteId {
         self.record.id
@@ -198,13 +414,199 @@ impl<'a> VerifiedHostSiteView<'a> {
         self.record.kind
     }
 
-    pub fn actions(self) -> impl ExactSizeIterator<Item = VerifiedHostSiteActionKind> + 'a {
+    pub fn action_kinds(self) -> impl ExactSizeIterator<Item = VerifiedHostSiteActionKind> + 'a {
         self.record.actions.iter().map(|action| match action {
             ir::HostSiteAction::Operation { .. } => VerifiedHostSiteActionKind::Operation,
             ir::HostSiteAction::Terminator { .. } => VerifiedHostSiteActionKind::Terminator,
             ir::HostSiteAction::ControlEdge { .. } => VerifiedHostSiteActionKind::ControlEdge,
             ir::HostSiteAction::Root { .. } => VerifiedHostSiteActionKind::ManifestRoot,
         })
+    }
+
+    pub fn actions(self) -> impl ExactSizeIterator<Item = VerifiedHostAction<'a>> + 'a {
+        self.record.actions.iter().map(move |action| {
+            verified_host_action(self.program, action)
+                .expect("verified host site action references checked ownership IR")
+        })
+    }
+}
+
+fn verified_owner<'a>(
+    program: &'a ir::OwnershipProgram,
+    unit: usize,
+    owner: ir::OwnerId,
+) -> Option<VerifiedOwnerView<'a>> {
+    let info = program.units.get(unit)?.owners.get(&owner)?;
+    Some(VerifiedOwnerView {
+        id: VerifiedOwnerId { key: owner.0 },
+        info,
+    })
+}
+
+fn verified_operand<'a>(
+    program: &'a ir::OwnershipProgram,
+    unit: usize,
+    operand: &ir::Operand,
+) -> Option<VerifiedOperandView<'a>> {
+    let use_ = match operand.use_ {
+        ir::OwnershipUse::Borrow => VerifiedOwnershipUse::Borrow,
+        ir::OwnershipUse::Move => VerifiedOwnershipUse::Move,
+        ir::OwnershipUse::Clone => VerifiedOwnershipUse::Clone,
+    };
+    Some(VerifiedOperandView {
+        owner: verified_owner(program, unit, operand.owner)?,
+        use_,
+    })
+}
+
+fn verified_edge<'a>(
+    program: &'a ir::OwnershipProgram,
+    unit: usize,
+    edge: &ir::Edge,
+) -> Option<VerifiedEdgeView<'a>> {
+    let block = program
+        .units
+        .get(unit)?
+        .blocks
+        .get(edge.target.0 as usize)?;
+    Some(VerifiedEdgeView {
+        target: VerifiedBlockId { key: edge.target.0 },
+        params: block
+            .params
+            .iter()
+            .map(|param| verified_owner(program, unit, param.owner))
+            .collect::<Option<Vec<_>>>()?,
+        args: edge
+            .args
+            .iter()
+            .map(|operand| verified_operand(program, unit, operand))
+            .collect::<Option<Vec<_>>>()?,
+    })
+}
+
+fn verified_host_action<'a>(
+    program: &'a ir::OwnershipProgram,
+    action: &'a ir::HostSiteAction,
+) -> Option<VerifiedHostAction<'a>> {
+    let block_id = |block: ir::BlockId| VerifiedBlockId { key: block.0 };
+    match *action {
+        ir::HostSiteAction::Operation {
+            unit,
+            block,
+            operation,
+        } => {
+            let op = program
+                .units
+                .get(unit)?
+                .blocks
+                .get(block.0 as usize)?
+                .ops
+                .get(operation)?;
+            let block = block_id(block);
+            Some(VerifiedHostAction::Operation(match op {
+                ir::Op::Define { dest, label } => VerifiedHostOperation::Define {
+                    block,
+                    dest: verified_owner(program, unit, *dest)?,
+                    label,
+                },
+                ir::Op::Apply {
+                    dest, label, args, ..
+                } => VerifiedHostOperation::Apply {
+                    block,
+                    dest: dest.and_then(|owner| verified_owner(program, unit, owner)),
+                    label,
+                    args: args
+                        .iter()
+                        .map(|operand| verified_operand(program, unit, operand))
+                        .collect::<Option<Vec<_>>>()?,
+                },
+                ir::Op::Copy { dest, source } => VerifiedHostOperation::Clone {
+                    block,
+                    dest: verified_owner(program, unit, *dest)?,
+                    source: verified_operand(program, unit, source)?,
+                },
+                ir::Op::Project { source } => VerifiedHostOperation::Project {
+                    block,
+                    source: verified_operand(program, unit, source)?,
+                },
+                ir::Op::LoopItem { dest, list } => VerifiedHostOperation::LoopItem {
+                    block,
+                    dest: verified_owner(program, unit, *dest)?,
+                    list: verified_operand(program, unit, list)?,
+                },
+                ir::Op::Drop { owner } => VerifiedHostOperation::Drop {
+                    block,
+                    owner: verified_operand(program, unit, owner)?,
+                },
+                ir::Op::RootConsume { root, owner } => VerifiedHostOperation::RootConsume {
+                    block,
+                    root,
+                    owner: verified_operand(program, unit, owner)?,
+                },
+            }))
+        }
+        ir::HostSiteAction::Terminator { unit, block } => {
+            let terminal = &program
+                .units
+                .get(unit)?
+                .blocks
+                .get(block.0 as usize)?
+                .terminator;
+            let block = block_id(block);
+            Some(VerifiedHostAction::Terminator(match terminal {
+                ir::Terminator::Return { result } => VerifiedHostTerminator::Return {
+                    block,
+                    result: verified_operand(program, unit, result)?,
+                },
+                ir::Terminator::Jump(edge) => VerifiedHostTerminator::Jump {
+                    block,
+                    edge: verified_edge(program, unit, edge)?,
+                },
+                ir::Terminator::Branch {
+                    condition,
+                    then_edge,
+                    else_edge,
+                } => VerifiedHostTerminator::Branch {
+                    block,
+                    condition: verified_operand(program, unit, condition)?,
+                    then_edge: verified_edge(program, unit, then_edge)?,
+                    else_edge: verified_edge(program, unit, else_edge)?,
+                },
+                ir::Terminator::Match { scrutinee, arms } => VerifiedHostTerminator::Match {
+                    block,
+                    scrutinee: verified_operand(program, unit, scrutinee)?,
+                    arms: arms
+                        .iter()
+                        .map(|edge| verified_edge(program, unit, edge))
+                        .collect::<Option<Vec<_>>>()?,
+                },
+                ir::Terminator::Loop {
+                    list,
+                    body_edge,
+                    exit_edge,
+                } => VerifiedHostTerminator::Loop {
+                    block,
+                    list: verified_operand(program, unit, list)?,
+                    body_edge: verified_edge(program, unit, body_edge)?,
+                    exit_edge: verified_edge(program, unit, exit_edge)?,
+                },
+                ir::Terminator::Exit => VerifiedHostTerminator::Exit { block },
+            }))
+        }
+        ir::HostSiteAction::ControlEdge { source, target, .. } => {
+            Some(VerifiedHostAction::ControlEdge {
+                source: block_id(source),
+                target: block_id(target),
+            })
+        }
+        ir::HostSiteAction::Root {
+            unit,
+            manifest_index,
+            owner,
+        } => Some(VerifiedHostAction::ManifestRoot {
+            manifest_index,
+            owner: verified_owner(program, unit, owner)?,
+        }),
     }
 }
 
@@ -287,7 +689,7 @@ impl<'a> VerifiedHostFunctionView<'a> {
 
     pub fn tensor_helper(self, helper: usize) -> Option<VerifiedHostTensorHelperView<'a>> {
         let raw = self.function().tensor_helpers.get(helper)?;
-        let _plan = self.emission.nested_dags.iter().find(|candidate| {
+        let plan = self.emission.nested_dags.iter().find(|candidate| {
             candidate.location
                 == NestedDagLocation::Function {
                     function: self.index,
@@ -296,8 +698,22 @@ impl<'a> VerifiedHostFunctionView<'a> {
         })?;
         Some(VerifiedHostTensorHelperView {
             helper: raw,
-            dag: VerifiedDagView { dag: &raw.dag },
+            dag: VerifiedDagView {
+                dag: &raw.dag,
+                plan: &plan.plan,
+            },
         })
+    }
+
+    pub fn sites(self) -> impl Iterator<Item = VerifiedHostSiteView<'a>> + 'a {
+        let unit = self.index + 1;
+        let program = self.emission.ownership_program();
+        self.emission
+            .sites
+            .records
+            .iter()
+            .filter(move |record| record.unit == unit)
+            .map(move |record| VerifiedHostSiteView { record, program })
     }
 }
 
@@ -306,11 +722,19 @@ impl<'a> VerifiedHostFunctionView<'a> {
 #[derive(Clone, Copy)]
 pub struct VerifiedHostEmission<'a> {
     payload: &'a HostEmissionPayload,
+    program: &'a ir::OwnershipProgram,
     sites: &'a ir::HostSiteMap,
     nested_dags: &'a [NestedDagProof],
 }
 
 impl<'a> VerifiedHostEmission<'a> {
+    fn ownership_program(self) -> &'a ir::OwnershipProgram {
+        // The emission cursor is built only from the host proof variant.
+        // Its program reference is threaded explicitly below rather than
+        // recovered from a raw sibling payload.
+        self.program
+    }
+
     pub fn globals(self) -> &'a [ConcreteHostBinding] {
         &self.payload.program.globals
     }
@@ -332,12 +756,16 @@ impl<'a> VerifiedHostEmission<'a> {
 
     pub fn global_tensor_helper(self, helper: usize) -> Option<VerifiedHostTensorHelperView<'a>> {
         let raw = self.payload.program.global_tensor_helpers.get(helper)?;
-        self.nested_dags
+        let plan = self
+            .nested_dags
             .iter()
             .find(|candidate| candidate.location == NestedDagLocation::Global(helper))?;
         Some(VerifiedHostTensorHelperView {
             helper: raw,
-            dag: VerifiedDagView { dag: &raw.dag },
+            dag: VerifiedDagView {
+                dag: &raw.dag,
+                plan: &plan.plan,
+            },
         })
     }
 
@@ -350,10 +778,20 @@ impl<'a> VerifiedHostEmission<'a> {
     }
 
     pub fn sites(self) -> impl ExactSizeIterator<Item = VerifiedHostSiteView<'a>> + 'a {
+        let program = self.ownership_program();
         self.sites
             .records
             .iter()
-            .map(|record| VerifiedHostSiteView { record })
+            .map(move |record| VerifiedHostSiteView { record, program })
+    }
+
+    pub fn root_sites(self) -> impl Iterator<Item = VerifiedHostSiteView<'a>> + 'a {
+        let program = self.ownership_program();
+        self.sites
+            .records
+            .iter()
+            .filter(|record| record.unit == 0)
+            .map(move |record| VerifiedHostSiteView { record, program })
     }
 }
 
@@ -493,7 +931,7 @@ pub fn verify_ownership<P: EmissionPayload>(
             verify::verify(ir_program)?;
             let payload = host_payload(&program)?;
             verify::verify_host_sites(&payload.program, &payload.manifest, ir_program, sites)?;
-            verify_manifest_sinks(payload, ir_program)?;
+            verify_manifest_sinks(payload, ir_program, sites)?;
             verify_nested_dags(&program, nested_dags)?;
         }
         (OwnershipProof::Dag(plan), PayloadKind::Dag) => {
@@ -513,6 +951,7 @@ pub fn verify_ownership<P: EmissionPayload>(
 fn verify_manifest_sinks(
     payload: &HostEmissionPayload,
     program: &ir::OwnershipProgram,
+    sites: &ir::HostSiteMap,
 ) -> Result<(), OwnershipError> {
     use chelis_types::types::Lane;
     let expected = payload
@@ -522,13 +961,33 @@ fn verify_manifest_sinks(
         .filter(|entry| entry.lane == Lane::Host)
         .map(|entry| entry.name.as_str())
         .collect::<Vec<_>>();
-    let actual = program
-        .units
+    let actual = sites
+        .records
         .iter()
-        .find(|unit| unit.kind == ir::UnitKind::Roots)
-        .into_iter()
-        .flat_map(|unit| &unit.blocks)
-        .flat_map(|block| &block.ops)
+        .filter(|site| {
+            site.actions.iter().any(|action| {
+                matches!(
+                    action,
+                    ir::HostSiteAction::Root {
+                        manifest_index: Some(_),
+                        ..
+                    }
+                )
+            })
+        })
+        .flat_map(|site| &site.actions)
+        .filter_map(|action| match *action {
+            ir::HostSiteAction::Operation {
+                unit,
+                block,
+                operation,
+            } => program
+                .units
+                .get(unit)
+                .and_then(|unit| unit.blocks.iter().find(|candidate| candidate.id == block))
+                .and_then(|block| block.ops.get(operation)),
+            _ => None,
+        })
         .filter_map(|op| match op {
             ir::Op::RootConsume { root, .. } => Some(root.as_str()),
             _ => None,
@@ -549,7 +1008,9 @@ fn verify_manifest_sinks(
 impl VerifiedHostProgram {
     pub fn emission(&self) -> VerifiedHostEmission<'_> {
         let OwnershipProof::Host {
-            sites, nested_dags, ..
+            program,
+            sites,
+            nested_dags,
         } = &self.0.proof
         else {
             unreachable!("sealed host specialization")
@@ -559,6 +1020,7 @@ impl VerifiedHostProgram {
             .expect("sealed host payload specialization");
         VerifiedHostEmission {
             payload,
+            program,
             sites,
             nested_dags,
         }
@@ -591,7 +1053,13 @@ impl VerifiedDagProgram {
         let payload = (&self.0.payload as &dyn std::any::Any)
             .downcast_ref::<DagEmissionPayload>()
             .expect("sealed DAG payload specialization");
-        VerifiedDagView { dag: &payload.dag }
+        let OwnershipProof::Dag(plan) = &self.0.proof else {
+            unreachable!("sealed DAG specialization")
+        };
+        VerifiedDagView {
+            dag: &payload.dag,
+            plan,
+        }
     }
 
     pub fn render(&self) -> String {
@@ -677,13 +1145,76 @@ enum DagDirective {
     BorrowLoad { node: NodeId },
     Produce { node: NodeId, borrows: Vec<NodeId> },
     Clone { node: NodeId, source: NodeId },
+    CloneProduce { node: NodeId, source: NodeId },
     MoveProduce { node: NodeId, source: NodeId },
-    Store { node: NodeId, source: NodeId },
+    CloneStore { node: NodeId, source: NodeId },
+    MoveStore { node: NodeId, source: NodeId },
     StoreRoot { node: NodeId },
-    Drop { node: NodeId, source: NodeId },
+    BorrowedDrop { node: NodeId, source: NodeId },
+    OwnedDrop { node: NodeId, source: NodeId },
     Root { source: NodeId },
     RootClone { source: NodeId },
     ScopeDrop { source: NodeId },
+}
+
+impl DagDirective {
+    fn node(&self) -> Option<NodeId> {
+        match *self {
+            Self::BorrowLoad { node }
+            | Self::Produce { node, .. }
+            | Self::Clone { node, .. }
+            | Self::CloneProduce { node, .. }
+            | Self::MoveProduce { node, .. }
+            | Self::CloneStore { node, .. }
+            | Self::MoveStore { node, .. }
+            | Self::StoreRoot { node }
+            | Self::BorrowedDrop { node, .. }
+            | Self::OwnedDrop { node, .. } => Some(node),
+            Self::Root { .. } | Self::RootClone { .. } | Self::ScopeDrop { .. } => None,
+        }
+    }
+
+    fn view(&self) -> VerifiedDagAction<'_> {
+        match self {
+            Self::BorrowLoad { node } => VerifiedDagAction::BorrowLoad { node: *node },
+            Self::Produce { node, borrows } => VerifiedDagAction::Produce {
+                node: *node,
+                borrows,
+            },
+            Self::Clone { node, source } => VerifiedDagAction::Clone {
+                node: *node,
+                source: *source,
+            },
+            Self::CloneProduce { node, source } => VerifiedDagAction::CloneProduce {
+                node: *node,
+                source: *source,
+            },
+            Self::MoveProduce { node, source } => VerifiedDagAction::MoveProduce {
+                node: *node,
+                source: *source,
+            },
+            Self::CloneStore { node, source } => VerifiedDagAction::CloneStore {
+                node: *node,
+                source: *source,
+            },
+            Self::MoveStore { node, source } => VerifiedDagAction::MoveStore {
+                node: *node,
+                source: *source,
+            },
+            Self::StoreRoot { node } => VerifiedDagAction::StoreRoot { node: *node },
+            Self::BorrowedDrop { node, source } => VerifiedDagAction::BorrowedDrop {
+                node: *node,
+                source: *source,
+            },
+            Self::OwnedDrop { node, source } => VerifiedDagAction::OwnedDrop {
+                node: *node,
+                source: *source,
+            },
+            Self::Root { source } => VerifiedDagAction::Root { source: *source },
+            Self::RootClone { source } => VerifiedDagAction::RootClone { source: *source },
+            Self::ScopeDrop { source } => VerifiedDagAction::ScopeDrop { source: *source },
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -694,7 +1225,7 @@ struct DagOwnershipPlan {
 
 impl DagOwnershipPlan {
     fn lower(dag: &Dag) -> Result<Self, OwnershipError> {
-        let structural_errors = crate::verify::verify(dag);
+        let structural_errors = crate::verify::verify_ownership_input(dag);
         if !structural_errors.is_empty() {
             return Err(OwnershipError::LoweringInvariant {
                 unit: "dag".to_string(),
@@ -725,29 +1256,80 @@ impl DagOwnershipPlan {
                 }
                 RiscOp::Drop => {
                     require_dag_arity(node.id, "drop", 1, node.inputs.len())?;
-                    consume_dag_owner(&mut states, node.inputs[0], node.id)?;
-                    directives.push(DagDirective::Drop {
-                        node: node.id,
-                        source: node.inputs[0],
-                    });
+                    match states.get(&node.inputs[0]).copied() {
+                        Some(DagOwnerState::BorrowedLive) => {
+                            directives.push(DagDirective::BorrowedDrop {
+                                node: node.id,
+                                source: node.inputs[0],
+                            });
+                        }
+                        Some(DagOwnerState::OwnedLive) => {
+                            consume_dag_owner(&mut states, node.inputs[0], node.id)?;
+                            directives.push(DagDirective::OwnedDrop {
+                                node: node.id,
+                                source: node.inputs[0],
+                            });
+                        }
+                        Some(DagOwnerState::OwnedTerminal) => {
+                            return Err(OwnershipError::DagDuplicateTerminal {
+                                owner: node.inputs[0].0,
+                            });
+                        }
+                        None => {
+                            return Err(OwnershipError::DagInput {
+                                node: node.id.0,
+                                input: node.inputs[0].0,
+                            });
+                        }
+                    }
                 }
                 RiscOp::Realize => {
                     require_dag_arity(node.id, "realize", 1, node.inputs.len())?;
-                    consume_dag_owner(&mut states, node.inputs[0], node.id)?;
+                    let source_state = require_live_dag_owner(&states, node.inputs[0], node.id)?;
                     owners.insert(node.id, DagOwnerOrigin::OwnedProducer);
                     states.insert(node.id, DagOwnerState::OwnedLive);
-                    directives.push(DagDirective::MoveProduce {
-                        node: node.id,
-                        source: node.inputs[0],
-                    });
+                    match source_state {
+                        DagOwnerState::BorrowedLive => {
+                            directives.push(DagDirective::CloneProduce {
+                                node: node.id,
+                                source: node.inputs[0],
+                            });
+                        }
+                        DagOwnerState::OwnedLive
+                            if dag_owner_used_after(dag, node.inputs[0], node.id) =>
+                        {
+                            directives.push(DagDirective::CloneProduce {
+                                node: node.id,
+                                source: node.inputs[0],
+                            });
+                        }
+                        DagOwnerState::OwnedLive => {
+                            consume_dag_owner(&mut states, node.inputs[0], node.id)?;
+                            directives.push(DagDirective::MoveProduce {
+                                node: node.id,
+                                source: node.inputs[0],
+                            });
+                        }
+                        DagOwnerState::OwnedTerminal => {
+                            unreachable!("require_live_dag_owner rejects terminal owners")
+                        }
+                    }
                 }
                 RiscOp::Store { .. } => {
                     require_dag_arity(node.id, "store", 1, node.inputs.len())?;
-                    consume_dag_owner(&mut states, node.inputs[0], node.id)?;
-                    directives.push(DagDirective::Store {
-                        node: node.id,
-                        source: node.inputs[0],
-                    });
+                    let source_state = require_live_dag_owner(&states, node.inputs[0], node.id)?;
+                    if source_state == DagOwnerState::BorrowedLive {
+                        directives.push(DagDirective::CloneStore {
+                            node: node.id,
+                            source: node.inputs[0],
+                        });
+                    } else {
+                        consume_dag_owner(&mut states, node.inputs[0], node.id)?;
+                        directives.push(DagDirective::MoveStore {
+                            node: node.id,
+                            source: node.inputs[0],
+                        });
+                    }
                 }
                 _ => {
                     let mut borrows = node.inputs.clone();
@@ -814,7 +1396,7 @@ impl DagOwnershipPlan {
     }
 
     fn verify(&self, dag: &Dag) -> Result<(), OwnershipError> {
-        let structural_errors = crate::verify::verify(dag);
+        let structural_errors = crate::verify::verify_ownership_input(dag);
         if !structural_errors.is_empty() {
             return Err(OwnershipError::LoweringInvariant {
                 unit: "dag".to_string(),
@@ -858,41 +1440,104 @@ impl DagOwnershipPlan {
                 }
                 RiscOp::Drop => {
                     require_dag_arity(node.id, "drop", 1, node.inputs.len())?;
-                    consume_dag_owner(&mut states, node.inputs[0], node.id)?;
-                    require_exact_dag_directive(
-                        directive,
-                        &DagDirective::Drop {
-                            node: node.id,
-                            source: node.inputs[0],
-                        },
-                        node.id,
-                    )?;
+                    match states.get(&node.inputs[0]).copied() {
+                        Some(DagOwnerState::BorrowedLive) => require_exact_dag_directive(
+                            directive,
+                            &DagDirective::BorrowedDrop {
+                                node: node.id,
+                                source: node.inputs[0],
+                            },
+                            node.id,
+                        )?,
+                        Some(DagOwnerState::OwnedLive) => {
+                            consume_dag_owner(&mut states, node.inputs[0], node.id)?;
+                            require_exact_dag_directive(
+                                directive,
+                                &DagDirective::OwnedDrop {
+                                    node: node.id,
+                                    source: node.inputs[0],
+                                },
+                                node.id,
+                            )?;
+                        }
+                        Some(DagOwnerState::OwnedTerminal) => {
+                            return Err(OwnershipError::DagDuplicateTerminal {
+                                owner: node.inputs[0].0,
+                            });
+                        }
+                        None => {
+                            return Err(OwnershipError::DagInput {
+                                node: node.id.0,
+                                input: node.inputs[0].0,
+                            });
+                        }
+                    }
                 }
                 RiscOp::Realize => {
                     require_dag_arity(node.id, "realize", 1, node.inputs.len())?;
-                    consume_dag_owner(&mut states, node.inputs[0], node.id)?;
-                    require_exact_dag_directive(
-                        directive,
-                        &DagDirective::MoveProduce {
-                            node: node.id,
-                            source: node.inputs[0],
-                        },
-                        node.id,
-                    )?;
+                    let source_state = require_live_dag_owner(&states, node.inputs[0], node.id)?;
+                    match source_state {
+                        DagOwnerState::BorrowedLive => require_exact_dag_directive(
+                            directive,
+                            &DagDirective::CloneProduce {
+                                node: node.id,
+                                source: node.inputs[0],
+                            },
+                            node.id,
+                        )?,
+                        DagOwnerState::OwnedLive
+                            if dag_owner_used_after(dag, node.inputs[0], node.id) =>
+                        {
+                            require_exact_dag_directive(
+                                directive,
+                                &DagDirective::CloneProduce {
+                                    node: node.id,
+                                    source: node.inputs[0],
+                                },
+                                node.id,
+                            )?;
+                        }
+                        DagOwnerState::OwnedLive => {
+                            consume_dag_owner(&mut states, node.inputs[0], node.id)?;
+                            require_exact_dag_directive(
+                                directive,
+                                &DagDirective::MoveProduce {
+                                    node: node.id,
+                                    source: node.inputs[0],
+                                },
+                                node.id,
+                            )?;
+                        }
+                        DagOwnerState::OwnedTerminal => {
+                            unreachable!("require_live_dag_owner rejects terminal owners")
+                        }
+                    }
                     owners.insert(node.id, DagOwnerOrigin::OwnedProducer);
                     states.insert(node.id, DagOwnerState::OwnedLive);
                 }
                 RiscOp::Store { .. } => {
                     require_dag_arity(node.id, "store", 1, node.inputs.len())?;
-                    consume_dag_owner(&mut states, node.inputs[0], node.id)?;
-                    require_exact_dag_directive(
-                        directive,
-                        &DagDirective::Store {
-                            node: node.id,
-                            source: node.inputs[0],
-                        },
-                        node.id,
-                    )?;
+                    let source_state = require_live_dag_owner(&states, node.inputs[0], node.id)?;
+                    if source_state == DagOwnerState::BorrowedLive {
+                        require_exact_dag_directive(
+                            directive,
+                            &DagDirective::CloneStore {
+                                node: node.id,
+                                source: node.inputs[0],
+                            },
+                            node.id,
+                        )?;
+                    } else {
+                        consume_dag_owner(&mut states, node.inputs[0], node.id)?;
+                        require_exact_dag_directive(
+                            directive,
+                            &DagDirective::MoveStore {
+                                node: node.id,
+                                source: node.inputs[0],
+                            },
+                            node.id,
+                        )?;
+                    }
                 }
                 _ => {
                     let mut borrows = node.inputs.clone();
@@ -1014,16 +1659,25 @@ impl DagOwnershipPlan {
                 DagDirective::Clone { node, source } => {
                     let _ = writeln!(out, "clone n{} from n{}", node.0, source.0);
                 }
+                DagDirective::CloneProduce { node, source } => {
+                    let _ = writeln!(out, "produce n{} clone n{}", node.0, source.0);
+                }
                 DagDirective::MoveProduce { node, source } => {
                     let _ = writeln!(out, "produce n{} move n{}", node.0, source.0);
                 }
-                DagDirective::Store { node, source } => {
+                DagDirective::CloneStore { node, source } => {
+                    let _ = writeln!(out, "store n{} clone n{}", node.0, source.0);
+                }
+                DagDirective::MoveStore { node, source } => {
                     let _ = writeln!(out, "store n{} move n{}", node.0, source.0);
                 }
                 DagDirective::StoreRoot { node } => {
                     let _ = writeln!(out, "store-root n{}", node.0);
                 }
-                DagDirective::Drop { node, source } => {
+                DagDirective::BorrowedDrop { node, source } => {
+                    let _ = writeln!(out, "drop n{} borrow n{}", node.0, source.0);
+                }
+                DagDirective::OwnedDrop { node, source } => {
                     let _ = writeln!(out, "drop n{} move n{}", node.0, source.0);
                 }
                 DagDirective::Root { source } => {
@@ -1069,6 +1723,14 @@ fn validate_dag_dependencies(dag: &Dag, node: &crate::dag::DagNode) -> Result<()
         }
     }
     Ok(())
+}
+
+fn dag_owner_used_after(dag: &Dag, owner: NodeId, consumer: NodeId) -> bool {
+    dag.nodes()
+        .iter()
+        .skip(consumer.0 + 1)
+        .any(|node| node.inputs.contains(&owner) || node.shape_deps.contains(&owner))
+        || dag.roots().contains(&owner)
 }
 
 fn require_live_dag_owner(

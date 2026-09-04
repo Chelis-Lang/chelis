@@ -283,6 +283,12 @@ fn build_app(
 /// matching close. Panics when the function is absent, so a renamed or
 /// dropped definition fails loudly instead of vacuously passing.
 fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
+    // The public symbol is now the [04-LIN-7] borrowing adapter. Constructor
+    // layout and projection are emitted in the consuming implementation body.
+    let (prefix, params) = signature
+        .split_once('(')
+        .expect("test signature contains parameter list");
+    let signature = format!("{prefix}__chelis_owned_body({params}");
     let start = source
         .find(&format!("{signature} {{"))
         .unwrap_or_else(|| panic!("emitted C has no `{signature}` definition:\n{source}"));

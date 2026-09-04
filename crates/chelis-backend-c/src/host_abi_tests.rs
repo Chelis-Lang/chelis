@@ -220,6 +220,78 @@ fn public_backend_emission_edges_cannot_borrow_raw_payloads() {
     assert!(metal.contains("dag: &chelis_ir::ownership::VerifiedDagProgram"));
 }
 
+fn verified_host_from_source(source: &str) -> chelis_ir::ownership::VerifiedHostProgram {
+    let declarations = chelis_surf::parser::parse_str(source).expect("parse host source");
+    let deep = chelis_surf::desugar::desugar_program(&declarations);
+    let checked = chelis_types::check_typed_program(&deep)
+        .unwrap_or_else(|errors| panic!("check host source: {:?}", errors.errors));
+    let checked = chelis_effects::check_program(&checked).expect("effects host source");
+    let checked = chelis_types::check_linearity(&checked).expect("linearity host source");
+    let realizability =
+        chelis_effects::realizability::infer_realizability(&checked, crate::TENSOR_CAPABLE_PRIMS);
+    let manifest = chelis_effects::realizability::compute_root_manifest(&checked, &realizability);
+    let lowered = chelis_ir::host::try_lower_compiled_program_with_manifest(&checked, &manifest)
+        .expect("lower host source");
+    let host =
+        crate::prepare_host_program_for_codegen(lowered.host.expect("source uses the host lane"))
+            .expect("select C host payload");
+    let manifested = chelis_types::manifest::ManifestedProgram::new(
+        checked,
+        manifest,
+        chelis_types::types::Target::C,
+    );
+    chelis_ir::ownership::verify_ownership(
+        chelis_ir::ownership::lower_host_ownership(&manifested, host)
+            .expect("lower host ownership"),
+    )
+    .expect("verify host ownership")
+}
+
+#[test]
+fn recursive_calls_target_the_consuming_body_not_the_external_clone_adapter() {
+    let source = include_str!(
+        "../../chelis-cli/tests/fixtures/compiled_value_ownership/issue_1206_depth_1.ch"
+    );
+    let verified = verified_host_from_source(source);
+    let emitted = crate::codegen_host_program(&verified, "recursive_depth_1")
+        .unwrap()
+        .c_source;
+    let body = "step__chelis_owned_body";
+
+    assert!(emitted.contains("chelis_tensor* step(chelis_tensor* state"));
+    assert!(
+        emitted.matches(&format!("{body}(")).count() >= 3,
+        "declaration, definition, wrapper entry, and recursive body call must retain the internal symbol:\n{emitted}"
+    );
+    assert_eq!(
+        emitted.matches("= step(").count(),
+        0,
+        "internal recursion must never re-enter the external cloning adapter:\n{emitted}"
+    );
+}
+
+#[test]
+fn backend_local_host_ownership_inference_cannot_return() {
+    let source = include_str!("host_emit.rs");
+    for forbidden in [
+        concat!("Returns", "Arg"),
+        concat!("Param", "Alias"),
+        concat!("analyze_", "returns_arg"),
+        concat!("result_", "alias_set"),
+        concat!("retain_", "call_escaped_args"),
+        concat!("is_definitely_", "fresh_heap_expr"),
+        concat!("scope_", "releases"),
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "backend-local ownership inference `{forbidden}` returned"
+        );
+    }
+    assert!(source.contains("VerifiedHostAction::Operation"));
+    assert!(source.contains("VerifiedHostTerminator::Return"));
+    assert!(source.contains("emit_expression_site"));
+}
+
 #[test]
 fn abi_projection_preserves_exact_verified_site_and_nested_dag_cursors() {
     let source = include_str!(
@@ -268,7 +340,7 @@ fn abi_projection_preserves_exact_verified_site_and_nested_dag_cursors() {
         manifest,
         chelis_types::types::Target::C,
     );
-    let selected = crate::prepare_host_program_for_codegen(host);
+    let selected = crate::prepare_host_program_for_codegen(host).expect("select C host payload");
     let verified = chelis_ir::ownership::verify_ownership(
         chelis_ir::ownership::lower_host_ownership(&manifested, selected)
             .expect("lower host ownership"),
@@ -277,7 +349,13 @@ fn abi_projection_preserves_exact_verified_site_and_nested_dag_cursors() {
     let emission = verified.emission();
     let expected_sites = emission
         .sites()
-        .map(|site| (site.id(), site.kind(), site.actions().collect::<Vec<_>>()))
+        .map(|site| {
+            (
+                site.id(),
+                site.kind(),
+                site.action_kinds().collect::<Vec<_>>(),
+            )
+        })
         .collect::<Vec<_>>();
     let projected = crate::host_abi::project_program(emission).expect("project verified host");
 

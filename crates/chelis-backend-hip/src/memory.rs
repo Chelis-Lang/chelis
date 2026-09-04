@@ -102,12 +102,18 @@ impl MemoryPlan {
     }
 
     pub fn emit_cleanup(&self) -> Vec<String> {
+        self.emit_cleanup_with_drops(&[])
+    }
+
+    pub fn emit_cleanup_with_drops(&self, dropped_sources: &[NodeId]) -> Vec<String> {
         let mut lines = Vec::new();
         for (idx, kind) in self.node_kinds.iter().enumerate() {
-            if matches!(
-                kind,
-                NodeMemoryKind::TerminalDrop { .. } | NodeMemoryKind::Skipped
-            ) {
+            if dropped_sources.contains(&NodeId(idx))
+                || matches!(
+                    kind,
+                    NodeMemoryKind::TerminalDrop { .. } | NodeMemoryKind::Skipped
+                )
+            {
                 continue;
             }
             lines.push(format!("    chelis_gpu_free_view(d_t{idx});"));

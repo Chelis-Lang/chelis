@@ -1958,7 +1958,8 @@ fn execution_artifact_from_compiled(
                     .all(|global| matches!(&global.ty, chelis_ir::ConcreteHostType::Scalar(_)));
                 let selected = projected_host_program
                     .unwrap_or_else(|| host_compiled.host.take().expect("host branch selected"));
-                let selected = chelis_backend_c::prepare_host_program_for_codegen(selected);
+                let selected = chelis_backend_c::prepare_host_program_for_codegen(selected)
+                    .map_err(unsupported_stage_error)?;
                 let verified = chelis_ir::ownership::verify_ownership(
                     chelis_ir::ownership::lower_host_ownership(&compiled.program, selected)
                         .map_err(|error| {
@@ -2081,7 +2082,8 @@ fn execution_artifact_from_compiled(
                 reject_unsupported_effect_ops_in_host_program(host_program, BuildTarget::Hip)?;
                 reject_unsupported_hip_ops_in_host_program(host_program)?;
                 let selected = host_compiled.host.take().expect("host branch selected");
-                let selected = chelis_backend_c::prepare_host_program_for_codegen(selected);
+                let selected = chelis_backend_c::prepare_host_program_for_codegen(selected)
+                    .map_err(unsupported_stage_error)?;
                 let verified = chelis_ir::ownership::verify_ownership(
                     chelis_ir::ownership::lower_host_ownership(&compiled.program, selected)
                         .map_err(|error| {

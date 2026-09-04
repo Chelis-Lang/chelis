@@ -199,20 +199,27 @@ pub fn prepare_dag_for_codegen(
 /// Select the exact nested C helper DAGs before host ownership lowering.
 pub fn prepare_host_program_for_codegen(
     mut program: chelis_ir::host::ConcreteHostProgram,
-) -> chelis_ir::host::ConcreteHostProgram {
-    fn prepare(helper: &mut chelis_ir::host::HostTensorHelper) {
+) -> Result<chelis_ir::host::ConcreteHostProgram, chelis_types::unsupported::Unsupported> {
+    fn prepare(
+        helper: &mut chelis_ir::host::HostTensorHelper,
+    ) -> Result<(), chelis_types::unsupported::Unsupported> {
         let specialized = chelis_ir::specialize::specialize_for_blas(&helper.dag);
+        chelis_ir::check_axis_sources(
+            &specialized,
+            chelis_types::unsupported::Stage::Codegen("c"),
+        )?;
         helper.dag = emit::CEmitter::rename_anonymous_dims(specialized);
+        Ok(())
     }
     for helper in &mut program.global_tensor_helpers {
-        prepare(helper);
+        prepare(helper)?;
     }
     for function in &mut program.functions {
         for helper in &mut function.tensor_helpers {
-            prepare(helper);
+            prepare(helper)?;
         }
     }
-    program
+    Ok(program)
 }
 
 #[cfg(test)]
@@ -296,7 +303,7 @@ mod tests {
             },
             chelis_types::types::Target::C,
         );
-        let selected = prepare_host_program_for_codegen(program.clone());
+        let selected = prepare_host_program_for_codegen(program.clone())?;
         let lowered = chelis_ir::ownership::lower_host_ownership(&manifested, selected)
             .expect("C backend unit-test host must lower ownership");
         let verified = chelis_ir::ownership::verify_ownership(lowered)

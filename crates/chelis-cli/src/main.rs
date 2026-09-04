@@ -1508,7 +1508,7 @@ fn verified_host_codegen_program(
     };
     let manifested =
         chelis_types::manifest::ManifestedProgram::new(checked.clone(), manifest.clone(), target);
-    let selected = chelis_backend_c::prepare_host_program_for_codegen(program);
+    let selected = chelis_backend_c::prepare_host_program_for_codegen(program)?;
     let lowered = chelis_ir::ownership::lower_host_ownership(&manifested, selected)?;
     Ok(chelis_ir::ownership::verify_ownership(lowered)?)
 }

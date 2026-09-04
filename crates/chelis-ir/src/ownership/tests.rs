@@ -441,6 +441,7 @@ fn host_payload_site_and_directive_universes_are_bijective() {
     );
     let record = |index, kind, actions| HostSiteRecord {
         id: HostSiteId::from_index(index),
+        unit: 0,
         kind,
         actions,
     };
@@ -461,7 +462,8 @@ fn host_payload_site_and_directive_universes_are_bijective() {
                 HostSiteKind::ManifestRoot,
                 vec![
                     HostSiteAction::Root {
-                        manifest_index: 0,
+                        unit: 0,
+                        manifest_index: Some(0),
                         owner: OwnerId(0),
                     },
                     HostSiteAction::Operation {
@@ -505,7 +507,8 @@ fn host_payload_site_and_directive_universes_are_bijective() {
     duplicate_root.records[2]
         .actions
         .push(HostSiteAction::Root {
-            manifest_index: 0,
+            unit: 0,
+            manifest_index: Some(0),
             owner: OwnerId(0),
         });
     assert!(matches!(
@@ -574,6 +577,7 @@ fn payload_census_rejects_a_missing_match_option_binding_and_wrong_kind() {
         .enumerate()
         .map(|(index, kind)| HostSiteRecord {
             id: HostSiteId::from_index(index),
+            unit: 0,
             kind,
             actions: Vec::new(),
         })
@@ -626,6 +630,7 @@ fn control_and_root_actions_are_complete_unique_and_kind_checked() {
     );
     let record = |index, kind, actions| HostSiteRecord {
         id: HostSiteId::from_index(index),
+        unit: 0,
         kind,
         actions,
     };
@@ -714,12 +719,30 @@ fn dag_verification_checks_mutated_directives_and_terminal_completeness() {
     let dropped = dag.add_node(RiscOp::Drop, vec![copied], ty.clone(), None);
     let mut plan = DagOwnershipPlan::lower(&dag).unwrap();
     plan.verify(&dag).unwrap();
-    plan.directives[2] = DagDirective::Drop {
+    plan.directives[2] = DagDirective::OwnedDrop {
         node: dropped,
         source: load,
     };
     assert!(matches!(
         plan.verify(&dag),
+        Err(OwnershipError::DagDirectiveMap { .. })
+    ));
+
+    let mut borrowed_drop = Dag::new();
+    let borrowed =
+        borrowed_drop.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+    let dropped = borrowed_drop.add_node(RiscOp::Drop, vec![borrowed], ty.clone(), None);
+    let mut plan = DagOwnershipPlan::lower(&borrowed_drop).unwrap();
+    assert!(matches!(
+        plan.directives[1],
+        DagDirective::BorrowedDrop { .. }
+    ));
+    plan.directives[1] = DagDirective::OwnedDrop {
+        node: dropped,
+        source: borrowed,
+    };
+    assert!(matches!(
+        plan.verify(&borrowed_drop),
         Err(OwnershipError::DagDirectiveMap { .. })
     ));
 
@@ -730,6 +753,62 @@ fn dag_verification_checks_mutated_directives_and_terminal_completeness() {
     plan.directives.pop();
     assert!(matches!(
         plan.verify(&unterminated),
+        Err(OwnershipError::DagDirectiveMap { .. })
+    ));
+
+    let mut borrowed_realize = Dag::new();
+    let borrowed = borrowed_realize.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        TensorType::scalar_f32(),
+        None,
+    );
+    let realized = borrowed_realize.add_node(
+        RiscOp::Realize,
+        vec![borrowed],
+        TensorType::scalar_f32(),
+        None,
+    );
+    borrowed_realize.add_root(realized);
+    let mut plan = DagOwnershipPlan::lower(&borrowed_realize).unwrap();
+    assert!(matches!(
+        plan.directives[1],
+        DagDirective::CloneProduce { .. }
+    ));
+    plan.directives[1] = DagDirective::MoveProduce {
+        node: realized,
+        source: borrowed,
+    };
+    assert!(matches!(
+        plan.verify(&borrowed_realize),
+        Err(OwnershipError::DagDirectiveMap { .. })
+    ));
+
+    let mut borrowed_store = Dag::new();
+    let borrowed = borrowed_store.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        TensorType::scalar_f32(),
+        None,
+    );
+    let stored = borrowed_store.add_node(
+        RiscOp::Store { name: "out".into() },
+        vec![borrowed],
+        TensorType::scalar_f32(),
+        None,
+    );
+    borrowed_store.add_root(stored);
+    let mut plan = DagOwnershipPlan::lower(&borrowed_store).unwrap();
+    assert!(matches!(
+        plan.directives[1],
+        DagDirective::CloneStore { .. }
+    ));
+    plan.directives[1] = DagDirective::MoveStore {
+        node: stored,
+        source: borrowed,
+    };
+    assert!(matches!(
+        plan.verify(&borrowed_store),
         Err(OwnershipError::DagDirectiveMap { .. })
     ));
 }

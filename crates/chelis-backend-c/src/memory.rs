@@ -106,10 +106,19 @@ impl MemoryPlan {
     }
 
     pub fn emit_cleanup(&self, output_ids: &[NodeId]) -> Vec<String> {
+        self.emit_cleanup_with_drops(output_ids, &[])
+    }
+
+    pub fn emit_cleanup_with_drops(
+        &self,
+        output_ids: &[NodeId],
+        dropped_sources: &[NodeId],
+    ) -> Vec<String> {
         let mut lines = Vec::new();
         for (idx, kind) in self.node_kinds.iter().enumerate() {
             let id = NodeId(idx);
             if output_ids.contains(&id)
+                || dropped_sources.contains(&id)
                 || matches!(
                     kind,
                     NodeMemoryKind::BorrowedLoad

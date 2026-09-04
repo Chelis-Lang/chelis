@@ -93,6 +93,7 @@ pub(super) fn verify_host_actions(
     let mut terminals = BTreeSet::new();
     let mut controls = BTreeMap::new();
     let mut roots = BTreeMap::new();
+    let mut display_roots = Vec::new();
     for (index, site) in sites.records.iter().enumerate() {
         if matches!(
             site.kind,
@@ -153,27 +154,32 @@ pub(super) fn verify_host_actions(
                     }
                 }
                 HostSiteAction::Root {
+                    unit,
                     manifest_index,
                     owner,
                 } => {
                     if site.kind != super::ir::HostSiteKind::ManifestRoot {
                         return Err(site_error(index, "root has inappropriate site kind"));
                     }
-                    let Some(entry) = manifest.entries.get(manifest_index) else {
-                        return Err(site_error(index, "root names missing manifest entry"));
-                    };
-                    if entry.lane != Lane::Host {
-                        return Err(site_error(index, "root names a non-host manifest entry"));
-                    }
                     if !program
                         .units
-                        .iter()
-                        .any(|unit| unit.owners.contains_key(&owner))
+                        .get(unit)
+                        .is_some_and(|unit| unit.owners.contains_key(&owner))
                     {
                         return Err(site_error(index, "directive names missing owner"));
                     }
-                    if roots.insert(manifest_index, (index, owner)).is_some() {
-                        return Err(site_error(index, "manifest root belongs to two sites"));
+                    if let Some(manifest_index) = manifest_index {
+                        let Some(entry) = manifest.entries.get(manifest_index) else {
+                            return Err(site_error(index, "root names missing manifest entry"));
+                        };
+                        if entry.lane != Lane::Host {
+                            return Err(site_error(index, "root names a non-host manifest entry"));
+                        }
+                        if roots.insert(manifest_index, (index, owner)).is_some() {
+                            return Err(site_error(index, "manifest root belongs to two sites"));
+                        }
+                    } else {
+                        display_roots.push((index, owner));
                     }
                 }
                 HostSiteAction::ControlEdge {
@@ -297,6 +303,38 @@ pub(super) fn verify_host_actions(
             ));
         }
     }
+    for (site_index, owner) in display_roots {
+        let site = &sites.records[site_index];
+        let consumes = site
+            .actions
+            .iter()
+            .filter_map(|action| match *action {
+                HostSiteAction::Operation {
+                    unit,
+                    block,
+                    operation,
+                } => program
+                    .units
+                    .get(unit)
+                    .and_then(|unit| unit.blocks.iter().find(|candidate| candidate.id == block))
+                    .and_then(|block| block.ops.get(operation)),
+                _ => None,
+            })
+            .filter_map(|op| match op {
+                Op::RootConsume { owner, .. } => Some(owner),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if consumes.len() != 1
+            || consumes[0].owner != owner
+            || consumes[0].use_ != OwnershipUse::Move
+        {
+            return Err(site_error(
+                site_index,
+                "display root action does not match its exact root-consume operation",
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -386,6 +424,29 @@ fn census_host_payload(
             .entries
             .iter()
             .filter(|entry| entry.lane == Lane::Host)
+            .map(|_| super::ir::HostSiteKind::ManifestRoot),
+    );
+    sites.extend(
+        host.globals
+            .iter()
+            .flat_map(|binding| {
+                let unmatched = binding.display_roots.iter().filter(|display| {
+                    !manifest.entries.iter().any(|entry| {
+                        let selected = binding.name == entry.def_name
+                            || matches!(
+                                &binding.value.kind,
+                                ConcreteHostExprKind::Call { function, args, .. }
+                                    if function == &entry.def_name && args.is_empty()
+                            );
+                        entry.lane == Lane::Host
+                            && selected
+                            && independent_display_root(entry) == **display
+                    })
+                });
+                let legacy = (binding.display_roots.is_empty() && binding.display_name.is_some())
+                    .then_some(());
+                unmatched.map(|_| ()).chain(legacy)
+            })
             .map(|_| super::ir::HostSiteKind::ManifestRoot),
     );
     sites.push(super::ir::HostSiteKind::FunctionReturn);
@@ -789,9 +850,9 @@ fn definitions(unit: &Unit) -> Result<BTreeSet<OwnerId>, OwnershipError> {
 
 fn destination(op: &Op) -> Option<OwnerId> {
     match op {
-        Op::Define { dest, .. } | Op::Copy { dest, .. } => Some(*dest),
+        Op::Define { dest, .. } | Op::Copy { dest, .. } | Op::LoopItem { dest, .. } => Some(*dest),
         Op::Apply { dest, .. } => *dest,
-        Op::Drop { .. } | Op::RootConsume { .. } => None,
+        Op::Project { .. } | Op::Drop { .. } | Op::RootConsume { .. } => None,
     }
 }
 
@@ -803,7 +864,6 @@ fn check_params(unit: &Unit) -> Result<(), OwnershipError> {
                 (param.mode, origin),
                 (ParamMode::Owned, OwnerOrigin::Owned)
                     | (ParamMode::Borrowed, OwnerOrigin::BorrowedFrom(_))
-                    | (ParamMode::Borrowed, OwnerOrigin::InternalBorrow)
                     | (ParamMode::Borrowed, OwnerOrigin::ExternalBorrow)
                     | (ParamMode::EntryBorrow, OwnerOrigin::ExternalBorrow)
             ) && (param.mode != ParamMode::EntryBorrow || block.id == unit.entry);
@@ -926,6 +986,25 @@ fn verify_op(
                 block.id,
                 source,
                 Some(OwnershipUse::Clone),
+                definitions,
+                live,
+            )?;
+            define(unit, *dest, live)
+        }
+        Op::Project { source } => use_operand(
+            unit,
+            block.id,
+            source,
+            Some(OwnershipUse::Borrow),
+            definitions,
+            live,
+        ),
+        Op::LoopItem { dest, list } => {
+            use_operand(
+                unit,
+                block.id,
+                list,
+                Some(OwnershipUse::Borrow),
                 definitions,
                 live,
             )?;
@@ -1146,7 +1225,10 @@ fn transfer(
     let passed = edge.args.iter().map(|a| a.owner).collect::<BTreeSet<_>>();
     let mut next = live.clone();
     for param in &block.params {
-        if param.mode != ParamMode::Owned && !passed.contains(&param.owner) {
+        if param.mode != ParamMode::Owned
+            && !passed.contains(&param.owner)
+            && unit.owners[&param.owner].origin != OwnerOrigin::ExternalBorrow
+        {
             next.remove(&param.owner);
         }
     }
@@ -1162,7 +1244,10 @@ fn transfer(
         check_borrow_edge(unit, arg.owner, param)?;
     }
     for param in &block.params {
-        if param.mode != ParamMode::Owned {
+        if param.mode != ParamMode::Owned
+            && (passed.contains(&param.owner)
+                || unit.owners[&param.owner].origin != OwnerOrigin::ExternalBorrow)
+        {
             next.remove(&param.owner);
         }
     }
@@ -1217,17 +1302,14 @@ fn check_borrow_edge(
     let source_root = match unit.owners[&source].origin {
         OwnerOrigin::Owned => Some(source),
         OwnerOrigin::BorrowedFrom(owner) => Some(owner),
-        OwnerOrigin::InternalBorrow | OwnerOrigin::ExternalBorrow => None,
+        OwnerOrigin::ExternalBorrow => None,
     };
     let valid = matches!(
         (source_root, unit.owners[&target.owner].origin),
         (Some(a), OwnerOrigin::BorrowedFrom(b)) if a == b
     ) || matches!(
         (source_root, unit.owners[&target.owner].origin),
-        (
-            None,
-            OwnerOrigin::InternalBorrow | OwnerOrigin::ExternalBorrow
-        )
+        (None, OwnerOrigin::ExternalBorrow)
     );
     if valid {
         Ok(())

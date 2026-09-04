@@ -13,8 +13,9 @@ use chelis_ir::host::{
     try_lower_compiled_program_with_manifest,
 };
 use chelis_ir::ownership::{
-    HostOwnershipProgram, OwnershipError, VerifiedHostProgram, lower_dag_ownership,
-    lower_host_ownership, verify_ownership,
+    HostOwnershipProgram, OwnershipError, VerifiedDagAction, VerifiedHostAction,
+    VerifiedHostOperation, VerifiedHostProgram, VerifiedHostTerminator, VerifiedOwnershipUse,
+    lower_dag_ownership, lower_host_ownership, verify_ownership,
 };
 use chelis_ir::{ConcreteHostType, Dag, DimInfo, RiscOp, TensorType};
 use chelis_surf::desugar::desugar_program;
@@ -36,6 +37,56 @@ const FIXTURE_DIR: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-cli/tests/fixtures/compiled_value_ownership/"
 );
+
+#[test]
+fn verified_dag_exposes_the_exact_drop_source_without_raw_plan_access() {
+    let ty = TensorType::scalar_f32();
+    let mut dag = Dag::new();
+    let source = dag.add_node(
+        RiscOp::synth_const(Prim::F32, 1.0),
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let drop = dag.add_node(RiscOp::Drop, vec![source], ty, None);
+    let verified = verify_ownership(lower_dag_ownership(dag).unwrap()).unwrap();
+
+    assert_eq!(
+        verified.emission().action_for_node(drop),
+        Some(VerifiedDagAction::OwnedDrop { node: drop, source })
+    );
+}
+
+#[test]
+fn verified_dag_distinguishes_a_borrowed_logical_drop_from_an_owned_terminal() {
+    let ty = TensorType::scalar_f32();
+    let mut dag = Dag::new();
+    let borrowed = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+    let borrowed_drop = dag.add_node(RiscOp::Drop, vec![borrowed], ty.clone(), None);
+    let owned = dag.add_node(
+        RiscOp::synth_const(Prim::F32, 1.0),
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let owned_drop = dag.add_node(RiscOp::Drop, vec![owned], ty, None);
+    let verified = verify_ownership(lower_dag_ownership(dag).unwrap()).unwrap();
+
+    assert_eq!(
+        verified.emission().action_for_node(borrowed_drop),
+        Some(VerifiedDagAction::BorrowedDrop {
+            node: borrowed_drop,
+            source: borrowed,
+        })
+    );
+    assert_eq!(
+        verified.emission().action_for_node(owned_drop),
+        Some(VerifiedDagAction::OwnedDrop {
+            node: owned_drop,
+            source: owned,
+        })
+    );
+}
 
 struct Front {
     checked: CheckedProgram,
@@ -164,9 +215,12 @@ fn target_rejected_function_containers_reach_backend_after_verification() {
 #[test]
 fn aliased_roots_copy_the_earlier_sink_in_manifest_order() {
     let roots = unit_text(&verified_fixture("issue_1222_root_alias"), "roots");
-    assert_eq!(count(&roots, "= copy clone"), 1, "{roots}");
+    // Each artifact sink receives its own owner. The shared materialized value
+    // remains live until both sinks have been emitted, then is dropped once.
+    assert_eq!(count(&roots, "= copy clone"), 2, "{roots}");
     assert_eq!(count(&roots, "root original move"), 1, "{roots}");
     assert_eq!(count(&roots, "root alias move"), 1, "{roots}");
+    assert_eq!(count(&roots, "drop move"), 1, "{roots}");
     assert!(
         line_index(&roots, "root original move") < line_index(&roots, "root alias move"),
         "{roots}"
@@ -202,6 +256,113 @@ fn non_root_heap_value_gets_a_scope_exit_drop() {
 }
 
 #[test]
+fn nested_scope_escape_projects_the_same_owner_into_the_outer_payload_slot() {
+    let verified = verified_source("b = {\n  q = to_tensor([1.0f32, 2.0f32])\n  q\n}\n");
+    let body = unit_text(&verified, "roots");
+    assert_eq!(count(&body, "project borrow"), 1, "{body}");
+    assert!(
+        line_index(&body, "project borrow") < line_index(&body, "drop move"),
+        "the outer payload slot must be bound before the projected owner reaches its terminal:\n{body}"
+    );
+
+    let flat = unit_text(
+        &verified_source("b = to_tensor([1.0f32, 2.0f32])\n"),
+        "roots",
+    );
+    assert_eq!(count(&flat, "project borrow"), 0, "{flat}");
+
+    let doubly_nested = unit_text(
+        &verified_source(
+            "b = {\n  middle = {\n    q = to_tensor([1.0f32, 2.0f32])\n    q\n  }\n  middle\n}\n",
+        ),
+        "roots",
+    );
+    assert_eq!(
+        count(&doubly_nested, "project borrow"),
+        2,
+        "each lexical boundary must project the owner into the next outer payload slot:\n{doubly_nested}"
+    );
+    assert!(
+        line_index(&doubly_nested, "project borrow") < line_index(&doubly_nested, "drop move"),
+        "both payload projections must precede the owner's terminal:\n{doubly_nested}"
+    );
+}
+
+#[test]
+fn source_copy_mints_a_fresh_owned_identity_for_named_fresh_and_tail_values() {
+    let named_program = verified_source(
+        "a = to_tensor([1.0f32, 2.0f32])\n\
+         b = copy(a)\n",
+    );
+    let named = unit_text(&named_program, "roots");
+    assert!(named.contains("= tensor:"), "{named}");
+    assert!(
+        (0..named_program.nested_dag_count()).any(|index| named_program
+            .nested_dag_render(index)
+            .is_some_and(|dag| dag.contains("clone n"))),
+        "source copy must be preserved in a verified nested DAG: {:?}",
+        (0..named_program.nested_dag_count())
+            .filter_map(|index| named_program.nested_dag_render(index))
+            .collect::<Vec<_>>()
+    );
+    assert!(named.contains("root a move"), "{named}");
+    assert!(named.contains("root b move"), "{named}");
+
+    let fresh_program = verified_source("b = copy(to_tensor([3.0f32, 4.0f32]))\n");
+    let fresh = unit_text(&fresh_program, "roots");
+    assert!(
+        fresh.contains("= tensor:"),
+        "the fresh operand must still produce a distinct host owner:\n{fresh}"
+    );
+    assert!(
+        (0..fresh_program.nested_dag_count()).any(|index| fresh_program
+            .nested_dag_render(index)
+            .is_some_and(|dag| dag.contains("clone n"))),
+        "fresh source copy must be preserved in a verified nested DAG"
+    );
+
+    let tail_program = verified_source(
+        "def duplicate(x: tensor[2, f32]) -> tensor[2, f32] = copy(x)\n\
+         source = to_tensor([5.0f32, 6.0f32])\n\
+         out = duplicate(source)\n",
+    );
+    let tail = unit_text(&tail_program, "duplicate");
+    assert_eq!(
+        count(&tail, "= copy clone %"),
+        1,
+        "entry adaptation must mint one owner before the helper consumes it:\n{tail}"
+    );
+    assert!(
+        tail.lines().any(|line| line.contains("= tensor:")),
+        "{tail}"
+    );
+    assert!(
+        (0..tail_program.nested_dag_count()).any(|index| tail_program
+            .nested_dag_render(index)
+            .is_some_and(|dag| dag.contains("clone n"))),
+        "tail source copy must be preserved in a verified nested DAG"
+    );
+    assert!(tail.contains("return move"), "{tail}");
+}
+
+#[test]
+fn debug_observes_the_existing_owner_and_is_not_source_copy() {
+    let roots = unit_text(
+        &verified_source(
+            "a = to_tensor([1.0f32, 2.0f32])\n\
+             b = debug(a)\n",
+        ),
+        "roots",
+    );
+    assert!(roots.contains("builtin:debug(borrow"), "{roots}");
+    assert_eq!(
+        count(&roots, "= copy clone"),
+        count(&roots, "root "),
+        "debug must not mint an incidental owner; only artifact-root clones remain:\n{roots}"
+    );
+}
+
+#[test]
 fn missing_manifest_binding_is_a_typed_lowering_error() {
     let mut front = front("out = [1i64]\n");
     let mut ghost = front.manifest.entries[0].clone();
@@ -223,12 +384,22 @@ fn fresh_and_variable_arguments_have_distinct_single_transfer_chains() {
     let fresh = verified_fixture("issue_1356_fresh_argument");
     let roots = unit_text(&fresh, "roots");
     assert!(roots.contains("call:identity(move"), "{roots}");
-    assert_eq!(count(&roots, "= copy clone"), 0, "{roots}");
+    // Every clone belongs to an artifact root; the fresh call argument moves.
+    assert_eq!(
+        count(&roots, "= copy clone"),
+        count(&roots, "root "),
+        "{roots}"
+    );
 
     let variable = verified_fixture("issue_1356_variable_argument");
     let roots = unit_text(&variable, "roots");
     assert!(roots.contains("call:identity(move"), "{roots}");
-    assert_eq!(count(&roots, "= copy clone"), 1, "{roots}");
+    // The named argument needs one additional clone before the consuming call.
+    assert_eq!(
+        count(&roots, "= copy clone"),
+        count(&roots, "root ") + 1,
+        "{roots}"
+    );
 }
 
 #[test]
@@ -272,7 +443,19 @@ fn mixed_if_arms_join_one_owned_result_and_copy_only_the_alias_arm() {
     for fixture in ["issue_1352_if_fresh", "issue_1352_if_alias"] {
         let roots = unit_text(&verified_fixture(fixture), "roots");
         assert!(roots.contains("branch borrow"), "{fixture}:\n{roots}");
-        assert_eq!(count(&roots, "= copy clone"), 1, "{fixture}:\n{roots}");
+        // Two copies mint the artifact root owners. Exactly one earlier copy
+        // adapts the borrowed arm into the join's owned block parameter.
+        assert_eq!(count(&roots, "= copy clone"), 3, "{fixture}:\n{roots}");
+        let join = line_index(&roots, "b3 (Owned %");
+        assert_eq!(
+            roots
+                .lines()
+                .take(join)
+                .filter(|line| line.contains("= copy clone"))
+                .count(),
+            1,
+            "{fixture}:\n{roots}"
+        );
         assert!(
             roots.lines().any(|line| line.contains("(Owned %")),
             "{fixture}:\n{roots}"
@@ -305,6 +488,28 @@ fn match_adt_and_match_option_use_the_same_owned_join_rule() {
         "{choose}"
     );
     assert!(choose.contains("= copy clone"), "{choose}");
+}
+
+#[test]
+fn option_some_moves_fresh_payloads_and_clones_named_payloads_before_the_move() {
+    let fresh = unit_text(&verified_fixture("option_string"), "option_length");
+    assert!(fresh.contains("builtin:Some(move"), "{fresh}");
+
+    let named = unit_text(
+        &verified_source(
+            r#"
+def length_after_wrap() -> int64 = {
+  text = "abc"
+  wrapped: Option[string] = Some(text)
+  string_len(text)
+}
+length = length_after_wrap()
+"#,
+        ),
+        "length_after_wrap",
+    );
+    assert!(named.contains("= copy clone"), "{named}");
+    assert!(named.contains("builtin:Some(move"), "{named}");
 }
 
 #[test]
@@ -468,9 +673,74 @@ fn authored_entries_are_borrow_adapters_but_internal_specializations_are_not() {
 }
 
 #[test]
+fn internal_borrowed_formal_remains_live_through_both_branch_arms() {
+    let internal = front(
+        "def choose(x: &tensor[1, f32], flag: bool) -> tensor[1, f32] =\n\
+         if flag then x else x\n\
+         input = to_tensor([cast(1.0, f32)])\n\
+         out = choose(&input, true)\n",
+    );
+    let mut host = internal.host;
+    let function = host
+        .functions
+        .iter_mut()
+        .find(|function| function.name == "choose")
+        .expect("choose host function");
+    function.origin = HostFunctionOrigin::Monomorphized;
+    let verified = verify_ownership(lower_host_ownership(&internal.manifested, host).unwrap())
+        .expect("an internal borrowed formal spans its complete function body");
+    let function = unit_text(&verified, "choose");
+    assert!(!function.contains("EntryBorrow"), "{function}");
+    assert!(function.contains("b0 (Borrowed %0"), "{function}");
+    assert_eq!(count(&function, "copy clone %0"), 2, "{function}");
+}
+
+#[test]
 fn host_payload_crosses_the_independently_verified_site_boundary() {
     let verified = verified_fixture("issue_1352_if_fresh");
     assert!(verified.render().contains("root "));
+}
+
+#[test]
+fn verified_sites_export_closed_typed_clone_drop_and_root_actions() {
+    let verified = verified_fixture("issue_1222_root_alias");
+    let emission = verified.emission();
+    let actions = emission
+        .root_sites()
+        .flat_map(|site| site.actions())
+        .collect::<Vec<_>>();
+    assert!(actions.iter().any(|action| matches!(
+        action,
+        VerifiedHostAction::Operation(VerifiedHostOperation::Clone { source, .. })
+            if source.use_() == VerifiedOwnershipUse::Clone && source.owner().is_heap()
+    )));
+    assert!(actions.iter().any(|action| matches!(
+        action,
+        VerifiedHostAction::Operation(VerifiedHostOperation::RootConsume { .. })
+    )));
+    assert!(actions.iter().any(|action| matches!(
+        action,
+        VerifiedHostAction::Terminator(VerifiedHostTerminator::Exit { .. })
+    )));
+}
+
+#[test]
+fn verified_control_edges_carry_exact_target_parameters_and_operands() {
+    let verified = verified_fixture("issue_1352_if_fresh");
+    let edges = verified
+        .emission()
+        .root_sites()
+        .flat_map(|site| site.actions())
+        .filter_map(|action| match action {
+            VerifiedHostAction::Terminator(VerifiedHostTerminator::Jump { edge, .. }) => Some(edge),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(edges.iter().any(|edge| {
+        edge.params().len() == 1
+            && edge.args().len() == 1
+            && edge.args()[0].use_() == VerifiedOwnershipUse::Move
+    }));
 }
 
 fn scalar_tensor() -> TensorType {
@@ -550,7 +820,7 @@ fn a_dag_owner_cannot_have_two_terminal_directives() {
 }
 
 #[test]
-fn a_borrowed_dag_load_cannot_be_consumed_by_drop() {
+fn a_borrowed_dag_drop_is_a_non_consuming_logical_discard() {
     let mut dag = Dag::new();
     let load = dag.add_node(
         RiscOp::Load {
@@ -560,14 +830,17 @@ fn a_borrowed_dag_load_cannot_be_consumed_by_drop() {
         scalar_tensor(),
         None,
     );
-    dag.add_node(RiscOp::Drop, vec![load], scalar_tensor(), None);
-    assert!(matches!(
-        lower_dag_ownership(dag),
-        Err(OwnershipError::DagBorrowConsumed {
-            owner: 0,
-            consumer: 1,
+    let discarded = dag.add_node(RiscOp::Drop, vec![load], scalar_tensor(), None);
+    let copied_after_discard = dag.add_node(RiscOp::Copy, vec![load], scalar_tensor(), None);
+    dag.add_root(copied_after_discard);
+    let verified = verify_ownership(lower_dag_ownership(dag).unwrap()).unwrap();
+    assert_eq!(
+        verified.emission().action_for_node(discarded),
+        Some(VerifiedDagAction::BorrowedDrop {
+            node: discarded,
+            source: load,
         })
-    ));
+    );
 
     let mut twin = Dag::new();
     let load = twin.add_node(
@@ -581,6 +854,154 @@ fn a_borrowed_dag_load_cannot_be_consumed_by_drop() {
     let copied = twin.add_node(RiscOp::Copy, vec![load], scalar_tensor(), None);
     twin.add_node(RiscOp::Drop, vec![copied], scalar_tensor(), None);
     verify_ownership(lower_dag_ownership(twin).unwrap()).unwrap();
+}
+
+#[test]
+fn realize_clones_a_borrowed_or_fanned_out_source_and_moves_a_last_owned_source() {
+    let mut borrowed = Dag::new();
+    let load = borrowed.add_node(
+        RiscOp::Load {
+            name: "entry".into(),
+        },
+        vec![],
+        scalar_tensor(),
+        None,
+    );
+    let realized = borrowed.add_node(RiscOp::Realize, vec![load], scalar_tensor(), None);
+    let later = borrowed.add_node(RiscOp::Copy, vec![load], scalar_tensor(), None);
+    borrowed.add_root(realized);
+    borrowed.add_root(later);
+    let verified = verify_ownership(lower_dag_ownership(borrowed).unwrap()).unwrap();
+    assert_eq!(
+        verified.emission().action_for_node(realized),
+        Some(VerifiedDagAction::CloneProduce {
+            node: realized,
+            source: load,
+        })
+    );
+
+    let mut fanned = Dag::new();
+    let load = fanned.add_node(
+        RiscOp::Load {
+            name: "entry".into(),
+        },
+        vec![],
+        scalar_tensor(),
+        None,
+    );
+    let produced = fanned.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
+    let realized = fanned.add_node(RiscOp::Realize, vec![produced], scalar_tensor(), None);
+    let later = fanned.add_node(RiscOp::Copy, vec![produced], scalar_tensor(), None);
+    fanned.add_root(realized);
+    fanned.add_root(later);
+    let verified = verify_ownership(lower_dag_ownership(fanned).unwrap()).unwrap();
+    assert_eq!(
+        verified.emission().action_for_node(realized),
+        Some(VerifiedDagAction::CloneProduce {
+            node: realized,
+            source: produced,
+        })
+    );
+
+    let mut last = Dag::new();
+    let load = last.add_node(
+        RiscOp::Load {
+            name: "entry".into(),
+        },
+        vec![],
+        scalar_tensor(),
+        None,
+    );
+    let produced = last.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
+    let realized = last.add_node(RiscOp::Realize, vec![produced], scalar_tensor(), None);
+    last.add_root(realized);
+    let verified = verify_ownership(lower_dag_ownership(last).unwrap()).unwrap();
+    assert_eq!(
+        verified.emission().action_for_node(realized),
+        Some(VerifiedDagAction::MoveProduce {
+            node: realized,
+            source: produced,
+        })
+    );
+}
+
+#[test]
+fn store_clones_a_borrowed_source_but_moves_an_owned_source() {
+    let mut borrowed = Dag::new();
+    let load = borrowed.add_node(
+        RiscOp::Load {
+            name: "entry".into(),
+        },
+        vec![],
+        scalar_tensor(),
+        None,
+    );
+    let stored = borrowed.add_node(
+        RiscOp::Store { name: "out".into() },
+        vec![load],
+        scalar_tensor(),
+        None,
+    );
+    borrowed.add_root(stored);
+    let verified = verify_ownership(lower_dag_ownership(borrowed).unwrap()).unwrap();
+    assert_eq!(
+        verified.emission().action_for_node(stored),
+        Some(VerifiedDagAction::CloneStore {
+            node: stored,
+            source: load,
+        })
+    );
+
+    let mut owned = Dag::new();
+    let load = owned.add_node(
+        RiscOp::Load {
+            name: "entry".into(),
+        },
+        vec![],
+        scalar_tensor(),
+        None,
+    );
+    let produced = owned.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
+    let stored = owned.add_node(
+        RiscOp::Store { name: "out".into() },
+        vec![produced],
+        scalar_tensor(),
+        None,
+    );
+    owned.add_root(stored);
+    let verified = verify_ownership(lower_dag_ownership(owned).unwrap()).unwrap();
+    assert_eq!(
+        verified.emission().action_for_node(stored),
+        Some(VerifiedDagAction::MoveStore {
+            node: stored,
+            source: produced,
+        })
+    );
+}
+
+#[test]
+fn dangling_owned_dag_producer_receives_a_verified_scope_drop() {
+    let mut dag = Dag::new();
+    let unused = dag.add_node(
+        RiscOp::synth_const(Prim::F32, 1.0),
+        vec![],
+        scalar_tensor(),
+        None,
+    );
+    let output = dag.add_node(
+        RiscOp::synth_const(Prim::F32, 2.0),
+        vec![],
+        scalar_tensor(),
+        None,
+    );
+    dag.add_root(output);
+    let verified = verify_ownership(lower_dag_ownership(dag).unwrap()).unwrap();
+    assert!(
+        verified
+            .emission()
+            .actions()
+            .any(|action| action == VerifiedDagAction::ScopeDrop { source: unused })
+    );
 }
 
 #[test]

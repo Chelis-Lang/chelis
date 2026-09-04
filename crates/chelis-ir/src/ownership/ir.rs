@@ -101,7 +101,6 @@ impl ParamMode {
 pub(crate) enum OwnerOrigin {
     Owned,
     BorrowedFrom(OwnerId),
-    InternalBorrow,
     ExternalBorrow,
 }
 
@@ -151,6 +150,17 @@ pub(crate) enum Op {
     Copy {
         dest: OwnerId,
         source: Operand,
+    },
+    /// Project an existing logical owner into the current host payload slot.
+    /// This changes no ownership state: it gives emission a typed, spelling-
+    /// independent binding for a value escaping a nested expression scope.
+    Project {
+        source: Operand,
+    },
+    /// Materialize the current element of a verified host list loop.
+    LoopItem {
+        dest: OwnerId,
+        list: Operand,
     },
     Drop {
         owner: Operand,
@@ -253,7 +263,8 @@ pub(crate) enum HostSiteAction {
         target: BlockId,
     },
     Root {
-        manifest_index: usize,
+        unit: usize,
+        manifest_index: Option<usize>,
         owner: OwnerId,
     },
 }
@@ -261,6 +272,7 @@ pub(crate) enum HostSiteAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HostSiteRecord {
     pub(crate) id: HostSiteId,
+    pub(crate) unit: usize,
     pub(crate) kind: HostSiteKind,
     pub(crate) actions: Vec<HostSiteAction>,
 }
@@ -276,10 +288,11 @@ pub(crate) struct HostSiteBuilder {
 }
 
 impl HostSiteBuilder {
-    pub(crate) fn add(&mut self, kind: HostSiteKind) -> HostSiteId {
+    pub(crate) fn add(&mut self, unit: usize, kind: HostSiteKind) -> HostSiteId {
         let id = HostSiteId::from_index(self.records.len());
         self.records.push(HostSiteRecord {
             id,
+            unit,
             kind,
             actions: Vec::new(),
         });

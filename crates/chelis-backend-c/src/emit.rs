@@ -4,12 +4,24 @@ use chelis_ir::dag::{
     Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep,
     FusedStepOp, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim, SymbolicDimSource, TensorType,
 };
-use chelis_ir::ownership::{VerifiedDagProgram, VerifiedDagView};
+use chelis_ir::ownership::{VerifiedDagAction, VerifiedDagProgram, VerifiedDagView};
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_types::{CheckedCastKind, CheckedCastPlan, ElementRef, NumericTrap, ScalarValue};
 
 use crate::memory::{MemoryPlan, NodeMemoryKind};
+
+fn unsupported_verified_dag_action(node: NodeId, detail: &str) -> Unsupported {
+    Unsupported::new(
+        UnsupportedKind::Op("Drop".to_string()),
+        format!("verified DAG ownership action at node {}: {detail}", node.0),
+        Stage::Codegen("c"),
+        chelis_types::deliberate_rejection!(
+            "[04-TOT-2]",
+            "verified ownership and the retained DAG payload must agree exactly; no backend-local ownership fallback is permitted"
+        ),
+    )
+}
 
 /// Emits C source code from a RISC DAG.
 pub struct CEmitter {
@@ -357,7 +369,16 @@ impl CEmitter {
             }
         }
 
-        let cleanup = e.memory_plan.emit_cleanup(&output_ids);
+        let dropped_sources = dag
+            .actions()
+            .filter_map(|action| match action {
+                VerifiedDagAction::OwnedDrop { source, .. } => Some(source),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let cleanup = e
+            .memory_plan
+            .emit_cleanup_with_drops(&output_ids, &dropped_sources);
         for line in cleanup {
             e.lines.push(line);
         }
@@ -635,7 +656,27 @@ impl CEmitter {
                 unreachable!("dropout should be rejected before C code generation")
             }
             RiscOp::Copy => self.emit_realize(id, &node.inputs, &node.output_type),
-            RiscOp::Drop => {}
+            RiscOp::Drop => {
+                let action = dag.action_for_node(node.id).ok_or_else(|| {
+                    unsupported_verified_dag_action(node.id, "missing Drop action")
+                })?;
+                match action {
+                    VerifiedDagAction::BorrowedDrop { node: drop, source }
+                    | VerifiedDagAction::OwnedDrop { node: drop, source }
+                        if drop == node.id && node.inputs.first() == Some(&source) =>
+                    {
+                        if matches!(action, VerifiedDagAction::OwnedDrop { .. }) {
+                            self.line(&format!("chelis_tensor_release(t{});", source.0));
+                        }
+                    }
+                    _ => {
+                        return Err(unsupported_verified_dag_action(
+                            node.id,
+                            "Drop action does not name the exact typed payload source",
+                        ));
+                    }
+                }
+            }
             // WS-A1 + WS-A4: `Sum` carries an `accumulator: Prim` field
             // that governs both the running-sum precision and the output
             // precision (verified by `chelis_ir::verify::C3a` to equal
@@ -7257,7 +7298,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_materializes_and_drop_emits_no_wrapper() {
+    fn copy_materializes_and_drop_releases_exact_descriptor_once() {
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
         let copy = dag.add_node(RiscOp::Copy, vec![x], vec_f32(4), None);
@@ -7273,6 +7314,24 @@ mod tests {
             !c.contains("chelis_tensor *t3"),
             "Drop should not emit a tensor wrapper or compute statement:\n{c}"
         );
+        assert_eq!(
+            c.matches("chelis_tensor_release(t2);").count(),
+            1,
+            "verified Drop must release its exact descriptor at the Drop site and suppress cleanup duplication:\n{c}"
+        );
+    }
+
+    #[test]
+    fn borrowed_drop_is_a_logical_discard_without_a_runtime_release() {
+        let mut dag = Dag::new();
+        let borrowed = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        dag.add_node(RiscOp::Drop, vec![borrowed], vec_f32(4), None);
+        let output = dag.add_node(RiscOp::Copy, vec![borrowed], vec_f32(4), None);
+        dag.add_root(output);
+
+        let c = emit_test_dag(&dag, "test_borrowed_drop").unwrap();
+
+        assert!(!c.contains("chelis_tensor_release(t0);"), "{c}");
     }
 
     #[test]

@@ -1,8 +1,8 @@
 # Implicit Linearity
 
-**Status:** Implemented `copy-drop` foundation. Its scope-end lifetime strategy is
-superseded as a target contract by `compiled_value_ownership.md`; that plan records
-the still-unimplemented migration to verified ownership lowering and last-use release.
+**Status:** Implemented verified ownership lowering over the `copy-drop` foundation.
+Its conservative scope-end lifetime strategy is superseded as a target contract by
+`compiled_value_ownership.md`; that plan retains last-use release as successor work.
 **Owning specs:** `spec/03-deep-syntax.md`, `spec/04-type-system.md`,
 `spec/05-risc-primitives.md`, and `spec/design/borrow_typed_primitives.md`.
 
@@ -15,11 +15,10 @@ contract requires the successor ownership lowering to place terminal releases at
 last-use/post-dominance boundary and before tail calls; that is correctness work for
 compiled heap values, not an optional allocation optimization.
 
-The current lowered IR makes part of the result explicit. `RiscOp::Copy` and
-`RiscOp::Drop` are real IR nodes, and every lowered linear value has exactly one
-terminal path: a consuming use or a `Drop`. The successor `OwnershipProgram` makes the
-borrow/move/clone disposition and join ownership explicit before any backend sees the
-program. Slot planners treat terminal consumes and `Drop` as authoritative live-range
+The verified `OwnershipProgram` makes `RiscOp::Copy` and `RiscOp::Drop` real
+ownership operations: every lowered linear value has exactly one terminal path,
+and every backend receives the borrow/move/clone disposition before emission.
+Slot planners treat terminal consumes and `Drop` as authoritative live-range
 closes.
 
 ## Drop Insertion
@@ -36,12 +35,14 @@ dropped by the end of that iteration. Values defined outside a loop and consumed
 the loop require the existing loop-aware ownership rules; cases where the compiler
 cannot prove a single terminal path remain hard errors.
 
-`Drop` is not a numerical computation. AD treats it as a gradient sink. Tensor slot
-planners close the dropped value's live range there. The current C/HIP emitters still
-treat the IR node as an emission no-op and reconstruct host releases from backend-local
-state; the successor verified-ownership lanes emit the matching heap release at the
-terminal operation. Independent liveness may refine allocation details but must not
-extend a program owner past that operation.
+`Drop` is not a numerical computation. AD treats it as a gradient sink. For an owned
+source, tensor slot planners close the dropped value's live range there. C and HIP emit the exact
+descriptor release selected by the verified directive; Metal consumes the same
+directive as a typed no-device-owner disposition. A `Drop` over a borrowed DAG `Load`
+is instead a typed logical discard: it emits no release and leaves the external owner
+live; Metal consumes that disposition without inventing a device owner. Independent
+liveness may refine allocation details but must not extend a program owner past an
+owned terminal operation.
 
 ## Copy Insertion
 

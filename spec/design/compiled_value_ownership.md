@@ -204,8 +204,12 @@ site identities and consumes one verified payload if it must produce another;
 it cannot clone or rebuild a raw sibling program after verification.
 
 The DAG specialization uses the existing stable `NodeId` identity. Loads are
-borrowed entries; producers mint owners; `Copy` clones; roots and stores are
-explicit sinks; and `Drop` is an explicit terminal. Standalone DAGs and every
+borrowed entries; producers mint owners; and `Copy` clones. A `Drop` over an
+owned producer is an explicit terminal, while a `Drop` over a borrowed `Load`
+is a typed logical discard that neither releases nor terminates the external
+owner. `Realize` clones a borrowed or still-needed owner and moves a last-use
+owned source; `Store` likewise clones an entry borrow but consumes an owned
+source. Roots and stores remain explicit sinks. Standalone DAGs and every
 nested `HostTensorHelper` run the same DAG ownership verifier. The host payload
 keeps each nested helper and its proof inseparable, so a backend cannot route a
 raw helper DAG around verification. Phase 2 adds no reusable-storage proof.
@@ -780,15 +784,21 @@ and fast-gate checks pass on the same committed head.
 - ownership-directed releases for heap-valued host code; and
 - deletion of C emitter ownership inference for converted forms.
 
-Phase 2 owns terminal semantics for every `RiscOp::Drop` consumer. C and HIP
-emit the same single release selected by the verified DAG directive and exclude
-that owner from epilogue cleanup. Metal consumes the verified directive through
-its typed no-reuse/no-device-owner plan and never invents a device owner or a
-reuse decision. The backend emission mechanics land after the sealed boundary
-and DAG verifier exist, but remain part of this phase's exit contract.
+Phase 2 owns the closed disposition for every `RiscOp::Drop` consumer. For an
+owned source, C and HIP emit the same single release selected by the verified
+DAG directive and exclude that owner from epilogue cleanup. For a borrowed
+`Load`, both consume a distinct borrowed-discard directive and emit no release;
+the external owner remains live. Metal consumes both verified directives
+through its typed no-reuse/no-device-owner plan and never invents a device
+owner or a reuse decision. The backend emission mechanics land after the
+sealed boundary and DAG verifier exist, but remain part of this phase's exit
+contract.
 
-This phase promotes exactly five oracle rows: the [#1346] fold row, the two
-[#1352] mixed fresh-arm rows, and the two [#1356] fresh-argument rows. It
+This phase promotes exactly six oracle rows: the [#1346] fold row, the two
+[#1352] mixed fresh-arm rows, the two [#1356] fresh-argument rows, and
+`recursive-depth-1-control`. Real scope-exit `Drop` balances the depth-one
+recursive frame completely; Phase 3 still owns the last-use peak bound for
+depths 32, 128, and 288. The launch subset remains the same four rows. Phase 2
 preserves [#1222] and [#1344] as ordinary regressions.
 
 **Not this phase:** moving terminal operations earlier than the verifier's
@@ -799,6 +809,14 @@ initial correct placement or enabling in-place reuse.
 **Authoritative oracle:**
 `.venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 2`;
 exit zero and final line `COMPILED VALUE OWNERSHIP PHASE 2: PASS`.
+
+**Phase 2 delivery receipt:** the committed transition removes the six Phase 2
+expected-failure receipts, consumes the sealed host and DAG ownership actions
+in C/HIP/Metal, and deletes the parallel C-host ownership inference. The same
+head must also pass `--phase launch`, whose final line is
+`COMPILED VALUE OWNERSHIP LAUNCH SUBSET: PASS`. The three remaining [#1206]
+peak receipts record conservative scope-exit placement and retain Phase 3 as
+their promotion phase.
 
 ## Phase 3 — last-use reclamation and shared reuse proof
 
@@ -861,7 +879,7 @@ exit zero and final line `COMPILED VALUE OWNERSHIP ORACLE: PASS`.
 |---|---|
 | [#543] | Phase 1 adds tensor heap cloning/finalization and closes all five aggregate-tensor rows, including the function-internal tensor-literal temporary. The top-level tuple missing-`main` observation is [#545], not an ownership-oracle row |
 | [#544] | Phase 1 makes aggregate child clone/release balance independent of count, capacity growth, and nesting |
-| [#1206] | Phase 3 moves dead frame releases before tail calls and proves peak live bytes independent of recursion depth. Runtime-valued `with seed` remains [#735] syntax/semantics work; recursive-host operation support remains [#729]/[#730] capability work |
+| [#1206] | Phase 2 balances the depth-one recursive frame with real scope-exit `Drop`; Phase 3 moves dead frame releases before tail calls and proves the depths 32/128/288 peak live bytes independent of recursion depth. Runtime-valued `with seed` remains [#735] syntax/semantics work; recursive-host operation support remains [#729]/[#730] capability work |
 | [#1214] | Phase 3 removes backend-local eligibility and executes the shared caller-storage negative on HIP hardware. [#1172] owns the span-key cause that can over-broaden hints; Surf reachability is exposure evidence, not another ownership mechanism |
 | [#1222] | closed instance; Phase 0 onward retains teardown/alias regressions |
 | [#1344] | closed instance; Phase 0 onward retains captured-borrow regressions |
