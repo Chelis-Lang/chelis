@@ -22,6 +22,10 @@ PIP_INSTALL_COMMAND = re.compile(
     r"(?<![\w.-])(?:python(?:3(?:\.\d+)?)?\s+-m\s+)?"
     r"pip(?:3(?:\.\d+)?)?\s+install(?=\s|$)"
 )
+NO_PYPI_BOOTSTRAP_CLAIM = re.compile(
+    r"\b(?:no|without)\b[^\n.;]{0,80}\bPyPI\b[^\n.;]{0,40}\bbootstrap\b",
+    re.IGNORECASE,
+)
 
 GLIBC231_JOBS = (
     (REPO_ROOT / ".github/workflows/ci.yml", "smt-build-glibc231"),
@@ -117,6 +121,13 @@ class Glibc231WorkflowTests(unittest.TestCase):
             release_docs,
             re.compile(r"(?<![A-Za-z0-9_])tomli(?![A-Za-z0-9_])", re.IGNORECASE),
         )
+
+    def test_release_docs_explicitly_deny_separate_pypi_bootstrap(self):
+        release_docs = markdown_h2_section(
+            SMT_BUILD_DOC, "Release builds (chelis#422)"
+        )
+
+        self.assertRegex(release_docs, NO_PYPI_BOOTSTRAP_CLAIM)
 
     def test_escape_hatch_patterns_cover_realistic_command_spellings(self):
         for command in (
