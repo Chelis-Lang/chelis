@@ -13,9 +13,10 @@
 //! kernels", that's a signal the corresponding phase has shipped — flip
 //! the assertion.
 
-use chelis_backend_metal::codegen_metal;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
+use support::codegen_metal;
 
 fn vec_f32(n: usize) -> TensorType {
     TensorType {
@@ -198,7 +199,7 @@ fn wsm1_matmul_at_tile_boundary_routes_to_mps() {
 // ===========================================================================
 
 #[test]
-fn m7_partial_axis_reduction_falls_through_to_stub() {
+fn m7_partial_axis_reduction_is_rejected_before_codegen() {
     // Sum{axis:1} with no matmul subgraph behind it — partial-axis
     // reduction is M4.next territory. Emitter must not silently emit a
     // full-axis kernel and lie about the result.
@@ -215,8 +216,13 @@ fn m7_partial_axis_reduction_falls_through_to_stub() {
     );
     dag.add_root(r);
 
-    let result = codegen_metal(&dag, "axis1");
-    assert_falls_through_to_stub(&result.mm_source, "axis-1 reduction (no matmul)");
+    let error = chelis_ir::ownership::lower_dag_ownership(dag)
+        .expect_err("out-of-range reduction axis must not cross the verified boundary");
+    assert!(
+        error
+            .to_string()
+            .contains("axis 1 but input has 1 dimensions")
+    );
 }
 
 #[test]
@@ -372,7 +378,7 @@ fn wsm1_int32_unary_neg_emits_typed_kernel() {
 }
 
 #[test]
-fn wsm1_unary_transcendental_on_int_rejected_at_codegen() {
+fn wsm1_unary_transcendental_on_int_rejected_before_codegen() {
     // Defense in depth: the type checker rejects transcendentals on
     // integer precisions per spec §5.4. If a regression admitted such
     // a DAG, the Metal emitter must bail with a structured error, not
@@ -391,12 +397,9 @@ fn wsm1_unary_transcendental_on_int_rejected_at_codegen() {
     let n = dag.add_node(RiscOp::Exp, vec![a], int_ty, None);
     dag.add_root(n);
 
-    let result = codegen_metal(&dag, "bad_transcend");
-    let src = &result.mm_source;
-    assert!(
-        src.contains("M1 fallback stub"),
-        "int32 transcendental must fall through to stub via codegen rejection: {src}"
-    );
+    let error = chelis_ir::ownership::lower_dag_ownership(dag)
+        .expect_err("integer transcendental must not cross the verified boundary");
+    assert!(error.to_string().contains("requires float input"));
 }
 
 #[test]

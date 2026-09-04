@@ -252,9 +252,11 @@ mod imp {
             });
         }
 
-        // Wait for the child, killing it past a generous deadline. cvc5
-        // honors `tlimit-per` (= timeout_ms), so the kill only fires on a
-        // genuine hang.
+        // Wait for the child, killing it past a generous deadline. Solver
+        // phases share a request-wide cvc5 budget bounded by `timeout_ms`;
+        // requests without an auxiliary phase retain that whole budget. The
+        // unchanged grace period therefore covers orchestration overhead
+        // without misclassifying valid multi-phase work as a hung child.
         let deadline = Instant::now() + Duration::from_millis(timeout_ms.saturating_add(10_000));
         let mut timed_out = false;
         let status = loop {

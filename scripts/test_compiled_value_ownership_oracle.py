@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit and mutation tests for chelis#1286's Phase 0 ownership oracle."""
+"""Unit and mutation tests for chelis#1286's compiled-ownership oracle."""
 
 from __future__ import annotations
 
@@ -25,7 +25,8 @@ EXPECTED_CHILD_ISSUES = frozenset(
 
 EXPECTED_FIXTURE_IDS = frozenset(
     """
-    oracle-self-tests runtime-ledger-process-tests
+    oracle-self-tests runtime-ledger-process-tests runtime-heap-kind-tests
+    runtime-option-node-tests runtime-mapped-file-tests runtime-write-guard-tests
     aggregate-tensor-list aggregate-tensor-tuple aggregate-tensor-dict
     aggregate-tensor-adt aggregate-tensor-nested-repeated aggregate-scalar-control
     list-string-4-threshold-control list-string-5-threshold
@@ -298,7 +299,17 @@ class ManifestContractTests(unittest.TestCase):
 
     def test_open_children_use_typed_expected_failures(self) -> None:
         fixtures = oracle.fixture_manifest()
-        open_children = EXPECTED_CHILD_ISSUES - {1222, 1344}
+        open_children = EXPECTED_CHILD_ISSUES - {
+            543,
+            544,
+            879,
+            1222,
+            1286,
+            1344,
+            1346,
+            1352,
+            1356,
+        }
         for issue in open_children:
             rows = [fixture for fixture in fixtures if fixture.issue == issue]
             with self.subTest(issue=issue):
@@ -483,7 +494,7 @@ class ManifestContractTests(unittest.TestCase):
                 self.assertIn("def identity", text)
                 self.assertNotIn("fn (", text)
 
-    def test_recursive_function_metal_rows_are_typed_expected_failures(self) -> None:
+    def test_recursive_function_rows_are_typed_must_passes(self) -> None:
         rows = [
             row
             for row in oracle.fixture_manifest()
@@ -492,13 +503,7 @@ class ManifestContractTests(unittest.TestCase):
         self.assertTrue(rows)
         for row in rows:
             with self.subTest(fixture=row.id):
-                if row.backend is oracle.Backend.METAL:
-                    self.assertEqual(
-                        row.expected,
-                        oracle.ExpectedFailure(879, oracle.Detector.EXACT_REJECTION),
-                    )
-                else:
-                    self.assertIsInstance(row.expected, oracle.MustPass)
+                self.assertIsInstance(row.expected, oracle.MustPass)
 
     def test_c_and_hip_reuse_rows_name_exact_behavioral_tests(self) -> None:
         rows = {row.id: row for row in oracle.fixture_manifest()}
@@ -554,6 +559,114 @@ class ManifestContractTests(unittest.TestCase):
                 "manifest-receipt-omitted",
             },
         )
+
+    def test_phase_one_mutation_canaries_bind_exact_runtime_receipts(self) -> None:
+        rows = {row.id: row for row in oracle.fixture_manifest()}
+        bindings = {
+            "heap-kind-without-finalizer": (
+                "runtime-heap-kind-tests",
+                "heap_kind_universe_and_clone_release_are_exhaustive",
+                "clone_rejects_null_and_live_wrong_kind_values",
+            ),
+            "option-host-carrier-omitted": (
+                "runtime-option-node-tests",
+                "option_nodes_clone_once_and_release_once_at_each_edge",
+                "option_nodes_reject_none_unwrap_and_invalid_children",
+            ),
+            "mapped-file-carrier-omitted": (
+                "runtime-mapped-file-tests",
+                "mapped_file_retain_release_is_balanced",
+                "mapped_file_lifetime_rejects_null_and_live_wrong_kind_handles",
+            ),
+            "tensor-clone-omitted": (
+                "runtime-heap-kind-tests",
+                "heap_kind_universe_and_clone_release_are_exhaustive",
+                "clone_rejects_null_and_live_wrong_kind_values",
+            ),
+        }
+        active = {
+            mutation.id
+            for mutation in oracle.mutation_manifest()
+            if mutation.activation_phase == 1
+        }
+        self.assertEqual(active, set(bindings))
+        for mutation_id, (fixture_id, canary, negative_twin) in bindings.items():
+            with self.subTest(mutation=mutation_id):
+                fixture = rows[fixture_id]
+                self.assertIsInstance(fixture.expected, oracle.MustPass)
+                self.assertIs(fixture.action, oracle.Action.COMMAND)
+                self.assertIn("--features", fixture.command)
+                self.assertIn("ownership-ledger", fixture.command)
+                self.assertIn(canary, fixture.test_census)
+                self.assertIn(negative_twin, fixture.test_census)
+
+    def test_phase_two_mutation_canaries_bind_exact_execution_receipts(self) -> None:
+        rows = {row.id: row for row in oracle.fixture_manifest()}
+        active = {
+            mutation.id
+            for mutation in oracle.mutation_manifest()
+            if mutation.activation_phase == 2
+        }
+        self.assertEqual(
+            active,
+            {"branch-clone-borrowed", "backend-local-ownership-predicate-restored"},
+        )
+
+        for fixture_id in (
+            "if-mixed-fresh-arm",
+            "if-alias-control",
+            "match-adt-mixed-fresh-arm",
+            "match-option-mixed-fresh-control",
+        ):
+            with self.subTest(mutation="branch-clone-borrowed", fixture=fixture_id):
+                fixture = rows[fixture_id]
+                self.assertIsInstance(fixture.expected, oracle.MustPass)
+                self.assertIs(fixture.action, oracle.Action.LEDGER_BUILD_RUN)
+                self.assertIsNotNone(fixture.expected_output)
+
+        depth_one = rows["recursive-depth-1-control"]
+        self.assertIsInstance(depth_one.expected, oracle.MustPass)
+        self.assertEqual(depth_one.green_by, 2)
+        self.assertIs(depth_one.action, oracle.Action.LEDGER_BUILD_RUN)
+        self.assertEqual(depth_one.peak_bound, 512)
+        self.assertIsNone(depth_one.ledger_receipt)
+
+        oracle.validate_active_mutation_contracts("2")
+        source_path = oracle.REPO_ROOT / "crates/chelis-backend-c/src/host_emit.rs"
+        source = source_path.read_text()
+        exact_clone_entry = (
+            "        let source_var = self.owner_var(source.owner())?;"
+        )
+        self.assertIn(exact_clone_entry, source)
+        renamed_inference = """        enum RecoveredLifetime {
+            Named,
+            Temporary,
+        }
+        let recovered = if source.owner().names().is_empty() {
+            RecoveredLifetime::Temporary
+        } else {
+            RecoveredLifetime::Named
+        };
+        let source_var = match recovered {
+            RecoveredLifetime::Named | RecoveredLifetime::Temporary => {
+                self.owner_var(source.owner())?
+            }
+        };"""
+        mutated = source.replace(exact_clone_entry, renamed_inference, 1)
+        self.assertNotEqual(mutated, source)
+        original_read_text = Path.read_text
+
+        def read_mutated_host(path: Path, *args: object, **kwargs: object) -> str:
+            if path == source_path:
+                return mutated
+            return original_read_text(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", new=read_mutated_host):
+            with self.assertRaisesRegex(
+                oracle.OracleFailure,
+                "backend-local-ownership-predicate-restored: C host emission reads a generic owner binder spelling",
+            ):
+                oracle.validate_active_mutation_contracts("2")
 
 
 class LedgerContractTests(unittest.TestCase):
@@ -933,7 +1046,15 @@ class ReceiptContractTests(unittest.TestCase):
         rows = {
             row.id: row
             for row in oracle.fixture_manifest()
-            if row.id in {"oracle-self-tests", "runtime-ledger-process-tests"}
+            if row.id
+            in {
+                "oracle-self-tests",
+                "runtime-ledger-process-tests",
+                "runtime-heap-kind-tests",
+                "runtime-option-node-tests",
+                "runtime-mapped-file-tests",
+                "runtime-write-guard-tests",
+            }
         }
         context = mock.Mock(environment={})
         empty_list = oracle.subprocess.CompletedProcess(
@@ -942,7 +1063,7 @@ class ReceiptContractTests(unittest.TestCase):
             stdout="",
             stderr="Ran 0 tests\n\nOK\n",
         )
-        for fixture_id in ("oracle-self-tests", "runtime-ledger-process-tests"):
+        for fixture_id in rows:
             with self.subTest(fixture=fixture_id):
                 with mock.patch.object(oracle, "_run", return_value=empty_list) as run:
                     detection = oracle._execute_command(context, rows[fixture_id])
@@ -954,6 +1075,10 @@ class ReceiptContractTests(unittest.TestCase):
         cases = (
             ("oracle-self-tests", "skipped 'mutant'"),
             ("runtime-ledger-process-tests", "ignored"),
+            ("runtime-heap-kind-tests", "ignored"),
+            ("runtime-option-node-tests", "ignored"),
+            ("runtime-mapped-file-tests", "ignored"),
+            ("runtime-write-guard-tests", "ignored"),
             ("c-caller-owned-reuse", "ignored"),
             ("hip-caller-bytes-unchanged-hardware", "ignored"),
         )
@@ -1034,7 +1159,7 @@ class ReceiptContractTests(unittest.TestCase):
             detection = oracle._execute_command(context, fixture)
         self.assertIs(detection.detector, oracle.Detector.SOURCE_CONTRACT)
 
-    def test_target_module_output_cannot_forge_python_test_execution(self) -> None:
+    def test_forged_import_transcript_cannot_replace_python_callbacks(self) -> None:
         fixture = next(
             row
             for row in oracle.fixture_manifest()
@@ -1102,6 +1227,36 @@ if __name__ == "__main__":
         self.assertEqual(run.call_count, 2)
         self.assertIs(detection.detector, oracle.Detector.ZERO_VACUITY)
         self.assertIn("SKIPPED", detection.detail)
+
+    def test_forged_main_transcript_without_owned_receipt_fails_zero_vacuity(self) -> None:
+        fixture = next(
+            row
+            for row in oracle.fixture_manifest()
+            if row.id == "oracle-self-tests"
+        )
+        listed = oracle.subprocess.CompletedProcess(
+            args=("test-list",),
+            returncode=0,
+            stdout="".join(f"{name}: test\n" for name in fixture.test_census),
+            stderr="",
+        )
+        forged_main = oracle.subprocess.CompletedProcess(
+            args=("python-target",),
+            returncode=0,
+            stdout=(
+                "test_body (__main__.ForgedReceiptTests.test_body) ... ok\n"
+                "Ran 1 test in 0.001s\n\nOK\n"
+            ),
+            stderr="",
+        )
+        context = mock.Mock(environment={})
+        with mock.patch.object(
+            oracle, "_run", side_effect=(listed, forged_main)
+        ) as run:
+            detection = oracle._execute_command(context, fixture)
+        self.assertEqual(run.call_count, 2)
+        self.assertIs(detection.detector, oracle.Detector.ZERO_VACUITY)
+        self.assertIn("receipt", detection.detail)
 
     def test_python_execution_receipt_schema_and_counts_fail_closed(self) -> None:
         module = "scripts.test_example"
@@ -1208,19 +1363,38 @@ if __name__ == "__main__":
                     detection = oracle._execute_command(context, fixture)
                 self.assertIs(detection.detector, oracle.Detector.ZERO_VACUITY)
 
+    def test_listing_only_execution_fails_zero_vacuity(self) -> None:
+        fixture = next(
+            row
+            for row in oracle.fixture_manifest()
+            if row.id == "runtime-heap-kind-tests"
+        )
+        listing = "".join(f"{name}: test\n" for name in fixture.test_census)
+        listed = oracle.subprocess.CompletedProcess(
+            args=("test-list",), returncode=0, stdout=listing, stderr=""
+        )
+        listing_only = oracle.subprocess.CompletedProcess(
+            args=("test-runner",), returncode=0, stdout=listing, stderr=""
+        )
+        context = mock.Mock(environment={})
+        with mock.patch.object(
+            oracle, "_run", side_effect=(listed, listing_only)
+        ) as run:
+            detection = oracle._execute_command(context, fixture)
+        self.assertEqual(run.call_count, 2)
+        self.assertIs(detection.detector, oracle.Detector.ZERO_VACUITY)
+
     def test_ledger_receipt_count_drift_fails_closed(self) -> None:
         fixture = next(
             row
             for row in oracle.fixture_manifest()
-            if row.id == "aggregate-tensor-list"
+            if row.id == "recursive-depth-32"
         )
         ledger = oracle.Ledger(
             records=(),
-            summary=oracle.LedgerSummary(12, 0, 11, 224, 224, 0),
+            summary=oracle.LedgerSummary(14, 14, 0, 0, 4719, 0),
             kind_allocations=oracle.Counter(),
-            live_kind_counts=oracle.Counter(
-                {"List": 4, "Tensor": 4, "TensorStorage": 4}
-            ),
+            live_kind_counts=oracle.Counter(),
             invalid_events=oracle.Counter(),
         )
         with self.assertRaisesRegex(oracle.OracleFailure, "frozen ledger receipt drift"):
@@ -1246,12 +1420,12 @@ if __name__ == "__main__":
             oracle.classify_result(expected, oracle.Detection.success("clean"), "fixture")
 
     def test_nonzero_receipt_rejects_exit_and_diagnostic_drift(self) -> None:
-        option = next(
+        control = next(
             row
             for row in oracle.fixture_manifest()
-            if row.id == "option-nested-string"
+            if row.id == "fold-fresh-control"
         )
-        signal = replace(option, expected_exit=-11, diagnostic_fragments=())
+        signal = replace(control, expected_exit=-11, diagnostic_fragments=())
         self.assertIs(
             oracle.detect_nonzero(signal, -11, ""),
             oracle.Detector.NONZERO_EXIT,
@@ -1261,16 +1435,17 @@ if __name__ == "__main__":
             oracle.Detector.MANIFEST,
         )
 
-        expected_diagnostic = (
-            "unsupported: unresolved host type `Option(String)` on boxing a "
-            "resolved host value; no fallback representation is permitted"
+        exact = replace(
+            control,
+            expected_exit=23,
+            diagnostic_fragments=("synthetic exact diagnostic",),
         )
         self.assertIs(
-            oracle.detect_nonzero(option, 1, expected_diagnostic),
+            oracle.detect_nonzero(exact, 23, "synthetic exact diagnostic"),
             oracle.Detector.NONZERO_EXIT,
         )
         self.assertIs(
-            oracle.detect_nonzero(option, 1, "unrelated parser failure"),
+            oracle.detect_nonzero(exact, 23, "unrelated parser failure"),
             oracle.Detector.MANIFEST,
         )
 
@@ -1286,7 +1461,14 @@ if __name__ == "__main__":
         fixture = next(
             row
             for row in oracle.fixture_manifest()
-            if row.id == "fresh-call-argument"
+            if row.id == "fold-alias-single-owner"
+        )
+        fixture = replace(
+            fixture,
+            expected_exit=1,
+            diagnostic_fragments=(
+                "compiled ownership ledger detected invalid list release",
+            ),
         )
         ledger = oracle.Ledger(
             records=(),
@@ -1301,7 +1483,7 @@ if __name__ == "__main__":
                 oracle.subprocess.CompletedProcess(
                     args=("fixture",),
                     returncode=1,
-                    stdout=fixture.expected_output or "",
+                    stdout=(fixture.expected_output or "") + "\n",
                     stderr="compiled ownership ledger detected invalid list release",
                 ),
                 Path("unused.jsonl"),

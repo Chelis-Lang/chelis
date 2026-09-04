@@ -1495,6 +1495,31 @@ fn build_root_manifest(
     chelis_effects::realizability::compute_root_manifest(checked, &realizability)
 }
 
+fn verified_host_codegen_program(
+    checked: &chelis_types::CheckedProgram,
+    manifest: &chelis_types::manifest::RootManifest,
+    target: BuildTarget,
+    program: chelis_ir::host::ConcreteHostProgram,
+) -> Result<chelis_ir::ownership::VerifiedHostProgram, Box<dyn std::error::Error>> {
+    let target = match target {
+        BuildTarget::C => chelis_types::types::Target::C,
+        BuildTarget::Hip => chelis_types::types::Target::Hip,
+        BuildTarget::Metal => chelis_types::types::Target::Metal,
+    };
+    let manifested =
+        chelis_types::manifest::ManifestedProgram::new(checked.clone(), manifest.clone(), target);
+    let selected = chelis_backend_c::prepare_host_program_for_codegen(program)?;
+    let lowered = chelis_ir::ownership::lower_host_ownership(&manifested, selected)?;
+    Ok(chelis_ir::ownership::verify_ownership(lowered)?)
+}
+
+fn verified_dag_codegen_program(
+    dag: chelis_ir::dag::Dag,
+) -> Result<chelis_ir::ownership::VerifiedDagProgram, Box<dyn std::error::Error>> {
+    let lowered = chelis_ir::ownership::lower_dag_ownership(dag)?;
+    Ok(chelis_ir::ownership::verify_ownership(lowered)?)
+}
+
 fn require_build_manifest_inputs(
     manifest: &chelis_types::manifest::RootManifest,
     target: BuildTarget,
@@ -3215,7 +3240,7 @@ fn cmd_build(
 
     match target {
         BuildTarget::C => {
-            if let Some(host_program) = compiled_program.host.as_ref()
+            if let Some(host_program) = compiled_program.host.as_mut()
                 && (requires_main
                     || chelis_ir::host::host_program_requires_host_backend(host_program)
                     || dag.roots().is_empty()
@@ -3263,7 +3288,14 @@ fn cmd_build(
                         BuildTarget::C,
                     ),
                 )?;
-                let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
+                let selected = std::mem::take(host_program);
+                let verified = verified_host_codegen_program(
+                    checked,
+                    &root_manifest,
+                    BuildTarget::C,
+                    selected,
+                )?;
+                let result = chelis_backend_c::codegen_host_program(&verified, func_name)?;
                 cmd_build_c_result(result, func_name, output, &symbolic_dims, requires_main)
             } else {
                 shared_compiler_gate(
@@ -3276,7 +3308,7 @@ fn cmd_build(
                 let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
                 cmd_build_c(
-                    &fused,
+                    fused,
                     func_name,
                     file,
                     output,
@@ -3323,9 +3355,16 @@ fn cmd_build(
                 || (dag.roots().is_empty()
                     && preferred_entry_dag.is_none()
                     && host_requires_host_backend))
-                && let Some(host_program) = compiled_program.host.as_ref()
+                && let Some(host_program) = compiled_program.host.as_mut()
             {
-                let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
+                let selected = std::mem::take(host_program);
+                let verified = verified_host_codegen_program(
+                    checked,
+                    &root_manifest,
+                    BuildTarget::Hip,
+                    selected,
+                )?;
+                let result = chelis_backend_c::codegen_host_program(&verified, func_name)?;
                 cmd_build_hip_host(result, func_name, output, requires_main)
             } else {
                 let mut hip_dag = if let Some(entry_dag) = preferred_entry_dag {
@@ -3351,7 +3390,7 @@ fn cmd_build(
                 ))?;
                 let fused = chelis_ir::fuse::fuse(&specialized);
                 cmd_build_hip(
-                    &fused,
+                    fused,
                     func_name,
                     file,
                     output,
@@ -3380,24 +3419,41 @@ fn cmd_build(
                 .as_ref()
                 .map(chelis_ir::host::host_program_requires_host_backend)
                 .unwrap_or(false);
-            // Same single-entry limitation as HIP: programs without a `main`
-            // and with multiple sibling tensor-signature defs fall back to
-            // the preferred entry; others are silently dropped. Tracked as
-            // a residual issue mirroring HIP.
+            // Metal has no host-value lane. Validate any required host form
+            // through the C emitter's fallible ABI projection before choosing
+            // a Metal DAG entry, so unsupported recursive function values are
+            // rejected instead of being silently dropped (#879). A genuinely
+            // host-only program keeps the existing fallback artifact path.
             let preferred_entry_dag = compiled_program
                 .host
                 .as_ref()
                 .and_then(chelis_ir::host::preferred_tensor_entry_name)
                 .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(checked, name));
+            let validated_host = if host_requires_host_backend {
+                if let Some(selected) = compiled_program.host.take() {
+                    let verified = verified_host_codegen_program(
+                        checked,
+                        &root_manifest,
+                        BuildTarget::Metal,
+                        selected,
+                    )?;
+                    Some(chelis_backend_c::codegen_host_program(
+                        &verified, func_name,
+                    )?)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             if dag.roots().is_empty()
                 && preferred_entry_dag.is_none()
                 && host_requires_host_backend
-                && let Some(host_program) = compiled_program.host.as_ref()
+                && let Some(result) = validated_host
             {
                 // Host-only programs fall through to the C backend, exactly
                 // like the HIP path. The metal path doesn't have a separate
                 // host wrapper today; reuse cmd_build_hip_host for parity.
-                let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
                 cmd_build_hip_host(result, func_name, output, requires_main)
             } else {
                 let mut metal_dag = if let Some(entry_dag) = preferred_entry_dag {
@@ -3429,7 +3485,7 @@ fn cmd_build(
                 // boundary; this typed gate owns the public early diagnostic.
                 chelis_ir::verify::validate_metal_admissible_precisions(&metal_dag)?;
                 let fused = chelis_ir::fuse::fuse(&metal_dag);
-                cmd_build_metal(&fused, func_name, file, output, &symbolic_dims)
+                cmd_build_metal(fused, func_name, file, output, &symbolic_dims)
             }
         }
     }
@@ -3538,7 +3594,7 @@ fn cmd_build_deep(
 
     match target {
         BuildTarget::C => {
-            if let Some(host_program) = compiled_program.host.as_ref()
+            if let Some(host_program) = compiled_program.host.as_mut()
                 && (requires_main
                     || chelis_ir::host::host_program_requires_host_backend(host_program)
                     || dag.roots().is_empty()
@@ -3572,7 +3628,14 @@ fn cmd_build_deep(
                         BuildTarget::C,
                     ),
                 )?;
-                let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
+                let selected = std::mem::take(host_program);
+                let verified = verified_host_codegen_program(
+                    checked,
+                    &root_manifest,
+                    BuildTarget::C,
+                    selected,
+                )?;
+                let result = chelis_backend_c::codegen_host_program(&verified, func_name)?;
                 cmd_build_c_result(result, func_name, output, &symbolic_dims, requires_main)
             } else {
                 shared_compiler_gate(
@@ -3585,7 +3648,7 @@ fn cmd_build_deep(
                 let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
                 cmd_build_c(
-                    &fused,
+                    fused,
                     func_name,
                     file,
                     output,
@@ -3627,9 +3690,16 @@ fn cmd_build_deep(
                 || (dag.roots().is_empty()
                     && preferred_entry_dag.is_none()
                     && host_requires_host_backend))
-                && let Some(host_program) = compiled_program.host.as_ref()
+                && let Some(host_program) = compiled_program.host.as_mut()
             {
-                let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
+                let selected = std::mem::take(host_program);
+                let verified = verified_host_codegen_program(
+                    checked,
+                    &root_manifest,
+                    BuildTarget::Hip,
+                    selected,
+                )?;
+                let result = chelis_backend_c::codegen_host_program(&verified, func_name)?;
                 cmd_build_hip_host(result, func_name, output, requires_main)
             } else {
                 let mut hip_dag = if let Some(entry_dag) = preferred_entry_dag {
@@ -3655,7 +3725,7 @@ fn cmd_build_deep(
                 ))?;
                 let fused = chelis_ir::fuse::fuse(&specialized);
                 cmd_build_hip(
-                    &fused,
+                    fused,
                     func_name,
                     file,
                     output,
@@ -3689,12 +3759,28 @@ fn cmd_build_deep(
                 .as_ref()
                 .and_then(chelis_ir::host::preferred_tensor_entry_name)
                 .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(checked, name));
+            let validated_host = if host_requires_host_backend {
+                if let Some(selected) = compiled_program.host.take() {
+                    let verified = verified_host_codegen_program(
+                        checked,
+                        &root_manifest,
+                        BuildTarget::Metal,
+                        selected,
+                    )?;
+                    Some(chelis_backend_c::codegen_host_program(
+                        &verified, func_name,
+                    )?)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             if dag.roots().is_empty()
                 && preferred_entry_dag.is_none()
                 && host_requires_host_backend
-                && let Some(host_program) = compiled_program.host.as_ref()
+                && let Some(result) = validated_host
             {
-                let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
                 cmd_build_hip_host(result, func_name, output, requires_main)
             } else {
                 let mut metal_dag = if let Some(entry_dag) = preferred_entry_dag {
@@ -3723,7 +3809,7 @@ fn cmd_build_deep(
                 // Deep get the same f64 rejection behavior.
                 chelis_ir::verify::validate_metal_admissible_precisions(&metal_dag)?;
                 let fused = chelis_ir::fuse::fuse(&metal_dag);
-                cmd_build_metal(&fused, func_name, file, output, &symbolic_dims)
+                cmd_build_metal(fused, func_name, file, output, &symbolic_dims)
             }
         }
     }
@@ -9260,22 +9346,26 @@ fn cmd_validate(
 }
 
 fn cmd_build_c(
-    dag: &chelis_ir::dag::Dag,
+    dag: chelis_ir::dag::Dag,
     func_name: &str,
     _file: &std::path::Path,
     output: Option<&std::path::Path>,
     symbolic_dims_hint: &[String],
     root_manifest: &chelis_types::manifest::RootManifest,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut result = chelis_backend_c::codegen_with_options(
-        dag,
-        func_name,
-        chelis_backend_c::CodegenOptions {
-            use_blas: true,
-            ..chelis_backend_c::CodegenOptions::default()
-        },
-    )?;
-    let symbolic_dims = fallback_symbolic_dims(dag, &result.symbolic_dims, symbolic_dims_hint);
+    let symbolic_dims = fallback_symbolic_dims(&dag, &[], symbolic_dims_hint);
+    let options = chelis_backend_c::CodegenOptions {
+        use_blas: true,
+        ..chelis_backend_c::CodegenOptions::default()
+    };
+    let selected = chelis_backend_c::prepare_dag_for_codegen(dag, options);
+    let verified = verified_dag_codegen_program(selected)?;
+    let mut result = chelis_backend_c::codegen_with_options(&verified, func_name, options)?;
+    let symbolic_dims = if result.symbolic_dims.is_empty() {
+        symbolic_dims
+    } else {
+        result.symbolic_dims.clone()
+    };
     let root_names =
         tensor_manifest_root_names(&result.output_labels, root_manifest, BuildTarget::C, "C")?;
     let requires_main = root_manifest.requires_main();
@@ -9425,10 +9515,11 @@ fn tensor_manifest_observation_driver(func_name: &str, root_names: &[String]) ->
         r#"
 
 static void chelis_manifest_print_tensor_elem(const chelis_tensor *tensor, int64_t index) {
+    chelis_read_view view = chelis_tensor_read_view(tensor);
     uint64_t bits = 0;
-    int64_t width = chelis_dtype_size(tensor->dtype);
-    memcpy(&bits, (const uint8_t *)tensor->data + index * width, (size_t)width);
-    chelis_scalar scalar = chelis_scalar_from_bits(tensor->dtype, bits);
+    int64_t width = chelis_dtype_size(view.dtype);
+    memcpy(&bits, (const uint8_t *)view.data + index * width, (size_t)width);
+    chelis_scalar scalar = chelis_scalar_from_bits(view.dtype, bits);
     chelis_string text = chelis_string_from_scalar(scalar);
     fputs(chelis_string_data(text), stdout);
     chelis_string_release(text);
@@ -9439,22 +9530,24 @@ static void chelis_manifest_print_tensor(const chelis_tensor *tensor) {
         fputs("unsupported: [05-UNS-1] Tensor root returned no tensor\n", stderr);
         exit(1);
     }
-    if (tensor->rank == 0) {
+    int32_t rank = chelis_tensor_rank(tensor);
+    if (rank == 0) {
         chelis_manifest_print_tensor_elem(tensor, 0);
         return;
     }
     fputs("tensor(shape=[", stdout);
-    for (int32_t dim = 0; dim < tensor->rank; ++dim) {
+    for (int32_t dim = 0; dim < rank; ++dim) {
         if (dim > 0) fputs(", ", stdout);
-        printf("%lld", (long long)tensor->shape[dim]);
+        printf("%lld", (long long)chelis_tensor_shape(tensor, dim));
     }
     fputs("], data=[", stdout);
-    int64_t limit = tensor->size < 32 ? tensor->size : 32;
+    int64_t size = chelis_tensor_numel(tensor);
+    int64_t limit = size < 32 ? size : 32;
     for (int64_t index = 0; index < limit; ++index) {
         if (index > 0) fputs(", ", stdout);
         chelis_manifest_print_tensor_elem(tensor, index);
     }
-    if (tensor->size > limit) fputs(", ...", stdout);
+    if (size > limit) fputs(", ...", stdout);
     fputs("])", stdout);
 }
 "#,
@@ -9467,7 +9560,7 @@ static void chelis_manifest_print_tensor(const chelis_tensor *tensor) {
     for (index, name) in root_names.iter().enumerate() {
         let label = chelis_ir::span_sanitize::sanitize_for_format_string(name);
         source.push_str(&format!(
-            "    printf(\"{label} = \");\n    chelis_manifest_print_tensor(outputs[{index}]);\n    printf(\"\\n\");\n    chelis_free(outputs[{index}]);\n"
+            "    printf(\"{label} = \");\n    chelis_manifest_print_tensor(outputs[{index}]);\n    printf(\"\\n\");\n    chelis_tensor_release(outputs[{index}]);\n"
         ));
     }
     source.push_str("    return 0;\n}\n");
@@ -9487,8 +9580,8 @@ mod exact_manifest_observation_driver_tests {
             "chelis_string_data",
             "chelis_string_release",
             "chelis_dtype_size",
-            "tensor->dtype",
-            "tensor->rank",
+            "view.dtype",
+            "chelis_tensor_rank(tensor)",
         ] {
             assert!(
                 source.contains(required),
@@ -9511,9 +9604,9 @@ mod exact_manifest_observation_driver_tests {
     #[test]
     fn manifest_bool_elements_read_one_byte_storage() {
         let source = tensor_manifest_observation_driver("entry", &["root".to_string()]);
-        assert!(source.contains("(const uint8_t *)tensor->data"), "{source}");
+        assert!(source.contains("(const uint8_t *)view.data"), "{source}");
         assert!(
-            !source.contains("(const float *)tensor->data)[index] != 0.0f"),
+            !source.contains("(const float *)view.data)[index] != 0.0f"),
             "manifest Bool observation retained four-byte float storage:\n{source}"
         );
     }
@@ -9563,14 +9656,17 @@ fn tensor_manifest_root_names(
 }
 
 fn cmd_build_hip(
-    dag: &chelis_ir::dag::Dag,
+    dag: chelis_ir::dag::Dag,
     func_name: &str,
     _file: &std::path::Path,
     output: Option<&std::path::Path>,
     symbolic_dims_hint: &[String],
     root_manifest: &chelis_types::manifest::RootManifest,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut result = chelis_backend_hip::codegen_hip(dag, func_name)?;
+    let symbolic_dims = fallback_symbolic_dims(&dag, &[], symbolic_dims_hint);
+    let selected = chelis_backend_hip::prepare_dag_for_codegen(dag);
+    let verified = verified_dag_codegen_program(selected)?;
+    let mut result = chelis_backend_hip::codegen_hip(&verified, func_name)?;
     let requires_main = root_manifest.requires_main();
     if requires_main {
         let root_names = tensor_manifest_root_names(
@@ -9620,7 +9716,11 @@ fn cmd_build_hip(
         runtime_dir.join("libchelis_runtime.a").display(),
         runtime_dir.join("chelis_hip_runtime.h").display()
     );
-    let symbolic_dims = fallback_symbolic_dims(dag, &result.symbolic_dims, symbolic_dims_hint);
+    let symbolic_dims = if result.symbolic_dims.is_empty() {
+        symbolic_dims
+    } else {
+        result.symbolic_dims.clone()
+    };
     if !symbolic_dims.is_empty() {
         println!("Symbolic dims: {}", symbolic_dims.join(", "));
     }
@@ -9658,13 +9758,15 @@ fn cmd_build_hip(
 }
 
 fn cmd_build_metal(
-    dag: &chelis_ir::dag::Dag,
+    dag: chelis_ir::dag::Dag,
     func_name: &str,
     _file: &std::path::Path,
     output: Option<&std::path::Path>,
     symbolic_dims_hint: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let result = chelis_backend_metal::codegen_metal(dag, func_name);
+    let symbolic_dims = fallback_symbolic_dims(&dag, &[], symbolic_dims_hint);
+    let verified = verified_dag_codegen_program(dag)?;
+    let result = chelis_backend_metal::codegen_metal(&verified, func_name);
 
     let out_dir = output
         .map(|p| p.to_path_buf())
@@ -9702,7 +9804,11 @@ fn cmd_build_metal(
         runtime_dir.join("libchelis_runtime.a").display(),
         runtime_dir.join("chelis_metal_runtime.h").display()
     );
-    let symbolic_dims = fallback_symbolic_dims(dag, &result.symbolic_dims, symbolic_dims_hint);
+    let symbolic_dims = if result.symbolic_dims.is_empty() {
+        symbolic_dims
+    } else {
+        result.symbolic_dims.clone()
+    };
     if !symbolic_dims.is_empty() {
         println!("Symbolic dims: {}", symbolic_dims.join(", "));
     }

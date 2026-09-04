@@ -635,7 +635,7 @@ The handler argument rules are:
 Surf has top-level macro definitions:
 
 ```text
-macro linear_layer(x, w, b) = add(matmul(x, w), expand(b, 0, batch))
+macro linear_layer(x, w, b) = add(matmul(x, w), insert(b, 0, batch))
 macro relu_ref(x) = max_elem(x, 0.0)
 ```
 
@@ -658,7 +658,7 @@ Macro rules:
 
 Standard prelude macros:
 
-- `linear_layer(x, w, b)` -> `add(matmul(x, w), expand(b, 0, batch))`
+- `linear_layer(x, w, b)` -> `add(matmul(x, w), insert(b, 0, batch))`
 - `residual(x, f)` -> `add(x, f(x))`
 - `cross_entropy(logits, labels)` -> the standard `softmax` / `log` / `sum` / `mean`
   composition
@@ -1675,7 +1675,7 @@ def predict(
   w: tensor[features, 1, f32],
   b: tensor[1, f32]
 ) -> tensor[samples, 1, f32] =
-  add(matmul(x, w), expand(b, 0, samples))
+  add(matmul(x, w), insert(b, 0, samples))
 
 def mse_loss(
   y_pred: tensor[samples, 1, f32],

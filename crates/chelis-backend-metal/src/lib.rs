@@ -34,7 +34,7 @@ use chelis_ir::dag::DimExpr;
 
 pub mod blas;
 pub mod dtype;
-pub mod emit;
+mod emit;
 pub mod kernels;
 
 /// Result of Metal code generation.
@@ -114,12 +114,23 @@ pub fn runtime_dir() -> &'static str {
 /// broadcasts/strides incremental). The stub still links and emits the
 /// correct ABI, so CLI/structural tests remain stable as the supported
 /// surface grows.
-pub fn codegen_metal(dag: &chelis_ir::dag::Dag, func_name: &str) -> MetalCodegenResult {
+///
+/// ```compile_fail
+/// # use chelis_ir::dag::Dag;
+/// fn bypass(raw: &Dag) {
+///     let _ = chelis_backend_metal::codegen_metal(raw, "unchecked");
+/// }
+/// ```
+pub fn codegen_metal(
+    dag: &chelis_ir::ownership::VerifiedDagProgram,
+    func_name: &str,
+) -> MetalCodegenResult {
+    let dag = dag.emission();
     let input_labels = emit::input_labels(dag);
     let output_labels = emit::output_labels(dag);
-    let symbolic_dims = chelis_ir::dag::symbolic_params(dag);
+    let symbolic_dims = dag.symbolic_params();
 
-    let (mm_source, peak_device_bytes) = match emit::emit_dag(dag, func_name) {
+    let (mm_source, peak_device_bytes) = match emit::emit_verified_dag(dag, func_name) {
         Ok(r) => (r.mm_source, r.peak_device_bytes),
         // Unsupported DAG shape: keep the stub so the build pipeline (CLI
         // dispatch, file emission, link recipe) stays consistent. Calling
@@ -169,5 +180,18 @@ pub fn codegen_metal(dag: &chelis_ir::dag::Dag, func_name: &str) -> MetalCodegen
         peak_device_bytes_estimate: Some(peak_device_bytes),
         peak_device_bytes_terms: Vec::new(),
         peak_device_bytes_static_extra: peak_device_bytes,
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use chelis_ir::ownership::{OwnershipError, VerifiedDagProgram};
+
+    pub(crate) fn verified_dag(
+        dag: &chelis_ir::dag::Dag,
+    ) -> Result<VerifiedDagProgram, OwnershipError> {
+        chelis_ir::ownership::verify_ownership(chelis_ir::ownership::lower_dag_ownership(
+            dag.clone(),
+        )?)
     }
 }

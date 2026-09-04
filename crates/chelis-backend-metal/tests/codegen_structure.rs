@@ -7,9 +7,10 @@
 //! M1 ships the stub-output assertions. M2 fills in elementwise structural
 //! coverage; M4 reductions; M5 matmul.
 
-use chelis_backend_metal::codegen_metal;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
+use support::codegen_metal;
 
 fn vec_f32(n: usize) -> TensorType {
     TensorType {
@@ -191,7 +192,8 @@ fn m2_simple_add_emits_raw_string_literal_and_dispatch_site() {
     );
     // Output is materialized via the host-side chelis_alloc + device->host copy.
     assert!(
-        src.contains("chelis_metal_device_to_host(outputs[0]->data,"),
+        src.contains("chelis_tensor_write *store_guard_0 = chelis_tensor_begin_write(outputs[0]);")
+            && src.contains("chelis_metal_device_to_host(store_view_0.data,"),
         "expected device->host copy into outputs[0]: {src}"
     );
 }
@@ -409,12 +411,16 @@ fn m2_root_without_store_writes_output_back() {
     // The function MUST write outputs[0]. Without this, the C ABI is
     // silently violated and downstream callers see uninitialized output.
     assert!(
-        src.contains("outputs[0] = chelis_alloc(") && src.contains("outputs[0]->data,"),
+        src.contains("outputs[0] = chelis_alloc(")
+            && src.contains(
+                "chelis_tensor_write *root_guard_0 = chelis_tensor_begin_write(outputs[0]);"
+            )
+            && src.contains("chelis_metal_device_to_host(root_view_0.data,"),
         "no-Store root must write outputs[0] via chelis_alloc + device->host. Source:\n{src}"
     );
     // And the chelis_metal_device_to_host call must reference outputs[0].
     assert!(
-        src.contains("chelis_metal_device_to_host(outputs[0]->data,"),
+        src.contains("chelis_metal_device_to_host(root_view_0.data,"),
         "no-Store root must call chelis_metal_device_to_host into outputs[0]: {src}"
     );
 }
@@ -629,15 +635,27 @@ fn build_matmul_dag_prec(m: usize, k: usize, n: usize, prec: Prim) -> Dag {
             accumulator: acc,
         },
         vec![mul],
-        mat_prec(m, n, prec),
+        mat_prec(m, n, acc),
         None,
     );
-    dag.add_root(sum);
+    let root = if acc == prec {
+        sum
+    } else {
+        dag.add_node(
+            RiscOp::Cast {
+                new_precision: prec,
+            },
+            vec![sum],
+            mat_prec(m, n, prec),
+            None,
+        )
+    };
+    dag.add_root(root);
     dag
 }
 
 #[test]
-fn m4_axis_nonzero_reduction_falls_through_to_stub() {
+fn m4_axis_nonzero_reduction_is_rejected_before_codegen() {
     // The M4 first cut handles full-axis reduce only (axis=0 on rank-1).
     // axis-nonzero falls through to the stub.
     let mut dag = Dag::new();
@@ -661,11 +679,12 @@ fn m4_axis_nonzero_reduction_falls_through_to_stub() {
     );
     dag.add_root(stored);
 
-    let result = codegen_metal(&dag, "axisone");
+    let error = chelis_ir::ownership::lower_dag_ownership(dag)
+        .expect_err("out-of-range reduction axis must not cross the verified boundary");
     assert!(
-        result.mm_source.contains("M1 fallback stub"),
-        "axis-nonzero reduce should fall through to stub: {}",
-        result.mm_source
+        error
+            .to_string()
+            .contains("axis 1 but input has 1 dimensions")
     );
 }
 

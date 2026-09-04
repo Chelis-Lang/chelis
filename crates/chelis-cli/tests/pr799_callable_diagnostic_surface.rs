@@ -171,8 +171,20 @@ fn declared_callback_parameter_with_named_callback_still_builds() {
         generated_c.contains("int8_t (*callback)(int8_t)"),
         "the callback must keep its exact typed declarator:\n{generated_c}"
     );
-    assert!(
-        !generated_c.contains("void *") && !generated_c.contains("void*"),
-        "callback ABIs must never be type-erased:\n{generated_c}"
-    );
+    for erased_callback_declarator in [
+        "void *(*callback)(",
+        "void* (*callback)(",
+        "(*callback)(void *)",
+        "(*callback)(void*)",
+        "void *apply8(",
+        "void* apply8(",
+        "apply8(void *",
+        "apply8(void*",
+    ] {
+        assert!(
+            !generated_c.contains(erased_callback_declarator),
+            "callback ABI contains erased declarator \
+             {erased_callback_declarator:?}:\n{generated_c}"
+        );
+    }
 }

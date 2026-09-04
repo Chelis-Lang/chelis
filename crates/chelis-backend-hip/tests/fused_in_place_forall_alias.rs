@@ -15,11 +15,12 @@
 //! touch the BLAS dispatch (W1-A) or the new `Scatter` emit branch
 //! (W2-A); both are intentionally out of scope here.
 
-use chelis_backend_hip::codegen_hip;
+mod support;
 use chelis_ir::dag::{
     Dag, DimInfo, FusedInput, FusedStep, FusedStepOp, NodeId, RiscOp, TensorType,
 };
 use chelis_types::types::Prim;
+use support::codegen_hip;
 
 fn vec_lit_f32(n: usize) -> TensorType {
     TensorType {
@@ -70,7 +71,7 @@ fn fan_in_dag(
         a_ty.clone(),
         None,
     );
-    let a = dag.add_node(RiscOp::Realize, vec![x_a], a_ty.clone(), None);
+    let a = dag.add_node(RiscOp::Copy, vec![x_a], a_ty.clone(), None);
 
     let x_b = dag.add_node(
         RiscOp::Load { name: "x_b".into() },
@@ -78,7 +79,7 @@ fn fan_in_dag(
         b_ty.clone(),
         None,
     );
-    let b = dag.add_node(RiscOp::Realize, vec![x_b], b_ty.clone(), None);
+    let b = dag.add_node(RiscOp::Copy, vec![x_b], b_ty.clone(), None);
 
     let x_c = dag.add_node(
         RiscOp::Load { name: "x_c".into() },
@@ -86,7 +87,7 @@ fn fan_in_dag(
         c_ty.clone(),
         None,
     );
-    let c = dag.add_node(RiscOp::Realize, vec![x_c], c_ty.clone(), None);
+    let c = dag.add_node(RiscOp::Copy, vec![x_c], c_ty.clone(), None);
 
     let ops = vec![
         FusedStep {
@@ -400,14 +401,14 @@ fn fan_in_multi_consumer_reusable_input_does_not_alias() {
         vec_lit_f32(4),
         None,
     );
-    let a = dag.add_node(RiscOp::Realize, vec![x_a], vec_named_f32("seq", 4), None);
+    let a = dag.add_node(RiscOp::Copy, vec![x_a], vec_named_f32("seq", 4), None);
     let x_b = dag.add_node(
         RiscOp::Load { name: "x_b".into() },
         vec![],
         vec_named_f32("seq", 4),
         None,
     );
-    let b = dag.add_node(RiscOp::Realize, vec![x_b], vec_named_f32("seq", 4), None);
+    let b = dag.add_node(RiscOp::Copy, vec![x_b], vec_named_f32("seq", 4), None);
 
     let ops = vec![FusedStep {
         op: FusedStepOp::Add,
@@ -492,14 +493,14 @@ fn fan_in_no_reusable_input_keeps_slot_backed_path() {
         a_ty.clone(),
         None,
     );
-    let a = dag.add_node(RiscOp::Realize, vec![x_a], a_ty.clone(), None);
+    let a = dag.add_node(RiscOp::Copy, vec![x_a], a_ty.clone(), None);
     let x_b = dag.add_node(
         RiscOp::Load { name: "x_b".into() },
         vec![],
         a_ty.clone(),
         None,
     );
-    let b = dag.add_node(RiscOp::Realize, vec![x_b], a_ty.clone(), None);
+    let b = dag.add_node(RiscOp::Copy, vec![x_b], a_ty.clone(), None);
 
     let ops = vec![FusedStep {
         op: FusedStepOp::Add,

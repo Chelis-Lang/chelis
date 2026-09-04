@@ -349,23 +349,11 @@ const GRANDFATHER_SEAM_ROWS: &[FrozenDispositionRow] = &[
 /// not the general relocation mechanism owned by chelis#1160.
 const INT64_DIM_CARRIER_SUCCESSOR_OVERRIDE: &str =
     "maintainer-override(PR #1149 int64 dimension-carrier successor identities, chelis#1112)";
-const INT64_DIM_CARRIER_SUCCESSOR_ROWS: &[FrozenDispositionRow] = &[
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_tensor * chelis_alloc ( int ndim , const int64_t * shape , int dtype ) ;",
-        flags: &["raw-dtype-int"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_tensor * chelis_alloc_view ( int ndim , const int64_t * shape , int dtype , float * data ) ;",
-        flags: &["float-carrier", "raw-dtype-int", "numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-struct",
-        id: "chelis_runtime.h: typedef struct { float * data ; int64_t shape [ 8 ] ; int64_t strides [ 8 ] ; int ndim ; int dtype ; int64_t size ; int owns_data ; } chelis_tensor",
-        flags: &["float-carrier", "raw-dtype-int", "numeric-op"],
-    },
-];
+const INT64_DIM_CARRIER_SUCCESSOR_ROWS: &[FrozenDispositionRow] = &[FrozenDispositionRow {
+    kind: "header-export",
+    id: "chelis_runtime.h: chelis_tensor * chelis_alloc ( int ndim , const int64_t * shape , int dtype ) ;",
+    flags: &["raw-dtype-int"],
+}];
 
 /// The exact enforcement descriptors carrying the permanent non-seam disposition, frozen
 /// on the same principle as the seam set and for the same reason: a string
@@ -1289,6 +1277,228 @@ const FINAL_NONNUMERIC_ROWS: &[StaticSurfaceDescriptor] = &[
     ),
     StaticSurfaceDescriptor::new(
         PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_adt * chelis_adt_take_value ( chelis_value value ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: const chelis_adt * chelis_adt_borrow_value ( chelis_value value ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_dict * chelis_dict_take_value ( chelis_value value ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: const chelis_dict * chelis_dict_borrow_value ( chelis_value value ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_list_take_value ( chelis_value value ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: const chelis_list * chelis_list_borrow_value ( chelis_value value ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_mapped_file * chelis_mapped_file_take_value ( chelis_value value ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: const chelis_mapped_file * chelis_mapped_file_borrow_value ( chelis_value value ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_mapped_file_retain ( const chelis_mapped_file * mapped ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_mapped_file_release ( const chelis_mapped_file * mapped ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_option * chelis_option_none ( void ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_option * chelis_option_some ( chelis_value value ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: _Bool chelis_option_is_some ( const chelis_option * option ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_value chelis_option_unwrap ( const chelis_option * option ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_option * chelis_option_take_value ( chelis_value value ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: const chelis_option * chelis_option_borrow_value ( chelis_value value ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_option_retain ( const chelis_option * option ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_option_release ( const chelis_option * option ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_string chelis_string_take_value ( chelis_value value ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_string chelis_string_borrow_value ( chelis_value value ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_tensor_write * chelis_tensor_begin_write ( chelis_tensor * tensor ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_tensor_end_write ( chelis_tensor_write * guard ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_tensor_retain ( const chelis_tensor * tensor ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_tensor_release ( const chelis_tensor * tensor ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_tensor * chelis_tensor_take_value ( chelis_value value ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: const chelis_tensor * chelis_tensor_borrow_value ( chelis_value value ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_tuple * chelis_tuple_take_value ( chelis_value value ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: const chelis_tuple * chelis_tuple_borrow_value ( chelis_value value ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_value chelis_value_clone ( chelis_value value ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_value chelis_value_take_adt ( chelis_adt * adt ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_value chelis_value_take_dict ( chelis_dict * dict ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_value chelis_value_take_list ( chelis_list * list ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_value chelis_value_take_mapped_file ( chelis_mapped_file * mapped ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_value chelis_value_take_option ( chelis_option * option ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_value chelis_value_take_string ( chelis_string value ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_value chelis_value_take_tensor ( chelis_tensor * tensor ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_value chelis_value_take_tuple ( chelis_tuple * tuple ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
         "header-struct",
         "chelis_runtime.h: typedef struct { void * handle ; } chelis_string",
         &[],
@@ -1297,15 +1507,16 @@ const FINAL_NONNUMERIC_ROWS: &[StaticSurfaceDescriptor] = &[
 
 /// The exact tagged-carrier declarations of the chelis#1289 public C ABI:
 /// the dtype tag enumeration, the canonical `chelis_scalar` image, the
-/// tagged `chelis_value` (tag enum, payload union, carrier struct), both
-/// option carriers, and the dtype-tagged `chelis_tensor`. These rows ARE the
-/// tagged transport; the callables operating on them register as numeric
-/// operations below. [05-OP-31] states each declaration verbatim.
+/// tagged `chelis_value` (tag enum, payload union, carrier struct), and the
+/// fixed tensor read/write views. Opaque heap descriptors are not transport
+/// rows: only the view returned under [05-OP-44]'s access rules carries
+/// numeric data across the ABI. These rows ARE the tagged transport; the
+/// callables operating on them register as numeric operations below.
 const FINAL_TAGGED_TRANSPORT_ROWS: &[StaticSurfaceDescriptor] = &[
     StaticSurfaceDescriptor::new(
         PRIMARY_CENSUS_FAMILY,
         "header-struct",
-        "chelis_runtime.h: enum { CHELIS_VALUE_UNIT = 0 , CHELIS_VALUE_SCALAR = 1 , CHELIS_VALUE_STRING = 2 , CHELIS_VALUE_TENSOR = 3 , CHELIS_VALUE_LIST = 4 , CHELIS_VALUE_TUPLE = 5 , CHELIS_VALUE_DICT = 6 , CHELIS_VALUE_ADT = 7 }",
+        "chelis_runtime.h: enum { CHELIS_VALUE_UNIT = 0 , CHELIS_VALUE_SCALAR = 1 , CHELIS_VALUE_STRING = 2 , CHELIS_VALUE_TENSOR = 3 , CHELIS_VALUE_LIST = 4 , CHELIS_VALUE_TUPLE = 5 , CHELIS_VALUE_DICT = 6 , CHELIS_VALUE_ADT = 7 , CHELIS_VALUE_OPTION = 8 , CHELIS_VALUE_MAPPED_FILE = 9 }",
         &[],
     ),
     StaticSurfaceDescriptor::new(
@@ -1323,19 +1534,13 @@ const FINAL_TAGGED_TRANSPORT_ROWS: &[StaticSurfaceDescriptor] = &[
     StaticSurfaceDescriptor::new(
         PRIMARY_CENSUS_FAMILY,
         "header-struct",
-        "chelis_runtime.h: typedef struct { uint8_t is_some ; uint8_t reserved [ 7 ] ; chelis_scalar value ; } chelis_option_scalar",
+        "chelis_runtime.h: typedef struct { const void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_read_view",
         &["numeric-op"],
     ),
     StaticSurfaceDescriptor::new(
         PRIMARY_CENSUS_FAMILY,
         "header-struct",
-        "chelis_runtime.h: typedef struct { uint8_t is_some ; uint8_t reserved [ 7 ] ; chelis_value value ; } chelis_option_value",
-        &["numeric-op"],
-    ),
-    StaticSurfaceDescriptor::new(
-        PRIMARY_CENSUS_FAMILY,
-        "header-struct",
-        "chelis_runtime.h: typedef struct { void * data ; const int64_t * shape ; const int64_t * strides ; int64_t size ; int64_t byte_capacity ; int32_t rank ; chelis_dtype dtype ; uint8_t owns_data ; uint8_t reserved [ 2 ] ; } chelis_tensor",
+        "chelis_runtime.h: typedef struct { void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_write_view",
         &["numeric-op"],
     ),
     StaticSurfaceDescriptor::new(
@@ -2004,6 +2209,16 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         surface: StaticSurfaceDescriptor::new(
             PRIMARY_CENSUS_FAMILY,
             "header-export",
+            "chelis_runtime.h: chelis_option * chelis_dict_get ( const chelis_dict * dict , chelis_value key ) ;",
+            &[],
+        ),
+        atom: "[05-OP-32]",
+        authority_anchor: "`dict_get` returns one owned [05-OP-44] option\n> node that is `None` only for absence",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
             "chelis_runtime.h: chelis_list * chelis_tensor_elements ( const chelis_tensor * tensor ) ;",
             &[],
         ),
@@ -2024,7 +2239,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         surface: StaticSurfaceDescriptor::new(
             PRIMARY_CENSUS_FAMILY,
             "header-export",
-            "chelis_runtime.h: chelis_option_scalar chelis_dict_get_scalar ( const chelis_dict * dict , chelis_value key , chelis_dtype dtype ) ;",
+            "chelis_runtime.h: chelis_option * chelis_dict_get_scalar ( const chelis_dict * dict , chelis_value key , chelis_dtype dtype ) ;",
             &["numeric-op"],
         ),
         atom: "[05-OP-31]",
@@ -2034,7 +2249,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         surface: StaticSurfaceDescriptor::new(
             PRIMARY_CENSUS_FAMILY,
             "header-export",
-            "chelis_runtime.h: chelis_option_scalar chelis_parse_scalar ( chelis_string text , chelis_dtype dtype ) ;",
+            "chelis_runtime.h: chelis_option * chelis_parse_scalar ( chelis_string text , chelis_dtype dtype ) ;",
             &["numeric-op"],
         ),
         atom: "[05-OP-31]",
@@ -2064,7 +2279,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         surface: StaticSurfaceDescriptor::new(
             PRIMARY_CENSUS_FAMILY,
             "header-export",
-            "chelis_runtime.h: chelis_scalar chelis_value_as_scalar ( chelis_value value ) ;",
+            "chelis_runtime.h: chelis_scalar chelis_value_unbox_scalar ( chelis_value value ) ;",
             &[],
         ),
         atom: "[05-OP-31]",
@@ -2094,11 +2309,31 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         surface: StaticSurfaceDescriptor::new(
             PRIMARY_CENSUS_FAMILY,
             "header-export",
-            "chelis_runtime.h: chelis_tensor * chelis_alloc_view ( int32_t rank , const int64_t * shape , chelis_dtype dtype , void * data , int64_t byte_capacity ) ;",
+            "chelis_runtime.h: chelis_tensor * chelis_tensor_entry_borrow ( int32_t rank , const int64_t * shape , chelis_dtype dtype , const void * data , int64_t byte_capacity ) ;",
             &["numeric-op"],
         ),
-        atom: "[05-OP-33]",
-        authority_anchor: "A view is non-owning contiguous storage whose declared\n> capacity covers its checked byte size",
+        atom: "[05-OP-44]",
+        authority_anchor: "`chelis_tensor_entry_borrow` validates the declared rank,\n> extents, dtype, alignment, and capacity",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_read_view chelis_tensor_read_view ( const chelis_tensor * tensor ) ;",
+            &[],
+        ),
+        atom: "[05-OP-44]",
+        authority_anchor: "`chelis_tensor_read_view` returns\n> [05-OP-31]'s read view",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_write_view chelis_tensor_write_view ( const chelis_tensor_write * guard ) ;",
+            &[],
+        ),
+        atom: "[05-OP-44]",
+        authority_anchor: "`chelis_tensor_write_view` borrows its `const` guard",
     },
     FinalNumericOperationRegistration {
         surface: StaticSurfaceDescriptor::new(
@@ -2138,7 +2373,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
             &[],
         ),
         atom: "[05-OP-31]",
-        authority_anchor: "rank zero has null `shape` and `strides` pointers",
+        authority_anchor: "empty product equal to one",
     },
     FinalNumericOperationRegistration {
         surface: StaticSurfaceDescriptor::new(
@@ -2274,7 +2509,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         surface: StaticSurfaceDescriptor::new(
             PRIMARY_CENSUS_FAMILY,
             "header-export",
-            "chelis_runtime.h: chelis_value chelis_value_from_scalar ( chelis_scalar value ) ;",
+            "chelis_runtime.h: chelis_value chelis_value_box_scalar ( chelis_scalar value ) ;",
             &[],
         ),
         atom: "[05-OP-31]",
@@ -2324,7 +2559,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         surface: StaticSurfaceDescriptor::new(
             PRIMARY_CENSUS_FAMILY,
             "header-export",
-            "chelis_runtime.h: void chelis_fill_scalar ( chelis_tensor * tensor , chelis_scalar value ) ;",
+            "chelis_runtime.h: void chelis_fill_scalar ( chelis_tensor_write * guard , chelis_scalar value ) ;",
             &[],
         ),
         atom: "[05-OP-31]",
@@ -4692,6 +4927,44 @@ fn capacity_census_matches_public_surface() {
 }
 
 #[test]
+fn tensor_entry_borrow_successor_has_exact_op44_authority() {
+    const ID: &str = "chelis_runtime.h: chelis_tensor * chelis_tensor_entry_borrow ( int32_t rank , const int64_t * shape , chelis_dtype dtype , const void * data , int64_t byte_capacity ) ;";
+    const SIGNATURE: &str = "`chelis_tensor *chelis_tensor_entry_borrow(int32_t rank, const int64_t *shape, chelis_dtype dtype, const void *data, int64_t byte_capacity)`";
+
+    let root = repo_root();
+    let current = current_inventory(&root);
+    assert!(
+        current
+            .iter()
+            .all(|row| !row.id.contains("chelis_alloc_view")),
+        "the retired foreign-storage alias must not remain in the published census"
+    );
+    let row = current
+        .iter()
+        .find(|row| row.kind == "header-export" && row.id == ID)
+        .expect("the exact entry-borrow successor is present in the published header census");
+    let registration = FINAL_NUMERIC_OPERATION_ROWS
+        .iter()
+        .find(|registration| registration.surface.kind == row.kind && registration.surface.id == ID)
+        .expect("entry borrow has an exact semantic registration");
+    assert_eq!(registration.atom, "[05-OP-44]");
+    assert_eq!(registration.surface.flags, &["numeric-op"]);
+    assert!(
+        include_str!("../../../spec/registry/c_heap_lifetime.md").contains(SIGNATURE),
+        "[05-OP-44]'s incorporated registry must contain the exact successor signature"
+    );
+    let spec = fs::read_to_string(root.join(CONTROLLING_SPEC_REL)).expect("read spec/05");
+    assert_eq!(
+        capacity_census_authority::classify_final_authority(
+            &authority_surface(row),
+            final_authority_registries(),
+            &spec,
+        ),
+        Ok(capacity_census_authority::FinalAuthority::NumericOperation { atom: "[05-OP-44]" })
+    );
+}
+
+#[test]
 fn migrated_primary_rows_have_exact_final_authority_and_no_transition_disposition() {
     let baseline: Baseline = serde_json::from_str(
         &fs::read_to_string(repo_root().join(BASELINE_REL)).expect("read primary baseline"),
@@ -4919,23 +5192,11 @@ fn sanctioned_actions_name_complete_identity_change_and_new_atom_paths() {
 
 #[test]
 fn int64_dim_carrier_successors_use_named_one_off_overrides() {
-    const SUCCESSORS: &[(&str, &str, &[&str])] = &[
-        (
-            "header-export",
-            "chelis_runtime.h: chelis_tensor * chelis_alloc ( int ndim , const int64_t * shape , int dtype ) ;",
-            &["raw-dtype-int"],
-        ),
-        (
-            "header-export",
-            "chelis_runtime.h: chelis_tensor * chelis_alloc_view ( int ndim , const int64_t * shape , int dtype , float * data ) ;",
-            &["float-carrier", "raw-dtype-int", "numeric-op"],
-        ),
-        (
-            "header-struct",
-            "chelis_runtime.h: typedef struct { float * data ; int64_t shape [ 8 ] ; int64_t strides [ 8 ] ; int ndim ; int dtype ; int64_t size ; int owns_data ; } chelis_tensor",
-            &["float-carrier", "raw-dtype-int", "numeric-op"],
-        ),
-    ];
+    const SUCCESSORS: &[(&str, &str, &[&str])] = &[(
+        "header-export",
+        "chelis_runtime.h: chelis_tensor * chelis_alloc ( int ndim , const int64_t * shape , int dtype ) ;",
+        &["raw-dtype-int"],
+    )];
     const OVERRIDE: &str =
         "maintainer-override(PR #1149 int64 dimension-carrier successor identities, chelis#1112)";
 

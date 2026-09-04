@@ -5,10 +5,12 @@
 //! the complete two-operand explicit-output einsum grammar and size checks.
 
 use chelis_runtime::{
-    chelis_alloc, chelis_free, chelis_string_from_cstr, chelis_string_release, chelis_tensor,
-    chelis_tensor_cumsum, chelis_tensor_einsum, chelis_tensor_scatter_add, chelis_tensor_trace,
-    chelis_tensor_where, CHELIS_DTYPE_BOOL, CHELIS_DTYPE_F32, CHELIS_DTYPE_F64, CHELIS_DTYPE_I32,
-    CHELIS_DTYPE_I64, CHELIS_DTYPE_I8,
+    chelis_alloc, chelis_string_from_cstr, chelis_string_release, chelis_tensor,
+    chelis_tensor_begin_write, chelis_tensor_cumsum, chelis_tensor_einsum, chelis_tensor_end_write,
+    chelis_tensor_rank, chelis_tensor_read_view, chelis_tensor_release, chelis_tensor_scatter_add,
+    chelis_tensor_shape, chelis_tensor_trace, chelis_tensor_where, chelis_tensor_write_view,
+    CHELIS_DTYPE_BOOL, CHELIS_DTYPE_F32, CHELIS_DTYPE_F64, CHELIS_DTYPE_I32, CHELIS_DTYPE_I64,
+    CHELIS_DTYPE_I8,
 };
 use std::env;
 use std::ffi::CString;
@@ -20,13 +22,29 @@ unsafe fn tensor(dtype: u8, shape: &[i64]) -> *mut chelis_tensor {
     chelis_alloc(shape.len() as i32, shape.as_ptr(), dtype)
 }
 
+unsafe fn write<T: Copy>(tensor: *mut chelis_tensor, values: &[T]) {
+    let guard = chelis_tensor_begin_write(tensor);
+    let view = chelis_tensor_write_view(guard);
+    assert_eq!(view.count as usize, values.len());
+    view.data
+        .cast::<T>()
+        .copy_from(values.as_ptr(), values.len());
+    chelis_tensor_end_write(guard);
+}
+
+unsafe fn read<T: Copy>(tensor: *const chelis_tensor) -> Vec<T> {
+    let view = chelis_tensor_read_view(tensor);
+    std::slice::from_raw_parts(view.data.cast::<T>(), view.count as usize).to_vec()
+}
+
+unsafe fn read_one<T: Copy>(tensor: *const chelis_tensor) -> T {
+    read::<T>(tensor)[0]
+}
+
 unsafe fn f32_tensor(shape: &[i64], bits: &[u32]) -> *mut chelis_tensor {
     unsafe {
         let value = tensor(CHELIS_DTYPE_F32, shape);
-        (*value)
-            .data
-            .cast::<u32>()
-            .copy_from(bits.as_ptr(), bits.len());
+        write(value, bits);
         value
     }
 }
@@ -34,10 +52,7 @@ unsafe fn f32_tensor(shape: &[i64], bits: &[u32]) -> *mut chelis_tensor {
 unsafe fn f64_tensor(shape: &[i64], bits: &[u64]) -> *mut chelis_tensor {
     unsafe {
         let value = tensor(CHELIS_DTYPE_F64, shape);
-        (*value)
-            .data
-            .cast::<u64>()
-            .copy_from(bits.as_ptr(), bits.len());
+        write(value, bits);
         value
     }
 }
@@ -45,10 +60,7 @@ unsafe fn f64_tensor(shape: &[i64], bits: &[u64]) -> *mut chelis_tensor {
 unsafe fn i32_tensor(shape: &[i64], values: &[i32]) -> *mut chelis_tensor {
     unsafe {
         let value = tensor(CHELIS_DTYPE_I32, shape);
-        (*value)
-            .data
-            .cast::<i32>()
-            .copy_from(values.as_ptr(), values.len());
+        write(value, values);
         value
     }
 }
@@ -56,10 +68,7 @@ unsafe fn i32_tensor(shape: &[i64], values: &[i32]) -> *mut chelis_tensor {
 unsafe fn i64_tensor(shape: &[i64], values: &[i64]) -> *mut chelis_tensor {
     unsafe {
         let value = tensor(CHELIS_DTYPE_I64, shape);
-        (*value)
-            .data
-            .cast::<i64>()
-            .copy_from(values.as_ptr(), values.len());
+        write(value, values);
         value
     }
 }
@@ -92,19 +101,20 @@ fn f32_trace_uses_the_canonical_adjacent_pair_tree() {
     unsafe {
         let shape = [5_i64, 5];
         let matrix = tensor(CHELIS_DTYPE_F32, &shape);
-        let data = (*matrix).data.cast::<f32>();
+        let mut values = vec![0.0_f32; 25];
         for (index, value) in [1e20_f32, 1.0, -1e20_f32, 1.0, 1.0]
             .iter()
             .copied()
             .enumerate()
         {
-            *data.add(index * 5 + index) = value;
+            values[index * 5 + index] = value;
         }
+        write(matrix, &values);
         let output = chelis_tensor_trace(matrix, 0, 1);
-        assert_eq!((*output).dtype, CHELIS_DTYPE_F32);
-        assert_eq!((*(*output).data.cast::<f32>()).to_bits(), 1.0_f32.to_bits());
-        chelis_free(output);
-        chelis_free(matrix);
+        assert_eq!(chelis_tensor_read_view(output).dtype, CHELIS_DTYPE_F32);
+        assert_eq!(read_one::<f32>(output).to_bits(), 1.0_f32.to_bits());
+        chelis_tensor_release(output);
+        chelis_tensor_release(matrix);
     }
 }
 
@@ -113,19 +123,20 @@ fn f64_trace_uses_the_canonical_adjacent_pair_tree() {
     unsafe {
         let shape = [5_i64, 5];
         let matrix = tensor(CHELIS_DTYPE_F64, &shape);
-        let data = (*matrix).data.cast::<f64>();
+        let mut values = vec![0.0_f64; 25];
         for (index, value) in [1e300_f64, 1.0, -1e300_f64, 1.0, 1.0]
             .iter()
             .copied()
             .enumerate()
         {
-            *data.add(index * 5 + index) = value;
+            values[index * 5 + index] = value;
         }
+        write(matrix, &values);
         let output = chelis_tensor_trace(matrix, 0, 1);
-        assert_eq!((*output).dtype, CHELIS_DTYPE_F64);
-        assert_eq!((*(*output).data.cast::<f64>()).to_bits(), 1.0_f64.to_bits());
-        chelis_free(output);
-        chelis_free(matrix);
+        assert_eq!(chelis_tensor_read_view(output).dtype, CHELIS_DTYPE_F64);
+        assert_eq!(read_one::<f64>(output).to_bits(), 1.0_f64.to_bits());
+        chelis_tensor_release(output);
+        chelis_tensor_release(matrix);
     }
 }
 
@@ -141,9 +152,9 @@ fn integer_trace_balancing_avoids_spurious_overflow_but_traps_true_overflow() {
                     }
                     let input = i32_tensor(&[4, 4], &matrix);
                     let output = chelis_tensor_trace(input, 0, 1);
-                    assert_eq!(*(*output).data.cast::<i32>(), i32::MAX - 1);
-                    chelis_free(output);
-                    chelis_free(input);
+                    assert_eq!(read_one::<i32>(output), i32::MAX - 1);
+                    chelis_tensor_release(output);
+                    chelis_tensor_release(input);
                 }
                 "trace-i64-balanced" => {
                     let mut matrix = vec![0_i64; 16];
@@ -152,9 +163,9 @@ fn integer_trace_balancing_avoids_spurious_overflow_but_traps_true_overflow() {
                     }
                     let input = i64_tensor(&[4, 4], &matrix);
                     let output = chelis_tensor_trace(input, 0, 1);
-                    assert_eq!(*(*output).data.cast::<i64>(), i64::MAX - 1);
-                    chelis_free(output);
-                    chelis_free(input);
+                    assert_eq!(read_one::<i64>(output), i64::MAX - 1);
+                    chelis_tensor_release(output);
+                    chelis_tensor_release(input);
                 }
                 "trace-i32-overflow" => {
                     let input = i32_tensor(&[2, 2], &[i32::MAX, 0, 0, 1]);
@@ -219,58 +230,58 @@ unsafe fn run_nan_arithmetic_case(case: &str) {
             "f32-cumsum" => {
                 let input = f32_tensor(&[1], &[F32_PAYLOAD]);
                 let output = chelis_tensor_cumsum(input, 0);
-                assert_eq!(*(*output).data.cast::<u32>(), 0x7fc0_0000);
-                chelis_free(output);
-                chelis_free(input);
+                assert_eq!(read_one::<u32>(output), 0x7fc0_0000);
+                chelis_tensor_release(output);
+                chelis_tensor_release(input);
             }
             "f64-cumsum" => {
                 let input = f64_tensor(&[1], &[F64_PAYLOAD]);
                 let output = chelis_tensor_cumsum(input, 0);
-                assert_eq!(*(*output).data.cast::<u64>(), 0x7ff8_0000_0000_0000);
-                chelis_free(output);
-                chelis_free(input);
+                assert_eq!(read_one::<u64>(output), 0x7ff8_0000_0000_0000);
+                chelis_tensor_release(output);
+                chelis_tensor_release(input);
             }
             "f32-scatter" => {
                 let base = f32_tensor(&[1], &[F32_PAYLOAD]);
                 let indices = tensor(CHELIS_DTYPE_I8, &[1]);
-                *(*indices).data.cast::<i8>() = 0;
+                write(indices, &[0_i8]);
                 let updates = f32_tensor(&[1], &[0.0_f32.to_bits()]);
                 let output = chelis_tensor_scatter_add(base, indices, updates, 0);
-                assert_eq!(*(*output).data.cast::<u32>(), 0x7fc0_0000);
-                chelis_free(output);
-                chelis_free(updates);
-                chelis_free(indices);
-                chelis_free(base);
+                assert_eq!(read_one::<u32>(output), 0x7fc0_0000);
+                chelis_tensor_release(output);
+                chelis_tensor_release(updates);
+                chelis_tensor_release(indices);
+                chelis_tensor_release(base);
             }
             "f64-scatter" => {
                 let base = f64_tensor(&[1], &[F64_PAYLOAD]);
                 let indices = tensor(CHELIS_DTYPE_I8, &[1]);
-                *(*indices).data.cast::<i8>() = 0;
+                write(indices, &[0_i8]);
                 let updates = f64_tensor(&[1], &[0.0_f64.to_bits()]);
                 let output = chelis_tensor_scatter_add(base, indices, updates, 0);
-                assert_eq!(*(*output).data.cast::<u64>(), 0x7ff8_0000_0000_0000);
-                chelis_free(output);
-                chelis_free(updates);
-                chelis_free(indices);
-                chelis_free(base);
+                assert_eq!(read_one::<u64>(output), 0x7ff8_0000_0000_0000);
+                chelis_tensor_release(output);
+                chelis_tensor_release(updates);
+                chelis_tensor_release(indices);
+                chelis_tensor_release(base);
             }
             "f32-einsum" => {
                 let lhs = f32_tensor(&[1], &[F32_PAYLOAD]);
                 let rhs = f32_tensor(&[1], &[1.0_f32.to_bits()]);
                 let output = call_einsum("i,i->", lhs, rhs, CHELIS_DTYPE_F32);
-                assert_eq!(*(*output).data.cast::<u32>(), 0x7fc0_0000);
-                chelis_free(output);
-                chelis_free(rhs);
-                chelis_free(lhs);
+                assert_eq!(read_one::<u32>(output), 0x7fc0_0000);
+                chelis_tensor_release(output);
+                chelis_tensor_release(rhs);
+                chelis_tensor_release(lhs);
             }
             "f64-einsum" => {
                 let lhs = f64_tensor(&[1], &[F64_PAYLOAD]);
                 let rhs = f64_tensor(&[1], &[1.0_f64.to_bits()]);
                 let output = call_einsum("i,i->", lhs, rhs, CHELIS_DTYPE_F64);
-                assert_eq!(*(*output).data.cast::<u64>(), 0x7ff8_0000_0000_0000);
-                chelis_free(output);
-                chelis_free(rhs);
-                chelis_free(lhs);
+                assert_eq!(read_one::<u64>(output), 0x7ff8_0000_0000_0000);
+                chelis_tensor_release(output);
+                chelis_tensor_release(rhs);
+                chelis_tensor_release(lhs);
             }
             "f32-trace" => {
                 let input = f32_tensor(
@@ -283,9 +294,9 @@ unsafe fn run_nan_arithmetic_case(case: &str) {
                     ],
                 );
                 let output = chelis_tensor_trace(input, 0, 1);
-                assert_eq!(*(*output).data.cast::<u32>(), 0x7fc0_0000);
-                chelis_free(output);
-                chelis_free(input);
+                assert_eq!(read_one::<u32>(output), 0x7fc0_0000);
+                chelis_tensor_release(output);
+                chelis_tensor_release(input);
             }
             "f64-trace" => {
                 let input = f64_tensor(
@@ -298,9 +309,9 @@ unsafe fn run_nan_arithmetic_case(case: &str) {
                     ],
                 );
                 let output = chelis_tensor_trace(input, 0, 1);
-                assert_eq!(*(*output).data.cast::<u64>(), 0x7ff8_0000_0000_0000);
-                chelis_free(output);
-                chelis_free(input);
+                assert_eq!(read_one::<u64>(output), 0x7ff8_0000_0000_0000);
+                chelis_tensor_release(output);
+                chelis_tensor_release(input);
             }
             other => panic!("unknown arithmetic NaN child `{other}`"),
         }
@@ -346,17 +357,17 @@ fn every_shared_runtime_arithmetic_consumer_canonicalizes_f32_f64_nan() {
 fn where_selection_preserves_f32_f64_nan_payload_bits() {
     unsafe {
         let condition = tensor(CHELIS_DTYPE_BOOL, &[1]);
-        *(*condition).data = 1;
+        write(condition, &[1_u8]);
 
         let then_f32 = f32_tensor(&[1], &[0x7fc1_2345]);
         let else_f32 = f32_tensor(&[1], &[0x7fc5_4321]);
         let selected_f32 = chelis_tensor_where(condition, then_f32, else_f32);
-        assert_eq!(*(*selected_f32).data.cast::<u32>(), 0x7fc1_2345);
+        assert_eq!(read_one::<u32>(selected_f32), 0x7fc1_2345);
 
         let then_f64 = f64_tensor(&[1], &[0x7ff8_0000_0000_1234]);
         let else_f64 = f64_tensor(&[1], &[0x7ff8_0000_0000_4321]);
         let selected_f64 = chelis_tensor_where(condition, then_f64, else_f64);
-        assert_eq!(*(*selected_f64).data.cast::<u64>(), 0x7ff8_0000_0000_1234);
+        assert_eq!(read_one::<u64>(selected_f64), 0x7ff8_0000_0000_1234);
 
         for value in [
             selected_f64,
@@ -367,7 +378,7 @@ fn where_selection_preserves_f32_f64_nan_payload_bits() {
             then_f32,
             condition,
         ] {
-            chelis_free(value);
+            chelis_tensor_release(value);
         }
     }
 }
@@ -379,25 +390,22 @@ unsafe fn run_einsum_grammar_case(case: &str) {
                 let lhs = f32_tensor(&[], &[2.0_f32.to_bits()]);
                 let rhs = f32_tensor(&[], &[3.0_f32.to_bits()]);
                 let output = call_einsum(",->", lhs, rhs, CHELIS_DTYPE_F32);
-                assert_eq!((*output).rank, 0);
-                assert_eq!(*(*output).data.cast::<f32>(), 6.0);
-                chelis_free(output);
-                chelis_free(rhs);
-                chelis_free(lhs);
+                assert_eq!(chelis_tensor_rank(output), 0);
+                assert_eq!(read_one::<f32>(output), 6.0);
+                chelis_tensor_release(output);
+                chelis_tensor_release(rhs);
+                chelis_tensor_release(lhs);
             }
             "legal-scalar-vector" => {
                 let lhs = f32_tensor(&[], &[2.0_f32.to_bits()]);
                 let rhs = f32_tensor(&[2], &[3.0_f32.to_bits(), 4.0_f32.to_bits()]);
                 let output = call_einsum(",i->i", lhs, rhs, CHELIS_DTYPE_F32);
-                assert_eq!((*output).rank, 1);
-                assert_eq!(*(*output).shape.as_ptr(), 2);
-                assert_eq!(
-                    std::slice::from_raw_parts((*output).data.cast::<f32>(), 2),
-                    &[6.0, 8.0]
-                );
-                chelis_free(output);
-                chelis_free(rhs);
-                chelis_free(lhs);
+                assert_eq!(chelis_tensor_rank(output), 1);
+                assert_eq!(chelis_tensor_shape(output, 0), 2);
+                assert_eq!(read::<f32>(output), [6.0, 8.0]);
+                chelis_tensor_release(output);
+                chelis_tensor_release(rhs);
+                chelis_tensor_release(lhs);
             }
             "legal-repeated-input" => {
                 let lhs = f32_tensor(
@@ -411,10 +419,10 @@ unsafe fn run_einsum_grammar_case(case: &str) {
                 );
                 let rhs = f32_tensor(&[2], &[3.0_f32.to_bits(), 4.0_f32.to_bits()]);
                 let output = call_einsum("ii,i->", lhs, rhs, CHELIS_DTYPE_F32);
-                assert_eq!(*(*output).data.cast::<f32>(), 11.0);
-                chelis_free(output);
-                chelis_free(rhs);
-                chelis_free(lhs);
+                assert_eq!(read_one::<f32>(output), 11.0);
+                chelis_tensor_release(output);
+                chelis_tensor_release(rhs);
+                chelis_tensor_release(lhs);
             }
             "invalid-uppercase" => {
                 let lhs = f32_tensor(&[1], &[1.0_f32.to_bits()]);

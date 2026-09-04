@@ -426,20 +426,32 @@ fn describe_grammar_error(e: &PredGrammarError) -> String {
 // Deep node helpers (local to this module to stay decoupled from infer.rs)
 // ===========================================================================
 
+// chelis#1125 PP7 / spec/04-type-system.md §10 [04-TOT-5]: these three
+// readers are the whole module's view of a Deep node, and they were
+// `Expr::List`-only. On the stamped ingress every node arrives as an
+// `Expr::Node`, so `tag` returned `None` for the `module` wrapper,
+// `flatten_with_modules` never descended into it, and NO `deftype` was ever
+// validated -- the entire D-WF opaque-invariant pass was inert on
+// `check_typed_program` while `check_ir_program` ran it. That is PP7's "axis
+// A, not axis B" case: the pass IS invoked from the typed entry; its readers
+// could not decode the carrier. Every other helper below (`var_name`,
+// `meta_value`, `has_true_meta`, `as_def`, `is_zero_arg_constant`, `fn_body`,
+// `flatten_with_modules`) is defined in terms of these three, so repairing
+// them repairs the module.
+
 fn tag(expr: &Expr) -> Option<DeepTag> {
     match expr {
+        Expr::Node(node, _) => Some(node.tag()),
         Expr::List(list, _) => list.tag(),
         _ => None,
     }
 }
 
 fn children(expr: &Expr) -> &[Expr] {
-    if let Expr::List(list, _) = expr
-        && list.elements.len() >= 2
-    {
-        &list.elements[2..]
-    } else {
-        &[]
+    match expr {
+        Expr::Node(node, _) => node.children_slice(),
+        Expr::List(list, _) if list.elements.len() >= 2 => &list.elements[2..],
+        _ => &[],
     }
 }
 
@@ -459,12 +471,13 @@ fn var_name(expr: &Expr) -> Option<&str> {
 }
 
 fn meta_map(expr: &Expr) -> Option<&chelis_deep::MetaMap> {
-    if let Expr::List(list, _) = expr
-        && let Some(Expr::Map(map, _)) = list.elements.get(1)
-    {
-        Some(map)
-    } else {
-        None
+    match expr {
+        Expr::Node(node, _) => Some(node.meta()),
+        Expr::List(list, _) => match list.elements.get(1) {
+            Some(Expr::Map(map, _)) => Some(map),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -535,11 +548,11 @@ fn flatten_with_modules(exprs: &[Expr]) -> Vec<(Option<String>, &Expr)> {
                 (None, Some(n)) => Some(n.to_string()),
                 (p, None) => p.map(str::to_string),
             };
-            if let Expr::List(list, _) = expr {
-                // `(module {} name children...)`: skip tag, meta, name.
-                for child in list.elements.iter().skip(3) {
-                    push(child, key.as_deref(), out);
-                }
+            // `(module {} name children...)`: `children` already drops the
+            // tag and the metadata map on either carrier, so `skip(1)` drops
+            // the module name and leaves the declarations.
+            for child in children(expr).iter().skip(1) {
+                push(child, key.as_deref(), out);
             }
             return;
         }

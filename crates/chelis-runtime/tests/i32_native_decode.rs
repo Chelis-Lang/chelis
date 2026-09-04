@@ -7,10 +7,12 @@ use std::ffi::c_int;
 use std::ptr;
 
 use chelis_runtime::{
-    chelis_alloc, chelis_free, chelis_string_from_cstr, chelis_tensor, chelis_tensor_clamp,
-    chelis_tensor_cmplt, chelis_tensor_cumsum, chelis_tensor_einsum, chelis_tensor_scatter_add,
-    chelis_tensor_trace, chelis_tensor_where, data_as_f32, data_as_f32_const, Bool8, TensorElement,
-    CHELIS_DTYPE_BOOL, CHELIS_DTYPE_F32, CHELIS_DTYPE_I32,
+    chelis_alloc, chelis_string_from_cstr, chelis_tensor, chelis_tensor_begin_write,
+    chelis_tensor_clamp, chelis_tensor_cmplt, chelis_tensor_cumsum, chelis_tensor_einsum,
+    chelis_tensor_end_write, chelis_tensor_read_view, chelis_tensor_release,
+    chelis_tensor_scatter_add, chelis_tensor_trace, chelis_tensor_where, chelis_tensor_write_view,
+    data_as_f32, data_as_f32_const, Bool8, TensorElement, CHELIS_DTYPE_BOOL, CHELIS_DTYPE_F32,
+    CHELIS_DTYPE_I32,
 };
 
 unsafe fn i32_tensor(shape: &[i64], values: &[i32]) -> *mut chelis_tensor {
@@ -21,19 +23,22 @@ unsafe fn i32_tensor(shape: &[i64], values: &[i32]) -> *mut chelis_tensor {
             shape.as_ptr()
         };
         let tensor = chelis_alloc(shape.len() as c_int, shape_ptr, CHELIS_DTYPE_I32);
-        assert_eq!((*tensor).size as usize, values.len());
-        let data = i32::data_ptr_unchecked(tensor);
-        for (index, value) in values.iter().copied().enumerate() {
-            *data.add(index) = value;
-        }
+        let guard = chelis_tensor_begin_write(tensor);
+        let view = chelis_tensor_write_view(guard);
+        assert_eq!(view.count as usize, values.len());
+        view.data
+            .cast::<i32>()
+            .copy_from(values.as_ptr(), values.len());
+        chelis_tensor_end_write(guard);
         tensor
     }
 }
 
 unsafe fn read_i32(tensor: *mut chelis_tensor) -> Vec<i32> {
     unsafe {
-        let data = i32::data_ptr_unchecked(tensor);
-        (0..(*tensor).size as usize)
+        let view = chelis_tensor_read_view(tensor);
+        let data = view.data.cast::<i32>();
+        (0..view.count as usize)
             .map(|index| *data.add(index))
             .collect()
     }
@@ -41,8 +46,9 @@ unsafe fn read_i32(tensor: *mut chelis_tensor) -> Vec<i32> {
 
 unsafe fn read_bool_payload(tensor: *mut chelis_tensor) -> Vec<bool> {
     unsafe {
-        let data = Bool8::data_ptr_unchecked(tensor);
-        (0..(*tensor).size as usize)
+        let view = chelis_tensor_read_view(tensor);
+        let data = view.data.cast::<Bool8>();
+        (0..view.count as usize)
             .map(|index| (*data.add(index)).get())
             .collect()
     }
@@ -57,9 +63,9 @@ fn cmplt_orders_negative_and_non_negative_int32_values() {
 
         assert_eq!(read_bool_payload(out), vec![true, false, false]);
 
-        chelis_free(out);
-        chelis_free(rhs);
-        chelis_free(lhs);
+        chelis_tensor_release(out);
+        chelis_tensor_release(rhs);
+        chelis_tensor_release(lhs);
     }
 }
 
@@ -68,19 +74,22 @@ fn where_selects_int32_branches_with_exact_bool8_condition() {
     unsafe {
         let shape = [2_i64];
         let cond = chelis_alloc(1, shape.as_ptr(), CHELIS_DTYPE_BOOL);
-        let cond_data = Bool8::data_ptr_unchecked(cond);
+        let guard = chelis_tensor_begin_write(cond);
+        let write = chelis_tensor_write_view(guard);
+        let cond_data = write.data.cast::<Bool8>();
         *cond_data = Bool8::new(true);
         *cond_data.add(1) = Bool8::new(false);
+        chelis_tensor_end_write(guard);
         let then_tensor = i32_tensor(&[2], &[10, 20]);
         let else_tensor = i32_tensor(&[2], &[-10, -20]);
         let out = chelis_tensor_where(cond, then_tensor, else_tensor);
 
         assert_eq!(read_i32(out), vec![10, -20]);
 
-        chelis_free(out);
-        chelis_free(else_tensor);
-        chelis_free(then_tensor);
-        chelis_free(cond);
+        chelis_tensor_release(out);
+        chelis_tensor_release(else_tensor);
+        chelis_tensor_release(then_tensor);
+        chelis_tensor_release(cond);
     }
 }
 
@@ -94,10 +103,10 @@ fn scatter_add_accumulates_native_int32_updates() {
 
         assert_eq!(read_i32(out), vec![1]);
 
-        chelis_free(out);
-        chelis_free(updates);
-        chelis_free(indices);
-        chelis_free(base);
+        chelis_tensor_release(out);
+        chelis_tensor_release(updates);
+        chelis_tensor_release(indices);
+        chelis_tensor_release(base);
     }
 }
 
@@ -109,8 +118,8 @@ fn cumsum_preserves_exact_int32_prefixes() {
 
         assert_eq!(read_i32(out), vec![1_000_000_000, 1]);
 
-        chelis_free(out);
-        chelis_free(input);
+        chelis_tensor_release(out);
+        chelis_tensor_release(input);
     }
 }
 
@@ -122,8 +131,8 @@ fn trace_accumulates_native_int32_diagonal_values() {
 
         assert_eq!(read_i32(out), vec![1]);
 
-        chelis_free(out);
-        chelis_free(matrix);
+        chelis_tensor_release(out);
+        chelis_tensor_release(matrix);
     }
 }
 
@@ -137,10 +146,10 @@ fn clamp_compares_signed_int32_values() {
 
         assert_eq!(read_i32(out), vec![-8, 7, 8]);
 
-        chelis_free(out);
-        chelis_free(upper);
-        chelis_free(lower);
-        chelis_free(input);
+        chelis_tensor_release(out);
+        chelis_tensor_release(upper);
+        chelis_tensor_release(lower);
+        chelis_tensor_release(input);
     }
 }
 
@@ -154,9 +163,9 @@ fn einsum_multiplies_native_int32_values() {
 
         assert_eq!(read_i32(out), vec![6]);
 
-        chelis_free(out);
-        chelis_free(rhs);
-        chelis_free(lhs);
+        chelis_tensor_release(out);
+        chelis_tensor_release(rhs);
+        chelis_tensor_release(lhs);
     }
 }
 
@@ -165,19 +174,21 @@ fn typed_boundaries_separate_f32_and_bool8_payloads() {
     unsafe {
         let f32_tensor = chelis_alloc(0, ptr::null(), CHELIS_DTYPE_F32);
         let bool_tensor = chelis_alloc(0, ptr::null(), CHELIS_DTYPE_BOOL);
+        let f32_view = chelis_tensor_read_view(f32_tensor);
+        let bool_view = chelis_tensor_read_view(bool_tensor);
 
-        assert_eq!(data_as_f32(f32_tensor), (*f32_tensor).data.cast::<f32>());
         assert_eq!(
-            data_as_f32_const(f32_tensor),
-            (*f32_tensor).data.cast::<f32>()
+            data_as_f32(f32_tensor),
+            f32_view.data.cast_mut().cast::<f32>()
         );
+        assert_eq!(data_as_f32_const(f32_tensor), f32_view.data.cast::<f32>());
         assert_eq!(
             Bool8::data_ptr(bool_tensor).expect("bool tensor uses Bool8 storage"),
-            (*bool_tensor).data.cast::<Bool8>()
+            bool_view.data.cast_mut().cast::<Bool8>()
         );
 
-        chelis_free(bool_tensor);
-        chelis_free(f32_tensor);
+        chelis_tensor_release(bool_tensor);
+        chelis_tensor_release(f32_tensor);
     }
 }
 

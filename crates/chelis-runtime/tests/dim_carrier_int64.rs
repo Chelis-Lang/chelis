@@ -28,8 +28,9 @@
 use std::process::Command;
 
 use chelis_runtime::{
-    chelis_alloc, chelis_alloc_view, chelis_free, chelis_tensor, chelis_tensor_numel,
-    chelis_tensor_shape, CHELIS_DTYPE_F32,
+    chelis_alloc, chelis_tensor_begin_write, chelis_tensor_end_write, chelis_tensor_entry_borrow,
+    chelis_tensor_numel, chelis_tensor_read_view, chelis_tensor_release, chelis_tensor_shape,
+    chelis_tensor_write_view, CHELIS_DTYPE_F32,
 };
 
 const AXIS_CHILD_CASE_ENV: &str = "CHELIS_DIM_CARRIER_AXIS_CHILD_CASE";
@@ -60,7 +61,7 @@ fn large_extent_capacity_child() {
     let shape = [ABOVE_INT32, 1i64];
     let mut backing = [0.0f32; 1];
     unsafe {
-        chelis_alloc_view(
+        chelis_tensor_entry_borrow(
             2,
             shape.as_ptr(),
             CHELIS_DTYPE_F32,
@@ -91,7 +92,7 @@ fn a_small_view_reports_the_same_layout_it_always_did() {
     let shape = [2i64, 3i64];
     let mut backing = [0.0f32; 6];
     unsafe {
-        let tensor = chelis_alloc_view(
+        let tensor = chelis_tensor_entry_borrow(
             2,
             shape.as_ptr(),
             CHELIS_DTYPE_F32,
@@ -101,9 +102,8 @@ fn a_small_view_reports_the_same_layout_it_always_did() {
         assert_eq!(chelis_tensor_shape(tensor, 0), 2);
         assert_eq!(chelis_tensor_shape(tensor, 1), 3);
         assert_eq!(chelis_tensor_numel(tensor), 6);
-        assert_eq!((&(*tensor).strides)[0], 3);
-        assert_eq!((&(*tensor).strides)[1], 1);
-        chelis_free(tensor);
+        assert_eq!(chelis_tensor_read_view(tensor).count, 6);
+        chelis_tensor_release(tensor);
     }
 }
 
@@ -112,7 +112,7 @@ fn negative_axis_indexes_from_the_end() {
     let shape = [2i64, 3i64];
     let mut backing = [0.0f32; 6];
     unsafe {
-        let tensor = chelis_alloc_view(
+        let tensor = chelis_tensor_entry_borrow(
             2,
             shape.as_ptr(),
             CHELIS_DTYPE_F32,
@@ -121,7 +121,7 @@ fn negative_axis_indexes_from_the_end() {
         );
         assert_eq!(chelis_tensor_shape(tensor, -1), 3);
         assert_eq!(chelis_tensor_shape(tensor, -2), 2);
-        chelis_free(tensor);
+        chelis_tensor_release(tensor);
     }
 }
 
@@ -154,7 +154,7 @@ fn out_of_range_axis_child() {
     let shape = [2i64, 3i64];
     let mut backing = [0.0f32; 6];
     unsafe {
-        let tensor = chelis_alloc_view(
+        let tensor = chelis_tensor_entry_borrow(
             2,
             shape.as_ptr(),
             CHELIS_DTYPE_F32,
@@ -179,17 +179,8 @@ fn run_axis_child(case: &str) -> (bool, String) {
     )
 }
 
-/// The Rust `#[repr(C)]` mirror and the published header must describe the
-/// same bytes. Nothing generates one from the other, so without this the
-/// two can be widened independently and every compiled program reads the
-/// wrong field offsets while both crates' own tests stay green.
-///
-/// The probe is compiled by the same `cc` the census and the C-backend
-/// compile-run tests already require, and a missing compiler fails loudly
-/// for the same reason it does there: a skip would make the mirror
-/// unchecked exactly when it matters.
 #[test]
-fn the_published_header_and_the_rust_mirror_describe_the_same_bytes() {
+fn the_published_header_keeps_extents_wide_and_tensor_fields_opaque() {
     let include_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("include");
     let probe_dir = std::env::temp_dir().join(format!(
         "chelis-dim-carrier-probe-{}-{}",
@@ -203,37 +194,28 @@ fn the_published_header_and_the_rust_mirror_describe_the_same_bytes() {
     let source = probe_dir.join("layout_probe.c");
     std::fs::write(
         &source,
-        r#"#include <stddef.h>
-#include <stdio.h>
+        r#"#include <stdint.h>
 #include "chelis_runtime.h"
 
+static chelis_tensor *borrow_large(const int64_t *shape, const void *data) {
+    return chelis_tensor_entry_borrow(1, shape, CHELIS_DTYPE_F32, data, INT64_C(8589934592));
+}
+
 int main(void) {
-    printf("%zu %zu %zu %zu %zu %zu %zu %zu %zu %zu %zu %zu\n",
-           sizeof(chelis_tensor),
-           _Alignof(chelis_tensor),
-           offsetof(chelis_tensor, data),
-           offsetof(chelis_tensor, shape),
-           offsetof(chelis_tensor, strides),
-           offsetof(chelis_tensor, size),
-           offsetof(chelis_tensor, byte_capacity),
-           offsetof(chelis_tensor, rank),
-           offsetof(chelis_tensor, dtype),
-           offsetof(chelis_tensor, owns_data),
-           offsetof(chelis_tensor, reserved),
-           sizeof(((chelis_tensor *)0)->size));
-    return 0;
+    chelis_tensor *tensor = 0;
+    return tensor == 0 && borrow_large != 0 ? 0 : 1;
 }
 "#,
     )
     .expect("write probe source");
-    let binary = probe_dir.join("layout_probe");
+    let object = probe_dir.join("layout_probe.o");
     let compile = Command::new("cc")
         .arg("-I")
         .arg(&include_dir)
+        .arg("-c")
         .arg(&source)
-        .arg("-lm")
         .arg("-o")
-        .arg(&binary)
+        .arg(&object)
         .output()
         .expect("the layout probe requires a C compiler (`cc`) on PATH");
     assert!(
@@ -241,36 +223,7 @@ int main(void) {
         "layout probe failed to compile against the published header:\n{}",
         String::from_utf8_lossy(&compile.stderr)
     );
-    let run = Command::new(&binary).output().expect("run layout probe");
-    assert!(run.status.success(), "layout probe exited nonzero");
-    let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
-    let observed: Vec<usize> = stdout
-        .split_whitespace()
-        .map(|field| field.parse().expect("probe prints decimal sizes"))
-        .collect();
     let _ = std::fs::remove_dir_all(&probe_dir);
-
-    let expected = vec![
-        std::mem::size_of::<chelis_tensor>(),
-        std::mem::align_of::<chelis_tensor>(),
-        std::mem::offset_of!(chelis_tensor, data),
-        std::mem::offset_of!(chelis_tensor, shape),
-        std::mem::offset_of!(chelis_tensor, strides),
-        std::mem::offset_of!(chelis_tensor, size),
-        std::mem::offset_of!(chelis_tensor, byte_capacity),
-        std::mem::offset_of!(chelis_tensor, rank),
-        std::mem::offset_of!(chelis_tensor, dtype),
-        std::mem::offset_of!(chelis_tensor, owns_data),
-        std::mem::offset_of!(chelis_tensor, reserved),
-        std::mem::size_of::<i64>(),
-    ];
-    assert_eq!(
-        observed, expected,
-        "the header and the Rust mirror disagree about `chelis_tensor`: \
-         [size, align, data, shape, strides, size, byte_capacity, rank, dtype, \
-          owns_data, reserved, size-width] header={observed:?} \
-         rust={expected:?}"
-    );
 }
 
 /// Manual gate (chelis#1112): the ALLOCATING counterpart of the metadata
@@ -304,11 +257,16 @@ fn an_allocation_above_int32_elements_reports_its_true_extent() {
         // Touch both ends: a truncated `size` would have under-allocated,
         // and the write past `2^31` elements is the read the old carrier
         // could not address.
-        let data = (*tensor).data as *mut f32;
+        let guard = chelis_tensor_begin_write(tensor);
+        let write = chelis_tensor_write_view(guard);
+        let data = write.data as *mut f32;
         *data.add(0) = 1.0;
         *data.add((ABOVE_INT32 + 15) as usize) = 2.0;
+        chelis_tensor_end_write(guard);
+        let read = chelis_tensor_read_view(tensor);
+        let data = read.data as *const f32;
         assert_eq!(*data.add(0), 1.0);
         assert_eq!(*data.add((ABOVE_INT32 + 15) as usize), 2.0);
-        chelis_free(tensor);
+        chelis_tensor_release(tensor);
     }
 }

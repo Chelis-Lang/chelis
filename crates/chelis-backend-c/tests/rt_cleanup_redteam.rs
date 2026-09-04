@@ -22,13 +22,14 @@
 //! gate stays green for orchestrator merging and WS-Cleanup-Fixups can
 //! re-enable them when fixed.
 
-use chelis_backend_c::codegen;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_types::types::Prim;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+use support::codegen;
 
 mod common;
 
@@ -220,31 +221,47 @@ const HARNESS: &str = r#"
 static chelis_tensor *bf16_tensor_from_bits(const uint16_t *bits, int n) {
     int64_t shape[1] = {n};
     chelis_tensor *t = chelis_alloc(1, shape, CHELIS_DTYPE_BF16);
-    memcpy(t->data, bits, (size_t)n * sizeof(uint16_t));
+    chelis_tensor_write *guard = chelis_tensor_begin_write(t);
+    memcpy(chelis_tensor_write_view(guard).data, bits, (size_t)n * sizeof(uint16_t));
+    chelis_tensor_end_write(guard);
     return t;
 }
 
 static chelis_tensor *f16_tensor_from_bits(const uint16_t *bits, int n) {
     int64_t shape[1] = {n};
     chelis_tensor *t = chelis_alloc(1, shape, CHELIS_DTYPE_F16);
-    memcpy(t->data, bits, (size_t)n * sizeof(uint16_t));
+    chelis_tensor_write *guard = chelis_tensor_begin_write(t);
+    memcpy(chelis_tensor_write_view(guard).data, bits, (size_t)n * sizeof(uint16_t));
+    chelis_tensor_end_write(guard);
     return t;
 }
 
 static chelis_tensor *bf16_tensor_from_f32(const float *src, int n) {
     int64_t shape[1] = {n};
     chelis_tensor *t = chelis_alloc(1, shape, CHELIS_DTYPE_BF16);
-    uint16_t *p = (uint16_t*)t->data;
+    chelis_tensor_write *guard = chelis_tensor_begin_write(t);
+    uint16_t *p = (uint16_t*)chelis_tensor_write_view(guard).data;
     for (int i = 0; i < n; i++) p[i] = chelis_f32_to_bf16(src[i]);
+    chelis_tensor_end_write(guard);
     return t;
 }
 
 static chelis_tensor *f16_tensor_from_f32(const float *src, int n) {
     int64_t shape[1] = {n};
     chelis_tensor *t = chelis_alloc(1, shape, CHELIS_DTYPE_F16);
-    uint16_t *p = (uint16_t*)t->data;
+    chelis_tensor_write *guard = chelis_tensor_begin_write(t);
+    uint16_t *p = (uint16_t*)chelis_tensor_write_view(guard).data;
     for (int i = 0; i < n; i++) p[i] = chelis_f32_to_f16(src[i]);
+    chelis_tensor_end_write(guard);
     return t;
+}
+
+static const uint16_t *tensor_u16_data(const chelis_tensor *t) {
+    return (const uint16_t*)chelis_tensor_read_view(t).data;
+}
+
+static const float *tensor_f32_data(const chelis_tensor *t) {
+    return (const float*)chelis_tensor_read_view(t).data;
 }
 "#;
 
@@ -303,10 +320,10 @@ int main(void) {{
     chelis_tensor *inputs[1] = {{x}};
     chelis_tensor *outputs[1] = {{0}};
     bf16_abs_edge(inputs, 1, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     printf("0x%04X\n", (unsigned)p[0]);
-    chelis_free(x);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(x);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -344,10 +361,10 @@ int main(void) {{
     chelis_tensor *inputs[1] = {{x}};
     chelis_tensor *outputs[1] = {{0}};
     f16_abs_edge(inputs, 1, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     printf("0x%04X\n", (unsigned)p[0]);
-    chelis_free(x);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(x);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -564,7 +581,7 @@ int main(void) {{
     chelis_tensor *inputs[1] = {{x}};
     chelis_tensor *outputs[1] = {{0}};
     bf16_sum_4096(inputs, 1, outputs, 1);
-    float backend = ((float*)outputs[0]->data)[0];
+    float backend = tensor_f32_data(outputs[0])[0];
     /* Naive bf16-direct: every add rounds back to bf16. */
     uint16_t acc = 0x0000;
     uint16_t step = chelis_f32_to_bf16(0.001f);
@@ -574,8 +591,8 @@ int main(void) {{
     }}
     float naive = chelis_bf16_to_f32(acc);
     printf("%.8f\n%.8f\n", backend, naive);
-    chelis_free(x);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(x);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -739,9 +756,9 @@ fn bf16_matmul_wrapper_balances_scratch_alloc_and_free_when_output_is_bf16() {
         "bf16 matmul wrapper must allocate exactly 3 scratch buffers (af, bf, cf):\n{src}"
     );
     // free(t{id}_af), free(t{id}_bf), free(t{id}_cf) plus the contiguity
-    // chelis_free's (`if (t{id}_a != t{a}) chelis_free(t{id}_a);` and
-    // similar for _b). Match the bare `free(t` and the wrapper-internal
-    // pattern.
+    // descriptor releases (`if (t{id}_a != t{a})
+    // chelis_tensor_release(t{id}_a);` and similar for _b). Match the bare
+    // `free(t` calls used only for the wrapper's scratch buffers.
     let af_free = src.contains("free(t") && src.contains("_af);");
     let bf_free = src.contains("free(t") && src.contains("_bf);");
     let cf_free = src.contains("free(t") && src.contains("_cf);");
@@ -831,9 +848,9 @@ extern void bf16_const_extra(chelis_tensor **inputs, int n_in, chelis_tensor **o
 int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     bf16_const_extra(NULL, 0, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     printf("0x%04X\n", (unsigned)p[0]);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -881,9 +898,9 @@ extern void f16_const_extra(chelis_tensor **inputs, int n_in, chelis_tensor **ou
 int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     f16_const_extra(NULL, 0, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     printf("0x%04X\n", (unsigned)p[0]);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -945,9 +962,9 @@ extern void cast_f32_bf16(chelis_tensor **inputs, int n_in, chelis_tensor **outp
 int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     cast_f32_bf16(NULL, 0, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     printf("0x%04X\n", (unsigned)p[0]);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -994,9 +1011,9 @@ extern void cast_bf16_f32(chelis_tensor **inputs, int n_in, chelis_tensor **outp
 int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     cast_bf16_f32(NULL, 0, outputs, 1);
-    float v = ((float*)outputs[0]->data)[0];
+    float v = tensor_f32_data(outputs[0])[0];
     printf("%.8f\n", v);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -1042,9 +1059,9 @@ extern void cast_f32_f16(chelis_tensor **inputs, int n_in, chelis_tensor **outpu
 int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     cast_f32_f16(NULL, 0, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     printf("0x%04X\n", (unsigned)p[0]);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -1129,16 +1146,16 @@ int main(void) {{
     chelis_tensor *inputs[3] = {{a, b, c}};
     chelis_tensor *outputs[1] = {{0}};
     bf16_chain(inputs, 3, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     for (int i = 0; i < {n}; i++) {{
         if (i) printf(" ");
         printf("%.8f", chelis_bf16_to_f32(p[i]));
     }}
     printf("\n");
-    chelis_free(a);
-    chelis_free(b);
-    chelis_free(c);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(a);
+    chelis_tensor_release(b);
+    chelis_tensor_release(c);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#

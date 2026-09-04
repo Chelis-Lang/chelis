@@ -67,7 +67,7 @@ fn options_of_active_scalars_share_the_exact_tagged_scalar_carrier() {
             .expect("every active runtime scalar has an exact Option ABI");
         assert_eq!(
             abi.c_type_name(),
-            Some("chelis_option_scalar"),
+            Some("chelis_option*"),
             "Option<{precision:?}> must not retain a per-dtype compatibility struct"
         );
     }
@@ -75,7 +75,7 @@ fn options_of_active_scalars_share_the_exact_tagged_scalar_carrier() {
     let string_option = ConcreteHostType::Option(Box::new(ConcreteHostType::Scalar(Prim::String)));
     let abi = HostAbiType::try_from_concrete(&string_option)
         .expect("strings use the generic exact value carrier");
-    assert_eq!(abi.c_type_name(), Some("chelis_option_value"));
+    assert_eq!(abi.c_type_name(), Some("chelis_option*"));
 }
 
 /// Once Phase 3 supplies exact scalar storage, every container recursively
@@ -151,8 +151,11 @@ fn unresolved_callee_markers_are_rejected_at_projection_in_both_positions() {
         arg_tys: Vec::new(),
         ty: ConcreteHostType::Scalar(Prim::Int32),
     });
-    let err = crate::host_abi::project_program(&call_marker)
-        .expect_err("a callable marker in Call position must never project");
+    let err = crate::host_abi::project_binding(
+        call_marker.globals.into_iter().next().unwrap(),
+        &chelis_unord::UnordSet::new(),
+    )
+    .expect_err("a callable marker in Call position must never project");
     let rendered = err.to_string();
     assert!(rendered.contains("unresolved function value"), "{rendered}");
     assert!(!rendered.contains("#chelis-unresolved"), "{rendered}");
@@ -162,12 +165,202 @@ fn unresolved_callee_markers_are_rejected_at_projection_in_both_positions() {
         args: Vec::new(),
         ty: ConcreteHostType::Scalar(Prim::Int32),
     });
-    let err = crate::host_abi::project_program(&builtin_marker)
-        .expect_err("a transform marker in Builtin position must never project");
+    let err = crate::host_abi::project_binding(
+        builtin_marker.globals.into_iter().next().unwrap(),
+        &chelis_unord::UnordSet::new(),
+    )
+    .expect_err("a transform marker in Builtin position must never project");
     let rendered = err.to_string();
     assert!(
         rendered.contains("transform application"),
         "the transform marker carries its own semantic payload: {rendered}"
     );
     assert!(!rendered.contains("#chelis-unresolved"), "{rendered}");
+}
+
+/// Phase 2A boundary ratchet: a compiled backend may accept raw payloads only
+/// by value in its explicit pre-verification selection step. Every borrowed
+/// public emission edge must require a sealed verified specialization.
+#[test]
+fn public_backend_emission_edges_cannot_borrow_raw_payloads() {
+    let sources = [
+        ("c", include_str!("lib.rs")),
+        ("hip", include_str!("../../chelis-backend-hip/src/lib.rs")),
+        (
+            "metal",
+            include_str!("../../chelis-backend-metal/src/lib.rs"),
+        ),
+    ];
+
+    for (backend, source) in sources {
+        for signature in source.match_indices("pub fn ").map(|(start, _)| {
+            let rest = &source[start..];
+            &rest[..rest.find('{').unwrap_or(rest.len())]
+        }) {
+            assert!(
+                !signature.contains("&Dag")
+                    && !signature.contains("&chelis_ir::dag::Dag")
+                    && !signature.contains("&ConcreteHostProgram")
+                    && !signature.contains("&chelis_ir::host::ConcreteHostProgram"),
+                "{backend} exposes a public borrowed raw emission payload:\n{signature}"
+            );
+        }
+    }
+
+    let c = sources[0].1;
+    assert!(c.contains("dag: &chelis_ir::ownership::VerifiedDagProgram"));
+    assert!(c.contains("program: &chelis_ir::ownership::VerifiedHostProgram"));
+    assert!(c.contains("mod emit;"));
+    assert!(c.contains("mod host_emit;"));
+
+    let hip = sources[1].1;
+    assert!(hip.contains("dag: &chelis_ir::ownership::VerifiedDagProgram"));
+
+    let metal = sources[2].1;
+    assert!(metal.contains("dag: &chelis_ir::ownership::VerifiedDagProgram"));
+}
+
+fn verified_host_from_source(source: &str) -> chelis_ir::ownership::VerifiedHostProgram {
+    let declarations = chelis_surf::parser::parse_str(source).expect("parse host source");
+    let deep = chelis_surf::desugar::desugar_program(&declarations);
+    let checked = chelis_types::check_typed_program(&deep)
+        .unwrap_or_else(|errors| panic!("check host source: {:?}", errors.errors));
+    let checked = chelis_effects::check_program(&checked).expect("effects host source");
+    let checked = chelis_types::check_linearity(&checked).expect("linearity host source");
+    let realizability =
+        chelis_effects::realizability::infer_realizability(&checked, crate::TENSOR_CAPABLE_PRIMS);
+    let manifest = chelis_effects::realizability::compute_root_manifest(&checked, &realizability);
+    let lowered = chelis_ir::host::try_lower_compiled_program_with_manifest(&checked, &manifest)
+        .expect("lower host source");
+    let host =
+        crate::prepare_host_program_for_codegen(lowered.host.expect("source uses the host lane"))
+            .expect("select C host payload");
+    let manifested = chelis_types::manifest::ManifestedProgram::new(
+        checked,
+        manifest,
+        chelis_types::types::Target::C,
+    );
+    chelis_ir::ownership::verify_ownership(
+        chelis_ir::ownership::lower_host_ownership(&manifested, host)
+            .expect("lower host ownership"),
+    )
+    .expect("verify host ownership")
+}
+
+#[test]
+fn recursive_calls_target_the_consuming_body_not_the_external_clone_adapter() {
+    let source = include_str!(
+        "../../chelis-cli/tests/fixtures/compiled_value_ownership/issue_1206_depth_1.ch"
+    );
+    let verified = verified_host_from_source(source);
+    let emitted = crate::codegen_host_program(&verified, "recursive_depth_1")
+        .unwrap()
+        .c_source;
+    let body = "step__chelis_owned_body";
+
+    assert!(emitted.contains("chelis_tensor* step(chelis_tensor* state"));
+    assert!(
+        emitted.matches(&format!("{body}(")).count() >= 3,
+        "declaration, definition, wrapper entry, and recursive body call must retain the internal symbol:\n{emitted}"
+    );
+    assert_eq!(
+        emitted.matches("= step(").count(),
+        0,
+        "internal recursion must never re-enter the external cloning adapter:\n{emitted}"
+    );
+}
+
+#[test]
+fn backend_local_host_ownership_inference_cannot_return() {
+    let source = include_str!("host_emit.rs");
+    assert!(
+        !source.contains(".names()"),
+        "generic verified owners must not expose binder spelling to C ownership emission"
+    );
+    assert!(source.contains("VerifiedHostAction::Operation"));
+    assert!(source.contains("VerifiedHostTerminator::Return"));
+    assert!(source.contains("emit_expression_site"));
+    assert!(source.contains("binding_name"));
+}
+
+#[test]
+fn abi_projection_preserves_exact_verified_site_and_nested_dag_cursors() {
+    let source = include_str!(
+        "../../chelis-cli/tests/fixtures/compiled_value_ownership/issue_543_adt_tensor.ch"
+    );
+    let declarations = chelis_surf::parser::parse_str(source).expect("parse ownership fixture");
+    let deep = chelis_surf::desugar::desugar_program(&declarations);
+    let checked = chelis_types::check_typed_program(&deep)
+        .unwrap_or_else(|errors| panic!("check fixture: {:?}", errors.errors));
+    let checked = chelis_effects::check_program(&checked).expect("effects fixture");
+    let checked = chelis_types::check_linearity(&checked).expect("linearity fixture");
+    let realizability =
+        chelis_effects::realizability::infer_realizability(&checked, crate::TENSOR_CAPABLE_PRIMS);
+    let manifest = chelis_effects::realizability::compute_root_manifest(&checked, &realizability);
+    let lowered = chelis_ir::host::try_lower_compiled_program_with_manifest(&checked, &manifest)
+        .expect("lower fixture");
+    let mut host = lowered
+        .host
+        .expect("aggregate tensor fixture uses host lane");
+    let helper_ty = TensorType {
+        dims: vec![chelis_ir::DimInfo::Lit(2)],
+        precision: Prim::F32,
+    };
+    let mut helper_dag = chelis_ir::Dag::new();
+    let helper_root = helper_dag.add_node(
+        chelis_ir::RiscOp::Load { name: "x".into() },
+        Vec::new(),
+        helper_ty.clone(),
+        None,
+    );
+    helper_dag.add_root(helper_root);
+    host.global_tensor_helpers
+        .push(chelis_ir::host::HostTensorHelper {
+            name: "__verified_cursor_probe".into(),
+            dag: helper_dag,
+            inputs: vec![chelis_ir::host::HostTensorInput {
+                name: "x".into(),
+                ty: helper_ty.clone(),
+            }],
+            output: helper_ty,
+            specialization: None,
+            summary_rejection: None,
+        });
+    let manifested = chelis_types::manifest::ManifestedProgram::new(
+        checked,
+        manifest,
+        chelis_types::types::Target::C,
+    );
+    let selected = crate::prepare_host_program_for_codegen(host).expect("select C host payload");
+    let verified = chelis_ir::ownership::verify_ownership(
+        chelis_ir::ownership::lower_host_ownership(&manifested, selected)
+            .expect("lower host ownership"),
+    )
+    .expect("verify host ownership");
+    let emission = verified.emission();
+    let expected_sites = emission
+        .sites()
+        .map(|site| {
+            (
+                site.id(),
+                site.kind(),
+                site.action_kinds().collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let projected = crate::host_abi::project_program(emission).expect("project verified host");
+
+    assert_eq!(projected.sites().len(), expected_sites.len());
+    for (projected, expected) in projected.sites().iter().zip(expected_sites) {
+        assert_eq!((projected.id, projected.kind), (expected.0, expected.1));
+        assert_eq!(projected.actions, expected.2);
+    }
+    let helper = projected
+        .global_tensor_helper(0)
+        .or_else(|| {
+            (0..projected.program().functions.len())
+                .find_map(|function| projected.function_tensor_helper(function, 0))
+        })
+        .expect("aggregate tensor fixture retains its verified nested helper");
+    assert!(!helper.dag().is_empty());
 }

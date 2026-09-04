@@ -1581,6 +1581,7 @@ pub(super) fn adt_carrier_set(adt_reg: &AdtRegistry) -> UnordSet<String> {
 pub(super) fn validate_deferred_borrow_vars(
     subst: &Subst,
     adt_reg: &AdtRegistry,
+    declared_type_names: &UnordMap<TypeVar, String>,
     errors: &mut DiagnosticSink<'_>,
 ) {
     let deferred = subst.take_deferred_borrow_vars();
@@ -1619,9 +1620,31 @@ pub(super) fn validate_deferred_borrow_vars(
             Type::Ref(_) => true,
         };
         if !sound {
+            // chelis#260 Site 2 / spec/04 [04-FIT-9]: name the source type
+            // parameter when this signature declared one.
+            //
+            // The lookup is on the RESOLVED variable, not the deferred one.
+            // Measured on `def go[t](x: t)`: the resolver mints `t` as ?343,
+            // the instantiation for the body renames it to ?344, the borrow
+            // site defers a later variable ?345, and ?345 resolves to ?344.
+            // The recorded map is keyed by what the instantiation minted, so
+            // ?344 is the key that carries the name -- and ?344 is also what
+            // this diagnostic prints, which is the coincidence that makes the
+            // rendering correct rather than merely adjacent.
+            //
+            // [04-FIT-10]: with no recorded name the internal identity still
+            // renders, because a variable with no source provenance must not
+            // be given an invented one.
+            let subject = match peeled {
+                Type::Var(resolved_var) => match declared_type_names.get(resolved_var) {
+                    Some(name) => format!("`{name}`"),
+                    None => format!("{peeled}"),
+                },
+                _ => format!("{peeled}"),
+            };
             errors.push(CheckError::new(
                 CheckErrorKind::TypeMismatch,
-                format!("borrow requires tensor or tensor-carrying input, got {peeled}"),
+                format!("borrow requires tensor or tensor-carrying input, got {subject}"),
                 vec!["Use `&x` only with tensor values".to_string()],
             ));
         }

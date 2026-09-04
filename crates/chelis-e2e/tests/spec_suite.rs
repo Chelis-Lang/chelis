@@ -484,7 +484,15 @@ fn runtime_library_path() -> std::path::PathBuf {
 
 fn compile_and_run_dag(dag: &Dag, func_name: &str) -> String {
     assert!(gcc_available(), "gcc not available -- skipping");
-    let result = chelis_backend_c::codegen(dag, func_name).unwrap();
+    let selected = chelis_backend_c::prepare_dag_for_codegen(
+        dag.clone(),
+        chelis_backend_c::CodegenOptions::default(),
+    );
+    let verified = chelis_ir::ownership::verify_ownership(
+        chelis_ir::ownership::lower_dag_ownership(selected).unwrap(),
+    )
+    .unwrap();
+    let result = chelis_backend_c::codegen(&verified, func_name).unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let rt_dir = runtime_src_dir();
     let write = |name: &str, content: &str| {
@@ -517,12 +525,14 @@ void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int 
 int main() {{
     chelis_tensor *outputs[1] = {{0}};
     {func_name}(NULL, 0, outputs, 1);
-    for (int i = 0; i < outputs[0]->size; i++) {{
+    chelis_read_view output_view = chelis_tensor_read_view(outputs[0]);
+    const float *output_data = (const float *)output_view.data;
+    for (int64_t i = 0; i < output_view.count; i++) {{
         if (i > 0) printf(" ");
-        printf("%.6f", ((float *)outputs[0]->data)[i]);
+        printf("%.6f", output_data[i]);
     }}
     printf("\n");
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -581,7 +591,15 @@ fn spec_generated_c_compiles() {
     let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
     dag.add_root(c);
 
-    let result = chelis_backend_c::codegen(&dag, "spec_test").unwrap();
+    let selected = chelis_backend_c::prepare_dag_for_codegen(
+        dag.clone(),
+        chelis_backend_c::CodegenOptions::default(),
+    );
+    let verified = chelis_ir::ownership::verify_ownership(
+        chelis_ir::ownership::lower_dag_ownership(selected).unwrap(),
+    )
+    .unwrap();
+    let result = chelis_backend_c::codegen(&verified, "spec_test").unwrap();
     assert!(
         !result.c_source.is_empty(),
         "codegen should produce non-empty C source"

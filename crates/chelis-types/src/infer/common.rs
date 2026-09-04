@@ -874,11 +874,19 @@ pub(super) fn resolve_type_aliases(ty: &Type, adt_reg: &AdtRegistry, vg: &mut Va
 /// declaration carries: the dtype-family bounds its metadata declared
 /// (chelis#1474) and the source spelling of every dimension parameter it
 /// introduced (chelis#260).
-type ResolvedDeclaredType = (
-    Type,
-    Vec<(TypeVar, TypeVarRestriction)>,
-    UnordMap<DimVar, String>,
-);
+/// A declaration's resolved type together with the binder facts the
+/// declaration carries.
+///
+/// A struct rather than a tuple because this has now grown twice: chelis#1474
+/// added the dtype-family bounds and chelis#260 added the dimension names,
+/// each time making an unnamed tuple harder to read at the call sites. The
+/// type names are chelis#260 Site 2's addition.
+pub(super) struct ResolvedDeclaredType {
+    pub(super) ty: Type,
+    pub(super) bounds: Vec<(TypeVar, TypeVarRestriction)>,
+    pub(super) dim_names: UnordMap<DimVar, String>,
+    pub(super) type_names: UnordMap<TypeVar, String>,
+}
 
 pub(super) fn resolve_deep_type(
     expr: &deep::Expr,
@@ -888,7 +896,7 @@ pub(super) fn resolve_deep_type(
     binder_mode: BinderMode<'_>,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<Type, ErrorWitness> {
-    let (ty, _, _) = resolve_deep_type_with_bounds_and_dim_names(
+    let resolved = resolve_deep_type_with_bounds_and_dim_names(
         expr,
         vg,
         adt_reg,
@@ -897,7 +905,7 @@ pub(super) fn resolve_deep_type(
         UnordMap::new(),
         errors,
     )?;
-    Ok(ty)
+    Ok(resolved.ty)
 }
 
 /// Resolve a declaration's type expression under declared dtype-family bounds
@@ -924,16 +932,22 @@ pub(super) fn resolve_deep_type_with_bounds_and_dim_names(
     dtype_bounds: UnordMap<String, TypeVarRestriction>,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<ResolvedDeclaredType, ErrorWitness> {
-    let (ty, bounds, dim_names) = {
+    let (ty, bounds, dim_names, type_names) = {
         let mut resolver =
             DeepTypeResolver::new(use_site, binder_mode, adt_reg.resolution_env(), vg, errors)
                 .with_dtype_bounds(dtype_bounds);
         let ty = resolver.resolve(expr)?.into_type();
         let dim_names = resolver.dim_var_names();
+        let type_names = resolver.type_var_names();
         let bounds = resolver.finish_dtype_bounds()?;
-        (ty, bounds, dim_names)
+        (ty, bounds, dim_names, type_names)
     };
-    Ok((resolve_type_aliases(&ty, adt_reg, vg), bounds, dim_names))
+    Ok(ResolvedDeclaredType {
+        ty: resolve_type_aliases(&ty, adt_reg, vg),
+        bounds,
+        dim_names,
+        type_names,
+    })
 }
 
 /// Decode a declaration node's `dtype_bounds` metadata into checker
@@ -1789,17 +1803,18 @@ pub(super) fn collect_declarations(
                     errors,
                 );
                 let installed = match &resolved {
-                    Ok((_, bounds, _)) => install_declared_bounds(bounds, subst, name, errors),
+                    Ok(resolved) => install_declared_bounds(&resolved.bounds, subst, name, errors),
                     Err(_) => Ok(()),
                 };
                 subst.leave_level(signature_level, vg);
-                if let (Ok((ty, _, dim_names)), Ok(())) = (resolved, installed) {
-                    let scheme = env.generalize(&ty, subst);
+                if let (Ok(resolved), Ok(())) = (resolved, installed) {
+                    let scheme = env.generalize(&resolved.ty, subst);
                     env.bind(name.to_string(), scheme);
                     // chelis#260: keep the source names of the declared dim
-                    // parameters. This is the only point where `n` and `m`
-                    // are still associated with their variables.
-                    env.record_declared_dim_names(name, dim_names);
+                    // and type parameters. This is the only point where `n`,
+                    // `m` and `t` are still associated with their variables.
+                    env.record_declared_dim_names(name, resolved.dim_names);
+                    env.record_declared_type_names(name, resolved.type_names);
                 }
             }
         }
@@ -2258,6 +2273,10 @@ pub(super) fn infer_top_level(
         // when the signature was never recorded, in which case the collapse
         // diagnostic falls back to the internal id.
         let mut declared_dim_names: UnordMap<DimVar, String> = UnordMap::new();
+        // chelis#260 Site 2: the same provenance for type parameters. The
+        // deferred-borrow drain reports on these fresh variables long after
+        // this instantiation, so the composed map is parked on `Env` below.
+        let mut declared_type_names: UnordMap<TypeVar, String> = UnordMap::new();
         let declared_ty = if provisional_recursive_type.is_none() {
             env.lookup(&name).map(|s| {
                 let s = s.clone();
@@ -2270,6 +2289,7 @@ pub(super) fn infer_top_level(
                     // the internal id (spec/04 [04-FIT-9]).
                     let (ty, mapping, dvar_mapping) = env.instantiate_scheme(&s, vg, subst);
                     declared_dim_names = env.declared_dim_names_for(&name, &dvar_mapping);
+                    declared_type_names = env.declared_type_names_for(&name, &mapping);
                     recursion_caller_guard = recursion::begin_caller(
                         &name,
                         declared_signatures.get(&name).map(|m| &m.binders),
@@ -2277,8 +2297,13 @@ pub(super) fn infer_top_level(
                     );
                     ty
                 } else {
-                    let (ty, dvar_mapping) = env.instantiate_with_dvar_mapping(&s, vg, subst);
+                    // chelis#260 Site 2 needs the TYPE mapping as well, so
+                    // this branch takes the full instantiation rather than
+                    // the dim-only projection. Both renamings come from one
+                    // call, so they cannot describe different instantiations.
+                    let (ty, mapping, dvar_mapping) = env.instantiate_scheme(&s, vg, subst);
                     declared_dim_names = env.declared_dim_names_for(&name, &dvar_mapping);
+                    declared_type_names = env.declared_type_names_for(&name, &mapping);
                     ty
                 }
             })
@@ -2293,6 +2318,10 @@ pub(super) fn infer_top_level(
         // nested source annotations. Infer against a lexical clone so the
         // scope follows nested env clones but cannot leak to the next `def`
         // or into the reusable top-level environment.
+        // chelis#260 Site 2: park the composed map on the OUTER env, which
+        // is what the per-def deferred-borrow drain reads. `body_env` below
+        // is a clone, so parking there would not survive to the drain.
+        env.set_active_declared_type_names(declared_type_names);
         let mut body_env = env.clone();
         body_env.set_type_resolution_binders(
             declared_signatures

@@ -305,6 +305,252 @@ fn smt_name_is_cvc5_safe(name: &str) -> bool {
     !name.as_bytes().contains(&0)
 }
 
+/// Collect every distinct `sqrt` argument in deterministic expression order.
+///
+/// cvc5's real `SQRT` is partial: at a negative argument its value is
+/// underspecified. A nested or quantified occurrence is kept out of the
+/// domain-proof fragment deliberately. Supporting either shape would require
+/// proving a scoped obligation rather than the single free-variable
+/// implication built by [`authorize_sqrt_domains`].
+#[cfg(feature = "smt")]
+fn collect_sqrt_arguments(
+    expr: &SmtExpr,
+    under_quantifier: bool,
+    arguments: &mut Vec<SmtExpr>,
+) -> Result<(), String> {
+    match expr {
+        SmtExpr::Apply(name, args) if name == "sqrt" && args.len() == 1 => {
+            let argument = &args[0];
+            if under_quantifier {
+                return Err(sqrt_domain_error(
+                    "a quantified `sqrt` needs a scoped domain proof",
+                ));
+            }
+            if contains_sqrt(argument) {
+                return Err(sqrt_domain_error(
+                    "a nested `sqrt` argument is outside the domain-proof fragment",
+                ));
+            }
+            if !is_total_algebraic_numeric_expr(argument) {
+                return Err(sqrt_domain_error(
+                    "its argument is outside the total algebraic domain-proof fragment",
+                ));
+            }
+            if !arguments.iter().any(|known| known == argument) {
+                arguments.push(argument.clone());
+            }
+            Ok(())
+        }
+        SmtExpr::Apply(_, args) => {
+            for argument in args {
+                collect_sqrt_arguments(argument, under_quantifier, arguments)?;
+            }
+            Ok(())
+        }
+        SmtExpr::Arith(_, left, right) | SmtExpr::Cmp(_, left, right) => {
+            collect_sqrt_arguments(left, under_quantifier, arguments)?;
+            collect_sqrt_arguments(right, under_quantifier, arguments)
+        }
+        SmtExpr::Bool(_, children) => {
+            for child in children {
+                collect_sqrt_arguments(child, under_quantifier, arguments)?;
+            }
+            Ok(())
+        }
+        SmtExpr::Not(inner) => collect_sqrt_arguments(inner, under_quantifier, arguments),
+        SmtExpr::Forall(_, body) | SmtExpr::Exists(_, body) => {
+            collect_sqrt_arguments(body, true, arguments)
+        }
+        SmtExpr::Ite(condition, then_branch, else_branch) => {
+            collect_sqrt_arguments(condition, under_quantifier, arguments)?;
+            collect_sqrt_arguments(then_branch, under_quantifier, arguments)?;
+            collect_sqrt_arguments(else_branch, under_quantifier, arguments)
+        }
+        SmtExpr::Var(_) | SmtExpr::RealLit(_) | SmtExpr::IntLit(_) | SmtExpr::BoolLit(_) => Ok(()),
+    }
+}
+
+#[cfg(feature = "smt")]
+fn contains_sqrt(expr: &SmtExpr) -> bool {
+    match expr {
+        SmtExpr::Apply(name, args) => name == "sqrt" || args.iter().any(contains_sqrt),
+        SmtExpr::Arith(_, left, right) | SmtExpr::Cmp(_, left, right) => {
+            contains_sqrt(left) || contains_sqrt(right)
+        }
+        SmtExpr::Bool(_, children) => children.iter().any(contains_sqrt),
+        SmtExpr::Not(inner) => contains_sqrt(inner),
+        SmtExpr::Forall(_, body) | SmtExpr::Exists(_, body) => contains_sqrt(body),
+        SmtExpr::Ite(condition, then_branch, else_branch) => {
+            contains_sqrt(condition) || contains_sqrt(then_branch) || contains_sqrt(else_branch)
+        }
+        SmtExpr::Var(_) | SmtExpr::RealLit(_) | SmtExpr::IntLit(_) | SmtExpr::BoolLit(_) => false,
+    }
+}
+
+/// The deliberately small numeric fragment used by the auxiliary domain
+/// proof. Every operation here is total over cvc5's Int/Real sorts. Division,
+/// conditionals, applications, and quantifiers stay out: using a partial or
+/// scoped term to authorize another partial term would only move the
+/// soundness hole.
+#[cfg(feature = "smt")]
+fn is_total_algebraic_numeric_expr(expr: &SmtExpr) -> bool {
+    match expr {
+        SmtExpr::Var(_) | SmtExpr::IntLit(_) => true,
+        SmtExpr::RealLit(value) => value.is_finite(),
+        SmtExpr::Arith(ArithOp::Neg, operand, _) => is_total_algebraic_numeric_expr(operand),
+        SmtExpr::Arith(ArithOp::Add | ArithOp::Sub | ArithOp::Mul, left, right) => {
+            is_total_algebraic_numeric_expr(left) && is_total_algebraic_numeric_expr(right)
+        }
+        SmtExpr::Arith(ArithOp::Div, _, _)
+        | SmtExpr::BoolLit(_)
+        | SmtExpr::Cmp(_, _, _)
+        | SmtExpr::Bool(_, _)
+        | SmtExpr::Not(_)
+        | SmtExpr::Forall(_, _)
+        | SmtExpr::Exists(_, _)
+        | SmtExpr::Apply(_, _)
+        | SmtExpr::Ite(_, _, _) => false,
+    }
+}
+
+/// Flatten only top-level conjunctions and retain atomic comparisons whose
+/// operands belong to the total algebraic fragment. In particular, a
+/// precondition containing `sqrt` can never authorize its own argument.
+#[cfg(feature = "smt")]
+fn collect_sqrt_domain_evidence(expr: &SmtExpr, evidence: &mut Vec<SmtExpr>) {
+    match expr {
+        SmtExpr::Bool(BoolOp::And, children) => {
+            for child in children {
+                collect_sqrt_domain_evidence(child, evidence);
+            }
+        }
+        SmtExpr::Cmp(_, left, right)
+            if is_total_algebraic_numeric_expr(left) && is_total_algebraic_numeric_expr(right) =>
+        {
+            evidence.push(expr.clone());
+        }
+        SmtExpr::BoolLit(_) => evidence.push(expr.clone()),
+        _ => {}
+    }
+}
+
+#[cfg(feature = "smt")]
+fn sqrt_domain_error(detail: &str) -> String {
+    format!(
+        "cannot prove every `sqrt` argument non-negative from the user's other total, \
+         sqrt-free conjunctive preconditions: {detail} (chelis#1475; routes to Tier C)"
+    )
+}
+
+#[cfg(feature = "smt")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SolverTimeoutPlan {
+    domain_ms: Option<u64>,
+    main_ms: u64,
+}
+
+/// Allocate the caller's request-wide solver budget without creating a zero
+/// cvc5 sub-budget (where `tlimit-per=0` means no solver time limit).
+///
+/// A property without `sqrt` still has only one solver phase and therefore
+/// retains the exact historical timeout, including the zero/unlimited case.
+#[cfg(feature = "smt")]
+fn solver_timeout_plan(
+    has_sqrt_domain_phase: bool,
+    request_ms: u64,
+) -> Result<SolverTimeoutPlan, String> {
+    if !has_sqrt_domain_phase {
+        return Ok(SolverTimeoutPlan {
+            domain_ms: None,
+            main_ms: request_ms,
+        });
+    }
+    if request_ms < 2 {
+        return Err(sqrt_domain_error(
+            "the request timeout is too small to allocate positive timeouts to both solver phases",
+        ));
+    }
+
+    let domain_ms = request_ms / 2;
+    Ok(SolverTimeoutPlan {
+        domain_ms: Some(domain_ms),
+        main_ms: request_ms - domain_ms,
+    })
+}
+
+#[cfg(feature = "smt")]
+struct SqrtDomainAuthorization {
+    arguments: Vec<SmtExpr>,
+    main_timeout_ms: u64,
+}
+
+#[cfg(feature = "smt")]
+fn require_proved_sqrt_domain(result: TierBResult) -> Result<(), String> {
+    match result {
+        TierBResult::Proved => Ok(()),
+        TierBResult::Disproved(_) => Err(sqrt_domain_error("the domain obligation is false")),
+        TierBResult::Timeout => Err(sqrt_domain_error("the domain obligation timed out")),
+        TierBResult::Unknown => Err(sqrt_domain_error("the domain obligation is unknown")),
+        TierBResult::Error(reason) => Err(sqrt_domain_error(&format!(
+            "the domain obligation could not be lowered safely: {reason}"
+        ))),
+    }
+}
+
+/// Prove, without assuming any new user-visible facts, that every exact
+/// `sqrt` argument in the property is non-negative.
+///
+/// The one auxiliary implication uses only independent, sqrt-free conjuncts
+/// from the user's preconditions. Only UNSAT of the negated conjunction
+/// (`TierBResult::Proved`) authorizes lowering. SAT, timeout, unknown, and any
+/// lowering error all fail closed. The auxiliary and main solver phases split
+/// the caller's request-wide timeout so their aggregate cvc5 budget never
+/// exceeds it.
+#[cfg(feature = "smt")]
+fn authorize_sqrt_domains(
+    property: &SmtProperty,
+    timeout_ms: u64,
+) -> Result<SqrtDomainAuthorization, String> {
+    let mut arguments = Vec::new();
+    for precondition in &property.preconditions {
+        collect_sqrt_arguments(precondition, false, &mut arguments)?;
+    }
+    collect_sqrt_arguments(&property.postcondition, false, &mut arguments)?;
+    let timeout_plan = solver_timeout_plan(!arguments.is_empty(), timeout_ms)?;
+    let Some(domain_timeout_ms) = timeout_plan.domain_ms else {
+        return Ok(SqrtDomainAuthorization {
+            arguments,
+            main_timeout_ms: timeout_plan.main_ms,
+        });
+    };
+
+    let mut evidence = Vec::new();
+    for precondition in &property.preconditions {
+        collect_sqrt_domain_evidence(precondition, &mut evidence);
+    }
+    let obligations = arguments
+        .iter()
+        .cloned()
+        .map(|argument| {
+            SmtExpr::Cmp(
+                CmpOp::Ge,
+                Box::new(argument),
+                Box::new(SmtExpr::RealLit(0.0)),
+            )
+        })
+        .collect();
+    let obligation = SmtProperty {
+        variables: property.variables.clone(),
+        preconditions: evidence,
+        postcondition: SmtExpr::Bool(BoolOp::And, obligations),
+    };
+    require_proved_sqrt_domain(solve_property_cvc5(&obligation, domain_timeout_ms))?;
+    Ok(SqrtDomainAuthorization {
+        arguments,
+        main_timeout_ms: timeout_plan.main_ms,
+    })
+}
+
 /// Solve a property IN-PROCESS with cvc5. This is the function the isolation
 /// worker child actually runs; the parent reaches it only when isolation is
 /// disabled (every test, and any non-`chelis` host that does not opt in).
@@ -313,11 +559,13 @@ pub(crate) fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> Ti
     use cvc5_rs::{Kind, Solver, TermManager};
     use std::collections::BTreeMap;
 
-    // SAFETY MODEL (review 6 -- TOTAL LOWERING): `lower_to_cvc5` is the SOLE
-    // authority on cvc5-safety, and it is TOTAL -- every `mk_term` call site
-    // first verifies cvc5's requirement for that kind (operand sorts AND
-    // arity), and any violation returns `Err` (routed to a clean Tier C
-    // result) BEFORE `mk_term` is reached. cvc5's `mk_term` ABORTS THE PROCESS
+    // SAFETY MODEL (review 6 -- TOTAL LOWERING): `lower_to_cvc5` is the sole
+    // authority on cvc5 term-construction safety, and it is TOTAL -- every
+    // `mk_term` call site first verifies cvc5's requirement for that kind
+    // (operand sorts AND arity), and any violation returns `Err` (routed to a
+    // clean Tier C result) BEFORE `mk_term` is reached. The sqrt-domain
+    // preflight above is separately authoritative for whether cvc5's partial
+    // SQRT kind may be constructed at all. cvc5's `mk_term` ABORTS THE PROCESS
     // on a malformed term (a sort-mismatched comparison, a zero/one-child
     // `and`/`or`, a non-binary `implies`, sqrt over an Int, a non-finite
     // literal), surfacing to a JSON consumer as an empty-stdout bare exit -- a
@@ -341,6 +589,14 @@ pub(crate) fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> Ti
         ));
     }
 
+    let SqrtDomainAuthorization {
+        arguments: authorized_sqrt_arguments,
+        main_timeout_ms,
+    } = match authorize_sqrt_domains(property, timeout_ms) {
+        Ok(authorization) => authorization,
+        Err(reason) => return TierBResult::Error(reason),
+    };
+
     let tm = TermManager::new();
     let mut solver = Solver::new(&tm);
 
@@ -362,7 +618,7 @@ pub(crate) fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> Ti
     };
     solver.set_logic(&logic);
     solver.set_option("produce-models", "true");
-    solver.set_option("tlimit-per", &timeout_ms.to_string());
+    solver.set_option("tlimit-per", &main_timeout_ms.to_string());
 
     // 1. Declare variables. `sorts` mirrors `vars` so the lowering knows each
     //    variable's cvc5 sort without re-querying cvc5 (and so a var absent
@@ -397,7 +653,13 @@ pub(crate) fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> Ti
     let mut precondition_terms: Vec<cvc5_rs::Term> =
         Vec::with_capacity(property.preconditions.len());
     for pre in &property.preconditions {
-        let term = match lower_to_cvc5(&tm, pre, &vars, &sorts) {
+        let term = match lower_to_cvc5_with_sqrt_domains(
+            &tm,
+            pre,
+            &vars,
+            &sorts,
+            &authorized_sqrt_arguments,
+        ) {
             Ok((t, SmtSort::Bool)) => t,
             Ok((_, other)) => {
                 return TierBResult::Error(format!(
@@ -410,10 +672,41 @@ pub(crate) fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> Ti
         precondition_terms.push(term);
     }
 
+    // The auxiliary proof established these facts from the user's own
+    // assumptions. Re-asserting them here is semantically redundant, but it
+    // makes cvc5's partial-SQRT domain explicit in the main query rather than
+    // relying on the solver to rediscover the implication while evaluating
+    // SQRT.
+    for argument in &authorized_sqrt_arguments {
+        let (argument_term, argument_sort) = match lower_to_cvc5_with_sqrt_domains(
+            &tm,
+            argument,
+            &vars,
+            &sorts,
+            &authorized_sqrt_arguments,
+        ) {
+            Ok(lowered) => lowered,
+            Err(reason) => return TierBResult::Error(reason),
+        };
+        if argument_sort != SmtSort::Real {
+            return TierBResult::Error(sqrt_domain_error(&format!(
+                "a proved argument lowers to {argument_sort:?}, expected Real"
+            )));
+        }
+        let zero = tm.mk_real(0);
+        solver.assert_formula(tm.mk_term(Kind::CVC5_KIND_GEQ, &[argument_term, zero]));
+    }
+
     // 3. Assert negation of postcondition. cvc5's NOT requires a Bool operand;
     //    `NOT(non-bool)` aborts ("expecting a Boolean subexpression"), so a
     //    postcondition that lowers to a non-Bool sort routes to Tier C.
-    let post_term = match lower_to_cvc5(&tm, &property.postcondition, &vars, &sorts) {
+    let post_term = match lower_to_cvc5_with_sqrt_domains(
+        &tm,
+        &property.postcondition,
+        &vars,
+        &sorts,
+        &authorized_sqrt_arguments,
+    ) {
         Ok((t, SmtSort::Bool)) => t,
         Ok((_, other)) => {
             return TierBResult::Error(format!(
@@ -492,15 +785,13 @@ pub(crate) fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> Ti
 /// prover: `TierBResult::Error` degrades the disproof to Tier C fuzzing under
 /// `auto`, and to `Unsupported` under `smt-only`.
 ///
-/// The consequence worth naming, since abstention is silent by design: a
-/// `sqrt`-guarded property gets no precondition validation in either direction,
-/// and cvc5's SQRT is underspecified at a negative argument, so a model whose
-/// argument is negative can satisfy a `sqrt` lower bound vacuously and surface
-/// as a counterexample to a property that is true. That is chelis#1475, and it
-/// belongs at the lowering, which introduces the partiality, not here. Widening
-/// this guard to reject on any non-`true` would appear to cover it while
-/// reintroducing the false-rejection class that made the first version of this
-/// check unsound in the rejecting direction.
+/// Abstention is still silent by design. Partial `sqrt` cannot exploit that
+/// silence: before any SQRT term is built, [`authorize_sqrt_domains`] proves
+/// each exact argument non-negative from independent total preconditions and
+/// otherwise routes the property to Tier C (chelis#1475). Widening this model
+/// guard to reject on any non-`true` would instead reintroduce the
+/// false-rejection class that made the first version of this check unsound in
+/// the rejecting direction.
 #[cfg(feature = "smt")]
 fn validate_model_satisfies_preconditions(
     property: &SmtProperty,
@@ -920,12 +1211,29 @@ fn quantifier_bound_vars(
 ///
 /// `sorts` carries each variable's declared sort, extended with quantifier
 /// bound-var sorts as we descend into a `Forall`/`Exists` body.
+///
+/// This public, context-free entry point deliberately rejects `sqrt`: only
+/// [`solve_property_cvc5`] can supply the exact argument authorization created
+/// by its domain preflight.
 #[cfg(feature = "smt")]
 pub fn lower_to_cvc5(
     tm: &cvc5_rs::TermManager,
     expr: &SmtExpr,
     vars: &std::collections::BTreeMap<String, cvc5_rs::Term>,
     sorts: &chelis_unord::UnordMap<String, SmtSort>,
+) -> Result<(cvc5_rs::Term, SmtSort), String> {
+    lower_to_cvc5_with_sqrt_domains(tm, expr, vars, sorts, &[])
+}
+
+/// Internal lowering entry with an exact set of `sqrt` arguments whose
+/// non-negativity has already been proved by [`authorize_sqrt_domains`].
+#[cfg(feature = "smt")]
+fn lower_to_cvc5_with_sqrt_domains(
+    tm: &cvc5_rs::TermManager,
+    expr: &SmtExpr,
+    vars: &std::collections::BTreeMap<String, cvc5_rs::Term>,
+    sorts: &chelis_unord::UnordMap<String, SmtSort>,
+    authorized_sqrt_arguments: &[SmtExpr],
 ) -> Result<(cvc5_rs::Term, SmtSort), String> {
     use cvc5_rs::Kind;
 
@@ -989,13 +1297,16 @@ pub fn lower_to_cvc5(
         // lowers NEG as unary and ignores the placeholder, so lower ONLY the
         // real operand.
         SmtExpr::Arith(ArithOp::Neg, left, _placeholder) => {
-            let (l, ls) = lower_to_cvc5(tm, left, vars, sorts)?;
+            let (l, ls) =
+                lower_to_cvc5_with_sqrt_domains(tm, left, vars, sorts, authorized_sqrt_arguments)?;
             require_numeric_sort(ls, "neg operand")?;
             (tm.mk_term(Kind::CVC5_KIND_NEG, &[l]), ls)
         }
         SmtExpr::Arith(op, left, right) => {
-            let (l, ls) = lower_to_cvc5(tm, left, vars, sorts)?;
-            let (r, rs) = lower_to_cvc5(tm, right, vars, sorts)?;
+            let (l, ls) =
+                lower_to_cvc5_with_sqrt_domains(tm, left, vars, sorts, authorized_sqrt_arguments)?;
+            let (r, rs) =
+                lower_to_cvc5_with_sqrt_domains(tm, right, vars, sorts, authorized_sqrt_arguments)?;
             require_numeric_sort(ls, "arithmetic operand")?;
             require_numeric_sort(rs, "arithmetic operand")?;
             if ls != rs {
@@ -1023,8 +1334,10 @@ pub fn lower_to_cvc5(
             (term, result_sort)
         }
         SmtExpr::Cmp(op, left, right) => {
-            let (l, ls) = lower_to_cvc5(tm, left, vars, sorts)?;
-            let (r, rs) = lower_to_cvc5(tm, right, vars, sorts)?;
+            let (l, ls) =
+                lower_to_cvc5_with_sqrt_domains(tm, left, vars, sorts, authorized_sqrt_arguments)?;
+            let (r, rs) =
+                lower_to_cvc5_with_sqrt_domains(tm, right, vars, sorts, authorized_sqrt_arguments)?;
             // Both operands must lower to the SAME cvc5 sort; a mixed pair
             // aborts cvc5. (cvc5 would coerce Int->Real for some mixes, but
             // routing the mix to Tier C is sound -- the property is still
@@ -1056,7 +1369,9 @@ pub fn lower_to_cvc5(
         SmtExpr::Bool(op, children) => {
             let lowered: Vec<(cvc5_rs::Term, SmtSort)> = children
                 .iter()
-                .map(|c| lower_to_cvc5(tm, c, vars, sorts))
+                .map(|c| {
+                    lower_to_cvc5_with_sqrt_domains(tm, c, vars, sorts, authorized_sqrt_arguments)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             for (_, s) in &lowered {
                 if *s != SmtSort::Bool {
@@ -1095,7 +1410,8 @@ pub fn lower_to_cvc5(
             (term, SmtSort::Bool)
         }
         SmtExpr::Not(inner) => {
-            let (t, s) = lower_to_cvc5(tm, inner, vars, sorts)?;
+            let (t, s) =
+                lower_to_cvc5_with_sqrt_domains(tm, inner, vars, sorts, authorized_sqrt_arguments)?;
             if s != SmtSort::Bool {
                 return Err(format!(
                     "`not` operand has sort {s:?}, expected Bool (routes to Tier C)"
@@ -1119,7 +1435,13 @@ pub fn lower_to_cvc5(
                 extended_vars.insert(name.clone(), bound_vars[i].clone());
                 extended_sorts.insert(name.clone(), *sort);
             }
-            let (body_term, body_sort) = lower_to_cvc5(tm, body, &extended_vars, &extended_sorts)?;
+            let (body_term, body_sort) = lower_to_cvc5_with_sqrt_domains(
+                tm,
+                body,
+                &extended_vars,
+                &extended_sorts,
+                authorized_sqrt_arguments,
+            )?;
             if body_sort != SmtSort::Bool {
                 return Err(format!(
                     "quantifier body has sort {body_sort:?}, expected Bool (routes to Tier C)"
@@ -1149,9 +1471,20 @@ pub fn lower_to_cvc5(
                     args.len()
                 ));
             }
+            if name == "sqrt"
+                && !authorized_sqrt_arguments
+                    .iter()
+                    .any(|argument| argument == &args[0])
+            {
+                return Err(sqrt_domain_error(
+                    "this exact argument was not authorized by the domain preflight",
+                ));
+            }
             let lowered: Vec<(cvc5_rs::Term, SmtSort)> = args
                 .iter()
-                .map(|a| lower_to_cvc5(tm, a, vars, sorts))
+                .map(|a| {
+                    lower_to_cvc5_with_sqrt_domains(tm, a, vars, sorts, authorized_sqrt_arguments)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             let arg_sorts: Vec<SmtSort> = lowered.iter().map(|(_, s)| *s).collect();
             let lowered_args: Vec<cvc5_rs::Term> = lowered.iter().map(|(t, _)| t.clone()).collect();
@@ -1213,14 +1546,27 @@ pub fn lower_to_cvc5(
             }
         }
         SmtExpr::Ite(cond, then_expr, else_expr) => {
-            let (c, cs) = lower_to_cvc5(tm, cond, vars, sorts)?;
+            let (c, cs) =
+                lower_to_cvc5_with_sqrt_domains(tm, cond, vars, sorts, authorized_sqrt_arguments)?;
             if cs != SmtSort::Bool {
                 return Err(format!(
                     "if-then-else condition has sort {cs:?}, expected Bool (routes to Tier C)"
                 ));
             }
-            let (t, ts) = lower_to_cvc5(tm, then_expr, vars, sorts)?;
-            let (e, es) = lower_to_cvc5(tm, else_expr, vars, sorts)?;
+            let (t, ts) = lower_to_cvc5_with_sqrt_domains(
+                tm,
+                then_expr,
+                vars,
+                sorts,
+                authorized_sqrt_arguments,
+            )?;
+            let (e, es) = lower_to_cvc5_with_sqrt_domains(
+                tm,
+                else_expr,
+                vars,
+                sorts,
+                authorized_sqrt_arguments,
+            )?;
             if ts != es {
                 return Err(format!(
                     "if-then-else branches have differing sorts {ts:?} vs {es:?} (routes to Tier C)"
@@ -1277,6 +1623,73 @@ fn contains_transcendental(expr: &SmtExpr) -> bool {
 mod tests {
     use super::*;
     use crate::solver::{ArithOp, CmpOp, SmtExpr, SmtSort};
+
+    #[test]
+    fn issue1475_only_a_proved_domain_obligation_authorizes_sqrt() {
+        assert_eq!(require_proved_sqrt_domain(TierBResult::Proved), Ok(()));
+        for result in [
+            TierBResult::Disproved(serde_json::json!({})),
+            TierBResult::Timeout,
+            TierBResult::Unknown,
+            TierBResult::Error("planted lowering failure".to_string()),
+        ] {
+            let reason = require_proved_sqrt_domain(result)
+                .expect_err("every non-proof domain result must fail closed");
+            assert!(reason.contains("sqrt"), "reason names sqrt: {reason}");
+            assert!(
+                reason.contains("Tier C"),
+                "reason names the safe fallback: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue1475_solver_sub_budgets_never_exceed_the_request() {
+        let minimum = solver_timeout_plan(true, 2).expect("one millisecond per solver phase");
+        assert_eq!(minimum.domain_ms, Some(1));
+        assert_eq!(minimum.main_ms, 1);
+
+        let even = solver_timeout_plan(true, 5_000).expect("two positive sub-budgets");
+        assert_eq!(even.domain_ms, Some(2_500));
+        assert_eq!(even.main_ms, 2_500);
+        assert_eq!(even.domain_ms.unwrap() + even.main_ms, 5_000);
+
+        let odd = solver_timeout_plan(true, 5_001).expect("two positive sub-budgets");
+        assert_eq!(odd.domain_ms, Some(2_500));
+        assert_eq!(odd.main_ms, 2_501);
+        assert_eq!(odd.domain_ms.unwrap() + odd.main_ms, 5_001);
+
+        let maximum = solver_timeout_plan(true, u64::MAX).expect("subtraction cannot overflow");
+        assert_eq!(maximum.domain_ms, Some(u64::MAX / 2));
+        assert_eq!(maximum.main_ms, u64::MAX - (u64::MAX / 2));
+        assert_eq!(
+            maximum.domain_ms.unwrap().checked_add(maximum.main_ms),
+            Some(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn issue1475_non_sqrt_solve_retains_the_whole_request_budget() {
+        for request_ms in [0, 1, 5_000] {
+            let plan = solver_timeout_plan(false, request_ms).expect("one solver needs no split");
+            assert_eq!(plan.domain_ms, None);
+            assert_eq!(plan.main_ms, request_ms);
+        }
+    }
+
+    #[test]
+    fn issue1475_tiny_sqrt_budget_fails_instead_of_making_zero_unlimited() {
+        for request_ms in [0, 1] {
+            let reason = solver_timeout_plan(true, request_ms)
+                .expect_err("two solver phases need two positive millisecond budgets");
+            assert!(reason.contains("sqrt"), "reason names the path: {reason}");
+            assert!(
+                reason.contains("timeout"),
+                "reason names the budget: {reason}"
+            );
+            assert!(reason.contains("Tier C"), "reason names fallback: {reason}");
+        }
+    }
 
     #[test]
     fn proves_x_squared_non_negative() {

@@ -99,6 +99,7 @@ CONTRACT_FILES = (
     "spec/registry/c_scalar_carrier.md",
     "spec/registry/c_container_boundary.md",
     "spec/registry/c_tensor_runtime.md",
+    "spec/registry/c_heap_lifetime.md",
     "spec/registry/stdlib_adt_identities.md",
     "spec/registry/stdlib_numeric_manifest.md",
 )
@@ -150,6 +151,7 @@ EXPECTED_PHASE4B_OP_HEADINGS = {
     41: "`sub(left, right) -> result`",
     42: "`stop_gradient(value) -> result`",
     43: "`relu(x) -> result`",
+    44: "`heap_lifetime(handle, parameters...) -> result`",
 }
 
 # These are independent, executable copies of the exact normative manifests.
@@ -161,14 +163,14 @@ EXPECTED_OP_MANIFESTS = {
         """\
 | dtype storage size | `int64_t chelis_dtype_size(chelis_dtype dtype)` |
 | scalar validation/construction | `chelis_scalar chelis_scalar_from_bits(chelis_dtype dtype, uint64_t bits)` |
-| value boxing | `chelis_value chelis_value_from_scalar(chelis_scalar value)` |
-| value extraction | `chelis_scalar chelis_value_as_scalar(chelis_value value)` |
+| value boxing | `chelis_value chelis_value_box_scalar(chelis_scalar value)` |
+| value extraction | `chelis_scalar chelis_value_unbox_scalar(chelis_value value)` |
 | rank-zero tensor construction | `chelis_tensor *chelis_scalar_tensor(chelis_scalar value)` |
 | rank-zero tensor extraction | `chelis_scalar chelis_tensor_to_scalar(const chelis_tensor *tensor)` |
-| tensor fill | `void chelis_fill_scalar(chelis_tensor *tensor, chelis_scalar value)` |
+| tensor fill | `void chelis_fill_scalar(chelis_tensor_write *guard, chelis_scalar value)` |
 | scalar rendering | `chelis_string chelis_string_from_scalar(chelis_scalar value)` |
-| scalar parsing | `chelis_option_scalar chelis_parse_scalar(chelis_string text, chelis_dtype dtype)` |
-| exact dictionary scalar lookup | `chelis_option_scalar chelis_dict_get_scalar(const chelis_dict *dict, chelis_value key, chelis_dtype dtype)` |""".splitlines()
+| scalar parsing | `chelis_option *chelis_parse_scalar(chelis_string text, chelis_dtype dtype)` |
+| exact dictionary scalar lookup | `chelis_option *chelis_dict_get_scalar(const chelis_dict *dict, chelis_value key, chelis_dtype dtype)` |""".splitlines()
     ),
     "05-OP-32": tuple(
         """\
@@ -191,7 +193,7 @@ EXPECTED_OP_MANIFESTS = {
 | dictionary length | `int64_t chelis_dict_len(const chelis_dict *dict)` |
 | dictionary construction | `chelis_dict *chelis_dict_from_pairs(const chelis_list *pairs)` |
 | dictionary membership | `bool chelis_dict_contains(const chelis_dict *dict, chelis_value key)` |
-| dictionary lookup | `chelis_option_value chelis_dict_get(const chelis_dict *dict, chelis_value key)` |
+| dictionary lookup | `chelis_option *chelis_dict_get(const chelis_dict *dict, chelis_value key)` |
 | dictionary removal | `chelis_dict *chelis_dict_remove(const chelis_dict *dict, chelis_value key)` |
 | dictionary insertion | `chelis_dict *chelis_dict_insert(const chelis_dict *dict, chelis_value key, chelis_value value)` |
 | dictionary merge | `chelis_dict *chelis_dict_merge(const chelis_dict *left, const chelis_dict *right)` |
@@ -206,7 +208,6 @@ EXPECTED_OP_MANIFESTS = {
     "05-OP-33": tuple(
         """\
 | owned allocation | `chelis_tensor *chelis_alloc(int32_t rank, const int64_t *shape, chelis_dtype dtype)` |
-| borrowed view | `chelis_tensor *chelis_alloc_view(int32_t rank, const int64_t *shape, chelis_dtype dtype, void *data, int64_t byte_capacity)` |
 | rank | `int32_t chelis_tensor_rank(const chelis_tensor *tensor)` |
 | extent | `int64_t chelis_tensor_shape(const chelis_tensor *tensor, int32_t axis)` |
 | element count | `int64_t chelis_tensor_numel(const chelis_tensor *tensor)` |
@@ -324,6 +325,60 @@ EXPECTED_OP_MANIFESTS = {
 | `tokenizer::load_tokenizer` | `(string)->Tokenizer!{IO}` |
 | `tokenizer::try_load_tokenizer` | `(string)->Option[Tokenizer]!{IO}` |""".splitlines()
     ),
+    "05-OP-44": tuple(
+        """\
+| string retain | `void chelis_string_retain(chelis_string value)` |
+| string release | `void chelis_string_release(chelis_string value)` |
+| tensor retain | `void chelis_tensor_retain(const chelis_tensor *tensor)` |
+| tensor release | `void chelis_tensor_release(const chelis_tensor *tensor)` |
+| list retain | `void chelis_list_retain(const chelis_list *list)` |
+| list release | `void chelis_list_release(const chelis_list *list)` |
+| tuple retain | `void chelis_tuple_retain(const chelis_tuple *tuple)` |
+| tuple release | `void chelis_tuple_release(const chelis_tuple *tuple)` |
+| dictionary retain | `void chelis_dict_retain(const chelis_dict *dict)` |
+| dictionary release | `void chelis_dict_release(const chelis_dict *dict)` |
+| ADT retain | `void chelis_adt_retain(const chelis_adt *adt)` |
+| ADT release | `void chelis_adt_release(const chelis_adt *adt)` |
+| option retain | `void chelis_option_retain(const chelis_option *option)` |
+| option release | `void chelis_option_release(const chelis_option *option)` |
+| mapped-file retain | `void chelis_mapped_file_retain(const chelis_mapped_file *mapped)` |
+| mapped-file release | `void chelis_mapped_file_release(const chelis_mapped_file *mapped)` |
+| value clone | `chelis_value chelis_value_clone(chelis_value value)` |
+| value release | `void chelis_value_release(chelis_value value)` |
+| string take into value | `chelis_value chelis_value_take_string(chelis_string value)` |
+| tensor take into value | `chelis_value chelis_value_take_tensor(chelis_tensor *tensor)` |
+| list take into value | `chelis_value chelis_value_take_list(chelis_list *list)` |
+| tuple take into value | `chelis_value chelis_value_take_tuple(chelis_tuple *tuple)` |
+| dictionary take into value | `chelis_value chelis_value_take_dict(chelis_dict *dict)` |
+| ADT take into value | `chelis_value chelis_value_take_adt(chelis_adt *adt)` |
+| option take into value | `chelis_value chelis_value_take_option(chelis_option *option)` |
+| mapped-file take into value | `chelis_value chelis_value_take_mapped_file(chelis_mapped_file *mapped)` |
+| string take out of value | `chelis_string chelis_string_take_value(chelis_value value)` |
+| string borrow from value | `chelis_string chelis_string_borrow_value(chelis_value value)` |
+| tensor take out of value | `chelis_tensor *chelis_tensor_take_value(chelis_value value)` |
+| tensor borrow from value | `const chelis_tensor *chelis_tensor_borrow_value(chelis_value value)` |
+| list take out of value | `chelis_list *chelis_list_take_value(chelis_value value)` |
+| list borrow from value | `const chelis_list *chelis_list_borrow_value(chelis_value value)` |
+| tuple take out of value | `chelis_tuple *chelis_tuple_take_value(chelis_value value)` |
+| tuple borrow from value | `const chelis_tuple *chelis_tuple_borrow_value(chelis_value value)` |
+| dictionary take out of value | `chelis_dict *chelis_dict_take_value(chelis_value value)` |
+| dictionary borrow from value | `const chelis_dict *chelis_dict_borrow_value(chelis_value value)` |
+| ADT take out of value | `chelis_adt *chelis_adt_take_value(chelis_value value)` |
+| ADT borrow from value | `const chelis_adt *chelis_adt_borrow_value(chelis_value value)` |
+| option take out of value | `chelis_option *chelis_option_take_value(chelis_value value)` |
+| option borrow from value | `const chelis_option *chelis_option_borrow_value(chelis_value value)` |
+| mapped-file take out of value | `chelis_mapped_file *chelis_mapped_file_take_value(chelis_value value)` |
+| mapped-file borrow from value | `const chelis_mapped_file *chelis_mapped_file_borrow_value(chelis_value value)` |
+| option none | `chelis_option *chelis_option_none(void)` |
+| option some | `chelis_option *chelis_option_some(chelis_value value)` |
+| option discriminant | `bool chelis_option_is_some(const chelis_option *option)` |
+| option unwrap | `chelis_value chelis_option_unwrap(const chelis_option *option)` |
+| tensor entry borrow | `chelis_tensor *chelis_tensor_entry_borrow(int32_t rank, const int64_t *shape, chelis_dtype dtype, const void *data, int64_t byte_capacity)` |
+| tensor read view | `chelis_read_view chelis_tensor_read_view(const chelis_tensor *tensor)` |
+| tensor begin write | `chelis_tensor_write *chelis_tensor_begin_write(chelis_tensor *tensor)` |
+| tensor write view | `chelis_write_view chelis_tensor_write_view(const chelis_tensor_write *guard)` |
+| tensor end write | `void chelis_tensor_end_write(chelis_tensor_write *guard)` |""".splitlines()
+    ),
     "05-OP-38": tuple(
         """\
 > | `tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,T]!E` |
@@ -358,7 +413,7 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-8": "ea385826c01b7cb1d24e75e1dbb4889149f0a08441d798eafcee75fc7d9f7b4f",
     "05-OP-9": "8359a6d8688f86f3818477c4d3fd8df04018e593fab9ad7ffa6fd0ebf5c1acf1",
     "05-OP-10": "5d77be3eb92d9db44da15ea02a0706239f8f1c70b32ab0391d5dad6aff94cfa2",
-    "05-OP-11": "688952d434f31b332cd82a871a4da3e0a6e64e2d440f258ff9d24e5be8a37945",
+    "05-OP-11": "a9db7bb96766662e5c520e7714d0a6d266aebe9eb17603d4fd9750698c33133b",
     "05-OP-12": "6e99f2ecbb3c7fbf3ae4f852104b03bdf65f5edf7ead1cae02c9e1d833708353",
     "05-OP-13": "3fd84ffa594776abc51a8c277c5d9a0dbc2b7b8fc11ab1bf32209b30c7d97890",
     "05-OP-14": "cba4686a8a31fb18cf9c5213af5ac4a545b03ce548b5c7bcd96e8f7f76648a40",
@@ -378,9 +433,9 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-28": "9eb81ed515be3e016371f951a75a3b65c4bae2cd8bfbc8de22c510f8e71be56b",
     "05-OP-29": "3fc46cb450b49244dfea8859a662190128420ab2565f7d18f5f97d7ffb27fd0a",
     "05-OP-30": "30c8c04f547161b7c40cbe5659a0c5fee34102f34a6fc605bcde8740221b461b",
-    "05-OP-31": "31e1d9d5be4b12496c6a5f9d3ee3cd8f134d9868e2c0e526bb36dea97b813538",
-    "05-OP-32": "e8102df69288ef68e023b236ef6e74bd82b327b50fd94f9aa9880cc6c8dfdeeb",
-    "05-OP-33": "b0c9cf420f89f9c4c74219a41e55fd2bd36619bba25989a3d06a302424764fca",
+    "05-OP-31": "20100b3524f8381469ea2a24d035da89be346f7809b70bfd6698aa94b6df9031",
+    "05-OP-32": "fc45b2ef829aeebdb0d524059c63452cd2d9c733a5c2cdf85b5bfdd845bda8a1",
+    "05-OP-33": "ca99addff76d91d2125e820dcadbd31c0460f9e0de6ec69bfaec5894d51b1e08",
     "05-OP-34": "0d2c7d4a051a43dc6b0c93b241434ff1d66bbd7a3e6d47e5c74b669d2fd687bf",
     "05-OP-35": "6eb9a0e1023aeed6dcf43abe8623a9b94dcb38db15224f38915320108c276ef7",
     "05-OP-36": "aeaaf9888f922b31159b8b7536444603897d649c8fb477e77bda659346177ab4",
@@ -391,6 +446,7 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-41": "7bbbba7450bf89f9eac66a7f660f7352940a41e4baf6f7497873e46a29be41db",
     "05-OP-42": "d469e00652b7b9239f37532817b3c0f563bf22a66743c66dab66ce879be43ff4",
     "05-OP-43": "51dd3a7b7df5ecc20c7796a49f7a0122daf0f3a4b6538993964fea7a9f284ee7",
+    "05-OP-44": "8780fd73492c0289b4ed995891f72e43fcca4171ae0925ce9766117f5ff9ede1",
 }
 
 # The markers are part of the freeze contract: each must occur exactly once,
@@ -414,7 +470,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/05-risc-primitives.md",
         "### 2.1 Elementwise Binary",
         "### 2.4 Movement",
-        "90fdc968d6de13e06f0908da4666d98d6e68258195eed3123e30b2c57dda7485",
+        "a8fc522c8db143bce747512c7c64c52f62b2fb40c18e1e7906bf03ebcf027cf0",
     ),
     "logical builtin contract": (
         "spec/05-risc-primitives.md",
@@ -426,7 +482,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/04-type-system.md",
         "#### 4.5.3 Name-Preserving Rank Polymorphism",
         "#### 4.5.4 Concat Result Typing",
-        "8f7ed49ec2a00115a9fc9d423c0e56040f68b42d31580b259597da98ec859733",
+        "3c84ab77716d7d9f2d5f2024141086c209f3f094a1949a3bdd06685d65b25aea",
     ),
     "window extrema contract": (
         "spec/05-risc-primitives.md",
@@ -530,6 +586,7 @@ OP_MANIFEST_REGISTRY_FILES = {
     "05-OP-31": "spec/registry/c_scalar_carrier.md",
     "05-OP-32": "spec/registry/c_container_boundary.md",
     "05-OP-33": "spec/registry/c_tensor_runtime.md",
+    "05-OP-44": "spec/registry/c_heap_lifetime.md",
     "05-OP-34": "spec/registry/stdlib_adt_identities.md",
     "05-OP-35": "spec/registry/stdlib_numeric_manifest.md",
 }
@@ -1201,8 +1258,8 @@ def validate_normative_contract(
             ),
             ("    Option,\n    MappedFile,", "Option heap kind"),
             (
-                "| `string` | `String` | opaque `chelis_string` handle and "
-                "`CHELIS_VALUE_STRING` |",
+                "| `string` | `String` | fixed `chelis_string` wrapper with an "
+                "opaque target and `CHELIS_VALUE_STRING` |",
                 "string carrier mapping",
             ),
             (
@@ -1246,8 +1303,9 @@ def validate_normative_contract(
             ),
             (
                 "`UnsupportedKind::HostAbi`, `Stage::Codegen(\"c\")`, and\n"
-                "`Unimplemented { issue: #879 }` before ownership verification "
-                "constructs a\nplan",
+                "`Unimplemented { issue: #879 }` after the sealed ownership "
+                "boundary certifies\nthe exact selected payload and before backend "
+                "emission",
                 "recursive function target rejection",
             ),
             (
@@ -1261,8 +1319,26 @@ def validate_normative_contract(
                 "Option legacy-carrier deletion target",
             ),
             (
-                "The existing exact ABI remains [05-OP-31..33] and all three registries",
+                "The exact ABI is [05-OP-31..33], [05-OP-44], and all four registries",
                 "complete C ABI authority chain",
+            ),
+            (
+                "A successful begin invalidates every previously returned read view; "
+                "dereferencing\n  such a stale view violates the caller precondition",
+                "write-begin read-view invalidation",
+            ),
+            (
+                "This phase promotes exactly twenty-three oracle rows: the five [#543]\n"
+                "aggregate-tensor rows (including the function-internal tensor-literal\n"
+                "temporary), the eight [#544] size/nesting rows, the five direct/nested\n"
+                "`Option` and mapped-file rows, and the five [#879] Metal rejection rows",
+                "Phase 1 exact ownership row map",
+            ),
+            (
+                "This phase promotes exactly six oracle rows: the [#1346] fold row, "
+                "the two\n[#1352] mixed fresh-arm rows, the two [#1356] "
+                "fresh-argument rows, and\n`recursive-depth-1-control`",
+                "Phase 2 exact ownership row map",
             ),
             (
                 "balanced tensor/string/List/tuple/dictionary/ADT/Option/mapped-file "
@@ -1362,14 +1438,14 @@ def validate_normative_contract(
         implicit_linearity,
         (
             (
-                "The current C/HIP emitters still\n"
-                "treat the IR node as an emission no-op and reconstruct host "
-                "releases from backend-local\nstate",
+                "The verified `OwnershipProgram` makes `RiscOp::Copy` and "
+                "`RiscOp::Drop` real\nownership operations",
                 "current Drop implementation status",
             ),
             (
-                "the successor verified-ownership lanes emit the matching heap "
-                "release at the\nterminal operation",
+                "C and HIP emit the exact\ndescriptor release selected by the "
+                "verified directive; Metal consumes the same\ndirective as a typed "
+                "no-device-owner disposition",
                 "successor Drop release",
             ),
         ),
@@ -1671,12 +1747,18 @@ def validate_normative_contract(
                 "runtime extent guard trap line",
             ),
             (
-                "the result keeps only the forms that consumer admits",
-                "deferred expand candidate elimination",
+                "Each operation has exactly one result shape. `expand` sets "
+                "the extent at\n`axis` and leaves the rank unchanged; `insert` adds an axis of extent `size`\nat `axis` and produces rank `rank(x) + 1`. No result is deferred, no consumer\nselects between shapes, and no context supplies a default.",
+                "expand and insert each have one result shape",
             ),
             (
-                "their defaults settle in source order",
-                "positional expand settlement order",
+                "`insert` admits `axis` in `0..=rank(x)`, so\n`axis == rank(x)` appends a trailing axis. An axis outside its operation's\nrange is a type error.",
+                "insert axis range",
+            ),
+            (
+                "**Named-axis insert (`R+1`).** The inverse arithmetic "
+                "direction: `insert`\nadds a *named* axis",
+                "named-axis form belongs to insert",
             ),
             (
                 "| Ordered comparison (`cmplt`, `lt`, `gt`, `gte`, `lte`) | any "
@@ -1865,7 +1947,7 @@ def validate_normative_contract(
             "zero-length axis is a type error when statically known",
             "execution-time extent is zero",
             "traps `Domain` as operation\n> `mean` at the result dtype",
-            "`expand(g / divisor, original_shape, axis)`",
+            "`insert(g / divisor, axis, original_extent)`",
             "no accumulator parameter of its own",
         ),
         "05-OP-12": (
@@ -2038,16 +2120,36 @@ def validate_normative_contract(
         ),
         "05-OP-31": (
             "exactly the ten final public C callables",
-            "typedef struct { void *data; const int64_t *shape; const int64_t "
-            "*strides; int64_t size; int64_t byte_capacity; int32_t rank; "
-            "chelis_dtype dtype; uint8_t owns_data; uint8_t reserved[2]; } "
-            "chelis_tensor;",
+            "CHELIS_VALUE_ADT = 7, CHELIS_VALUE_OPTION = 8, "
+            "CHELIS_VALUE_MAPPED_FILE = 9 };",
+            "typedef struct { const void *data; int64_t count; chelis_dtype "
+            "dtype; uint8_t reserved[7]; } chelis_read_view;",
+            "typedef struct { void *data; int64_t count; chelis_dtype dtype; "
+            "uint8_t reserved[7]; } chelis_write_view;",
+            "there is no by-value option carrier",
+            "exactly one of the ten constants above",
+            "that handle is exactly one [05-OP-44] owner",
+            "`chelis_tensor` is [05-OP-44]'s opaque descriptor handle and has "
+            "no public field",
             "typedef struct { chelis_value key; chelis_value value; } "
             "chelis_dict_entry;",
             "rank in `0..=INT32_MAX`",
-            "rank zero has null `shape` and `strides` pointers",
-            "positive rank has non-null pointers to exactly `rank` int64 entries",
+            "a rank-zero descriptor has no extents",
+            "exactly `rank` nonnegative int64 extents",
+            "with the rank-zero empty product equal to one",
             "There is no rank-eight limit",
+            "byte size is the checked product `count * chelis_dtype_size(dtype)`",
+            "A view with zero `count` has null `data`",
+            "A read view is valid only while an owner of its descriptor is live "
+            "and until that descriptor is passed to "
+            "`chelis_tensor_begin_write`, whichever comes first",
+            "A successful begin invalidates every read view previously returned "
+            "for that descriptor",
+            "dereferencing such a stale view violates the caller precondition",
+            "A write view is valid only while its exclusive guard is live",
+            "nothing is retained, released, or freed through a view pointer",
+            "Foreign storage enters only through [05-OP-44]'s entry borrow",
+            "through [05-OP-44]'s exclusive write guard",
             "F32=0`, `F64=1`, `I32=2`, `Bool=3`, `I64=4",
             "unused high bits are zero",
             "bool payload is exactly `0` or `1`",
@@ -2089,6 +2191,12 @@ def validate_normative_contract(
             "Equality includes the key kind and integer dtype",
             "Float keys are rejected",
             "later duplicate replaces the value",
+            "`dict_get` returns one owned [05-OP-44] option node that is `None` "
+            "only for absence",
+            "An option node renders as `None` when it owns no child and otherwise "
+            "as `Some(` followed by `R` of its child and `)`",
+            "A mapped file renders as `<mapped-file:` followed by its exact int64 "
+            "byte length in decimal digits and then `>`",
             "Recursive dictionary observation is canonical rather than "
             "insertion-ordered",
             "Recursive observation uses one byte grammar `R(value)` over every "
@@ -2111,8 +2219,15 @@ def validate_normative_contract(
             "outside AD and have no accumulator",
         ),
         "05-OP-33": (
-            "exactly the twenty-three final public C callable identities",
+            "exactly the twenty-two final public C callable identities",
             "axes and rank are `int32_t`",
+            "tensor arguments and results are [05-OP-44]'s opaque `chelis_tensor` "
+            "handles, and every tensor result is a new owner",
+            "alignment, live-owner state, and write-guard state, before reading "
+            "data",
+            "Foreign storage enters only through [05-OP-44]'s entry borrow; no "
+            "callable in this family constructs a non-owning view, adopts caller "
+            "bytes, or frees storage",
             "extents, sizes, offsets, counts, and element counts are `int64_t`",
             "rank is nonnegative",
             "before allocation or element access",
@@ -2460,6 +2575,84 @@ def validate_normative_contract(
             "remains intact through AD and every other",
             "The operation has no accumulator",
         ),
+        "05-OP-44": (
+            "exactly the heap-handle, strong-owner, tagged-value conversion, "
+            "option-node, entry-borrow, and guarded-access callable identities",
+            "typedef struct { void *handle; } chelis_string;",
+            "typedef struct chelis_tensor chelis_tensor;",
+            "typedef struct chelis_tensor_write chelis_tensor_write;",
+            "typedef struct chelis_option chelis_option;",
+            "typedef struct chelis_mapped_file chelis_mapped_file;",
+            "The heap-kind universe is closed and exact: `String`, `Tensor`, "
+            "`TensorStorage`, `List`, `Tuple`, `Dict`, `Adt`, `Option`, and "
+            "`MappedFile`",
+            "exactly one strong-owner count, and every kind has exactly one "
+            "finalizer",
+            "`TensorStorage` is private",
+            "one retain callable, one release callable, one take conversion into a "
+            "value, one take conversion out of a value, and one borrow conversion "
+            "out of a value",
+            "no kind-generic handle, untagged payload, owner flag, or second "
+            "representation of any kind",
+            "Tensor, List, tuple, dictionary, ADT, option, and mapped-file "
+            "carriers are\n> pointers to incomplete C types",
+            "`chelis_string` is the one fixed by-value\n> wrapper",
+            "A live handle is one logical owner under [04-LIN-3]",
+            "Retain creates one additional owner by a checked relaxed increment",
+            "exceed the representable owner range traps `Overflow`",
+            "the final release synchronizes with release/acquire ordering before "
+            "running the kind's finalizer exactly once",
+            "live handle whose kind disagrees with the callable or with\n> the "
+            "value tag, traps `Domain`",
+            "Reusing its stale pointer afterward violates the live-handle\n> "
+            "precondition",
+            "does not\n> promise a diagnostic or retain a tombstone",
+            "there is no non-owning value",
+            "`chelis_value_clone` creates one additional owner for a heap tag",
+            "A take conversion out of a value moves the value's owner to the "
+            "returned handle and ends the value",
+            "A borrow conversion out of a value returns the handle without "
+            "creating or consuming an owner",
+            "A constructor clones each borrowed child exactly once",
+            "a finalizer releases each stored child exactly once",
+            "no value contains itself and no heap graph has a cycle",
+            "`chelis_option_none` owns no child and `chelis_option_some` owns "
+            "exactly one tagged child",
+            "`chelis_option_unwrap` of a `None` node traps `Domain`",
+            "There is no by-value, discriminant-plus-payload, or scalar-special "
+            "option carrier",
+            "`CHELIS_VALUE_MAPPED_FILE` is its only tagged representation",
+            "A tensor handle is a descriptor that retains exactly one storage "
+            "allocation for its whole lifetime",
+            "`chelis_tensor_retain` and `chelis_tensor_release` are the only "
+            "public tensor lifetime operations",
+            "`chelis_tensor_begin_write` succeeds only when the descriptor has "
+            "exactly one live owner, its storage has exactly one live descriptor, "
+            "the storage is runtime-owned, and no guard is active on it",
+            "non-owning guard embedded in that descriptor",
+            "A successful begin invalidates\n> every read view previously returned "
+            "for that descriptor before it activates\n> the guard",
+            "Dereferencing one afterward violates the caller precondition; the\n> "
+            "runtime does not promise to diagnose that stale pointer",
+            "The guard borrows,\n> but neither consumes nor clones, the descriptor's "
+            "existing owner for the\n> guard lifetime; it allocates no guard object",
+            "Every other begin,\n> read view, retain, clone, or release of that "
+            "descriptor traps `Domain` until\n> `chelis_tensor_end_write` consumes "
+            "and deactivates the guard without freeing\n> an allocation or consuming "
+            "the descriptor owner",
+            "`chelis_tensor_write_view` borrows its `const` guard",
+            "a compiler's reuse proof never replaces them",
+            "An entry borrow, following [04-LIN-7], is a descriptor over storage "
+            "the caller owns",
+            "produces storage that is never runtime-owned",
+            "`chelis_tensor_begin_write` on it traps `Domain`",
+            "no address comparison, retain count, or later invocation makes that "
+            "storage runtime-owned",
+            "cannot prove a foreign allocation's lifetime or physical size",
+            "no alias, wrapper, deprecated spelling, field-level access, owner "
+            "flag, or free-style path",
+            "no accumulator and is outside AD",
+        ),
         "05-RNG-1": (
             "Every conforming evaluation of a `with seed(N)` program produces "
             "byte-identical random results",
@@ -2554,16 +2747,45 @@ def validate_normative_contract(
                 "ToEnd shrink end requires a zero start",
             ),
             (
-                "is well formed only\nwhen the operand's extent at `axis` is 1",
-                "expand same-rank form requires a unit source extent",
+                "`expand` sets the extent at `axis` and is well formed only "
+                "when the operand's\nextent at `axis` is 1",
+                "expand requires a unit source extent",
             ),
             (
-                "the form is a claim that the operand's extent at `axis` is "
-                "1. A\nruntime operand extent at `axis` other than 1 under "
-                "the same-rank form fails\nthat claim's runtime extent guard "
-                "and traps `Domain`, placed and rendered per\n"
-                "`spec/04-type-system.md` §4.7 and [04-NUM-9].",
-                "expand same-rank non-unit source extent traps Domain",
+                "A reduction axis, `expand`'s broadcast axis, and `insert`'s"
+                "\n> new-axis position SHALL be",
+                "axis atom names both movement primitives",
+            ),
+            (
+                "names the\n> dimension it creates, which is by construction not a dimension of the\n> operand; that name SHALL be statically resolvable in the same sense",
+                "insert names a dimension absent from the operand",
+            ),
+            (
+                "> `insert(g / divisor, axis, original_extent)` at the "
+                "operand dtype.",
+                "mean adjoint reinserts the reduced axis",
+            ),
+            (
+                "[05-AXIS-1] governs the reduction, `expand`, and `insert`\n> family",
+                "C axis family names both movement primitives",
+            ),
+            (
+                "| `insert` | `(&tensor[D,p], axis: int32, size: int64) -> "
+                "tensor[D_plus,p]` | Insert a new dimension of width `size` "
+                "at position `axis`, producing rank `rank(x) + 1`.",
+                "insert movement row",
+            ),
+            (
+                "A literal operand extent at\n`axis` other than 1 is a type error. A symbolic or runtime operand extent at\n`axis` other than 1 fails that claim's runtime extent guard and traps\n`Domain`, placed and rendered per `spec/04-type-system.md` §4.7 and\n[04-NUM-9].",
+                "expand non-unit source extent is rejected or traps",
+            ),
+            (
+                "| `expand` | `insert(sum(g, axis), axis, 1i64)`",
+                "expand adjoint restores the unit axis",
+            ),
+            (
+                "| `insert` | `sum(g, axis)`",
+                "insert adjoint collapses the inserted axis",
             ),
             (
                 "| `cmplt(a, b)` | `cmplt(a, b)` | "

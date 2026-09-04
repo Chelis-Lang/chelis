@@ -19,7 +19,7 @@
 //!
 //! Acceptance oracle: `cargo test -p chelis-backend-c --test dtype_matrix_bf16_f16_extended`.
 
-use chelis_backend_c::codegen;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::eval_tensor;
 use chelis_types::types::Prim;
@@ -28,6 +28,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+use support::codegen;
 
 mod common;
 
@@ -192,25 +193,39 @@ const HARNESS: &str = r#"
 static chelis_tensor *bf16_tensor_from_f32(const float *src, int n) {
     int64_t shape[1] = {n};
     chelis_tensor *t = chelis_alloc(1, shape, CHELIS_DTYPE_BF16);
-    uint16_t *p = (uint16_t*)t->data;
+    chelis_tensor_write *guard = chelis_tensor_begin_write(t);
+    uint16_t *p = (uint16_t*)chelis_tensor_write_view(guard).data;
     for (int i = 0; i < n; i++) p[i] = chelis_f32_to_bf16(src[i]);
+    chelis_tensor_end_write(guard);
     return t;
 }
 
 static chelis_tensor *f16_tensor_from_f32(const float *src, int n) {
     int64_t shape[1] = {n};
     chelis_tensor *t = chelis_alloc(1, shape, CHELIS_DTYPE_F16);
-    uint16_t *p = (uint16_t*)t->data;
+    chelis_tensor_write *guard = chelis_tensor_begin_write(t);
+    uint16_t *p = (uint16_t*)chelis_tensor_write_view(guard).data;
     for (int i = 0; i < n; i++) p[i] = chelis_f32_to_f16(src[i]);
+    chelis_tensor_end_write(guard);
     return t;
 }
 
 static chelis_tensor *f32_tensor_from_f32(const float *src, int n) {
     int64_t shape[1] = {n};
     chelis_tensor *t = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
-    float *p = (float*)t->data;
+    chelis_tensor_write *guard = chelis_tensor_begin_write(t);
+    float *p = (float*)chelis_tensor_write_view(guard).data;
     for (int i = 0; i < n; i++) p[i] = src[i];
+    chelis_tensor_end_write(guard);
     return t;
+}
+
+static const uint16_t *tensor_u16_data(const chelis_tensor *t) {
+    return (const uint16_t*)chelis_tensor_read_view(t).data;
+}
+
+static const float *tensor_f32_data(const chelis_tensor *t) {
+    return (const float*)chelis_tensor_read_view(t).data;
 }
 "#;
 
@@ -285,10 +300,10 @@ int main(void) {{
     chelis_tensor *inputs[1] = {{x}};
     chelis_tensor *outputs[1] = {{0}};
     {test_name}(inputs, 1, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     for (int i = 0; i < {n}; i++) printf("%.8f\n", {to_f32}(p[i]));
-    chelis_free(x);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(x);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -384,11 +399,11 @@ int main(void) {{
     chelis_tensor *inputs[2] = {{a, b}};
     chelis_tensor *outputs[1] = {{0}};
     {test_name}(inputs, 2, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     for (int i = 0; i < {n}; i++) printf("%.8f\n", {to_f32}(p[i]));
-    chelis_free(a);
-    chelis_free(b);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(a);
+    chelis_tensor_release(b);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -827,10 +842,10 @@ int main(void) {{
     chelis_tensor *inputs[1] = {{x}};
     chelis_tensor *outputs[1] = {{0}};
     {test_name}(inputs, 1, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     printf("%.8f\n", {to_f32}(p[0]));
-    chelis_free(x);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(x);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -1002,10 +1017,10 @@ extern void {test_name}(chelis_tensor **inputs, int n_in, chelis_tensor **output
 int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     {test_name}(NULL, 0, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     printf("0x%04X\n", (unsigned)p[0]);
     printf("%.8f\n", {to_f32}(p[0]));
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -1061,9 +1076,9 @@ extern void {test_name}(chelis_tensor **inputs, int n_in, chelis_tensor **output
 int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     {test_name}(NULL, 0, outputs, 1);
-    float v = ((float*)outputs[0]->data)[0];
+    float v = tensor_f32_data(outputs[0])[0];
     printf("%.8f\n", v);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -1114,10 +1129,10 @@ extern void {test_name}(chelis_tensor **inputs, int n_in, chelis_tensor **output
 int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     {test_name}(NULL, 0, outputs, 1);
-    uint16_t *p = (uint16_t*)outputs[0]->data;
+    const uint16_t *p = tensor_u16_data(outputs[0]);
     printf("0x%04X\n", (unsigned)p[0]);
     printf("%.8f\n", {to_f32}(p[0]));
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#

@@ -1,10 +1,10 @@
 //! C code generation backend for the Chelis language.
 
 pub mod blas;
-pub mod emit;
+mod emit;
 mod emitted_expr;
 mod host_abi;
-pub mod host_emit;
+mod host_emit;
 pub mod memory;
 pub mod toolchain;
 
@@ -102,21 +102,36 @@ pub struct CodegenOptions {
 /// Repeated `Load(name)` nodes share one input slot, surfaced via `input_labels`.
 /// `Store(name)` nodes are exported as named outputs in `output_labels`; any
 /// remaining DAG roots are appended afterward as `root{index}`.
+///
+/// ```compile_fail
+/// # use chelis_ir::dag::Dag;
+/// fn bypass(raw: &Dag) {
+///     let _ = chelis_backend_c::codegen(raw, "unchecked");
+/// }
+/// ```
 pub fn codegen(
-    dag: &chelis_ir::dag::Dag,
+    dag: &chelis_ir::ownership::VerifiedDagProgram,
     func_name: &str,
 ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
     codegen_with_options(dag, func_name, CodegenOptions::default())
 }
 
+/// Compile a sealed, verified host payload.
+///
+/// ```compile_fail
+/// # use chelis_ir::host::ConcreteHostProgram;
+/// fn bypass(raw: &ConcreteHostProgram) {
+///     let _ = chelis_backend_c::codegen_host_program(raw, "unchecked");
+/// }
+/// ```
 pub fn codegen_host_program(
-    program: &chelis_ir::host::ConcreteHostProgram,
+    program: &chelis_ir::ownership::VerifiedHostProgram,
     func_name: &str,
 ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
     // Resolve the backend capability boundary once.  All emission below is
     // over the private, fully-resolved ABI vocabulary; neither source nor
     // header generation can re-interpret logical types independently.
-    let abi_program = host_abi::project_program(program)?;
+    let abi_program = host_abi::project_program(program.emission())?;
     let c_source = host_emit::emit_host_abi_program(&abi_program, func_name)?;
     let h_header = host_emit::emit_host_abi_header(&abi_program, func_name)?;
     let needs_blas = c_source.contains("#include \"chelis_blas.h\"")
@@ -138,18 +153,12 @@ pub fn codegen_host_program(
 
 /// Generate C source code from a RISC DAG with explicit backend options.
 pub fn codegen_with_options(
-    dag: &chelis_ir::dag::Dag,
+    dag: &chelis_ir::ownership::VerifiedDagProgram,
     func_name: &str,
     options: CodegenOptions,
 ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
-    let specialized;
-    let dag = if options.use_blas {
-        specialized = chelis_ir::specialize::specialize_for_blas(dag);
-        &specialized
-    } else {
-        dag
-    };
     let c_source = emit::CEmitter::emit_dag_with_options(dag, func_name, options)?;
+    let dag = dag.emission();
     let h_header = format!(
         "void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
     );
@@ -160,7 +169,7 @@ pub fn codegen_with_options(
             .any(|node| matches!(node.op, chelis_ir::dag::RiscOp::BlasMatmul { .. }));
     let input_labels = emit::CEmitter::input_labels(dag);
     let output_labels = emit::CEmitter::output_labels(dag);
-    let symbolic_dims = chelis_ir::dag::symbolic_params(dag);
+    let symbolic_dims = dag.symbolic_params();
     Ok(CodegenResult {
         c_source,
         h_header,
@@ -174,6 +183,58 @@ pub fn codegen_with_options(
     })
 }
 
+/// Apply the C backend's payload-selection rewrites before ownership lowering.
+pub fn prepare_dag_for_codegen(
+    dag: chelis_ir::dag::Dag,
+    options: CodegenOptions,
+) -> chelis_ir::dag::Dag {
+    let dag = if options.use_blas {
+        chelis_ir::specialize::specialize_for_blas(&dag)
+    } else {
+        dag
+    };
+    emit::CEmitter::rename_anonymous_dims(dag)
+}
+
+/// Select the exact nested C helper DAGs before host ownership lowering.
+pub fn prepare_host_program_for_codegen(
+    mut program: chelis_ir::host::ConcreteHostProgram,
+) -> Result<chelis_ir::host::ConcreteHostProgram, chelis_types::unsupported::Unsupported> {
+    fn prepare(
+        helper: &mut chelis_ir::host::HostTensorHelper,
+    ) -> Result<(), chelis_types::unsupported::Unsupported> {
+        let specialized = chelis_ir::specialize::specialize_for_blas(&helper.dag);
+        chelis_ir::check_axis_sources(
+            &specialized,
+            chelis_types::unsupported::Stage::Codegen("c"),
+        )?;
+        helper.dag = emit::CEmitter::rename_anonymous_dims(specialized);
+        Ok(())
+    }
+    for helper in &mut program.global_tensor_helpers {
+        prepare(helper)?;
+    }
+    for function in &mut program.functions {
+        for helper in &mut function.tensor_helpers {
+            prepare(helper)?;
+        }
+    }
+    Ok(program)
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use chelis_ir::ownership::{OwnershipError, VerifiedDagProgram};
+
+    pub(crate) fn verified_dag(
+        dag: &chelis_ir::dag::Dag,
+        options: crate::CodegenOptions,
+    ) -> Result<VerifiedDagProgram, OwnershipError> {
+        let selected = crate::prepare_dag_for_codegen(dag.clone(), options);
+        chelis_ir::ownership::verify_ownership(chelis_ir::ownership::lower_dag_ownership(selected)?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +245,71 @@ mod tests {
     use std::path::PathBuf;
     use std::process::Command;
     use std::{env, fs};
+
+    fn codegen(
+        dag: &Dag,
+        name: &str,
+    ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
+        codegen_with_options(dag, name, CodegenOptions::default())
+    }
+
+    fn codegen_with_options(
+        dag: &Dag,
+        name: &str,
+        options: CodegenOptions,
+    ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
+        let verified = crate::testing::verified_dag(dag, options)
+            .expect("C backend unit-test DAG must verify ownership");
+        super::codegen_with_options(&verified, name, options)
+    }
+
+    fn codegen_host_program(
+        program: &chelis_ir::host::ConcreteHostProgram,
+        name: &str,
+    ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
+        let source = program
+            .functions
+            .iter()
+            .map(|function| {
+                let params = function
+                    .params
+                    .iter()
+                    .enumerate()
+                    .map(|(index, _)| format!("p{index}: f64"))
+                    .collect::<Vec<_>>();
+                let body = if params.is_empty() { "0.0f64" } else { "p0" };
+                format!(
+                    "def {}({}) -> f64 = {body}",
+                    function.name,
+                    params.join(", ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let declarations = chelis_surf::parser::parse_str(&source)
+            .unwrap_or_else(|error| panic!("parse synthetic host signatures: {error:?}"));
+        let deep = chelis_surf::desugar::desugar_program(&declarations);
+        let checked = chelis_types::check_typed_program(&deep).unwrap_or_else(|errors| {
+            panic!("check synthetic host signatures: {:?}", errors.errors)
+        });
+        let checked = chelis_effects::check_program(&checked)
+            .unwrap_or_else(|error| panic!("effects synthetic host signatures: {error:?}"));
+        let checked = chelis_types::check_linearity(&checked)
+            .unwrap_or_else(|error| panic!("linearity synthetic host signatures: {error:?}"));
+        let manifested = chelis_types::manifest::ManifestedProgram::new(
+            checked,
+            chelis_types::manifest::RootManifest {
+                entries: Vec::new(),
+            },
+            chelis_types::types::Target::C,
+        );
+        let selected = prepare_host_program_for_codegen(program.clone())?;
+        let lowered = chelis_ir::ownership::lower_host_ownership(&manifested, selected)
+            .expect("C backend unit-test host must lower ownership");
+        let verified = chelis_ir::ownership::verify_ownership(lowered)
+            .expect("C backend unit-test host must verify ownership");
+        super::codegen_host_program(&verified, name)
+    }
 
     fn scalar_f32() -> TensorType {
         TensorType::scalar_f32()
@@ -357,7 +483,6 @@ mod tests {
     /// after` (the symbolic entry-wrapper concat mis-sizing) must be rejected
     /// loud at codegen, never emit the heap-corrupting copy loop.
     #[test]
-    #[should_panic(expected = "chelis#593")]
     fn codegen_rejects_mis_sized_leading_axis_pad() {
         let mut dag = Dag::new();
         let sym = TensorType {
@@ -379,7 +504,11 @@ mod tests {
             sym,
             None,
         );
-        let _ = codegen(&dag, "mis_sized").unwrap();
+        let error = match chelis_ir::ownership::lower_dag_ownership(dag) {
+            Err(error) => error,
+            Ok(_) => panic!("a mis-sized pad must not become verified backend input"),
+        };
+        assert!(error.to_string().contains("expected 4"));
     }
 
     /// Positive parity: a CORRECTLY sized leading-axis Pad over a symbolic
@@ -456,15 +585,14 @@ mod tests {
             scalar_f32(),
             None,
         );
-        let result = emit::CEmitter::emit_dag_with_options(
-            &dag,
-            "internal_helper",
-            CodegenOptions {
-                static_entry: true,
-                ..CodegenOptions::default()
-            },
-        )
-        .unwrap();
+        let options = CodegenOptions {
+            static_entry: true,
+            ..CodegenOptions::default()
+        };
+        let verified = crate::testing::verified_dag(&dag, options)
+            .expect("static-entry test DAG must verify ownership");
+        let result =
+            emit::CEmitter::emit_dag_with_options(&verified, "internal_helper", options).unwrap();
         assert!(
             result.contains("static void internal_helper("),
             "internal helper must be static; got source starting:\n{}",
@@ -989,12 +1117,15 @@ int main(void) {
 #include "chelis_runtime.h"
 int main(void) {
     int64_t shape[2] = {2, 3};
-    chelis_tensor *base = chelis_alloc(2, shape, CHELIS_DTYPE_F32);
-    ((float*)base->data)[4] = 7.0f;
-    chelis_tensor *view = chelis_alloc_view(2, shape, CHELIS_DTYPE_F32, base->data, base->byte_capacity);
-    chelis_free(view);
-    if (((float*)base->data)[4] != 7.0f) return 2;
-    chelis_free(base);
+    float data[6] = {0};
+    data[4] = 7.0f;
+    chelis_tensor *base = chelis_tensor_entry_borrow(
+        2, shape, CHELIS_DTYPE_F32, data, sizeof(data)
+    );
+    chelis_tensor *view = chelis_contiguous(base);
+    chelis_tensor_release(view);
+    if (data[4] != 7.0f) return 2;
+    chelis_tensor_release(base);
     return 0;
 }
 "#;
@@ -1052,8 +1183,8 @@ void test_add(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_o
 int main() {
     chelis_tensor *outputs[1] = {0};
     test_add(NULL, 0, outputs, 1);
-    printf("%.1f\n", ((float*)outputs[0]->data)[0]);
-    chelis_free(outputs[0]);
+    printf("%.1f\n", ((const float*)chelis_tensor_read_view(outputs[0]).data)[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }
 "#;
@@ -1106,17 +1237,18 @@ int main() {
             r#"
 #include "chelis_runtime.h"
 static double chelis_test_element_as_f64(const chelis_tensor *tensor, int64_t index) {{
-    switch (tensor->dtype) {{
-        case CHELIS_DTYPE_F32: return ((const float*)tensor->data)[index];
-        case CHELIS_DTYPE_F64: return ((const double*)tensor->data)[index];
-        case CHELIS_DTYPE_I8: return ((const int8_t*)tensor->data)[index];
-        case CHELIS_DTYPE_I16: return ((const int16_t*)tensor->data)[index];
-        case CHELIS_DTYPE_I32: return ((const int32_t*)tensor->data)[index];
-        case CHELIS_DTYPE_I64: return (double)((const int64_t*)tensor->data)[index];
-        case CHELIS_DTYPE_BF16: return chelis_bf16_to_f32(((const uint16_t*)tensor->data)[index]);
-        case CHELIS_DTYPE_F16: return chelis_f16_to_f32(((const uint16_t*)tensor->data)[index]);
+    chelis_read_view view = chelis_tensor_read_view(tensor);
+    switch (view.dtype) {{
+        case CHELIS_DTYPE_F32: return ((const float*)view.data)[index];
+        case CHELIS_DTYPE_F64: return ((const double*)view.data)[index];
+        case CHELIS_DTYPE_I8: return ((const int8_t*)view.data)[index];
+        case CHELIS_DTYPE_I16: return ((const int16_t*)view.data)[index];
+        case CHELIS_DTYPE_I32: return ((const int32_t*)view.data)[index];
+        case CHELIS_DTYPE_I64: return (double)((const int64_t*)view.data)[index];
+        case CHELIS_DTYPE_BF16: return chelis_bf16_to_f32(((const uint16_t*)view.data)[index]);
+        case CHELIS_DTYPE_F16: return chelis_f16_to_f32(((const uint16_t*)view.data)[index]);
         case CHELIS_DTYPE_BOOL: {{
-            uint8_t value = ((const uint8_t*)tensor->data)[index];
+            uint8_t value = ((const uint8_t*)view.data)[index];
             if (value > UINT8_C(1)) abort();
             return value;
         }}
@@ -1127,12 +1259,12 @@ void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int 
 int main() {{
     chelis_tensor *outputs[1] = {{0}};
     {func_name}(NULL, 0, outputs, 1);
-    for (int i = 0; i < outputs[0]->size; i++) {{
+    for (int i = 0; i < chelis_tensor_numel(outputs[0]); i++) {{
         if (i > 0) printf(" ");
         printf("%.6f", chelis_test_element_as_f64(outputs[0], i));
     }}
     printf("\n");
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -1201,10 +1333,15 @@ int main() {{
     fn harness_input_fill_line(lhs: &str, value: f32) -> String {
         let bits = value.to_bits();
         let (tensor, index) = lhs
-            .split_once("->data[")
+            .split_once('[')
             .and_then(|(tensor, index)| index.strip_suffix(']').map(|index| (tensor, index)))
             .expect("f32 harness destination must be a tensor data index");
-        format!("((float*){tensor}->data)[{index}] = chelis_f32_from_bits(0x{bits:08x}u);")
+        format!(
+            "do {{ chelis_tensor_write *guard = chelis_tensor_begin_write({tensor}); \
+             chelis_write_view view = chelis_tensor_write_view(guard); \
+             ((float*)view.data)[{index}] = chelis_f32_from_bits(0x{bits:08x}u); \
+             chelis_tensor_end_write(guard); }} while (0);"
+        )
     }
 
     /// Issue #252: the test-harness fill must round-trip every f32 value
@@ -1224,7 +1361,7 @@ int main() {{
             f32::from_bits(0x1234_5678),
         ];
         for value in cases {
-            let line = harness_input_fill_line("dst->data[0]", value);
+            let line = harness_input_fill_line("dst[0]", value);
             let want_bits = value.to_bits();
             let needle = format!("chelis_f32_from_bits(0x{want_bits:08x}u)");
             assert!(
@@ -1241,7 +1378,7 @@ int main() {{
         // zero, but the bit pattern is nonzero and must survive.
         let denormal = 1e-40_f32;
         assert_ne!(denormal.to_bits(), 0);
-        let line = harness_input_fill_line("dst->data[0]", denormal);
+        let line = harness_input_fill_line("dst[0]", denormal);
         assert!(
             !line.contains("0.00000000f"),
             "denormal must not collapse to `0.00000000f`: {line}"
@@ -1301,7 +1438,7 @@ int main() {{
                     "chelis_tensor *input_{case_idx}_{slot} = chelis_alloc({ndim}, {shape_arg}, CHELIS_DTYPE_F32);"
                 ));
                 for (i, value) in input.data.iter().enumerate() {
-                    let lhs = format!("input_{case_idx}_{slot}->data[{i}]");
+                    let lhs = format!("input_{case_idx}_{slot}[{i}]");
                     lines.push(harness_input_fill_line(&lhs, *value));
                 }
                 lines.push(format!(
@@ -1317,7 +1454,7 @@ int main() {{
                 "for (int out_idx = 0; out_idx < {n_out}; out_idx++) {{"
             ));
             lines.push(format!(
-                "    for (int i = 0; i < outputs_{case_idx}[out_idx]->size; i++) {{"
+                "    for (int i = 0; i < chelis_tensor_numel(outputs_{case_idx}[out_idx]); i++) {{"
             ));
             lines.push("        if (out_idx > 0 || i > 0) printf(\" \");".to_string());
             lines.push(format!(
@@ -1328,10 +1465,12 @@ int main() {{
             lines.push("}".to_string());
             lines.push("printf(\"\\n\");".to_string());
             for slot in 0..result.input_labels.len() {
-                lines.push(format!("chelis_free(input_{case_idx}_{slot});"));
+                lines.push(format!("chelis_tensor_release(input_{case_idx}_{slot});"));
             }
             for slot in 0..n_out {
-                lines.push(format!("chelis_free(outputs_{case_idx}[{slot}]);"));
+                lines.push(format!(
+                    "chelis_tensor_release(outputs_{case_idx}[{slot}]);"
+                ));
             }
             case_blocks.push(lines.join("\n    "));
         }
@@ -1344,17 +1483,18 @@ int main() {{
             r#"
 #include "chelis_runtime.h"
 static double chelis_test_element_as_f64(const chelis_tensor *tensor, int64_t index) {{
-    switch (tensor->dtype) {{
-        case CHELIS_DTYPE_F32: return ((const float*)tensor->data)[index];
-        case CHELIS_DTYPE_F64: return ((const double*)tensor->data)[index];
-        case CHELIS_DTYPE_I8: return ((const int8_t*)tensor->data)[index];
-        case CHELIS_DTYPE_I16: return ((const int16_t*)tensor->data)[index];
-        case CHELIS_DTYPE_I32: return ((const int32_t*)tensor->data)[index];
-        case CHELIS_DTYPE_I64: return (double)((const int64_t*)tensor->data)[index];
-        case CHELIS_DTYPE_BF16: return chelis_bf16_to_f32(((const uint16_t*)tensor->data)[index]);
-        case CHELIS_DTYPE_F16: return chelis_f16_to_f32(((const uint16_t*)tensor->data)[index]);
+    chelis_read_view view = chelis_tensor_read_view(tensor);
+    switch (view.dtype) {{
+        case CHELIS_DTYPE_F32: return ((const float*)view.data)[index];
+        case CHELIS_DTYPE_F64: return ((const double*)view.data)[index];
+        case CHELIS_DTYPE_I8: return ((const int8_t*)view.data)[index];
+        case CHELIS_DTYPE_I16: return ((const int16_t*)view.data)[index];
+        case CHELIS_DTYPE_I32: return ((const int32_t*)view.data)[index];
+        case CHELIS_DTYPE_I64: return (double)((const int64_t*)view.data)[index];
+        case CHELIS_DTYPE_BF16: return chelis_bf16_to_f32(((const uint16_t*)view.data)[index]);
+        case CHELIS_DTYPE_F16: return chelis_f16_to_f32(((const uint16_t*)view.data)[index]);
         case CHELIS_DTYPE_BOOL: {{
-            uint8_t value = ((const uint8_t*)tensor->data)[index];
+            uint8_t value = ((const uint8_t*)view.data)[index];
             if (value > UINT8_C(1)) abort();
             return value;
         }}
@@ -2116,14 +2256,17 @@ int main(void) {{
                     r#"int64_t shape_values[2] = { 4, 2 };
     chelis_tensor *values = chelis_alloc(2, shape_values, CHELIS_DTYPE_F32);
     float values_data[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
-    for (int i = 0; i < 8; i++) ((float*)values->data)[i] = values_data[i];
+    chelis_tensor_write *values_guard = chelis_tensor_begin_write(values);
+    chelis_write_view values_view = chelis_tensor_write_view(values_guard);
+    for (int i = 0; i < 8; i++) ((float*)values_view.data)[i] = values_data[i];
+    chelis_tensor_end_write(values_guard);
     inputs[SLOT] = values;"#
                         .replace("SLOT", &slot.to_string()),
                 ),
                 // #476: a CHELIS_DTYPE_I32 index tensor stores int32 values
                 // bit-packed into the float-typed `data` buffer; they MUST be
                 // written through an `(int32_t*)` cast, not as floats. The
-                // pre-fix fixture wrote `indices->data[i] = 2.0f` (the FLOAT
+                // pre-fix fixture wrote an f32 through an i32 tensor (the FLOAT
                 // 2.0, whose int32 reinterpretation is 0x40000000), which only
                 // round-tripped because the buggy reader did `(int)data[i]` and
                 // truncated the float back. Writing the int32 value directly is
@@ -2131,8 +2274,11 @@ int main(void) {{
                 "indices" => input_lines.push(
                     r#"int64_t shape_indices[1] = { 3 };
     chelis_tensor *indices = chelis_alloc(1, shape_indices, CHELIS_DTYPE_I32);
-    int32_t *indices_i32 = (int32_t*)indices->data;
+    chelis_tensor_write *indices_guard = chelis_tensor_begin_write(indices);
+    chelis_write_view indices_view = chelis_tensor_write_view(indices_guard);
+    int32_t *indices_i32 = (int32_t*)indices_view.data;
     indices_i32[0] = 0; indices_i32[1] = 2; indices_i32[2] = 0;
+    chelis_tensor_end_write(indices_guard);
     inputs[SLOT] = indices;"#
                         .replace("SLOT", &slot.to_string()),
                 ),
@@ -2146,7 +2292,10 @@ int main(void) {{
                     r#"int64_t shape_updates[2] = { 3, 2 };
     chelis_tensor *updates = chelis_alloc(2, shape_updates, CHELIS_DTYPE_F32);
     float updates_data[6] = { 1, 10, 2, 20, 3, 30 };
-    for (int i = 0; i < 6; i++) ((float*)updates->data)[i] = updates_data[i];
+    chelis_tensor_write *updates_guard = chelis_tensor_begin_write(updates);
+    chelis_write_view updates_view = chelis_tensor_write_view(updates_guard);
+    for (int i = 0; i < 6; i++) ((float*)updates_view.data)[i] = updates_data[i];
+    chelis_tensor_end_write(updates_guard);
     inputs[SLOT] = updates;"#
                         .replace("SLOT", &slot.to_string()),
                 ),
@@ -2161,19 +2310,21 @@ int main(void) {{
     {inputs}
     chelis_tensor *outputs[2] = {{0}};
     test_sparse(inputs, {n_in}, outputs, 2);
-    for (int i = 0; i < outputs[0]->size; i++) {{
+    chelis_read_view output0_view = chelis_tensor_read_view(outputs[0]);
+    chelis_read_view output1_view = chelis_tensor_read_view(outputs[1]);
+    for (int i = 0; i < output0_view.count; i++) {{
         if (i > 0) printf(" ");
-        printf("%.6f", ((float*)outputs[0]->data)[i]);
+        printf("%.6f", ((const float*)output0_view.data)[i]);
     }}
     printf(" |");
-    for (int i = 0; i < outputs[1]->size; i++) {{
+    for (int i = 0; i < output1_view.count; i++) {{
         if (i > 0) printf(" ");
-        printf("%.6f", ((float*)outputs[1]->data)[i]);
+        printf("%.6f", ((const float*)output1_view.data)[i]);
     }}
     printf("\n");
-    for (int i = 0; i < {n_in}; i++) chelis_free(inputs[i]);
-    chelis_free(outputs[0]);
-    chelis_free(outputs[1]);
+    for (int i = 0; i < {n_in}; i++) chelis_tensor_release(inputs[i]);
+    chelis_tensor_release(outputs[0]);
+    chelis_tensor_release(outputs[1]);
     return 0;
 }}
 "#,
@@ -2380,9 +2531,13 @@ int main(void) {{
         assert!(
             result
                 .c_source
-                .contains("int64_t batch = inputs[0]->shape[0];")
+                .contains("int64_t batch = chelis_tensor_shape(inputs[0], 0);")
         );
-        assert!(result.c_source.contains("inputs[1]->shape[0] != batch"));
+        assert!(
+            result
+                .c_source
+                .contains("chelis_tensor_shape(inputs[1], 0) != batch")
+        );
 
         let lines = compile_and_run_input_cases(
             &dag,
@@ -2439,7 +2594,7 @@ int main(void) {{
         assert!(
             result
                 .c_source
-                .contains("int64_t batch = inputs[0]->shape[0];")
+                .contains("int64_t batch = chelis_tensor_shape(inputs[0], 0);")
         );
 
         let lines = compile_and_run_input_cases(
@@ -2515,7 +2670,7 @@ int main(void) {{
         assert!(
             result
                 .c_source
-                .contains("int64_t seq = inputs[0]->shape[2];")
+                .contains("int64_t seq = chelis_tensor_shape(inputs[0], 2);")
         );
         assert!(result.c_source.contains("cblas_sgemm"));
         assert!(result.c_source.contains("_batch_count = (batch * heads);"));
@@ -2635,10 +2790,18 @@ int main(void) {{
         assert!(
             result
                 .c_source
-                .contains("int64_t batch = inputs[0]->shape[0];")
+                .contains("int64_t batch = chelis_tensor_shape(inputs[0], 0);")
         );
-        assert!(result.c_source.contains("inputs[1]->shape[0] != batch"));
-        assert!(result.c_source.contains("inputs[2]->shape[0] != batch"));
+        assert!(
+            result
+                .c_source
+                .contains("chelis_tensor_shape(inputs[1], 0) != batch")
+        );
+        assert!(
+            result
+                .c_source
+                .contains("chelis_tensor_shape(inputs[2], 0) != batch")
+        );
     }
 
     #[test]
@@ -2672,9 +2835,11 @@ void test_multi(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n
 int main(void) {
     chelis_tensor *outputs[2] = {0};
     test_multi(NULL, 0, outputs, 2);
-    printf("%.1f %.1f\n", ((float*)outputs[0]->data)[0], ((float*)outputs[1]->data)[0]);
-    chelis_free(outputs[0]);
-    chelis_free(outputs[1]);
+    printf("%.1f %.1f\n",
+           ((const float*)chelis_tensor_read_view(outputs[0]).data)[0],
+           ((const float*)chelis_tensor_read_view(outputs[1]).data)[0]);
+    chelis_tensor_release(outputs[0]);
+    chelis_tensor_release(outputs[1]);
     return 0;
 }
 "#;
@@ -2716,18 +2881,21 @@ void test_load_copy(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, i
 int main(void) {
     int64_t shape[1] = {2};
     chelis_tensor *input = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
-    ((float*)input->data)[0] = 3.0f;
-    ((float*)input->data)[1] = 4.0f;
+    chelis_tensor_write *guard = chelis_tensor_begin_write(input);
+    chelis_write_view input_view = chelis_tensor_write_view(guard);
+    ((float*)input_view.data)[0] = 3.0f;
+    ((float*)input_view.data)[1] = 4.0f;
+    chelis_tensor_end_write(guard);
     chelis_tensor *inputs[1] = {input};
     chelis_tensor *outputs[1] = {0};
     test_load_copy(inputs, 1, outputs, 1);
     printf("%d %d %.1f %.1f\n",
            outputs[0] == input,
-           outputs[0]->data == input->data,
-           ((float*)outputs[0]->data)[0],
-           ((float*)outputs[0]->data)[1]);
-    chelis_free(outputs[0]);
-    chelis_free(input);
+           chelis_tensor_read_view(outputs[0]).data == chelis_tensor_read_view(input).data,
+           ((const float*)chelis_tensor_read_view(outputs[0]).data)[0],
+           ((const float*)chelis_tensor_read_view(outputs[0]).data)[1]);
+    chelis_tensor_release(outputs[0]);
+    chelis_tensor_release(input);
     return 0;
 }
 "#;
@@ -2747,7 +2915,11 @@ int main(void) {
             String::from_utf8_lossy(&out.stderr)
         );
         let run = Command::new(bin_path).output().unwrap();
-        assert!(run.status.success());
+        assert!(
+            run.status.success(),
+            "materialized-load harness failed: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
         assert_eq!(String::from_utf8(run.stdout).unwrap().trim(), "0 0 3.0 4.0");
     }
 
@@ -2856,7 +3028,7 @@ void test_blas(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_
 int main(void) {
     chelis_tensor *outputs[1] = {0};
     test_blas(NULL, 0, outputs, 1);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }
 "#;
@@ -3198,19 +3370,25 @@ int main(void) {{
     int64_t shape[1] = {{ {n} }};
     chelis_tensor *ta = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
     chelis_tensor *tb = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
-    for (int i = 0; i < {n}; i++) {{ ((float*)ta->data)[i] = 0.5f; ((float*)tb->data)[i] = 0.5f; }}
+    chelis_tensor_write *ta_guard = chelis_tensor_begin_write(ta);
+    chelis_tensor_write *tb_guard = chelis_tensor_begin_write(tb);
+    chelis_write_view ta_view = chelis_tensor_write_view(ta_guard);
+    chelis_write_view tb_view = chelis_tensor_write_view(tb_guard);
+    for (int i = 0; i < {n}; i++) {{ ((float*)ta_view.data)[i] = 0.5f; ((float*)tb_view.data)[i] = 0.5f; }}
+    chelis_tensor_end_write(ta_guard);
+    chelis_tensor_end_write(tb_guard);
     chelis_tensor *inputs[2] = {{ta, tb}};
     chelis_tensor *outputs[1] = {{0}};
     test_simd_compile(inputs, 2, outputs, 1);
     float expected = expf(1.0f);
     for (int i = 0; i < {n}; i++) {{
-        float diff = ((float*)outputs[0]->data)[i] - expected;
+        float diff = ((const float*)chelis_tensor_read_view(outputs[0]).data)[i] - expected;
         if (diff < 0) diff = -diff;
         if (diff > 1e-5f) {{ return 1; }}
     }}
-    chelis_free(ta);
-    chelis_free(tb);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(ta);
+    chelis_tensor_release(tb);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -3291,13 +3469,13 @@ int main(void) {{
         let a_init: String = a_data
             .iter()
             .enumerate()
-            .map(|(i, v)| harness_input_fill_line(&format!("ta->data[{i}]"), *v))
+            .map(|(i, v)| harness_input_fill_line(&format!("ta[{i}]"), *v))
             .collect::<Vec<_>>()
             .join("\n    ");
         let b_init: String = b_data
             .iter()
             .enumerate()
-            .map(|(i, v)| harness_input_fill_line(&format!("tb->data[{i}]"), *v))
+            .map(|(i, v)| harness_input_fill_line(&format!("tb[{i}]"), *v))
             .collect::<Vec<_>>()
             .join("\n    ");
 
@@ -3317,11 +3495,11 @@ int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     test_oracle(inputs, 2, outputs, 1);
     for (int i = 0; i < {n}; i++) {{
-        printf("%.8f\n", ((float*)outputs[0]->data)[i]);
+        printf("%.8f\n", ((const float*)chelis_tensor_read_view(outputs[0]).data)[i]);
     }}
-    chelis_free(ta);
-    chelis_free(tb);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(ta);
+    chelis_tensor_release(tb);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -3445,7 +3623,7 @@ int main(void) {{
         let x_init = inputs
             .iter()
             .enumerate()
-            .map(|(i, v)| harness_input_fill_line(&format!("tx->data[{i}]"), *v))
+            .map(|(i, v)| harness_input_fill_line(&format!("tx[{i}]"), *v))
             .collect::<Vec<_>>()
             .join("\n    ");
 
@@ -3463,10 +3641,10 @@ int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     test_single_exp_run(inputs, 1, outputs, 1);
     for (int i = 0; i < {n}; i++) {{
-        printf("%.8f\n", ((float*)outputs[0]->data)[i]);
+        printf("%.8f\n", ((const float*)chelis_tensor_read_view(outputs[0]).data)[i]);
     }}
-    chelis_free(tx);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(tx);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -3861,7 +4039,7 @@ int main(void) {{
     }
 
     /// Compile a DAG whose single root is an f64 tensor, drive it from a C main
-    /// that reinterprets outputs[0]->data as `double*`, and return the printed
+    /// that reads the output view as `double*`, and return the printed
     /// line-separated values with 17 significant digits each.
     fn compile_and_run_f64(dag: &Dag, func_name: &str, expected_size: usize) -> Vec<f64> {
         if !gcc_available() {
@@ -3881,11 +4059,11 @@ void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int 
 int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     {func_name}(NULL, 0, outputs, 1);
-    double *d = (double*)outputs[0]->data;
-    for (int i = 0; i < outputs[0]->size; i++) {{
+    const double *d = (const double*)chelis_tensor_read_view(outputs[0]).data;
+    for (int i = 0; i < chelis_tensor_numel(outputs[0]); i++) {{
         printf("%.17g\n", d[i]);
     }}
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#

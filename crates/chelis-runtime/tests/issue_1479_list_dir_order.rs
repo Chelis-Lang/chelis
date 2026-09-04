@@ -21,7 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chelis_runtime::{
     chelis_list_dir, chelis_list_index, chelis_list_len, chelis_list_release, chelis_string,
-    chelis_string_data, chelis_string_from_cstr, chelis_string_release, chelis_value_as_string,
+    chelis_string_borrow_value, chelis_string_data, chelis_string_from_cstr, chelis_string_release,
 };
 
 /// A self-cleaning probe directory. `chelis-runtime` deliberately carries
@@ -84,7 +84,7 @@ fn list_dir_names(dir: &Path) -> Vec<String> {
         let mut names = Vec::with_capacity(len as usize);
         for index in 0..len {
             let element = chelis_list_index(list, index);
-            let text = chelis_value_as_string(element);
+            let text = chelis_string_borrow_value(element);
             names.push(
                 CStr::from_ptr(chelis_string_data(text))
                     .to_str()

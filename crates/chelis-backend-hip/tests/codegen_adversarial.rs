@@ -2,10 +2,12 @@
 //!
 //! These probe edge cases not covered by S1-S13 structural tests.
 
-use chelis_backend_hip::{HipCodegenResult, codegen_hip};
+use chelis_backend_hip::HipCodegenResult;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{RejectionAuthorityKind, Stage, Unsupported, UnsupportedKind};
+use support::codegen_hip;
 
 fn scalar_f32() -> TensorType {
     TensorType::scalar_f32()
@@ -660,7 +662,8 @@ fn rt12b_copy_bool_carries_the_bool_family_authority() {
 fn rt12b_realize_bool_carries_the_bool_family_authority() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_bool(4), None);
-    let realize = dag.add_node(RiscOp::Realize, vec![x], vec_bool(4), None);
+    let owned = dag.add_node(RiscOp::Copy, vec![x], vec_bool(4), None);
+    let realize = dag.add_node(RiscOp::Realize, vec![owned], vec_bool(4), None);
     dag.add_root(realize);
     let error = expect_hip_codegen_rejection(
         codegen_hip(&dag, "test_realize_bool"),
@@ -691,7 +694,8 @@ fn rt12b_unrelated_bool_numeric_op_retains_generic_authority() {
 fn rt12b_non_bool_materialization_retains_generic_authority() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_i64(4), None);
-    let realize = dag.add_node(RiscOp::Realize, vec![x], vec_i64(4), None);
+    let owned = dag.add_node(RiscOp::Copy, vec![x], vec_i64(4), None);
+    let realize = dag.add_node(RiscOp::Realize, vec![owned], vec_i64(4), None);
     dag.add_root(realize);
     let error = expect_hip_codegen_rejection(
         codegen_hip(&dag, "test_realize_i64"),

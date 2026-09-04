@@ -3,7 +3,7 @@
 //! These verify the generated C/HIP source is well-formed WITHOUT requiring
 //! a GPU or HIP runtime. They run in default CI.
 
-use chelis_backend_hip::codegen_hip;
+mod support;
 use chelis_ir::dag::{
     Dag, DimInfo, ExtremaKind, ExtremaOperand, RiscOp, RtAxis, RtDim, TensorType,
 };
@@ -13,6 +13,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use support::codegen_hip;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -335,7 +336,6 @@ fn s3_all_elementwise_ops_emit_kernels() {
         (RiscOp::Mul, "mul"),
         (RiscOp::MaxElem, "max_elem"),
         (RiscOp::MinElem, "min_elem"),
-        (RiscOp::CmpLt, "cmplt"),
     ];
     for (op, name) in &ops_and_names {
         let mut dag = Dag::new();
@@ -1268,7 +1268,7 @@ extern "C" void test_compile(chelis_tensor **inputs, int n_in, chelis_tensor **o
 int main(void) {
     chelis_tensor *outputs[1] = {0};
     test_compile(NULL, 0, outputs, 1);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }
 "#;

@@ -16,7 +16,8 @@
 //! predicate semantically identical; any change here should be
 //! mirrored in `chelis-backend-c/src/emit.rs` under the same name.
 
-use chelis_ir::dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_ir::dag::{DagNode, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_ir::ownership::VerifiedDagView;
 
 /// Pinned alias-proof spec for an in-place FusedElem.
 ///
@@ -44,7 +45,7 @@ pub(crate) struct FusedInPlaceSpec {
 ///     FusedElem itself); multi-consumer inputs cannot be safely
 ///     aliased because mutating the buffer would corrupt the second
 ///     consumer's read.
-pub(crate) fn fused_in_place_spec(node: &DagNode, dag: &Dag) -> Option<NodeId> {
+pub(crate) fn fused_in_place_spec(node: &DagNode, dag: VerifiedDagView<'_>) -> Option<NodeId> {
     let reusable_input = node.reusable_input?;
     if !matches!(node.op, RiscOp::FusedElem { .. }) {
         return None;

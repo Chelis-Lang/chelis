@@ -505,9 +505,9 @@ fn a_c_header_owns_its_rows_by_declaration_never_by_a_keyword() {
     let rows = c_owners(
         r#"
         #include <stdint.h>
-        typedef struct { float *data; int dtype; int64_t shape[8]; int64_t strides[8]; int rank; int64_t size; } chelis_tensor;
-        extern float *chelis_row(const chelis_tensor *t);
-        static inline void chelis_copy(chelis_tensor *t) {
+        typedef struct { float *data; int dtype; int64_t shape[8]; int64_t strides[8]; int rank; int64_t size; } chelis_probe_tensor;
+        extern float *chelis_row(const chelis_probe_tensor *t);
+        static inline void chelis_copy(chelis_probe_tensor *t) {
             for (int i = 0; i < t->rank; i++) { t->data = (float *)0; }
         }
         "#,
@@ -520,11 +520,11 @@ fn a_c_header_owns_its_rows_by_declaration_never_by_a_keyword() {
         "a keyword or placeholder must never own a row: {owners:?}"
     );
     for expected in [
-        ("descriptor-field", "chelis_tensor::data"),
-        ("raw-element-pointer", "chelis_tensor::data"),
-        ("descriptor-field", "chelis_tensor::rank"),
-        ("narrow-metadata", "chelis_tensor::rank"),
-        ("fixed-rank-metadata", "chelis_tensor::shape"),
+        ("descriptor-field", "chelis_probe_tensor::data"),
+        ("raw-element-pointer", "chelis_probe_tensor::data"),
+        ("descriptor-field", "chelis_probe_tensor::rank"),
+        ("narrow-metadata", "chelis_probe_tensor::rank"),
+        ("fixed-rank-metadata", "chelis_probe_tensor::shape"),
         ("raw-element-pointer", "chelis_row"),
         ("direct-data-access", "chelis_copy"),
         ("raw-element-pointer", "chelis_copy"),
@@ -573,14 +573,17 @@ fn a_called_function_never_becomes_the_owner_of_its_callers_body() {
         #include <string.h>
         #include "chelis_runtime.h"
         #define CHELIS_PROBE_CHECK(call) do { (void)(call); } while (0)
-        static inline void chelis_probe_copy(chelis_tensor *t, const float *src) {
+        typedef struct { float *data; size_t size; } chelis_probe_tensor;
+        static inline void chelis_probe_copy(chelis_probe_tensor *t, const float *src) {
             CHELIS_PROBE_CHECK(memcpy(t->data, src, (size_t)t->size * sizeof(float)));
         }
         "#,
     );
     assert!(!rows.is_empty(), "the body carries seams");
     assert!(
-        rows.iter().all(|(_, owner)| owner == "chelis_probe_copy"),
+        rows.iter().all(|(_, owner)| {
+            owner == "chelis_probe_copy" || owner.starts_with("chelis_probe_tensor::")
+        }),
         "a statement belongs to the function that encloses it, not to what it calls: {rows:?}"
     );
     for kind in [
@@ -837,14 +840,10 @@ fn the_public_header_is_owned_declaration_by_declaration() {
     let owners: std::collections::BTreeSet<&str> =
         rows.iter().map(|row| row.owner.as_str()).collect();
     assert!(!owners.contains("module"), "{owners:?}");
-    for expected in [
-        "chelis_alloc",
-        "chelis_alloc_view",
-        "chelis_tensor::data",
-        "chelis_tensor::rank",
-    ] {
+    for expected in ["chelis_alloc", "chelis_tensor_entry_borrow"] {
         assert!(owners.contains(expected), "{owners:?}");
     }
+    assert!(!owners.contains("chelis_alloc_view"), "{owners:?}");
 }
 
 #[test]

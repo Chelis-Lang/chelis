@@ -28,7 +28,9 @@
 //! case where all three mistakes cancel.
 
 use chelis_runtime::{
-    chelis_alloc, chelis_free, chelis_tensor, chelis_tensor_diagonal, chelis_tensor_trace,
+    chelis_alloc, chelis_tensor, chelis_tensor_begin_write, chelis_tensor_diagonal,
+    chelis_tensor_end_write, chelis_tensor_numel, chelis_tensor_rank, chelis_tensor_read_view,
+    chelis_tensor_release, chelis_tensor_shape, chelis_tensor_trace, chelis_tensor_write_view,
     CHELIS_DTYPE_BOOL, CHELIS_DTYPE_F32, CHELIS_DTYPE_I64,
 };
 use std::env;
@@ -40,28 +42,44 @@ unsafe fn tensor(dtype: u8, shape: &[i64]) -> *mut chelis_tensor {
     chelis_alloc(shape.len() as i32, shape.as_ptr(), dtype)
 }
 
+unsafe fn write_elements<T: Copy>(tensor: *mut chelis_tensor, values: &[T]) {
+    let guard = chelis_tensor_begin_write(tensor);
+    let view = chelis_tensor_write_view(guard);
+    assert_eq!(view.count as usize, values.len());
+    view.data
+        .cast::<T>()
+        .copy_from(values.as_ptr(), values.len());
+    chelis_tensor_end_write(guard);
+}
+
+unsafe fn elements<T: Copy>(tensor: *const chelis_tensor) -> Vec<T> {
+    let view = chelis_tensor_read_view(tensor);
+    if view.count == 0 {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(view.data.cast::<T>(), view.count as usize).to_vec()
+    }
+}
+
 /// `f32` tensor holding `0, 1, 2, ...` in row-major order, so every element
 /// names its own flat index and a misrouted coordinate is legible.
 unsafe fn ramp_f32(shape: &[i64]) -> *mut chelis_tensor {
     let out = tensor(CHELIS_DTYPE_F32, shape);
-    let count = (*out).size as usize;
+    let count = chelis_tensor_numel(out) as usize;
     let values = (0..count).map(|index| index as f32).collect::<Vec<_>>();
-    (*out).data.cast::<f32>().copy_from(values.as_ptr(), count);
+    write_elements(out, &values);
     out
 }
 
 unsafe fn f32_elements(tensor: *const chelis_tensor) -> Vec<f32> {
     // [05-OP-31]: a zero-size tensor has a null `data` pointer, which is not a
     // legal slice base even for a zero-length slice.
-    if (*tensor).size == 0 {
-        return Vec::new();
-    }
-    std::slice::from_raw_parts((*tensor).data.cast::<f32>(), (*tensor).size as usize).to_vec()
+    elements(tensor)
 }
 
 unsafe fn extents(tensor: *const chelis_tensor) -> Vec<i64> {
-    (0..(*tensor).rank as usize)
-        .map(|axis| *(*tensor).shape.as_ptr().add(axis))
+    (0..chelis_tensor_rank(tensor) as usize)
+        .map(|axis| chelis_tensor_shape(tensor, axis as i32))
         .collect()
 }
 
@@ -331,8 +349,8 @@ fn diagonal_maps_every_axis_pair_to_the_declared_source_coordinates() {
                     case.name, case.elements
                 ));
             }
-            chelis_free(out);
-            chelis_free(input);
+            chelis_tensor_release(out);
+            chelis_tensor_release(input);
         }
     }
     assert!(
@@ -365,8 +383,8 @@ fn trace_reduces_the_axis_the_diagonal_was_written_into() {
                     case.name, case.elements
                 ));
             }
-            chelis_free(out);
-            chelis_free(input);
+            chelis_tensor_release(out);
+            chelis_tensor_release(input);
         }
     }
     assert!(
@@ -385,24 +403,23 @@ fn trace_reduces_the_axis_the_diagonal_was_written_into() {
 fn diagonal_preserves_stored_bits_for_bool_and_int64_in_both_axis_orders() {
     unsafe {
         let flags = tensor(CHELIS_DTYPE_BOOL, &[2, 2, 2]);
-        (*flags)
-            .data
-            .copy_from([1_u8, 0, 0, 1, 1, 1, 0, 0].as_ptr(), 8);
+        write_elements(flags, &[1_u8, 0, 0, 1, 1, 1, 0, 0]);
         // out[d][k] = in[d][d][k]: (in[0][0][0], in[0][0][1], in[1][1][0], in[1][1][1]).
         for (axis1, axis2, required) in [(0_i32, 1_i32, [1_u8, 0, 0, 0]), (1, 0, [1, 0, 0, 0])] {
             let out = chelis_tensor_diagonal(flags, axis1, axis2);
-            let observed = std::slice::from_raw_parts((*out).data, 4);
+            let observed = elements::<u8>(out);
             assert_eq!(
-                observed, &required,
+                observed, required,
                 "bool diagonal at axes ({axis1}, {axis2}) lost stored bits"
             );
-            chelis_free(out);
+            chelis_tensor_release(out);
         }
-        chelis_free(flags);
+        chelis_tensor_release(flags);
 
         let wide = tensor(CHELIS_DTYPE_I64, &[2, 2, 2]);
-        (*wide).data.cast::<i64>().copy_from(
-            [
+        write_elements(
+            wide,
+            &[
                 i64::MIN,
                 i64::MAX,
                 -1,
@@ -411,21 +428,19 @@ fn diagonal_preserves_stored_bits_for_bool_and_int64_in_both_axis_orders() {
                 -9_007_199_254_740_993,
                 123,
                 i64::MIN + 1,
-            ]
-            .as_ptr(),
-            8,
+            ],
         );
         // out[j][d] = in[d][j][d] for axes (2, 0):
         // (in[0][0][0], in[1][0][1], in[0][1][0], in[1][1][1]).
         let out = chelis_tensor_diagonal(wide, 2, 0);
-        let observed = std::slice::from_raw_parts((*out).data.cast::<i64>(), 4);
+        let observed = elements::<i64>(out);
         assert_eq!(
             observed,
-            &[i64::MIN, -9_007_199_254_740_993, -1, i64::MIN + 1],
+            [i64::MIN, -9_007_199_254_740_993, -1, i64::MIN + 1],
             "int64 diagonal at axes (2, 0) did not preserve exact stored values"
         );
-        chelis_free(out);
-        chelis_free(wide);
+        chelis_tensor_release(out);
+        chelis_tensor_release(wide);
     }
 }
 
@@ -455,7 +470,7 @@ fn run_invalid_case(case: &str) -> ! {
             }
             "trace-bool-operand" => {
                 let flags = tensor(CHELIS_DTYPE_BOOL, &[2, 2]);
-                (*flags).data.copy_from([1_u8, 0, 0, 1].as_ptr(), 4);
+                write_elements(flags, &[1_u8, 0, 0, 1]);
                 chelis_tensor_trace(flags, 0, 1);
             }
             other => panic!("unknown invalid diagonal case: {other}"),

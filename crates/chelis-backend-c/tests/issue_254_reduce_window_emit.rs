@@ -9,9 +9,10 @@
 //! same Surf programs through the IR evaluator path. The IR evaluator
 //! is the authoritative oracle per `spec/05-risc-primitives.md` §6.
 
-use chelis_backend_c::codegen;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, ReduceWindowKind, RiscOp, TensorType};
 use chelis_types::types::Prim;
+use support::codegen;
 
 fn tensor_4d(shape: [usize; 4]) -> TensorType {
     TensorType {

@@ -9,7 +9,7 @@ use std::ptr;
 
 use chelis_runtime::{
     CHELIS_DTYPE_BOOL, CHELIS_DTYPE_F32, CHELIS_DTYPE_F64, CHELIS_DTYPE_I32, CHELIS_DTYPE_I64,
-    RuntimeDType, TensorElement, chelis_alloc, chelis_dtype, chelis_free, chelis_tensor,
+    RuntimeDType, TensorElement, chelis_alloc, chelis_dtype, chelis_tensor, chelis_tensor_release,
     chelis_tensor_to_scalar,
 };
 
@@ -34,7 +34,7 @@ fn data_ptr_f32_rejects_f64_tensor() {
         let err = res.unwrap_err();
         assert_eq!(err.expected, RuntimeDType::F32);
         assert_eq!(err.actual, RuntimeDType::F64);
-        chelis_free(t);
+        chelis_tensor_release(t);
     }
 }
 
@@ -44,7 +44,7 @@ fn data_ptr_f32_rejects_i64_tensor() {
         let t = alloc_scalar(CHELIS_DTYPE_I64);
         let res = <f32 as TensorElement>::data_ptr(t);
         assert!(res.is_err(), "f32::data_ptr must reject CHELIS_DTYPE_I64");
-        chelis_free(t);
+        chelis_tensor_release(t);
     }
 }
 
@@ -57,7 +57,7 @@ fn data_ptr_f64_rejects_f32_tensor() {
         let err = res.unwrap_err();
         assert_eq!(err.expected, RuntimeDType::F64);
         assert_eq!(err.actual, RuntimeDType::F32);
-        chelis_free(t);
+        chelis_tensor_release(t);
     }
 }
 
@@ -70,7 +70,7 @@ fn data_ptr_i64_rejects_f64_tensor() {
         let err = res.unwrap_err();
         assert_eq!(err.expected, RuntimeDType::I64);
         assert_eq!(err.actual, RuntimeDType::F64);
-        chelis_free(t);
+        chelis_tensor_release(t);
     }
 }
 
@@ -83,7 +83,7 @@ fn data_ptr_i64_rejects_i32_tensor() {
         let err = res.unwrap_err();
         assert_eq!(err.expected, RuntimeDType::I64);
         assert_eq!(err.actual, RuntimeDType::I32);
-        chelis_free(t);
+        chelis_tensor_release(t);
     }
 }
 
@@ -96,7 +96,7 @@ fn data_ptr_i64_rejects_bool_tensor() {
         let err = res.unwrap_err();
         assert_eq!(err.expected, RuntimeDType::I64);
         assert_eq!(err.actual, RuntimeDType::Bool);
-        chelis_free(t);
+        chelis_tensor_release(t);
     }
 }
 
@@ -113,7 +113,7 @@ fn i64_round_trip_at_low_value_byte_exact() {
         let out = chelis_tensor_to_scalar(t);
         assert_eq!(out.dtype, CHELIS_DTYPE_I64);
         assert_eq!(out.bits, u64::from_ne_bytes(raw.to_ne_bytes()));
-        chelis_free(t);
+        chelis_tensor_release(t);
     }
 }
 
@@ -126,7 +126,7 @@ fn i64_above_2pow53_round_trips_without_float_conversion() {
         let out = chelis_tensor_to_scalar(t);
         assert_eq!(out.dtype, CHELIS_DTYPE_I64);
         assert_eq!(out.bits, u64::from_ne_bytes(raw.to_ne_bytes()));
-        chelis_free(t);
+        chelis_tensor_release(t);
     }
 }
 
@@ -139,6 +139,6 @@ fn f64_precision_beyond_f32_round_trips() {
         let out = chelis_tensor_to_scalar(t);
         assert_eq!(out.dtype, CHELIS_DTYPE_F64);
         assert_eq!(out.bits, VALUE.to_bits());
-        chelis_free(t);
+        chelis_tensor_release(t);
     }
 }

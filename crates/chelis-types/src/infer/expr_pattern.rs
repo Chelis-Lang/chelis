@@ -184,7 +184,12 @@ pub(super) fn pattern_bindings(
                 *has_wildcard = true;
             }
             DeepTag::PatLit => {
-                // No bindings, but value should match scrutinee type
+                // A literal pattern binds nothing. [04-PAT-1]'s constraint on
+                // the scrutinee type is its entire contribution, and it is
+                // checked here so every nesting depth reached by this walk --
+                // tuple, record, and constructor sub-patterns included -- gets
+                // one decision at both checker ingresses.
+                check_literal_pattern(pat, kids.first(), scrutinee_ty, subst, adt_reg, errors);
             }
             DeepTag::PatCtor => {
                 if let Some(ctor_name) = kids.first().and_then(|e| symbol_name(e)) {
@@ -474,6 +479,219 @@ pub(super) fn pattern_bindings(
             _ => {}
         }
     }
+}
+
+/// The scalar family a `pat-lit` value atom denotes, for [04-LIT-1]'s closed
+/// atom-to-primitive pairing. A `pat-lit` carries only its raw value, so this
+/// is the only type information a literal pattern has.
+enum LiteralPatternAtom<'a> {
+    Integer(i64),
+    Float(f64),
+    Bool(bool),
+    Str(&'a str),
+}
+
+impl LiteralPatternAtom<'_> {
+    /// The `[04-LIT-1]` family name, for the diagnostic.
+    fn family(&self) -> &'static str {
+        match self {
+            LiteralPatternAtom::Integer(_) => "integer",
+            LiteralPatternAtom::Float(_) => "floating-point",
+            LiteralPatternAtom::Bool(_) => "boolean",
+            LiteralPatternAtom::Str(_) => "string",
+        }
+    }
+
+    /// The canonical spelling of the pattern, for the diagnostic.
+    fn rendered(&self) -> String {
+        match self {
+            LiteralPatternAtom::Integer(value) => value.to_string(),
+            LiteralPatternAtom::Float(value) => {
+                let printed = value.to_string();
+                if printed.contains(['.', 'e', 'E', 'n', 'i']) {
+                    printed
+                } else {
+                    format!("{printed}.0")
+                }
+            }
+            LiteralPatternAtom::Bool(value) => value.to_string(),
+            LiteralPatternAtom::Str(value) => format!("{value:?}"),
+        }
+    }
+
+    /// The primitive families this atom may denote, for the diagnostic.
+    fn admissible_primitives(&self) -> &'static str {
+        match self {
+            LiteralPatternAtom::Integer(_) => "an integer primitive",
+            LiteralPatternAtom::Float(_) => "a float primitive",
+            LiteralPatternAtom::Bool(_) => "`bool`",
+            LiteralPatternAtom::Str(_) => "`string`",
+        }
+    }
+
+    /// The scrutinee type that would admit this pattern, for the repair hint.
+    fn admissible_scrutinee(&self) -> &'static str {
+        match self {
+            LiteralPatternAtom::Integer(_) => "an integer dtype",
+            LiteralPatternAtom::Float(_) => "a float dtype",
+            LiteralPatternAtom::Bool(_) => "the `bool` type",
+            LiteralPatternAtom::Str(_) => "the `string` type",
+        }
+    }
+}
+
+fn literal_pattern_atom(value: Option<&deep::Expr>) -> Option<LiteralPatternAtom<'_>> {
+    match value? {
+        deep::Expr::Atom(deep::Atom::Int(value), _) => Some(LiteralPatternAtom::Integer(*value)),
+        deep::Expr::Atom(deep::Atom::Float(value), _) => Some(LiteralPatternAtom::Float(*value)),
+        deep::Expr::Atom(deep::Atom::Bool(value), _) => Some(LiteralPatternAtom::Bool(*value)),
+        deep::Expr::Atom(deep::Atom::Str(value), _) => {
+            Some(LiteralPatternAtom::Str(value.as_str()))
+        }
+        // A `pat-lit` whose child is not a scalar atom is a Deep
+        // well-formedness question, not a typing one. Deciding a family for it
+        // here would report [04-PAT-1] against a node that has no literal
+        // value at all, so this check declines and leaves the shape to its
+        // owner.
+        _ => None,
+    }
+}
+
+/// chelis#1494 / [04-PAT-1]: a literal pattern is a typing constraint on the
+/// scrutinee, so a pattern whose value atom cannot denote the scrutinee's
+/// primitive is a `TypeMismatch` rather than a silently dead arm.
+///
+/// Three ways to violate it, all located at the pattern:
+///
+/// 1. the scrutinee is not primitive at all (a tensor, nominal, tuple, record,
+///    or function scrutinee admits no literal pattern);
+/// 2. the atom's family disagrees with the scrutinee primitive's family under
+///    [04-LIT-1]'s closed pairing;
+/// 3. an integer pattern lies outside the scrutinee integer width's range,
+///    under the same range rule spec/04 §5.3 and §5.6 apply to a literal bound
+///    at that type. A float primitive has no such range: finalization at a
+///    float width is total under [04-NUM-1].
+///
+/// A literal pattern selects no width, because a `pat-lit` has no precision
+/// slot and admits no suffix (spec/02 §P10a), so an unsuffixed integer pattern
+/// is admissible against every integer primitive. Unifying it with §5.3's
+/// `int32` default instead would reject `match x_int64 with { | 1 => ... }` and
+/// leave no spelling for an `int64` literal pattern.
+fn check_literal_pattern(
+    pat: &deep::Expr,
+    value: Option<&deep::Expr>,
+    scrutinee_ty: &Type,
+    subst: &Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    let resolved = adt_reg.expand_aliases(&subst.apply(scrutinee_ty));
+    // An unresolved scrutinee decides nothing yet, and an already-failed one
+    // owns its own diagnostic: reporting here would either invent a rejection
+    // or cascade off a root cause reported upstream (chelis#731 section C3).
+    if matches!(resolved, Type::Var(_) | Type::Error(_)) {
+        return;
+    }
+    let Some(atom) = literal_pattern_atom(value) else {
+        return;
+    };
+
+    let Type::Prim(prim) = &resolved else {
+        report_literal_pattern_error(
+            pat,
+            errors,
+            format!(
+                "{} literal pattern `{}` cannot match a scrutinee of type `{resolved}`: a \
+                 literal pattern is admissible only against a primitive scrutinee \
+                 (spec/04-type-system.md [04-PAT-1])",
+                atom.family(),
+                atom.rendered(),
+            ),
+            vec![
+                "Destructure the scrutinee with a constructor, record, or tuple pattern, or \
+                 match a primitive field of it, instead of comparing it to a literal"
+                    .to_string(),
+            ],
+        );
+        return;
+    };
+
+    let admissible = match &atom {
+        LiteralPatternAtom::Integer(_) => prim.is_integer(),
+        LiteralPatternAtom::Float(_) => prim.is_float(),
+        LiteralPatternAtom::Bool(_) => *prim == Prim::Bool,
+        LiteralPatternAtom::Str(_) => *prim == Prim::String,
+    };
+    if !admissible {
+        report_literal_pattern_error(
+            pat,
+            errors,
+            format!(
+                // No indefinite article before the dtype: the correct one is
+                // pronunciation-dependent rather than spelling-dependent
+                // ("an f32", "a bf16", "a bool"), so the phrasing avoids the
+                // choice instead of encoding a pronunciation table. It also
+                // matches the non-primitive arm above.
+                "{} literal pattern `{}` cannot match a scrutinee of type `{}`: a literal \
+                 pattern denotes only {} (integer to integer, float to float, boolean to \
+                 `bool`, string to `string`), so this arm could never match \
+                 (spec/04-type-system.md [04-PAT-1], [04-LIT-1])",
+                atom.family(),
+                atom.rendered(),
+                prim.name(),
+                atom.admissible_primitives(),
+            ),
+            vec![format!(
+                "Write a pattern in the scrutinee's own family, or give the scrutinee {}. \
+                 A literal pattern carries no suffix and no cast, so no conversion is \
+                 available here (spec/02-surf-syntax.md section P10a)",
+                atom.admissible_scrutinee(),
+            )],
+        );
+        return;
+    }
+
+    if let LiteralPatternAtom::Integer(literal) = &atom
+        && let Some((low, high)) = prim.integer_range()
+        && (*literal < low || *literal > high)
+    {
+        report_literal_pattern_error(
+            pat,
+            errors,
+            format!(
+                "integer literal pattern `{literal}` is outside the `{}` range \
+                 [{low}, {high}], so this arm could never match \
+                 (spec/04-type-system.md [04-PAT-1], section 5.3)",
+                prim.name(),
+            ),
+            vec![format!(
+                "Use a value the scrutinee's `{}` width can hold, or widen the scrutinee",
+                prim.name(),
+            )],
+        );
+    }
+}
+
+/// Push one [04-PAT-1] rejection, located at the pattern node so downstream
+/// tooling can point at the arm that carries it.
+fn report_literal_pattern_error(
+    pat: &deep::Expr,
+    errors: &mut DiagnosticSink<'_>,
+    message: String,
+    suggestions: Vec<String>,
+) {
+    let mut error = CheckError::new(
+        CheckErrorKind::TypeMismatch,
+        with_macro_provenance(pat, message),
+        suggestions,
+    );
+    if let Some(id) = pat.span_id() {
+        error.span_offset = parse_span_offset(id);
+        error.span_id = Some(id.to_string());
+    } else if pat.span().offset > 0 {
+        error.span_offset = Some(pat.span().offset);
+    }
+    errors.push(error);
 }
 
 #[allow(clippy::too_many_arguments)]

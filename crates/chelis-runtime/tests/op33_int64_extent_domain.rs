@@ -33,10 +33,12 @@
 //! exited zero.
 
 use chelis_runtime::{
-    chelis_alloc, chelis_dims, chelis_list_from_values, chelis_list_index, chelis_list_len,
-    chelis_scalar_from_bits, chelis_string_from_cstr, chelis_tensor, chelis_tensor_concat,
-    chelis_tensor_einsum, chelis_tensor_split, chelis_value_as_tensor, chelis_value_from_scalar,
-    chelis_value_from_tensor, CHELIS_DTYPE_F32, CHELIS_DTYPE_I64,
+    chelis_alloc, chelis_list_from_values, chelis_list_index, chelis_list_len,
+    chelis_scalar_from_bits, chelis_string_from_cstr, chelis_tensor, chelis_tensor_begin_write,
+    chelis_tensor_borrow_value, chelis_tensor_concat, chelis_tensor_einsum,
+    chelis_tensor_end_write, chelis_tensor_entry_borrow, chelis_tensor_numel, chelis_tensor_rank,
+    chelis_tensor_read_view, chelis_tensor_shape, chelis_tensor_split, chelis_tensor_write_view,
+    chelis_value_box_scalar, chelis_value_take_tensor, CHELIS_DTYPE_F32, CHELIS_DTYPE_I64,
 };
 use std::env;
 use std::ffi::CString;
@@ -55,56 +57,53 @@ unsafe fn tensor(shape: &[i64], dtype: u8) -> *mut chelis_tensor {
     chelis_alloc(shape.len() as i32, shape.as_ptr(), dtype)
 }
 
+unsafe fn write_f32(tensor: *mut chelis_tensor, values: &[f32]) {
+    let guard = chelis_tensor_begin_write(tensor);
+    let view = chelis_tensor_write_view(guard);
+    assert_eq!(view.count as usize, values.len());
+    view.data
+        .cast::<f32>()
+        .copy_from(values.as_ptr(), values.len());
+    chelis_tensor_end_write(guard);
+}
+
+unsafe fn read_f32(tensor: *const chelis_tensor) -> Vec<f32> {
+    let view = chelis_tensor_read_view(tensor);
+    std::slice::from_raw_parts(view.data.cast::<f32>(), view.count as usize).to_vec()
+}
+
 /// A structurally valid carrier that *declares* a large extent and the
 /// matching capacity without materializing it.
 ///
-/// `validate_tensor` reads the declared metadata, exactly as it must for a
-/// foreign caller, so this is the shape of tensor a C consumer can hand the
-/// runtime. Every case built this way must trap before any element access, so
+/// The entry-borrow boundary validates the declaration and constructs an
+/// opaque descriptor. Every case built this way must trap before element access, so
 /// the undersized backing buffer is never read; that is the property under
 /// test.
 struct DeclaredCarrier {
-    _shape: Box<[i64]>,
-    _strides: Box<[i64]>,
     _data: Box<[f32]>,
-    tensor: chelis_tensor,
+    tensor: *mut chelis_tensor,
 }
 
-fn declared_carrier(shape: &[i64]) -> DeclaredCarrier {
-    let mut strides = vec![0_i64; shape.len()];
-    let mut running = 1_i64;
-    for axis in (0..shape.len()).rev() {
-        strides[axis] = running;
-        running = running
-            .checked_mul(shape[axis])
-            .expect("fixture stride fits int64");
-    }
+unsafe fn declared_carrier(shape: &[i64]) -> DeclaredCarrier {
     let size = shape
         .iter()
         .copied()
         .try_fold(1_i64, i64::checked_mul)
         .expect("fixture element count fits int64");
     let data = vec![0.0_f32; 8].into_boxed_slice();
-    let shape = shape.to_vec().into_boxed_slice();
-    let strides = strides.into_boxed_slice();
-    let tensor = chelis_tensor {
-        data: if size == 0 {
-            std::ptr::null_mut()
-        } else {
-            data.as_ptr() as *mut u8
-        },
-        shape: chelis_dims(shape.as_ptr()),
-        strides: chelis_dims(strides.as_ptr()),
-        size,
-        byte_capacity: size.checked_mul(4).expect("fixture capacity fits int64"),
-        rank: shape.len() as i32,
-        dtype: CHELIS_DTYPE_F32,
-        owns_data: 0,
-        reserved: [0; 2],
+    let pointer: *const std::ffi::c_void = if size == 0 {
+        std::ptr::null()
+    } else {
+        data.as_ptr().cast()
     };
+    let tensor = chelis_tensor_entry_borrow(
+        shape.len() as i32,
+        shape.as_ptr(),
+        CHELIS_DTYPE_F32,
+        pointer,
+        size.checked_mul(4).expect("fixture capacity fits int64"),
+    );
     DeclaredCarrier {
-        _shape: shape,
-        _strides: strides,
         _data: data,
         tensor,
     }
@@ -124,7 +123,7 @@ unsafe fn int_size_list(sizes: &[i64]) -> *mut chelis_runtime::chelis_list {
     let values = sizes
         .iter()
         .map(|size| {
-            chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_I64, *size as u64))
+            chelis_value_box_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_I64, *size as u64))
         })
         .collect::<Vec<_>>();
     chelis_list_from_values(values.as_ptr(), values.len() as i64)
@@ -157,7 +156,7 @@ fn run_case(case: &str) -> ! {
             "einsum-reduction-buffer-byte-size" => {
                 let lhs = declared_carrier(&[BUFFER_BAND_EXTENT, 1]);
                 let rhs = declared_carrier(&[BUFFER_BAND_EXTENT, 1]);
-                einsum("az,cw->zw", &lhs.tensor, &rhs.tensor);
+                einsum("az,cw->zw", lhs.tensor, rhs.tensor);
             }
             // i64::MAX + 1 through the size list.
             "split-size-sum-at-int64-ceiling" => {
@@ -179,8 +178,8 @@ fn run_case(case: &str) -> ! {
                 let first = tensor(&[i64::MAX, 0], CHELIS_DTYPE_F32);
                 let second = tensor(&[1, 0], CHELIS_DTYPE_F32);
                 let parts = [
-                    chelis_value_from_tensor(first),
-                    chelis_value_from_tensor(second),
+                    chelis_value_take_tensor(first),
+                    chelis_value_take_tensor(second),
                 ];
                 chelis_tensor_concat(
                     chelis_list_from_values(parts.as_ptr(), parts.len() as i64),
@@ -288,37 +287,26 @@ fn derived_products_and_sums_trap_at_the_int64_extent_ceiling() {
 #[test]
 fn zero_extent_acceptance_does_not_depend_on_axis_order() {
     unsafe {
-        for (shape, expected_strides) in [
-            (vec![i64::MAX, 0, i64::MAX], vec![0, i64::MAX, 1]),
-            (vec![i64::MAX, i64::MAX, 0], vec![0, 0, 1]),
-            (vec![BAND_EXTENT, 0, BAND_EXTENT], vec![0, BAND_EXTENT, 1]),
-            (vec![BAND_EXTENT, BAND_EXTENT, 0], vec![0, 0, 1]),
-            (vec![0, 0], vec![0, 1]),
-            (vec![0], vec![1]),
+        for shape in [
+            vec![i64::MAX, 0, i64::MAX],
+            vec![i64::MAX, i64::MAX, 0],
+            vec![BAND_EXTENT, 0, BAND_EXTENT],
+            vec![BAND_EXTENT, BAND_EXTENT, 0],
+            vec![0, 0],
+            vec![0],
         ] {
             let allocated = tensor(&shape, CHELIS_DTYPE_F32);
             assert_eq!(
-                (*allocated).size,
+                chelis_tensor_numel(allocated),
                 0,
                 "shape {shape:?} must hold no elements"
             );
-            assert_eq!(
-                (*allocated).byte_capacity,
-                0,
-                "shape {shape:?} must need no bytes"
-            );
-            assert!(
-                (*allocated).data.is_null(),
-                "shape {shape:?} must carry null data"
-            );
-            assert_eq!(
-                std::slice::from_raw_parts(
-                    (*allocated).strides.as_ptr(),
-                    (*allocated).rank as usize
-                ),
-                expected_strides.as_slice(),
-                "shape {shape:?} must keep canonical strides"
-            );
+            let view = chelis_tensor_read_view(allocated);
+            assert!(view.data.is_null(), "shape {shape:?} must carry null data");
+            assert_eq!(chelis_tensor_rank(allocated), shape.len() as i32);
+            for (axis, extent) in shape.iter().copied().enumerate() {
+                assert_eq!(chelis_tensor_shape(allocated, axis as i32), extent);
+            }
         }
 
         // The same permutation invariance through a derived einsum count. The
@@ -341,7 +329,7 @@ fn zero_extent_acceptance_does_not_depend_on_axis_order() {
                 CHELIS_DTYPE_F32,
             );
             assert_eq!(
-                (*contracted).size,
+                chelis_tensor_numel(contracted),
                 0,
                 "einsum `{equation}` over {equation_shape:?} must produce an empty result"
             );
@@ -355,14 +343,8 @@ fn legal_products_sums_and_zero_extents_still_execute_exactly() {
         // einsum: a legal contraction still produces its exact value.
         let lhs = tensor(&[3], CHELIS_DTYPE_F32);
         let rhs = tensor(&[3], CHELIS_DTYPE_F32);
-        (*lhs)
-            .data
-            .cast::<f32>()
-            .copy_from([1.0_f32, 2.0, 3.0].as_ptr(), 3);
-        (*rhs)
-            .data
-            .cast::<f32>()
-            .copy_from([4.0_f32, 5.0, 6.0].as_ptr(), 3);
+        write_f32(lhs, &[1.0_f32, 2.0, 3.0]);
+        write_f32(rhs, &[4.0_f32, 5.0, 6.0]);
         let text = CString::new("i,i->").expect("equation is C-compatible");
         let contracted = chelis_tensor_einsum(
             chelis_string_from_cstr(text.as_ptr()),
@@ -370,8 +352,8 @@ fn legal_products_sums_and_zero_extents_still_execute_exactly() {
             rhs,
             CHELIS_DTYPE_F32,
         );
-        assert_eq!((*contracted).rank, 0);
-        assert_eq!(*(*contracted).data.cast::<f32>(), 32.0_f32);
+        assert_eq!(chelis_tensor_rank(contracted), 0);
+        assert_eq!(read_f32(contracted), [32.0_f32]);
 
         // einsum: a large but representable extent with a zero-size partner
         // is legal and must not be swept up by the ceiling checks.
@@ -384,48 +366,33 @@ fn legal_products_sums_and_zero_extents_still_execute_exactly() {
             narrow,
             CHELIS_DTYPE_F32,
         );
-        assert_eq!((*empty).size, 0);
+        assert_eq!(chelis_tensor_numel(empty), 0);
 
         // split: nonnegative sizes summing to the extent, including a zero.
         let source = tensor(&[4, 1], CHELIS_DTYPE_F32);
-        (*source)
-            .data
-            .cast::<f32>()
-            .copy_from([10.0_f32, 20.0, 30.0, 40.0].as_ptr(), 4);
+        write_f32(source, &[10.0_f32, 20.0, 30.0, 40.0]);
         let parts = chelis_tensor_split(source, 0, int_size_list(&[0, 3, 1]));
         assert_eq!(chelis_list_len(parts), 3);
-        let first = chelis_value_as_tensor(chelis_list_index(parts, 0));
-        assert_eq!((*first).size, 0);
-        let middle = chelis_value_as_tensor(chelis_list_index(parts, 1));
-        assert_eq!(
-            std::slice::from_raw_parts((*middle).data.cast::<f32>(), 3),
-            &[10.0, 20.0, 30.0]
-        );
-        let last = chelis_value_as_tensor(chelis_list_index(parts, 2));
-        assert_eq!(
-            std::slice::from_raw_parts((*last).data.cast::<f32>(), 1),
-            &[40.0]
-        );
+        let first = chelis_tensor_borrow_value(chelis_list_index(parts, 0));
+        assert_eq!(chelis_tensor_numel(first), 0);
+        let middle = chelis_tensor_borrow_value(chelis_list_index(parts, 1));
+        assert_eq!(read_f32(middle), [10.0, 20.0, 30.0]);
+        let last = chelis_tensor_borrow_value(chelis_list_index(parts, 2));
+        assert_eq!(read_f32(last), [40.0]);
 
         // concat: extents that sum inside int64, including a zero-extent part.
         let empty_part = tensor(&[0, 2], CHELIS_DTYPE_F32);
         let filled_part = tensor(&[2, 2], CHELIS_DTYPE_F32);
-        (*filled_part)
-            .data
-            .cast::<f32>()
-            .copy_from([1.0_f32, 2.0, 3.0, 4.0].as_ptr(), 4);
+        write_f32(filled_part, &[1.0_f32, 2.0, 3.0, 4.0]);
         let values = [
-            chelis_value_from_tensor(empty_part),
-            chelis_value_from_tensor(filled_part),
+            chelis_value_take_tensor(empty_part),
+            chelis_value_take_tensor(filled_part),
         ];
         let joined = chelis_tensor_concat(
             chelis_list_from_values(values.as_ptr(), values.len() as i64),
             0,
         );
-        assert_eq!((*joined).size, 4);
-        assert_eq!(
-            std::slice::from_raw_parts((*joined).data.cast::<f32>(), 4),
-            &[1.0, 2.0, 3.0, 4.0]
-        );
+        assert_eq!(chelis_tensor_numel(joined), 4);
+        assert_eq!(read_f32(joined), [1.0, 2.0, 3.0, 4.0]);
     }
 }

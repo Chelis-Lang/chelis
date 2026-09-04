@@ -953,7 +953,7 @@ jobs:
   # This phase is hardware-independent; the HIP hardware row becomes mandatory
   # in Phase 3.
   compiled-value-ownership-phase0-oracle:
-    name: Compiled Value Ownership Phase 0 Oracle
+    name: Compiled Value Ownership Phase 2 Oracle
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -988,8 +988,11 @@ jobs:
           # suite as the single writer for this namespace.
           save-if: false
 
-      - name: Compiled value ownership Phase 0 oracle
-        run: .venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 0
+      - name: Compiled value ownership Phase 2 oracle
+        run: .venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 2
+
+      - name: Compiled value ownership launch subset
+        run: .venv/bin/python scripts/compiled_value_ownership_oracle.py --phase launch
 
   # chelis#893 Phase 0's authoritative oracle is the `runtime-representation`
   # gate stage. It runs release-profile reproducers whose artifacts are never

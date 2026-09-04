@@ -14,9 +14,10 @@
 //!    the new behavior (panic with a useful message) is in fact a
 //!    panic, not a downgrade.
 
-use chelis_backend_c::emit::CEmitter;
+mod support;
 use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
+use support::emit_dag;
 
 fn mat(r: usize, c: usize, p: Prim) -> TensorType {
     TensorType {
@@ -58,14 +59,14 @@ fn c_backend_admits_f16_tensor_with_uint16_storage_post_ws_1() {
         },
         None,
     );
-    let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+    let src = emit_dag(&dag, "test_fn").unwrap();
     assert!(
         src.contains("CHELIS_DTYPE_F16"),
         "WS-1: C backend must allocate f16 tensors via `CHELIS_DTYPE_F16`; got source:\n{src}"
     );
     assert!(
         src.contains(
-            "chelis_fill_scalar(t0, chelis_scalar_from_bits(CHELIS_DTYPE_F16, UINT16_C(0x3C00)))"
+            "chelis_fill_scalar(t0_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_F16, UINT16_C(0x3C00)))"
         ),
         "C backend must preserve the exact f16 tag and bits through the single public fill API; got source:\n{src}"
     );
@@ -91,14 +92,14 @@ fn c_backend_admits_bf16_tensor_with_uint16_storage_post_ws_1() {
         },
         None,
     );
-    let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+    let src = emit_dag(&dag, "test_fn").unwrap();
     assert!(
         src.contains("CHELIS_DTYPE_BF16"),
         "WS-1: C backend must allocate bf16 tensors via `CHELIS_DTYPE_BF16`; got source:\n{src}"
     );
     assert!(
         src.contains(
-            "chelis_fill_scalar(t0, chelis_scalar_from_bits(CHELIS_DTYPE_BF16, UINT16_C(0x3F80)))"
+            "chelis_fill_scalar(t0_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_BF16, UINT16_C(0x3F80)))"
         ),
         "C backend must preserve the exact bf16 tag and bits through the single public fill API; got source:\n{src}"
     );
@@ -134,7 +135,7 @@ fn ws_a4_c_backend_emits_int8_tensor_via_int8_t_no_silent_downgrade() {
         },
         None,
     );
-    let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+    let src = emit_dag(&dag, "test_fn").unwrap();
     assert!(
         src.contains("int8_t"),
         "WS-A4: C backend must emit i8 tensors via `int8_t` (no silent \
@@ -228,7 +229,7 @@ fn c_backend_blas_matmul_f64_does_not_silently_lower_to_sgemm() {
     let _matmul = dag.add_node(matmul_op, vec![a, b], mat(2, 4, Prim::F64), None);
 
     // Catch the panic if the backend rejects; otherwise inspect the source.
-    let emit_result = std::panic::catch_unwind(|| CEmitter::emit_dag(&dag, "test_fn"));
+    let emit_result = std::panic::catch_unwind(|| emit_dag(&dag, "test_fn"));
     match emit_result {
         Err(_panic) => {
             // Backend rejected via panic — acceptable behavior. Pass.
@@ -288,7 +289,7 @@ fn c_backend_blas_matmul_bf16_routes_through_convert_then_sgemm_post_ws_1() {
     )
     .expect("bf16 matmul default constructs (accumulator=f32 per §5.7.1)");
     let _matmul = dag.add_node(matmul_op, vec![a, b], mat(2, 4, Prim::Bf16), None);
-    let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+    let src = emit_dag(&dag, "test_fn").unwrap();
     assert!(
         src.contains("chelis_bf16_to_f32"),
         "WS-1: bf16 matmul must convert operands to f32 before BLAS dispatch; got:\n{src}"

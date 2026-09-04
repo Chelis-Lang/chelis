@@ -67,24 +67,18 @@ const DLTENSOR_CAPSULE: &[u8] = b"dltensor\0";
 
 create_exception!(chelis, ChelisError, pyo3::exceptions::PyException);
 
-/// Exact mirror of `chelis_runtime.h`'s public `chelis_tensor`.
-///
-/// Shape and stride storage is dynamically ranked and owned separately from
-/// this descriptor. A field-order or width mismatch is silent corruption on
-/// every host-entry call, so the layout is pinned by a Rust-side offset test.
-/// `ChelisGpuTensor` below is a separate, device-only ABI.
+#[repr(C)]
+struct ChelisTensor {
+    _private: [u8; 0],
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct ChelisTensor {
-    data: *mut c_void,
-    shape: *const i64,
-    strides: *const i64,
-    size: i64,
-    byte_capacity: i64,
-    rank: i32,
+struct ChelisReadView {
+    data: *const c_void,
+    count: i64,
     dtype: u8,
-    owns_data: u8,
-    reserved: [u8; 2],
+    reserved: [u8; 7],
 }
 
 #[repr(C)]
@@ -100,7 +94,21 @@ struct ChelisGpuTensor {
 }
 
 type HostEntry = unsafe extern "C" fn(*mut *mut ChelisTensor, c_int, *mut *mut ChelisTensor, c_int);
-type HostFreeFn = unsafe extern "C" fn(*mut ChelisTensor);
+type HostEntryBorrowFn =
+    unsafe extern "C" fn(i32, *const i64, u8, *const c_void, i64) -> *mut ChelisTensor;
+type HostReleaseFn = unsafe extern "C" fn(*const ChelisTensor);
+type HostReadViewFn = unsafe extern "C" fn(*const ChelisTensor) -> ChelisReadView;
+type HostRankFn = unsafe extern "C" fn(*const ChelisTensor) -> i32;
+type HostShapeFn = unsafe extern "C" fn(*const ChelisTensor, i32) -> i64;
+
+#[derive(Clone, Copy)]
+struct HostRuntimeApi {
+    entry_borrow: HostEntryBorrowFn,
+    release: HostReleaseFn,
+    read_view: HostReadViewFn,
+    rank: HostRankFn,
+    shape: HostShapeFn,
+}
 type DeviceEntry =
     unsafe extern "C" fn(*mut *mut ChelisGpuTensor, c_int, *mut *mut ChelisGpuTensor, c_int);
 type HipFreeFn = unsafe extern "C" fn(*mut c_void) -> i32;
@@ -159,7 +167,7 @@ enum TensorOwner {
 
 struct CpuTensorHandle {
     ptr: NonNull<ChelisTensor>,
-    release: HostFreeFn,
+    api: HostRuntimeApi,
     _library: Rc<Library>,
 }
 
@@ -270,9 +278,8 @@ struct DlpackContext {
 
 struct CpuInputTensor {
     _owner: Py<PyAny>,
-    _shape: Box<[i64]>,
-    _strides: Box<[i64]>,
-    tensor: ChelisTensor,
+    ptr: NonNull<ChelisTensor>,
+    release: HostReleaseFn,
 }
 
 struct GpuInputTensor {
@@ -293,10 +300,12 @@ struct NativeTensor {
 
 impl Drop for CpuTensorHandle {
     fn drop(&mut self) {
-        // The artifact runtime allocated the descriptor, data, shape, and
-        // strides and is the sole authority for their ownership contract.
-        // Keep its library live beside the function pointer and delegate the
-        // one final Rc drop to the canonical destructor.
+        unsafe { (self.api.release)(self.ptr.as_ptr()) }
+    }
+}
+
+impl Drop for CpuInputTensor {
+    fn drop(&mut self) {
         unsafe { (self.release)(self.ptr.as_ptr()) }
     }
 }
@@ -429,17 +438,18 @@ impl NativeCompiledModel {
 
 impl NativeCompiledModel {
     fn call_host(&self, py: Python<'_>, values: &[Py<PyAny>]) -> PyResult<PyObject> {
+        let api = unsafe { load_host_runtime_api(&self.loaded.library)? };
         let mut inputs = self
             .loaded
             .manifest
             .inputs
             .iter()
             .zip(values)
-            .map(|(spec, value)| cpu_input_tensor(py, value.bind(py), spec))
+            .map(|(spec, value)| cpu_input_tensor(py, value.bind(py), spec, api))
             .collect::<PyResult<Vec<_>>>()?;
         let input_ptrs = inputs
             .iter_mut()
-            .map(|input| &mut input.tensor as *mut ChelisTensor)
+            .map(|input| input.ptr.as_ptr())
             .collect::<Vec<_>>();
         let output_ptrs = vec![std::ptr::null_mut(); self.loaded.manifest.outputs.len()];
 
@@ -449,12 +459,6 @@ impl NativeCompiledModel {
                 .library
                 .get::<HostEntry>(symbol_name.as_bytes())
                 .map_err(|err| ChelisError::new_err(format!("load symbol failed: {err}")))?
-        };
-        let release = unsafe {
-            self.loaded
-                .library
-                .get::<HostFreeFn>(b"chelis_free\0")
-                .map_err(|err| ChelisError::new_err(format!("load chelis_free failed: {err}")))?
         };
         let execution = HostExecution {
             entry: *entry,
@@ -471,7 +475,7 @@ impl NativeCompiledModel {
             })?;
             owners.push(TensorOwner::Cpu(Rc::new(CpuTensorHandle {
                 ptr,
-                release: *release,
+                api,
                 _library: Rc::clone(&self.loaded.library),
             })));
         }
@@ -540,6 +544,26 @@ impl NativeCompiledModel {
         }
         outputs_to_python(py, &self.loaded.manifest.outputs, owners)
     }
+}
+
+unsafe fn load_host_runtime_api(library: &Library) -> PyResult<HostRuntimeApi> {
+    macro_rules! load {
+        ($ty:ty, $symbol:literal) => {
+            *unsafe { library.get::<$ty>($symbol) }.map_err(|error| {
+                ChelisError::new_err(format!(
+                    "load {} failed: {error}",
+                    String::from_utf8_lossy(&$symbol[..$symbol.len() - 1])
+                ))
+            })?
+        };
+    }
+    Ok(HostRuntimeApi {
+        entry_borrow: load!(HostEntryBorrowFn, b"chelis_tensor_entry_borrow\0"),
+        release: load!(HostReleaseFn, b"chelis_tensor_release\0"),
+        read_view: load!(HostReadViewFn, b"chelis_tensor_read_view\0"),
+        rank: load!(HostRankFn, b"chelis_tensor_rank\0"),
+        shape: load!(HostShapeFn, b"chelis_tensor_shape\0"),
+    })
 }
 
 #[pyfunction(signature = (source, *, source_kind = "surf"))]
@@ -1666,6 +1690,7 @@ fn cpu_input_tensor(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
     spec: &ExecutionTensorSpec,
+    api: HostRuntimeApi,
 ) -> PyResult<CpuInputTensor> {
     let owner = owner_object(value)?;
     if device_kind(&owner)? == DeviceKind::Gpu {
@@ -1714,30 +1739,29 @@ fn cpu_input_tensor(
         .and_then(|bytes| i64::try_from(bytes).ok())
         .ok_or_else(|| PyValueError::new_err("input byte capacity exceeds the host ABI"))?;
     let host_shape = host_dims(&shape)?;
-    let host_strides = host_dims(&strides)?;
-    let tensor = ChelisTensor {
-        data: if size == 0 {
-            std::ptr::null_mut()
-        } else {
-            data_ptr
-        },
-        shape: host_dims_ptr(&host_shape),
-        strides: host_dims_ptr(&host_strides),
-        size: i64::try_from(size)
-            .map_err(|_| PyValueError::new_err("input element count exceeds the host ABI"))?,
-        byte_capacity,
-        rank: i32::try_from(shape.len())
-            .map_err(|_| PyValueError::new_err("input rank exceeds the host ABI"))?,
-        dtype: u8::try_from(runtime_dtype)
-            .map_err(|_| PyValueError::new_err("runtime dtype tag exceeds the host ABI"))?,
-        owns_data: 0,
-        reserved: [0; 2],
+    let data = if size == 0 {
+        std::ptr::null()
+    } else {
+        data_ptr.cast_const()
     };
+    let tensor = unsafe {
+        (api.entry_borrow)(
+            i32::try_from(shape.len())
+                .map_err(|_| PyValueError::new_err("input rank exceeds the host ABI"))?,
+            host_dims_ptr(&host_shape),
+            u8::try_from(runtime_dtype)
+                .map_err(|_| PyValueError::new_err("runtime dtype tag exceeds the host ABI"))?,
+            data,
+            byte_capacity,
+        )
+    };
+    let ptr = NonNull::new(tensor).ok_or_else(|| {
+        PyRuntimeError::new_err("chelis_tensor_entry_borrow returned a NULL descriptor")
+    })?;
     Ok(CpuInputTensor {
         _owner: array.unbind(),
-        _shape: host_shape,
-        _strides: host_strides,
-        tensor,
+        ptr,
+        release: api.release,
     })
 }
 
@@ -1838,9 +1862,8 @@ fn validate_shape(spec: &ExecutionTensorSpec, shape: &[usize]) -> PyResult<()> {
     Ok(())
 }
 
-/// Own the exact-width host dimension vector whose pointer is published in
-/// `ChelisTensor`. Empty boxes are valid for rank zero, and no fixed rank cap
-/// is imposed by the host ABI.
+/// Own the exact-width host dimension vector passed to the entry-borrow call.
+/// Empty boxes are valid for rank zero, and no fixed rank cap is imposed.
 fn host_dims(dims: &[usize]) -> PyResult<Box<[i64]>> {
     dims.iter()
         .map(|dim| {
@@ -1901,8 +1924,8 @@ fn dims_array(dims: &[usize]) -> PyResult<[i32; CHELIS_MAX_DIM]> {
 /// returned it as a successful count; the CPU input path only noticed because
 /// the later `checked_mul(itemsize)` / `i64::try_from(size)` happened to
 /// reject the clamped value, and the GPU path did not notice at all. The count
-/// crosses into `ChelisTensor.size`, which is `int64_t`, so int64 is the
-/// domain the check belongs in.
+/// crosses into the runtime's int64 element-count domain, so int64 is where
+/// the check belongs.
 ///
 /// A zero extent short-circuits to zero so acceptance does not depend on axis
 /// order. Without it a checked fold rejects `[i64::MAX, i64::MAX, 0]` while
@@ -1986,15 +2009,10 @@ impl TensorOwner {
     fn shape(&self) -> Vec<usize> {
         match self {
             Self::Cpu(handle) => unsafe {
-                let tensor = handle.ptr.as_ref();
-                if tensor.rank == 0 {
-                    Vec::new()
-                } else {
-                    std::slice::from_raw_parts(tensor.shape, tensor.rank as usize)
-                        .iter()
-                        .map(|dim| *dim as usize)
-                        .collect()
-                }
+                let rank = (handle.api.rank)(handle.ptr.as_ptr());
+                (0..rank)
+                    .map(|axis| (handle.api.shape)(handle.ptr.as_ptr(), axis) as usize)
+                    .collect()
             },
             Self::Gpu(handle) => unsafe {
                 let tensor = handle.ptr.as_ref();
@@ -2007,17 +2025,7 @@ impl TensorOwner {
 
     fn strides(&self) -> Vec<usize> {
         match self {
-            Self::Cpu(handle) => unsafe {
-                let tensor = handle.ptr.as_ref();
-                if tensor.rank == 0 {
-                    Vec::new()
-                } else {
-                    std::slice::from_raw_parts(tensor.strides, tensor.rank as usize)
-                        .iter()
-                        .map(|stride| *stride as usize)
-                        .collect()
-                }
-            },
+            Self::Cpu(_) => contiguous_strides(&self.shape()),
             Self::Gpu(handle) => unsafe {
                 let tensor = handle.ptr.as_ref();
                 (0..tensor.ndim as usize)
@@ -2029,7 +2037,9 @@ impl TensorOwner {
 
     fn data_ptr(&self) -> *mut c_void {
         match self {
-            Self::Cpu(handle) => unsafe { handle.ptr.as_ref().data },
+            Self::Cpu(handle) => unsafe {
+                (handle.api.read_view)(handle.ptr.as_ptr()).data.cast_mut()
+            },
             Self::Gpu(handle) => unsafe { handle.ptr.as_ref().data.cast() },
         }
     }
@@ -2041,14 +2051,13 @@ impl TensorOwner {
         }
     }
 
-    /// chelis#920: the `CHELIS_*` dtype tag the compiled kernel wrote
-    /// into the output tensor. `ChelisTensor` and `ChelisGpuTensor`
-    /// both already carry it, so this is the authoritative source for
-    /// the Python `dtype` attribute and the DLPack `bits` field —
-    /// nothing new has to be threaded through from the artifact.
+    /// chelis#920: the `CHELIS_*` dtype tag the compiled kernel wrote.
+    /// CPU descriptors expose it only through the read view.
     fn runtime_dtype(&self) -> i32 {
         match self {
-            Self::Cpu(handle) => unsafe { i32::from(handle.ptr.as_ref().dtype) },
+            Self::Cpu(handle) => unsafe {
+                i32::from((handle.api.read_view)(handle.ptr.as_ptr()).dtype)
+            },
             Self::Gpu(handle) => unsafe { handle.ptr.as_ref().dtype },
         }
     }
@@ -2290,7 +2299,7 @@ loss = (mean(x, 0) : tensor[f32])
 
     /// The host ABI's element count is an `int64_t`, so its check belongs in
     /// the int64 extent domain ([05-DIM-2]). These extents assume a 64-bit
-    /// host, which the `ChelisTensor` field-offset assertions below already
+    /// host, which the runtime's published `int64_t` metadata accessors
     /// require.
     #[test]
     fn element_count_reports_shapes_outside_the_int64_extent_domain() {
@@ -2325,19 +2334,24 @@ loss = (mean(x, 0) : tensor[f32])
     }
 
     struct HostTensorFixture {
-        _shape: Box<[i64]>,
-        _strides: Box<[i64]>,
-        tensor: ChelisTensor,
+        ptr: NonNull<ChelisTensor>,
+        release: HostReleaseFn,
+    }
+
+    impl Drop for HostTensorFixture {
+        fn drop(&mut self) {
+            unsafe { (self.release)(self.ptr.as_ptr()) }
+        }
     }
 
     fn host_tensor_fixture<T>(
+        api: HostRuntimeApi,
         data: *mut T,
         shape: &[usize],
         strides: &[usize],
         dtype: i32,
     ) -> HostTensorFixture {
         let host_shape = host_dims(shape).expect("shape fits host ABI");
-        let host_strides = host_dims(strides).expect("strides fit host ABI");
         let size = element_count(shape).expect("element count");
         validate_canonical_host_strides(shape, strides).expect("canonical test tensor strides");
         let element_bytes = match dtype {
@@ -2345,41 +2359,45 @@ loss = (mean(x, 0) : tensor[f32])
             CHELIS_DTYPE_F64 => std::mem::size_of::<f64>(),
             other => panic!("test fixture has no byte width for dtype tag {other}"),
         };
-        let tensor = ChelisTensor {
-            data: if size == 0 {
-                std::ptr::null_mut()
-            } else {
-                data.cast()
-            },
-            shape: host_dims_ptr(&host_shape),
-            strides: host_dims_ptr(&host_strides),
-            size: i64::try_from(size).expect("element count fits host ABI"),
-            byte_capacity: i64::try_from(size * element_bytes)
-                .expect("byte capacity fits host ABI"),
-            rank: i32::try_from(shape.len()).expect("rank fits host ABI"),
-            dtype: u8::try_from(dtype).expect("dtype tag fits host ABI"),
-            owns_data: 0,
-            reserved: [0; 2],
+        let tensor = unsafe {
+            (api.entry_borrow)(
+                i32::try_from(shape.len()).expect("rank fits host ABI"),
+                host_dims_ptr(&host_shape),
+                u8::try_from(dtype).expect("dtype tag fits host ABI"),
+                if size == 0 {
+                    std::ptr::null()
+                } else {
+                    data.cast_const().cast()
+                },
+                i64::try_from(size * element_bytes).expect("byte capacity fits host ABI"),
+            )
         };
         HostTensorFixture {
-            _shape: host_shape,
-            _strides: host_strides,
-            tensor,
+            ptr: NonNull::new(tensor).expect("entry borrow returns a descriptor"),
+            release: api.release,
         }
     }
 
+    unsafe fn host_values<T: Copy>(api: HostRuntimeApi, tensor: *const ChelisTensor) -> Vec<T> {
+        let view = unsafe { (api.read_view)(tensor) };
+        assert!(view.count >= 0, "runtime returned a negative element count");
+        if view.count == 0 {
+            return Vec::new();
+        }
+        assert!(
+            !view.data.is_null(),
+            "nonempty runtime tensor has NULL data"
+        );
+        unsafe { std::slice::from_raw_parts(view.data.cast::<T>(), view.count as usize) }.to_vec()
+    }
+
     #[test]
-    fn host_tensor_mirror_matches_the_exact_dynamic_rank_c_abi() {
-        assert_eq!(std::mem::size_of::<ChelisTensor>(), 48);
-        assert_eq!(std::mem::offset_of!(ChelisTensor, data), 0);
-        assert_eq!(std::mem::offset_of!(ChelisTensor, shape), 8);
-        assert_eq!(std::mem::offset_of!(ChelisTensor, strides), 16);
-        assert_eq!(std::mem::offset_of!(ChelisTensor, size), 24);
-        assert_eq!(std::mem::offset_of!(ChelisTensor, byte_capacity), 32);
-        assert_eq!(std::mem::offset_of!(ChelisTensor, rank), 40);
-        assert_eq!(std::mem::offset_of!(ChelisTensor, dtype), 44);
-        assert_eq!(std::mem::offset_of!(ChelisTensor, owns_data), 45);
-        assert_eq!(std::mem::offset_of!(ChelisTensor, reserved), 46);
+    fn host_tensor_is_opaque_and_read_view_has_the_exact_fixed_layout() {
+        assert_eq!(std::mem::size_of::<ChelisTensor>(), 0);
+        assert_eq!(std::mem::size_of::<ChelisReadView>(), 24);
+        assert_eq!(std::mem::offset_of!(ChelisReadView, data), 0);
+        assert_eq!(std::mem::offset_of!(ChelisReadView, count), 8);
+        assert_eq!(std::mem::offset_of!(ChelisReadView, dtype), 16);
     }
 
     #[test]
@@ -2390,21 +2408,12 @@ loss = (mean(x, 0) : tensor[f32])
     }
 
     #[test]
-    fn host_fixture_uses_exact_rank_zero_empty_and_canonical_stride_contracts() {
-        let mut scalar = [1.0_f32];
-        let scalar_fixture = host_tensor_fixture(scalar.as_mut_ptr(), &[], &[], CHELIS_DTYPE_F32);
-        assert!(scalar_fixture.tensor.shape.is_null());
-        assert!(scalar_fixture.tensor.strides.is_null());
-        assert_eq!(scalar_fixture.tensor.byte_capacity, 4);
-
+    fn host_input_validation_accepts_rank_zero_empty_and_canonical_strides() {
+        assert_eq!(element_count(&[]).expect("rank-zero count"), 1);
+        assert_eq!(element_count(&[0]).expect("empty count"), 0);
         let noncanonical = validate_canonical_host_strides(&[4], &[2])
             .expect_err("a noncontiguous public host carrier must be rejected");
         assert!(noncanonical.to_string().contains("contiguous row-major"));
-
-        let mut ignored = [0.0_f32];
-        let empty = host_tensor_fixture(ignored.as_mut_ptr(), &[0], &[1], CHELIS_DTYPE_F32);
-        assert!(empty.tensor.data.is_null());
-        assert_eq!(empty.tensor.byte_capacity, 0);
     }
 
     #[test]
@@ -2444,17 +2453,13 @@ loss = (mean(x, 0) : tensor[f32])
                     .get::<HostEntry>(symbol.as_bytes())
                     .expect("resolve rank-copy entry")
             };
-            let release = unsafe {
-                library
-                    .get::<HostFreeFn>(b"chelis_free\0")
-                    .expect("resolve canonical runtime destructor")
-            };
+            let api = unsafe { load_host_runtime_api(&library).expect("resolve host runtime API") };
 
             let mut data = [7.25_f32];
             let strides = contiguous_strides(shape);
-            let mut input =
-                host_tensor_fixture(data.as_mut_ptr(), shape, &strides, CHELIS_DTYPE_F32);
-            let mut input_ptrs = vec![&mut input.tensor as *mut ChelisTensor];
+            let input =
+                host_tensor_fixture(api, data.as_mut_ptr(), shape, &strides, CHELIS_DTYPE_F32);
+            let mut input_ptrs = vec![input.ptr.as_ptr()];
             let mut output_ptrs = vec![std::ptr::null_mut()];
             unsafe {
                 (*entry)(
@@ -2467,28 +2472,18 @@ loss = (mean(x, 0) : tensor[f32])
             let output = NonNull::new(output_ptrs[0]).expect("rank-copy output");
             let owner = TensorOwner::Cpu(Rc::new(CpuTensorHandle {
                 ptr: output,
-                release: *release,
+                api,
                 _library: Rc::clone(&library),
             }));
-            let tensor = unsafe { output.as_ref() };
-            assert_eq!(tensor.rank, shape.len() as i32);
-            assert_eq!(tensor.size, 1);
             let expected_shape = shape.iter().map(|dim| *dim as i64).collect::<Vec<_>>();
-            if expected_shape.is_empty() {
-                assert!(tensor.shape.is_null());
-                assert!(tensor.strides.is_null());
-            } else {
-                assert!(!tensor.shape.is_null());
-                assert!(!tensor.strides.is_null());
-                let output_shape = unsafe {
-                    std::slice::from_raw_parts(tensor.shape, usize::try_from(tensor.rank).unwrap())
-                };
-                assert_eq!(output_shape, expected_shape);
-            }
+            assert_eq!(unsafe { (api.rank)(output.as_ptr()) }, shape.len() as i32);
+            let output_shape = (0..shape.len())
+                .map(|axis| unsafe { (api.shape)(output.as_ptr(), axis as i32) })
+                .collect::<Vec<_>>();
+            assert_eq!(output_shape, expected_shape);
             assert_eq!(owner.shape(), shape);
             assert_eq!(owner.strides(), contiguous_strides(shape));
-            let output_value = unsafe { *tensor.data.cast::<f32>() };
-            assert_eq!(output_value, 7.25);
+            assert_eq!(unsafe { host_values::<f32>(api, output.as_ptr()) }, [7.25]);
 
             // The runtime output is shared by every exported Python/DLPack
             // view. Dropping a non-final Rc must retain it; the final drop
@@ -2503,14 +2498,7 @@ loss = (mean(x, 0) : tensor[f32])
             // the output-owner destructor path. They must remain live after
             // the owned output (including its metadata) has been released.
             assert_eq!(data[0], 7.25);
-            assert_eq!(&*input._shape, &expected_shape);
-            assert_eq!(
-                input._strides.to_vec(),
-                contiguous_strides(shape)
-                    .into_iter()
-                    .map(|stride| stride as i64)
-                    .collect::<Vec<_>>()
-            );
+            drop(input);
             drop(library);
         }
     }
@@ -2730,11 +2718,11 @@ loss = (mean(x, 0) : tensor[f32])
                     .get::<HostEntry>(symbol_name.as_bytes())
                     .expect("resolve host entry")
             };
+            let api = unsafe { load_host_runtime_api(&library).expect("resolve host runtime API") };
 
             let mut data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
-            let mut input = host_tensor_fixture(data.as_mut_ptr(), &[4], &[1], CHELIS_DTYPE_F32);
-            let mut input_ptrs: Vec<*mut ChelisTensor> =
-                vec![&mut input.tensor as *mut ChelisTensor];
+            let input = host_tensor_fixture(api, data.as_mut_ptr(), &[4], &[1], CHELIS_DTYPE_F32);
+            let mut input_ptrs: Vec<*mut ChelisTensor> = vec![input.ptr.as_ptr()];
             let mut output_ptrs: Vec<*mut ChelisTensor> = vec![std::ptr::null_mut()];
             unsafe {
                 (*entry)(
@@ -2746,7 +2734,9 @@ loss = (mean(x, 0) : tensor[f32])
             }
             let out = output_ptrs[0];
             assert!(!out.is_null(), "compiled execution returned a NULL output");
-            let value = unsafe { *(*out).data.cast::<f32>() };
+            let value = unsafe { host_values::<f32>(api, out)[0] };
+            unsafe { (api.release)(out) };
+            drop(input);
             // The unload under test. Everything below this line only runs
             // if it did not take the process down with it.
             drop(library);
@@ -2831,6 +2821,7 @@ loss = (mean(x, 0) : tensor[f32])
                 .get::<HostEntry>(symbol_name.as_bytes())
                 .expect("resolve host entry")
         };
+        let api = unsafe { load_host_runtime_api(&library).expect("resolve host runtime API") };
 
         let mut data = input.to_vec();
         // chelis#933: the input buffer belongs to the caller. Snapshot
@@ -2838,9 +2829,14 @@ loss = (mean(x, 0) : tensor[f32])
         // as read-only; `f64_fused_chain_does_not_mutate_the_input`
         // states the invariant under its own name.
         let input_before = data.clone();
-        let mut tensor =
-            host_tensor_fixture(data.as_mut_ptr(), &[input.len()], &[1], CHELIS_DTYPE_F64);
-        let mut input_ptrs: Vec<*mut ChelisTensor> = vec![&mut tensor.tensor as *mut ChelisTensor];
+        let tensor = host_tensor_fixture(
+            api,
+            data.as_mut_ptr(),
+            &[input.len()],
+            &[1],
+            CHELIS_DTYPE_F64,
+        );
+        let mut input_ptrs: Vec<*mut ChelisTensor> = vec![tensor.ptr.as_ptr()];
         let mut output_ptrs: Vec<*mut ChelisTensor> = vec![std::ptr::null_mut()];
         unsafe {
             (*entry)(
@@ -2853,11 +2849,9 @@ loss = (mean(x, 0) : tensor[f32])
 
         let out = output_ptrs[0];
         assert!(!out.is_null(), "compiled execution returned a NULL output");
-        let (out_dtype, values) = unsafe {
-            let t = &*out;
-            let values = std::slice::from_raw_parts(t.data.cast::<f64>(), t.size as usize).to_vec();
-            (i32::from(t.dtype), values)
-        };
+        let view = unsafe { (api.read_view)(out) };
+        let out_dtype = i32::from(view.dtype);
+        let values = unsafe { host_values::<f64>(api, out) };
         // chelis#933: a compiled kernel may read its inputs but must
         // never write to them. Checked for every f64 case, not just the
         // dedicated test, because the in-place fusion that caused this
@@ -2868,6 +2862,8 @@ loss = (mean(x, 0) : tensor[f32])
             "compiled execution mutated its input buffer (chelis#933): the buffer \
              belongs to the caller and must be treated as read-only"
         );
+        unsafe { (api.release)(out) };
+        drop(tensor);
         drop(library);
         (out_dtype, values)
     }
@@ -3058,10 +3054,11 @@ loss = (mean(x, 0) : tensor[f32])
                 .get::<HostEntry>(symbol_name.as_bytes())
                 .expect("resolve host entry")
         };
+        let api = unsafe { load_host_runtime_api(&library).expect("resolve host runtime API") };
 
         let mut data: Vec<f32> = vec![1.0];
-        let mut tensor = host_tensor_fixture(data.as_mut_ptr(), &[1], &[1], CHELIS_DTYPE_F32);
-        let mut input_ptrs: Vec<*mut ChelisTensor> = vec![&mut tensor.tensor as *mut ChelisTensor];
+        let tensor = host_tensor_fixture(api, data.as_mut_ptr(), &[1], &[1], CHELIS_DTYPE_F32);
+        let mut input_ptrs: Vec<*mut ChelisTensor> = vec![tensor.ptr.as_ptr()];
         let mut output_ptrs: Vec<*mut ChelisTensor> = vec![std::ptr::null_mut()];
         unsafe {
             (*entry)(
@@ -3073,10 +3070,11 @@ loss = (mean(x, 0) : tensor[f32])
         }
         let out = output_ptrs[0];
         assert!(!out.is_null(), "compiled execution returned a NULL output");
-        let (out_dtype, value) = unsafe {
-            let t = &*out;
-            (i32::from(t.dtype), *t.data.cast::<f32>())
-        };
+        let view = unsafe { (api.read_view)(out) };
+        let out_dtype = i32::from(view.dtype);
+        let value = unsafe { host_values::<f32>(api, out)[0] };
+        unsafe { (api.release)(out) };
+        drop(tensor);
         drop(library);
 
         assert_eq!(
@@ -3314,6 +3312,7 @@ def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
                 .get::<HostEntry>(symbol.as_bytes())
                 .expect("host entry symbol resolves via dlsym")
         };
+        let api = unsafe { load_host_runtime_api(&library).expect("resolve host runtime API") };
 
         // Keep input buffers alive across the call.
         let mut buffers: Vec<Vec<f32>> = inputs.iter().map(|(data, _)| data.clone()).collect();
@@ -3321,6 +3320,7 @@ def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
         for (index, (_, shape)) in inputs.iter().enumerate() {
             let strides = contiguous_strides(shape);
             input_tensors.push(host_tensor_fixture(
+                api,
                 buffers[index].as_mut_ptr(),
                 shape,
                 &strides,
@@ -3328,8 +3328,8 @@ def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
             ));
         }
         let mut input_ptrs: Vec<*mut ChelisTensor> = input_tensors
-            .iter_mut()
-            .map(|input| &mut input.tensor as *mut _)
+            .iter()
+            .map(|input| input.ptr.as_ptr())
             .collect();
         let mut output_ptrs: Vec<*mut ChelisTensor> =
             vec![std::ptr::null_mut(); manifest.outputs.len()];
@@ -3343,13 +3343,11 @@ def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
         }
         let results = output_ptrs
             .iter()
-            .map(|&ptr| {
+            .map(|&ptr| unsafe {
                 assert!(!ptr.is_null(), "compiled execution returned a NULL output");
-                let tensor = unsafe { &*ptr };
-                let slice = unsafe {
-                    std::slice::from_raw_parts(tensor.data.cast::<f32>(), tensor.size as usize)
-                };
-                slice.to_vec()
+                let values = host_values::<f32>(api, ptr);
+                (api.release)(ptr);
+                values
             })
             .collect::<Vec<_>>();
         drop(input_tensors);
@@ -3429,8 +3427,8 @@ def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
     // Fix 2: a def named `free`, selected via `entry_name` in a multi-def
     // program (so it goes through the entry-scoped metadata lane), must produce
     // a linkable artifact. Emitting `void free(...)` would clash with libc, and
-    // even `void chelis_free(...)` would clash with the runtime's own
-    // `chelis_free` (declared in `chelis_runtime.h`) — so the entry lane emits
+    // even a runtime-named destructor would clash with the runtime's own
+    // declarations in `chelis_runtime.h` — so the entry lane emits
     // the fixed, collision-free symbol `chelis_main`. This is an end-to-end
     // compile: `run_compile_and_load_job` invokes cc to build the shared
     // library, so a successful load + a callable manifest proves the
@@ -4006,10 +4004,11 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
                 .get::<HostEntry>(symbol.as_bytes())
                 .expect("host entry symbol resolves")
         };
+        let api = unsafe { load_host_runtime_api(&library).expect("resolve host runtime API") };
         let mut buffer: Vec<f32> = vec![3.0, 4.0];
         let strides = contiguous_strides(&[2]);
-        let mut input = host_tensor_fixture(buffer.as_mut_ptr(), &[2], &strides, CHELIS_DTYPE_F32);
-        let mut input_ptrs: Vec<*mut ChelisTensor> = vec![&mut input.tensor as *mut _];
+        let input = host_tensor_fixture(api, buffer.as_mut_ptr(), &[2], &strides, CHELIS_DTYPE_F32);
+        let mut input_ptrs: Vec<*mut ChelisTensor> = vec![input.ptr.as_ptr()];
         let mut output_ptrs: Vec<*mut ChelisTensor> = vec![std::ptr::null_mut(); 1];
         unsafe {
             (*entry_fn)(
@@ -4020,10 +4019,10 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
             );
         }
         assert!(!output_ptrs[0].is_null(), "NULL output");
-        let out = unsafe { &*output_ptrs[0] };
-        let slice =
-            unsafe { std::slice::from_raw_parts(out.data.cast::<f32>(), out.size as usize) };
+        let slice = unsafe { host_values::<f32>(api, output_ptrs[0]) };
         assert_eq!(slice, &[6.0, 8.0], "main([3,4]) == 2*[3,4]");
+        unsafe { (api.release)(output_ptrs[0]) };
+        drop(input);
         drop(buffer);
         drop(library);
     }

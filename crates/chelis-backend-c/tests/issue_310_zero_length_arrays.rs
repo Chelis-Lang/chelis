@@ -16,7 +16,7 @@
 //! `host_span_comments.rs`. The non-empty cases provide negative parity: the
 //! `[N]` array form must still be emitted when there *are* elements.
 
-use chelis_backend_c::host_emit::emit_host_program;
+mod support;
 use chelis_ir::ConcreteHostType as HostType;
 use chelis_ir::host::{
     ConcreteHostExpr as HostExpr, ConcreteHostExprKind as HostExprKind,
@@ -25,6 +25,7 @@ use chelis_ir::host::{
 };
 use std::path::PathBuf;
 use std::process::Command;
+use support::emit_host_program;
 
 mod common;
 
@@ -81,8 +82,17 @@ fn issue_310_nullary_adt_variant_emits_no_zero_length_array() {
     );
     // The construct call must pass a NULL field pointer with count 0.
     assert!(
-        src.contains("chelis_adt_construct(chelis_string_from_cstr(\"Nothing\"), NULL, 0)"),
+        src.contains("chelis_string_from_cstr(\"Nothing\")"),
+        "{src}"
+    );
+    assert!(
+        src.lines()
+            .any(|line| line.contains("chelis_adt_construct(") && line.contains(", NULL, 0)")),
         "nullary ADT construct must pass NULL fields with count 0:\n{src}"
+    );
+    assert!(
+        src.contains("chelis_string_release("),
+        "constructor-name owner must be released after the cloning ADT constructor:\n{src}"
     );
 }
 
@@ -105,13 +115,12 @@ fn issue_310_adt_variant_with_fields_still_emits_array() {
         src.contains("[1];"),
         "single-field ADT variant must still declare a `[1];` array:\n{src}"
     );
-    assert!(
-        src.contains("chelis_adt_construct(chelis_string_from_cstr(\"Just\"),"),
-        "expected chelis_adt_construct for Just:\n{src}"
-    );
+    assert!(src.contains("chelis_string_from_cstr(\"Just\")"), "{src}");
+    assert!(src.contains("chelis_adt_construct("), "{src}");
     // Must NOT degrade to NULL/0 when fields are present.
     assert!(
-        !src.contains("chelis_string_from_cstr(\"Just\"), NULL, 0"),
+        !src.lines()
+            .any(|line| line.contains("chelis_adt_construct(") && line.contains(", NULL, 0)")),
         "field-carrying ADT variant must not pass NULL/0:\n{src}"
     );
 }

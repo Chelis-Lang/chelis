@@ -179,7 +179,15 @@ fn c_render_result(prim: Prim) -> &'static str {
 /// dtype, then the exact tagged runtime carrier owns dtype-correct extraction
 /// and canonical rendering instead of an ad-hoc decimal `printf`.
 fn compile_and_run(dag: &Dag, func_name: &str) -> String {
-    let result = chelis_backend_c::codegen(dag, func_name).unwrap();
+    let selected = chelis_backend_c::prepare_dag_for_codegen(
+        dag.clone(),
+        chelis_backend_c::CodegenOptions::default(),
+    );
+    let verified = chelis_ir::ownership::verify_ownership(
+        chelis_ir::ownership::lower_dag_ownership(selected).unwrap(),
+    )
+    .unwrap();
+    let result = chelis_backend_c::codegen(&verified, func_name).unwrap();
 
     let tmp = tempfile::tempdir().unwrap();
     let rt_dir = runtime_src_dir();
@@ -216,7 +224,7 @@ int main(void) {{
     {func_name}(NULL, 0, outputs, 1);
     {render_result}
     printf("\n");
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#

@@ -136,12 +136,27 @@ pub struct Env {
     /// Recorded when a `defsig` is resolved, where the names are still in
     /// scope, and consumed after instantiation so a declared-dim diagnostic
     /// can say `n` and `m` rather than `d44` and `d45`. The `DimVar` keys are
-    /// PRE-generalization; `instantiate_with_dvar_mapping` supplies the
+    /// PRE-generalization; `instantiate_scheme` supplies the
     /// original-to-fresh hop that makes them comparable to what a check on an
     /// instantiated signature actually sees. Checker state only, never
     /// serialized.
     #[serde(skip)]
     declared_dim_names: UnordMap<String, UnordMap<DimVar, String>>,
+    /// chelis#260 Site 2: the same provenance for TYPE parameters. Kept
+    /// separate from `declared_dim_names` because the two are consumed by
+    /// different diagnostics and a signature may declare either alone.
+    #[serde(skip)]
+    declared_type_names: UnordMap<String, UnordMap<TypeVar, String>>,
+    /// The composed `fresh TypeVar -> source name` map for the definition
+    /// currently being inferred.
+    ///
+    /// The borrow diagnostic that needs it (`validate_deferred_borrow_vars`)
+    /// runs at the per-def drain, after body inference, and never sees the
+    /// instantiation that minted the fresh variables. Composing at the
+    /// instantiation site and parking the result here is what carries a
+    /// source name across that gap.
+    #[serde(skip)]
+    active_declared_type_names: UnordMap<TypeVar, String>,
     /// chelis#397/#469: provenance of `let`-bound `int`-valued names, so a
     /// runtime `expand` size built from a `let` binding can be checked for
     /// materializability. Cloned at every lexical scope boundary along with
@@ -453,8 +468,8 @@ impl Env {
     /// Resolve a definition's declared dim-parameter names against the fresh
     /// variables a given instantiation minted (chelis#260).
     ///
-    /// `dvar_mapping` is the original-to-fresh pairing from
-    /// [`Self::instantiate_with_dvar_mapping`]. The result is keyed by the
+    /// `dvar_mapping` is the original-to-fresh pairing returned by
+    /// [`Self::instantiate_scheme`]. The result is keyed by the
     /// FRESH variables, which is what a post-instantiation check reports on.
     /// An empty map means the names were never recorded; callers fall back to
     /// the internal id rather than inventing a name.
@@ -470,6 +485,56 @@ impl Env {
             .iter()
             .filter_map(|(from, to)| original.get(from).map(|n| (*to, n.clone())))
             .collect()
+    }
+
+    /// chelis#260 Site 2: record the source names of a signature's declared
+    /// TYPE parameters, the analogue of [`Self::record_declared_dim_names`].
+    pub(crate) fn record_declared_type_names(
+        &mut self,
+        name: &str,
+        names: UnordMap<TypeVar, String>,
+    ) {
+        if !names.is_empty() {
+            self.declared_type_names.insert(name.to_string(), names);
+        }
+    }
+
+    /// Resolve a definition's declared type-parameter names against the fresh
+    /// variables a given instantiation minted (chelis#260 Site 2).
+    ///
+    /// `tvar_mapping` is the original-to-fresh pairing from
+    /// [`Self::instantiate_scheme`]. It maps to a `Type` rather than a
+    /// `TypeVar`, so a quantifier instantiated to anything but a bare
+    /// variable simply has no fresh variable to name and is skipped: a
+    /// concrete type renders itself and needs no provenance.
+    pub(crate) fn declared_type_names_for(
+        &self,
+        name: &str,
+        tvar_mapping: &[(TypeVar, Type)],
+    ) -> UnordMap<TypeVar, String> {
+        let Some(original) = self.declared_type_names.get(name) else {
+            return UnordMap::new();
+        };
+        tvar_mapping
+            .iter()
+            .filter_map(|(from, to)| match to {
+                Type::Var(fresh) => original.get(from).map(|n| (*fresh, n.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Park the composed map for the definition now being inferred, so the
+    /// per-def deferred-borrow drain can name what it reports on.
+    pub(crate) fn set_active_declared_type_names(&mut self, names: UnordMap<TypeVar, String>) {
+        self.active_declared_type_names = names;
+    }
+
+    /// The parked map. Empty when the definition declared no type parameters
+    /// or none was recorded; callers fall back to the internal id rather than
+    /// inventing a name (spec/04 [04-FIT-10]).
+    pub(crate) fn active_declared_type_names(&self) -> &UnordMap<TypeVar, String> {
+        &self.active_declared_type_names
     }
 
     /// Instantiate a scheme into the caller's inference substitution so
@@ -498,22 +563,6 @@ impl Env {
         (ty, tvar_mapping)
     }
 
-    /// Instantiate a scheme and return the fresh dimension variable minted for
-    /// each quantified dim variable, in quantifier order (chelis#260).
-    ///
-    /// The dim analogue of [`Self::instantiate_with_tvar_mapping`]. Declared
-    /// dim diagnostics run against the instantiated signature, so they need
-    /// this hop to get back to the names the source wrote.
-    pub(crate) fn instantiate_with_dvar_mapping(
-        &self,
-        scheme: &Scheme,
-        var_gen: &mut VarGen,
-        inference_subst: &Subst,
-    ) -> (Type, Vec<(DimVar, DimVar)>) {
-        let (ty, _, dvar_mapping) = self.instantiate_scheme(scheme, var_gen, inference_subst);
-        (ty, dvar_mapping)
-    }
-
     /// The one instantiation mechanism (chelis#260 / chelis#1292).
     ///
     /// Every quantifier is renamed here and nowhere else, so the two jobs the
@@ -529,8 +578,8 @@ impl Env {
     /// rejected type-checking.
     ///
     /// Callable directly by a site that needs more than one of the renamings
-    /// at once, which is why it is crate-visible rather than a fourth
-    /// projection beside the three above.
+    /// at once, which is why it is crate-visible rather than a further
+    /// projection beside the ones above.
     pub(crate) fn instantiate_scheme(
         &self,
         scheme: &Scheme,
@@ -1005,10 +1054,11 @@ mod tests {
         }
     }
 
-    /// chelis#260: `instantiate_with_dvar_mapping` replaced a plain
-    /// `instantiate` call at the annotated-def site. It must therefore mint
-    /// the SAME variables in the SAME order, or the substitution the checker
-    /// runs on would change and this diagnostic-only fix would perturb
+    /// chelis#260: `instantiate_scheme` replaced a plain `instantiate` call
+    /// at the annotated-def site — first for the dim mapping (Site 1) and
+    /// then for the type mapping too (Site 2). It must therefore mint the
+    /// SAME variables in the SAME order, or the substitution the checker runs
+    /// on would change and these diagnostic-only fixes would perturb
     /// inference. Locking the equivalence rather than assuming it.
     ///
     /// The scheme carries a chelis#1292 restriction, so this also pins that
@@ -1025,8 +1075,8 @@ mod tests {
 
         let mapped_subst = Subst::new();
         let mut mapped_gen = VarGen::default();
-        let (mapped, mapping) =
-            env.instantiate_with_dvar_mapping(&scheme, &mut mapped_gen, &mapped_subst);
+        let (mapped, _tvar_mapping, mapping) =
+            env.instantiate_scheme(&scheme, &mut mapped_gen, &mapped_subst);
 
         assert_eq!(
             plain, mapped,
@@ -1084,8 +1134,8 @@ mod tests {
         let via_tvar_mapping = restrictions_after(&|subst, var_gen| {
             env.instantiate_with_tvar_mapping(&scheme, var_gen, subst);
         });
-        let via_dvar_mapping = restrictions_after(&|subst, var_gen| {
-            env.instantiate_with_dvar_mapping(&scheme, var_gen, subst);
+        let via_instantiate_scheme = restrictions_after(&|subst, var_gen| {
+            env.instantiate_scheme(&scheme, var_gen, subst);
         });
 
         assert_eq!(
@@ -1103,8 +1153,8 @@ mod tests {
             "the tvar-mapping route must install the same restrictions as the plain route"
         );
         assert_eq!(
-            via_instantiate, via_dvar_mapping,
-            "the dvar-mapping route must install the same restrictions as the plain route"
+            via_instantiate, via_instantiate_scheme,
+            "the instantiate_scheme route must install the same restrictions as the plain route"
         );
     }
 

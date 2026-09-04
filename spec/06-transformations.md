@@ -421,7 +421,8 @@ For each node in the original DAG, the vmap transformation adds the batch dimens
 | `ReduceSum(x, axis=d)` | `ReduceSum(x', axis=d)` -- reduce original axis, not batch |
 | `ReduceMax(x, axis=d)` | `ReduceMax(x', axis=d)` -- same |
 | `Reshape(x, D2)` | `Reshape(x', {batch} + D2)` -- preserve batch dim |
-| `Expand(x, dim, size)` | `Expand(x', dim, size)` -- expand within each batch element |
+| `Expand(x, dim, size)` | `Expand(x', dim, size)` -- broadcast within each batch element |
+| `Insert(x, dim, size)` | `Insert(x', dim, size)` -- insert within each batch element |
 | `Const(v, D, P)` | Batch-typed `Const(v, {batch} + D, P)` -- broadcast constant |
 | `Load(buf)` | Load with batch dimension added to buffer type |
 
@@ -481,8 +482,8 @@ These two are distinct concepts:
 
 ### 3.7 Runtime Extents
 
-A rank-0 extent value that feeds a movement bound, an `expand` size, or a
-`reshape` target (a `shape()` read, an integer parameter, a cast, checked
+A rank-0 extent value that feeds a movement bound, an `expand` or `insert`
+size, or a `reshape` target (a `shape()` read, an integer parameter, a cast, checked
 integer arithmetic, or a user-function result over these) is not batched. It
 is a non-tensor argument in the sense of §3.6: one value is shared by every
 batch element, it is evaluated exactly once, and its traps and effects occur
@@ -921,9 +922,9 @@ tuple, or List containing a float scalar or tensor leaf does not.
 
 ### 8.6 `batch_varying_extent` (vmap)
 
-**Trigger:** `vmap(f)` where a movement bound, `expand` size, or `reshape` target inside `f` depends on the elements of a vmapped tensor argument, so its value could differ between batch elements.
+**Trigger:** `vmap(f)` where a movement bound, `expand` or `insert` size, or `reshape` target inside `f` depends on the elements of a vmapped tensor argument, so its value could differ between batch elements.
 
-**Message:** `"vmap cannot vectorize an extent that depends on batched tensor elements: the expand size at <site> reads elements of vmapped argument 'x'. Compute the extent from shape() or a scalar argument, or apply the movement outside vmap."`
+**Message:** `"vmap cannot vectorize an extent that depends on batched tensor elements: the insert size at <site> reads elements of vmapped argument 'x'. Compute the extent from shape() or a scalar argument, or apply the movement outside vmap."`
 
 **Repair:** Suggest deriving the extent from `shape()` or a scalar parameter, or moving the data-dependent movement outside `vmap`.
 

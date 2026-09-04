@@ -9,13 +9,14 @@
 //! grep alone is insufficient because malformed comment emission could pass
 //! the grep but break the C source.
 
-use chelis_backend_c::codegen;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+use support::codegen;
 
 mod common;
 

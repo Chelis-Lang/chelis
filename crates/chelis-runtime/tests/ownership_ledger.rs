@@ -5,8 +5,8 @@ use std::fs;
 use std::process::Command;
 
 use chelis_runtime::{
-    chelis_alloc, chelis_free, chelis_string_from_cstr, chelis_string_release,
-    chelis_string_retain, CHELIS_DTYPE_F32,
+    chelis_alloc, chelis_string_from_cstr, chelis_string_release, chelis_string_retain,
+    chelis_tensor_entry_borrow, chelis_tensor_release, CHELIS_DTYPE_F32,
 };
 
 const CHILD_MODE: &str = "CHELIS_OWNERSHIP_LEDGER_TEST_CHILD";
@@ -46,7 +46,19 @@ fn ledger_process_probe() {
             "tensor-bytes" => {
                 let shape = [4_i64];
                 let tensor = chelis_alloc(1, shape.as_ptr(), CHELIS_DTYPE_F32);
-                chelis_free(tensor);
+                chelis_tensor_release(tensor);
+            }
+            "borrowed-tensor-bytes" => {
+                let shape = [4_i64];
+                let data = [0.0_f32; 4];
+                let tensor = chelis_tensor_entry_borrow(
+                    1,
+                    shape.as_ptr(),
+                    CHELIS_DTYPE_F32,
+                    data.as_ptr().cast(),
+                    16,
+                );
+                chelis_tensor_release(tensor);
             }
             "invalid-release" => {
                 let text = CString::new("bad").unwrap();
@@ -101,6 +113,24 @@ fn tensor_storage_uses_portable_payload_bytes() {
         "four f32 values own exactly sixteen logical bytes:\n{ledger}"
     );
     assert!(ledger.contains(r#""kind":"Tensor","bytes":0"#));
+    let _ = fs::remove_file(path);
+
+    // Negative parity: an entry borrow records the runtime-owned storage
+    // wrapper, but never counts the caller's bytes as runtime ownership.
+    let path = child_path("borrowed-tensor-bytes");
+    let output = run_child("borrowed-tensor-bytes", &path);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let ledger = fs::read_to_string(&path).expect("ledger file");
+    assert!(
+        ledger.contains(r#""kind":"TensorStorage","bytes":0"#),
+        "the runtime owns only the storage wrapper for an entry borrow:\n{ledger}"
+    );
+    assert!(ledger.contains(r#""event":"borrow""#), "{ledger}");
+    assert!(ledger.contains(r#""live_bytes":0"#), "{ledger}");
     let _ = fs::remove_file(path);
 }
 

@@ -200,10 +200,11 @@ fn issue_616_runtime_shrink_c_binary_handles_multiple_lengths() {
         .map(|n| {
             format!(
                 "    {{ int64_t shape[1] = {{{n}}}; chelis_tensor* x = chelis_alloc(1, shape, CHELIS_DTYPE_F32); \
-                 for (int i = 0; i < {n}; i++) ((float *)x->data)[i] = (float)(i + 1); \
-                 chelis_tensor* w = out(x); \
-                 for (int i = 0; i < w->size; i++) printf(\"%.6f\\n\", ((float *)w->data)[i]); \
-                 printf(\"---\\n\"); }}"
+                 chelis_tensor_write* x_guard = chelis_tensor_begin_write(x); chelis_write_view x_view = chelis_tensor_write_view(x_guard); \
+                 for (int i = 0; i < {n}; i++) ((float *)x_view.data)[i] = (float)(i + 1); chelis_tensor_end_write(x_guard); \
+                 chelis_tensor* w = out(x); chelis_read_view w_view = chelis_tensor_read_view(w); \
+                 for (int64_t i = 0; i < w_view.count; i++) printf(\"%.6f\\n\", ((const float *)w_view.data)[i]); \
+                 printf(\"---\\n\"); chelis_tensor_release(w); chelis_tensor_release(x); }}"
             )
         })
         .collect::<Vec<_>>()

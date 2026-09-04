@@ -1099,6 +1099,41 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("OP-31.*unused high bits")
 
+    def test_tensor_read_view_lifetime_ends_before_a_write_begins(self) -> None:
+        mutations = (
+            (
+                Path("spec/05-risc-primitives.md"),
+                "until that descriptor is passed to\n> "
+                "`chelis_tensor_begin_write`, whichever comes first",
+                "for as long as any descriptor owner remains live",
+                "OP-31.*chelis_tensor_begin_write",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "A successful begin invalidates\n> every read view previously "
+                "returned for that descriptor",
+                "A successful begin preserves every prior read view",
+                "OP-44.*successful begin invalidates",
+            ),
+            (
+                Path("spec/design/compiled_value_ownership.md"),
+                "A successful begin invalidates every previously returned read view; "
+                "dereferencing\n  such a stale view violates the caller precondition",
+                "A successful begin preserves every previously returned read view",
+                "write-begin read-view invalidation",
+            ),
+        )
+        for path, old, new, message in mutations:
+            with self.subTest(message=message):
+                contract = self.root / path
+                original = contract.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                contract.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    contract.write_text(original, encoding="utf-8")
+
     def test_scalar_carrier_pins_exact_public_layouts(self) -> None:
         block = oracle.atom_blocks(
             (REPO_ROOT / "spec/05-risc-primitives.md").read_text(encoding="utf-8")
@@ -1106,10 +1141,11 @@ class ContractValidationTests(unittest.TestCase):
         for declaration in (
             "typedef uint8_t chelis_dtype;",
             "typedef struct { chelis_dtype dtype; uint8_t reserved[7]; uint64_t bits; } chelis_scalar;",
-            "typedef struct { uint8_t is_some; uint8_t reserved[7]; chelis_scalar value; } chelis_option_scalar;",
+            "enum { CHELIS_VALUE_UNIT = 0, CHELIS_VALUE_SCALAR = 1, CHELIS_VALUE_STRING = 2, CHELIS_VALUE_TENSOR = 3, CHELIS_VALUE_LIST = 4, CHELIS_VALUE_TUPLE = 5, CHELIS_VALUE_DICT = 6, CHELIS_VALUE_ADT = 7, CHELIS_VALUE_OPTION = 8, CHELIS_VALUE_MAPPED_FILE = 9 };",
             "typedef union { chelis_scalar scalar; void *handle; } chelis_value_payload;",
             "typedef struct { chelis_value_tag tag; uint8_t reserved[7]; chelis_value_payload payload; } chelis_value;",
-            "typedef struct { void *data; const int64_t *shape; const int64_t *strides; int64_t size; int64_t byte_capacity; int32_t rank; chelis_dtype dtype; uint8_t owns_data; uint8_t reserved[2]; } chelis_tensor;",
+            "typedef struct { const void *data; int64_t count; chelis_dtype dtype; uint8_t reserved[7]; } chelis_read_view;",
+            "typedef struct { void *data; int64_t count; chelis_dtype dtype; uint8_t reserved[7]; } chelis_write_view;",
             "typedef struct { chelis_value key; chelis_value value; } chelis_dict_entry;",
         ):
             with self.subTest(declaration=declaration):
@@ -1118,12 +1154,12 @@ class ContractValidationTests(unittest.TestCase):
     def test_scalar_carrier_layout_mutation_fails(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "const int64_t *shape; const int64_t *strides; int64_t size; "
-            "int64_t byte_capacity; int32_t rank",
-            "int64_t shape[8]; int64_t strides[8]; int64_t size; "
-            "int64_t byte_capacity; int32_t rank",
+            "typedef struct { const void *data; int64_t count; chelis_dtype dtype; "
+            "uint8_t reserved[7]; } chelis_read_view;",
+            "typedef struct { const void *data; int32_t count; chelis_dtype dtype; "
+            "uint8_t reserved[3]; } chelis_read_view;",
         )
-        self.assert_contract_fails("OP-31.*chelis_tensor")
+        self.assert_contract_fails("OP-31.*chelis_read_view")
 
     def test_compiled_owner_atoms_are_frozen(self) -> None:
         mutations = (
@@ -1308,9 +1344,10 @@ class ContractValidationTests(unittest.TestCase):
             ),
             (
                 "`UnsupportedKind::HostAbi`, `Stage::Codegen(\"c\")`, and\n"
-                "`Unimplemented { issue: #879 }` before ownership verification "
-                "constructs a\nplan",
-                "an empty scalar before ownership verification constructs a plan",
+                "`Unimplemented { issue: #879 }` after the sealed ownership "
+                "boundary certifies\nthe exact selected payload and before backend "
+                "emission",
+                "an empty scalar after the sealed ownership boundary",
                 "recursive function target rejection",
             ),
             (
@@ -1386,9 +1423,10 @@ class ContractValidationTests(unittest.TestCase):
     def test_compiled_ownership_cannot_omit_string_or_tensor_tags(self) -> None:
         mutations = (
             (
-                "| `string` | `String` | opaque `chelis_string` handle and "
-                "`CHELIS_VALUE_STRING` |",
-                "| `string` | `String` | opaque `chelis_string` handle |",
+                "| `string` | `String` | fixed `chelis_string` wrapper with an "
+                "opaque target and `CHELIS_VALUE_STRING` |",
+                "| `string` | `String` | fixed `chelis_string` wrapper with an "
+                "opaque target |",
                 "string carrier mapping",
             ),
             (
@@ -1476,7 +1514,12 @@ class ContractValidationTests(unittest.TestCase):
             with self.subTest(message=message):
                 original = path.read_text(encoding="utf-8")
                 self.assertIn(old, original)
-                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                count = original.count(old)
+                self.assertGreater(count, 0)
+                replacement_count = count if message == "launch ownership oracle success line" else 1
+                path.write_text(
+                    original.replace(old, new, replacement_count), encoding="utf-8"
+                )
                 try:
                     self.assert_contract_fails(message)
                 finally:
@@ -1528,16 +1571,16 @@ class ContractValidationTests(unittest.TestCase):
     def test_implicit_linearity_distinguishes_current_and_successor_drop(self) -> None:
         mutations = (
             (
-                "The current C/HIP emitters still\n"
-                "treat the IR node as an emission no-op and reconstruct host "
-                "releases from backend-local\nstate",
-                "The current C/HIP emitters release every heap value at Drop",
+                "The verified `OwnershipProgram` makes `RiscOp::Copy` and "
+                "`RiscOp::Drop` real\nownership operations",
+                "The ownership program may treat copy and drop as emission no-ops",
                 "current Drop implementation status",
             ),
             (
-                "the successor verified-ownership lanes emit the matching heap "
-                "release at the\nterminal operation",
-                "the successor lanes may defer release until function exit",
+                "C and HIP emit the exact\ndescriptor release selected by the "
+                "verified directive; Metal consumes the same\ndirective as a typed "
+                "no-device-owner disposition",
+                "Backends may reconstruct a terminal release after verification",
                 "successor Drop release",
             ),
         )
@@ -1581,10 +1624,35 @@ class ContractValidationTests(unittest.TestCase):
     def test_compiled_ownership_phase_one_cannot_skip_container_authority(self) -> None:
         self.replace(
             Path("spec/design/compiled_value_ownership.md"),
-            "The existing exact ABI remains [05-OP-31..33] and all three registries",
-            "The existing exact ABI remains [05-OP-31] and [05-OP-33]",
+            "The exact ABI is [05-OP-31..33], [05-OP-44], and all four registries",
+            "The exact ABI is [05-OP-31..33] and the three carrier registries",
         )
         self.assert_contract_fails("complete C ABI authority chain")
+
+    def test_compiled_ownership_phase_row_maps_are_exact(self) -> None:
+        path = Path("spec/design/compiled_value_ownership.md")
+        mutations = (
+            (
+                "This phase promotes exactly twenty-three oracle rows: the five [#543]",
+                "This phase promotes exactly twenty-two oracle rows: four [#543] rows",
+                "Phase 1 exact ownership row map",
+            ),
+            (
+                "This phase promotes exactly six oracle rows: the [#1346] fold row",
+                "This phase promotes five oracle rows and leaves depth one unresolved",
+                "Phase 2 exact ownership row map",
+            ),
+        )
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                contract = self.root / path
+                original = contract.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                contract.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    contract.write_text(original, encoding="utf-8")
 
     def test_backend_cannot_accept_unverified_ownership(self) -> None:
         self.replace(
@@ -2081,6 +2149,10 @@ class ContractValidationTests(unittest.TestCase):
                 "JsonArray(List[Json]) | JsonObject(Dict[string,Json])",
                 "JsonArray(List[Json])",
             ),
+            "05-OP-44": (
+                "chelis_tensor_write *chelis_tensor_begin_write(chelis_tensor *tensor)",
+                "chelis_write_view chelis_tensor_begin_write(chelis_tensor *tensor)",
+            ),
             "05-OP-35": ("(p_float)->p_float", "(f32)->f32"),
             "05-OP-38": (
                 "(T,((T,int64)->T!E),int64)->tensor[n,T]!E",
@@ -2353,12 +2425,6 @@ class ContractValidationTests(unittest.TestCase):
                 "runtime extent guard placement in every execution mode",
             ),
             (
-                Path("spec/04-type-system.md"),
-                "their defaults settle in source order",
-                "their defaults settle in any order",
-                "positional expand settlement order",
-            ),
-            (
                 Path("spec/05-risc-primitives.md"),
                 "`InputAxis(t, a)`",
                 "`AxisRead(t, a)`",
@@ -2383,12 +2449,6 @@ class ContractValidationTests(unittest.TestCase):
                 "runtime extent guard trap line",
             ),
             (
-                Path("spec/04-type-system.md"),
-                "the result keeps only the forms that consumer admits",
-                "the result keeps every form",
-                "deferred expand candidate elimination",
-            ),
-            (
                 Path("spec/05-risc-primitives.md"),
                 "well formed only when the start\n  paired with it is `Lit(0)`",
                 "well formed with any start",
@@ -2396,21 +2456,84 @@ class ContractValidationTests(unittest.TestCase):
             ),
             (
                 Path("spec/05-risc-primitives.md"),
-                "is well formed only\nwhen the operand's extent at `axis` is 1",
-                "is well formed for any operand extent",
-                "expand same-rank form requires a unit source extent",
+                "`expand` sets the extent at `axis` and is well formed only "
+                "when the operand's\nextent at `axis` is 1",
+                "`expand` sets the extent at `axis` for any operand extent",
+                "expand requires a unit source extent",
             ),
             (
                 Path("spec/05-risc-primitives.md"),
-                "the form is a claim that the operand's extent at `axis` is "
-                "1. A\nruntime operand extent at `axis` other than 1 under "
-                "the same-rank form fails\nthat claim's runtime extent guard "
-                "and traps `Domain`, placed and rendered per\n"
-                "`spec/04-type-system.md` §4.7 and [04-NUM-9].",
-                "the form makes no claim about the operand. A\n"
-                "runtime operand extent at `axis` other than 1 under the "
-                "same-rank form is accepted.",
-                "expand same-rank non-unit source extent traps Domain",
+                "A literal operand extent at\n`axis` other than 1 is a type error. A symbolic or runtime operand extent at\n`axis` other than 1 fails that claim's runtime extent guard and traps\n`Domain`, placed and rendered per `spec/04-type-system.md` §4.7 and\n[04-NUM-9].",
+                "Any operand extent at\n`axis` is accepted.",
+                "expand non-unit source extent is rejected or traps",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "| `expand` | `insert(sum(g, axis), axis, 1i64)`",
+                "| `expand` | `sum(g, axis)` |",
+                "expand adjoint restores the unit axis",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "| `insert` | `sum(g, axis)`",
+                "| `insert` | `insert(g, axis, 1i64)` |",
+                "insert adjoint collapses the inserted axis",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "A reduction axis, `expand`'s broadcast axis, and `insert`'s"
+                "\n> new-axis position SHALL be",
+                "A reduction axis SHALL be",
+                "axis atom names both movement primitives",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "names the\n> dimension it creates, which is by construction not a dimension of the\n> operand; that name SHALL be statically resolvable in the same sense",
+                "names any\n> dimension",
+                "insert names a dimension absent from the operand",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "> `insert(g / divisor, axis, original_extent)` at the "
+                "operand dtype.",
+                "> `expand(g / divisor, original_shape, axis)` at the "
+                "operand dtype.",
+                "mean adjoint reinserts the reduced axis",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "[05-AXIS-1] governs the reduction, `expand`, and `insert`\n> family",
+                "[05-AXIS-1] governs the static reduction/expand family",
+                "C axis family names both movement primitives",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "| `insert` | `(&tensor[D,p], axis: int32, size: int64) -> "
+                "tensor[D_plus,p]` | Insert a new dimension of width `size` "
+                "at position `axis`, producing rank `rank(x) + 1`.",
+                "| `insert` | unspecified |",
+                "insert movement row",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "Each operation has exactly one result shape. `expand` sets "
+                "the extent at\n`axis` and leaves the rank unchanged; `insert` adds an axis of extent `size`\nat `axis` and produces rank `rank(x) + 1`. No result is deferred, no consumer\nselects between shapes, and no context supplies a default.",
+                "A consumer selects between two candidate shapes, and an unconsumed result\ntakes a default at the freeze point.",
+                "expand and insert each have one result shape",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "`insert` admits `axis` in `0..=rank(x)`, so\n`axis == rank(x)` appends a trailing axis. An axis outside its operation's\nrange is a type error.",
+                "`insert` admits any `axis`.",
+                "insert axis range",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "**Named-axis insert (`R+1`).** The inverse arithmetic "
+                "direction: `insert`\nadds a *named* axis",
+                "**Named-axis expand (`R+1`).** The inverse arithmetic "
+                "direction: `expand`\nadds a *named* axis",
+                "named-axis form belongs to insert",
             ),
             (
                 Path("spec/06-transformations.md"),
@@ -4303,14 +4426,14 @@ class FrozenContractChangeTests(unittest.TestCase):
 
     def test_unchanged_tree_passes(self) -> None:
         report = self.check()
-        self.assertIn("0 of 28 contract files changed", report[0])
+        self.assertIn("0 of 29 contract files changed", report[0])
 
     def test_every_contract_file_is_watched(self) -> None:
         # The converted whole-file-digest test. Contradictory prose prepended
         # to any contract file must fail, and the failure must name the file.
-        # The watched set is now all 28 CONTRACT_FILES, a superset of the 22
+        # The watched set is now all 29 CONTRACT_FILES, a superset of the 22
         # that carried a whole-file digest.
-        self.assertEqual(len(CONTRACT_FILES), 28)
+        self.assertEqual(len(CONTRACT_FILES), 29)
         for relative in oracle.CONTRACT_FILES:
             with self.subTest(relative=relative):
                 path = self.root / relative
@@ -4377,7 +4500,7 @@ class FrozenContractChangeTests(unittest.TestCase):
     def test_an_acknowledged_change_passes(self) -> None:
         self.append("spec/11-ffi.md", "\nA reviewed sentence.\n")
         report = self.check(acknowledgements=("spec/11-ffi.md",))
-        self.assertIn("1 of 28 contract files changed", report[0])
+        self.assertIn("1 of 29 contract files changed", report[0])
         self.assertIn("  ok  Frozen-contract-change: spec/11-ffi.md", report)
 
     def test_a_body_line_acknowledges_the_change(self) -> None:
@@ -4482,7 +4605,7 @@ class FrozenContractChangeTests(unittest.TestCase):
         report = self.check(
             acknowledgements=("spec/10-serialization.md",)
         )
-        self.assertIn("1 of 28 contract files changed", report[0])
+        self.assertIn("1 of 29 contract files changed", report[0])
 
     def test_an_unreadable_baseline_blob_is_an_error_not_an_absence(self) -> None:
         # Round 1 F3. Reading a failed `git show` as "absent at the merge base"

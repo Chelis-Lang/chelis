@@ -17,15 +17,17 @@
 //! returns a captured top-level binding, and a `let` binding that copies a
 //! captured binding inside a compiled function body.
 //!
-//! Tensors abort in `chelis_free` because they carry no refcount; the
-//! refcounted containers instead take an unearned release, wrapping the
-//! count past zero into a use-after-free that does not announce itself.
+//! Every heap value, tensors included, now carries a strong count: an
+//! unearned release finalizes a live value early or drives the count past
+//! zero into a use-after-free that does not announce itself. The emitted-C
+//! counts below therefore pin releases against allocations PLUS retains, so
+//! a balanced retain/release pair cannot mask a second release of one owner.
 //! Both directions are covered.
 //!
 //! Oracle: each program is built to C, linked, and RUN, and the emitted-C
-//! assertions pin *why* it passes -- exactly one release per allocation --
-//! so a future change cannot restore the crash by making the value
-//! fresh-but-leaked.
+//! assertions pin *why* it passes -- releases equal allocations plus
+//! retains -- so a future change cannot restore the crash by making the
+//! value fresh-but-leaked or by dropping a retain.
 //!
 //! The tests do not all fail the same way before the fix, and it is worth
 //! being exact about which do what:
@@ -116,7 +118,7 @@ fn build_run_and_emit(source: &str, stem: &str) -> (String, String) {
 }
 
 /// The body of the emitted `main`, where the scope-exit cleanup lives.
-/// Helper bodies and compiled functions are excluded so a `chelis_free`
+/// Helper bodies and compiled functions are excluded so a `chelis_tensor_release`
 /// inside a tensor kernel cannot be mistaken for a root release.
 fn emitted_main(emitted: &str) -> &str {
     let start = emitted
@@ -131,6 +133,27 @@ fn release_count(emitted: &str, call: &str) -> usize {
     emitted_main(emitted).matches(call).count()
 }
 
+fn assert_retain_release_counts(
+    emitted: &str,
+    retain_call: &str,
+    release_call: &str,
+    expected: (usize, usize),
+    context: &str,
+) {
+    let actual = (
+        release_count(emitted, retain_call),
+        release_count(emitted, release_call),
+    );
+    assert_eq!(
+        actual,
+        expected,
+        "{context}; got {} retain(s) and {} release(s):\n{}",
+        actual.0,
+        actual.1,
+        emitted_main(emitted)
+    );
+}
+
 /// The body of one emitted compiled function. `main`'s cleanup is not the
 /// only ledger the emitter keeps: a `let` block inside a compiled function
 /// releases its own heap bindings, and an escape retain can be emitted
@@ -140,7 +163,13 @@ fn emitted_function<'a>(emitted: &'a str, signature: &str) -> &'a str {
     // Anchor on the opening brace: every compiled function is also
     // forward-declared, and matching the bare signature slices the
     // declaration plus whatever function happens to follow it.
-    let definition = format!("{signature} {{");
+    let (head, params) = signature
+        .split_once('(')
+        .expect("function signature has parameters");
+    let (ret, name) = head
+        .rsplit_once(' ')
+        .expect("function signature has a return type and name");
+    let definition = format!("{ret} {name}__chelis_owned_body({params} {{");
     let start = emitted
         .find(&definition)
         .unwrap_or_else(|| panic!("emitted C defines `{definition}`:\n{emitted}"));
@@ -227,7 +256,8 @@ fn strip_span_comments(body: &str) -> String {
 /// Every release/retain call in `body`, tallied by kind.
 fn ownership_calls(body: &str) -> Vec<(&'static str, usize)> {
     [
-        "chelis_free(",
+        "chelis_tensor_release(",
+        "chelis_tensor_retain(",
         "chelis_list_release(",
         "chelis_tuple_release(",
         "chelis_dict_release(",
@@ -415,12 +445,12 @@ fn top_level_tensor_alias_frees_the_shared_allocation_once() {
         return;
     }
     let (stdout, emitted) = build_run_and_emit(ALIAS, "alias_tensor");
-    assert_eq!(
-        release_count(&emitted, "chelis_free("),
-        1,
-        "one tensor allocation must be freed exactly once, not once per \
-         name that refers to it (chelis#1222):\n{}",
-        emitted_main(&emitted)
+    assert_retain_release_counts(
+        &emitted,
+        "chelis_tensor_retain(",
+        "chelis_tensor_release(",
+        (2, 3),
+        "one allocation plus two artifact-root owners must balance exactly (chelis#1222)",
     );
     assert_line_matches_eval(ALIAS, "alias_tensor", &stdout, "a");
     assert_line_matches_eval(ALIAS, "alias_tensor", &stdout, "b");
@@ -433,11 +463,12 @@ fn top_level_tensor_alias_chain_frees_the_shared_allocation_once() {
     }
     let source = "a = to_tensor([1.0f32, 2.0f32, 3.0f32])\nb = a\nc = b\n";
     let (stdout, emitted) = build_run_and_emit(source, "alias_chain");
-    assert_eq!(
-        release_count(&emitted, "chelis_free("),
-        1,
-        "an alias chain still names one allocation:\n{}",
-        emitted_main(&emitted)
+    assert_retain_release_counts(
+        &emitted,
+        "chelis_tensor_retain(",
+        "chelis_tensor_release(",
+        (3, 4),
+        "one allocation plus three artifact-root owners must balance exactly",
     );
     assert_line_matches_eval(source, "alias_chain", &stdout, "c");
 }
@@ -454,11 +485,12 @@ fn distinct_top_level_tensors_are_each_freed() {
         "a = to_tensor([1.0f32, 2.0f32])\nb = to_tensor([3.0f32, 4.0f32])\n",
         "distinct_tensors",
     );
-    assert_eq!(
-        release_count(&emitted, "chelis_free("),
-        2,
-        "two separately built tensors are two allocations:\n{}",
-        emitted_main(&emitted)
+    assert_retain_release_counts(
+        &emitted,
+        "chelis_tensor_retain(",
+        "chelis_tensor_release(",
+        (2, 4),
+        "two allocations plus two artifact-root owners must balance exactly",
     );
 }
 
@@ -475,12 +507,12 @@ fn conditional_over_existing_bindings_claims_no_third_allocation() {
                   d = to_tensor([3.0f32, 4.0f32])\n\
                   c = if true then a else d\n";
     let (stdout, emitted) = build_run_and_emit(source, "alias_if");
-    assert_eq!(
-        release_count(&emitted, "chelis_free("),
-        2,
-        "the branch result is whichever arm ran, so only the two arms own \
-         allocations:\n{}",
-        emitted_main(&emitted)
+    assert_retain_release_counts(
+        &emitted,
+        "chelis_tensor_retain(",
+        "chelis_tensor_release(",
+        (5, 6),
+        "two allocations, the two emitted arm clones, and three artifact roots stay exact",
     );
     assert_line_matches_eval(source, "alias_if", &stdout, "c");
 }
@@ -498,12 +530,12 @@ fn identity_function_result_is_not_claimed_by_the_caller() {
                   a = to_tensor([1.0f32, 2.0f32])\n\
                   b = echo_t(a)\n";
     let (stdout, emitted) = build_run_and_emit(source, "alias_identity_fn");
-    assert_eq!(
-        release_count(&emitted, "chelis_free("),
-        1,
-        "a callee that hands back its argument returns no new \
-         allocation:\n{}",
-        emitted_main(&emitted)
+    assert_retain_release_counts(
+        &emitted,
+        "chelis_tensor_retain(",
+        "chelis_tensor_release(",
+        (3, 4),
+        "the owned call argument and two artifact-root owners balance the one allocation",
     );
     assert_line_matches_eval(source, "alias_identity_fn", &stdout, "b");
 }
@@ -519,11 +551,12 @@ fn function_building_a_fresh_result_is_claimed_by_the_caller() {
                   a = to_tensor([1.0f32, 2.0f32])\n\
                   b = doubled(a)\n";
     let (_stdout, emitted) = build_run_and_emit(source, "fresh_fn_result");
-    assert_eq!(
-        release_count(&emitted, "chelis_free("),
-        2,
-        "a computed result is the caller's to free:\n{}",
-        emitted_main(&emitted)
+    assert_retain_release_counts(
+        &emitted,
+        "chelis_tensor_retain(",
+        "chelis_tensor_release(",
+        (3, 4),
+        "the owned call argument and two artifact-root owners remain exact for a fresh result",
     );
 }
 
@@ -540,11 +573,12 @@ fn function_returning_a_captured_binding_is_not_claimed_by_the_caller() {
                   def pass_g() -> tensor[2, f32] = {\n  y = g\n  y\n}\n\
                   b = pass_g()\n";
     let (stdout, emitted) = build_run_and_emit(source, "alias_captured_return");
-    assert_eq!(
-        release_count(&emitted, "chelis_free("),
-        1,
-        "`g` is the only allocation; the call result is `g`:\n{}",
-        emitted_main(&emitted)
+    assert_retain_release_counts(
+        &emitted,
+        "chelis_tensor_retain(",
+        "chelis_tensor_release(",
+        (3, 6),
+        "three manifest roots consume the independently retained captured returns",
     );
     assert_line_matches_eval(source, "alias_captured_return", &stdout, "b");
 }
@@ -564,10 +598,18 @@ fn block_result_aliasing_an_outer_binding_claims_no_second_allocation() {
     }
     let source = "a = to_tensor([1.0f32, 2.0f32])\nb = {\n  x = a\n  x\n}\n";
     let (stdout, emitted) = build_run_and_emit(source, "alias_block_result");
+    assert_eq!(release_count(&emitted, "chelis_tensor_from_values("), 1);
     assert_eq!(
-        release_count(&emitted, "chelis_free("),
-        1,
-        "the block hands back `a`, it does not build a tensor:\n{}",
+        release_count(&emitted, "chelis_tensor_retain("),
+        2,
+        "the block hands back `a` through one value-temp retain and one result-owner retain:\n{}",
+        emitted_main(&emitted)
+    );
+    assert_eq!(
+        release_count(&emitted, "chelis_tensor_release("),
+        3,
+        "one allocation plus two retained owners requires three releases; fewer \
+         strands an owner and more restores the double release:\n{}",
         emitted_main(&emitted)
     );
     assert_line_matches_eval(source, "alias_block_result", &stdout, "b");
@@ -580,12 +622,12 @@ fn seeded_block_returning_an_outer_binding_claims_no_second_allocation() {
     }
     let source = "a = to_tensor([1.0f32, 2.0f32])\nb = with seed(1i64) { a }\n";
     let (stdout, emitted) = build_run_and_emit(source, "alias_with_seed");
-    assert_eq!(
-        release_count(&emitted, "chelis_free("),
-        1,
-        "a seed scope changes the RNG, not the ownership of its body's \
-         result:\n{}",
-        emitted_main(&emitted)
+    assert_retain_release_counts(
+        &emitted,
+        "chelis_tensor_retain(",
+        "chelis_tensor_release(",
+        (2, 3),
+        "a seed scope changes the RNG while two artifact roots remain balanced",
     );
     assert_line_matches_eval(source, "alias_with_seed", &stdout, "b");
 }
@@ -603,16 +645,17 @@ fn top_level_list_alias_releases_the_shared_allocation_once() {
     }
     let source = "a = [1i64, 2i64, 3i64]\nb = a\n";
     let (stdout, emitted) = build_run_and_emit(source, "alias_list");
-    assert_eq!(
-        release_count(&emitted, "chelis_list_release("),
-        1,
-        "an unearned release wraps the refcount past zero:\n{}",
-        emitted_main(&emitted)
+    assert_retain_release_counts(
+        &emitted,
+        "chelis_list_retain(",
+        "chelis_list_release(",
+        (2, 3),
+        "one list allocation plus two artifact-root owners must balance",
     );
     // A count alone would also pass if the one release named the wrong
     // pointer -- the list-of-values build temp, say -- and a refcount
     // underflow inside the runtime is not observable from the process
-    // exit status the way a bad `chelis_free` is.
+    // exit status the way a bad `chelis_tensor_release` is.
     assert!(
         emitted_main(&emitted).contains("chelis_list_release(__binding_0_value);"),
         "the surviving release must name the binding that owns the \
@@ -629,11 +672,12 @@ fn top_level_string_alias_releases_the_shared_allocation_once() {
     }
     let source = "a = \"hello\"\nb = a\n";
     let (stdout, emitted) = build_run_and_emit(source, "alias_string");
-    assert_eq!(
-        release_count(&emitted, "chelis_string_release("),
-        1,
-        "an unearned release wraps the refcount past zero:\n{}",
-        emitted_main(&emitted)
+    assert_retain_release_counts(
+        &emitted,
+        "chelis_string_retain(",
+        "chelis_string_release(",
+        (2, 3),
+        "one string allocation plus two artifact-root owners must balance",
     );
     assert!(
         emitted_main(&emitted).contains("chelis_string_release(__binding_0_value);"),
@@ -655,11 +699,12 @@ fn two_aliases_of_one_list_release_it_once() {
     }
     let source = "a = [1i64, 2i64]\nb = a\nc = a\n";
     let (stdout, emitted) = build_run_and_emit(source, "alias_list_twice");
-    assert_eq!(
-        release_count(&emitted, "chelis_list_release("),
-        1,
-        "three names, one allocation, one release:\n{}",
-        emitted_main(&emitted)
+    assert_retain_release_counts(
+        &emitted,
+        "chelis_list_retain(",
+        "chelis_list_release(",
+        (3, 4),
+        "one list allocation plus three artifact-root owners must balance",
     );
     assert_line_matches_eval(source, "alias_list_twice", &stdout, "c");
 }
@@ -672,11 +717,12 @@ fn distinct_top_level_lists_are_each_released() {
     }
     let (_stdout, emitted) =
         build_run_and_emit("a = [1i64, 2i64]\nb = [3i64, 4i64]\n", "distinct_lists");
-    assert_eq!(
-        release_count(&emitted, "chelis_list_release("),
-        2,
-        "two separately built lists are two allocations:\n{}",
-        emitted_main(&emitted)
+    assert_retain_release_counts(
+        &emitted,
+        "chelis_list_retain(",
+        "chelis_list_release(",
+        (2, 4),
+        "two list allocations plus two artifact-root owners must balance",
     );
 }
 
@@ -695,16 +741,15 @@ fn nested_block_shadowing_a_binding_name_does_not_reclaim_it_twice() {
                   b = {\n  a = to_tensor([9.0f32, 9.0f32])\n  a\n}\n\
                   c = a\n";
     let (stdout, emitted) = build_run_and_emit(source, "alias_shadowed_name");
-    // Two allocations (the outer tensor and the shadowing inner one), two
-    // frees. The count pins both directions at once: three would mean `c`
-    // was claimed as well and the double free is back, one would mean the
-    // inner allocation was orphaned when its name went out of scope.
-    assert_eq!(
-        release_count(&emitted, "chelis_free("),
-        2,
-        "`c` names `a`'s allocation and the block built its own; the \
-         shadowing inner binding must make neither look unowned:\n{}",
-        emitted_main(&emitted)
+    // Two allocations (the outer tensor and the shadowing inner one), plus
+    // one retain/release pair for the inner block transfer.
+    assert_eq!(release_count(&emitted, "chelis_tensor_from_values("), 2);
+    assert_retain_release_counts(
+        &emitted,
+        "chelis_tensor_retain(",
+        "chelis_tensor_release(",
+        (3, 5),
+        "two allocations plus three artifact-root owners must balance across shadowing",
     );
     assert_line_matches_eval(source, "alias_shadowed_name", &stdout, "c");
     assert_line_matches_eval(source, "alias_shadowed_name", &stdout, "b");
@@ -929,18 +974,20 @@ fn file_fed_pipeline_with_an_alias_binding_runs_to_completion() {
         "both names must still be observable roots:\n{stdout}"
     );
     assert_line_matches_eval(&source, "alias_pipeline", &stdout, "total");
-    // `rho` names `rho_base`'s allocation, so the cleanup block carries one
-    // fewer `chelis_free` than it has tensor-typed roots.
-    let frees = release_count(&emitted, "chelis_free(");
+    // Seven tensor roots each receive an explicit artifact owner. The eight
+    // live tensor descriptors produced by the pipeline plus those seven
+    // retains are then released exactly once.
     let tensor_roots = stdout
         .lines()
         .filter(|line| line.contains(" = tensor("))
         .count();
-    assert_eq!(
-        frees,
-        tensor_roots - 1,
-        "exactly one tensor root is an alias:\n{}",
-        emitted_main(&emitted)
+    assert_eq!(tensor_roots, 7, "fixture drifted:\n{stdout}");
+    assert_retain_release_counts(
+        &emitted,
+        "chelis_tensor_retain(",
+        "chelis_tensor_release(",
+        (7, 15),
+        "the file-fed pipeline must balance every artifact owner and descriptor",
     );
 }
 
@@ -970,12 +1017,13 @@ fn a_root_spelled_like_a_binder_key_is_freed_once() {
                     b = {\n  q = to_tensor([3.0f32, 4.0f32])\n  q\n}\n\
                     c = zzq_root\n";
     let (_stdout, emitted) = build_run_and_emit(colliding, "binder_key_root");
-    assert_eq!(
-        release_count(&emitted, "chelis_free("),
-        2,
-        "two tensors are built and `c` names the first one, so the cleanup \
-         frees two pointers however the root is spelled:\n{}",
-        emitted_main(&emitted)
+    assert_eq!(release_count(&emitted, "chelis_tensor_from_values("), 2);
+    assert_retain_release_counts(
+        &emitted,
+        "chelis_tensor_retain(",
+        "chelis_tensor_release(",
+        (3, 5),
+        "two tensors and three artifact owners balance however the root is spelled",
     );
     assert_alpha_invariant_pair(
         colliding,
@@ -1052,20 +1100,18 @@ fn a_let_binder_shadowing_a_parameter_does_not_mask_an_outer_result() {
     // the pre-#1302 borrowed-return contract the third release WAS the
     // chelis#1222 defect; the count alone no longer distinguishes the
     // two, which is why `f`'s retain count is pinned alongside it.
-    assert_eq!(
-        release_count(&emitted, "chelis_list_release("),
-        3,
-        "`f` returns the captured `g` through an owned binding, so the \
-         caller claims the result: argument temp, claimed result, and `g` \
-         are each released once:\n{}",
-        emitted_main(&emitted)
+    assert_retain_release_counts(
+        &emitted,
+        "chelis_list_retain(",
+        "chelis_list_release(",
+        (3, 5),
+        "the three artifact owners and two live main-scope values must balance",
     );
     let f_body = emitted_function(&emitted, "chelis_list* f(chelis_list* p)");
     assert_eq!(
         count_in(f_body, "chelis_list_retain("),
-        2,
-        "`f` owns at both leaves (value-temp copy retain and result-target \
-         retain), which is what licenses the caller's claim:\n{f_body}"
+        1,
+        "`f` retains its captured result exactly once before returning it:\n{f_body}"
     );
     assert_alpha_invariant_pair(
         colliding,
@@ -1089,11 +1135,12 @@ fn debug_hands_back_its_argument_and_is_not_claimed_again() {
     // bare name.
     let source = "a = to_tensor([1.0f32, 2.0f32])\nb = debug(a)\n";
     let (_stdout, emitted) = build_run_and_emit(source, "debug_alias");
-    assert_eq!(
-        release_count(&emitted, "chelis_free("),
-        1,
-        "`b` is `a`, so there is one tensor and one free:\n{}",
-        emitted_main(&emitted)
+    assert_retain_release_counts(
+        &emitted,
+        "chelis_tensor_retain(",
+        "chelis_tensor_release(",
+        (2, 3),
+        "`debug` preserves one logical tensor while both artifact roots own observations",
     );
 }
 
@@ -1109,12 +1156,12 @@ fn debug_of_a_fresh_value_is_still_claimed() {
     let source = "a = to_tensor([1.0f32, 2.0f32])\n\
                   b = debug(to_tensor([3.0f32, 4.0f32]))\n";
     let (_stdout, emitted) = build_run_and_emit(source, "debug_fresh");
-    assert_eq!(
-        release_count(&emitted, "chelis_free("),
-        2,
-        "two tensors were built and neither is the other, so both are \
-         freed:\n{}",
-        emitted_main(&emitted)
+    assert_retain_release_counts(
+        &emitted,
+        "chelis_tensor_retain(",
+        "chelis_tensor_release(",
+        (2, 4),
+        "two distinct tensors plus their artifact owners must balance",
     );
 }
 
@@ -1137,9 +1184,8 @@ fn a_builtin_transfer_out_of_a_block_keeps_its_matching_release() {
     let releases = count_in(body, "chelis_list_release(");
     assert_eq!(
         (creations, retains),
-        (1, 1),
-        "fixture drifted: it must build one list and take one transfer \
-         retain:\n{body}"
+        (1, 0),
+        "`debug` observes and returns the same logical owner without a clone:\n{body}"
     );
     assert_eq!(
         creations + retains,
