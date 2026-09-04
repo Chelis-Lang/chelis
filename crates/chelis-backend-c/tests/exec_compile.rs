@@ -181,6 +181,66 @@ fn runtime_lib_path() -> PathBuf {
 }
 
 /// Write generated C + harness, compile, run, return stdout. None = compile/run failure.
+/// Compile and run like [`compile_and_run_kernel`], but return the exit
+/// status and BOTH streams instead of `None` on failure.
+///
+/// chelis#1277: a runtime extent guard's whole observable is a nonzero exit
+/// with a trap line on stderr, which the success-only helper discards - it
+/// `eprintln!`s stderr and returns `None`, so a caller cannot assert on the
+/// trap it was testing for. This shares that helper's compile plumbing rather
+/// than duplicating the runtime-library discovery and include copying.
+fn compile_and_run_kernel_capturing(
+    test_name: &str,
+    c_source: &str,
+    harness: &str,
+) -> (bool, String) {
+    let dir = std::env::temp_dir().join(format!("chelis_exec_{test_name}"));
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("kernel.c"), c_source).unwrap();
+    fs::write(dir.join("main.c"), harness).unwrap();
+    let include_dir = runtime_include_dir();
+    for hdr in &[
+        "chelis_runtime.h",
+        "chelis_runtime_dtype.h",
+        "chelis_blas.h",
+        "chelis_simd.h",
+        "chelis_math.h",
+    ] {
+        let src = fs::read_to_string(include_dir.join(hdr)).unwrap();
+        fs::write(dir.join(hdr), src).unwrap();
+    }
+    let bin = dir.join("trap_bin");
+    let compile = Command::new("gcc")
+        .arg("-O2")
+        .args(simd_isa_flags())
+        .args([
+            "-std=c11",
+            "-I",
+            dir.to_str().unwrap(),
+            dir.join("kernel.c").to_str().unwrap(),
+            dir.join("main.c").to_str().unwrap(),
+            runtime_lib_path().to_str().unwrap(),
+            "-lm",
+            "-o",
+            bin.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to invoke gcc");
+    // A compile failure is never a skip. The success-only helper returns
+    // `None` for it, and a caller that treats `None` as "no toolchain" then
+    // passes vacuously on a kernel that did not build - so this one fails
+    // loudly instead, and its callers need no escape branch.
+    assert!(
+        compile.status.success(),
+        "COMPILE FAILED [{test_name}]:\n{}\nKernel C:\n{c_source}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new(&bin).output().expect("failed to run binary");
+    let mut text = String::from_utf8_lossy(&run.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&run.stderr));
+    (run.status.success(), text)
+}
+
 fn compile_and_run_kernel(test_name: &str, c_source: &str, harness: &str) -> Option<String> {
     let probe = common::probe_dir(&format!("exec_{test_name}"));
     let dir = probe.path().to_path_buf();
@@ -4446,4 +4506,152 @@ fn direct_relu_preserves_input_bits_and_adjoint_uses_strict_positive_mask() {
         lhs_bits: &[0x7fc1, 0x8000, 0, 0xbf80, 0x3f80, 1],
         rhs_bits: &[0x7fc3, 0x7f80, 0x8000, 0xffc3, 0xbf80, 0x7f80],
     });
+}
+
+// ---- chelis#1277 Slice B: runtime extent guards, driven with runtime inputs ----
+//
+// A CLI-rooted program cannot observe these guards on C. When `main` calls the
+// def on literal shapes, every claim in the inlined kernel is provable from
+// literals, so a violation is a check-time type error and no runtime guard is
+// reachable. The guard is observable only when the EXPORTED kernel is driven
+// with runtime inputs, which is what this harness does. That mirrors the
+// eval-lane finding: the lane that can observe the guard is not the lane a
+// `.ch` fixture reaches.
+//
+// The shared `make_view_typed_1d` cannot be used here: it keeps ONE `static`
+// shape array, so a second view overwrites the first and both tensors report
+// the same extent - which would make a mismatch test pass while comparing a
+// value with itself.
+
+const GUARD_HARNESS_HEADER: &str = r#"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include "chelis_runtime.h"
+
+static const int64_t guard_strides[1] = {1};
+
+static chelis_tensor guard_view(void* data, int64_t* shape, int64_t n) {
+    shape[0] = n;
+    return (chelis_tensor){
+        .data = data,
+        .shape = shape,
+        .strides = guard_strides,
+        .size = n,
+        .byte_capacity = n * chelis_dtype_size(CHELIS_DTYPE_F32),
+        .rank = 1,
+        .dtype = CHELIS_DTYPE_F32,
+        .owns_data = 0,
+        .reserved = {0, 0},
+    };
+}
+"#;
+
+/// Two `Load`s declaring one symbolic dim, with only the first read for data.
+/// The class is all-interface, so `spec/04-type-system.md` section 4.7 places
+/// its guard at entry and names the `load` primitive.
+fn two_witness_dag() -> chelis_ir::dag::Dag {
+    use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+    let named = || TensorType {
+        dims: vec![DimInfo::Named("n".into(), None)],
+        precision: Prim::F32,
+    };
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], named(), None);
+    let _p = dag.add_node(RiscOp::Load { name: "p".into() }, vec![], named(), None);
+    let out = dag.add_node(RiscOp::Neg, vec![x], named(), None);
+    dag.add_root(out);
+    dag
+}
+
+#[test]
+fn an_all_interface_class_traps_at_entry_when_its_witnesses_disagree() {
+    let dag = two_witness_dag();
+    let result = codegen_with_options(
+        &dag,
+        "guard_entry",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .expect("codegen");
+
+    let harness = format!(
+        r#"{GUARD_HARNESS_HEADER}
+extern void guard_entry(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float xd[2] = {{1.0f, 2.0f}};
+    float pd[3] = {{1.0f, 2.0f, 3.0f}};
+    int64_t xs[1];
+    int64_t ps[1];
+    chelis_tensor xt = guard_view(xd, xs, 2);
+    chelis_tensor pt = guard_view(pd, ps, 3);
+    chelis_tensor* inputs[2] = {{&xt, &pt}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    guard_entry(inputs, 2, outputs, 1);
+    printf("NO TRAP\n");
+    return 0;
+}}
+"#
+    );
+
+    let (ok, out) = compile_and_run_kernel_capturing("guard_entry", &result.c_source, &harness);
+    assert!(!ok, "witnesses of `n` disagree at 2 and 3: {out}");
+    assert!(
+        !out.contains("NO TRAP"),
+        "the guard runs at ENTRY, before any other operation: {out}"
+    );
+    assert!(
+        out.contains("numeric trap: domain in load at int64"),
+        "section 4.7 makes this an [04-NUM-9] guard naming the `load`: {out}"
+    );
+    assert!(
+        out.contains('n'),
+        "the disagreeing claim is conveyed: {out}"
+    );
+}
+
+/// The positive twin: agreeing witnesses run to completion. Without it, a
+/// guard that trapped on every class would satisfy the row above.
+#[test]
+fn an_all_interface_class_runs_when_its_witnesses_agree() {
+    let dag = two_witness_dag();
+    let result = codegen_with_options(
+        &dag,
+        "guard_entry_ok",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .expect("codegen");
+
+    let harness = format!(
+        r#"{GUARD_HARNESS_HEADER}
+extern void guard_entry_ok(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float xd[2] = {{1.0f, 2.0f}};
+    float pd[2] = {{3.0f, 4.0f}};
+    int64_t xs[1];
+    int64_t ps[1];
+    chelis_tensor xt = guard_view(xd, xs, 2);
+    chelis_tensor pt = guard_view(pd, ps, 2);
+    chelis_tensor* inputs[2] = {{&xt, &pt}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    guard_entry_ok(inputs, 2, outputs, 1);
+    printf("RAN %.1f\n", ((float*)outputs[0]->data)[0]);
+    return 0;
+}}
+"#
+    );
+
+    let (ok, out) = compile_and_run_kernel_capturing("guard_entry_ok", &result.c_source, &harness);
+    assert!(ok, "agreeing witnesses must execute: {out}");
+    assert!(out.contains("RAN -1.0"), "and produce neg(x): {out}");
 }
