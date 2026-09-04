@@ -2761,6 +2761,15 @@ const SEMANTIC_REGISTRATIONS: &[SemanticRegistration] = &[
                    -> tensor[D\\axes, int64]",
         atom: "[05-OP-29]",
     },
+    SemanticRegistration {
+        callable: "[compiler-builtin-numeric] relu(input: &tensor[D, p]) -> tensor[D, p]",
+        atom: "[05-OP-43]",
+    },
+    SemanticRegistration {
+        callable: "[compiler-risc-numeric] relu_adjoint(input: &tensor[D, p], cotangent: \
+                   &tensor[D, p]) -> tensor[D, p]",
+        atom: "[05-OP-43]",
+    },
 ];
 
 fn repo_root() -> PathBuf {
@@ -7612,6 +7621,37 @@ fn count_is_registered_against_its_exact_authority_atom() {
         registration_problem(*registration, &spec).is_none(),
         "count must name the existing [05-OP-29] normative atom"
     );
+}
+
+/// chelis#1313: the structural ReLU identity and its dedicated adjoint are
+/// compiler-owned numeric operations. Neither is discoverable through a
+/// published C header, stdlib def, or prelude ADT, so pin both directions of
+/// their exact [05-OP-43] registration here.
+#[test]
+fn relu_identities_are_registered_against_their_exact_authority_atom() {
+    let expected = [
+        (
+            "[compiler-builtin-numeric] relu(input: &tensor[D, p]) -> tensor[D, p]",
+            "[05-OP-43]",
+        ),
+        (
+            "[compiler-risc-numeric] relu_adjoint(input: &tensor[D, p], cotangent: &tensor[D, p]) -> tensor[D, p]",
+            "[05-OP-43]",
+        ),
+    ];
+    let spec = fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL))
+        .expect("controlling spec/05 must be readable");
+    for (callable, atom) in expected {
+        let registration = SEMANTIC_REGISTRATIONS
+            .iter()
+            .find(|registration| registration.callable == callable)
+            .unwrap_or_else(|| panic!("missing semantic registration for `{callable}`"));
+        assert_eq!(registration.atom, atom, "wrong authority for `{callable}`");
+        assert!(
+            registration_problem(*registration, &spec).is_none(),
+            "`{callable}` must name the existing [05-OP-43] normative atom"
+        );
+    }
 }
 
 #[test]

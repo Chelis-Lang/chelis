@@ -3467,6 +3467,15 @@ class SmtCiSplitTests(unittest.TestCase):
             "cargo test -p chelis-prove --features smt --lib cvc5_engine_",
             block,
         )
+        # chelis#1125 PP7: prove_deep_obligations.rs is `#![cfg(feature =
+        # "smt")]` and had no runner anywhere, so its assertion that the `.dp`
+        # surface proves at `proof_tier = smt` could not fail. The step below
+        # is the runner; pinning it here is what keeps a merged smt-gated test
+        # from going uninvoked again.
+        self.assertIn(
+            "cargo test -p chelis-cli --features smt --test prove_deep_obligations",
+            block,
+        )
         forbidden = [
             "--features carcara",
             "--features z3",

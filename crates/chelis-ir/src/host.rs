@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_deep::decode_effect_kind;
-use chelis_types::adt::{AdtDef, AdtRegistry};
+use chelis_types::adt::{AdtDef, AdtRegistry, TypeAliasDef};
 use chelis_types::infer::type_to_deep_expr;
 use chelis_types::types::{Dim, NominalArg, NominalParamKind, Prim, TensorPrec, Type};
 use chelis_types::{BUILTIN_NAMES, CheckedProgram};
@@ -2175,6 +2175,7 @@ fn lower_host_program(
             let declared_ty = ty_expr
                 .as_ref()
                 .map(|ty| decode_host_type_or_raise(ty, &UnordMap::new()))
+                .map(|ty| expand_host_type_aliases(program, ty))
                 .filter(|ty| !ty.is_unresolved());
             // chelis#1137: movement-helper lowering may prove a different
             // rank from the checker's provisional type (notably `expand`
@@ -4156,6 +4157,8 @@ fn risc_op_canonical_name(op: &RiscOp) -> &'static str {
         RiscOp::Mul => "mul",
         RiscOp::MaxElem => "max_elem",
         RiscOp::MinElem => "min_elem",
+        RiscOp::Relu => "relu",
+        RiscOp::ReluAdjoint => "relu_adjoint",
         RiscOp::Neg => "neg",
         RiscOp::Abs => "abs",
         RiscOp::Reshape { .. } => "reshape",
@@ -10515,7 +10518,21 @@ fn actualize_tensor_helper_types(
                         })
                         .unwrap_or(forward)
                 }),
+            crate::dag::RiscOp::ReluAdjoint => node
+                .inputs
+                .first()
+                .and_then(|input| inferred.get(input))
+                .map(|input| {
+                    node.inputs
+                        .get(1)
+                        .and_then(|gradient| inferred.get(gradient))
+                        .map(|gradient| {
+                            merge_binary_tensor_types(input, gradient, node.output_type.precision)
+                        })
+                        .unwrap_or_else(|| precision_like(input, node.output_type.precision))
+                }),
             crate::dag::RiscOp::Neg
+            | crate::dag::RiscOp::Relu
             | crate::dag::RiscOp::Exp
             | crate::dag::RiscOp::Log
             | crate::dag::RiscOp::Sin
@@ -11364,6 +11381,25 @@ fn expr_host_type(
     expand_host_type_aliases(program, specialized)
 }
 
+/// Resolve a transparent alias after reef linking has qualified the use-site
+/// spelling but the checker registry still owns the declaration's authored
+/// spelling. Exact identity wins; a terminal fallback is valid only when it
+/// identifies one alias, matching the other linked-name lookups in this lane.
+fn resolve_host_type_alias<'a>(registry: &'a AdtRegistry, name: &str) -> Option<&'a TypeAliasDef> {
+    if let Some(alias) = registry.resolve_alias(name) {
+        return Some(alias);
+    }
+    if registry.lookup(name).is_some() {
+        return None;
+    }
+    let mut matches = registry
+        .aliases
+        .iter()
+        .filter_map(|(key, alias)| terminal_name_matches(key, name).then_some(alias));
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
 /// Expand checker-validated aliases before a host type drives layout,
 /// constructor, field, or match decisions.
 ///
@@ -11388,7 +11424,7 @@ fn expand_host_type_aliases(program: &CheckedProgram, ty: HostTypeTerm) -> HostT
                     .into_iter()
                     .map(|argument| expand(program, argument, visiting))
                     .collect::<Vec<_>>();
-                let Some(alias) = program.adt_registry().resolve_alias(&name) else {
+                let Some(alias) = resolve_host_type_alias(program.adt_registry(), &name) else {
                     return HostTypeTerm::Adt(name, args);
                 };
                 if alias.params.len() != args.len() || !visiting.insert(name.clone()) {
@@ -12140,7 +12176,7 @@ fn decode_expanded_host_type_expr(program: &CheckedProgram, expr: &Expr) -> Opti
         && let Some((name, arguments)) = children
             .split_first()
             .and_then(|(name, arguments)| symbol_name(name).map(|name| (name, arguments)))
-        && let Some(alias) = program.adt_registry().resolve_alias(name)
+        && let Some(alias) = resolve_host_type_alias(program.adt_registry(), name)
         && alias.params.len() == arguments.len()
     {
         let parameter_kinds = if alias.param_kinds.len() == alias.params.len() {
@@ -14445,6 +14481,78 @@ mod tests {
 
     fn parse_one_expr(source: &str) -> Expr {
         deep_expr(source)
+    }
+
+    #[test]
+    fn linked_alias_resolution_accepts_one_terminal_match() {
+        let mut registry = AdtRegistry::new();
+        registry.register_alias(
+            "PairAlias".to_string(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Type::Tuple(vec![Type::Prim(Prim::F32), Type::Prim(Prim::F32)]),
+        );
+
+        let resolved = resolve_host_type_alias(
+            &registry,
+            "Pkg__issue__1293__recursive__cotangents__Demo__Main__PairAlias",
+        )
+        .expect("a qualified linked reference must find its unique transparent alias");
+        assert!(matches!(resolved.body, Type::Tuple(_)));
+    }
+
+    #[test]
+    fn linked_alias_resolution_refuses_an_ambiguous_terminal_match() {
+        let mut registry = AdtRegistry::new();
+        for name in ["Adep__PairAlias", "Blib__PairAlias"] {
+            registry.register_alias(
+                name.to_string(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Type::Tuple(vec![Type::Prim(Prim::F32), Type::Prim(Prim::F32)]),
+            );
+        }
+
+        assert!(
+            resolve_host_type_alias(&registry, "Pkg__PairAlias").is_none(),
+            "a non-exact terminal spelling must not silently select one colliding alias"
+        );
+        assert!(
+            resolve_host_type_alias(&registry, "Adep__PairAlias").is_some(),
+            "an exact linked alias identity remains authoritative"
+        );
+    }
+
+    #[test]
+    fn linked_alias_resolution_preserves_an_exact_adt_identity() {
+        let mut registry = AdtRegistry::new();
+        registry.defs.insert(
+            "Pkg__collidelib__Demo__Main__Wrapped".to_string(),
+            AdtDef {
+                name: "Pkg__collidelib__Demo__Main__Wrapped".to_string(),
+                type_params: Vec::new(),
+                param_kinds: Vec::new(),
+                param_vars: Vec::new(),
+                param_args: Vec::new(),
+                variants: Vec::new(),
+                opaque: false,
+                defining_module: None,
+            },
+        );
+        registry.register_alias(
+            "Pkg__collidedep__Demo__Main__Wrapped".to_string(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Type::Tuple(vec![Type::Prim(Prim::F32), Type::Prim(Prim::F32)]),
+        );
+
+        assert!(
+            resolve_host_type_alias(&registry, "Pkg__collidelib__Demo__Main__Wrapped").is_none(),
+            "an exact ADT identity must not be reinterpreted as another package's alias"
+        );
     }
 
     #[test]

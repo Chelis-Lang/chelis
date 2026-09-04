@@ -342,6 +342,8 @@ pub(crate) fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::MaxElem => "max_elem",
         RiscOp::MinElem => "min_elem",
         RiscOp::ExtremaAdjoint { .. } => "extrema_adjoint",
+        RiscOp::Relu => "relu",
+        RiscOp::ReluAdjoint => "relu_adjoint",
         RiscOp::Neg => "neg",
         RiscOp::Recip => "recip",
         RiscOp::Exp => "exp",
@@ -817,6 +819,21 @@ fn compute_adjoints(
                 None,
             );
             Some(vec![(a, zero_a), (b, zero_b), (cotangent, dg)])
+        }
+        RiscOp::Relu => {
+            let x = node.inputs[0];
+            let ty = forward.get(x).unwrap().output_type.clone();
+            let dx = dag.add_node(RiscOp::ReluAdjoint, vec![x, g], ty, None);
+            Some(vec![(x, dx)])
+        }
+        RiscOp::ReluAdjoint => {
+            let x = node.inputs[0];
+            let cotangent = node.inputs[1];
+            let ty_x = forward.get(x).unwrap().output_type.clone();
+            let ty_g = forward.get(cotangent).unwrap().output_type.clone();
+            let zero_x = dag.add_node(RiscOp::synth_const(ty_x.precision, 0.0), vec![], ty_x, None);
+            let dg = dag.add_node(RiscOp::ReluAdjoint, vec![x, g], ty_g, None);
+            Some(vec![(x, zero_x), (cotangent, dg)])
         }
 
         // --- Unary elementwise ---
@@ -2421,16 +2438,9 @@ mod tests {
 
     #[test]
     fn grad_relu_positive() {
-        // relu(x) = max(x, 0), d/dx = 1 when x > 0
-        let (dag, x, out) = build_unary_dag(|dag, a, ty| {
-            let zero = dag.add_node(
-                RiscOp::synth_const(ty.precision, 0.0),
-                vec![],
-                ty.clone(),
-                None,
-            );
-            dag.add_node(RiscOp::MaxElem, vec![a, zero], ty.clone(), None)
-        });
+        // [05-OP-43]: d/dx relu(x) = 1 when x > 0.
+        let (dag, x, out) =
+            build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Relu, vec![a], ty.clone(), None));
         let (a, n) = finite_diff(&dag, out, x, "x", &[], 2.0, 1e-5);
         assert_grad_close(a, n);
         assert!((a - 1.0).abs() < 1e-4);
@@ -2438,16 +2448,9 @@ mod tests {
 
     #[test]
     fn grad_relu_negative() {
-        // relu(x) = max(x, 0), d/dx = 0 when x < 0
-        let (dag, x, out) = build_unary_dag(|dag, a, ty| {
-            let zero = dag.add_node(
-                RiscOp::synth_const(ty.precision, 0.0),
-                vec![],
-                ty.clone(),
-                None,
-            );
-            dag.add_node(RiscOp::MaxElem, vec![a, zero], ty.clone(), None)
-        });
+        // [05-OP-43]: d/dx relu(x) = 0 when x < 0.
+        let (dag, x, out) =
+            build_unary_dag(|dag, a, ty| dag.add_node(RiscOp::Relu, vec![a], ty.clone(), None));
         let (a, n) = finite_diff(&dag, out, x, "x", &[], -2.0, 1e-5);
         assert_grad_close(a, n);
         assert!(a.abs() < 1e-4);

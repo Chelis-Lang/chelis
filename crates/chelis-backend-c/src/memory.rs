@@ -170,6 +170,8 @@ fn classify_nodes(dag: VerifiedDagView<'_>, skipped: &UnordSet<NodeId>) -> Vec<N
                 | RiscOp::MaxElem
                 | RiscOp::MinElem
                 | RiscOp::ExtremaAdjoint { .. }
+                | RiscOp::Relu
+                | RiscOp::ReluAdjoint
                 | RiscOp::Neg
                 | RiscOp::Recip
                 | RiscOp::Exp

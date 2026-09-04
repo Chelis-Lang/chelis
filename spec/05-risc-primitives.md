@@ -1157,8 +1157,6 @@ intact Tier-2 identity.
 > rather than to `max_elem`'s tie rule. Non-float operands are type errors.
 > The operation has no accumulator.
 
-*(Not fully implemented; chelis#1313.)*
-
 ### 3.4 Higher-Level Operations
 
 | Name | Lowering to RISC |

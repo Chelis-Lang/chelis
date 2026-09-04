@@ -208,6 +208,8 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::MaxElem
             | WireRiscOp::MinElem
             | WireRiscOp::ExtremaAdjoint { .. }
+            | WireRiscOp::Relu
+            | WireRiscOp::ReluAdjoint
             | WireRiscOp::Neg
             | WireRiscOp::Recip
             | WireRiscOp::Exp

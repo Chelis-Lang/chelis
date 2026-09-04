@@ -4187,3 +4187,263 @@ fn direct_extrema_adjoints_copy_exact_gradient_bits_for_ties_and_nan_selection()
         &[0x7fc3, 0xbf80, 0x3f80, 0x8000, 0x4040, 0xc080],
     );
 }
+
+fn host_scalar_relu_program(ty: HostType) -> HostProgram {
+    let body = HostExpr::new(HostExprKind::Builtin {
+        name: "relu".to_string(),
+        args: vec![HostExpr::new(HostExprKind::Var(
+            "x".to_string(),
+            ty.clone(),
+        ))],
+        ty: ty.clone(),
+    });
+    HostProgram {
+        globals: Vec::new(),
+        global_tensor_helpers: Vec::new(),
+        functions: vec![HostFunction {
+            name: "the_fn".to_string(),
+            params: vec![HostParam {
+                name: "x".to_string(),
+                ty: ty.clone(),
+            }],
+            ret_ty: ty,
+            body,
+            tensor_helpers: Vec::new(),
+            origin: HostFunctionOrigin::Authored,
+            specialization: None,
+            summary_rejections: Vec::new(),
+        }],
+        summary_rejections: Vec::new(),
+    }
+}
+
+fn host_scalar_relu_reduced_bits_case(tag: &str, ty: HostType, inputs: &[u16], expected: &[u16]) {
+    assert_eq!(inputs.len(), expected.len());
+    let function = format!("host_scalar_relu_{tag}_bits");
+    let src = emit_host_program(&host_scalar_relu_program(ty), &function)
+        .expect("ownership-verified host ReLU codegen");
+    let format_bits = |bits: &[u16]| {
+        bits.iter()
+            .map(|value| format!("UINT16_C(0x{value:04x})"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+#include <stdint.h>
+#define N {n}
+extern uint16_t the_fn(uint16_t);
+int main(void) {{
+    uint16_t inputs[N] = {{ {inputs} }};
+    uint16_t expected[N] = {{ {expected} }};
+    for (int i = 0; i < N; ++i) {{
+        uint16_t got = the_fn(inputs[i]);
+        if (got != expected[i]) {{
+            fprintf(stderr, "{tag} ReLU bit mismatch at %d: got 0x%04x expected 0x%04x\n",
+                    i, (unsigned)got, (unsigned)expected[i]);
+            return 1;
+        }}
+    }}
+    return 0;
+}}
+"#,
+        n = inputs.len(),
+        inputs = format_bits(inputs),
+        expected = format_bits(expected),
+    );
+    let run = compile_and_capture_run(&function, &src, &harness);
+    assert!(
+        run.status.success(),
+        "{tag} host scalar ReLU changed selected stored bits: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+/// [05-OP-43] / chelis#1313: the reduced-float HostProgram ABI carries f16
+/// as stored `uint16_t` bits. ReLU selects that exact carrier for nonnegative
+/// values and every NaN; only a strictly negative numeric input becomes +0.
+#[test]
+fn host_scalar_relu_f16_preserves_selected_stored_bits() {
+    host_scalar_relu_reduced_bits_case(
+        "f16",
+        HostType::Scalar(Prim::F16),
+        &[
+            0xbc00, 0x8000, 0x0000, 0x3c00, 0x7e11, 0xfe11, 0x7c01, 0xfc01,
+        ],
+        &[
+            0x0000, 0x8000, 0x0000, 0x3c00, 0x7e11, 0xfe11, 0x7c01, 0xfc01,
+        ],
+    );
+}
+
+/// [05-OP-43] / chelis#1313: bf16 has the same exact selected-stored-value
+/// rule, including payload/sign preservation for quiet and signaling NaNs.
+#[test]
+fn host_scalar_relu_bf16_preserves_selected_stored_bits() {
+    host_scalar_relu_reduced_bits_case(
+        "bf16",
+        HostType::Scalar(Prim::Bf16),
+        &[
+            0xbf80, 0x8000, 0x0000, 0x3f80, 0x7fc1, 0xffc1, 0x7f91, 0xff91,
+        ],
+        &[
+            0x0000, 0x8000, 0x0000, 0x3f80, 0x7fc1, 0xffc1, 0x7f91, 0xff91,
+        ],
+    );
+}
+
+fn direct_relu_bit_case(case: DirectExtremaBitCase<'_>, expected: [&[u64]; 2]) {
+    let DirectExtremaBitCase {
+        tag,
+        prim,
+        c_dtype,
+        bits_type,
+        lhs_bits: x_bits,
+        rhs_bits: g_bits,
+    } = case;
+    let n = x_bits.len();
+    assert_eq!(g_bits.len(), n);
+    assert!(expected.iter().all(|values| values.len() == n));
+    let format_bits = |bits: &[u64]| {
+        bits.iter()
+            .map(|value| match bits_type {
+                "uint64_t" => format!("UINT64_C(0x{value:016x})"),
+                "uint32_t" => format!("UINT32_C(0x{value:08x})"),
+                _ => format!("UINT16_C(0x{value:04x})"),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    let mut dag = Dag::new();
+    let ty = vec_prim(n, prim);
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+    let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], ty.clone(), None);
+    let relu = dag.add_node(RiscOp::Relu, vec![x], ty.clone(), None);
+    let adjoint = dag.add_node(RiscOp::ReluAdjoint, vec![x, g], ty, None);
+    dag.add_root(relu);
+    dag.add_root(adjoint);
+    let function = format!("direct_relu_{tag}");
+    let src = codegen(&dag, &function).unwrap().c_source;
+    assert!(!src.contains("fmax"), "{tag}: {src}");
+
+    let setup = match prim {
+        Prim::F64 => {
+            "double x_data[N]; double g_data[N]; memcpy(x_data, x_bits, sizeof(x_bits)); memcpy(g_data, g_bits, sizeof(g_bits));"
+        }
+        Prim::F32 => {
+            "float x_data[N]; float g_data[N]; memcpy(x_data, x_bits, sizeof(x_bits)); memcpy(g_data, g_bits, sizeof(g_bits));"
+        }
+        Prim::F16 | Prim::Bf16 => "uint16_t *x_data = x_bits; uint16_t *g_data = g_bits;",
+        _ => unreachable!(),
+    };
+    let read_got = match prim {
+        Prim::F64 => {
+            "uint64_t got; memcpy(&got, &((double *)chelis_tensor_read_view(outputs[out]).data)[i], sizeof(got));"
+        }
+        Prim::F32 => {
+            "uint32_t got; memcpy(&got, &((float *)chelis_tensor_read_view(outputs[out]).data)[i], sizeof(got));"
+        }
+        Prim::F16 | Prim::Bf16 => {
+            "uint16_t got = ((uint16_t *)chelis_tensor_read_view(outputs[out]).data)[i];"
+        }
+        _ => unreachable!(),
+    };
+    let expected_rows = expected
+        .iter()
+        .map(|values| format!("{{ {} }}", format_bits(values)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+#include <stdint.h>
+#define N {n}
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    {bits_type} x_bits[N] = {{ {x} }};
+    {bits_type} g_bits[N] = {{ {g} }};
+    {bits_type} expected[2][N] = {{ {expected_rows} }};
+    {setup}
+    chelis_tensor *x = make_view_typed_1d(x_data, N, {c_dtype});
+    chelis_tensor *g = make_view_typed_1d(g_data, N, {c_dtype});
+    chelis_tensor *inputs[2] = {{ x, g }};
+    chelis_tensor *outputs[2] = {{ NULL, NULL }};
+    {function}(inputs, 2, outputs, 2);
+    for (int out = 0; out < 2; out++) {{
+        for (int i = 0; i < N; i++) {{ {read_got} if (got != expected[out][i]) return 1; }}
+    }}
+    puts("PASS"); return 0;
+}}
+"#,
+        x = format_bits(x_bits),
+        g = format_bits(g_bits),
+    );
+    let output = compile_and_run_kernel(&function, &src, &harness)
+        .unwrap_or_else(|| panic!("{tag} direct ReLU and adjoint did not compile and run"));
+    assert!(output.contains("PASS"), "{tag}: {output}");
+}
+
+#[test]
+fn direct_relu_preserves_input_bits_and_adjoint_uses_strict_positive_mask() {
+    let run = |case: DirectExtremaBitCase<'_>| {
+        let x = case.lhs_bits;
+        let g = case.rhs_bits;
+        let forward = [x[0], x[1], 0, 0, x[4], x[5]];
+        let adjoint = [0, 0, 0, 0, g[4], g[5]];
+        direct_relu_bit_case(case, [&forward, &adjoint]);
+    };
+
+    run(DirectExtremaBitCase {
+        tag: "f64",
+        prim: Prim::F64,
+        c_dtype: "CHELIS_DTYPE_F64",
+        bits_type: "uint64_t",
+        lhs_bits: &[
+            0x7ff8_1111_2222_3333,
+            0x8000_0000_0000_0000,
+            0,
+            0xbff0_0000_0000_0000,
+            0x3ff0_0000_0000_0000,
+            1,
+        ],
+        rhs_bits: &[
+            0x7ff8_abcd_1234_5678,
+            0x7ff0_0000_0000_0000,
+            0x8000_0000_0000_0000,
+            0xfff8_abcd_1234_5678,
+            0xbff0_0000_0000_0000,
+            0x7ff0_0000_0000_0000,
+        ],
+    });
+    run(DirectExtremaBitCase {
+        tag: "f32",
+        prim: Prim::F32,
+        c_dtype: "CHELIS_DTYPE_F32",
+        bits_type: "uint32_t",
+        lhs_bits: &[0x7fc1_2345, 0x8000_0000, 0, 0xbf80_0000, 0x3f80_0000, 1],
+        rhs_bits: &[
+            0x7fc6_789a,
+            0x7f80_0000,
+            0x8000_0000,
+            0xffc6_789a,
+            0xbf80_0000,
+            0x7f80_0000,
+        ],
+    });
+    run(DirectExtremaBitCase {
+        tag: "f16",
+        prim: Prim::F16,
+        c_dtype: "CHELIS_DTYPE_F16",
+        bits_type: "uint16_t",
+        lhs_bits: &[0x7e11, 0x8000, 0, 0xbc00, 0x3c00, 1],
+        rhs_bits: &[0x7e33, 0x7c00, 0x8000, 0xfe33, 0xbc00, 0x7c00],
+    });
+    run(DirectExtremaBitCase {
+        tag: "bf16",
+        prim: Prim::Bf16,
+        c_dtype: "CHELIS_DTYPE_BF16",
+        bits_type: "uint16_t",
+        lhs_bits: &[0x7fc1, 0x8000, 0, 0xbf80, 0x3f80, 1],
+        rhs_bits: &[0x7fc3, 0x7f80, 0x8000, 0xffc3, 0xbf80, 0x7f80],
+    });
+}

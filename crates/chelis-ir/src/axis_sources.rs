@@ -230,6 +230,8 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         | RiscOp::MaxElem
         | RiscOp::MinElem
         | RiscOp::ExtremaAdjoint { .. }
+        | RiscOp::Relu
+        | RiscOp::ReluAdjoint
         | RiscOp::Neg
         | RiscOp::Exp
         | RiscOp::Log

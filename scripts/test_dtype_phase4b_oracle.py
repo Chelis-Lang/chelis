@@ -121,6 +121,22 @@ class ContractValidationTests(unittest.TestCase):
             "Phase 4B acknowledgement enforcing mode"
         )
 
+    def test_relu_device_completion_cannot_regress_to_issue_receipts(self) -> None:
+        self.replace(
+            Path("spec/design/capability_table.md"),
+            "No backend cell cites [#1313] after it closes",
+            "Every backend cell cites [#1313] after it closes",
+        )
+        self.assert_contract_fails("ReLU closed-issue receipt removal")
+
+    def test_relu_child_oracle_cannot_drop_the_exact_success_line(self) -> None:
+        self.replace(
+            Path("spec/design/dtype_semantics.md"),
+            "DTYPE RELU ORACLE:\nPASS",
+            "DTYPE RELU ORACLE: MAYBE",
+        )
+        self.assert_contract_fails("ReLU child oracle success line")
+
     def test_missing_operation_atom_fails(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),

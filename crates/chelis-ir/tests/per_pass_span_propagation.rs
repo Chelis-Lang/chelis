@@ -737,8 +737,8 @@ fn tier2_sub_nodes_use_synthesized_marker_when_parent_has_no_span() {
     // No parent span — sub-nodes should get __synthesized_tier2__.
     let _ = tier2::lower_relu(&mut dag, x, &scalar_f32(), None);
 
-    // The relu decomposes into Const(0) + MaxElem. Both should carry the
-    // marker. The original Const(1) input does NOT.
+    // The dedicated ReLU identity carries the synthesized marker. The
+    // original Const(1) input does not.
     let mut marker_count = 0usize;
     for node in dag.nodes() {
         match node.span_id.as_deref() {
@@ -756,8 +756,8 @@ fn tier2_sub_nodes_use_synthesized_marker_when_parent_has_no_span() {
         }
     }
     assert!(
-        marker_count >= 2,
-        "expected at least 2 sub-nodes carrying __synthesized_tier2__, got {marker_count}"
+        marker_count == 1,
+        "expected exactly one ReLU identity carrying __synthesized_tier2__, got {marker_count}"
     );
 }
 

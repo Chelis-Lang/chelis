@@ -912,7 +912,7 @@ class completion oracle and ends with `RUNTIME EXTENT ORACLE: PASS`.
 | [#1382] | bare binder as an `expand` size: no witness in eval, compiled lanes ICE | A |
 | [#1397] | shape-derived bound erases a declared result; wildcard root masks #1378 | B (claim erasure); separately tracked root boundary |
 | [#1480] | a `ToEnd` shrink end is never checked against a `Lit(0)` start | B |
-| [#1482] | runtime-bound `shrink` consumed elementwise: the `Const` operand's axis has no declared dim source and C build ICEs | B |
+| [#1482] | runtime-bound `shrink` consumed by a composite elementwise lowering: a synthesized `Const` operand's axis has no declared dim source and C build ICEs. [#1313] removes this mechanism from ReLU only; sigmoid retains the class and typed receipt | B; ReLU variant fixed as part of [#1482] by [#1313] |
 | [#1265] | comparison consumer never selects the deferred shape | superseded; re-read against §4.7.2 |
 | [#1380] | `matmul` over two deferred positional `expand` results publishes `?0` as the checked result type | superseded; re-read against §4.7.2 |
 | [#1338] | coupled defaults settle nondeterministically | superseded; resolved by construction under §4.7.2's single result shape |
@@ -1107,4 +1107,5 @@ decides the underlying rule, and what replaces it.
 [#1467]: https://github.com/Chelis-Lang/chelis/pull/1467
 [#1480]: https://github.com/Chelis-Lang/chelis/issues/1480
 [#1482]: https://github.com/Chelis-Lang/chelis/issues/1482
+[#1313]: https://github.com/Chelis-Lang/chelis/issues/1313
 [#1489]: https://github.com/Chelis-Lang/chelis/issues/1489

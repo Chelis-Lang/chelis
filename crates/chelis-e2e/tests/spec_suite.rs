@@ -303,28 +303,15 @@ fn spec_unbound_variable_is_error() {
 // =========================================================================
 
 #[test]
-fn spec_relu_decomposes_to_max_elem() {
+fn spec_relu_survives_as_dedicated_identity() {
     let src = r#"
         (def {} x (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))
         (def {} y (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
             (var {} relu) (var {} x)))
     "#;
     let dag = lower_deep(src);
-    let has_max_elem = dag.nodes().iter().any(|n| matches!(n.op, RiscOp::MaxElem));
-    let has_const_zero = dag
-        .nodes()
-        .iter()
-        .any(|n| matches!(n.op, RiscOp::Const { value } if value.as_f64_lossy() == 0.0));
-    assert!(has_max_elem, "relu should decompose to MaxElem");
-    assert!(has_const_zero, "relu should decompose with Const(0)");
-    // No standalone Relu op should exist in the DAG.
-    let has_no_relu_tag = dag.nodes().iter().all(|n| {
-        !matches!(
-            &n.op,
-            RiscOp::Load { name } if name == "relu"
-        )
-    });
-    assert!(has_no_relu_tag, "RISC DAG must not contain a relu Load");
+    assert!(dag.nodes().iter().any(|n| matches!(n.op, RiscOp::Relu)));
+    assert!(!dag.nodes().iter().any(|n| matches!(n.op, RiscOp::MaxElem)));
 }
 
 #[test]

@@ -1980,7 +1980,8 @@ pub struct WireRecordPatternField {
 ///   that exact encoding.
 /// - `7`: chelis#1277 Slice A — `WireRiscOp::Expand::size` changed from a
 ///   display string to `WireRtDim`, and `WireRtDim` gained the structural
-///   `InputAxis` metadata read.
+///   `InputAxis` metadata read. Chelis#1313 added the dedicated `Relu` and
+///   `ReluAdjoint` identities to this unreleased exact schema.
 pub const WIRE_DAG_SCHEMA_VERSION: u32 = 7;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
@@ -2286,6 +2287,63 @@ impl WireDag {
                         fill.prim().name(),
                         node.id,
                         output_prim.name()
+                    )));
+                }
+            }
+
+            if matches!(&node.op, WireRiscOp::Relu | WireRiscOp::ReluAdjoint) {
+                let expected_inputs = if matches!(&node.op, WireRiscOp::Relu) {
+                    1
+                } else {
+                    2
+                };
+                if node.inputs.len() != expected_inputs {
+                    return Err(WireDagContractError::new(format!(
+                        "WireDag ReLU node {} requires exactly {expected_inputs} input(s), found {}",
+                        node.id,
+                        node.inputs.len()
+                    )));
+                }
+                let inputs = node
+                    .inputs
+                    .iter()
+                    .map(|input_id| {
+                        self.nodes[..index]
+                            .iter()
+                            .find(|candidate| candidate.id == *input_id)
+                            .ok_or_else(|| {
+                                WireDagContractError::new(format!(
+                                    "WireDag ReLU node {} input {input_id} does not resolve to an earlier node",
+                                    node.id
+                                ))
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let Some(output_prim) = Prim::parse_name(&node.output_type.precision) else {
+                    return Err(WireDagContractError::new(format!(
+                        "WireDag ReLU node {} has unknown output dtype {}",
+                        node.id, node.output_type.precision
+                    )));
+                };
+                if !matches!(output_prim, Prim::F16 | Prim::Bf16 | Prim::F32 | Prim::F64) {
+                    return Err(WireDagContractError::new(format!(
+                        "WireDag ReLU node {} output dtype must be float, found {}",
+                        node.id, node.output_type.precision
+                    )));
+                }
+                if inputs.iter().any(|input| {
+                    input.output_type.precision != node.output_type.precision
+                        || input.output_type.dims.len() != node.output_type.dims.len()
+                        || input
+                            .output_type
+                            .dims
+                            .iter()
+                            .zip(&node.output_type.dims)
+                            .any(|(actual, expected)| !wire_dim_info_equal(actual, expected))
+                }) {
+                    return Err(WireDagContractError::new(format!(
+                        "WireDag ReLU node {} inputs must match its output shape and float dtype",
+                        node.id
                     )));
                 }
             }
@@ -2685,6 +2743,8 @@ pub enum WireRiscOp {
         extrema: WireExtremaKind,
         operand: WireExtremaOperand,
     },
+    Relu,
+    ReluAdjoint,
     Neg,
     Recip,
     Exp,
@@ -3193,6 +3253,63 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn relu_wire_identities_round_trip_as_distinct_exact_variants() {
+        for (op, expected) in [
+            (WireRiscOp::Relu, r#"{"kind":"relu"}"#),
+            (WireRiscOp::ReluAdjoint, r#"{"kind":"relu_adjoint"}"#),
+        ] {
+            let encoded = serde_json::to_string(&op).expect("serialize relu identity");
+            assert_eq!(encoded, expected);
+            let decoded =
+                serde_json::from_str::<WireRiscOp>(&encoded).expect("decode relu identity");
+            assert_eq!(serde_json::to_string(&decoded).unwrap(), expected);
+        }
+
+        assert!(serde_json::from_str::<WireRiscOp>(r#"{"kind":"relu_surrogate"}"#).is_err());
+    }
+
+    #[test]
+    fn relu_wire_contract_rejects_wrong_arity_dtype_and_shape() {
+        let ty = |precision: &str, size: usize| WireTensorType {
+            dims: vec![WireDimInfo::Lit { size }],
+            precision: precision.to_string(),
+        };
+        let load = |id, precision: &str, size| WireDagNode {
+            id,
+            op: WireRiscOp::Load {
+                name: format!("input_{id}"),
+            },
+            inputs: vec![],
+            output_type: ty(precision, size),
+        };
+        let validate = |op, inputs, output_type| {
+            WireDag {
+                schema_version: WIRE_DAG_SCHEMA_VERSION,
+                nodes: vec![
+                    load(0, "f32", 4),
+                    load(1, "f32", 4),
+                    WireDagNode {
+                        id: 2,
+                        op,
+                        inputs,
+                        output_type,
+                    },
+                ],
+                roots: vec![2],
+            }
+            .validate_wire_contract()
+        };
+
+        validate(WireRiscOp::Relu, vec![0], ty("f32", 4)).expect("valid ReLU wire node");
+        validate(WireRiscOp::ReluAdjoint, vec![0, 1], ty("f32", 4))
+            .expect("valid ReLU adjoint wire node");
+        assert!(validate(WireRiscOp::Relu, vec![0, 1], ty("f32", 4)).is_err());
+        assert!(validate(WireRiscOp::Relu, vec![0], ty("int32", 4)).is_err());
+        assert!(validate(WireRiscOp::ReluAdjoint, vec![0, 1], ty("f32", 3)).is_err());
+        assert!(validate(WireRiscOp::ReluAdjoint, vec![0, 99], ty("f32", 4)).is_err());
     }
 
     #[test]

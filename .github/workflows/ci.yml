@@ -399,6 +399,18 @@ jobs:
       - name: Run cvc5 engine smoke tests
         run: cargo test -p chelis-prove --features smt --lib cvc5_engine_
 
+      # chelis#1125 PP7: `crates/chelis-cli/tests/prove_deep_obligations.rs` is
+      # `#![cfg(feature = "smt")]` and had NO invocation anywhere. The gate
+      # never passes `--features smt`, this job tested only `chelis-prove`, and
+      # smt-full-prove.yml never names `chelis-cli`, so a merged test asserting
+      # the correct proof tier for the `.dp` surface could not fail and the
+      # regression it was written to catch landed green. This is the smallest
+      # step that runs it, in the job that already provisions cvc5. Pinned by
+      # scripts/test_gate.py's SmtCiSplitTests so it cannot silently disappear
+      # again.
+      - name: Run the Deep-surface obligation tier tests
+        run: cargo test -p chelis-cli --features smt --test prove_deep_obligations
+
       # Clippy's `disallowed_types` ban on raw hash collections
       # (spec/design/hash_order_determinism.md C2.3) only sees the
       # configuration it compiles. This job already provisions cvc5, so it is
@@ -413,7 +425,7 @@ jobs:
   # source (cmake/g++/libgmp) and is only PROVEN on ubuntu-latest by the
   # smt-build job above. These two lanes prove cvc5 also builds on the
   # other two release targets BEFORE release.yml relies on the feature
-  # there: the glibc-2.31 (debian:11) compat toolchain and macOS-arm64.
+  # there: the glibc-2.31 Bullseye compat toolchain and macOS-arm64.
   # Each mirrors its release.yml job's build command exactly
   # (`cargo build --release -p chelis-cli --features smt`) and runs the
   # post-build verifier (.github/scripts/verify_release_smt.py) to
@@ -427,57 +439,25 @@ jobs:
     runs-on: ubuntu-latest
     needs: [changes]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
-    container: debian:11
+    # The immutable digest supplies Python, git, curl, and CA certificates
+    # before checkout while retaining Debian 11's glibc 2.31. After checkout,
+    # ci_apt_get replaces its moving mirrors with the repository-pinned
+    # snapshot before installing anything.
+    container: python:3.11.13-bullseye@sha256:df0bd610af061603b29d63eb82027b64d5a3f15506e39270422b10b2a55079fc
     defaults:
       run:
         shell: bash
     steps:
-      # python3-pip provides `tomli` (cvc5's build-time TOML codegen
-      # needs it on Python < 3.11; debian:11 ships Python 3.9, and
-      # python3-tomli is not in the main bullseye suite, only backports).
-      # python3-venv provides the `venv` module cvc5's cmake create_venv
-      # step uses for its codegen venv (debian:11's slim image omits it,
-      # so create_venv fails configure.sh otherwise). m4 is required by
-      # GMP's configure: cvc5's --auto-download builds its own static GMP
-      # from source, and GMP's ./configure aborts with "No usable m4 in
-      # $PATH" without it (debian:11's slim image omits m4; ubuntu-latest
-      # and the macOS image both ship it). cmake/g++/libclang for the
-      # cvc5 source build; libgmp/libmpfr-dev are not strictly needed for
-      # the smt-only feature (cvc5 builds its own static GMP) but match
-      # the Linux smt-build recipe. git is needed because cvc5-sys clones
-      # the cvc5 source at build time.
-      # Bootstrap the few packages needed BEFORE the in-repo retry helper can
-      # run, on the slim debian:11 image: git + ca-certificates + curl for
-      # `actions/checkout@v6`, and python3 to run scripts/ci_apt_get.py itself
-      # (debian:11-slim ships no python3, and the helper installs python3 among
-      # the heavy set -- so python3 must exist first; chicken-and-egg). This
-      # split lets the heavy prereq install (the one that actually flakes on a
-      # mirror reset) go through the retry helper, which lives in the repo and
-      # cannot be invoked until checkout. Kept inline and minimal; a reset on
-      # these four tiny packages is far rarer than on the full cvc5 set.
-      - name: Bootstrap checkout prerequisites
-        run: |
-          set -euo pipefail
-          apt-get update
-          apt-get install -y --no-install-recommends git ca-certificates curl python3
-
       - name: Checkout
         uses: actions/checkout@v6
 
-      # apt-get under retry: debian:11's mirrors intermittently reset the
-      # connection mid-download (`deb.debian.org ... Connection reset by
-      # peer`), flaking this job with no code change. ci_apt_get.py retries
-      # the update+install pair on a transient failure; a genuine packaging
-      # error still fails after the attempts are exhausted. --no-sudo: the
-      # container already runs as root and has no sudo. See scripts/ci_apt_get.py.
+      # m4 is required by GMP's configure; cmake/g++/libclang support the cvc5
+      # source build. The pinned snapshot makes package indices and payloads
+      # one immutable generation, while the retry loop still handles network
+      # resets and stalls. The Python 3.11 base already supplies git, pip, and
+      # venv, and cvc5 uses stdlib tomllib rather than a PyPI tomli bootstrap.
       - name: Install build prerequisites
-        run: |
-          set -euo pipefail
-          python3 scripts/ci_apt_get.py --no-sudo --no-install-recommends \
-            build-essential m4 \
-            cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev \
-            python3 python3-pip python3-venv
-          pip3 install --break-system-packages tomli || pip3 install tomli
+        run: python3 scripts/ci_apt_get.py --debian-bullseye-snapshot --no-sudo --no-install-recommends build-essential m4 cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev
 
       - name: Assert glibc 2.31 build environment
         run: |
@@ -489,7 +469,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       # chelis#583: dedicated stable-key cvc5 cache, in its OWN
-      # `linux-glibc231` namespace so the debian:11 (glibc 2.31) toolchain's
+      # `linux-glibc231` namespace so the Bullseye (glibc 2.31) toolchain's
       # libcvc5.a is never crossed with the ubuntu-latest one. On a warm hit
       # cvc5-sys links the prebuilt lib (built in this same container, so the
       # glibc-2.31 assertion below stays valid) instead of rebuilding from
@@ -500,7 +480,7 @@ jobs:
 
       # Durable Release asset first, Actions cache fallback second; see the
       # smt-build job for the full rationale. The asset is built in this same
-      # debian:11 (glibc 2.31) container by build-cvc5.yml, so the glibc-2.31
+      # Bullseye (glibc 2.31) container by build-cvc5.yml, so the glibc-2.31
       # assertion below stays valid on the linked artifact.
       - name: Fetch durable prebuilt cvc5 (Release asset)
         id: cvc5fetch

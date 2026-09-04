@@ -733,6 +733,15 @@ pub enum RiscOp {
         operand: ExtremaOperand,
     },
 
+    /// [05-OP-43] ReLU identity. This node must survive construction and AD
+    /// intact so its zero-at-zero adjoint is not replaced by MaxElem's
+    /// first-operand tie rule.
+    Relu,
+    /// AD-only [05-OP-43] selector. Inputs are `(x, cotangent)`; output is the
+    /// complete cotangent exactly where `0 < x`, and exact positive zero
+    /// otherwise (including both zeros and NaN).
+    ReluAdjoint,
+
     // --- Unary elementwise ---
     Neg,
     Exp,
@@ -1417,6 +1426,11 @@ impl RiscOp {
             // Internal reverse-mode selection node; Beacon targets the
             // forward extrema identity rather than its generated adjoint.
             RiscOp::ExtremaAdjoint { .. } => false,
+
+            // [05-OP-43] identity and its AD-only selector stay explicit so
+            // the zero-at-zero convention cannot collapse to MaxElem's tie
+            // rule. Beacon has not yet registered dedicated transformers.
+            RiscOp::Relu | RiscOp::ReluAdjoint => false,
 
             // `FusedElem` is a backend specialization that bundles
             // elementwise steps into one kernel; Beacon targets the
@@ -2179,7 +2193,8 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         | RiscOp::CmpLt
         | RiscOp::MaxElem
         | RiscOp::MinElem
-        | RiscOp::ExtremaAdjoint { .. } => node
+        | RiscOp::ExtremaAdjoint { .. }
+        | RiscOp::ReluAdjoint => node
             .inputs
             .iter()
             .find_map(|input| shape_source_for_axis(dag, *input, axis)),
@@ -2195,6 +2210,7 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         | RiscOp::Floor
         | RiscOp::Ceil
         | RiscOp::Round
+        | RiscOp::Relu
         | RiscOp::UniformLike { .. }
         | RiscOp::Dropout { .. } => shape_source_for_axis(dag, *node.inputs.first()?, axis),
         RiscOp::Copy
@@ -3413,6 +3429,8 @@ mod tests {
             RiscOp::ScatterAdd { axis: 0 },
             RiscOp::Scatter { axis: 0 },
             RiscOp::ScatterElements { axis: 0 },
+            RiscOp::Relu,
+            RiscOp::ReluAdjoint,
         ]
     }
 
@@ -3425,12 +3443,12 @@ mod tests {
     #[test]
     fn every_risc_op_is_classified_for_verifier_subset() {
         let all = one_of_every_risc_op();
-        // 53-variant closed vocabulary (spec WI-2 / dag.rs RiscOp); the
-        // 53rd is `CastTrunc`, the [05-OP-6] ladder rung (chelis#759).
+        // Explicit targetability samples include both dedicated ReLU
+        // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            53,
-            "one_of_every_risc_op must list all 53 RiscOp variants"
+            55,
+            "one_of_every_risc_op must list all 55 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -3446,13 +3464,14 @@ mod tests {
         // (1, chelis#759), one_hot (1), the `Shape` metadata read (1), sparse
         // gather/scatter (4, including element-wise `ScatterElements`),
         // linearity/lifecycle markers + store (4), reduce-window-grad (1),
-        // and fused-elem (1) are excluded (19).
+        // fused-elem (1), and the dedicated ReLU identity/adjoint (2) are
+        // excluded (21) until Beacon registers their own transformers.
         assert_eq!(
             targetable, 34,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 19,
+            excluded, 21,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 

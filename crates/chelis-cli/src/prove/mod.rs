@@ -2007,28 +2007,46 @@ fn count_invariant_opaque_surf(decls: &[Decl]) -> usize {
 
 /// Deep twin of `count_invariant_opaque_surf`: a `deftype` whose metadata
 /// carries both `opaque: true` and an `invariant` entry.
+///
+/// chelis#1125 PP7 / spec/04-type-system.md §10 [04-TOT-5]: this reader was
+/// dead twice over and therefore returned zero for EVERY input, so the warning
+/// could not fire on the `.dp` path at all while the `.ch` path warned from
+/// `count_invariant_opaque_surf`. It destructured `Expr::List` only, and a
+/// `.dp` reaches here through `parse_and_stamp_file` as `Expr::Node`; and it
+/// read element 0 as `Atom::Name("deftype")`, which decode-once (§C4.2)
+/// forbids, because the parser stamps every vocabulary tag as `Atom::Tag`. It
+/// now decodes the tag on either carrier and compares it to `DeepTag::Deftype`,
+/// so no tag spelling is compared as a string at all.
 #[cfg(not(feature = "smt"))]
 fn count_invariant_opaque_deep(exprs: &[DeepExpr]) -> usize {
-    fn scan(expr: &DeepExpr, acc: &mut usize) {
-        if let DeepExpr::List(list, _) = expr {
-            let tag = list.elements.first().and_then(|head| match head {
-                DeepExpr::Atom(DeepAtom::Name(sym), _) => Some(sym.as_str()),
+    /// The decoded tag, metadata, and children of a form on either admitted
+    /// carrier. Deliberately local: the shared total accessor is a separate
+    /// change (PP7 slice E5b).
+    fn decoded(expr: &DeepExpr) -> Option<(DeepTag, &MetaMap, &[DeepExpr])> {
+        match expr {
+            DeepExpr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
+            DeepExpr::List(list, _) => match (list.tag(), list.elements.get(1)) {
+                (Some(tag), Some(DeepExpr::Map(meta, _))) => Some((tag, meta, &list.elements[2..])),
                 _ => None,
+            },
+            _ => None,
+        }
+    }
+    fn scan(expr: &DeepExpr, acc: &mut usize) {
+        let Some((tag, meta, children)) = decoded(expr) else {
+            return;
+        };
+        if tag == DeepTag::Deftype {
+            let opaque = meta.entries.iter().any(|(key, value)| {
+                key == "opaque" && matches!(value, DeepExpr::Atom(DeepAtom::Bool(true), _))
             });
-            if tag == Some("deftype")
-                && let Some(DeepExpr::Map(meta, _)) = list.elements.get(1)
-            {
-                let opaque = meta.entries.iter().any(|(key, value)| {
-                    key == "opaque" && matches!(value, DeepExpr::Atom(DeepAtom::Bool(true), _))
-                });
-                let has_invariant = meta.entries.iter().any(|(key, _)| key == "invariant");
-                if opaque && has_invariant {
-                    *acc += 1;
-                }
+            let has_invariant = meta.entries.iter().any(|(key, _)| key == "invariant");
+            if opaque && has_invariant {
+                *acc += 1;
             }
-            for child in &list.elements {
-                scan(child, acc);
-            }
+        }
+        for child in children {
+            scan(child, acc);
         }
     }
     let mut acc = 0;
