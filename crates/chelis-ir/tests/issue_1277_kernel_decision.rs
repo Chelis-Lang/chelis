@@ -80,6 +80,23 @@ fn a_match_on_a_constructor_literal_stays_a_kernel() {
     assert_eq!(decision(src, "run"), Ok(true));
 }
 
+/// chelis#1058: the compiled lowering carries literal window and stride
+/// lists only; a runtime list keeps the def in host code on both lanes.
+#[test]
+fn a_runtime_window_list_is_host_before_lowering() {
+    let src = "def f(x: tensor[6, f32], w: int64, s: int64) -> tensor[5, f32] = \
+               reduce_window_max(x, [w], [s])\n";
+    assert_eq!(decision(src, "f"), Ok(false));
+}
+
+/// chelis#776: a `pad` fill that does not resolve statically keeps the def in
+/// host code on both lanes.
+#[test]
+fn a_runtime_pad_fill_is_host_before_lowering() {
+    let src = "def f(x: tensor[4, f32], r: f32) -> tensor[6, f32] = pad(&x, [[1i64, 1i64]], r)\n";
+    assert_eq!(decision(src, "f"), Ok(false));
+}
+
 /// A host-only builtin reached through a `let` inside the body (the
 /// issue_1222 shape the corpus found).
 #[test]

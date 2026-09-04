@@ -3281,6 +3281,24 @@ impl UncarriableWalk<'_> {
                             "the builtin `{name}`, which has no tensor-DAG lowering"
                         ));
                     }
+                    if name.starts_with("reduce_window_")
+                        && kids[1..]
+                            .iter()
+                            .skip(1)
+                            .any(|list_arg| !is_literal_int_list(list_arg))
+                    {
+                        return Some(format!(
+                            "`{name}` with a non-literal window or stride list, which the \
+                             compiled lowering does not carry (chelis#1058)"
+                        ));
+                    }
+                    if name == "pad" && kids.get(3).is_some_and(|fill| !is_static_scalar(fill)) {
+                        return Some(
+                            "`pad` with a fill value that does not resolve statically \
+                             (chelis#776)"
+                                .to_string(),
+                        );
+                    }
                 }
                 kids.iter().find_map(|kid| self.expr(kid))
             }
@@ -3544,6 +3562,44 @@ fn is_static_constructor(expr: &Expr, walk: &UncarriableWalk<'_>) -> bool {
             .filter(|callee| tag(callee) == Some(DeepTag::Var))
             .and_then(|callee| children(callee).first().and_then(symbol_name))
             .is_some_and(|name| name.chars().next().is_some_and(char::is_uppercase)),
+        _ => false,
+    }
+}
+
+/// A window or stride list the compiled lowering accepts: a literal `Cons`
+/// chain of integer literals (`lower_builtin_app`'s `reduce_window_*` rule).
+fn is_literal_int_list(expr: &Expr) -> bool {
+    crate::lower::collect_cons_chain(expr).is_some_and(|elems| {
+        elems
+            .iter()
+            .all(|elem| crate::lower::extract_int_for_dim(elem).is_some())
+    })
+}
+
+/// A fill value `lower_builtin_app` resolves statically for `pad`: a numeric
+/// literal, optionally under `neg` or a float `cast` (chelis#776).
+fn is_static_scalar(expr: &Expr) -> bool {
+    match expr {
+        Expr::Atom(Atom::Float(_), _) | Expr::Atom(Atom::Int(_), _) => true,
+        Expr::MetaExpr(meta, _) => is_static_scalar(&meta.expr),
+        Expr::List(_, _) | Expr::Node(_, _) => {
+            let Some((expr_tag, _, kids)) = stamped_parts(expr) else {
+                return false;
+            };
+            match expr_tag {
+                DeepTag::Lit => kids.first().is_some_and(is_static_scalar),
+                DeepTag::Cast => kids.first().is_some_and(is_static_scalar),
+                DeepTag::App => {
+                    kids.first()
+                        .and_then(as_list)
+                        .filter(|callee| tag(callee) == Some(DeepTag::Var))
+                        .and_then(|callee| children(callee).first().and_then(symbol_name))
+                        == Some("neg")
+                        && kids.get(1).is_some_and(is_static_scalar)
+                }
+                _ => false,
+            }
+        }
         _ => false,
     }
 }
