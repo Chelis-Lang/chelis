@@ -274,7 +274,7 @@ const FAMILIES: &[Family] = &[
         extra_params: "",
         declared_result: Some("tensor[3, 2, f32]"),
         wrong_result: Some("tensor[9, 9, f32]"),
-        members: &["expand", "conv2d"],
+        members: &["expand", "insert", "conv2d"],
     },
     Family {
         name: "shape query",
@@ -694,7 +694,7 @@ fn the_proved_and_unproved_counts_partition_every_covered_row() {
         covered,
         "every covered row is either proved by its family or not"
     );
-    assert_eq!((proved, not_proved), (128, 15), "the split the body states");
+    assert_eq!((proved, not_proved), (128, 16), "the split the body states");
     assert_eq!(BUILTINS.len() - covered, 9, "rows outside the coverage set");
 }
 

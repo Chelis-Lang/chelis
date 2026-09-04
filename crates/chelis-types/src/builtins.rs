@@ -78,6 +78,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "reshape",
     "permute",
     "expand",
+    "insert",
     "pad",
     "shrink",
     "stride",
@@ -237,6 +238,7 @@ const SHAPE_COMPUTED_INFERENCE_BUILTINS: &[&str] = &[
     "argmin_reduce",
     "mean",
     "expand",
+    "insert",
     "layer_norm",
     "conv2d",
     "scatter_elements",
@@ -1067,6 +1069,14 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         tensor_settlement: TensorSettlement::Propagates,
     },
     BuiltinDecl {
+        name: "insert",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::NameTracked,
+        axis_arguments: AxisArgumentLayout::Fixed(&[1, 3]),
+        tensor_settlement: TensorSettlement::Propagates,
+    },
+    BuiltinDecl {
         name: "pad",
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
@@ -1861,7 +1871,7 @@ pub fn shape_class(name: &str) -> ShapeClass {
         // symbolic output row, rejecting positional axes at symbolic rank —
         // the same gate structure as the reductions.
         "sum" | "count" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce"
-        | "argmax_reduce" | "argmin_reduce" | "expand" => ShapeClass::NameTracked,
+        | "argmax_reduce" | "argmin_reduce" | "expand" | "insert" => ShapeClass::NameTracked,
         // Positional reshapes/permutes, matmul/conv, axis-indexed ops,
         // gather/scatter, and every non-tensor/host builtin.
         _ => ShapeClass::Rewriting,
@@ -2473,6 +2483,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_unop("reshape", &mut env, &mut vg);
     tensor_unop("permute", &mut env, &mut vg);
     tensor_expand_to_out("expand", &mut env, &mut vg);
+    tensor_expand_to_out("insert", &mut env, &mut vg);
     tensor_unop("pad", &mut env, &mut vg);
     tensor_unop("shrink", &mut env, &mut vg);
     tensor_unop("stride", &mut env, &mut vg);

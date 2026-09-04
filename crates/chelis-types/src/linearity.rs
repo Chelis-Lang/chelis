@@ -2041,6 +2041,7 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
                 | "reshape"
                 | "permute"
                 | "expand"
+                | "insert"
                 | "pad"
                 | "shrink"
                 | "stride"
