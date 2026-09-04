@@ -39,12 +39,12 @@ clarabel = ["dep:clarabel", "num-rational", "dep:num-bigint", "dep:num-traits"]
 # independent auditability of the linear-arithmetic / EUF fragment (the
 # SmtExpr/SmtSort surface has no bit-vector representation, so the bit-vector
 # slice of Alethe is not reachable here). It audits cvc5's output, so it
-# implies `smt`. `gmp-mpfr-sys/use-system-libs` forces the
-# transitive `rug -> gmp-mpfr-sys` build to LINK system GMP (needs the
-# `gmp-devel` headers) instead of compiling GMP from C source, keeping the
-# build off the slow from-source path. Carcara's `rug` enables only
-# `integer`+`rational`, so neither MPFR nor MPC belongs in this feature.
-carcara = ["smt", "dep:carcara", "gmp-mpfr-sys/use-system-libs"]
+# implies `smt`. Carcara's `rug` enables only `integer`+`rational`; its
+# transitive `gmp-mpfr-sys` therefore builds the locked GMP source without
+# activating MPFR or MPC. Do not force `use-system-libs`: when Cargo unifies
+# this feature with `arb`'s default MPFR/MPC set, supported distributions can
+# provide older libraries than the locked bindings accept.
+carcara = ["smt", "dep:carcara"]
 # WI-14 Arb/FLINT rigorous-enclosure oracle. `arb-sys` vendors FLINT + Arb C
 # source and compiles them (and pulls `gmp-mpfr-sys`, which compiles GMP/MPFR),
 # so a clean build compiles the C stack from source (~1 min cold). The oracle is
@@ -81,11 +81,6 @@ z3 = { version = "0.20", default-features = false, optional = true }
 # note), so it is a pinned git dependency. Pin a specific rev for build
 # reproducibility and CI-cache stability.
 carcara = { git = "https://github.com/ufmg-smite/carcara", rev = "45bfaedce92b31970cc2f8b07966813652aed8b0", optional = true }
-# Pulled in only so the `carcara` feature can force `use-system-libs` on the
-# transitive `rug -> gmp-mpfr-sys` build (cargo unifies the feature across the
-# graph). `default-features = false` retains the GMP base required by Rug
-# without activating the default MPFR and MPC features.
-gmp-mpfr-sys = { version = "1", default-features = false, optional = true }
 # WI-15 SoS certificate engine (behind `clarabel`). clarabel is the float SDP
 # core that PROPOSES a Gram matrix; num-bigint/num-traits back the exact-rational
 # repair + verification that turns the proposal into a checked certificate
@@ -127,7 +122,7 @@ tempfile = "3"
 # entry, so cargo UNIFIES the features: when `--features clarabel` is on, the
 # `sdp` + the matching backend turn on for the active target; when it is off,
 # clarabel is not built at all (optional dep), so neither does any BLAS. Linux
-# links system OpenBLAS (libopenblas-dev; already in the CI smt-glibc231 lane);
+# builds and statically links the OpenBLAS source selected by `openblas-src`;
 # macOS uses the OS-bundled Accelerate framework. The shipped release binary
 # does not enable `clarabel`, so it links no BLAS.
 [target.'cfg(target_os = "linux")'.dependencies]

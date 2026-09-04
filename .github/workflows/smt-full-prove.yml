@@ -52,8 +52,10 @@ jobs:
 
       - name: Install C dependencies
         # libz3-dev provides the unversioned libz3 on default linker and
-        # loader paths. libopenblas-dev backs the Clarabel SDP backend.
-        run: python3 scripts/ci_apt_get.py gcc g++ cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev libz3-dev
+        # loader paths. gmp-mpfr-sys and openblas-src build their locked
+        # sources; distribution versions can be older than the Rust bindings
+        # accept. m4 and make support those source builds.
+        run: python3 scripts/ci_apt_get.py gcc g++ cmake libclang-dev m4 make libz3-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -160,8 +162,8 @@ jobs:
       - name: Run the production solver config (cvc5 + Clarabel, both live)
         run: cargo test -p chelis-prove --features "smt clarabel"
 
-      - name: Install arb lane prerequisites (m4, make, gappa)
-        run: python3 scripts/ci_apt_get.py m4 make gappa
+      - name: Install Gappa proof checker
+        run: python3 scripts/ci_apt_get.py gappa
 
       - name: Re-validate committed Gappa proofs (--check-only)
         run: .venv/bin/python scripts/generate_erf_proof.py --check-only
