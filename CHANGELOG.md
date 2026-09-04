@@ -43,6 +43,15 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   and Reef prepared-graph cache v2 → v3; stale entries rebuild
   automatically.
 
+### Fixed
+
+- **Tier B no longer reports cvc5 counterexamples produced by an
+  out-of-domain `sqrt` value (chelis#1475).** Every exact square-root argument
+  must first be proved non-negative from independent, sqrt-free total
+  preconditions. Unsafe or unproved arguments fall through to Tier C instead
+  of adding a domain assumption, while guarded and algebraically non-negative
+  arguments retain SMT discharge.
+
 ## [0.18.6] — 2026-08-28
 
 The largest breaking cut since 0.18.0, and almost all of it is at a

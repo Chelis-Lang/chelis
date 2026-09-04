@@ -134,6 +134,10 @@ DORA, SR 11-7, and EU AI Act compliance buyers need.
 - Tier B timeout/unknown is unsupported with a reason on smt-only paths, or
   Tier C fallback in auto mode. It is never reported as failed without a
   counterexample.
+- Tier B emits cvc5's partial `sqrt` only when a separate total-algebraic
+  obligation proves every argument non-negative from the user's independent
+  conjunctive preconditions. Unproved, nested, quantified, or partial-evidence
+  shapes fall through to Tier C rather than strengthening the query.
 - Assumption-backed green proofs run a non-vacuity check over the assumptions
   alone. SAT establishes the assumption domain, UNSAT makes the composed
   verdict `invalid`, and unknown/timeout makes it `unsupported`.
