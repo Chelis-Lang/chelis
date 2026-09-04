@@ -2623,9 +2623,9 @@ things by execution. The vacuity is **live on `main` today**. The live routes
 are **role-keyed, not tag-keyed**: every one sits in a child slot the walk
 declines to enter, and the tags involved are ordinary vocabulary tags with
 ordinary dispositions. And the mechanism the class needs is a typed read at
-the slot plus a coverage census, **not** a further tightening of the stamp
-walk, because no stamp walk can reach a node that legitimately carries no
-stamp in either the accepted or the rejected case.
+the slot, **not** a further tightening of the stamp walk, because no stamp
+walk can reach a node that legitimately carries no stamp in either the
+accepted or the rejected case.
 
 #### The live instances
 
@@ -2654,8 +2654,9 @@ child, so each pair isolates the extraction failure rather than the form.
 
 The comparison rows matter more than the vacuous ones, and the `Selector`
 role is small enough to enumerate exhaustively. `child_stamp_role` is total
-over `DeepTag`, and exactly eight of its arms yield `Selector`. All eight
-were probed:
+over `DeepTag`, and six of its match arms yield `Selector` at some child
+index. Because `PatCtor | PatRecord` and `Grad | Vmap` each cover two tags,
+those six arms are eight tag-and-index slots. All eight were probed:
 
 | slot | unreadable child | verdict |
 |---|---|---|
@@ -2759,16 +2760,39 @@ the report, both `typed_nodes: 4, untyped_nodes: 0, total_nodes: 4`. The
 `fitness.rs:166-190` comment promising "its counts are now the checked truth"
 holds only for the nodes the walk reached.
 
-The honest count already exists in the same function.
-`analyze_ir_program` (`fitness.rs:~172`) computes `structural_stats(exprs)`,
-whose `total_nodes` is `count_nodes` over the parsed tree, and hands it to
-`clean_fitness_from_stats` alongside the inference stats - which uses it only
-for the validator-warning structure score and never compares the two. The two
-populations are not directly comparable (the structural count includes atoms,
-maps, and metadata values that inference never visits by design), so the
-census below needs a role-filtered expected set rather than a subtraction.
-The point is that the parsed side is already materialized at the one call
-site that would host the comparison.
+A parsed count does exist in the same function. `analyze_ir_program`
+(`fitness.rs:~172`) computes `structural_stats(exprs)`, whose `total_nodes`
+is `count_nodes` over the parsed tree, and hands it to
+`clean_fitness_from_stats` (`fitness.rs:190`) alongside the inference stats,
+which uses it only for the validator-warning structure score and never
+compares the two. That comparison is not the repair, and this item does not
+propose it: the two populations are not directly comparable, since the
+structural count includes atoms, maps, and metadata values inference never
+visits by design. The paragraph is here to explain why the ratio is silent,
+not to argue for a second counter.
+
+#### Relation to [04-TOT-3], and what [04-TOT-4] adds
+
+[04-TOT-3] governs this class already, and the implementation agrees. The
+`access` and `record` rejections are abbreviated in the tables above; in full
+each ends `(spec/03-deep-syntax.md; chelis#731 [04-TOT-3])`, so an unreadable
+child in a selector-shaped slot is an [04-TOT-3] rejection wherever it is
+implemented. R1 through R3 are **unimplemented [04-TOT-3] cases, not a hole
+in [04-TOT-3]'s wording**, and an implementer fixing them cites [04-TOT-3],
+the same as the adjacent shipped code.
+
+[04-TOT-4] therefore extends rather than replaces. It carries [04-TOT-3]'s
+obligation from the form down to each of the form's slots, and it adds two
+sentences no earlier atom states:
+
+1. **An omitted optional child and a present unreadable one are distinct
+   inputs, and only the omission may default.** Nothing before this says so,
+   and R1 is exactly the conflation: one `unwrap_or(0)` serving both.
+2. **Coverage quantifies over the submitted program, not the checked
+   result.** This is the one [04-TOT-2] structurally cannot express, and R1
+   is the proof: R1 satisfies [04-TOT-2] completely - empty error vector, no
+   `Type::Error` anywhere - and is still wrong. A missing quantifier, not a
+   missing rule.
 
 #### What we deliver
 
@@ -2790,26 +2814,17 @@ ones is the spelling of the read. So the structural fix belongs at the read:
    `kids.get(1)` being `None`, which the seam distinguishes from a present
    child it could not read. This is the whole of R1, and it is why the repair
    is not "delete the default".
-3. **The census is the standing ratchet, not the fix.** At
-   `finalize_checked_program` (`infer/checked.rs:~1503`), enumerate the
-   submitted program's slots with `child_stamp_role` and compare against the
-   set inference consumed. `product.record_canonical` (`infer/expr.rs:~664`)
-   already materializes the visited set; the missing half is the expected
-   set, and the role table already computes it. A slot in the expected set
-   with no consumer is a totality trace on the same footing as a missing
-   stamp. This also closes the coverage-keyed truncation route [#874] records
-   from the cancellable front end, independently of where bail points sit.
-4. **Each role names its consumer.** The census cannot key on `infer_expr`
-   alone, because every role is read by someone: `Type` by the type
-   resolver, `EffectHandler` by `chelis-effects`, `Binder` by name
-   extraction, `Selector` by the parent's own disposition. The expected set
-   is therefore a map from role to owning consumer, and a consumer that
-   records no consumption for a slot it owns is the violation. Adding a role
-   without an owner is a compile error at that map.
+3. **The seam sits beneath both ingresses.** It lives in
+   `chelis-types/src/infer/*`, below the point where the serialized `.dp`
+   ingress and the typed `check_typed_program` ingress converge, so the fix
+   is ingress-independent by construction. That is why the unvalidated
+   ingress list below does not weaken the repair, only the evidence.
 
-**Explicitly not delivered here:** any change to which slots are legal bare
-lists. The sanctioned set stays exactly as `desugar.rs`'s `bare_list()`
-builds it, enumerated below.
+**Explicitly not delivered here.** Two things. Any change to which slots are
+legal bare lists: the sanctioned set stays exactly as `desugar.rs`'s
+`bare_list()` builds it, enumerated below. And the parsed-vs-checked census,
+which closes none of R1 through R5 and is recorded as an open question rather
+than a deliverable - see decision row 18.
 
 #### Oracle and ratchet
 
@@ -2846,13 +2861,16 @@ whose head is a legitimate in-scope constructor. Their job is to prove the
 seam rejects unreadability rather than non-tagged-ness; without them the
 cheapest wrong fix - rejecting every bare list - passes the negatives.
 
-**Mutation receipt.** Three staged mutations, each run before and after:
-restoring `unwrap_or(0)` at `expr_transform.rs:308` must redden exactly R1's
-four rows and leave the positives green; deleting the `else` arm at
-`expr_pattern.rs:190` must redden R2 and R3; removing one role from the
-census's role-to-consumer map must fail to compile rather than silently
-shrink the expected set. The third is the one that outlives the other two:
-it is what stops the next slot from being added unowned.
+**Mutation receipt.** Four staged mutations, each run before and after.
+Restoring `unwrap_or(0)` at `expr_transform.rs:308` must redden exactly R1's
+four rows and leave the positives green. Reverting the read at
+`expr_pattern.rs:190`, the `DeepTag::PatCtor` arm, must redden R2 and only
+R2. Reverting `expr_pattern.rs:282`, the `DeepTag::PatRecord` arm, must
+redden R3 and only R3; the two arms are separate and a mutation at one leaves
+the other's row green. Reverting the `continue` at `expr_record.rs:335` must
+redden R5's attribution row while leaving the program rejected, which is the
+mutation most likely to be mis-run, because a coarser assertion passes in
+both states.
 
 **Prove-red-first is free here and must not be skipped anyway.** Record each
 negative's exact failing command and output on the pre-fix tree in the
@@ -2861,7 +2879,7 @@ evidence, not that record.
 
 #### Scope, slices, and overlap
 
-Roughly 250 to 400 hand-written lines across three slices, each shippable
+Roughly 150 to 250 hand-written lines across two slices, each shippable
 alone:
 
 - **Slice 1 - the four instances.** `expr_transform.rs:308` and
@@ -2875,20 +2893,17 @@ alone:
   gains the expected-shape half beside `bypass_child_expectation`
   (`role.rs:~232`), which already names exactly this concept for
   `ExplicitInferenceBypass` and needs extending to `Selector`.
-- **Slice 3 - the census and its role-to-consumer map**, at
-  `finalize_checked_program`. Largest, and the only one that needs the
-  fitness report to carry a parsed count beside the visited one.
 
 **Overlap.** `chelis-deep/src/role.rs` is shared with [#908]'s carrier work;
 Slice 2 extends `bypass_child_expectation`'s neighbourhood rather than
 `child_stamp_role` itself, so the role table's totality test is untouched.
 `normalize_nodes_to_lists` (`infer/program.rs:~1931`) rewrites `BareList` to
 a tagless `Expr::List` at the serialized-IR ingress while the typed ingress
-keeps `BareList`; [#1125]'s ingress-parity work may unify those, and Slice 3
-should land after it if it is in flight, because the census enumerates the
-post-ingress tree and would otherwise need two expected-set spellings.
-Nothing here depends on the [#1085] BareList disposition work, which governs
-expression position where the checker is already loud.
+keeps `BareList`; [#1125]'s ingress-parity work may unify those. Neither
+slice here is affected either way, because both sit in
+`chelis-types/src/infer/*`, beneath the point where the two ingresses
+converge. Nothing here depends on the [#1085] BareList disposition work,
+which governs expression position where the checker is already loud.
 
 #### What this does not establish
 
@@ -2903,26 +2918,29 @@ at four points, not enumerated: `deftype`'s type-parameter list, `params`
 entries, `handle-effect`'s kind child, and `record`'s constructor head all
 rejected, which is evidence of health and not proof of it. Nor is any claim
 made about `ExplicitInferenceBypass` slots, where a dedicated owner is
-supposed to visit and this design did not verify that one does. The census in
-Slice 3 is what converts the remaining roles from spot checks into a
-statement; until it lands, the honest scope is the eight `Selector` slots.
+supposed to visit and this design did not verify that one does. Converting
+the remaining roles from spot checks into a statement needs an enumerator
+this item does not deliver (decision row 18); until one exists, the honest
+scope is the eight `Selector` slots.
 
 One ingress was exercised: the `.dp` CLI path, which is
 `chelis-compiler-api`'s `check` beneath. `chelis prove`, the typed
 `check_typed_program` ingress that preserves `BareList` where the serialized
 ingress normalizes it away, and the `check_in_context` surface - which
 hardcodes `score: 1.0` and an empty error vector for any compile that
-returns `Ok` (`compiler.rs:~2396`) - were not probed. That last one is worth
+returns `Ok` (`compiler.rs:2398`) - were not probed. That last one is worth
 a look under this class's lens and is not claimed either way here.
 
 The cancellation route [#874] records as its fourth, coverage-keyed door was
-checked and is **closed at the surface it named**: PR #934 never merged, and
-the cancellation work that did land carries an explicit
+checked and is **closed at the surface it named**. PR #934 never merged. The
+cancellation work that did land came in under [#930] and carries an explicit
 `bail_if_cancelled("check")` after fitness is computed
-(`crates/chelis-compiler-api/src/compiler.rs:829`) whose comment names this
-exact failure - "a cancelled walk must not become a CheckResult". Whether
+(`crates/chelis-compiler-api/src/compiler.rs:829`) whose comment - cited to
+chelis#930, not #934 - names this exact failure: "a cancelled walk must not
+become a CheckResult". Whether
 every other `Ok`-returning front-end entry has the same guard was not
-audited, and Slice 3's census would make the question moot.
+audited. That audit is not this item's, and it is not needed for the four
+named instances, none of which involves cancellation.
 
 ### Later residue: kinded nominal applications ([#1247], with [#1258])
 
@@ -3336,7 +3354,7 @@ vacuity, or [#1076]/[#672]'s independently owned name-precedence work.
 | PP6 (decided, not delivered) | [#1486] (a hole is never quantified and no reference observes it before the body; an authored binder is rigid), [#1487] (lambda bodies and applied values are eager references), [#1485] (every reference-graph component is inferred as one group; the three spellings reject as `CycleDetected` identically at both ingresses); [#1134] closes when all three are dispositioned as PP6 states |
 | PP7 | [#1125]'s carrier axis: the seven probed divergences receive the same verdict from `check_ir_program` and `check_typed_program`, and one shared total accessor plus the lint make a carrier a reader cannot decode a diagnostic rather than an absent subtree. Axis B (`validate_ir_program` runs on the serialized-IR entry only), owned by [#1537], and the unswept guarded-arm inventory are named residue, not claims |
 | [#1134] forward-reference residual | both checker ingresses reject eager forward values, accept backward values from value initializers and from function bodies wherever the schedule places them except the [#1485] shape, accept declaration-local explicitly typed external inputs, retain sequential local scope, and reject bare self-reference/eager value cycles identically; the schedule's order invariants are asserted directly |
-| PP8 | [#874]'s class statement, restated as coverage rather than tag-keying, and [#887]'s Tier 1 residue. Seven named programs over `vmap`'s axis, `pat-ctor`/`pat-record` heads, and `grad`'s operand are rejected instead of scoring 1.0, and `kv`'s unreadable key reports its own form instead of an `internal:` stamp violation naming a different node; the selector-read seam makes a silently-defaulted slot unspellable; the census makes an unowned slot a compile error. The `Selector` role is enumerated and all eight of its slots are claimed; the other roles are spot-checked only, until the census lands |
+| PP8 | [#874]'s class statement, restated as coverage rather than tag-keying, and [#887]'s Tier 1 residue. Seven named programs over `vmap`'s axis, `pat-ctor`/`pat-record` heads, and `grad`'s operand are rejected instead of scoring 1.0, and `kv`'s unreadable key reports its own form instead of an `internal:` stamp violation naming a different node; the selector-read seam makes a silently-defaulted slot unspellable, and sits beneath both ingresses. The `Selector` role is enumerated and all eight of its slots are claimed; the other roles are spot-checked only, and converting them into a claim needs an enumerator this item does not deliver (decision row 18) |
 
 ## Decisions and remaining questions
 
@@ -3358,7 +3376,8 @@ vacuity, or [#1076]/[#672]'s independently owned name-precedence work.
 | 14 | whether the seven comparison identities admit a scalar beside a tensor ([#1506]) | DECIDED 2026-09-03: no; the checker rejects and the spec wins. `[05-OP-36]` ("Mixed surfaces ... are type errors"), `spec/05` §1.2, and `spec/04` §4.2-§4.3 already decide it, and `add`/`max_elem` reject the same pair today, the `spec/05` §2.1 prose above `[05-OP-40]` naming their scalar form "the rank-zero instance of the tensor rule, not scalar/tensor broadcasting". The rewrite at `infer/app.rs:457-506` goes; the three accepting `issue5_cmp_broadcast_both_forms` rows and `coral_comparison_ops_broadcast_tensor_scalar` become negative controls; scalar-scalar and same-shape tensor-tensor forms stay; the diagnostic names `[05-OP-36]` and the explicit `expand(to_tensor([c]), axis, shape(x, axis))` spelling. ALTERNATIVE, not taken and requiring the user's explicit choice: amend `[05-OP-36]` to admit one active-numeric scalar beside one tensor of the same dtype, comparing every element against the scalar and returning `tensor[D, bool]`. Its cost: it contradicts §1.2's "hard rule" and §4.2's rationale; it must explain why comparison broadcasts when `add`, `max_elem`, and `[05-OP-17..19]` do not, or extend them too; it leaves a rank-0 tensor beside a tensor undecided; the evaluator already implements it, so the runtime cost is nil; and Coral depends on the accepting behaviour today (`coral_prerequisites.rs:315`), so the rejection has a downstream migration cost that the alternative avoids. Sequencing under the decision taken: the explicit spelling executes as an insertion on every lane until [#597] closes (Slice B2a item b2.5 for C, Slice B2h for eval), so PR B of PP5 D8 lands after both or states the gap | PP5 D4/D8 + `[05-OP-36]` |
 | 15 | whether PP5's identity-rank validator stays as a second rank model beside unification | DECIDED 2026-09-03 by `spec/04` §4.7.2 and the D1-D5 evidence: it goes. **What the user is asked to confirm, in one sentence:** for `s = stride(x, 2i64); e = expand(x, 0i32, 2i64); add(s, e)` on `x: tensor[n, f32]`, the checker accepts the program with `e` at `tensor[2, f32]`, the only shape the language assigns to `expand` (row 16, [#1532]; the `f5ec5ca63` checker already stamps it), and PP5 stops rejecting it; the loud outcome for `n != 1` is the `Domain` trap `spec/05` §2.4.1 states ([#1523], merged; narrowed by [#1532]) once Slice B2a item b2.5 carries its guard, a literal operand extent other than 1 being a check-time type error instead. Today, for this program, eval rejects with `[3] vs [2, 6]` and the C insertion path trips R3's rank guard, because the runtime still inserts ([#597]) and the consumer `add` exposes the inserted axis; that loudness is the consumer's, not the language's: the bare spelling `sig f: tensor[6, f32] -> tensor[2, f32]; def f(x) = expand(x, 0, 2i64)` with no consumer is silent on both lanes today (`chelis check` score 1 at `-> tensor[2, f32]`, `chelis eval` and the compiled C both print `shape=[2, 6]` with no diagnostic; measured by the [#1277] owner and re-measured here on the f5ec5ca63 build and the 09-01 binary), which is [#597] as filed, and under the single-meaning rule plainly so. Unification is the one rank authority; the validator's `expand` derivation, input rank plus one, is a rank the language never assigns to `expand`, and it rejects programs whose stamped types agree (measured, D2 third row). The checker half of [#668] resolves into [#597] (the runtime must execute `expand` as the unit-extent broadcast, with §2.4.1's guard), [#1512] (reductions over a genuinely unresolved operand), and [#1506]. Because this flips ten whole [#1463] rows, the control half of an eleventh, and the corpus row in `issue_731_fitness_honesty_corpus.rs` from rejection to acceptance, the implementation PR (D8 PR A) states the flip in its body, lands after S2a (the [#1277] stream's `insert` builtin plus mechanical rename, branch `agent/1277-s2a-insert-rename`; [#1532] itself is merged as `b8e08e5b9`), and lands only after the user confirms the sentence above. The single-meaning decision (row 16) removed the earlier alternative reading of positional `expand` as insertion-only; that meaning is now `insert`'s | PP5 D6 (d) |
 | 16 | whether positional `expand` is one operation or two | DECIDED 2026-09-03 by the user: "I don't want ambiguity that is resolved at runtime. Make expand canonically only insert or increase the number of dimension (whichever is more canonical). Use something else (e.g. insert) for alternative. I don't want overloaded uses like this." Confirmed as: `expand` keeps only the same-rank singleton broadcast (rank unchanged; the operand's extent at `axis` must be 1; a literal violation is a check-time type error; a symbolic extent is a §4.7 runtime `Domain` guard, per [#1523]); a new primitive `insert` adds an axis of extent `size` at `axis`; `spec/04` §4.7.2's two-candidate deferred model is deleted. Recorded in PR [#1532], merged as `b8e08e5b9` (`spec/02`, `spec/03`, `spec/04`, `spec/05`, `spec/06`, `spec/08`, `runtime_extents.md`; `spec/05` §2.4 rows and adjoints for both primitives under `[05-AXIS-1]`/`[05-MOV-1]`, §4.7.2 without the two-candidate model, §4.5.3's named forms as `insert`; no new `[05-OP-N]`). PP5 consumes the decision and adds nothing to it | [#1532] + PP5 D2 |
-| 17 | whether the source-coverage obligation is a new atom or a tightening of [04-TOT-2], and whether [#887] closes | DECIDED 2026-09-03: a new atom. [04-TOT-2] quantifies over the checked result and cannot be tightened into a statement about the submitted program; [04-TOT-3] already forbids the three live instances but only for a malformed form "that reaches the checker", and nothing required them to reach it. [04-TOT-4] supplies the missing coverage quantifier and distinguishes an absent optional child from a present unreadable one. [#887] is RE-SCOPED, not closed: its Tier 2 shipped via [#998]/[#1019]/[#1041], and its Tier 1 consumption-boundary residue is this item's Slice 2 | [04-TOT-4] + PP8 |
+| 17 | whether the source-coverage obligation is a new atom or a tightening of an existing one, and whether [#887] closes | DECIDED 2026-09-03: a new atom that EXTENDS [04-TOT-3] rather than replacing it. [04-TOT-3] already governs the live instances and the shipped `access`/`record` rejections cite it, so R1 through R3 are unimplemented [04-TOT-3] cases and an implementer fixing them cites [04-TOT-3]. [04-TOT-4] carries that obligation from the form to each of the form's slots and adds the two sentences no earlier atom states: an omitted optional child and a present unreadable one are distinct inputs with only the omission permitted to default, and coverage quantifies over the submitted program rather than the checked result. The second is the one [04-TOT-2] structurally cannot express, and R1 proves it by satisfying [04-TOT-2] completely while being wrong. [#887] is RE-SCOPED, not closed: its Tier 2 shipped via [#998]/[#1019]/[#1041], and its Tier 1 consumption-boundary residue is this item's Slice 2 | [04-TOT-4] + PP8 |
+| 18 | whether a parsed-vs-checked coverage census belongs at `finalize_checked_program` | OPEN, recorded 2026-09-03, no deliverable attached. It closes none of PP8's five named instances, which Slices 1 and 2 close between them, and its three candidate justifications do not survive a necessity trace: the roles it would guard have no demonstrated defect, `child_stamp_role` already makes an unclassified tag a compile error, and the cancellation route it would subsume is closed at the surface [#874] named. It is also the only proposal here touching the public fitness surface. Revisit if a coverage-keyed instance appears that the selector-read seam does not reach | PP8 + [#874] |
 
 ## Contract summary
 
