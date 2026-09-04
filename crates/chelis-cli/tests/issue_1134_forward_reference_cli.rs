@@ -51,6 +51,20 @@ fn assert_failed_report(name: &str, extension: &str, source: &str, expected_kind
     );
 }
 
+fn assert_only_cycle_report(name: &str, source: &str) {
+    let (success, report) = check_report(name, "ch", source);
+    assert!(!success, "{name}: initialization cycle exited successfully");
+    let errors = report["errors"].as_array().expect("errors array");
+    assert!(
+        errors.iter().any(|error| error["kind"] == "CycleDetected"),
+        "{name}: expected CycleDetected: {report:#}"
+    );
+    assert!(
+        errors.iter().all(|error| error["kind"] == "CycleDetected"),
+        "{name}: component co-inference leaked a non-cycle diagnostic: {report:#}"
+    );
+}
+
 #[test]
 fn check_rejects_forward_values_on_deep_and_surf_surfaces() {
     assert_failed_report(
@@ -288,40 +302,35 @@ fn check_accepts_a_backward_value_read_across_a_hoisted_module_function() {
     );
 }
 
-/// chelis#1485 at the public surface, restated for the narrowed mirror edge.
-///
-/// A value naming a function that reads the value back. With `f` SIGNED the
-/// mirror edge is gone (chelis#1486), the schedule no longer stalls, and the
-/// program checks clean; with `g` `defsig`-less the mirror edge remains and
-/// the backward read still reports unbound.
-///
-/// The clean row is an intermediate state, not the disposition. [04-INF-7]
-/// makes this program an eager value cycle and chelis#1487 gives the detector
-/// the lambda and value-stack edges it needs to say so, at which point this
-/// row becomes `CycleDetected`.
-///
-/// Disposition lock: the signed row moved with this change, the `defsig`-less
-/// row did not, and either moving again reddens the test.
+/// chelis#1485 / [04-INF-7] at the public surface. Full-reference components
+/// reject identically regardless of whether the reader has a complete header,
+/// is reached through a lambda, or has no `defsig`. Component co-inference may
+/// use provisional bindings, but no `UnboundVariable` may escape.
 #[test]
 fn a_value_that_names_a_function_reading_it_back_is_a_recorded_stall() {
-    assert_clean_report(
+    assert_only_cycle_report(
         "mirror_escape_signed",
-        "ch",
         "module MirrorEscape\n\n\
          def anchor() -> int32 = 1\n\n\
          carried = wrap(f)\n\n\
          def wrap(g) = g\n\n\
          def f(n: int32) -> int32 = if (n <= 0) then 0 else carried((n - 1))\n",
     );
-    assert_failed_report(
+    assert_only_cycle_report(
+        "mirror_escape_lambda",
+        "module PickEscape\n\n\
+         def anchor() -> int32 = 1\n\n\
+         carried = pick(fn (x: int32) -> f(x))\n\n\
+         def pick(g) = 5\n\n\
+         def f(n: int32) -> int32 = add(n, carried)\n",
+    );
+    assert_only_cycle_report(
         "mirror_escape_defsig_less",
-        "ch",
         "module WrapEscape\n\n\
          def anchor() -> int32 = 1\n\n\
          carried = wrap(g)\n\n\
          def wrap(h) = h\n\n\
          def g(n) = if (n <= 0) then 0 else carried((n - 1))\n",
-        "UnboundVariable",
     );
 }
 

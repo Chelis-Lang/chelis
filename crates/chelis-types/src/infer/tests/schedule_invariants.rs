@@ -7,16 +7,15 @@
 //! defects lived in the emitted ORDER, which no verdict can see. This oracle
 //! asserts the schedule's invariants directly on the returned `Vec<usize>`:
 //!
-//! - I1: a permutation of the item ordinals, with every recursive component's
-//!   members contiguous;
+//! - I1: a permutation of the item ordinals, with every full-reference
+//!   component's members contiguous;
 //! - I2: when the reference graph is acyclic, every reference edge is
 //!   respected (referenced before referencer);
 //! - I3: when the hoist order already respects every edge, the schedule IS
 //!   the hoist order once components are collapsed, so every program without
 //!   a barrier keeps the exact order it had before chelis#1134;
-//! - I4: when the reference graph has a cycle, the schedule is still total
-//!   and every call edge is respected, so a callee is still inferred before
-//!   its caller while a genuine binding cycle is being broken.
+//! - I4: contracting every full-reference component makes the precedence
+//!   graph acyclic, so there is no scheduler stall-release path.
 //!
 //! The reference graph is derived from the generator's own declaration of
 //! what each named item references and which recursive component it belongs
@@ -278,6 +277,7 @@ struct Reference {
     vertex: Vec<usize>,
     edges: BTreeMap<(usize, usize), EdgeKind>,
     hoist: Vec<usize>,
+    cyclic_components: BTreeSet<usize>,
 }
 
 fn reference(program: &Program, measured: &Measured) -> Reference {
@@ -317,11 +317,12 @@ fn reference(program: &Program, measured: &Measured) -> Reference {
     }
     let mut value_ordinal: BTreeMap<&str, usize> = BTreeMap::new();
     let mut function_index: BTreeMap<&str, usize> = BTreeMap::new();
-    let mut first_member: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut definition_index: BTreeMap<&str, usize> = BTreeMap::new();
     for index in 0..item_count {
         let Some(declaration) = declared(index) else {
             continue;
         };
+        definition_index.entry(declaration.name).or_insert(index);
         match declaration.kind {
             Kind::Value => {
                 value_ordinal.entry(declaration.name).or_insert(index);
@@ -330,17 +331,78 @@ fn reference(program: &Program, measured: &Measured) -> Reference {
                 function_index.entry(declaration.name).or_insert(index);
             }
         }
-        if let Some(label) = declaration.component {
-            first_member.entry(label).or_insert(index);
+    }
+    // Independent full-reference SCC model. The implementation uses Tarjan;
+    // this small generated oracle uses transitive closure so sharing an SCC
+    // bug cannot make both sides green. Non-definition items remain singleton
+    // vertices in the scheduling graph.
+    let mut reaches = vec![vec![false; item_count]; item_count];
+    let mut has_self_edge = vec![false; item_count];
+    for index in 0..item_count {
+        let Some(declaration) = declared(index) else {
+            continue;
+        };
+        reaches[index][index] = true;
+        for name in &declaration.references {
+            if let Some(&target) = definition_index.get(name) {
+                reaches[index][target] = true;
+                has_self_edge[index] |= index == target;
+            }
         }
     }
-    let vertex = (0..item_count)
-        .map(|index| {
-            declared(index)
-                .and_then(|declaration| declaration.component)
-                .map_or(index, |label| first_member[label])
-        })
-        .collect::<Vec<_>>();
+    for intermediate in 0..item_count {
+        for from in 0..item_count {
+            if !reaches[from][intermediate] {
+                continue;
+            }
+            for to in 0..item_count {
+                reaches[from][to] |= reaches[intermediate][to];
+            }
+        }
+    }
+    let mut vertex = (0..item_count).collect::<Vec<_>>();
+    for index in 0..item_count {
+        if declared(index).is_none() {
+            continue;
+        }
+        vertex[index] = (0..item_count)
+            .filter(|other| declared(*other).is_some())
+            .filter(|other| reaches[index][*other] && reaches[*other][index])
+            .min()
+            .expect("each definition reaches itself");
+    }
+    let mut members_by_vertex: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (index, &representative) in vertex.iter().enumerate() {
+        if declared(index).is_some() {
+            members_by_vertex
+                .entry(representative)
+                .or_default()
+                .push(index);
+        }
+    }
+    let cyclic_components = members_by_vertex
+        .iter()
+        .filter(|(_, members)| members.len() > 1 || has_self_edge[members[0]])
+        .map(|(representative, _)| *representative)
+        .collect::<BTreeSet<_>>();
+    // The older generator annotation describes the function-only planner SCC.
+    // Every such pair must remain in one full-reference component, though an
+    // eager value may now join it.
+    let mut representative_by_label = BTreeMap::new();
+    for index in 0..item_count {
+        let Some(label) = declared(index).and_then(|declaration| declaration.component) else {
+            continue;
+        };
+        let prior = representative_by_label
+            .entry(label)
+            .or_insert(vertex[index]);
+        assert_eq!(
+            *prior,
+            vertex[index],
+            "function component `{label}` was split by the full-reference model\n{}",
+            program.source()
+        );
+    }
     let floor = measured.module_fn_indices.first().copied();
     let header_of = |name: &str| -> Header {
         program
@@ -419,6 +481,7 @@ fn reference(program: &Program, measured: &Measured) -> Reference {
         vertex,
         edges,
         hoist,
+        cyclic_components,
     }
 }
 
@@ -513,11 +576,10 @@ fn violations(program: &Program) -> Vec<String> {
         members_by_vertex.entry(vertex).or_default().push(index);
     }
     for (vertex, members) in &members_by_vertex {
-        let mut slots = members
+        let slots = members
             .iter()
             .map(|member| position[*member])
             .collect::<Vec<_>>();
-        slots.sort_unstable();
         let contiguous = slots.windows(2).all(|pair| pair[1] == pair[0] + 1);
         if !contiguous {
             failures.push(format!(
@@ -526,8 +588,7 @@ fn violations(program: &Program) -> Vec<String> {
         }
     }
 
-    let acyclic = is_acyclic(&reference);
-    if acyclic {
+    if is_acyclic(&reference) {
         // I2: every edge respected.
         for (&edge, kind) in &reference.edges {
             if !respects(schedule, &reference.vertex, edge) {
@@ -551,14 +612,9 @@ fn violations(program: &Program) -> Vec<String> {
             ));
         }
     } else {
-        // I4: total (I1 above) and call edges still respected.
-        for (&edge, kind) in &reference.edges {
-            if *kind == EdgeKind::Call && !respects(schedule, &reference.vertex, edge) {
-                failures.push(format!(
-                    "I4: call edge {edge:?} violated while breaking a cycle: {schedule:?}\n{source}"
-                ));
-            }
-        }
+        failures.push(format!(
+            "I4: precedence graph is still cyclic after full-reference contraction: {schedule:?}\n{source}"
+        ));
     }
     failures
 }
@@ -863,7 +919,10 @@ fn round_eight_stall_free_program_keeps_planner_order() {
     );
     let measured = measure(&program);
     let reference = reference(&program, &measured);
-    assert!(is_acyclic(&reference), "D4_min has no reference cycle");
+    assert!(
+        reference.cyclic_components.is_empty(),
+        "D4_min has no reference cycle"
+    );
     assert!(violations(&program).is_empty());
     assert_before(&program, &measured, "tailfn", "carried");
     assert_before(&program, &measured, "carried", "helper");
@@ -886,7 +945,10 @@ fn a_value_reading_a_later_function_does_not_stall() {
     );
     let measured = measure(&program);
     let reference = reference(&program, &measured);
-    assert!(is_acyclic(&reference), "C2 has no reference cycle");
+    assert!(
+        reference.cyclic_components.is_empty(),
+        "C2 has no reference cycle"
+    );
     assert!(violations(&program).is_empty());
     assert_before(&program, &measured, "tail", "carried");
     assert_before(&program, &measured, "carried", "head");
@@ -908,7 +970,7 @@ fn a_textual_chain_would_close_a_cycle_this_graph_does_not_have() {
     );
     let measured = measure(&program);
     let reference = reference(&program, &measured);
-    assert!(is_acyclic(&reference));
+    assert!(reference.cyclic_components.is_empty());
     assert!(violations(&program).is_empty());
     assert_before(&program, &measured, "second", "reads");
     assert_before(&program, &measured, "reads", "first");
@@ -979,48 +1041,84 @@ fn a_below_floor_reader_of_a_hole_signature_function_follows_it() {
     assert_before(&complete, &measured, "r", "g");
 }
 
-/// chelis#1485/#1486 ratchet, restated for the narrowed mirror edge.
-///
-/// `carried` names `f` without applying it and `f` reads `carried`. The read
-/// edge `carried -> f` exists either way; whether the graph closes a cycle now
-/// depends on `f`'s header, which is exactly what PP6 item 2 changed. A
-/// `defsig`-less `f` still earns the mirror edge `f -> carried` and still
-/// stalls; a signed `f` publishes a header that is honest before its body
-/// under [04-INF-6], earns no mirror edge, and leaves an acyclic graph. The
-/// verdict half of both spellings is ratcheted in the parity suite and the CLI
-/// oracle.
-///
-/// Disposition lock. Before this change the reference graph was cyclic for
-/// BOTH spellings, so the signed row is the half that reddened; it reddens
-/// again if either the mirror rule or the header classification moves.
+/// chelis#1485: every spelling is a cyclic component in the full reference
+/// graph even where the scheduler-only mirror edge is absent. The component
+/// is emitted contiguously and the scheduler never exercises a stall release.
 #[test]
 fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
-    for (header, f) in [
+    for (label, carried, helper, reader) in [
         (
-            Header::Complete,
-            "def f(n: int32) -> int32 = if (n <= 0) then 0 else carried((n - 1))",
+            "signed reader",
+            value("carried", "carried = wrap(f)", &["wrap", "f"]),
+            function("wrap", "def wrap(g) = g", &[]),
+            signed_function(
+                "f",
+                "def f(n: int32) -> int32 = if (n <= 0) then 0 else carried((n - 1))",
+                &["carried"],
+            ),
         ),
         (
-            Header::Absent,
-            "def f(n) = if (n <= 0) then 0 else carried((n - 1))",
+            "lambda naming a signed reader",
+            value(
+                "carried",
+                "carried = pick(fn (x: int32) -> f(x))",
+                &["pick", "f"],
+            ),
+            function("pick", "def pick(g) = 5", &[]),
+            signed_function(
+                "f",
+                "def f(n: int32) -> int32 = add(n, carried)",
+                &["carried"],
+            ),
+        ),
+        (
+            "defsig-less reader",
+            value("carried", "carried = wrap(g)", &["wrap", "g"]),
+            function("wrap", "def wrap(h) = h", &[]),
+            function(
+                "g",
+                "def g(n) = if (n <= 0) then 0 else carried((n - 1))",
+                &["carried"],
+            ),
         ),
     ] {
         let program = named(
             true,
             vec![
                 signed_function("anchor", "def anchor() -> int32 = 1", &[]),
-                value("carried", "carried = wrap(f)", &["wrap", "f"]),
-                function("wrap", "def wrap(g) = g", &[]),
-                function("f", f, &["carried"]).with_header(header),
+                carried,
+                helper,
+                reader,
             ],
         );
         let measured = measure(&program);
-        let stall_reference = reference(&program, &measured);
+        let reference = reference(&program, &measured);
+        let item_named = |name: &str| {
+            measured
+                .flat
+                .iter()
+                .position(|item| {
+                    matches!(item, FlatItem::Declared(position) if program.declarations[*position].name == name)
+                })
+                .unwrap_or_else(|| panic!("missing `{name}` item"))
+        };
+        let carried_item = item_named("carried");
+        let reader_item = item_named(if label == "defsig-less reader" {
+            "g"
+        } else {
+            "f"
+        });
         assert_eq!(
-            !is_acyclic(&stall_reference),
-            header == Header::Absent,
-            "the mirror edge must close this cycle for a `defsig`-less `f`, and only \
-             for that spelling\n{}",
+            reference.vertex[carried_item],
+            reference.vertex[reader_item],
+            "{label}: carried and its reader must share a full-reference component\n{}",
+            program.source()
+        );
+        assert!(
+            reference
+                .cyclic_components
+                .contains(&reference.vertex[carried_item]),
+            "{label}: component must be cyclic\n{}",
             program.source()
         );
         assert!(violations(&program).is_empty(), "{}", program.source());
@@ -1029,11 +1127,11 @@ fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
 }
 
 #[test]
-fn a_genuine_binding_cycle_stays_total_with_callees_first() {
+fn a_genuine_binding_cycle_stays_total_as_one_component() {
     // `F1_three.ch`: `carried` reads the `defsig`-less `caller`, which needs
     // `helper`, which reads `carried`. A real reference cycle, which
-    // `detect_top_level_binding_cycles` reports; the schedule must still emit
-    // every item once and keep the callee before its caller.
+    // `detect_top_level_binding_cycles` reports; the schedule must emit every
+    // item once with the whole reference component contiguous.
     let three = named(
         true,
         vec![
@@ -1044,18 +1142,33 @@ fn a_genuine_binding_cycle_stays_total_with_callees_first() {
     );
     let measured = measure(&three);
     let three_reference = reference(&three, &measured);
-    assert!(!is_acyclic(&three_reference), "{}", three.source());
+    assert!(
+        !three_reference.cyclic_components.is_empty(),
+        "{}",
+        three.source()
+    );
     assert!(violations(&three).is_empty(), "{}", three.source());
     assert_eq!(measured.schedule.len(), measured.flat.len());
-    assert_before(&three, &measured, "helper", "caller");
+    let three_positions = positions(&measured.schedule);
+    let component_slots = three_reference
+        .vertex
+        .iter()
+        .enumerate()
+        .filter(|(_, vertex)| three_reference.cyclic_components.contains(vertex))
+        .map(|(index, _)| three_positions[index])
+        .collect::<Vec<_>>();
+    assert!(
+        component_slots
+            .windows(2)
+            .all(|pair| pair[1] == pair[0] + 1),
+        "full-reference component must be contiguous: {:?}",
+        measured.schedule
+    );
 
     // `C1_mirror_cycle.ch`: the same runtime cycle through a SIGNED pair.
-    // Narrowing the mirror edge to `defsig`-less functions (chelis#1486)
-    // removes `ping -> carried`, so this graph is no longer cyclic: the read
-    // edge `carried -> pong` is all that remains and the component follows the
-    // value. The runtime cycle is unchanged and
-    // `detect_top_level_binding_cycles` still owns that verdict; the schedule's
-    // job here is to stay total and to respect the one remaining edge.
+    // The signed spelling has no mirror edge, but its calls and eager read
+    // still form one full-reference component. The cycle detector owns the
+    // verdict and the scheduler owns contiguous co-inference.
     let mirror = named(
         true,
         vec![
@@ -1076,11 +1189,28 @@ fn a_genuine_binding_cycle_stays_total_with_callees_first() {
     );
     let measured = measure(&mirror);
     let mirror_reference = reference(&mirror, &measured);
-    assert!(is_acyclic(&mirror_reference), "{}", mirror.source());
+    assert!(
+        !mirror_reference.cyclic_components.is_empty(),
+        "{}",
+        mirror.source()
+    );
     assert!(violations(&mirror).is_empty(), "{}", mirror.source());
     assert_eq!(measured.schedule.len(), measured.flat.len());
-    assert_before(&mirror, &measured, "carried", "ping");
-    assert_before(&mirror, &measured, "carried", "pong");
+    let mirror_positions = positions(&measured.schedule);
+    let component_slots = mirror_reference
+        .vertex
+        .iter()
+        .enumerate()
+        .filter(|(_, vertex)| mirror_reference.cyclic_components.contains(vertex))
+        .map(|(index, _)| mirror_positions[index])
+        .collect::<Vec<_>>();
+    assert!(
+        component_slots
+            .windows(2)
+            .all(|pair| pair[1] == pair[0] + 1),
+        "full-reference component must be contiguous: {:?}",
+        measured.schedule
+    );
 }
 
 #[test]

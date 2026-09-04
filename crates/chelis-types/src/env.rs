@@ -203,9 +203,18 @@ pub struct Env {
     /// owns them rather than against the schedule's position.
     #[serde(skip)]
     current_declaration_ordinal: Option<usize>,
+    /// Exact names in the full-reference component currently being
+    /// co-inferred. A cyclic component is prebound monomorphically, so these
+    /// bindings must be visible to one another even when source order would
+    /// ordinarily hide a later eager value. The inference driver installs
+    /// this capability only for that component and restores the prior set on
+    /// both completion and cancellation; it is never serialized.
+    #[serde(skip)]
+    active_top_level_component: UnordSet<String>,
 }
 
-/// Result of the [04-INF-4] eager-value scope test. See
+/// Result of the [04-INF-4] eager-value scope test, including the exact
+/// provisional capability installed for an active rejected cycle. See
 /// [`Env::top_level_value_visibility`].
 pub(crate) enum TopLevelValueVisibility<'a> {
     /// The name is in scope here, or the rule does not govern it.
@@ -396,6 +405,7 @@ impl Env {
         self.top_level_value_ordinals.clear();
         self.shadowed_prior_bindings.clear();
         self.current_declaration_ordinal = None;
+        self.active_top_level_component.clear();
     }
 
     /// Record the source position of one top-level eager value, and the
@@ -422,8 +432,20 @@ impl Env {
         self.current_declaration_ordinal = ordinal;
     }
 
+    /// Replace the exact full-reference component whose provisional eager
+    /// bindings may bypass ordinary source-position visibility. The returned
+    /// capability must be restored before the inference level is left.
+    #[must_use = "restore the prior top-level component capability on every exit"]
+    pub(crate) fn replace_active_top_level_component(
+        &mut self,
+        names: UnordSet<String>,
+    ) -> UnordSet<String> {
+        std::mem::replace(&mut self.active_top_level_component, names)
+    }
+
     /// [04-INF-4]: whether `name` resolves to a top-level eager value that is
-    /// already declared at the current declaration.
+    /// already declared at the current declaration, or is a provisional
+    /// member of the exact cyclic component currently being co-inferred.
     ///
     /// `Visible` covers every name this rule does not govern: a lexical
     /// binding that shadows the value, an imported or library name, a
@@ -432,8 +454,14 @@ impl Env {
     /// (`x: T = x`) legal without any prebinding. A later value is
     /// `NotYetDeclared`, carrying the outer binding it shadows when there is
     /// one so the caller can resolve against the still-current outer scope.
+    /// Active-component membership is checked after lexical shadowing and
+    /// before source order: this lets only the component's own provisional
+    /// bindings cross that boundary while preserving local-name precedence.
     pub(crate) fn top_level_value_visibility(&self, name: &str) -> TopLevelValueVisibility<'_> {
         if self.lexical_bindings.contains(name) {
+            return TopLevelValueVisibility::Visible;
+        }
+        if self.active_top_level_component.contains(name) {
             return TopLevelValueVisibility::Visible;
         }
         let (Some(declared_at), Some(current)) = (

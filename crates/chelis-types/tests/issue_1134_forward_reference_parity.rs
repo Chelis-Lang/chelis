@@ -138,32 +138,19 @@ fn a_malformed_external_input_type_reports_identically_at_both_ingresses() {
     }
 }
 
-/// chelis#1485, still recorded rather than repaired, restated for the narrowed
-/// mirror edge.
+/// chelis#1485 / [04-INF-7]: every full-reference component containing an
+/// eager value is rejected as one initialization cycle at both ingresses.
 ///
-/// A value that names a function which reads the value back. Narrowing the
-/// mirror edge to `defsig`-less module functions (chelis#1486) removes the
-/// back edge for the two SIGNED spellings, so their schedules are acyclic and
-/// they now check clean; the `defsig`-less spelling keeps its mirror edge,
-/// still stalls, and still reports the backward read as unbound. The stamped
-/// spelling still splits between the two ingresses.
-///
-/// These acceptances are an intermediate state, not the disposition. Under
-/// [04-INF-7] every one of these three programs is an eager value cycle, and
-/// the cycle detector does not yet see a reference nested in a lambda body or
-/// a call edge onto a value under evaluation (chelis#1487). When that lands
-/// each row becomes `CycleDetected`; the rows are spelled out one per line so
-/// that transition is visible rather than hidden in a loop.
-///
-/// Disposition lock. Every row's expectation moved with this change or moves
-/// with the next one, and the test reddens whenever a row's verdict does.
+/// The three spellings exercise a complete header, a lambda-mediated read,
+/// and a `defsig`-less reader. Their header shapes may change scheduling edges,
+/// but must not change the component verdict. In particular, provisional
+/// bindings used while co-inferring the component must prevent the historical
+/// `UnboundVariable` split without suppressing `CycleDetected`.
 #[test]
 fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
-    // `None` means the program is accepted at both ingresses today.
-    for (label, expected, source) in [
+    for (label, source) in [
         (
             "signed reader",
-            None,
             "module MirrorEscape\n\n\
              def anchor() -> int32 = 1\n\n\
              carried = wrap(f)\n\n\
@@ -172,7 +159,6 @@ fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
         ),
         (
             "lambda naming a signed reader",
-            None,
             "module PickEscape\n\n\
              def anchor() -> int32 = 1\n\n\
              carried = pick(fn (x: int32) -> f(x))\n\n\
@@ -181,7 +167,6 @@ fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
         ),
         (
             "defsig-less reader",
-            Some("UnboundVariable"),
             "module WrapEscape\n\n\
              def anchor() -> int32 = 1\n\n\
              carried = wrap(g)\n\n\
@@ -192,16 +177,14 @@ fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
         let program = surf_program(source);
         let (ir, typed) = diagnostics(&program);
         assert_eq!(ir, typed, "{label}: ingress diagnostics diverged");
-        match expected {
-            Some(kind) => assert!(
-                ir.iter().any(|(reported, _)| reported == kind),
-                "{label}: expected {kind}, got {ir:#?}"
-            ),
-            None => assert!(
-                ir.is_empty(),
-                "{label}: this spelling is accepted at this stage, got {ir:#?}"
-            ),
-        }
+        assert!(
+            ir.iter().any(|(kind, _)| kind == "CycleDetected"),
+            "{label}: expected CycleDetected, got {ir:#?}"
+        );
+        assert!(
+            ir.iter().all(|(kind, _)| kind == "CycleDetected"),
+            "{label}: component co-inference leaked a non-cycle diagnostic: {ir:#?}"
+        );
     }
     let stamped = deep_file_program(
         "(module {} MirrorEscapeStamped\n  \
@@ -215,16 +198,15 @@ fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
                (lit {type: (t-prim {} int32)} 0)\n      \
                (app {} (var {} carried) (app {} (var {} sub) (var {} n) (lit {type: (t-prim {} int32)} 1)))))))\n",
     );
-    // The stamped spelling declares `f` with an explicit `defsig`, so it loses
-    // its mirror edge with the Surf signed spelling and the two ingresses now
-    // agree. chelis#1485's ingress SPLIT is therefore closed here; the
-    // remaining half of its disposition is the `CycleDetected` verdict
-    // [04-INF-7] owes this program, which chelis#1487 delivers.
     let (ir, typed) = diagnostics(&stamped);
     assert_eq!(ir, typed, "stamped reader: ingress diagnostics diverged");
     assert!(
-        ir.is_empty(),
-        "stamped reader: this spelling is accepted at this stage, got {ir:#?}"
+        ir.iter().any(|(kind, _)| kind == "CycleDetected"),
+        "stamped reader: expected CycleDetected, got {ir:#?}"
+    );
+    assert!(
+        ir.iter().all(|(kind, _)| kind == "CycleDetected"),
+        "stamped reader: component co-inference leaked a non-cycle diagnostic: {ir:#?}"
     );
 }
 

@@ -6,12 +6,14 @@
 use super::*;
 use crate::context::LibraryProofId;
 
-/// Transactional owner for one recursive SCC's inference level and temporary
-/// top-level bindings. It snapshots every member binding before provisional
-/// prebinding so cancellation can restore the environment exactly.
-struct RecursiveLevelScope {
+/// Transactional owner for one cyclic full-reference component's inference
+/// level, provisional visibility capability, and temporary bindings. It
+/// snapshots every member binding before provisional prebinding so normal and
+/// cancelled exits both restore the surrounding environment exactly.
+struct ComponentLevelScope {
     level: crate::unify::LevelToken,
     members: Vec<(String, Option<Scheme>)>,
+    prior_active_component: UnordSet<String>,
 }
 
 #[cfg(test)]
@@ -88,11 +90,11 @@ fn schemes_match(left: &Scheme, right: &Scheme) -> bool {
         && left.body == right.body
 }
 
-impl RecursiveLevelScope {
+impl ComponentLevelScope {
     fn enter(
         indices: &[usize],
         items: &[(Option<String>, &deep::Expr)],
-        env: &Env,
+        env: &mut Env,
         var_gen: &VarGen,
         subst: &mut Subst,
     ) -> Self {
@@ -102,10 +104,16 @@ impl RecursiveLevelScope {
             .filter_map(|index| top_level_decl_name(items[*index].1))
             .filter(|name| seen.insert((*name).to_string()))
             .map(|name| (name.to_string(), env.lookup(name).cloned()))
-            .collect();
+            .collect::<Vec<_>>();
+        let active_component = members
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<UnordSet<_>>();
+        let prior_active_component = env.replace_active_top_level_component(active_component);
         Self {
             level: subst.enter_level(var_gen),
             members,
+            prior_active_component,
         }
     }
 
@@ -117,12 +125,14 @@ impl RecursiveLevelScope {
 
     /// Normal completion deliberately does not restore prior defsig/metadata
     /// bindings: completed generalized member schemes replace them below.
-    fn complete(self, env: &mut Env, var_gen: &VarGen, subst: &mut Subst) {
+    fn complete(mut self, env: &mut Env, var_gen: &VarGen, subst: &mut Subst) {
         self.remove_temporary_bindings(env);
+        let _finished_component = env
+            .replace_active_top_level_component(std::mem::take(&mut self.prior_active_component));
         subst.leave_level(self.level, var_gen);
     }
 
-    fn abort(self, env: &mut Env, var_gen: &VarGen, subst: &mut Subst) {
+    fn abort(mut self, env: &mut Env, var_gen: &VarGen, subst: &mut Subst) {
         #[cfg(test)]
         let prior_members = self.members.clone();
         super::recursion::abort_group();
@@ -132,6 +142,8 @@ impl RecursiveLevelScope {
                 env.bind(name, scheme);
             }
         }
+        let _aborted_component = env
+            .replace_active_top_level_component(std::mem::take(&mut self.prior_active_component));
         subst.leave_level(self.level, var_gen);
         #[cfg(test)]
         RECURSIVE_ABORT_OBSERVATION.with(|observation| {
@@ -256,10 +268,16 @@ pub(super) fn infer_program_with_product_in_session(
     validate_binder_literal_adoption_in_program(&items, &declared_signatures, errors);
     let external_input_types = collect_literal_external_input_types(&items);
     let metadata_prebound_names = UnordSet::new();
-    product.function_inference_plan = FunctionInferencePlan::build(&items);
-    let inference_groups = primary_inference_groups(&product.function_inference_plan, &items);
+    let top_level_references = TopLevelReferenceGraph::build(&items);
+    product.function_inference_plan =
+        FunctionInferencePlan::build_from_reference_graph(&top_level_references);
+    let inference_groups = primary_inference_groups_with_reference_graph(
+        &product.function_inference_plan,
+        &items,
+        &top_level_references,
+    );
     // Match the persisted-state driver: cache the TLS token once and poll at
-    // declaration granularity. In particular, an incomplete recursive SCC
+    // declaration granularity. In particular, an incomplete cyclic component
     // must consume its structured scope through `abort` before this schedule
     // returns; finishing or generalizing a partially inferred group would
     // leak its pins, temporary bindings, and child level.
@@ -270,11 +288,12 @@ pub(super) fn infer_program_with_product_in_session(
         if cancelled() {
             break;
         }
-        let mut recursive_scope = group
-            .recursive
-            .then(|| RecursiveLevelScope::enter(&group.indices, &items, &env, &vg, &mut subst));
-        let provisional_types = if group.recursive {
-            prebind_recursive_function_schemes(
+        let cyclic = group.cyclic;
+        let recursion_active = !group.recursive_function_indices.is_empty();
+        let mut component_scope = cyclic
+            .then(|| ComponentLevelScope::enter(&group.indices, &items, &mut env, &vg, &mut subst));
+        let provisional_types = if cyclic {
+            prebind_cyclic_component_schemes(
                 &group.indices,
                 &items,
                 &declared_signatures,
@@ -285,26 +304,29 @@ pub(super) fn infer_program_with_product_in_session(
         } else {
             UnordMap::new()
         };
-        // spec/04 §3.1.1: record in-group instantiations while this
-        // recursive group's bodies are inferred; validated in
-        // `finish_group` below.
-        if group.recursive {
+        // spec/04 §3.1.1: recursive-instantiation validation remains the
+        // function-plan projection. A mixed reference cycle alone must not
+        // activate it.
+        if recursion_active {
             super::recursion::begin_group(
-                group.indices.iter().filter_map(|&index| {
-                    top_level_decl_name(items[index].1).map(|name| {
-                        let authored = declared_signatures
-                            .get(name)
-                            .is_some_and(|metadata| !metadata.binders.is_empty());
-                        (name, authored)
-                    })
-                }),
+                group
+                    .recursive_function_indices
+                    .iter()
+                    .filter_map(|&index| {
+                        top_level_decl_name(items[index].1).map(|name| {
+                            let authored = declared_signatures
+                                .get(name)
+                                .is_some_and(|metadata| !metadata.binders.is_empty());
+                            (name, authored)
+                        })
+                    }),
                 &env,
             );
         }
         let mut deferred_bindings = Vec::new();
         for declaration_index in group.indices {
             if cancelled() {
-                if let Some(scope) = recursive_scope.take() {
+                if let Some(scope) = component_scope.take() {
                     scope.abort(&mut env, &vg, &mut subst);
                 }
                 break 'schedule;
@@ -338,7 +360,7 @@ pub(super) fn infer_program_with_product_in_session(
                 &mut product,
                 external_input_failure.as_ref(),
                 provisional_types.get(&declaration_index),
-                group.recursive,
+                cyclic,
                 &user_def_names,
                 &declared_signatures,
             ) {
@@ -358,24 +380,25 @@ pub(super) fn infer_program_with_product_in_session(
             // `validate_deferred_opaque_uses`).
             validate_deferred_opaque_uses(&subst, &adt_reg, errors);
             #[cfg(test)]
-            if group.recursive {
+            if cyclic {
                 primary_recursive_member_finished_for_test();
             }
         }
         if cancelled() {
-            if let Some(scope) = recursive_scope.take() {
+            if let Some(scope) = component_scope.take() {
                 scope.abort(&mut env, &vg, &mut subst);
             }
             break 'schedule;
         }
-        if group.recursive {
-            // Uniform-recursive-instantiation validation must run before the
-            // deferred generalization: it clears the instantiation-variable
-            // pins, which would otherwise block quantification here.
-            super::recursion::finish_group(&subst, errors);
-            recursive_scope
+        if cyclic {
+            // Function-recursion validation, when independently active, must
+            // clear its pins before component-wide generalization.
+            if recursion_active {
+                super::recursion::finish_group(&subst, errors);
+            }
+            component_scope
                 .take()
-                .expect("recursive group owns an inference-level scope")
+                .expect("cyclic component owns an inference-level scope")
                 .complete(&mut env, &vg, &mut subst);
             let schemes = deferred_bindings
                 .into_iter()
@@ -1290,8 +1313,14 @@ pub(super) fn infer_ir_program_with_state(
         .keys()
         .cloned()
         .collect::<UnordSet<_>>();
-    product.function_inference_plan = FunctionInferencePlan::build(&items);
-    let inference_groups = primary_inference_groups(&product.function_inference_plan, &items);
+    let top_level_references = TopLevelReferenceGraph::build(&items);
+    product.function_inference_plan =
+        FunctionInferencePlan::build_from_reference_graph(&top_level_references);
+    let inference_groups = primary_inference_groups_with_reference_graph(
+        &product.function_inference_plan,
+        &items,
+        &top_level_references,
+    );
     // chelis#930: cooperative cancellation at top-level-declaration
     // granularity. Body inference is one of the two front-end passes whose
     // cost scales with declaration count, so an abandoned compile has to be
@@ -1303,17 +1332,19 @@ pub(super) fn infer_ir_program_with_state(
     let cancelled = || cancel.as_ref().is_some_and(CancelToken::is_cancelled);
     super::recursion::reset();
     'schedule: for group in inference_groups {
-        let mut recursive_scope = group.recursive.then(|| {
-            RecursiveLevelScope::enter(
+        let cyclic = group.cyclic;
+        let recursion_active = !group.recursive_function_indices.is_empty();
+        let mut component_scope = cyclic.then(|| {
+            ComponentLevelScope::enter(
                 &group.indices,
                 &items,
-                &state.env,
+                &mut state.env,
                 &state.var_gen,
                 &mut state.subst,
             )
         });
-        let provisional_types = if group.recursive {
-            prebind_recursive_function_schemes(
+        let provisional_types = if cyclic {
+            prebind_cyclic_component_schemes(
                 &group.indices,
                 &items,
                 &declared_signatures,
@@ -1324,26 +1355,29 @@ pub(super) fn infer_ir_program_with_state(
         } else {
             UnordMap::new()
         };
-        // spec/04 §3.1.1: record in-group instantiations while this
-        // recursive group's bodies are inferred; validated in
-        // `finish_group` below.
-        if group.recursive {
+        // spec/04 §3.1.1: recursive-instantiation validation remains the
+        // function-plan projection. A mixed reference cycle alone must not
+        // activate it.
+        if recursion_active {
             super::recursion::begin_group(
-                group.indices.iter().filter_map(|&index| {
-                    top_level_decl_name(items[index].1).map(|name| {
-                        let authored = declared_signatures
-                            .get(name)
-                            .is_some_and(|metadata| !metadata.binders.is_empty());
-                        (name, authored)
-                    })
-                }),
+                group
+                    .recursive_function_indices
+                    .iter()
+                    .filter_map(|&index| {
+                        top_level_decl_name(items[index].1).map(|name| {
+                            let authored = declared_signatures
+                                .get(name)
+                                .is_some_and(|metadata| !metadata.binders.is_empty());
+                            (name, authored)
+                        })
+                    }),
                 &state.env,
             );
         }
         let mut deferred_bindings = Vec::new();
         for declaration_index in group.indices {
             if cancelled() {
-                if let Some(scope) = recursive_scope.take() {
+                if let Some(scope) = component_scope.take() {
                     scope.abort(&mut state.env, &state.var_gen, &mut state.subst);
                 }
                 break 'schedule;
@@ -1379,7 +1413,7 @@ pub(super) fn infer_ir_program_with_state(
                 &mut product,
                 prebound_type_failures.get(&declaration_index),
                 provisional_types.get(&declaration_index),
-                group.recursive,
+                cyclic,
                 &user_def_names,
                 &declared_signatures,
             ) {
@@ -1407,19 +1441,20 @@ pub(super) fn infer_ir_program_with_state(
             validate_deferred_opaque_uses(&state.subst, &state.adt_reg, errors);
         }
         if cancelled() {
-            if let Some(scope) = recursive_scope.take() {
+            if let Some(scope) = component_scope.take() {
                 scope.abort(&mut state.env, &state.var_gen, &mut state.subst);
             }
             break 'schedule;
         }
-        if group.recursive {
-            // Uniform-recursive-instantiation validation must run before the
-            // deferred generalization: it clears the instantiation-variable
-            // pins, which would otherwise block quantification here.
-            super::recursion::finish_group(&state.subst, errors);
-            recursive_scope
+        if cyclic {
+            // Function-recursion validation, when independently active, must
+            // clear its pins before component-wide generalization.
+            if recursion_active {
+                super::recursion::finish_group(&state.subst, errors);
+            }
+            component_scope
                 .take()
-                .expect("recursive group owns an inference-level scope")
+                .expect("cyclic component owns an inference-level scope")
                 .complete(&mut state.env, &state.var_gen, &mut state.subst);
             let schemes = deferred_bindings
                 .into_iter()
@@ -1622,41 +1657,49 @@ fn scan_declared_signatures(items: &[(Option<String>, &deep::Expr)]) -> Declared
 ///   in a bare unit, because the dishonest header is global from the first
 ///   pass. Kahn's priority keeps the displacement minimal, so the function
 ///   holds its hoist position and only its readers slide after it;
-/// - a recursive component is one vertex, because
-///   [`primary_inference_groups`] infers it as one unit at the first member
-///   the schedule reaches, so an edge one member earns constrains them all.
+/// - every strongly connected component of the full syntactic reference graph
+///   is one vertex. This includes mixed function/value components as well as
+///   ordinary recursive function groups, so an edge one member earns
+///   constrains them all.
 ///
 /// Bare functions keep textual availability (no call or mirror edge), and a
 /// forward value reference produces no edge because the scope rule leaves it
 /// unbound. Nothing else orders the graph: in particular there is no textual
 /// chain over non-function items and no chain over the planner order. Such
 /// chains are not dependencies, and they close cycles on legal programs.
-/// With real reference edges only, a cycle in this graph is a reference cycle
-/// through an eager value: a runtime initialization cycle that
-/// `detect_top_level_binding_cycles` reports as `CycleDetected` at every
-/// ingress, a runtime cycle through a lambda applied during the value's
-/// initialization that the detector does not yet see (chelis#1487), or a value
-/// that names a `defsig`-less function reading the value back
-/// (`carried = wrap(g)` with a `defsig`-less `g` reading `carried`), which
-/// cycles here because the mirror and the read edge point both ways; the stall
-/// then releases the function first and its backward read reports unbound
-/// (chelis#1485). Narrowing the mirror edge removes the signed spelling of
-/// that last shape from the cyclic class; a hole edge can close a two-cycle of
-/// its own (`r = f(2)` with `def f(n: int32) = add(r, n)`), which is an eager
-/// value cycle in the first place. In every case the schedule stays total by
-/// releasing the hoist-order-least remaining vertex, so a callee is still
-/// inferred before its caller.
+/// The canonical reference collector follows lambda bodies and both read and
+/// application edges. Contracting all of its SCCs therefore makes the
+/// remaining precedence graph acyclic by construction; the old
+/// hoist-order-least stall release is unnecessary and deliberately absent.
+/// A cyclic component containing an eager value is still rejected as
+/// `CycleDetected`, but its bodies co-infer under provisional bindings so the
+/// checker reaches that one ingress-independent verdict without first leaking
+/// an inference-order `UnboundVariable` (chelis#1485).
 ///
-/// This is availability, not visibility. Whether a name is in scope is
-/// decided by `Env::top_level_value_visibility` from source position alone,
-/// so no order this function produces can widen or narrow [04-INF-4] scope.
+/// This is availability, not ordinary source visibility. Whether a name is in
+/// scope is decided by `Env::top_level_value_visibility` from source position.
+/// The sole extra capability is the exact active cyclic component: its
+/// provisional members see one another only while that rejected component is
+/// co-inferred, and the component scope restores the prior capability on
+/// every exit. No schedule position can otherwise widen or narrow [04-INF-4].
 /// `crates/chelis-types/src/infer/tests/schedule_invariants.rs` asserts the
 /// invariants above directly on the returned order.
+#[cfg(test)]
 pub(super) fn primary_inference_schedule(
     function_plan: &FunctionInferencePlan,
     items: &[(Option<String>, &deep::Expr)],
 ) -> Vec<usize> {
-    if !function_plan.complete {
+    let references = TopLevelReferenceGraph::build(items);
+    primary_inference_schedule_with_reference_graph(function_plan, items, &references)
+}
+
+fn primary_inference_schedule_with_reference_graph(
+    function_plan: &FunctionInferencePlan,
+    items: &[(Option<String>, &deep::Expr)],
+    references: &TopLevelReferenceGraph,
+) -> Vec<usize> {
+    let reference_components = references.inference_components();
+    if !function_plan.complete || !reference_components.complete {
         return Vec::new();
     }
     let module_fn_indices = function_plan
@@ -1672,21 +1715,13 @@ pub(super) fn primary_inference_schedule(
         key[index] = position;
     }
 
-    // Contract every recursive component to one vertex, named by its lowest
-    // member ordinal and carrying its lowest member key. Members are emitted
-    // together, in the plan's own member order.
+    // Contract every SCC of the full reference graph to one vertex, named by
+    // its lowest member ordinal and carrying its lowest hoist key. This
+    // includes mixed function/value components, not only recursive functions.
     let mut vertex_of = (0..items.len()).collect::<Vec<_>>();
     let mut component_members: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for component in &function_plan.components {
-        if !component.recursive {
-            continue;
-        }
-        let mut members = Vec::new();
-        for member in &component.members {
-            if !members.contains(&member.item_index) {
-                members.push(member.item_index);
-            }
-        }
+    for component in &reference_components.components {
+        let members = component.members.clone();
         let Some(&representative) = members.iter().min() else {
             continue;
         };
@@ -1731,50 +1766,37 @@ pub(super) fn primary_inference_schedule(
                 .or_insert(index);
         }
     }
-    let referenced_names = eager_value_ordinals
-        .keys()
-        .chain(module_fn_by_name.keys())
-        .chain(hole_signature_definitions.keys())
-        .cloned()
-        .collect::<UnordSet<_>>();
     let floor = module_fn_indices.first().copied();
     let mut edges: BTreeSet<(usize, usize)> = BTreeSet::new();
-    if !referenced_names.is_empty() {
-        for (index, (_, expr)) in items.iter().enumerate() {
-            let mut referenced = UnordSet::new();
-            let mut bound = Vec::new();
-            collect_top_level_calls(expr, &referenced_names, &mut bound, &mut referenced);
-            let reader = vertex_of[index];
-            let reader_is_module_fn = module_fn_indices.contains(&index);
-            for name in referenced.into_sorted() {
-                if let Some(&value) = eager_value_ordinals.get(&name)
-                    && value < index
-                {
-                    edges.insert((vertex_of[value], reader));
-                }
-                if let Some(&function) = module_fn_by_name.get(&name)
-                    && (reader_is_module_fn
-                        || (floor.is_some_and(|floor| index >= floor)
-                            && !signatures.signed.contains(&name)))
-                {
-                    edges.insert((vertex_of[function], reader));
-                }
-                // The hole edge, in every region and in a bare unit too: a
-                // header with a wildcard slot is honest only after its body.
-                if let Some(&declaration) = hole_signature_definitions.get(&name) {
-                    edges.insert((vertex_of[declaration], reader));
-                }
+    for (index, item_references) in references.item_references.iter().enumerate() {
+        let reader = vertex_of[index];
+        let reader_is_module_fn = module_fn_indices.contains(&index);
+        for reference in item_references {
+            let name = &references.definition(reference.target).name;
+            if let Some(&value) = eager_value_ordinals.get(name)
+                && value < index
+            {
+                edges.insert((vertex_of[value], reader));
+            }
+            if let Some(&function) = module_fn_by_name.get(name)
+                && (reader_is_module_fn
+                    || (floor.is_some_and(|floor| index >= floor)
+                        && !signatures.signed.contains(name)))
+            {
+                edges.insert((vertex_of[function], reader));
+            }
+            // The hole edge, in every region and in a bare unit too: a
+            // header with a wildcard slot is honest only after its body.
+            if let Some(&declaration) = hole_signature_definitions.get(name) {
+                edges.insert((vertex_of[declaration], reader));
             }
         }
     }
     edges.retain(|(before, after)| before != after);
 
-    // Kahn's algorithm, releasing the hoist-order-least ready vertex. A stall
-    // is a reference cycle (already a `CycleDetected` error); release the
-    // hoist-order-least remaining vertex so the schedule stays total. An
-    // early-released vertex is skipped by the `emitted` guard when its
-    // remaining predecessors arrive, so no counter is ever decremented past
-    // zero.
+    // Kahn's algorithm, releasing the hoist-order-least ready component. Full
+    // reference SCC contraction makes this graph a DAG, so there is no
+    // user-program stall and no arbitrary release path.
     let mut successors: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     let mut remaining_predecessors: BTreeMap<usize, usize> = BTreeMap::new();
     for &(before, after) in &edges {
@@ -1792,7 +1814,7 @@ pub(super) fn primary_inference_schedule(
         .collect::<BTreeSet<_>>();
     let mut emitted = vec![false; items.len()];
     let mut schedule = Vec::with_capacity(items.len());
-    while let Some(&(key, vertex)) = ready.first().or_else(|| pending.first()) {
+    while let Some(&(key, vertex)) = ready.first() {
         ready.remove(&(key, vertex));
         pending.remove(&(key, vertex));
         if emitted[vertex] {
@@ -1816,77 +1838,82 @@ pub(super) fn primary_inference_schedule(
             }
         }
     }
+    debug_assert!(
+        pending.is_empty(),
+        "reference-component DAG must schedule every item"
+    );
     schedule
 }
 
 #[derive(Debug)]
 pub(super) struct PrimaryInferenceGroup {
     indices: Vec<usize>,
-    recursive: bool,
+    cyclic: bool,
+    recursive_function_indices: Vec<usize>,
 }
 
-/// Group the flat primary schedule into recursive SCC inference units.
-/// Acyclic bare functions stay in textual order; acyclic module functions
-/// retain dependency order. Only a genuine recursive component is grouped
-/// and prebound, so a bare acyclic forward helper remains unavailable.
-pub(super) fn primary_inference_groups(
+fn primary_inference_groups_with_reference_graph(
     function_plan: &FunctionInferencePlan,
     items: &[(Option<String>, &deep::Expr)],
+    references: &TopLevelReferenceGraph,
 ) -> Vec<PrimaryInferenceGroup> {
-    let schedule = primary_inference_schedule(function_plan, items);
-    primary_inference_groups_for_schedule(function_plan, schedule)
+    let schedule =
+        primary_inference_schedule_with_reference_graph(function_plan, items, references);
+    primary_inference_groups_for_schedule(function_plan, references, schedule)
 }
 
-/// Group one explicit schedule: a recursive component is emitted whole, in
-/// the plan's member order, at the first member the schedule reaches.
+/// Group one explicit schedule: every full-reference component is emitted
+/// whole in source order. Function recursive-instantiation membership stays a
+/// separate projection and is never inferred from a mixed component's cycle.
 pub(super) fn primary_inference_groups_for_schedule(
     function_plan: &FunctionInferencePlan,
+    references: &TopLevelReferenceGraph,
     schedule: Vec<usize>,
 ) -> Vec<PrimaryInferenceGroup> {
-    let recursive_components = function_plan
+    let reference_components = references.inference_components();
+    if !reference_components.complete {
+        return Vec::new();
+    }
+    let recursive_function_indices = function_plan
         .components
         .iter()
         .filter(|component| component.recursive)
-        .map(|component| {
-            component
-                .members
-                .iter()
-                .map(|member| member.item_index)
-                .collect::<Vec<_>>()
-        })
-        .filter(|indices| !indices.is_empty())
-        .collect::<Vec<_>>();
-    let mut component_by_index = UnordMap::new();
-    for (component_index, indices) in recursive_components.iter().enumerate() {
-        for index in indices {
-            component_by_index.insert(*index, component_index);
-        }
-    }
+        .flat_map(|component| component.members.iter().map(|member| member.item_index))
+        .collect::<UnordSet<_>>();
 
     let mut emitted_components = UnordSet::new();
     let mut groups = Vec::new();
     for index in schedule {
-        let Some(component_index) = component_by_index.get(&index).copied() else {
+        let Some(component_index) = reference_components.component_by_item[index] else {
             groups.push(PrimaryInferenceGroup {
                 indices: vec![index],
-                recursive: false,
+                cyclic: false,
+                recursive_function_indices: Vec::new(),
             });
             continue;
         };
         if emitted_components.insert(component_index) {
+            let component = &reference_components.components[component_index];
             groups.push(PrimaryInferenceGroup {
-                indices: recursive_components[component_index].clone(),
-                recursive: true,
+                indices: component.members.clone(),
+                cyclic: component.cyclic,
+                recursive_function_indices: component
+                    .members
+                    .iter()
+                    .copied()
+                    .filter(|index| recursive_function_indices.contains(index))
+                    .collect(),
             });
         }
     }
     groups
 }
 
-/// Install monomorphic arity-shaped types for the un-signed members of one
-/// recursive SCC. The component is removed and generalized as a unit after
-/// every body has unified with its provisional type.
-pub(super) fn prebind_recursive_function_schemes(
+/// Install monomorphic types for the un-signed members of one cyclic
+/// full-reference component. Functions receive arity-shaped function types;
+/// eager values receive one fresh type variable. The component is removed and
+/// generalized as a unit after every body has unified with its provisional.
+pub(super) fn prebind_cyclic_component_schemes(
     indices: &[usize],
     items: &[(Option<String>, &deep::Expr)],
     declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
@@ -1900,31 +1927,34 @@ pub(super) fn prebind_recursive_function_schemes(
         let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
             continue;
         };
-        let (Some(name), Some(fn_kids)) = (
-            kids.first().and_then(symbol_name),
-            kids.get(1)
-                .and_then(|body| tagged_children(body, DeepTag::Fn)),
-        ) else {
+        let (Some(name), Some(body)) = (kids.first().and_then(symbol_name), kids.get(1)) else {
             continue;
         };
         if declared_signatures.contains_key(name) || metadata_prebound_names.contains(name) {
             continue;
         }
-        let Some(params) = fn_kids.first() else {
-            continue;
-        };
-        let arity = match params {
-            deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => node.child_count(),
-            deep::Expr::List(params, _) if get_tag(params) == Some(DeepTag::Params) => {
-                children(params).len()
+        let ty = match tagged_children(body, DeepTag::Fn) {
+            Some(fn_kids) => {
+                let Some(params) = fn_kids.first() else {
+                    continue;
+                };
+                let arity = match params {
+                    deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => {
+                        node.child_count()
+                    }
+                    deep::Expr::List(params, _) if get_tag(params) == Some(DeepTag::Params) => {
+                        children(params).len()
+                    }
+                    deep::Expr::BareList(elements, _) => elements.len(),
+                    _ => continue,
+                };
+                Type::Fn(
+                    (0..arity).map(|_| vg.fresh_type()).collect(),
+                    Box::new(vg.fresh_type()),
+                )
             }
-            deep::Expr::BareList(elements, _) => elements.len(),
-            _ => continue,
+            None => vg.fresh_type(),
         };
-        let ty = Type::Fn(
-            (0..arity).map(|_| vg.fresh_type()).collect(),
-            Box::new(vg.fresh_type()),
-        );
         env.bind(name.to_string(), Scheme::mono(ty.clone()));
         provisional.insert(*index, ty);
     }
@@ -2232,7 +2262,7 @@ fn normalize_node_to_list(expr: &deep::Expr) -> deep::Expr {
 }
 
 #[cfg(test)]
-mod recursive_level_scope_tests {
+mod component_level_scope_tests {
     use super::*;
 
     fn mutual_defs() -> Vec<deep::Expr> {
@@ -2244,7 +2274,7 @@ mod recursive_level_scope_tests {
     }
 
     #[test]
-    fn recursive_scope_mints_provisionals_inside_then_removes_every_member() {
+    fn component_scope_mints_provisionals_and_restores_visibility_on_completion() {
         let exprs = mutual_defs();
         let items = top_level_decl_items_with_modules(&exprs);
         let indices = vec![0, 1];
@@ -2253,8 +2283,21 @@ mod recursive_level_scope_tests {
         let mut var_gen = VarGen::default();
         let mut subst = Subst::new();
 
-        let scope = RecursiveLevelScope::enter(&indices, &items, &env, &var_gen, &mut subst);
-        let provisional = prebind_recursive_function_schemes(
+        env.note_top_level_value_ordinal("right".to_string(), 1, None);
+        env.note_top_level_value_ordinal("outside".to_string(), 2, None);
+        env.set_current_declaration_ordinal(Some(0));
+        let _empty_component =
+            env.replace_active_top_level_component(["outside".to_string()].into_iter().collect());
+        let scope = ComponentLevelScope::enter(&indices, &items, &mut env, &var_gen, &mut subst);
+        assert!(matches!(
+            env.top_level_value_visibility("right"),
+            TopLevelValueVisibility::Visible
+        ));
+        assert!(matches!(
+            env.top_level_value_visibility("outside"),
+            TopLevelValueVisibility::NotYetDeclared { .. }
+        ));
+        let provisional = prebind_cyclic_component_schemes(
             &indices,
             &items,
             &UnordMap::new(),
@@ -2272,11 +2315,19 @@ mod recursive_level_scope_tests {
         assert_eq!(subst.current_level(), 0);
         assert!(env.lookup("left").is_none());
         assert!(env.lookup("right").is_none());
+        assert!(matches!(
+            env.top_level_value_visibility("right"),
+            TopLevelValueVisibility::NotYetDeclared { .. }
+        ));
+        assert!(matches!(
+            env.top_level_value_visibility("outside"),
+            TopLevelValueVisibility::Visible
+        ));
         assert_eq!(super::super::recursion::group_state_counts(), (0, 0));
     }
 
     #[test]
-    fn recursive_scope_abort_restores_prior_bindings_levels_and_pins() {
+    fn component_scope_abort_restores_bindings_levels_pins_and_visibility() {
         let exprs = mutual_defs();
         let items = top_level_decl_items_with_modules(&exprs);
         let indices = vec![0, 1];
@@ -2285,8 +2336,13 @@ mod recursive_level_scope_tests {
         env.bind("left".to_string(), prior.clone());
         let mut var_gen = VarGen::default();
         let mut subst = Subst::new();
-        let scope = RecursiveLevelScope::enter(&indices, &items, &env, &var_gen, &mut subst);
-        prebind_recursive_function_schemes(
+        env.note_top_level_value_ordinal("right".to_string(), 1, None);
+        env.note_top_level_value_ordinal("outside".to_string(), 2, None);
+        env.set_current_declaration_ordinal(Some(0));
+        let _empty_component =
+            env.replace_active_top_level_component(["outside".to_string()].into_iter().collect());
+        let scope = ComponentLevelScope::enter(&indices, &items, &mut env, &var_gen, &mut subst);
+        prebind_cyclic_component_schemes(
             &indices,
             &items,
             &UnordMap::new(),
@@ -2319,6 +2375,14 @@ mod recursive_level_scope_tests {
         assert_eq!(restored.rvars, prior.rvars);
         assert_eq!(restored.body, prior.body);
         assert!(env.lookup("right").is_none());
+        assert!(matches!(
+            env.top_level_value_visibility("right"),
+            TopLevelValueVisibility::NotYetDeclared { .. }
+        ));
+        assert!(matches!(
+            env.top_level_value_visibility("outside"),
+            TopLevelValueVisibility::Visible
+        ));
 
         let follow_up = infer_program(
             &chelis_deep::parser::parse_str("(def {} clean (fn {} (params {} x) (var {} x)))")
