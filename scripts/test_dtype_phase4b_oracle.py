@@ -2482,6 +2482,20 @@ class ContractValidationTests(unittest.TestCase):
             ),
             (
                 Path("spec/05-risc-primitives.md"),
+                "> `insert(g / divisor, axis, original_extent)` at the "
+                "operand dtype.",
+                "> `expand(g / divisor, original_shape, axis)` at the "
+                "operand dtype.",
+                "mean adjoint reinserts the reduced axis",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "[05-AXIS-1] governs the reduction, `expand`, and `insert`\n> family",
+                "[05-AXIS-1] governs the static reduction/expand family",
+                "C axis family names both movement primitives",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
                 "| `insert` | `(&tensor[D,p], axis: int32, size: int64) -> "
                 "tensor[D_plus,p]` | Insert a new dimension of width `size` "
                 "at position `axis`, producing rank `rank(x) + 1`.",

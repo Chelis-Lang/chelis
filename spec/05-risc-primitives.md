@@ -302,7 +302,7 @@ denotes the input dimensions with the complete selected axis set `K` removed.
 > zero-length axis is a type error when statically known. If an execution-time
 > extent is zero, a guard before the composition traps `Domain` as operation
 > `mean` at the result dtype. The single-axis adjoint is
-> `expand(g / divisor, original_shape, axis)` at the operand dtype. One or
+> `insert(g / divisor, axis, original_extent)` at the operand dtype. One or
 > more positional or named axes follow spec/04 §4.5.3: the call executes
 > these exact single-axis graphs in highest-original-position-first order and
 > the adjoint reverses that composition. Mixed, duplicate, dynamic, absent,
@@ -1859,7 +1859,8 @@ exact ADT identity by [05-OP-34].
 > checked arithmetic. A malformed carrier or invalid axis traps `Domain`; an
 > unrepresentable count, extent, offset, or allocation size traps `Overflow`
 > before allocation or element access. Each language operation follows its
-> own axis atom: [05-AXIS-1] governs the static reduction/expand family, while
+> own axis atom: [05-AXIS-1] governs the reduction, `expand`, and `insert`
+> family, while
 > [05-OP-7]/[05-SHAPE-1] admits a computed int32 axis for `shape`. C-family
 > axis parameters are runtime int32 values. Every signed axis accepted by this C family first
 > applies §2.3's one-step negative normalization; an axis still out of range
