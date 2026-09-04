@@ -2799,8 +2799,9 @@ sentences no earlier atom states:
 **The primary mechanism is a typed selector read, not another walk.** No
 stamp-walk tightening can reach R1 through R3: the walk inspects stamps, and
 the discarded nodes legitimately carry none in either the accepted or the
-rejected case. What distinguishes the four loud slots from the three silent
-ones is the spelling of the read. So the structural fix belongs at the read:
+rejected case. What distinguishes the four correctly-rejecting slots
+(`access`, `tuple-get`, `cast`, `grad`) from the three silent ones is the
+spelling of the read. So the structural fix belongs at the read:
 
 1. **Every role-slot read returns a result, never an `Option` with a
    default.** A `Selector`, `Binder`, `EffectHandler`, or `Type` child is
@@ -2888,8 +2889,10 @@ alone:
   honest unit, and it closes the named live instances without any new
   mechanism.
 - **Slice 2 - the selector-read seam.** One helper, then migrate the four
-  already-loud slots onto it so the seam is proven against known-good
-  behavior before it is trusted for new rejections. `chelis-deep/src/role.rs`
+  slots that already reject correctly (`access`, `tuple-get`, `cast`,
+  `grad`) onto it, so the seam is proven against known-good behavior before
+  it is trusted for new rejections. `kv` is not in that set: it rejects, but
+  by the wrong instrument, so it migrates with Slice 1's repair. `chelis-deep/src/role.rs`
   gains the expected-shape half beside `bypass_child_expectation`
   (`role.rs:~232`), which already names exactly this concept for
   `ExplicitInferenceBypass` and needs extending to `Selector`.
