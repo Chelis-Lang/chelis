@@ -774,7 +774,7 @@ impl RuntimeDimClass {
     /// literal) is evaluated at function entry". Every other class compares
     /// at least one locally computed value and takes the source position of
     /// the operation that introduces the guarded extent.
-    pub fn placement(&self) -> GuardPlacement {
+    pub fn placement(&self, dag: &Dag) -> GuardPlacement {
         // Section 4.7 keys on the guard's OPERANDS, not on whether the axis
         // belongs to a `Load`: "a guard whose operands are all interface
         // values (an input tensor's axis, a scalar parameter, or a literal)
@@ -790,15 +790,24 @@ impl RuntimeDimClass {
         // confused "is this axis a `Load`'s own" with "is this operand an
         // input's axis", and made every folded cross-tensor read a local
         // guard.
-        let interface = |source: &AxisSource| {
-            matches!(
-                source,
-                AxisSource::ExternalAxis { .. }
-                    | AxisSource::InputAxis { .. }
-                    | AxisSource::Literal { .. }
-            )
+        // `ScalarInput` straddles section 4.7's line: it records only WHICH
+        // SLOT holds the extent, and that slot is either a scalar PARAMETER
+        // (interface) or the arithmetic that produced one (locally computed).
+        // The DAG keeps the difference - the slot names a node and that node
+        // has an op - so this is decided by reading it, not by adding a
+        // second representation to carry it.
+        let interface = |member: &ClassMember| match member.source {
+            AxisSource::ExternalAxis { .. }
+            | AxisSource::InputAxis { .. }
+            | AxisSource::Literal { .. } => true,
+            AxisSource::ScalarInput { input } => dag
+                .get(member.node)
+                .and_then(|node| node.inputs.get(input))
+                .and_then(|slot| dag.get(*slot))
+                .is_some_and(|producer| matches!(producer.op, RiscOp::Load { .. })),
+            AxisSource::OpComputed { .. } | AxisSource::ClassSupplied { .. } => false,
         };
-        if self.members.iter().all(|member| interface(&member.source)) {
+        if self.members.iter().all(interface) {
             GuardPlacement::Entry
         } else {
             GuardPlacement::Local

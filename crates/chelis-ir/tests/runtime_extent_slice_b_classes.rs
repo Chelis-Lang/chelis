@@ -694,7 +694,7 @@ fn an_all_interface_class_is_an_entry_guard() {
     f32_load(&mut dag, "y", vec![named("n")]);
     let classes = derive_runtime_dim_classes(&dag);
     assert_eq!(
-        class_for(&classes, DimClaim::Name("n".into())).placement(),
+        class_for(&classes, DimClaim::Name("n".into())).placement(&dag),
         GuardPlacement::Entry,
     );
 }
@@ -730,33 +730,8 @@ fn a_class_whose_members_are_folded_input_axis_reads_is_an_entry_guard() {
     );
     let classes = derive_runtime_dim_classes(&dag);
     assert_eq!(
-        class_for(&classes, DimClaim::Literal(4)).placement(),
+        class_for(&classes, DimClaim::Literal(4)).placement(&dag),
         GuardPlacement::Entry,
-    );
-}
-
-/// The discriminating twin of the entry test: a scalar-sourced member is a
-/// locally computed value, so the class cannot be an entry guard even though
-/// its other member is an interface axis.
-#[test]
-fn a_class_with_a_scalar_sourced_member_is_a_local_guard() {
-    let mut dag = Dag::new();
-    let base = f32_load(&mut dag, "b", vec![]);
-    let size = f32_load(&mut dag, "k", vec![]);
-    f32_load(&mut dag, "x", vec![named("n")]);
-    dag.add_node(
-        RiscOp::Expand {
-            axis: 0,
-            size: RtDim::Node(1),
-        },
-        vec![base, size],
-        ty(vec![named("n")], Prim::F32),
-        None,
-    );
-    let classes = derive_runtime_dim_classes(&dag);
-    assert_eq!(
-        class_for(&classes, DimClaim::Name("n".into())).placement(),
-        GuardPlacement::Local,
     );
 }
 
@@ -918,4 +893,80 @@ fn symbolic_params_follow_assigned_slots_not_binding_names() {
         "`n` is axis 0 of the only input, so it comes first; name order would \
          report `m` first, which is the traversal section 4.7 forbids",
     );
+}
+
+// ---------------------------------------------------------------------------
+// A scalar PARAMETER is an interface value; a computed scalar is not.
+//
+// Section 4.7's interface list is "an input tensor's axis, a scalar parameter,
+// or a literal", against "checked integer arithmetic, a user-function result,
+// or an extent an operation computes". `AxisSource::ScalarInput` covers both
+// sides of that line, because it records only WHICH SLOT holds the extent.
+// The distinction survives in the DAG: the slot names a node, and that node
+// is either the `Load` of a scalar parameter or the arithmetic that produced
+// it, so the derivation can tell them apart without a second representation.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_class_fed_by_a_scalar_parameter_is_an_entry_guard() {
+    let mut dag = Dag::new();
+    let base = f32_load(&mut dag, "b", vec![]);
+    let k = dag.add_node(
+        RiscOp::Load { name: "k".into() },
+        vec![],
+        ty(vec![], Prim::Int64),
+        None,
+    );
+    let declaring = f32_load(&mut dag, "x", vec![named("k")]);
+    dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::Node(1),
+        },
+        vec![base, k],
+        ty(vec![named("k")], Prim::F32),
+        None,
+    );
+    let classes = derive_runtime_dim_classes(&dag);
+    assert_eq!(
+        class_for(&classes, DimClaim::Name("k".into())).placement(&dag),
+        GuardPlacement::Entry,
+        "a bare scalar parameter is section 4.7's \"a scalar parameter\"",
+    );
+    let _ = declaring;
+}
+
+/// The discriminating twin: the same class fed by CHECKED ARITHMETIC over that
+/// parameter is locally computed, so its guard takes the introducing
+/// operation's position. Without this row, treating every `ScalarInput` as
+/// interface would satisfy the row above and hoist an arithmetic guard to
+/// entry, where its operand does not yet exist.
+#[test]
+fn a_class_fed_by_computed_arithmetic_is_a_local_guard() {
+    let mut dag = Dag::new();
+    let base = f32_load(&mut dag, "b", vec![]);
+    let k = dag.add_node(
+        RiscOp::Load { name: "k".into() },
+        vec![],
+        ty(vec![], Prim::Int64),
+        None,
+    );
+    let doubled = dag.add_node(RiscOp::Mul, vec![k, k], ty(vec![], Prim::Int64), None);
+    let declaring = f32_load(&mut dag, "x", vec![named("k")]);
+    dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::Node(1),
+        },
+        vec![base, doubled],
+        ty(vec![named("k")], Prim::F32),
+        None,
+    );
+    let classes = derive_runtime_dim_classes(&dag);
+    assert_eq!(
+        class_for(&classes, DimClaim::Name("k".into())).placement(&dag),
+        GuardPlacement::Local,
+        "checked arithmetic is a locally computed value",
+    );
+    let _ = declaring;
 }
