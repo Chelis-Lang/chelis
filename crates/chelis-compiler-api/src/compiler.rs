@@ -1733,8 +1733,8 @@ fn execution_artifact_from_compiled(
 ) -> Result<CompiledExecutionArtifact> {
     let build_target = BuildTarget::from(target);
     reject_host_only_builtins_before_host_lowering(compiled.checked(), build_target)?;
-    let host_compiled =
-        chelis_ir::host::try_lower_manifested_program(&compiled.program).map_err(|diagnostic| {
+    let mut host_compiled = chelis_ir::host::try_lower_manifested_program(&compiled.program)
+        .map_err(|diagnostic| {
             stage_error_with_span(
                 "lower",
                 diagnostic.to_string(),
@@ -1863,15 +1863,22 @@ fn execution_artifact_from_compiled(
                 reject_unsized_named_dims(&entry_dag, "c")?;
                 let specialized = chelis_ir::specialize::specialize_for_blas(&entry_dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
-                let result = chelis_backend_c::codegen_with_options(
-                    &fused,
-                    entry_symbol,
-                    chelis_backend_c::CodegenOptions {
-                        use_blas: true,
-                        ..chelis_backend_c::CodegenOptions::default()
-                    },
+                let options = chelis_backend_c::CodegenOptions {
+                    use_blas: true,
+                    ..chelis_backend_c::CodegenOptions::default()
+                };
+                let selected = chelis_backend_c::prepare_dag_for_codegen(fused, options);
+                let verified = chelis_ir::ownership::verify_ownership(
+                    chelis_ir::ownership::lower_dag_ownership(selected).map_err(|error| {
+                        stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                    })?,
                 )
-                .map_err(unsupported_stage_error)?;
+                .map_err(|error| {
+                    stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                })?;
+                let result =
+                    chelis_backend_c::codegen_with_options(&verified, entry_symbol, options)
+                        .map_err(unsupported_stage_error)?;
                 return Ok(compiled_execution_artifact(
                     entry_symbol,
                     None,
@@ -1945,7 +1952,23 @@ fn execution_artifact_from_compiled(
                     host_program,
                     BuildTarget::C,
                 )?;
-                let result = chelis_backend_c::codegen_host_program(host_program, &func_name)
+                let scalar_only_globals = host_program
+                    .globals
+                    .iter()
+                    .all(|global| matches!(&global.ty, chelis_ir::ConcreteHostType::Scalar(_)));
+                let selected = projected_host_program
+                    .unwrap_or_else(|| host_compiled.host.take().expect("host branch selected"));
+                let selected = chelis_backend_c::prepare_host_program_for_codegen(selected);
+                let verified = chelis_ir::ownership::verify_ownership(
+                    chelis_ir::ownership::lower_host_ownership(&compiled.program, selected)
+                        .map_err(|error| {
+                            stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                        })?,
+                )
+                .map_err(|error| {
+                    stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                })?;
+                let result = chelis_backend_c::codegen_host_program(&verified, &func_name)
                     .map_err(unsupported_stage_error)?;
                 // Preserve a more specific host-emitter rejection (for
                 // example the function-value ABI) when one exists. The
@@ -1956,10 +1979,7 @@ fn execution_artifact_from_compiled(
                 // host-lane artifact with an explicit decline reason.
                 if strictness == EntryStrictness::Strict
                     && matches!(entry_lane_decline, Some(EntryLaneDecline::HasGlobals))
-                    && host_program
-                        .globals
-                        .iter()
-                        .all(|global| matches!(&global.ty, chelis_ir::ConcreteHostType::Scalar(_)))
+                    && scalar_only_globals
                 {
                     return Err(strict_entry_decline_error(EntryLaneDecline::HasGlobals));
                 }
@@ -1981,15 +2001,21 @@ fn execution_artifact_from_compiled(
             reject_unsized_named_dims(&compiled.dag, "c")?;
             let specialized = chelis_ir::specialize::specialize_for_blas(&compiled.dag);
             let fused = chelis_ir::fuse::fuse(&specialized);
-            let result = chelis_backend_c::codegen_with_options(
-                &fused,
-                &func_name,
-                chelis_backend_c::CodegenOptions {
-                    use_blas: true,
-                    ..chelis_backend_c::CodegenOptions::default()
-                },
+            let options = chelis_backend_c::CodegenOptions {
+                use_blas: true,
+                ..chelis_backend_c::CodegenOptions::default()
+            };
+            let selected = chelis_backend_c::prepare_dag_for_codegen(fused, options);
+            let verified = chelis_ir::ownership::verify_ownership(
+                chelis_ir::ownership::lower_dag_ownership(selected).map_err(|error| {
+                    stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                })?,
             )
-            .map_err(unsupported_stage_error)?;
+            .map_err(|error| {
+                stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+            })?;
+            let result = chelis_backend_c::codegen_with_options(&verified, &func_name, options)
+                .map_err(unsupported_stage_error)?;
             let mut artifact = compiled_execution_artifact(
                 &func_name,
                 None,
@@ -2054,7 +2080,18 @@ fn execution_artifact_from_compiled(
             {
                 reject_unsupported_effect_ops_in_host_program(host_program, BuildTarget::Hip)?;
                 reject_unsupported_hip_ops_in_host_program(host_program)?;
-                let result = chelis_backend_c::codegen_host_program(host_program, &func_name)
+                let selected = host_compiled.host.take().expect("host branch selected");
+                let selected = chelis_backend_c::prepare_host_program_for_codegen(selected);
+                let verified = chelis_ir::ownership::verify_ownership(
+                    chelis_ir::ownership::lower_host_ownership(&compiled.program, selected)
+                        .map_err(|error| {
+                            stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                        })?,
+                )
+                .map_err(|error| {
+                    stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                })?;
+                let result = chelis_backend_c::codegen_host_program(&verified, &func_name)
                     .map_err(unsupported_stage_error)?;
                 return Ok(compiled_execution_artifact(
                     &func_name,
@@ -2079,7 +2116,16 @@ fn execution_artifact_from_compiled(
             let specialized = chelis_ir::specialize::specialize_for_blas(&hip_dag);
             reject_unsupported_hip_ops(&specialized)?;
             let fused = chelis_ir::fuse::fuse(&specialized);
-            let result = chelis_backend_hip::codegen_hip(&fused, &func_name)
+            let selected = chelis_backend_hip::prepare_dag_for_codegen(fused);
+            let verified = chelis_ir::ownership::verify_ownership(
+                chelis_ir::ownership::lower_dag_ownership(selected).map_err(|error| {
+                    stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                })?,
+            )
+            .map_err(|error| {
+                stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+            })?;
+            let result = chelis_backend_hip::codegen_hip(&verified, &func_name)
                 .map_err(unsupported_stage_error)?;
             Ok(compiled_execution_artifact(
                 &func_name,

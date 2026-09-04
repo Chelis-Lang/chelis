@@ -25,6 +25,7 @@ pub(crate) enum NonHeapKind {
     Scalar(Prim),
     Unit,
     ContextualCallback,
+    FirstClassFunction,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -82,7 +83,10 @@ pub(crate) fn classify(
         T::Function(_, _) if placement == Placement::Parameter => {
             ValueClass::NonHeap(NonHeapKind::ContextualCallback)
         }
-        T::Function(_, _) => return Err(ClassifyError::FirstClassFunction),
+        // The target ABI still rejects first-class function values under
+        // chelis#879.  Ownership nevertheless models their logical identity
+        // so the sealed payload can reach that target-capability boundary.
+        T::Function(_, _) => ValueClass::NonHeap(NonHeapKind::FirstClassFunction),
         T::Adt(_, children) => container(children.iter(), HeapKind::Adt)?,
         T::List(child) => container(std::iter::once(child.as_ref()), HeapKind::List)?,
         T::Dict(key, value) => {
@@ -113,25 +117,10 @@ fn classify_prim(prim: Prim) -> ValueClass {
 }
 
 fn container<'a>(
-    children: impl Iterator<Item = &'a ConcreteHostType>,
+    _children: impl Iterator<Item = &'a ConcreteHostType>,
     kind: HeapKind,
 ) -> Result<ValueClass, ClassifyError> {
-    if children.into_iter().any(contains_function) {
-        Err(ClassifyError::FunctionContainer)
-    } else {
-        Ok(ValueClass::Heap(kind))
-    }
-}
-
-fn contains_function(ty: &ConcreteHostType) -> bool {
-    use ConcreteHostType as T;
-    match ty {
-        T::Function(_, _) => true,
-        T::Adt(_, xs) | T::Tuple(xs) => xs.iter().any(contains_function),
-        T::List(x) | T::Option(x) => contains_function(x),
-        T::Dict(k, v) => contains_function(k) || contains_function(v),
-        T::Scalar(_) | T::Tensor(_) | T::MappedFile | T::Unit => false,
-    }
+    Ok(ValueClass::Heap(kind))
 }
 
 pub(crate) fn render_type(ty: &ConcreteHostType) -> String {

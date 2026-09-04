@@ -899,10 +899,23 @@ fn build_training_programs_from_compiled(
     }
     let train_dag = dag_without_roots(&train_dag);
 
+    let c_selected = chelis_backend_c::prepare_dag_for_codegen(
+        train_dag.clone(),
+        chelis_backend_c::CodegenOptions::default(),
+    );
+    let c_verified = chelis_ir::ownership::verify_ownership(
+        chelis_ir::ownership::lower_dag_ownership(c_selected).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    let hip_selected = chelis_backend_hip::prepare_dag_for_codegen(train_dag);
+    let hip_verified = chelis_ir::ownership::verify_ownership(
+        chelis_ir::ownership::lower_dag_ownership(hip_selected).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
     let train_c =
-        chelis_backend_c::codegen(&train_dag, "chelis_train").map_err(|e| e.to_string())?;
-    let train_hip =
-        chelis_backend_hip::codegen_hip(&train_dag, "chelis_train").map_err(|e| e.to_string())?;
+        chelis_backend_c::codegen(&c_verified, "chelis_train").map_err(|e| e.to_string())?;
+    let train_hip = chelis_backend_hip::codegen_hip(&hip_verified, "chelis_train")
+        .map_err(|e| e.to_string())?;
 
     let train_labels = output_index_map(&train_c.output_labels);
     if !train_labels.contains_key("eval_output") {
@@ -924,9 +937,23 @@ fn build_transformer_programs() -> Result<ForwardPrograms, String> {
     add_named_store(&mut dag, "out", out);
     let fused = fuse::fuse(&dag);
     let fused = dag_without_roots(&fused);
-    let cpu = chelis_backend_c::codegen(&fused, "chelis_forward").map_err(|e| e.to_string())?;
-    let hip =
-        chelis_backend_hip::codegen_hip(&fused, "chelis_forward").map_err(|e| e.to_string())?;
+    let c_selected = chelis_backend_c::prepare_dag_for_codegen(
+        fused.clone(),
+        chelis_backend_c::CodegenOptions::default(),
+    );
+    let c_verified = chelis_ir::ownership::verify_ownership(
+        chelis_ir::ownership::lower_dag_ownership(c_selected).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    let hip_selected = chelis_backend_hip::prepare_dag_for_codegen(fused);
+    let hip_verified = chelis_ir::ownership::verify_ownership(
+        chelis_ir::ownership::lower_dag_ownership(hip_selected).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    let cpu =
+        chelis_backend_c::codegen(&c_verified, "chelis_forward").map_err(|e| e.to_string())?;
+    let hip = chelis_backend_hip::codegen_hip(&hip_verified, "chelis_forward")
+        .map_err(|e| e.to_string())?;
     let output_index = *output_index_map(&cpu.output_labels)
         .get("out")
         .ok_or("missing `out` output label".to_string())?;

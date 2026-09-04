@@ -370,7 +370,7 @@ fn moved_owner_cannot_be_used_again() {
 }
 
 #[test]
-fn classification_is_total_and_rejects_function_containers() {
+fn classification_is_total_for_opaque_first_class_function_values() {
     assert_eq!(
         classify(&ty(Prim::String), Placement::Value),
         Ok(ValueClass::Heap(HeapKind::String))
@@ -380,12 +380,16 @@ fn classification_is_total_and_rejects_function_containers() {
         classify(&ConcreteHostType::Unit, Placement::Value).unwrap()
     );
     let function = ConcreteHostType::Function(vec![], Box::new(ty(Prim::String)));
-    assert!(
+    assert_eq!(
+        classify(&function, Placement::Value),
+        Ok(ValueClass::NonHeap(NonHeapKind::FirstClassFunction))
+    );
+    assert_eq!(
         classify(
             &ConcreteHostType::Option(Box::new(function)),
-            Placement::Value
-        )
-        .is_err()
+            Placement::Value,
+        ),
+        Ok(ValueClass::Heap(HeapKind::Option))
     );
     assert_ne!(HeapKind::TensorStorage, HeapKind::Tensor);
 }
@@ -728,4 +732,42 @@ fn dag_verification_checks_mutated_directives_and_terminal_completeness() {
         plan.verify(&unterminated),
         Err(OwnershipError::DagDirectiveMap { .. })
     ));
+}
+
+#[test]
+fn store_terminal_can_be_an_exported_root_but_drop_cannot() {
+    let ty = TensorType {
+        dims: vec![DimInfo::Lit(2)],
+        precision: Prim::F32,
+    };
+    let mut stored = Dag::new();
+    let load = stored.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+    let copied = stored.add_node(RiscOp::Copy, vec![load], ty.clone(), None);
+    let output = stored.add_node(
+        RiscOp::Store { name: "out".into() },
+        vec![copied],
+        ty.clone(),
+        None,
+    );
+    stored.add_root(output);
+    let plan = DagOwnershipPlan::lower(&stored).unwrap();
+    plan.verify(&stored).unwrap();
+    assert!(plan.render().contains("store-root n2"));
+
+    let mut dropped = Dag::new();
+    let value = dropped.add_node(
+        RiscOp::synth_const(Prim::F32, 1.0),
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let terminal = dropped.add_node(RiscOp::Drop, vec![value], ty, None);
+    dropped.add_root(terminal);
+    let error = DagOwnershipPlan::lower(&dropped).unwrap_err();
+    assert!(matches!(error, OwnershipError::LoweringInvariant { .. }));
+    assert!(
+        error
+            .to_string()
+            .contains("terminal and cannot be a DAG root")
+    );
 }

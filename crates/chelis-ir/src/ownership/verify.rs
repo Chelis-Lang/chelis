@@ -583,6 +583,32 @@ fn verify_materialized_roots(
     host: &ConcreteHostProgram,
     manifest: &RootManifest,
 ) -> Result<(), OwnershipError> {
+    for binding in &host.globals {
+        for display in &binding.display_roots {
+            let candidates = manifest
+                .entries
+                .iter()
+                .filter(|entry| {
+                    let is_selected_binding = binding.name == entry.def_name
+                        || matches!(
+                            &binding.value.kind,
+                            ConcreteHostExprKind::Call { function, args, .. }
+                                if function == &entry.def_name && args.is_empty()
+                        );
+                    is_selected_binding && independent_display_root(entry) == *display
+                })
+                .count();
+            if candidates != 1 {
+                return Err(OwnershipError::HostSiteMap {
+                    detail: format!(
+                        "materialized payload root `{}` on binding `{}` has {candidates} exact manifest entries",
+                        display.name, binding.name
+                    ),
+                });
+            }
+        }
+    }
+
     let host_roots = manifest
         .entries
         .iter()
@@ -591,7 +617,23 @@ fn verify_materialized_roots(
     let payload_root_count = host
         .globals
         .iter()
-        .map(|binding| binding.display_roots.len())
+        .map(|binding| {
+            binding
+                .display_roots
+                .iter()
+                .filter(|display| {
+                    host_roots.iter().any(|entry| {
+                        let is_selected_binding = binding.name == entry.def_name
+                            || matches!(
+                                &binding.value.kind,
+                                ConcreteHostExprKind::Call { function, args, .. }
+                                    if function == &entry.def_name && args.is_empty()
+                            );
+                        is_selected_binding && independent_display_root(entry) == **display
+                    })
+                })
+                .count()
+        })
         .sum::<usize>();
     if payload_root_count != host_roots.len() {
         return Err(OwnershipError::HostSiteMap {

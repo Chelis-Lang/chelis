@@ -24,9 +24,10 @@
 //!   2. **Lex-sorted preamble.** The input-validation block lists labels
 //!      in lex order — a stable, observer-visible ordering.
 
-use chelis_backend_c::codegen;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
+use support::codegen;
 
 fn vec_f32(n: usize) -> TensorType {
     TensorType {

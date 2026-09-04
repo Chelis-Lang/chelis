@@ -178,7 +178,7 @@ enum Value {
     Fresh(OwnerId),
     Named(OwnerId),
     Callback(OwnerId),
-    FunctionRef(String),
+    FunctionRef { name: String, ty: ConcreteHostType },
 }
 
 struct Scope {
@@ -468,10 +468,11 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 unit: self.unit_name.clone(),
                 name: self.owner_label(owner)?,
             }),
-            Value::FunctionRef(name) => Err(OwnershipError::FirstClassFunctionValue {
-                unit: self.unit_name.clone(),
-                name,
-            }),
+            Value::FunctionRef { name, ty } => {
+                let owner = self.materialize_function_ref(&name, &ty)?;
+                self.moved.insert(owner);
+                Ok(Operand::move_(owner))
+            }
         }
     }
 
@@ -482,10 +483,11 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 Ok(Operand::borrow(owner))
             }
             Value::Named(owner) | Value::Callback(owner) => Ok(Operand::borrow(owner)),
-            Value::FunctionRef(name) => Err(OwnershipError::FirstClassFunctionValue {
-                unit: self.unit_name.clone(),
-                name,
-            }),
+            Value::FunctionRef { name, ty } => {
+                let owner = self.materialize_function_ref(&name, &ty)?;
+                self.register(owner)?;
+                Ok(Operand::borrow(owner))
+            }
         }
     }
 
@@ -502,11 +504,30 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                     .insert(name.to_string(), Place::Callback(owner));
                 Ok(())
             }
-            Value::FunctionRef(function) => Err(OwnershipError::FirstClassFunctionValue {
-                unit: self.unit_name.clone(),
-                name: function,
-            }),
+            Value::FunctionRef { name: function, ty } => {
+                let owner = self.materialize_function_ref(&function, &ty)?;
+                self.register(owner)?;
+                self.name_owner(owner, name)
+            }
         }
+    }
+
+    fn materialize_function_ref(
+        &mut self,
+        name: &str,
+        ty: &ConcreteHostType,
+    ) -> Result<OwnerId, OwnershipError> {
+        let owner = self.mint(
+            ty,
+            Placement::Value,
+            OwnerOrigin::Owned,
+            vec![name.to_string()],
+        )?;
+        self.emit(Op::Define {
+            dest: owner,
+            label: format!("function_ref:{name}"),
+        });
+        Ok(owner)
     }
 
     /// Add Phase 2 scope-exit terminals. Heap values use Drop; nonheap
@@ -802,7 +823,10 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             return self.capture(name);
         }
         if self.ctx.function_names.contains(name) {
-            return Ok(Value::FunctionRef(name.to_string()));
+            return Ok(Value::FunctionRef {
+                name: name.to_string(),
+                ty: ty.clone(),
+            });
         }
         Err(OwnershipError::UnboundName {
             unit: self.unit_name.clone(),
@@ -933,7 +957,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             if matches!(spec.ty, ConcreteHostType::Function(_, _)) {
                 let operand = match value {
                     Value::Callback(owner) => Operand::borrow(owner),
-                    Value::FunctionRef(name) => {
+                    Value::FunctionRef { name, .. } => {
                         let owner = self.mint(
                             &spec.ty,
                             Placement::Parameter,
@@ -1771,10 +1795,6 @@ pub(super) fn materialize_manifest_roots(
     host: &mut ConcreteHostProgram,
     manifest: &RootManifest,
 ) -> Result<Vec<Option<String>>, OwnershipError> {
-    for binding in &mut host.globals {
-        binding.display_name = None;
-        binding.display_roots.clear();
-    }
     let mut callable_bindings = BTreeMap::<String, String>::new();
     let mut result = Vec::with_capacity(manifest.entries.len());
     for (manifest_index, root) in manifest.entries.iter().enumerate() {
@@ -1782,12 +1802,25 @@ pub(super) fn materialize_manifest_roots(
             result.push(None);
             continue;
         }
+        let expected_display = display_root(root);
+        if let Some(binding) = host.globals.iter().find(|binding| {
+            binding.display_roots.iter().any(|display| {
+                display.name == expected_display.name && display.path == expected_display.path
+            })
+        }) {
+            callable_bindings
+                .entry(root.def_name.clone())
+                .or_insert_with(|| binding.name.clone());
+            result.push(Some(binding.name.clone()));
+            continue;
+        }
         if let Some(binding) = host
             .globals
             .iter_mut()
             .find(|binding| binding.name == root.def_name)
         {
-            binding.display_roots.push(display_root(root));
+            binding.display_name = None;
+            binding.display_roots.push(expected_display);
             result.push(Some(binding.name.clone()));
             continue;
         }

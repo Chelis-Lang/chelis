@@ -1,6 +1,6 @@
 use chelis_ir::host::{
-    ConcreteHostProgram, HostBlasMatmulSummary, HostFunctionSpecialization, HostSparseOpSummary,
-    HostTensorHelper, HostTensorSpecialization,
+    HostBlasMatmulSummary, HostFunctionSpecialization, HostSparseOpSummary, HostTensorHelper,
+    HostTensorSpecialization,
 };
 
 /// Sparse-op kind discriminator for the C summary-derived emission path.
@@ -173,9 +173,10 @@ use crate::host_abi::{
     HostAbiCallback as HostCallback, HostAbiCallbackKind as HostCallbackKind,
     HostAbiExpr as HostExpr, HostAbiExprKind as HostExprKind, HostAbiFunction as HostFunction,
     HostAbiMatchArm as HostMatchArm, HostAbiParam as HostParam, HostAbiProgram as HostProgram,
-    HostAbiType, HostAbiType as HostType, project_program,
+    HostAbiType, HostAbiType as HostType, ProjectedHostProgram,
 };
 use chelis_ir::dag::{DimExpr, DimInfo, RiscOp, TensorType};
+use chelis_ir::ownership::{VerifiedDagView, VerifiedHostTensorHelperView};
 use chelis_types::manifest::RootPathStep;
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
@@ -553,18 +554,12 @@ fn result_alias_set(
     }
 }
 
-pub fn emit_host_program(
-    program: &ConcreteHostProgram,
-    program_name: &str,
-) -> Result<String, Unsupported> {
-    let abi_program = project_program(program)?;
-    emit_host_abi_program(&abi_program, program_name)
-}
-
 pub(crate) fn emit_host_abi_program(
-    program: &HostProgram,
+    projected: &ProjectedHostProgram<'_>,
     program_name: &str,
 ) -> Result<String, Unsupported> {
+    let program = projected.program();
+    let _site_identity_count = projected.sites().len();
     // Emit helpers and functions into a body buffer first so we can detect which
     // runtime headers they transitively require (e.g. `chelis_math.h` on macOS
     // when a helper uses the vForce vvexpf/vvlogf path).  The preamble is then
@@ -635,6 +630,9 @@ pub(crate) fn emit_host_abi_program(
         helper_requirements.merge(append_helper(
             &mut body,
             helper,
+            projected
+                .global_tensor_helper(index)
+                .expect("projected global helper retains verified child"),
             &format!("{program_name}__global__tensor_{index}"),
         )?);
     }
@@ -692,7 +690,7 @@ pub(crate) fn emit_host_abi_program(
         }
     }
 
-    for function in &program.functions {
+    for (function_index, function) in program.functions.iter().enumerate() {
         if stubbed_functions.contains(&function.name) {
             // A stubbed wrapper aborts before any helper call; skip its
             // (possibly unemittable) tensor helpers entirely.
@@ -705,6 +703,9 @@ pub(crate) fn emit_host_abi_program(
             helper_requirements.merge(append_helper(
                 &mut body,
                 helper,
+                projected
+                    .function_tensor_helper(function_index, index)
+                    .expect("projected function helper retains verified child"),
                 &format!("{function_name}__tensor_{index}"),
             )?);
         }
@@ -1774,19 +1775,11 @@ fn append_tensor_reshape_helper(out: &mut Vec<String>) {
     out.push("}".to_string());
 }
 
-pub fn emit_host_header(
-    program: &ConcreteHostProgram,
-    program_name: &str,
-) -> Result<String, Unsupported> {
-    let abi_program = project_program(program)?;
-    emit_host_declarations(&abi_program, program_name, false, false)
-}
-
 pub(crate) fn emit_host_abi_header(
-    program: &HostProgram,
+    projected: &ProjectedHostProgram<'_>,
     program_name: &str,
 ) -> Result<String, Unsupported> {
-    emit_host_declarations(program, program_name, false, false)
+    emit_host_declarations(projected.program(), program_name, false, false)
 }
 
 fn emit_host_header_with_linkage(
@@ -1857,9 +1850,10 @@ impl HelperRequirements {
 fn append_helper(
     out: &mut Vec<String>,
     helper: &HostTensorHelper,
+    verified: VerifiedHostTensorHelperView<'_>,
     helper_name: &str,
 ) -> Result<HelperRequirements, Unsupported> {
-    if let Some((_input_name, _input_ty)) = identity_helper_input(helper) {
+    if let Some((_input_name, _input_ty)) = verified_identity_helper_input(helper, verified.dag()) {
         out.push(format!(
             "static void {}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out) {{",
             helper_name,
@@ -1876,13 +1870,13 @@ fn append_helper(
     // generated `.c` file and must never be exported symbols.  `static_entry`
     // ensures the kernel function itself gets `static` linkage so that when
     // compiled with `-shared -fPIC` the symbol is not exported via PLT.
-    let specialized = chelis_ir::specialize::specialize_for_blas(&helper.dag);
-    let uses_blas = specialized
+    let dag = verified.dag();
+    let uses_blas = dag
         .nodes()
         .iter()
         .any(|node| matches!(node.op, RiscOp::BlasMatmul { .. }));
-    let helper_src = CEmitter::emit_dag_with_options(
-        &specialized,
+    let helper_src = CEmitter::emit_verified_dag_with_options(
+        dag,
         helper_name,
         crate::CodegenOptions {
             use_blas: uses_blas,
@@ -1927,6 +1921,29 @@ fn append_helper(
     Ok(requirements)
 }
 
+fn verified_identity_helper_input(
+    helper: &HostTensorHelper,
+    dag: VerifiedDagView<'_>,
+) -> Option<(String, chelis_ir::dag::TensorType)> {
+    if dag.roots().len() != 1 || helper.inputs.len() != 1 {
+        return None;
+    }
+    let root = dag.roots()[0];
+    let node = dag.get(root)?;
+    match &node.op {
+        RiscOp::Load { name } if node.output_type == helper.output => helper
+            .inputs
+            .iter()
+            .find(|input| input.name == *name)
+            .map(|input| (input.name.clone(), input.ty.clone())),
+        _ => None,
+    }
+}
+
+// Transitional private ownership inference still reads the projected helper
+// metadata in this milestone. Backend emission itself uses the verified child
+// cursor above; this raw helper classifier is deleted with the remaining
+// inference apparatus in the next milestone.
 fn identity_helper_input(
     helper: &HostTensorHelper,
 ) -> Option<(String, chelis_ir::dag::TensorType)> {

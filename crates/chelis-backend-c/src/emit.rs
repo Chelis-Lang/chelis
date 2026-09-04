@@ -3,8 +3,8 @@
 use chelis_ir::dag::{
     Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep,
     FusedStepOp, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim, SymbolicDimSource, TensorType,
-    symbolic_bindings,
 };
+use chelis_ir::ownership::{VerifiedDagProgram, VerifiedDagView};
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_types::{CheckedCastKind, CheckedCastPlan, ElementRef, NumericTrap, ScalarValue};
@@ -73,13 +73,22 @@ struct FusedInPlaceSpec {
 
 impl CEmitter {
     /// Emit C source for an entire DAG as a function.
-    pub fn emit_dag(dag: &Dag, func_name: &str) -> Result<String, Unsupported> {
+    #[cfg(test)]
+    pub fn emit_dag(dag: &VerifiedDagProgram, func_name: &str) -> Result<String, Unsupported> {
         Self::emit_dag_with_options(dag, func_name, crate::CodegenOptions::default())
     }
 
     /// Emit C source for an entire DAG with explicit backend options.
     pub fn emit_dag_with_options(
-        dag: &Dag,
+        dag: &VerifiedDagProgram,
+        func_name: &str,
+        options: crate::CodegenOptions,
+    ) -> Result<String, Unsupported> {
+        Self::emit_verified_dag_with_options(dag.emission(), func_name, options)
+    }
+
+    pub(crate) fn emit_verified_dag_with_options(
+        dag: VerifiedDagView<'_>,
         func_name: &str,
         options: crate::CodegenOptions,
     ) -> Result<String, Unsupported> {
@@ -90,23 +99,11 @@ impl CEmitter {
         // `host_emit::append_helper`, which does not go through that entry,
         // and because it must precede `symbolic_occurrences`, whose
         // fallback for an unrecoverable axis is a panic (chelis#1482).
-        chelis_ir::axis_sources::check_axis_sources(
-            dag,
-            chelis_types::unsupported::Stage::Codegen("c"),
-        )?;
+        dag.check_axis_sources(chelis_types::unsupported::Stage::Codegen("c"))?;
         Self::reject_fused_integer_abs(dag)?;
         Self::validate_supported_precisions(dag);
         Self::validate_load_abi(dag);
         Self::validate_sparse_contracts(dag);
-        // Some Surf signatures surface anonymous (Named("", None)) axes into
-        // the lowered DAG (e.g. a rank-1 tensor parameter whose dim has no
-        // declared name). These would emit `int  = inputs[0]->shape[0];` and
-        // `(int64_t[]){ }` shape literals, neither of which compiles. Rewrite
-        // empty dim names to a stable synthesized identifier before the
-        // emitter walks the DAG.
-        let dag_owned = Self::rename_anonymous_dims(dag);
-        let dag = &dag_owned;
-
         // chelis#593 memory-safety floor. Run AFTER `rename_anonymous_dims`:
         // that pass resolves an anon (`*`/empty) output dim by copying the
         // first input's dims wholesale, which — for a `Pad` whose output has an
@@ -117,7 +114,7 @@ impl CEmitter {
         // is written.
         Self::validate_pad_output_sizing(dag);
 
-        let reduction_inlined = chelis_ir::fuse::reduction_inlined_fused_elems(dag);
+        let reduction_inlined = dag.reduction_inlined_fused_elems();
         let math_lib = options
             .math_lib_override
             .unwrap_or_else(crate::MathLib::detect);
@@ -134,7 +131,7 @@ impl CEmitter {
         // later site for the same symbol guards.
         let mut runtime_dim_sites = chelis_unord::UnordMap::new();
         {
-            let occurrences = chelis_ir::dag::symbolic_occurrences(dag);
+            let occurrences = dag.symbolic_occurrences();
             let load_declared: chelis_unord::UnordSet<&str> = occurrences
                 .iter()
                 .filter(|o| matches!(o.source, SymbolicDimSource::Load { .. }))
@@ -414,7 +411,7 @@ impl CEmitter {
         self.emit_tensor_snapshot(id, true);
     }
 
-    fn rename_anonymous_dims(dag: &Dag) -> Dag {
+    pub(crate) fn rename_anonymous_dims(dag: Dag) -> Dag {
         use chelis_ir::dag::DimInfo;
         fn is_anon(name: &str) -> bool {
             name.is_empty() || name == "*"
@@ -453,7 +450,7 @@ impl CEmitter {
                 other => other.clone(),
             }
         }
-        let mut out = dag.clone();
+        let mut out = dag;
         // DAG exposes no `nodes_mut`; rewrite by round-tripping replace_node.
         let ids: Vec<_> = out.nodes().iter().map(|n| n.id).collect();
         for id in ids {
@@ -528,7 +525,7 @@ impl CEmitter {
     /// external input can be scalar, so comparing only against that input
     /// would miss disagreement between later tensor inputs. Fully static,
     /// already-compatible input shapes stay byte-identical.
-    fn emit_elementwise_operand_guard(&mut self, node: &DagNode, dag: &Dag) {
+    fn emit_elementwise_operand_guard(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) {
         let dims_static = |dims: &[DimInfo]| dims.iter().all(|d| matches!(d, DimInfo::Lit(_)));
         let input_dims = node
             .inputs
@@ -563,7 +560,7 @@ impl CEmitter {
         }
     }
 
-    fn emit_node(&mut self, node: &DagNode, dag: &Dag) -> Result<(), Unsupported> {
+    fn emit_node(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
         let id = node.id.0;
         // chelis#664: same-shape elementwise family — guard operand
         // agreement before the op emitters index operands through the
@@ -900,7 +897,7 @@ impl CEmitter {
         }
     }
 
-    fn output_specs(dag: &Dag) -> Vec<OutputSpec> {
+    fn output_specs(dag: VerifiedDagView<'_>) -> Vec<OutputSpec> {
         let mut specs = Vec::new();
         let mut seen = chelis_unord::UnordSet::new();
 
@@ -935,14 +932,14 @@ impl CEmitter {
         specs
     }
 
-    pub(crate) fn output_labels(dag: &Dag) -> Vec<String> {
+    pub(crate) fn output_labels(dag: VerifiedDagView<'_>) -> Vec<String> {
         Self::output_specs(dag)
             .into_iter()
             .map(|output| output.label)
             .collect()
     }
 
-    pub(crate) fn input_labels(dag: &Dag) -> Vec<String> {
+    pub(crate) fn input_labels(dag: VerifiedDagView<'_>) -> Vec<String> {
         let mut labels = Vec::new();
         let mut seen = chelis_unord::UnordSet::new();
         for node in dag.nodes() {
@@ -970,8 +967,8 @@ impl CEmitter {
     /// fused integer emission is a separate dtype capability that chelis#729
     /// owns, so externally supplied fused IR remains loud instead of entering
     /// the float-only template.
-    fn reject_fused_integer_abs(dag: &Dag) -> Result<(), Unsupported> {
-        if let Some(node) = chelis_ir::analysis::first_fused_integer_abs_node(dag) {
+    fn reject_fused_integer_abs(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
+        if let Some(node) = dag.first_fused_integer_abs_node() {
             return Err(Unsupported::new(
                 UnsupportedKind::Op("Abs".to_string()),
                 format!("a fused integer tensor at C DAG node {}", node.0),
@@ -988,7 +985,7 @@ impl CEmitter {
         Ok(())
     }
 
-    fn validate_supported_precisions(dag: &Dag) {
+    fn validate_supported_precisions(dag: VerifiedDagView<'_>) {
         for node in dag.nodes() {
             match node.output_type.precision {
                 // WS-1 (dtype + Metal cleanup cycle): admit Bf16/F16 in
@@ -1079,7 +1076,7 @@ impl CEmitter {
         }
     }
 
-    fn validate_load_abi(dag: &Dag) {
+    fn validate_load_abi(dag: VerifiedDagView<'_>) {
         let mut seen = chelis_unord::UnordMap::<String, TensorType>::new();
         for node in dag.nodes() {
             if let RiscOp::Load { name } = &node.op {
@@ -1119,7 +1116,7 @@ impl CEmitter {
     ///
     /// The deeper wrapper-sizing fix is tracked in chelis#593; this is only
     /// the memory-safety guard.
-    fn validate_pad_output_sizing(dag: &Dag) {
+    fn validate_pad_output_sizing(dag: VerifiedDagView<'_>) {
         for node in dag.nodes() {
             let RiscOp::Pad { padding, .. } = &node.op else {
                 continue;
@@ -1173,7 +1170,7 @@ impl CEmitter {
         }
     }
 
-    fn validate_sparse_contracts(dag: &Dag) {
+    fn validate_sparse_contracts(dag: VerifiedDagView<'_>) {
         for node in dag.nodes() {
             match &node.op {
                 RiscOp::Gather { .. } => {
@@ -1247,7 +1244,7 @@ impl CEmitter {
         }
     }
 
-    fn input_types(dag: &Dag) -> chelis_unord::UnordMap<String, TensorType> {
+    fn input_types(dag: VerifiedDagView<'_>) -> chelis_unord::UnordMap<String, TensorType> {
         let mut seen = chelis_unord::UnordMap::<String, TensorType>::new();
         for node in dag.nodes() {
             if let RiscOp::Load { name } = &node.op {
@@ -1260,7 +1257,7 @@ impl CEmitter {
 
     fn emit_input_shape_preamble(
         &mut self,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
         input_slots: &chelis_unord::UnordMap<String, usize>,
         func_name: &str,
     ) {
@@ -1319,7 +1316,7 @@ impl CEmitter {
             }
         }
 
-        for binding in symbolic_bindings(dag) {
+        for binding in dag.symbolic_bindings() {
             // chelis#616: an op-declared dim is declared inline at its
             // owning op (the bound scalars are computed tensors that do not
             // exist here at prologue time); see `runtime_dim_sites`.
@@ -1588,7 +1585,7 @@ impl CEmitter {
     }
 
     #[allow(dead_code)] // Re-enabled only by the Phase 3 shared reuse proof (#1214).
-    fn fused_in_place_spec(&self, node: &DagNode, dag: &Dag) -> Option<NodeId> {
+    fn fused_in_place_spec(&self, node: &DagNode, dag: VerifiedDagView<'_>) -> Option<NodeId> {
         let reusable_input = node.reusable_input?;
         if !matches!(node.op, RiscOp::FusedElem { .. }) {
             return None;
@@ -2449,7 +2446,13 @@ impl CEmitter {
     /// f64 read through `float*` truncates the 8-byte payload). Both
     /// operands share precision `p` per the signature, but each type is
     /// resolved independently for robustness.
-    fn emit_cmplt(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType, dag: &Dag) {
+    fn emit_cmplt(
+        &mut self,
+        id: usize,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: VerifiedDagView<'_>,
+    ) {
         let a = inputs[0].0;
         let b = inputs[1].0;
         let a_ty = dag.get(inputs[0]).unwrap().output_type.clone();
@@ -4171,7 +4174,7 @@ impl CEmitter {
         axis: usize,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         let values = inputs[0].0;
         let indices = inputs[1].0;
@@ -4245,7 +4248,7 @@ impl CEmitter {
         axis: usize,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         let target = inputs[0].0;
         let indices = inputs[1].0;
@@ -4341,7 +4344,7 @@ impl CEmitter {
         axis: usize,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         let target = inputs[0].0;
         let indices = inputs[1].0;
@@ -4439,7 +4442,7 @@ impl CEmitter {
         axis: usize,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         let data = inputs[0].0;
         let indices = inputs[1].0;
@@ -4560,7 +4563,7 @@ impl CEmitter {
         accumulator: Prim,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         let input_node = dag.get(inputs[0]).unwrap();
         let input_prec = input_node.output_type.precision;
@@ -4627,7 +4630,7 @@ impl CEmitter {
         axes: &[usize],
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
         let input_ty = &dag.get(inputs[0]).expect("count input exists").output_type;
@@ -4760,7 +4763,7 @@ impl CEmitter {
         axis: usize,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
         let input_node = dag.get(inputs[0]).unwrap();
@@ -4955,7 +4958,7 @@ impl CEmitter {
         acc_c_ty: &str,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
         let input_node = dag.get(inputs[0]).unwrap();
@@ -5063,7 +5066,7 @@ impl CEmitter {
         input_prec: Prim,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
         let input_node = dag.get(inputs[0]).unwrap();
@@ -5129,7 +5132,7 @@ impl CEmitter {
         axis: usize,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) -> Result<(), Unsupported> {
         let a = inputs[0].0;
         let input_node = dag.get(inputs[0]).unwrap();
@@ -5248,7 +5251,7 @@ impl CEmitter {
         axis: usize,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
         let input_node = dag.get(inputs[0]).unwrap();
@@ -5320,7 +5323,7 @@ impl CEmitter {
         axis: usize,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
         init: &str,
         update_tmpl: &str,
         simd_fn: Option<&str>,
@@ -5439,7 +5442,7 @@ impl CEmitter {
         strides: &[usize],
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) -> Result<(), Unsupported> {
         let a = inputs[0].0;
         let input_node = dag.get(inputs[0]).unwrap();
@@ -5649,7 +5652,7 @@ impl CEmitter {
         strides: &[usize],
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         let x = inputs[0].0;
         let g = inputs[1].0;
@@ -5776,7 +5779,7 @@ impl CEmitter {
         axis: usize,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
         is_argmax: bool,
     ) -> Result<(), Unsupported> {
         let a = inputs[0].0;
@@ -6169,7 +6172,7 @@ impl CEmitter {
         new_shape: &[RtDim],
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
         let ndim = Self::ndim(ty);
@@ -6235,7 +6238,7 @@ impl CEmitter {
         axes: &[usize],
         inputs: &[NodeId],
         ty: &TensorType,
-        _dag: &Dag,
+        _dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
         let ndim = Self::ndim(ty);
@@ -6275,7 +6278,7 @@ impl CEmitter {
         size: &RtDim,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
         // An op-declared expanded axis is bound from the exact structural
@@ -6330,7 +6333,13 @@ impl CEmitter {
     /// extent (`t{a}_shape[axis]`); `Node(i)` reads the rank-0 integer bound
     /// scalar `t{inputs[i]}->data[0]` with its declared element type, cast to
     /// `int` for use as a C index.
-    fn bound_c_expr(bound: &RtDim, inputs: &[NodeId], a: usize, axis: usize, dag: &Dag) -> String {
+    fn bound_c_expr(
+        bound: &RtDim,
+        inputs: &[NodeId],
+        a: usize,
+        axis: usize,
+        dag: VerifiedDagView<'_>,
+    ) -> String {
         match bound {
             RtDim::Lit(n) => n.to_string(),
             RtDim::ToEnd => format!("t{a}_shape[{axis}]"),
@@ -6415,7 +6424,7 @@ impl CEmitter {
         fill: ScalarValue,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
         let et = Self::elem_type(ty);
@@ -6541,7 +6550,7 @@ impl CEmitter {
         bounds: &[(RtDim, RtDim)],
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         // chelis#368/#551: the `SHRINK_TO_END` full-axis sentinel encodes
         // "shrink axis `d` to its full runtime extent" for a SYMBOLIC no-pad
@@ -6637,7 +6646,7 @@ impl CEmitter {
         strides: &[RtDim],
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
         // chelis#616: per-axis step C expressions. The strided output extent is
@@ -6744,7 +6753,14 @@ impl CEmitter {
     /// Emit a cast-ladder node. `trunc` selects the [05-OP-6] rung:
     /// the float-to-integer leg truncates toward zero before its range
     /// check instead of rejecting a fractional value.
-    fn emit_cast(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType, dag: &Dag, trunc: bool) {
+    fn emit_cast(
+        &mut self,
+        id: usize,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: VerifiedDagView<'_>,
+        trunc: bool,
+    ) {
         let a = inputs[0].0;
         let src_ty = &dag
             .get(inputs[0])
@@ -6925,6 +6941,12 @@ mod tests {
     use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
     use chelis_types::types::Prim;
 
+    fn emit_test_dag(dag: &Dag, name: &str) -> Result<String, Unsupported> {
+        let verified = crate::testing::verified_dag(dag, crate::CodegenOptions::default())
+            .expect("C emitter unit-test DAG must verify ownership");
+        CEmitter::emit_dag(&verified, name)
+    }
+
     fn scalar_f32() -> TensorType {
         TensorType::scalar_f32()
     }
@@ -6951,8 +6973,8 @@ mod tests {
         let x = direct.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
         let out = direct.add_node(RiscOp::Abs, vec![x], ty.clone(), None);
         direct.set_roots(vec![out]);
-        let c = CEmitter::emit_dag(&direct, "integer_abs")
-            .expect("direct integer abs has a typed C kernel");
+        let c =
+            emit_test_dag(&direct, "integer_abs").expect("direct integer abs has a typed C kernel");
         assert!(c.contains("chelis_int_abs_guard"));
         assert!(c.contains("numeric trap: overflow in abs at int64"));
         assert!(!c.contains("fabsf(__in_a_"));
@@ -6971,7 +6993,7 @@ mod tests {
             None,
         );
         fused.set_roots(vec![out]);
-        let err = CEmitter::emit_dag(&fused, "fused_integer_abs")
+        let err = emit_test_dag(&fused, "fused_integer_abs")
             .expect_err("fused integer abs must not bypass the C guard");
         assert!(err.to_string().contains("unsupported: op `Abs`"));
     }
@@ -6992,7 +7014,7 @@ mod tests {
             scalar_f32(),
             None,
         );
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("chelis_alloc"));
         // The exact tagged scalar carries both the f32 dtype and the
         // source value's bit pattern into the single public fill API.
@@ -7022,7 +7044,7 @@ mod tests {
         );
         dag.set_roots(vec![padded]);
 
-        let c = CEmitter::emit_dag(&dag, "pad_exact_int64").unwrap();
+        let c = emit_test_dag(&dag, "pad_exact_int64").unwrap();
         assert!(c.contains(&format!(
             "chelis_fill_scalar(t1_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)INT64_C({exact})));"
         )));
@@ -7054,7 +7076,7 @@ mod tests {
                 None,
             );
             dag.set_roots(vec![padded]);
-            let c = CEmitter::emit_dag(&dag, "pad_signed_int64").unwrap();
+            let c = emit_test_dag(&dag, "pad_signed_int64").unwrap();
             assert!(
                 c.contains(&format!(
                     "chelis_fill_scalar(t1_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t){spelling}));"
@@ -7080,7 +7102,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("chelis_flat_to_indices"));
         assert!(c.contains("chelis_indices_to_flat"));
         assert!(c.contains("+"));
@@ -7096,7 +7118,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         // The slow (non-contiguous) path emits a typed pointer cast then negates.
         assert!(c.contains("((float*)t0_data)[idx]"));
     }
@@ -7111,7 +7133,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Exp, vec![a], scalar_f32(), None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("expf("));
     }
 
@@ -7125,7 +7147,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Log, vec![a], scalar_f32(), None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("logf("));
     }
 
@@ -7139,7 +7161,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Sin, vec![a], scalar_f32(), None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("sinf("));
     }
 
@@ -7153,7 +7175,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Sqrt, vec![a], scalar_f32(), None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("sqrtf("));
     }
 
@@ -7181,7 +7203,7 @@ mod tests {
             },
             None,
         );
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("uint8_t* restrict __out_2"));
         assert!(c.contains("? UINT8_C(1) : UINT8_C(0)"));
         assert!(!c.contains("? 1.0f : 0.0f"));
@@ -7203,7 +7225,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("#pragma omp parallel for"));
     }
 
@@ -7225,7 +7247,7 @@ mod tests {
             scalar_f32(),
             None,
         );
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         // Stride-4 ILP cascade (issue #163): four independent
         // accumulators rather than a single `acc +=` chain.
         assert!(c.contains("acc0 += __v"));
@@ -7239,15 +7261,16 @@ mod tests {
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
         let copy = dag.add_node(RiscOp::Copy, vec![x], vec_f32(4), None);
-        dag.add_node(RiscOp::Drop, vec![x], vec_f32(4), None);
+        let disposable = dag.add_node(RiscOp::Copy, vec![x], vec_f32(4), None);
+        dag.add_node(RiscOp::Drop, vec![disposable], vec_f32(4), None);
         dag.add_root(copy);
 
-        let c = CEmitter::emit_dag(&dag, "test_copy_drop").unwrap();
+        let c = emit_test_dag(&dag, "test_copy_drop").unwrap();
 
         assert!(c.contains("chelis_tensor *t1"));
         assert!(c.contains("((float*)t1_data)[i] = ((float*)t0_data)[idx];"));
         assert!(
-            !c.contains("t2"),
+            !c.contains("chelis_tensor *t3"),
             "Drop should not emit a tensor wrapper or compute statement:\n{c}"
         );
     }
@@ -7262,7 +7285,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::MaxReduce { axis: 0 }, vec![a], scalar_f32(), None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         // #172: the contiguous fast path uses the NaN-propagating SIMD
         // helper; the strided fallback uses the NaN-propagating scalar
         // helper. Plain C99 `fmaxf` (which DROPS NaN) must not appear in
@@ -7308,7 +7331,7 @@ mod tests {
                 vec_f32(2),
                 None,
             );
-            let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+            let c = emit_test_dag(&dag, "test_fn").unwrap();
             assert!(
                 c.contains(op),
                 "reduce_window {reducer:?} must use the NaN-dropping `{op}` (#172):\n{c}"
@@ -7336,7 +7359,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32(), None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("*"));
     }
 
@@ -7360,7 +7383,7 @@ mod tests {
                 None,
             );
             dag.add_node(op, vec![a, b], scalar_f32(), None);
-            let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+            let c = emit_test_dag(&dag, "test_fn").unwrap();
             assert!(c.contains("isnan(__in_a_2[i])"), "{c}");
             assert!(c.contains("!isnan(__in_b_2[i])"), "{c}");
             assert!(
@@ -7394,7 +7417,7 @@ mod tests {
             mat_f32(2, 3),
             None,
         );
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("chelis_tensor *t1 = chelis_alloc("));
         assert!(c.contains("memcpy(t1_data, t0_data, (size_t)t1_byte_capacity);"));
     }
@@ -7414,7 +7437,7 @@ mod tests {
             mat_f32(3, 2),
             None,
         );
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("in_indices[1] = out_indices[0]"));
         assert!(c.contains("in_indices[0] = out_indices[1]"));
         assert!(!c.contains("t1->strides[0] ="));
@@ -7438,7 +7461,7 @@ mod tests {
             vec_f32(4),
             None,
         );
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("in_indices[d] = d == 0 ? 0 : out_indices[d]"));
         assert!(!c.contains("t1->strides[0] ="));
     }
@@ -7458,7 +7481,7 @@ mod tests {
             scalar_f32(),
             None,
         );
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("memcpy(t1_data, t0_data, (size_t)t1_byte_capacity); /* store: out */"));
     }
 
@@ -7488,7 +7511,7 @@ mod tests {
                 precision,
             };
             dag.add_node(op, vec![a], dst_ty, None);
-            CEmitter::emit_dag(&dag, "test_fn").expect("emit")
+            emit_test_dag(&dag, "test_fn").expect("emit")
         }
 
         let trunc = emit(
@@ -7572,7 +7595,7 @@ mod tests {
                     None,
                 );
                 dag.add_root(output);
-                let c = CEmitter::emit_dag(&dag, "checked_cast_product").unwrap();
+                let c = emit_test_dag(&dag, "checked_cast_product").unwrap();
                 assert_eq!(
                     c.contains("/* checked cast identity */"),
                     source == target,
@@ -7623,7 +7646,7 @@ mod tests {
             dst_ty,
             None,
         );
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(
             c.contains("chelis_flat_to_indices"),
             "cast must emit a strided element-wise loop, not memcpy; got:\n{c}"
@@ -7652,7 +7675,7 @@ mod tests {
         );
         dag.add_node(RiscOp::Realize, vec![s], vec_f32(3), None);
 
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("chelis_tensor *t2 = chelis_alloc("));
         assert!(c.contains("chelis_indices_to_flat(indices, t1_strides, t1_rank)"));
         assert!(!c.contains("chelis_alloc_view"));
@@ -7667,7 +7690,7 @@ mod tests {
             scalar_f32(),
             None,
         );
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("inputs[0]"));
     }
 
@@ -7687,7 +7710,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Add, vec![x0, x1], scalar_f32(), None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("if (n_in != 1)"));
         assert!(c.contains("chelis_tensor *t0 = inputs[0];"));
         assert!(c.contains("chelis_tensor *t1 = inputs[0];"));
@@ -7696,25 +7719,28 @@ mod tests {
     #[test]
     fn input_labels_follow_first_load_occurrence() {
         let mut dag = Dag::new();
-        dag.add_node(
+        let b0 = dag.add_node(
             RiscOp::Load { name: "b".into() },
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(
+        let a = dag.add_node(
             RiscOp::Load { name: "a".into() },
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(
+        let b1 = dag.add_node(
             RiscOp::Load { name: "b".into() },
             vec![],
             scalar_f32(),
             None,
         );
-        assert_eq!(CEmitter::input_labels(&dag), vec!["b", "a"]);
+        dag.set_roots(vec![b0, a, b1]);
+        let verified = crate::testing::verified_dag(&dag, crate::CodegenOptions::default())
+            .expect("input-label test DAG must verify ownership");
+        assert_eq!(CEmitter::input_labels(verified.emission()), vec!["b", "a"]);
     }
 
     #[test]
@@ -7726,7 +7752,7 @@ mod tests {
             scalar_f32(),
             None,
         );
-        let c = CEmitter::emit_dag(&dag, "my_func").unwrap();
+        let c = emit_test_dag(&dag, "my_func").unwrap();
         assert!(c.contains(
             "void my_func(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out)"
         ));
@@ -7741,7 +7767,7 @@ mod tests {
             scalar_f32(),
             None,
         );
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("#include \"chelis_runtime.h\""));
     }
 
@@ -7760,7 +7786,7 @@ mod tests {
             vec_f32(5),
             None,
         );
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains(
             "chelis_fill_scalar(t1_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_F32,"
         ));
@@ -7784,7 +7810,7 @@ mod tests {
             vec_f32(3),
             None,
         );
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("src_indices[0] = dst_indices[0] + 1"));
     }
 
@@ -7811,7 +7837,7 @@ mod tests {
             vec_f32(5),
             None,
         );
-        let _ = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let _ = emit_test_dag(&dag, "test_fn").unwrap();
     }
 
     #[test]
@@ -7831,7 +7857,7 @@ mod tests {
             vec_f32(2),
             None,
         );
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("in_indices[0] = out_indices[0] * (2)"));
         assert!(!c.contains("t1->strides[0] ="));
     }
@@ -7859,7 +7885,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Mul, vec![c, d], scalar_f32(), None);
-        let code = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let code = emit_test_dag(&dag, "test_fn").unwrap();
         // t2 is add result, t4 is mul result
         assert!(code.contains("t2_data"));
         assert!(code.contains("t4_data"));
@@ -7881,7 +7907,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("(int64_t[]){ 4 }"));
     }
 
@@ -7904,7 +7930,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Neg, vec![s], scalar_f32(), None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         // Stride-4 ILP cascade (issue #163).
         assert!(c.contains("acc0 += __v"));
         assert!(c.contains("(acc0 + acc1) + (acc2 + acc3)"));
@@ -7921,7 +7947,7 @@ mod tests {
             scalar_f32(),
             None,
         );
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(!c.contains("chelis_tensor_release(t0);"));
         assert!(c.contains("outputs[0] = chelis_contiguous(t0);"));
     }
@@ -7943,7 +7969,7 @@ mod tests {
         );
         dag.add_root(a);
         dag.add_root(b);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("if (n_out != 2)"));
         assert!(c.contains("outputs[0] = t0;"));
         assert!(c.contains("outputs[1] = t1;"));
@@ -7973,7 +7999,7 @@ mod tests {
             },
             None,
         );
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("chelis_alloc(0, NULL, CHELIS_DTYPE_BOOL);"));
     }
 
@@ -8007,7 +8033,7 @@ mod tests {
             vec_f32(2),
             None,
         );
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         // chelis#1308 stores Bool tensors as one uint8 per element; the
         // draw gate must read the predicate at that width. A `(float*)`
         // read of the one-byte allocation is out of bounds and
@@ -8038,7 +8064,7 @@ mod tests {
             },
             None,
         );
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(
             c.contains("CHELIS_DTYPE_I64"),
             "generated C must use CHELIS_DTYPE_I64 dtype macro"
@@ -8073,7 +8099,7 @@ mod tests {
             },
             None,
         );
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(
             c.contains("CHELIS_DTYPE_F64"),
             "generated C must use CHELIS_DTYPE_F64 dtype macro:\n{c}"
@@ -8112,7 +8138,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Add, vec![a, b], ty, None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(
             c.contains("CHELIS_DTYPE_F64"),
             "generated C must use CHELIS_DTYPE_F64"
@@ -8139,8 +8165,10 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Exp, vec![a], ty, None);
+        let verified = crate::testing::verified_dag(&dag, crate::CodegenOptions::default())
+            .expect("f64 exp test DAG must verify ownership");
         let c = CEmitter::emit_dag_with_options(
-            &dag,
+            &verified,
             "test_fn",
             crate::CodegenOptions {
                 math_lib_override: Some(crate::MathLib::None),
@@ -8179,7 +8207,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Add, vec![a, b], ty, None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(
             c.contains("CHELIS_DTYPE_I64"),
             "generated C must use CHELIS_DTYPE_I64"
@@ -8247,15 +8275,13 @@ mod tests {
             mat_f32(2, 4),
             None,
         );
-        let result = crate::codegen_with_options(
-            &dag,
-            "test_fn",
-            crate::CodegenOptions {
-                use_blas: true,
-                ..crate::CodegenOptions::default()
-            },
-        )
-        .unwrap();
+        let options = crate::CodegenOptions {
+            use_blas: true,
+            ..crate::CodegenOptions::default()
+        };
+        let verified = crate::testing::verified_dag(&dag, options)
+            .expect("BLAS codegen test DAG must verify ownership");
+        let result = crate::codegen_with_options(&verified, "test_fn", options).unwrap();
         assert!(result.c_source.contains("cblas_sgemm("));
     }
 
@@ -8316,7 +8342,7 @@ mod tests {
             mat_f32(2, 4),
             None,
         );
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(!c.contains("cblas_sgemm("));
         assert!(c.contains("for (int64_t __reduce_i = 0; __reduce_i < 3; __reduce_i++) {"));
     }
@@ -8345,7 +8371,7 @@ mod tests {
             },
             None,
         );
-        let _ = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let _ = emit_test_dag(&dag, "test_fn").unwrap();
     }
 
     // ---- SIMD Level 1b fast-path tests ----
@@ -8368,7 +8394,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(
             c.contains("restrict"),
             "fast path should declare restrict pointers"
@@ -8412,7 +8438,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Add, vec![a_exp, b], vec_f32(4), None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         // The slow path (index-conversion fallback) must always be present in the
         // emitted C; at runtime, chelis_is_contiguous(t_expanded) == 0 directs
         // execution into this branch.
@@ -8439,7 +8465,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("restrict"), "unary fast path must use restrict");
         assert!(
             c.contains("#pragma omp parallel for simd"),
@@ -8474,7 +8500,7 @@ mod tests {
             input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
         }];
         dag.add_node(RiscOp::FusedElem { ops }, vec![a, b], vec_f32(4), None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(
             c.contains("restrict"),
             "fused fast path must use restrict pointers"
@@ -8511,7 +8537,7 @@ mod tests {
         }];
         dag.add_node(RiscOp::FusedElem { ops }, vec![x, scale], vec_f32(4), None);
 
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(c.contains("float* restrict __out_2 = (float*)t2_data;"));
         assert!(c.contains("const float* restrict __ext0_2 = (const float*)t0_data;"));
@@ -8546,7 +8572,7 @@ mod tests {
             None,
         );
 
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(c.contains("const double *t2_values_data = (const double*)t0_data;"));
         assert!(c.contains("const int32_t *t2_indices_data = (const int32_t*)t1_data;"));
@@ -8581,7 +8607,7 @@ mod tests {
             None,
         );
 
-        let c = CEmitter::emit_dag(&dag, "embedding_probe").unwrap();
+        let c = emit_test_dag(&dag, "embedding_probe").unwrap();
 
         assert!(c.contains("chelis_alloc(2, (int64_t[]){ 128, 1024 }, CHELIS_DTYPE_F32);"));
         assert!(
@@ -8596,8 +8622,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "C backend sparse gather requires int32/int64 indices")]
-    fn sparse_gather_rejects_float_indices_at_emit_boundary() {
+    fn sparse_gather_rejects_float_indices_at_verified_boundary() {
         let mut dag = Dag::new();
         let values = dag.add_node(
             RiscOp::Load {
@@ -8620,7 +8645,11 @@ mod tests {
             None,
         );
 
-        let _ = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let error = match chelis_ir::ownership::lower_dag_ownership(dag) {
+            Err(error) => error,
+            Ok(_) => panic!("float sparse indices must not become verified backend input"),
+        };
+        assert!(error.to_string().contains("requires int32/int64 indices"));
     }
 
     #[test]
@@ -8653,7 +8682,7 @@ mod tests {
             None,
         );
 
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(c.contains("const int64_t *t3_indices_data = (const int64_t*)t1_data;"));
         assert!(c.contains("const double *t3_updates_data = (const double*)t2_data;"));
@@ -8663,8 +8692,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "C backend sparse scatter_add requires int32/int64 indices")]
-    fn sparse_scatter_add_rejects_float_indices_at_emit_boundary() {
+    fn sparse_scatter_add_rejects_float_indices_at_verified_boundary() {
         let mut dag = Dag::new();
         let target = dag.add_node(
             RiscOp::Load {
@@ -8693,7 +8721,11 @@ mod tests {
             None,
         );
 
-        let _ = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let error = match chelis_ir::ownership::lower_dag_ownership(dag) {
+            Err(error) => error,
+            Ok(_) => panic!("float sparse indices must not become verified backend input"),
+        };
+        assert!(error.to_string().contains("requires int32/int64 indices"));
     }
 
     #[test]
@@ -8705,7 +8737,7 @@ mod tests {
         use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        let owned = dag.add_node(RiscOp::Realize, vec![x], vec_f32(4), None);
+        let owned = dag.add_node(RiscOp::Copy, vec![x], vec_f32(4), None);
         let scale = dag.add_node(
             RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
@@ -8724,7 +8756,7 @@ mod tests {
         );
         dag.set_reusable_input(fused, owned);
 
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(!c.contains("chelis_alloc_view"), "{c}");
         assert!(c.contains("chelis_tensor *t3 = chelis_alloc("), "{c}");
@@ -8766,7 +8798,7 @@ mod tests {
         let fused = dag.add_node(RiscOp::FusedElem { ops }, vec![x, scale], vec_f32(4), None);
         dag.set_reusable_input(fused, x);
 
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(
             !c.contains("CHELIS_DTYPE_F32, t0_data)"),
@@ -8824,7 +8856,7 @@ mod tests {
         );
         dag.set_reusable_input(fused, flat);
 
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(
             !c.contains("CHELIS_DTYPE_F32, t1_data)"),
@@ -8854,7 +8886,7 @@ mod tests {
         dag.add_root(fused);
         dag.add_root(other);
 
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(
             !c.contains("chelis_alloc_view"),
@@ -8877,7 +8909,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Cos, vec![a], scalar_f32(), None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("cosf("), "expected cosf( in:\n{c}");
     }
 
@@ -8891,7 +8923,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Tan, vec![a], scalar_f32(), None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("tanf("), "expected tanf( in:\n{c}");
     }
 
@@ -8905,7 +8937,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Atan, vec![a], scalar_f32(), None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("atanf("), "expected atanf( in:\n{c}");
     }
 
@@ -8919,7 +8951,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Abs, vec![a], scalar_f32(), None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("fabsf("), "expected fabsf( in:\n{c}");
     }
 
@@ -8933,7 +8965,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Floor, vec![a], scalar_f32(), None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("floorf("), "expected floorf( in:\n{c}");
     }
 
@@ -8947,7 +8979,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Ceil, vec![a], scalar_f32(), None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("ceilf("), "expected ceilf( in:\n{c}");
     }
 
@@ -8963,7 +8995,7 @@ mod tests {
             None,
         );
         dag.add_node(RiscOp::Round, vec![a], scalar_f32(), None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("rintf("), "expected rintf( in:\n{c}");
         assert!(
             !c.contains("roundf("),

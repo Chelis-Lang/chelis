@@ -7,9 +7,10 @@
 //! M1 ships the stub-output assertions. M2 fills in elementwise structural
 //! coverage; M4 reductions; M5 matmul.
 
-use chelis_backend_metal::codegen_metal;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
+use support::codegen_metal;
 
 fn vec_f32(n: usize) -> TensorType {
     TensorType {
@@ -634,15 +635,27 @@ fn build_matmul_dag_prec(m: usize, k: usize, n: usize, prec: Prim) -> Dag {
             accumulator: acc,
         },
         vec![mul],
-        mat_prec(m, n, prec),
+        mat_prec(m, n, acc),
         None,
     );
-    dag.add_root(sum);
+    let root = if acc == prec {
+        sum
+    } else {
+        dag.add_node(
+            RiscOp::Cast {
+                new_precision: prec,
+            },
+            vec![sum],
+            mat_prec(m, n, prec),
+            None,
+        )
+    };
+    dag.add_root(root);
     dag
 }
 
 #[test]
-fn m4_axis_nonzero_reduction_falls_through_to_stub() {
+fn m4_axis_nonzero_reduction_is_rejected_before_codegen() {
     // The M4 first cut handles full-axis reduce only (axis=0 on rank-1).
     // axis-nonzero falls through to the stub.
     let mut dag = Dag::new();
@@ -666,11 +679,12 @@ fn m4_axis_nonzero_reduction_falls_through_to_stub() {
     );
     dag.add_root(stored);
 
-    let result = codegen_metal(&dag, "axisone");
+    let error = chelis_ir::ownership::lower_dag_ownership(dag)
+        .expect_err("out-of-range reduction axis must not cross the verified boundary");
     assert!(
-        result.mm_source.contains("M1 fallback stub"),
-        "axis-nonzero reduce should fall through to stub: {}",
-        result.mm_source
+        error
+            .to_string()
+            .contains("axis 1 but input has 1 dimensions")
     );
 }
 

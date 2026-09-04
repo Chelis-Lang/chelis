@@ -5,7 +5,8 @@
 //! programs. Reductions land in M4, matmul in M5, and broadcasting/strided
 //! layouts will be added incrementally.
 
-use chelis_ir::dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, RtDim, TensorType};
+use chelis_ir::dag::{DagNode, DimInfo, NodeId, RiscOp, RtDim, TensorType};
+use chelis_ir::ownership::VerifiedDagView;
 use chelis_types::ScalarValue;
 
 /// chelis#616: the Metal lane requires compile-time movement bounds (it rejects
@@ -71,7 +72,7 @@ use chelis_unord::{UnordMap, UnordSet};
 /// Distinct input labels in DAG order.
 ///
 /// Mirrors `chelis_backend_hip::emit::HipEmitter::input_labels`.
-pub fn input_labels(dag: &Dag) -> Vec<String> {
+pub fn input_labels(dag: VerifiedDagView<'_>) -> Vec<String> {
     let mut labels = Vec::new();
     let mut seen = chelis_unord::UnordSet::new();
     for node in dag.nodes() {
@@ -99,7 +100,7 @@ struct OutputSpec {
 
 /// Compute output specs in stable order: Store-tagged nodes first, then any
 /// remaining roots that aren't already covered.
-fn output_specs(dag: &Dag) -> Vec<OutputSpec> {
+fn output_specs(dag: VerifiedDagView<'_>) -> Vec<OutputSpec> {
     let mut specs = Vec::new();
     let mut seen = chelis_unord::UnordSet::new();
 
@@ -136,14 +137,8 @@ fn output_specs(dag: &Dag) -> Vec<OutputSpec> {
 /// no-Store roots, mirroring `output_specs`. The CLI's `cmd_build_metal`
 /// passes this through to the result struct so users can map positional
 /// outputs back to symbolic names.
-pub fn output_labels(dag: &Dag) -> Vec<String> {
+pub fn output_labels(dag: VerifiedDagView<'_>) -> Vec<String> {
     output_specs(dag).into_iter().map(|s| s.label).collect()
-}
-
-/// Old M1-stub helper kept for tests that built against it before M2 emit
-/// landed. New callers should use `emit_dag` directly.
-pub fn stub_mm_source(func_name: &str) -> String {
-    stub_mm_source_with_reason(func_name, "")
 }
 
 /// Stub mm-source carrying a structured reason in its abort message.
@@ -201,7 +196,7 @@ extern "C" void {func_name}(chelis_tensor **inputs, int n_in,
 /// shape that `blas::detect_matmul_pattern` rejects, falling through
 /// to the stub). Additional reason categories slot in here as the
 /// stub gains more failure modes.
-pub fn stub_reason_hint(dag: &Dag, base_reason: &str) -> String {
+pub fn stub_reason_hint(dag: VerifiedDagView<'_>, base_reason: &str) -> String {
     use chelis_types::types::Prim;
     // If any Sum node has integer operand precision and matches the
     // expand+mul+sum matmul shape, surface the §5.7.2 hint. The
@@ -261,20 +256,17 @@ pub struct EmitResult {
     pub peak_device_bytes: usize,
 }
 
-/// Emit complete Objective-C++ source for a DAG.
-///
-/// Returns `Ok(EmitResult)` on success, `Err(msg)` if the DAG uses features
-/// the M2 emitter does not yet support (broadcasting, strided layouts,
-/// rank > 1 with non-trivial layout, partial-axis reductions outside the
-/// matmul subgraph, RNG).
-pub fn emit_dag(dag: &Dag, func_name: &str) -> Result<EmitResult, String> {
+pub(crate) fn emit_verified_dag(
+    dag: VerifiedDagView<'_>,
+    func_name: &str,
+) -> Result<EmitResult, String> {
     // chelis#1277 C4.1: the Metal codegen entry has no typed error channel
     // (`codegen_metal` falls back to an aborting stub), so a sourceless
     // mapping is rendered into the stub's reason here rather than returned
     // as a typed receipt. Metal device-path rows sit at their recorded
     // `lane_divergent` baseline until chelis#1383, per runtime_extents.md
     // C2.5.
-    chelis_ir::axis_sources::check_axis_sources(dag, Stage::Codegen("metal"))
+    dag.check_axis_sources(Stage::Codegen("metal"))
         .map_err(|unsupported| unsupported.to_string())?;
     reject_integer_abs(dag)?;
     let mut e = Emitter::new(func_name);
@@ -289,8 +281,8 @@ pub fn emit_dag(dag: &Dag, func_name: &str) -> Result<EmitResult, String> {
 /// The Metal unary template maps `Abs` to `fabs`; reject integer inputs at
 /// the public emission boundary until Phase 3 provides a typed, trapping
 /// backend kernel (chelis#699).
-fn reject_integer_abs(dag: &Dag) -> Result<(), String> {
-    if let Some(node) = chelis_ir::analysis::first_integer_abs_node(dag) {
+fn reject_integer_abs(dag: VerifiedDagView<'_>) -> Result<(), String> {
+    if let Some(node) = dag.first_integer_abs_node() {
         return Err(Unsupported::new(
             UnsupportedKind::Op("Abs".to_string()),
             format!("an integer tensor at Metal DAG node {}", node.0),
@@ -426,7 +418,7 @@ impl Emitter {
         out
     }
 
-    fn emit(&mut self, dag: &Dag) -> Result<(), String> {
+    fn emit(&mut self, dag: VerifiedDagView<'_>) -> Result<(), String> {
         self.plans.resize(dag.nodes().len(), None);
         let inputs = input_labels(dag);
         let specs = output_specs(dag);
@@ -569,7 +561,7 @@ impl Emitter {
 
     fn emit_node(
         &mut self,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
         node: &DagNode,
         inputs: &[String],
         outputs: &[String],
@@ -580,6 +572,31 @@ impl Emitter {
             RiscOp::Store { name } => self.emit_store(dag, node, name.as_str(), outputs),
             RiscOp::Const { value } => self.emit_const(node, value.as_f64_lossy()),
             RiscOp::Copy | RiscOp::Drop => Ok(()),
+
+            // Lowering represents f16/bf16 matmul's required f32
+            // accumulation followed by an explicit downcast. The existing
+            // matmul dispatch performs that downcast and records the
+            // operand-precision buffer on the Sum node, so bind the verified
+            // Cast identity to that exact buffer.
+            RiscOp::Cast { new_precision }
+                if node.inputs.len() == 1 && self.matmuls.contains_key(&node.inputs[0].0) =>
+            {
+                let source = self.plan_of(node.inputs[0]).cloned().ok_or_else(|| {
+                    format!(
+                        "Metal matmul downcast node {id}: source node {} was not materialized",
+                        node.inputs[0].0
+                    )
+                })?;
+                if source.prec != *new_precision {
+                    return Err(format!(
+                        "Metal matmul downcast node {id}: emitted precision `{}` does not match cast target `{}`",
+                        source.prec.name(),
+                        new_precision.name()
+                    ));
+                }
+                self.plans[id] = Some(source);
+                Ok(())
+            }
 
             // Unary elementwise (M2 first cut).
             RiscOp::Neg
@@ -822,7 +839,7 @@ impl Emitter {
         Ok(())
     }
 
-    fn emit_unary(&mut self, dag: &Dag, node: &DagNode) -> Result<(), String> {
+    fn emit_unary(&mut self, dag: VerifiedDagView<'_>, node: &DagNode) -> Result<(), String> {
         let in_id = *node
             .inputs
             .first()
@@ -923,7 +940,7 @@ impl Emitter {
         Ok(())
     }
 
-    fn emit_binary(&mut self, dag: &Dag, node: &DagNode) -> Result<(), String> {
+    fn emit_binary(&mut self, dag: VerifiedDagView<'_>, node: &DagNode) -> Result<(), String> {
         if node.inputs.len() != 2 {
             return Err(format!(
                 "binary node {} has {} inputs (expected 2)",
@@ -1007,7 +1024,7 @@ impl Emitter {
     /// `accumulator_override` is `None`.
     fn emit_reduce(
         &mut self,
-        _dag: &Dag,
+        _dag: VerifiedDagView<'_>,
         node: &DagNode,
         kind: kernels::ReduceKind,
         accumulator_override: Option<Prim>,
@@ -1573,7 +1590,7 @@ impl Emitter {
 
     fn emit_store(
         &mut self,
-        _dag: &Dag,
+        _dag: VerifiedDagView<'_>,
         node: &DagNode,
         name: &str,
         outputs: &[String],

@@ -348,9 +348,11 @@ stored in `Option`, `List`, tuple, dictionary, or ADT is a `FirstClassValue`,
 not a contextual callback. Until [#879] supplies the general closure carrier,
 the C-host projection rejects the complete recursively containing type with
 `UnsupportedKind::HostAbi`, `Stage::Codegen("c")`, and
-`Unimplemented { issue: #879 }` before ownership verification constructs a
-plan. The same rule applies to HIP or Metal builds that select the C-host
-fallback. It is a target capability result, not a language type error, scalar
+`Unimplemented { issue: #879 }` after the sealed ownership boundary certifies
+the exact selected payload and before backend emission. The ownership plan
+tracks the opaque logical function identity as non-heap without inventing a
+runtime representation. The same rule applies to HIP or Metal builds that
+select the C-host fallback. It is a target capability result, not a language type error, scalar
 substitution, empty value, or permission to omit the type from the registry.
 This plan neither defines the closure ABI nor closes [#879] or its [#909]
 tracker.

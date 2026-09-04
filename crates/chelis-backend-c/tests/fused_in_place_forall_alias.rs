@@ -13,7 +13,8 @@
 use chelis_ir::dag::{Dag, DimInfo, FusedInput, FusedStep, FusedStepOp, RiscOp, TensorType};
 use chelis_types::types::Prim;
 
-use chelis_backend_c::emit::CEmitter;
+mod support;
+use support::emit_dag;
 
 fn vec_lit_f32(n: usize) -> TensorType {
     TensorType {
@@ -45,7 +46,7 @@ fn vec_lit_f64(n: usize) -> TensorType {
 
 /// Build a 3-input fan-in FusedElem chain: `((a + b) * c)` where `a` is
 /// marked as the reusable input via `set_reusable_input`. Each external
-/// input is intermediate (a `Realize` node so memory planning treats it
+/// input is intermediate (a `Copy` node so memory planning treats it
 /// as SlotBacked, mirroring the copy-elision-probe fan-in shape).
 ///
 /// `a_ty`, `b_ty`, `c_ty`, `out_ty` are independent so callers can probe
@@ -58,7 +59,7 @@ fn fan_in_dag(
     out_ty: TensorType,
 ) -> (Dag, chelis_ir::dag::NodeId, chelis_ir::dag::NodeId) {
     let mut dag = Dag::new();
-    // Sources: Load + Realize stages so each fan-in input is SlotBacked
+    // Sources: Load + Copy stages so each fan-in input is SlotBacked
     // (intermediate), not BorrowedLoad. This mirrors how `copy(x)` arms
     // materialize into distinct backing slots in the real probe.
     let x_a = dag.add_node(
@@ -67,7 +68,7 @@ fn fan_in_dag(
         a_ty.clone(),
         None,
     );
-    let a = dag.add_node(RiscOp::Realize, vec![x_a], a_ty.clone(), None);
+    let a = dag.add_node(RiscOp::Copy, vec![x_a], a_ty.clone(), None);
 
     let x_b = dag.add_node(
         RiscOp::Load { name: "x_b".into() },
@@ -75,7 +76,7 @@ fn fan_in_dag(
         b_ty.clone(),
         None,
     );
-    let b = dag.add_node(RiscOp::Realize, vec![x_b], b_ty.clone(), None);
+    let b = dag.add_node(RiscOp::Copy, vec![x_b], b_ty.clone(), None);
 
     let x_c = dag.add_node(
         RiscOp::Load { name: "x_c".into() },
@@ -83,7 +84,7 @@ fn fan_in_dag(
         c_ty.clone(),
         None,
     );
-    let c = dag.add_node(RiscOp::Realize, vec![x_c], c_ty.clone(), None);
+    let c = dag.add_node(RiscOp::Copy, vec![x_c], c_ty.clone(), None);
 
     // Fused: `v0 = a + b; v1 = v0 * c;` over three external inputs.
     let ops = vec![
@@ -136,7 +137,7 @@ fn fan_in_literal_equal_shapes_defer_reuse_without_shared_proof() {
         vec_lit_f32(4),
         vec_lit_f32(4),
     );
-    let c = CEmitter::emit_dag(&dag, "test_fan_in_literal").unwrap();
+    let c = emit_dag(&dag, "test_fan_in_literal").unwrap();
     assert_reuse_deferred(&c, fused, a);
 }
 
@@ -159,7 +160,7 @@ fn fan_in_binder_equivalent_lit_to_named_defers_reuse_without_shared_proof() {
         vec_named_f32("seq", 4),
         vec_named_f32("seq", 4),
     );
-    let c = CEmitter::emit_dag(&dag, "test_fan_in_binder_lit_to_named").unwrap();
+    let c = emit_dag(&dag, "test_fan_in_binder_lit_to_named").unwrap();
     assert_reuse_deferred(&c, fused, a);
 }
 
@@ -174,7 +175,7 @@ fn fan_in_binder_equivalent_named_to_lit_defers_reuse_without_shared_proof() {
         vec_lit_f32(4),
         vec_lit_f32(4),
     );
-    let c = CEmitter::emit_dag(&dag, "test_fan_in_binder_named_to_lit").unwrap();
+    let c = emit_dag(&dag, "test_fan_in_binder_named_to_lit").unwrap();
     assert_reuse_deferred(&c, fused, a);
 }
 
@@ -188,7 +189,7 @@ fn fan_in_same_named_binder_defers_reuse_without_shared_proof() {
         vec_named_f32("seq", 4),
         vec_named_f32("seq", 4),
     );
-    let c = CEmitter::emit_dag(&dag, "test_fan_in_same_named_binder").unwrap();
+    let c = emit_dag(&dag, "test_fan_in_same_named_binder").unwrap();
     assert_reuse_deferred(&c, fused, a);
 }
 
@@ -205,7 +206,7 @@ fn fan_in_named_binder_with_unknown_size_defers_reuse_without_shared_proof() {
         vec_named_f32("seq", 4),
         vec_named_f32("seq", 4),
     );
-    let c = CEmitter::emit_dag(&dag, "test_fan_in_named_unsized").unwrap();
+    let c = emit_dag(&dag, "test_fan_in_named_unsized").unwrap();
     assert_reuse_deferred(&c, fused, a);
 }
 
@@ -221,7 +222,7 @@ fn fan_in_different_named_binders_does_not_alias() {
         vec_named_f32("seq", 4),
         vec_named_f32("seq", 4),
     );
-    let c = CEmitter::emit_dag(&dag, "test_fan_in_different_binders").unwrap();
+    let c = emit_dag(&dag, "test_fan_in_different_binders").unwrap();
     assert_reuse_deferred(&c, fused, a);
 }
 
@@ -237,7 +238,7 @@ fn fan_in_same_binder_different_known_size_does_not_alias() {
         vec_named_f32("seq", 8),
         vec_named_f32("seq", 8),
     );
-    let c = CEmitter::emit_dag(&dag, "test_fan_in_size_mismatch").unwrap();
+    let c = emit_dag(&dag, "test_fan_in_size_mismatch").unwrap();
     let fused_id = fused.0;
     let a_id = a.0;
 
@@ -262,7 +263,7 @@ fn fan_in_different_precision_does_not_alias() {
         vec_lit_f32(4),
         vec_lit_f32(4),
     );
-    let c = CEmitter::emit_dag(&dag, "test_fan_in_different_precision").unwrap();
+    let c = emit_dag(&dag, "test_fan_in_different_precision").unwrap();
     let fused_id = fused.0;
     let a_id = a.0;
 
@@ -287,14 +288,14 @@ fn fan_in_multi_consumer_reusable_input_does_not_alias() {
         vec_lit_f32(4),
         None,
     );
-    let a = dag.add_node(RiscOp::Realize, vec![x_a], vec_named_f32("seq", 4), None);
+    let a = dag.add_node(RiscOp::Copy, vec![x_a], vec_named_f32("seq", 4), None);
     let x_b = dag.add_node(
         RiscOp::Load { name: "x_b".into() },
         vec![],
         vec_named_f32("seq", 4),
         None,
     );
-    let b = dag.add_node(RiscOp::Realize, vec![x_b], vec_named_f32("seq", 4), None);
+    let b = dag.add_node(RiscOp::Copy, vec![x_b], vec_named_f32("seq", 4), None);
 
     let ops = vec![FusedStep {
         op: FusedStepOp::Add,
@@ -313,7 +314,7 @@ fn fan_in_multi_consumer_reusable_input_does_not_alias() {
     dag.add_root(fused);
     dag.add_root(other);
 
-    let c = CEmitter::emit_dag(&dag, "test_fan_in_multi_consumer").unwrap();
+    let c = emit_dag(&dag, "test_fan_in_multi_consumer").unwrap();
     let fused_id = fused.0;
     let a_id = a.0;
 
@@ -340,7 +341,7 @@ fn fan_in_different_rank_does_not_alias() {
         precision: Prim::F32,
     };
     let (dag, fused, a) = fan_in_dag(ty_r1.clone(), ty_r2.clone(), ty_r2.clone(), ty_r2);
-    let c = CEmitter::emit_dag(&dag, "test_fan_in_different_rank").unwrap();
+    let c = emit_dag(&dag, "test_fan_in_different_rank").unwrap();
     let fused_id = fused.0;
     let a_id = a.0;
 

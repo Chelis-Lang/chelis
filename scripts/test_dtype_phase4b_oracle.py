@@ -1344,9 +1344,10 @@ class ContractValidationTests(unittest.TestCase):
             ),
             (
                 "`UnsupportedKind::HostAbi`, `Stage::Codegen(\"c\")`, and\n"
-                "`Unimplemented { issue: #879 }` before ownership verification "
-                "constructs a\nplan",
-                "an empty scalar before ownership verification constructs a plan",
+                "`Unimplemented { issue: #879 }` after the sealed ownership "
+                "boundary certifies\nthe exact selected payload and before backend "
+                "emission",
+                "an empty scalar after the sealed ownership boundary",
                 "recursive function target rejection",
             ),
             (

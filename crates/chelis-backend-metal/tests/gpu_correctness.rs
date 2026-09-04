@@ -17,7 +17,7 @@
 //! for transcendental-heavy kernels — see ABS_TOL/REL_TOL constants and
 //! the per-test relaxations.
 
-use chelis_backend_metal::codegen_metal;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_types::types::Prim;
@@ -26,6 +26,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use support::codegen_metal;
 
 // f32 tolerance for Metal vs evaluator agreement. MSL's default
 // transcendentals are fast-math; widen vs HIP's tolerance for safety.

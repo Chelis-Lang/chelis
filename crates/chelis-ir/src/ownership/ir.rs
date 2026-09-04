@@ -224,7 +224,7 @@ pub(crate) struct OwnershipProgram {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HostSiteKind {
+pub enum HostSiteKind {
     Binding,
     Expression,
     Argument,

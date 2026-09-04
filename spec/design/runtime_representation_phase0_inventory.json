@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "e709b87c55ff39f7c3d00418bed1f972bb14cdf1ebc6159b2fed658ad096e251",
+  "freeze_sha256": "e677c4082bc74e1c73d027f78f642872a801b4aebc2ab1d519fc464b1defa49e",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -48,10 +48,6 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_count",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_dag_with_options",
       "deletion_phase": 4
     },
     {
@@ -196,6 +192,10 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_uniform_like",
+      "deletion_phase": 4
+    },
+    {
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_verified_dag_with_options",
       "deletion_phase": 4
     },
     {
@@ -1461,10 +1461,6 @@
       "sample": "const uint8_t* restrict __count_in_{id} = (const uint8_t*)t{a}_data;"
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_dag_with_options",
-      "sample": "static inline float chelis_uniform_sample_f32(uint64_t seed, uint64_t index, float low, float hig..."
-    },
-    {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_expand",
       "sample": "for (int64_t i = 0; i < t{id}_size; i++) {{"
     },
@@ -1607,6 +1603,10 @@
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_uniform_like",
       "sample": "uint64_t t{id}_seed = t{id}_active ? CHELIS_EFFECTIVE_UNIFORM_SEED({seed}ULL) : {seed}ULL;"
+    },
+    {
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_verified_dag_with_options",
+      "sample": "static inline float chelis_uniform_sample_f32(uint64_t seed, uint64_t index, float low, float hig..."
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::integer_abs_expr",

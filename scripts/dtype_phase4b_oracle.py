@@ -1303,8 +1303,9 @@ def validate_normative_contract(
             ),
             (
                 "`UnsupportedKind::HostAbi`, `Stage::Codegen(\"c\")`, and\n"
-                "`Unimplemented { issue: #879 }` before ownership verification "
-                "constructs a\nplan",
+                "`Unimplemented { issue: #879 }` after the sealed ownership "
+                "boundary certifies\nthe exact selected payload and before backend "
+                "emission",
                 "recursive function target rejection",
             ),
             (

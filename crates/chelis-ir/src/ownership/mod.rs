@@ -82,8 +82,12 @@ use std::collections::BTreeMap;
 
 use chelis_types::manifest::{ManifestedProgram, RootManifest};
 
-use crate::dag::{Dag, NodeId, RiscOp};
-use crate::host::ConcreteHostProgram;
+use crate::dag::{Dag, DagNode, NodeId, RiscOp, SymbolicDimBinding, SymbolicDimOccurrence};
+use crate::host::{
+    ConcreteHostBinding, ConcreteHostExpr, ConcreteHostFunction, ConcreteHostParam,
+    ConcreteHostProgram, HostFunctionOrigin, HostFunctionSpecialization, HostTensorHelper,
+    HostTensorInput, HostTensorSpecialization, SummaryRejection,
+};
 
 #[expect(
     dead_code,
@@ -97,7 +101,261 @@ mod render;
 mod verify;
 
 pub use error::OwnershipError;
-pub use ir::HostSiteId;
+pub use ir::{HostSiteId, HostSiteKind};
+
+/// Immutable cursor over the exact verified DAG payload. The raw [`Dag`]
+/// remains private so a backend can inspect only the payload whose ownership
+/// plan was verified, without recovering an unchecked sibling graph.
+#[derive(Clone, Copy)]
+pub struct VerifiedDagView<'a> {
+    dag: &'a Dag,
+}
+
+impl<'a> VerifiedDagView<'a> {
+    pub fn nodes(self) -> &'a [DagNode] {
+        self.dag.nodes()
+    }
+
+    pub fn roots(self) -> &'a [NodeId] {
+        self.dag.roots()
+    }
+
+    pub fn get(self, id: NodeId) -> Option<&'a DagNode> {
+        self.dag.get(id)
+    }
+
+    pub fn len(self) -> usize {
+        self.dag.len()
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.dag.is_empty()
+    }
+
+    pub fn is_root(self, id: NodeId) -> bool {
+        self.dag.is_root(id)
+    }
+
+    pub fn topological_order(self) -> Vec<NodeId> {
+        self.dag.topological_order()
+    }
+
+    pub fn symbolic_bindings(self) -> Vec<SymbolicDimBinding> {
+        crate::dag::symbolic_bindings(self.dag)
+    }
+
+    pub fn symbolic_occurrences(self) -> Vec<SymbolicDimOccurrence> {
+        crate::dag::symbolic_occurrences(self.dag)
+    }
+
+    pub fn symbolic_params(self) -> Vec<String> {
+        crate::dag::symbolic_params(self.dag)
+    }
+
+    pub fn reduction_inlined_fused_elems(self) -> chelis_unord::UnordSet<NodeId> {
+        crate::fuse::reduction_inlined_fused_elems(self.dag)
+    }
+
+    pub fn first_integer_abs_node(self) -> Option<NodeId> {
+        crate::analysis::first_integer_abs_node(self.dag)
+    }
+
+    pub fn first_fused_integer_abs_node(self) -> Option<NodeId> {
+        crate::analysis::first_fused_integer_abs_node(self.dag)
+    }
+
+    pub fn check_axis_sources(
+        self,
+        stage: chelis_types::unsupported::Stage,
+    ) -> Result<(), chelis_types::unsupported::Unsupported> {
+        crate::axis_sources::check_axis_sources(self.dag, stage)
+    }
+}
+
+/// One immutable record in the verified host payload/site bijection.
+#[derive(Clone, Copy)]
+pub struct VerifiedHostSiteView<'a> {
+    record: &'a ir::HostSiteRecord,
+}
+
+/// Closed classification for a verified ownership directive attached to a
+/// host-emission site. The verifier's block, operation, and owner identities
+/// remain private; consumers can branch only on this typed semantic role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifiedHostSiteActionKind {
+    Operation,
+    Terminator,
+    ControlEdge,
+    ManifestRoot,
+}
+
+impl<'a> VerifiedHostSiteView<'a> {
+    pub fn id(self) -> HostSiteId {
+        self.record.id
+    }
+
+    pub fn kind(self) -> HostSiteKind {
+        self.record.kind
+    }
+
+    pub fn actions(self) -> impl ExactSizeIterator<Item = VerifiedHostSiteActionKind> + 'a {
+        self.record.actions.iter().map(|action| match action {
+            ir::HostSiteAction::Operation { .. } => VerifiedHostSiteActionKind::Operation,
+            ir::HostSiteAction::Terminator { .. } => VerifiedHostSiteActionKind::Terminator,
+            ir::HostSiteAction::ControlEdge { .. } => VerifiedHostSiteActionKind::ControlEdge,
+            ir::HostSiteAction::Root { .. } => VerifiedHostSiteActionKind::ManifestRoot,
+        })
+    }
+}
+
+/// Immutable cursor over one nested host tensor helper and its verified DAG.
+#[derive(Clone, Copy)]
+pub struct VerifiedHostTensorHelperView<'a> {
+    helper: &'a HostTensorHelper,
+    dag: VerifiedDagView<'a>,
+}
+
+impl<'a> VerifiedHostTensorHelperView<'a> {
+    pub fn name(self) -> &'a str {
+        &self.helper.name
+    }
+
+    pub fn inputs(self) -> &'a [HostTensorInput] {
+        &self.helper.inputs
+    }
+
+    pub fn output(self) -> &'a crate::dag::TensorType {
+        &self.helper.output
+    }
+
+    pub fn specialization(self) -> Option<&'a HostTensorSpecialization> {
+        self.helper.specialization.as_ref()
+    }
+
+    pub fn summary_rejection(self) -> Option<&'a crate::host::HelperSummaryRejection> {
+        self.helper.summary_rejection.as_ref()
+    }
+
+    pub fn dag(self) -> VerifiedDagView<'a> {
+        self.dag
+    }
+}
+
+/// Immutable cursor over one concrete host function and its verified helpers.
+#[derive(Clone, Copy)]
+pub struct VerifiedHostFunctionView<'a> {
+    emission: VerifiedHostEmission<'a>,
+    index: usize,
+}
+
+impl<'a> VerifiedHostFunctionView<'a> {
+    fn function(self) -> &'a ConcreteHostFunction {
+        &self.emission.payload.program.functions[self.index]
+    }
+
+    pub fn name(self) -> &'a str {
+        &self.function().name
+    }
+
+    pub fn params(self) -> &'a [ConcreteHostParam] {
+        &self.function().params
+    }
+
+    pub fn ret_ty(self) -> &'a crate::host_type_state::ConcreteHostType {
+        &self.function().ret_ty
+    }
+
+    pub fn body(self) -> &'a ConcreteHostExpr {
+        &self.function().body
+    }
+
+    pub fn origin(self) -> HostFunctionOrigin {
+        self.function().origin
+    }
+
+    pub fn specialization(self) -> Option<&'a HostFunctionSpecialization> {
+        self.function().specialization.as_ref()
+    }
+
+    pub fn summary_rejections(self) -> &'a [SummaryRejection] {
+        &self.function().summary_rejections
+    }
+
+    pub fn tensor_helper_count(self) -> usize {
+        self.function().tensor_helpers.len()
+    }
+
+    pub fn tensor_helper(self, helper: usize) -> Option<VerifiedHostTensorHelperView<'a>> {
+        let raw = self.function().tensor_helpers.get(helper)?;
+        let _plan = self.emission.nested_dags.iter().find(|candidate| {
+            candidate.location
+                == NestedDagLocation::Function {
+                    function: self.index,
+                    helper,
+                }
+        })?;
+        Some(VerifiedHostTensorHelperView {
+            helper: raw,
+            dag: VerifiedDagView { dag: &raw.dag },
+        })
+    }
+}
+
+/// Immutable view of the exact verified host emission payload. Its fields are
+/// private; nested DAGs are reachable only as verified child cursors.
+#[derive(Clone, Copy)]
+pub struct VerifiedHostEmission<'a> {
+    payload: &'a HostEmissionPayload,
+    sites: &'a ir::HostSiteMap,
+    nested_dags: &'a [NestedDagProof],
+}
+
+impl<'a> VerifiedHostEmission<'a> {
+    pub fn globals(self) -> &'a [ConcreteHostBinding] {
+        &self.payload.program.globals
+    }
+
+    pub fn function_count(self) -> usize {
+        self.payload.program.functions.len()
+    }
+
+    pub fn function(self, index: usize) -> Option<VerifiedHostFunctionView<'a>> {
+        (index < self.function_count()).then_some(VerifiedHostFunctionView {
+            emission: self,
+            index,
+        })
+    }
+
+    pub fn global_tensor_helper_count(self) -> usize {
+        self.payload.program.global_tensor_helpers.len()
+    }
+
+    pub fn global_tensor_helper(self, helper: usize) -> Option<VerifiedHostTensorHelperView<'a>> {
+        let raw = self.payload.program.global_tensor_helpers.get(helper)?;
+        self.nested_dags
+            .iter()
+            .find(|candidate| candidate.location == NestedDagLocation::Global(helper))?;
+        Some(VerifiedHostTensorHelperView {
+            helper: raw,
+            dag: VerifiedDagView { dag: &raw.dag },
+        })
+    }
+
+    pub fn summary_rejections(self) -> &'a [SummaryRejection] {
+        &self.payload.program.summary_rejections
+    }
+
+    pub fn manifest(self) -> &'a RootManifest {
+        &self.payload.manifest
+    }
+
+    pub fn sites(self) -> impl ExactSizeIterator<Item = VerifiedHostSiteView<'a>> + 'a {
+        self.sites
+            .records
+            .iter()
+            .map(|record| VerifiedHostSiteView { record })
+    }
+}
 
 /// Closed payload identity. Public only so the sealed generic verifier can
 /// carry a public bound without exposing its private representation.
@@ -289,6 +547,23 @@ fn verify_manifest_sinks(
 }
 
 impl VerifiedHostProgram {
+    pub fn emission(&self) -> VerifiedHostEmission<'_> {
+        let OwnershipProof::Host {
+            sites, nested_dags, ..
+        } = &self.0.proof
+        else {
+            unreachable!("sealed host specialization")
+        };
+        let payload = (&self.0.payload as &dyn std::any::Any)
+            .downcast_ref::<HostEmissionPayload>()
+            .expect("sealed host payload specialization");
+        VerifiedHostEmission {
+            payload,
+            sites,
+            nested_dags,
+        }
+    }
+
     pub fn render(&self) -> String {
         match &self.0.proof {
             OwnershipProof::Host { program, .. } => render::render(program),
@@ -312,6 +587,13 @@ impl VerifiedHostProgram {
 }
 
 impl VerifiedDagProgram {
+    pub fn emission(&self) -> VerifiedDagView<'_> {
+        let payload = (&self.0.payload as &dyn std::any::Any)
+            .downcast_ref::<DagEmissionPayload>()
+            .expect("sealed DAG payload specialization");
+        VerifiedDagView { dag: &payload.dag }
+    }
+
     pub fn render(&self) -> String {
         match &self.0.proof {
             OwnershipProof::Dag(plan) => plan.render(),
@@ -397,6 +679,7 @@ enum DagDirective {
     Clone { node: NodeId, source: NodeId },
     MoveProduce { node: NodeId, source: NodeId },
     Store { node: NodeId, source: NodeId },
+    StoreRoot { node: NodeId },
     Drop { node: NodeId, source: NodeId },
     Root { source: NodeId },
     RootClone { source: NodeId },
@@ -486,6 +769,13 @@ impl DagOwnershipPlan {
             }
         }
         for (root_index, root) in dag.roots().iter().enumerate() {
+            if matches!(
+                dag.get(*root).map(|node| &node.op),
+                Some(RiscOp::Store { .. })
+            ) {
+                directives.push(DagDirective::StoreRoot { node: *root });
+                continue;
+            }
             let consumer = NodeId(dag.nodes().len() + root_index);
             match states.get(root).copied() {
                 Some(DagOwnerState::OwnedLive) => {
@@ -639,6 +929,17 @@ impl DagOwnershipPlan {
                 .get(cursor)
                 .ok_or_else(|| dag_directive_error(format!("root n{} has no directive", root.0)))?;
             cursor += 1;
+            if matches!(
+                dag.get(*root).map(|node| &node.op),
+                Some(RiscOp::Store { .. })
+            ) {
+                require_exact_dag_directive(
+                    directive,
+                    &DagDirective::StoreRoot { node: *root },
+                    *root,
+                )?;
+                continue;
+            }
             let consumer = NodeId(dag.nodes().len() + root_index);
             match states.get(root).copied() {
                 Some(DagOwnerState::OwnedLive) => {
@@ -718,6 +1019,9 @@ impl DagOwnershipPlan {
                 }
                 DagDirective::Store { node, source } => {
                     let _ = writeln!(out, "store n{} move n{}", node.0, source.0);
+                }
+                DagDirective::StoreRoot { node } => {
+                    let _ = writeln!(out, "store-root n{}", node.0);
                 }
                 DagDirective::Drop { node, source } => {
                     let _ = writeln!(out, "drop n{} move n{}", node.0, source.0);

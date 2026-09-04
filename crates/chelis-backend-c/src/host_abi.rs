@@ -16,9 +16,13 @@
 use chelis_ir::ConcreteHostType;
 use chelis_ir::host::{
     ConcreteHostBinding, ConcreteHostCallback, ConcreteHostCallbackKind, ConcreteHostExpr,
-    ConcreteHostExprKind, ConcreteHostFunction, ConcreteHostParam, ConcreteHostProgram,
-    HostBinding, HostCallback, HostCallbackKind, HostExpr, HostExprKind, HostFunction,
-    HostMatchArm, HostParam, HostPatternBinding, HostProgram,
+    ConcreteHostExprKind, ConcreteHostParam, HostBinding, HostCallback, HostCallbackKind, HostExpr,
+    HostExprKind, HostFunction, HostMatchArm, HostParam, HostPatternBinding, HostProgram,
+    HostTensorHelper,
+};
+use chelis_ir::ownership::{
+    HostSiteId, HostSiteKind, VerifiedHostEmission, VerifiedHostFunctionView,
+    VerifiedHostSiteActionKind, VerifiedHostTensorHelperView,
 };
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{RejectionAuthority, Stage, Unsupported, UnsupportedKind};
@@ -67,6 +71,48 @@ pub(crate) type HostAbiCallbackKind = HostCallbackKind<HostAbiType>;
 pub(crate) type HostAbiExpr = HostExpr<HostAbiType>;
 pub(crate) type HostAbiExprKind = HostExprKind<HostAbiType>;
 pub(crate) type HostAbiMatchArm = HostMatchArm<HostAbiType>;
+
+/// Private ABI projection paired with the exact verified payload/site map it
+/// was derived from. The projection may change type representation, but it
+/// cannot detach the nested verified DAG children or their structural site
+/// identities.
+pub(crate) struct ProjectedHostProgram<'a> {
+    program: HostAbiProgram,
+    emission: VerifiedHostEmission<'a>,
+    sites: Vec<ProjectedHostSite>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectedHostSite {
+    pub(crate) id: HostSiteId,
+    pub(crate) kind: HostSiteKind,
+    pub(crate) actions: Vec<VerifiedHostSiteActionKind>,
+}
+
+impl<'a> ProjectedHostProgram<'a> {
+    pub(crate) fn program(&self) -> &HostAbiProgram {
+        &self.program
+    }
+
+    pub(crate) fn global_tensor_helper(
+        &self,
+        index: usize,
+    ) -> Option<VerifiedHostTensorHelperView<'a>> {
+        self.emission.global_tensor_helper(index)
+    }
+
+    pub(crate) fn function_tensor_helper(
+        &self,
+        function: usize,
+        helper: usize,
+    ) -> Option<VerifiedHostTensorHelperView<'a>> {
+        self.emission.function(function)?.tensor_helper(helper)
+    }
+
+    pub(crate) fn sites(&self) -> &[ProjectedHostSite] {
+        &self.sites
+    }
+}
 
 impl HostAbiType {
     /// Resolve the private pre-Table-B C-host capability adapter.
@@ -183,32 +229,78 @@ impl HostAbiType {
 }
 
 pub(crate) fn project_program(
-    program: &ConcreteHostProgram,
-) -> Result<HostAbiProgram, Unsupported> {
-    let declared_callbacks = program
-        .functions
-        .iter()
-        .map(|function| function.name.clone())
+    emission: VerifiedHostEmission<'_>,
+) -> Result<ProjectedHostProgram<'_>, Unsupported> {
+    let declared_callbacks = (0..emission.function_count())
+        .filter_map(|index| emission.function(index))
+        .map(|function| function.name().to_string())
         .collect::<UnordSet<_>>();
-    Ok(HostAbiProgram {
-        globals: program
-            .globals
+    let program = HostAbiProgram {
+        globals: emission
+            .globals()
             .iter()
             .cloned()
             .map(|binding| project_binding(binding, &declared_callbacks))
             .collect::<Result<Vec<_>, _>>()?,
-        global_tensor_helpers: program.global_tensor_helpers.clone(),
-        functions: program
-            .functions
-            .iter()
-            .cloned()
+        global_tensor_helpers: (0..emission.global_tensor_helper_count())
+            .map(|index| {
+                helper_metadata(
+                    emission
+                        .global_tensor_helper(index)
+                        .expect("verified global helper census"),
+                )
+            })
+            .collect(),
+        functions: (0..emission.function_count())
+            .filter_map(|index| emission.function(index))
             .map(|function| project_function(function, &declared_callbacks))
             .collect::<Result<Vec<_>, _>>()?,
-        summary_rejections: program.summary_rejections.clone(),
+        summary_rejections: emission.summary_rejections().to_vec(),
+    };
+    let sites = emission
+        .sites()
+        .map(|site| ProjectedHostSite {
+            id: site.id(),
+            kind: site.kind(),
+            actions: site.actions().collect(),
+        })
+        .collect();
+    Ok(ProjectedHostProgram {
+        program,
+        emission,
+        sites,
     })
 }
 
-fn project_binding(
+fn helper_metadata(helper: VerifiedHostTensorHelperView<'_>) -> HostTensorHelper {
+    let mut dag = chelis_ir::dag::Dag::new();
+    let verified = helper.dag();
+    if verified.roots().len() == 1
+        && helper.inputs().len() == 1
+        && let Some(node) = verified.get(verified.roots()[0])
+        && let chelis_ir::dag::RiscOp::Load { name } = &node.op
+        && node.output_type == *helper.output()
+        && helper.inputs().iter().any(|input| input.name == *name)
+    {
+        let root = dag.add_node(
+            chelis_ir::dag::RiscOp::Load { name: name.clone() },
+            Vec::new(),
+            node.output_type.clone(),
+            node.span_id.clone(),
+        );
+        dag.add_root(root);
+    }
+    HostTensorHelper {
+        name: helper.name().to_string(),
+        dag,
+        inputs: helper.inputs().to_vec(),
+        output: helper.output().clone(),
+        specialization: helper.specialization().cloned(),
+        summary_rejection: helper.summary_rejection().cloned(),
+    }
+}
+
+pub(crate) fn project_binding(
     binding: ConcreteHostBinding,
     allowed_callbacks: &UnordSet<String>,
 ) -> Result<HostAbiBinding, Unsupported> {
@@ -222,28 +314,37 @@ fn project_binding(
 }
 
 fn project_function(
-    function: ConcreteHostFunction,
+    function: VerifiedHostFunctionView<'_>,
     declared_callbacks: &UnordSet<String>,
 ) -> Result<HostAbiFunction, Unsupported> {
     let mut allowed_callbacks = declared_callbacks.clone();
-    for param in &function.params {
+    for param in function.params() {
         if matches!(param.ty, ConcreteHostType::Function(_, _)) {
             allowed_callbacks.insert(param.name.clone());
         }
     }
     Ok(HostAbiFunction {
-        name: function.name,
+        name: function.name().to_string(),
         params: function
-            .params
-            .into_iter()
+            .params()
+            .iter()
+            .cloned()
             .map(project_function_param)
             .collect::<Result<Vec<_>, _>>()?,
-        ret_ty: HostAbiType::try_from_concrete(&function.ret_ty)?,
-        body: project_expr(function.body, &allowed_callbacks)?,
-        tensor_helpers: function.tensor_helpers,
-        origin: function.origin,
-        specialization: function.specialization,
-        summary_rejections: function.summary_rejections,
+        ret_ty: HostAbiType::try_from_concrete(function.ret_ty())?,
+        body: project_expr(function.body().clone(), &allowed_callbacks)?,
+        tensor_helpers: (0..function.tensor_helper_count())
+            .map(|index| {
+                helper_metadata(
+                    function
+                        .tensor_helper(index)
+                        .expect("verified function helper census"),
+                )
+            })
+            .collect(),
+        origin: function.origin(),
+        specialization: function.specialization().cloned(),
+        summary_rejections: function.summary_rejections().to_vec(),
     })
 }
 

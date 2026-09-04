@@ -148,6 +148,20 @@ fn real_phase2_corpus_lowers_and_verifies() {
 }
 
 #[test]
+fn target_rejected_function_containers_reach_backend_after_verification() {
+    for name in [
+        "reject_option_function",
+        "reject_list_function",
+        "reject_tuple_function",
+        "reject_dict_function",
+        "reject_adt_function",
+    ] {
+        let lowered = lower_fixture(name).unwrap_or_else(|error| panic!("{name}: {error}"));
+        verify_ownership(lowered).unwrap_or_else(|error| panic!("{name}: {error}"));
+    }
+}
+
+#[test]
 fn aliased_roots_copy_the_earlier_sink_in_manifest_order() {
     let roots = unit_text(&verified_fixture("issue_1222_root_alias"), "roots");
     assert_eq!(count(&roots, "= copy clone"), 1, "{roots}");

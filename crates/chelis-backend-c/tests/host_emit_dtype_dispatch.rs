@@ -31,15 +31,17 @@
 use std::fs;
 use std::process::Command;
 
-use chelis_backend_c::host_emit::emit_host_program;
+mod support;
 use chelis_ir::ConcreteHostType as HostType;
-use chelis_ir::dag::{DimInfo, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::host::{
     ConcreteHostBinding as HostBinding, ConcreteHostExpr as HostExpr,
     ConcreteHostExprKind as HostExprKind, ConcreteHostFunction as HostFunction,
     ConcreteHostParam as HostParam, ConcreteHostProgram as HostProgram, HostFunctionOrigin,
+    HostTensorHelper, HostTensorInput,
 };
 use chelis_types::types::Prim;
+use support::emit_host_program;
 
 fn vec_ty(n: usize, prim: Prim) -> TensorType {
     TensorType {
@@ -661,16 +663,45 @@ fn make_tensor_call_with_scalar_arg(scalar_ty: HostType, scalar_val: HostExpr) -
     // bind through a tensor helper.  We construct a TensorCall against
     // a synthetic helper (index 0) whose input is the scalar-coerced
     // tensor, then read the body through a top-level binding to drive
-    // emission.  The path under test runs before helper lookup, so
-    // an empty `tensor_helpers` slice is sufficient -- the scalar
-    // coercion arm executes regardless of whether the helper exists.
-    let tt = vec_ty(1, Prim::F32);
+    // emission.  The verified backend boundary requires the referenced
+    // helper to exist, so this fixture carries the exact rank-zero identity
+    // helper consumed by the call.
+    let precision = match scalar_ty {
+        HostType::Bool => Prim::Bool,
+        HostType::Float64 => Prim::F64,
+        HostType::Int64 => Prim::Int64,
+        ref other => panic!("unsupported scalar helper fixture type: {other:?}"),
+    };
+    let tt = TensorType {
+        dims: Vec::new(),
+        precision,
+    };
+    let mut helper_dag = Dag::new();
+    let helper_root = helper_dag.add_node(
+        RiscOp::Load {
+            name: "input".into(),
+        },
+        Vec::new(),
+        tt.clone(),
+        None,
+    );
+    helper_dag.add_root(helper_root);
+    let helper = HostTensorHelper {
+        name: "scalar_identity".into(),
+        dag: helper_dag,
+        inputs: vec![HostTensorInput {
+            name: "input".into(),
+            ty: tt.clone(),
+        }],
+        output: tt.clone(),
+        specialization: None,
+        summary_rejection: None,
+    };
     let call = HostExpr::new(HostExprKind::TensorCall {
         helper: 0,
         args: vec![scalar_val],
         ty: HostType::Tensor(tt.clone()),
     });
-    let _ = scalar_ty;
     HostProgram {
         globals: vec![HostBinding {
             name: "result".to_string(),
@@ -679,7 +710,7 @@ fn make_tensor_call_with_scalar_arg(scalar_ty: HostType, scalar_val: HostExpr) -
             ty: HostType::Tensor(tt.clone()),
             value: call,
         }],
-        global_tensor_helpers: Vec::new(),
+        global_tensor_helpers: vec![helper],
         functions: Vec::new(),
         summary_rejections: Vec::new(),
     }
