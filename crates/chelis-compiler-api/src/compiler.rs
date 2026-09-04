@@ -2864,7 +2864,7 @@ pub(crate) fn pipeline_rejection_to_compiler_error(
                 "parse",
                 error.to_string(),
                 GeneralKind::SurfParseError,
-                parse_error_span_surf(&source, &error),
+                Some(parse_error_span_surf(&source, &error)),
             )
         }
         PipelineRejection::Preparation(PreparationError::DeepParse(error)) => {
@@ -3377,7 +3377,7 @@ fn parse_surf(source: &str) -> Result<Vec<Decl>> {
             "parse",
             err.to_string(),
             GeneralKind::SurfParseError,
-            parse_error_span_surf(source, &err),
+            Some(parse_error_span_surf(source, &err)),
         )
     })
 }
@@ -3402,7 +3402,9 @@ fn parse_deep(source: &str) -> Result<Vec<DeepExpr>> {
 /// error would report.
 fn deep_ingress_error(stage: &str, error: &chelis_deep::StampOrParseError) -> CompilerError {
     let span = match error {
-        chelis_deep::StampOrParseError::Parse(parse_error) => parse_error_span_deep(parse_error),
+        chelis_deep::StampOrParseError::Parse(parse_error) => {
+            Some(parse_error_span_deep(parse_error))
+        }
         // The stamp half carries a measured extent, so it reports a range
         // where the parse half above can only report a point (chelis#1395).
         chelis_deep::StampOrParseError::Stamp(stamp_error) => Some(DiagnosticSpan::Range {
@@ -3419,7 +3421,7 @@ fn canonicalize_decompiled_surf(source: &str) -> Result<String> {
             "decompile",
             format!("decompiler emitted Surf that the parser rejected: {err}"),
             GeneralKind::SurfParseError,
-            parse_error_span_surf(source, &err),
+            Some(parse_error_span_surf(source, &err)),
         )
     })?;
     Ok(chelis_surf::format::format_program(&decls))
@@ -5101,12 +5103,49 @@ fn deep_span_to_diagnostic(span: Option<chelis_deep::Span>) -> Option<Diagnostic
     })
 }
 
-fn parse_error_span_surf(
-    source: &str,
-    err: &chelis_surf::parser::ParseError,
-) -> Option<DiagnosticSpan> {
+/// The byte offset a Surf lexer error carries.
+///
+/// Exhaustive by construction rather than a catch-all: a new `LexError`
+/// variant stops this compiling until its coordinate is chosen, which is what
+/// the previous `return None` arm silently avoided (chelis#1395). Every
+/// variant carries one, so the return type is `usize`, not `Option`.
+fn surf_lex_error_offset(err: &chelis_surf::lexer::LexError) -> usize {
+    use chelis_surf::lexer::LexError as Lex;
+    match err {
+        Lex::UnterminatedString { offset }
+        | Lex::InvalidEscape { offset, .. }
+        | Lex::UnescapedControl { offset, .. }
+        | Lex::InvalidNumber { offset, .. }
+        | Lex::UnexpectedChar { offset, .. }
+        | Lex::ReservedForFuture { offset, .. }
+        | Lex::UnterminatedBlockComment { offset }
+        | Lex::DeferredSuffix { offset, .. }
+        | Lex::UnsignedSuffix { offset, .. }
+        | Lex::IntegerSuffixOnFloat { offset, .. }
+        | Lex::HexFloatSuffix { offset, .. }
+        | Lex::UnknownSuffix { offset, .. } => *offset,
+    }
+}
+
+/// The byte offset a Deep lexer error carries. See `surf_lex_error_offset`.
+fn deep_lex_error_offset(err: &chelis_deep::lexer::LexError) -> usize {
+    use chelis_deep::lexer::LexError as Lex;
+    match err {
+        Lex::UnterminatedString { offset }
+        | Lex::InvalidEscape { offset, .. }
+        | Lex::InvalidNumber { offset, .. }
+        | Lex::UnexpectedChar { offset, .. }
+        | Lex::DeferredSuffix { offset, .. }
+        | Lex::UnsignedSuffix { offset, .. }
+        | Lex::IntegerSuffixOnFloat { offset, .. }
+        | Lex::HexFloatSuffix { offset, .. }
+        | Lex::UnknownSuffix { offset, .. } => *offset,
+    }
+}
+
+fn parse_error_span_surf(source: &str, err: &chelis_surf::parser::ParseError) -> DiagnosticSpan {
     let offset = match err {
-        chelis_surf::parser::ParseError::Lex(_) => return None,
+        chelis_surf::parser::ParseError::Lex(lex) => surf_lex_error_offset(lex),
         chelis_surf::parser::ParseError::UnexpectedEof => source.len(),
         chelis_surf::parser::ParseError::Expected { offset, .. }
         | chelis_surf::parser::ParseError::ReservedWordBinding { offset, .. }
@@ -5119,18 +5158,18 @@ fn parse_error_span_surf(
             offset, ..
         } => *offset,
     };
-    Some(DiagnosticSpan::Point { offset })
+    DiagnosticSpan::Point { offset }
 }
 
-fn parse_error_span_deep(err: &chelis_deep::parser::ParseError) -> Option<DiagnosticSpan> {
+fn parse_error_span_deep(err: &chelis_deep::parser::ParseError) -> DiagnosticSpan {
     let offset = match err {
-        chelis_deep::parser::ParseError::Lex(_) => return None,
+        chelis_deep::parser::ParseError::Lex(lex) => deep_lex_error_offset(lex),
         chelis_deep::parser::ParseError::UnexpectedEof { offset }
         | chelis_deep::parser::ParseError::Expected { offset, .. }
         | chelis_deep::parser::ParseError::EmptyList { offset } => *offset,
         chelis_deep::parser::ParseError::ForbiddenSpanChar { value_offset, .. } => *value_offset,
     };
-    Some(DiagnosticSpan::Point { offset })
+    DiagnosticSpan::Point { offset }
 }
 
 /// Project a check diagnostic onto the wire carrier.
@@ -6030,6 +6069,61 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use tempfile::TempDir;
+
+    /// chelis#1395 [04-FIT-16]: a lexer error carries a byte offset, so the
+    /// carrier transports it.
+    ///
+    /// Both languages previously matched `ParseError::Lex(_) => return None`,
+    /// discarding a coordinate the producer held -- the exact loss the tagged
+    /// carrier exists to stop, left in place at the one producer that cannot
+    /// reach the parser to be given a span.
+    #[test]
+    fn a_surf_lex_error_retains_its_point() {
+        let source = "x=\"unterminated";
+        let error = chelis_surf::parser::parse_str(source)
+            .expect_err("an unterminated string is a lex error");
+        assert!(
+            matches!(error, chelis_surf::parser::ParseError::Lex(_)),
+            "fixture must reach the lexer arm, got: {error:?}"
+        );
+        let span = parse_error_span_surf(source, &error);
+        assert_eq!(
+            span.extent(),
+            None,
+            "a lexer coordinate is a point, not a measured range"
+        );
+        assert_eq!(
+            span,
+            DiagnosticSpan::Point {
+                offset: source.find('"').expect("the fixture has a quote"),
+            },
+            "the point must be the offset the lexer reported"
+        );
+    }
+
+    /// The Deep half of the same omission. Kept as a separate test because the
+    /// two languages have separate `LexError` enums and separate projections;
+    /// one passing proved nothing about the other.
+    #[test]
+    fn a_deep_lex_error_retains_its_point() {
+        let source = "(x \"unterminated";
+        // `parse_raw_str` is the lex-then-parse entry; the stamped entries
+        // wrap the same `ParseError` in `StampOrParseError`.
+        let error = chelis_deep::parser::parse_raw_str(source)
+            .expect_err("an unterminated string is a lex error");
+        assert!(
+            matches!(error, chelis_deep::parser::ParseError::Lex(_)),
+            "fixture must reach the lexer arm, got: {error:?}"
+        );
+        let span = parse_error_span_deep(&error);
+        assert_eq!(span.extent(), None);
+        assert_eq!(
+            span,
+            DiagnosticSpan::Point {
+                offset: source.find('"').expect("the fixture has a quote"),
+            }
+        );
+    }
 
     #[test]
     fn decompile_maps_resugaring_rejection_to_the_validation_kind() {

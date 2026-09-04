@@ -22,8 +22,9 @@
 use chelis_compiler_api::compiler::{self, CompilerError};
 use chelis_compiler_api::schema::{
     AddFunctionRequest, AddPropertyRequest, ChangeSignatureRequest, CheckRequest, DecompileRequest,
-    DeepCallGraphRequest, DeepOutlineRequest, DeepReferencesRequest, ParseRequest, RenameRequest,
-    ReplaceFunctionBodyRequest, ReplaceFunctionRequest, SourceKind, ValidateMode, ValidateRequest,
+    DeepCallGraphRequest, DeepOutlineRequest, DeepReferencesRequest, DiagnosticSpan, ParseRequest,
+    RenameRequest, ReplaceFunctionBodyRequest, ReplaceFunctionRequest, SourceKind, ValidateMode,
+    ValidateRequest,
 };
 
 /// A well-formed module every door accepts at ingress. It carries the
@@ -585,6 +586,24 @@ fn a_stamp_rejection_points_at_the_offending_form_not_the_whole_input() {
         expected,
         "span must address the bare name: {}",
         error.errors[0].message
+    );
+    // The VARIANT, not just the offset (chelis#1395). The stamp half is the
+    // one producer here that genuinely measured an extent, so it must report
+    // `Range`. Asserting only `offset()` cannot tell a measured range from a
+    // bare coordinate, which let the two be swapped silently.
+    assert_eq!(
+        span,
+        DiagnosticSpan::Range {
+            offset: expected,
+            len: "unwrapped_name".len(),
+        },
+        "a measured stamp rejection reports a range covering the form: {}",
+        error.errors[0].message
+    );
+    assert_eq!(
+        span.extent(),
+        Some("unwrapped_name".len()),
+        "the extent is the one the stamp measured, not an invented width"
     );
     assert!(
         error.errors[0].message.contains("bare name"),

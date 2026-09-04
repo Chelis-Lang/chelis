@@ -202,23 +202,28 @@ fn the_error_object_member_order_is_pinned_to_its_bytes() {
     //
     // These bytes are NOT the ones the hand-assembled `format!` produced.
     // That template emitted neither `suggestions` (it had no slot for the
-    // field at all) nor a range (`"span_offset":30` was the whole location),
-    // so the error object changes shape in FOUR ways: `suggestions` appears
-    // when non-empty, `span_offset` becomes `span` carrying an offset AND a
-    // length, `suggestions` sits between `severity` and `span`, and effect
-    // diagnostics carry their hints too. All four follow from [04-FIT-15]
-    // and [04-FIT-16]; none is incidental.
+    // field at all) nor a structured location (`"span_offset":30` was the
+    // whole of it), so the error object changes shape in FOUR ways:
+    // `suggestions` appears when non-empty, `span_offset` becomes the tagged
+    // `span` carrier, `suggestions` sits between `severity` and `span`, and
+    // effect diagnostics carry their hints too. All four follow from
+    // [04-FIT-15] and [04-FIT-16]; none is incidental.
     //
-    // chelis#1395 adds a FIFTH: `span` is a tagged carrier, so a measured
-    // range is `{"span":"range",...}`. This pin caught that change -- it
-    // failed on the tag before the expectation was updated, which is the
-    // guarantee working.
+    // chelis#1395 adds a FIFTH: `span` is a tagged carrier. This pin caught
+    // that change -- it failed on the tag before the expectation was updated,
+    // which is the guarantee working.
     //
-    // It does NOT cover the `point` half. No CLI fixture here produces a
-    // coordinate without an identity, so the measured/unmeasured distinction
-    // is asserted at the carrier level in `schema.rs`'s unit module, not in
-    // these bytes. Saying otherwise would repeat the overclaim this pin was
-    // already corrected for once.
+    // The tag here is `point`, and that is the contract, not an accident of
+    // this fixture. `span_id` is `surf:30..34`, and an earlier revision read
+    // a length back out of that string. It is an opaque identity, not a
+    // measured extent: `spec/03-deep-syntax.md` §1.1.1 makes span IDs opaque
+    // whatever they are spelled like, so recovering `len` from one invents an
+    // extent [04-FIT-17] forbids. A check diagnostic therefore reports a
+    // coordinate, and a `range` on this line would be the defect.
+    //
+    // The carrier's OTHER half -- a measured range from a producer that has
+    // one -- is the Deep stamp path, pinned in `chelis-compiler-api`'s
+    // `phase3_stamped_ingress`, not in these bytes.
     //
     // The fourth arrived unnoticed because this pin covered only a CHECK
     // diagnostic, and the effect projection was the one dropping a field.
@@ -234,7 +239,7 @@ fn the_error_object_member_order_is_pinned_to_its_bytes() {
         errors_line,
         "  \"errors\": [{\"kind\":\"UnboundVariable\",\"message\":\"unbound variable: nope\",\
          \"severity\":0.6,\"suggestions\":[\"Check spelling of 'nope'\"],\
-         \"span\":{\"span\":\"range\",\"offset\":30,\"len\":4},\
+         \"span\":{\"span\":\"point\",\"offset\":30},\
          \"span_id\":\"surf:30..34\"}]",
         "the error object's member order and spelling are the wire contract"
     );

@@ -303,34 +303,29 @@ impl Diagnostic {
 /// `<source>:<start>..<end>` rendering is the only place a real end offset
 /// exists, so the range is DERIVED from it and omitted when it cannot be.
 ///
-/// Where the identity is absent the coordinate still travels, as
-/// `DiagnosticSpan::Point` (chelis#1395). The carrier's variant tag records
+/// The coordinate travels as `DiagnosticSpan::Point` whether or not an
+/// identity accompanies it (chelis#1395). The carrier's variant tag records
 /// whether an extent was measured, so [04-FIT-16]'s requirement that a
-/// coordinate travel without an identity is met without [04-FIT-17]'s
-/// prohibition on inventing one being weakened: `Point` has no `len` field.
+/// coordinate travel without an identity is met without weakening
+/// [04-FIT-17]'s prohibition on inventing one: `Point` has no `len` field.
 fn check_error_span(error: &chelis_types::errors::CheckError) -> Option<DiagnosticSpan> {
-    let offset = error.span_offset?;
-    let measured = error
-        .span_id
-        .as_deref()
-        .and_then(|id| {
-            id.rsplit_once(':')
-                .map(|(_, range)| range)
-                .unwrap_or(id)
-                .split_once("..")
-        })
-        .and_then(|(start, end)| Some((start.parse::<usize>().ok()?, end.parse::<usize>().ok()?)))
-        .filter(|(start, end)| *start == offset && end > start);
-    // chelis#1395: a coordinate the producer held now travels as `Point`
-    // rather than being dropped for want of an extent. The `end > start`
-    // filter keeps [04-FIT-17]'s zero-width prohibition: a degenerate
-    // `start..start` identity is a coordinate, not a measured empty range.
-    Some(match measured {
-        Some((start, end)) => DiagnosticSpan::Range {
-            offset,
-            len: end - start,
-        },
-        None => DiagnosticSpan::Point { offset },
+    // Always a point. `CheckError` carries `span_offset` and an opaque
+    // `span_id`, and no measured extent -- so there is nothing here to build a
+    // `Range` from.
+    //
+    // This previously recovered a length by parsing `N..M` out of `span_id`.
+    // That is not provenance: `spec/03-deep-syntax.md` §1.1.1 makes external
+    // span IDs opaque and their interpretation none of Chelis's concern, so a
+    // foreign `octant:30..34` is a valid opaque identity that the parse turned
+    // into a measured `Range { offset: 30, len: 4 }` nobody measured. A
+    // numeric-looking identity is still an identity; spelling is not
+    // provenance, and [04-FIT-17] forbids inventing an extent.
+    //
+    // A `Range` from this producer therefore waits on a typed field that
+    // carries an extent Chelis itself measured. The stamp ingress path in
+    // `compiler.rs` already has one and still reports `Range`.
+    Some(DiagnosticSpan::Point {
+        offset: error.span_offset?,
     })
 }
 
@@ -3597,24 +3592,19 @@ mod diagnostic_projection_contract {
         assert_eq!(range, r#"{"span":"range","offset":30,"len":4}"#);
     }
 
-    /// spec/04 [04-FIT-17]: a producer holding only a point or an opaque
-    /// identity gets neither an invented length nor a `0..0` range.
+    /// spec/04 [04-FIT-17] and `spec/03-deep-syntax.md` §1.1.1: a check
+    /// diagnostic reports the coordinate it holds and never derives an extent
+    /// from the identity beside it.
+    ///
+    /// `CheckError` carries `span_offset` and an opaque `span_id`, and no
+    /// measured length. An earlier revision recovered one by parsing `N..M`
+    /// out of the identity, which invents an extent for any identity that
+    /// happens to be spelled that way -- including a foreign one, since §1.1.1
+    /// makes external span IDs opaque and their interpretation none of
+    /// Chelis's concern.
     #[test]
-    fn a_span_is_emitted_only_when_its_range_is_derivable() {
-        let derived = Diagnostic::from_check_error(&check_error(
-            K::UnboundVariable {
-                identifier: "x".to_string(),
-            },
-            Some(30),
-            Some("surf:30..34"),
-        ));
-        assert_eq!(
-            derived.span.map(|span| (span.offset(), span.extent())),
-            Some((30, Some(4)))
-        );
-
-        // A producer with no location at all still reports nothing. This is
-        // the negative control the tagged carrier must not weaken: `Point`
+    fn a_check_diagnostic_reports_a_coordinate_never_a_derived_range() {
+        // A producer with no location at all still reports nothing. `Point`
         // exists for a coordinate the producer HELD, never for one it lacked.
         assert!(
             Diagnostic::from_check_error(&check_error(K::Other, None, None))
@@ -3623,29 +3613,59 @@ mod diagnostic_projection_contract {
             "no location at all must stay absent"
         );
 
-        // chelis#1395: these three previously reported nothing, dropping a
-        // coordinate the producer held. They now report it as a point. None
-        // of them synthesizes a RANGE, which is what [04-FIT-17] forbids.
         for (label, error) in [
-            ("a point with no id", check_error(K::Other, Some(30), None)),
+            ("no identity at all", check_error(K::Other, Some(30), None)),
             (
-                "an opaque id carrying no range",
+                "an opaque identity carrying no range",
                 check_error(K::Other, Some(30), Some("octant:theorem-7")),
             ),
-            // The identity's range disagrees with the producer's own offset.
-            // `span_offset` is the first-class coordinate and the identity is
-            // opaque, so the offset is trusted and the unusable range is not
-            // invented from it. The identity still travels in `span_id`, so a
-            // consumer can see the disagreement rather than having it hidden.
+            // The identity is Chelis's own spelling and still yields no
+            // extent: reading one back out of a string is not a typed
+            // producer path, so `surf:` earns no more trust here than
+            // `octant:` does.
             (
-                "an id whose range contradicts the offset",
+                "a range-shaped identity with Chelis's own prefix",
+                check_error(
+                    K::UnboundVariable {
+                        identifier: "x".to_string(),
+                    },
+                    Some(30),
+                    Some("surf:30..34"),
+                ),
+            ),
+            // The adversarial case: an EXTERNAL identity that merely looks
+            // like a range. Spelling is not provenance, and a consumer must
+            // not receive `len: 4` that no producer measured.
+            (
+                "a range-shaped identity from a foreign producer",
+                check_error(K::Other, Some(30), Some("octant:30..34")),
+            ),
+            // A degenerate identity is a coordinate, not a measured empty
+            // range; a consumer cannot tell an invented `len: 0` from a real
+            // one.
+            (
+                "a degenerate range-shaped identity",
+                check_error(K::Other, Some(30), Some("surf:30..30")),
+            ),
+            // The identity's range disagrees with the producer's own offset.
+            // `span_offset` is the first-class coordinate; the identity still
+            // travels in `span_id`, so a consumer can see the disagreement
+            // rather than having it hidden.
+            (
+                "an identity whose range contradicts the offset",
                 check_error(K::Other, Some(30), Some("surf:99..104")),
             ),
         ] {
+            let span = Diagnostic::from_check_error(&error).span;
             assert_eq!(
-                Diagnostic::from_check_error(&error).span,
+                span,
                 Some(DiagnosticSpan::Point { offset: 30 }),
                 "{label} must report the coordinate and no range"
+            );
+            assert_eq!(
+                span.map(|span| span.extent()),
+                Some(None),
+                "{label} must carry no extent"
             );
         }
     }
