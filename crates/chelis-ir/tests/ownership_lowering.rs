@@ -626,6 +626,113 @@ fn checked_scalar_call_slots_restore_the_exact_literal_type() {
 }
 
 #[test]
+fn checked_tensor_call_slots_preserve_dimension_instantiation_and_reject_forgery() {
+    let source = "sig guarded: tensor[n, f32] -> tensor[n, f32]\n\
+                  def guarded(x) = {\n\
+                    n = cast(shape(x, cast(0, int32)), int64)\n\
+                    if gt(cast(1, int64), n) then fail(\"empty\") else x\n\
+                  }\n\
+                  def call(x: tensor[4, f32]) -> tensor[4, f32] = guarded(x)\n\
+                  out = call(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)]))\n";
+    let front = front(source);
+    let verified = verify_ownership(
+        lower_host_ownership(&front.manifested, front.host.clone()).expect("valid instantiation"),
+    )
+    .expect("valid ownership");
+    assert!(unit_text(&verified, "call").contains("call:guarded"));
+
+    let mut forged = front.host;
+    let HostExprKind::Call { arg_tys, .. } = &mut forged
+        .functions
+        .iter_mut()
+        .find(|function| function.name == "call")
+        .expect("call function")
+        .body
+        .kind
+    else {
+        panic!("guarded call must remain a direct host call")
+    };
+    arg_tys[0] = ConcreteHostType::Tensor(TensorType {
+        dims: vec![DimInfo::Lit(5)],
+        precision: Prim::F32,
+    });
+    let error = lower_host_ownership(&front.manifested, forged).unwrap_err();
+    assert!(
+        matches!(error, OwnershipError::CallArgumentType { argument: 0, .. }),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn checked_nominal_dimension_provenance_rejects_a_different_name() {
+    let mut front = front(
+        "def nominal(x: tensor[batch, f32]) -> tensor[batch, f32] = {\n\
+           size = cast(shape(x, cast(0, int32)), int64)\n\
+           if gt(cast(1, int64), size) then fail(\"empty\") else x\n\
+         }\n\
+         def caller(x: tensor[batch, f32]) -> tensor[batch, f32] = nominal(x)\n\
+         out = 0\n",
+    );
+    let caller = front
+        .host
+        .functions
+        .iter_mut()
+        .find(|function| function.name == "caller")
+        .expect("caller function");
+    caller.params[0].ty = ConcreteHostType::Tensor(TensorType {
+        dims: vec![DimInfo::Named("seq".into(), None)],
+        precision: Prim::F32,
+    });
+    let error = lower_host_ownership(&front.manifested, front.host).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            OwnershipError::CallArgumentType {
+                ref callee,
+                argument: 0,
+                ..
+            } if callee == "nominal"
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn checked_repeated_dimension_variable_rejects_inconsistent_actuals() {
+    let mut front = front(
+        "sig paired: tensor[n, f32] -> tensor[n, f32] -> tensor[n, f32]\n\
+         def paired(x, y) = {\n\
+           size = cast(shape(y, cast(0, int32)), int64)\n\
+           if gt(cast(1, int64), size) then fail(\"empty\") else x\n\
+         }\n\
+         def caller(x: tensor[4, f32], y: tensor[4, f32]) -> tensor[4, f32] = paired(x, y)\n\
+         out = 0\n",
+    );
+    let caller = front
+        .host
+        .functions
+        .iter_mut()
+        .find(|function| function.name == "caller")
+        .expect("caller function");
+    caller.params[1].ty = ConcreteHostType::Tensor(TensorType {
+        dims: vec![DimInfo::Lit(5)],
+        precision: Prim::F32,
+    });
+    let error = lower_host_ownership(&front.manifested, front.host).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            OwnershipError::CallArgumentType {
+                ref callee,
+                argument: 1,
+                ..
+            } if callee == "paired"
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn forged_call_argument_types_cannot_retag_an_actual_expression() {
     let front = front("def keep(x: int32) -> int32 = x\nout = keep(1)\n");
 

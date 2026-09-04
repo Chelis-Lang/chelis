@@ -7,12 +7,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_deep::DeepTag;
-use chelis_deep::ast::Expr;
+use chelis_deep::ast::{Atom, Expr};
 use chelis_types::CheckedProgram;
 use chelis_types::manifest::RootManifest;
 use chelis_types::types::{Lane, Prim};
 
-use crate::dag::RiscOp;
+use crate::dag::{DimInfo, RiscOp, TensorType};
 use crate::host::{
     ConcreteHostCallback, ConcreteHostCallbackKind, ConcreteHostExpr, ConcreteHostExprKind,
     ConcreteHostFunction, ConcreteHostMatchArm, ConcreteHostProgram, HostBinding, HostDisplayRoot,
@@ -34,12 +34,329 @@ const ROOTS_UNIT: &str = "roots";
 struct ParamSpec {
     mode: ParamMode,
     ty: ConcreteHostType,
+    type_pattern: FormalTypePattern,
     callback_modes: Option<Vec<ParamMode>>,
+}
+
+struct DeclaredParam<'a> {
+    mode: ParamMode,
+    callback_modes: Option<Vec<ParamMode>>,
+    checked_type: &'a Expr,
 }
 
 #[derive(Clone)]
 struct Signature {
     params: Vec<ParamSpec>,
+}
+
+#[derive(Clone)]
+enum FormalTypePattern {
+    Exact,
+    Function(Vec<Self>, Box<Self>),
+    Adt(Vec<Self>),
+    List(Box<Self>),
+    Dict(Box<Self>, Box<Self>),
+    Tuple(Vec<Self>),
+    Tensor(Vec<FormalDimension>),
+    Option(Box<Self>),
+}
+
+#[derive(Clone)]
+enum FormalDimension {
+    Quantified(String),
+    Nominal,
+}
+
+impl FormalTypePattern {
+    fn from_checked(formal: &ConcreteHostType, checked: &Expr) -> Self {
+        let Some((tag, children)) = tag_and_children(checked) else {
+            return Self::nominal(formal);
+        };
+        if tag == DeepTag::TRef {
+            return children
+                .first()
+                .map(|inner| Self::from_checked(formal, inner))
+                .unwrap_or_else(|| Self::nominal(formal));
+        }
+        match (formal, tag) {
+            (ConcreteHostType::Function(params, ret), DeepTag::TFn) => {
+                let Some((checked_ret, checked_params)) = children.split_last() else {
+                    return Self::nominal(formal);
+                };
+                if params.len() != checked_params.len() {
+                    return Self::nominal(formal);
+                }
+                Self::Function(
+                    params
+                        .iter()
+                        .zip(checked_params)
+                        .map(|(formal, checked)| Self::from_checked(formal, checked))
+                        .collect(),
+                    Box::new(Self::from_checked(ret, checked_ret)),
+                )
+            }
+            (ConcreteHostType::Adt(_, args), DeepTag::TAdt) => {
+                let Some(checked_args) = children.get(1..) else {
+                    return Self::nominal(formal);
+                };
+                if args.len() != checked_args.len() {
+                    return Self::nominal(formal);
+                }
+                Self::Adt(
+                    args.iter()
+                        .zip(checked_args)
+                        .map(|(formal, checked)| Self::from_checked(formal, checked))
+                        .collect(),
+                )
+            }
+            (ConcreteHostType::List(inner), DeepTag::TAdt)
+            | (ConcreteHostType::Option(inner), DeepTag::TAdt) => children
+                .get(1)
+                .map(|checked| {
+                    let inner = Box::new(Self::from_checked(inner, checked));
+                    if matches!(formal, ConcreteHostType::List(_)) {
+                        Self::List(inner)
+                    } else {
+                        Self::Option(inner)
+                    }
+                })
+                .unwrap_or_else(|| Self::nominal(formal)),
+            (ConcreteHostType::Dict(key, value), DeepTag::TAdt) => {
+                match (children.get(1), children.get(2)) {
+                    (Some(checked_key), Some(checked_value)) => Self::Dict(
+                        Box::new(Self::from_checked(key, checked_key)),
+                        Box::new(Self::from_checked(value, checked_value)),
+                    ),
+                    _ => Self::nominal(formal),
+                }
+            }
+            (ConcreteHostType::Tuple(items), DeepTag::TTuple) if items.len() == children.len() => {
+                Self::Tuple(
+                    items
+                        .iter()
+                        .zip(children)
+                        .map(|(formal, checked)| Self::from_checked(formal, checked))
+                        .collect(),
+                )
+            }
+            (ConcreteHostType::Tensor(tensor), DeepTag::TTensor) => {
+                let Some((_, checked_dims)) = children.split_last() else {
+                    return Self::nominal(formal);
+                };
+                if tensor.dims.len() != checked_dims.len() {
+                    return Self::nominal(formal);
+                }
+                Self::Tensor(
+                    checked_dims
+                        .iter()
+                        .map(|dimension| {
+                            dimension_variable_key(dimension)
+                                .map(FormalDimension::Quantified)
+                                .unwrap_or(FormalDimension::Nominal)
+                        })
+                        .collect(),
+                )
+            }
+            _ => Self::nominal(formal),
+        }
+    }
+
+    fn nominal(formal: &ConcreteHostType) -> Self {
+        match formal {
+            ConcreteHostType::Function(params, ret) => Self::Function(
+                params.iter().map(Self::nominal).collect(),
+                Box::new(Self::nominal(ret)),
+            ),
+            ConcreteHostType::Adt(_, args) => Self::Adt(args.iter().map(Self::nominal).collect()),
+            ConcreteHostType::List(inner) => Self::List(Box::new(Self::nominal(inner))),
+            ConcreteHostType::Dict(key, value) => {
+                Self::Dict(Box::new(Self::nominal(key)), Box::new(Self::nominal(value)))
+            }
+            ConcreteHostType::Tuple(items) => {
+                Self::Tuple(items.iter().map(Self::nominal).collect())
+            }
+            ConcreteHostType::Tensor(tensor) => {
+                Self::Tensor(vec![FormalDimension::Nominal; tensor.dims.len()])
+            }
+            ConcreteHostType::Option(inner) => Self::Option(Box::new(Self::nominal(inner))),
+            ConcreteHostType::Scalar(_) | ConcreteHostType::MappedFile | ConcreteHostType::Unit => {
+                Self::Exact
+            }
+        }
+    }
+}
+
+fn dimension_variable_key(expr: &Expr) -> Option<String> {
+    let (DeepTag::DVar, children) = tag_and_children(expr)? else {
+        return None;
+    };
+    match children.first().map(strip_meta) {
+        Some(Expr::Atom(Atom::Name(name), _)) => Some(name.clone()),
+        _ => None,
+    }
+}
+
+#[derive(Default)]
+struct CallTypeInstantiation {
+    dimensions: BTreeMap<String, DimInfo>,
+}
+
+struct DirectCallArgument<'a> {
+    function: &'a str,
+    index: usize,
+    expr: &'a ConcreteHostExpr,
+    pattern: &'a FormalTypePattern,
+    formal: &'a ConcreteHostType,
+    checked_slot: &'a ConcreteHostType,
+}
+
+impl CallTypeInstantiation {
+    /// Check one checker-owned call slot against the resolved callable formal.
+    /// A direct callable may retain universally quantified dimension names in
+    /// its body signature even though the call site has instantiated them to
+    /// literals or other named dimensions ([04-TY] section 4.4). All other
+    /// structure, including scalar precision and tensor rank, stays exact.
+    fn admits(
+        &mut self,
+        pattern: &FormalTypePattern,
+        formal: &ConcreteHostType,
+        actual: &ConcreteHostType,
+    ) -> bool {
+        match (pattern, formal, actual) {
+            (FormalTypePattern::Exact, _, _) => formal == actual,
+            (
+                FormalTypePattern::Function(pattern_params, pattern_ret),
+                ConcreteHostType::Function(formal_params, formal_ret),
+                ConcreteHostType::Function(actual_params, actual_ret),
+            ) => {
+                pattern_params.len() == formal_params.len()
+                    && formal_params.len() == actual_params.len()
+                    && pattern_params
+                        .iter()
+                        .zip(formal_params)
+                        .zip(actual_params)
+                        .all(|((pattern, formal), actual)| self.admits(pattern, formal, actual))
+                    && self.admits(pattern_ret, formal_ret, actual_ret)
+            }
+            (
+                FormalTypePattern::Adt(pattern_args),
+                ConcreteHostType::Adt(formal_name, formal_args),
+                ConcreteHostType::Adt(actual_name, actual_args),
+            ) => {
+                formal_name == actual_name
+                    && pattern_args.len() == formal_args.len()
+                    && formal_args.len() == actual_args.len()
+                    && pattern_args
+                        .iter()
+                        .zip(formal_args)
+                        .zip(actual_args)
+                        .all(|((pattern, formal), actual)| self.admits(pattern, formal, actual))
+            }
+            (
+                FormalTypePattern::List(pattern),
+                ConcreteHostType::List(formal),
+                ConcreteHostType::List(actual),
+            )
+            | (
+                FormalTypePattern::Option(pattern),
+                ConcreteHostType::Option(formal),
+                ConcreteHostType::Option(actual),
+            ) => self.admits(pattern, formal, actual),
+            (
+                FormalTypePattern::Dict(key_pattern, value_pattern),
+                ConcreteHostType::Dict(formal_key, formal_value),
+                ConcreteHostType::Dict(actual_key, actual_value),
+            ) => {
+                self.admits(key_pattern, formal_key, actual_key)
+                    && self.admits(value_pattern, formal_value, actual_value)
+            }
+            (
+                FormalTypePattern::Tuple(patterns),
+                ConcreteHostType::Tuple(formal),
+                ConcreteHostType::Tuple(actual),
+            ) => {
+                patterns.len() == formal.len()
+                    && formal.len() == actual.len()
+                    && patterns
+                        .iter()
+                        .zip(formal)
+                        .zip(actual)
+                        .all(|((pattern, formal), actual)| self.admits(pattern, formal, actual))
+            }
+            (
+                FormalTypePattern::Tensor(dimensions),
+                ConcreteHostType::Tensor(formal),
+                ConcreteHostType::Tensor(actual),
+            ) => self.admits_tensor(dimensions, formal, actual),
+            _ => false,
+        }
+    }
+
+    fn admits_tensor(
+        &mut self,
+        dimensions: &[FormalDimension],
+        formal: &TensorType,
+        actual: &TensorType,
+    ) -> bool {
+        formal.precision == actual.precision
+            && dimensions.len() == formal.dims.len()
+            && formal.dims.len() == actual.dims.len()
+            && dimensions
+                .iter()
+                .zip(&formal.dims)
+                .zip(&actual.dims)
+                .all(|((pattern, formal), actual)| self.admits_dimension(pattern, formal, actual))
+    }
+
+    fn admits_dimension(
+        &mut self,
+        pattern: &FormalDimension,
+        formal: &DimInfo,
+        actual: &DimInfo,
+    ) -> bool {
+        match pattern {
+            FormalDimension::Quantified(key) => {
+                if formal == actual {
+                    return true;
+                }
+                match self.dimensions.get(key) {
+                    Some(bound) => dimensions_compatible(bound, actual),
+                    None => {
+                        self.dimensions.insert(key.clone(), actual.clone());
+                        true
+                    }
+                }
+            }
+            FormalDimension::Nominal => nominal_dimension_accepts(formal, actual),
+        }
+    }
+}
+
+fn nominal_dimension_accepts(formal: &DimInfo, actual: &DimInfo) -> bool {
+    match (formal, actual) {
+        (DimInfo::Named(name, None), _) if name.is_empty() || name == "*" => true,
+        (DimInfo::Named(formal, None), DimInfo::Named(actual, _)) => formal == actual,
+        (DimInfo::Named(_, None), DimInfo::Lit(_)) => true,
+        _ => dimensions_compatible(formal, actual),
+    }
+}
+
+fn dimensions_compatible(left: &DimInfo, right: &DimInfo) -> bool {
+    match (left, right) {
+        (DimInfo::Lit(left), DimInfo::Lit(right)) => left == right,
+        (DimInfo::Named(left, left_size), DimInfo::Named(right, right_size)) => {
+            left == right
+                && match (left_size, right_size) {
+                    (Some(left), Some(right)) => left == right,
+                    _ => true,
+                }
+        }
+        (DimInfo::Lit(left), DimInfo::Named(_, Some(right)))
+        | (DimInfo::Named(_, Some(left)), DimInfo::Lit(right)) => left == right,
+        (DimInfo::Lit(_), DimInfo::Named(_, None)) | (DimInfo::Named(_, None), DimInfo::Lit(_)) => {
+            true
+        }
+    }
 }
 
 pub(super) fn lower(
@@ -83,18 +400,23 @@ fn build_signatures(
 ) -> Result<BTreeMap<String, Signature>, OwnershipError> {
     let mut signatures = BTreeMap::new();
     for function in &host.functions {
-        let modes = declared_param_modes(checked, &function.name, function.params.len())
+        let declarations = declared_params(checked, &function.name, function.params.len())
             .ok_or_else(|| OwnershipError::MissingSignature {
                 function: function.name.clone(),
             })?;
         let params = function
             .params
             .iter()
-            .zip(modes)
-            .map(|(param, (mode, callback_modes))| ParamSpec {
-                mode,
+            .zip(declarations)
+            .map(|(param, declared)| ParamSpec {
+                mode: declared.mode,
                 ty: param.ty.clone(),
-                callback_modes,
+                type_pattern: if function.origin == HostFunctionOrigin::Authored {
+                    FormalTypePattern::from_checked(&param.ty, declared.checked_type)
+                } else {
+                    FormalTypePattern::nominal(&param.ty)
+                },
+                callback_modes: declared.callback_modes,
             })
             .collect();
         signatures.insert(function.name.clone(), Signature { params });
@@ -102,13 +424,14 @@ fn build_signatures(
     Ok(signatures)
 }
 
-/// Read owned/borrowed parameter modes from the checked function type. A
-/// monomorphized host specialization uses the authored generic signature.
-fn declared_param_modes(
-    checked: &CheckedProgram,
+/// Read ownership modes and dimension-variable provenance from the checked
+/// function type. A monomorphized host specialization uses the authored
+/// generic signature.
+fn declared_params<'a>(
+    checked: &'a CheckedProgram,
     name: &str,
     arity: usize,
-) -> Option<Vec<(ParamMode, Option<Vec<ParamMode>>)>> {
+) -> Option<Vec<DeclaredParam<'a>>> {
     let generic_name = match name.split_once("__mono_") {
         Some((generic, _)) => generic,
         None => name,
@@ -121,7 +444,17 @@ fn declared_param_modes(
     if params.len() != arity {
         return None;
     }
-    params.into_iter().map(param_mode_of).collect()
+    params
+        .into_iter()
+        .map(|param| {
+            let (mode, callback_modes) = param_mode_of(param)?;
+            Some(DeclaredParam {
+                mode,
+                callback_modes,
+                checked_type: param,
+            })
+        })
+        .collect()
 }
 
 fn strip_meta(expr: &Expr) -> &Expr {
@@ -699,10 +1032,11 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                         });
                     }
                     let mut values = Vec::with_capacity(args.len());
+                    let mut instantiation = CallTypeInstantiation::default();
                     for (index, ((arg, arg_ty), spec)) in
                         args.iter().zip(arg_tys).zip(&specs).enumerate()
                     {
-                        if arg_ty != &spec.ty {
+                        if !instantiation.admits(&spec.type_pattern, &spec.ty, arg_ty) {
                             return Err(OwnershipError::CallArgumentType {
                                 unit: self.unit_name.clone(),
                                 callee: function.clone(),
@@ -711,8 +1045,17 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                                 actual: render_type(arg_ty),
                             });
                         }
-                        values
-                            .push(self.lower_direct_call_argument(function, index, arg, &spec.ty)?);
+                        values.push(self.lower_direct_call_argument(
+                            DirectCallArgument {
+                                function,
+                                index,
+                                expr: arg,
+                                pattern: &spec.type_pattern,
+                                formal: &spec.ty,
+                                checked_slot: arg_ty,
+                            },
+                            &mut instantiation,
+                        )?);
                     }
                     values
                 } else {
@@ -1016,21 +1359,53 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         Ok(Value::Named(body_owner))
     }
 
-    /// Restore the checker-owned type that the concrete host IR's raw
-    /// `Int`/`Float` lexical carriers do not retain. The expected type has
-    /// already been checked against both `Call.arg_tys` and the resolved
-    /// callee formal. Every other expression carries its own concrete type and
-    /// must agree exactly instead of being retagged at the call boundary.
+    /// Resolve a variable through the ownership environment instead of
+    /// trusting its host-expression annotation. Call-site monomorphization can
+    /// legitimately leave the generic spelling on that annotation, while the
+    /// bound owner retains the concrete checked type.
+    fn direct_call_argument_type(
+        &self,
+        expr: &ConcreteHostExpr,
+    ) -> Result<ConcreteHostType, OwnershipError> {
+        if let ConcreteHostExprKind::Var(name, _) = &expr.kind {
+            if let Some(place) = self.lookup(name) {
+                let owner = match place {
+                    Place::Owner(owner) | Place::Callback(owner) => owner,
+                };
+                return Ok(self.info(owner)?.ty.clone());
+            }
+            if self.unit_name != ROOTS_UNIT
+                && let Some(binding) = self
+                    .ctx
+                    .host
+                    .globals
+                    .iter()
+                    .find(|binding| binding.name == *name)
+            {
+                return Ok(binding.ty.clone());
+            }
+        }
+        Ok(match &expr.kind {
+            ConcreteHostExprKind::Int(_) => ConcreteHostType::Scalar(Prim::Int32),
+            ConcreteHostExprKind::Float(_) => ConcreteHostType::Scalar(Prim::F32),
+            _ => expr_type(expr),
+        })
+    }
+
+    /// Restore the checker-owned call-slot type that the concrete host IR's raw
+    /// `Int`/`Float` lexical carriers do not retain. The slot has already been
+    /// checked against the resolved callee formal. Every other expression
+    /// carries its own concrete type and must be one consistent instantiation
+    /// of that formal instead of being retagged at the call boundary.
     fn lower_direct_call_argument(
         &mut self,
-        function: &str,
-        argument: usize,
-        expr: &ConcreteHostExpr,
-        expected: &ConcreteHostType,
+        argument: DirectCallArgument<'_>,
+        instantiation: &mut CallTypeInstantiation,
     ) -> Result<Value, OwnershipError> {
+        let actual = self.direct_call_argument_type(argument.expr)?;
         self.with_site(HostSiteKind::Argument, |lowerer| {
             lowerer.with_site(HostSiteKind::Expression, |lowerer| {
-                let raw_literal_allowed = match (&expr.kind, expected) {
+                let raw_literal_allowed = match (&argument.expr.kind, argument.checked_slot) {
                     (ConcreteHostExprKind::Int(_), ConcreteHostType::Scalar(prim)) => {
                         prim.is_integer() || prim.is_float()
                     }
@@ -1040,29 +1415,24 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                     _ => false,
                 };
                 if raw_literal_allowed {
-                    let label = match &expr.kind {
+                    let label = match &argument.expr.kind {
                         ConcreteHostExprKind::Int(value) => format!("literal {value}"),
                         ConcreteHostExprKind::Float(value) => format!("literal {value}"),
                         _ => unreachable!("raw literal admission is exhaustive"),
                     };
-                    return lowerer.define(expected, label);
+                    return lowerer.define(argument.checked_slot, label);
                 }
 
-                let actual = match &expr.kind {
-                    ConcreteHostExprKind::Int(_) => ConcreteHostType::Scalar(Prim::Int32),
-                    ConcreteHostExprKind::Float(_) => ConcreteHostType::Scalar(Prim::F32),
-                    _ => expr_type(expr),
-                };
-                if actual != *expected {
+                if !instantiation.admits(argument.pattern, argument.formal, &actual) {
                     return Err(OwnershipError::CallArgumentType {
                         unit: lowerer.unit_name.clone(),
-                        callee: function.to_string(),
-                        argument,
-                        expected: render_type(expected),
+                        callee: argument.function.to_string(),
+                        argument: argument.index,
+                        expected: render_type(argument.formal),
                         actual: render_type(&actual),
                     });
                 }
-                lowerer.lower_expr_at_site(expr, None)
+                lowerer.lower_expr_at_site(argument.expr, None)
             })
         })
     }
@@ -1118,6 +1488,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                     .zip(modes)
                     .map(|(ty, mode)| ParamSpec {
                         mode,
+                        type_pattern: FormalTypePattern::nominal(&ty),
                         ty,
                         callback_modes: None,
                     })
@@ -2365,4 +2736,59 @@ fn lower_function(
         lowerer.set_terminator(Terminator::Return { result })
     })?;
     lowerer.finish(UnitKind::Function, Some(CallableBody::new(body)), entry)
+}
+
+#[cfg(test)]
+mod call_type_instantiation_tests {
+    use super::*;
+
+    fn tensor(dims: Vec<DimInfo>, precision: Prim) -> ConcreteHostType {
+        ConcreteHostType::Tensor(TensorType { dims, precision })
+    }
+
+    #[test]
+    fn callable_dimension_variable_accepts_one_consistent_call_site_instantiation() {
+        let formal = tensor(vec![DimInfo::Named("n".into(), None)], Prim::F32);
+        let literal_four = tensor(vec![DimInfo::Lit(4)], Prim::F32);
+        let literal_five = tensor(vec![DimInfo::Lit(5)], Prim::F32);
+        let named_batch = tensor(vec![DimInfo::Named("batch".into(), None)], Prim::F32);
+        let pattern = FormalTypePattern::Tensor(vec![FormalDimension::Quantified("d0".into())]);
+        let mut instantiation = CallTypeInstantiation::default();
+
+        assert!(instantiation.admits(&pattern, &formal, &formal));
+        assert!(instantiation.admits(&pattern, &formal, &literal_four));
+        assert!(instantiation.admits(&pattern, &formal, &literal_four));
+        assert!(!instantiation.admits(&pattern, &formal, &literal_five));
+        assert!(CallTypeInstantiation::default().admits(&pattern, &formal, &named_batch));
+    }
+
+    #[test]
+    fn nominal_dimensions_keep_names_while_accepting_literal_extents_and_wildcards() {
+        let pattern = FormalTypePattern::Tensor(vec![FormalDimension::Nominal]);
+        let batch = tensor(vec![DimInfo::Named("batch".into(), None)], Prim::F32);
+        let same_batch = tensor(vec![DimInfo::Named("batch".into(), None)], Prim::F32);
+        let seq = tensor(vec![DimInfo::Named("seq".into(), None)], Prim::F32);
+        let literal_four = tensor(vec![DimInfo::Lit(4)], Prim::F32);
+        let wildcard = tensor(vec![DimInfo::Named("*".into(), None)], Prim::F32);
+
+        assert!(CallTypeInstantiation::default().admits(&pattern, &batch, &same_batch));
+        assert!(CallTypeInstantiation::default().admits(&pattern, &batch, &literal_four));
+        assert!(!CallTypeInstantiation::default().admits(&pattern, &batch, &seq));
+        assert!(CallTypeInstantiation::default().admits(&pattern, &wildcard, &seq));
+    }
+
+    #[test]
+    fn callable_dimension_instantiation_does_not_weaken_literals_rank_or_precision() {
+        let formal = tensor(vec![DimInfo::Named("n".into(), None)], Prim::F32);
+        let quantified = FormalTypePattern::Tensor(vec![FormalDimension::Quantified("d0".into())]);
+        let wrong_rank = tensor(vec![DimInfo::Lit(4), DimInfo::Lit(1)], Prim::F32);
+        let wrong_precision = tensor(vec![DimInfo::Lit(4)], Prim::F64);
+        let literal_four = tensor(vec![DimInfo::Lit(4)], Prim::F32);
+        let literal_five = tensor(vec![DimInfo::Lit(5)], Prim::F32);
+        let nominal = FormalTypePattern::Tensor(vec![FormalDimension::Nominal]);
+
+        assert!(!CallTypeInstantiation::default().admits(&quantified, &formal, &wrong_rank));
+        assert!(!CallTypeInstantiation::default().admits(&quantified, &formal, &wrong_precision));
+        assert!(!CallTypeInstantiation::default().admits(&nominal, &literal_four, &literal_five));
+    }
 }
