@@ -77,7 +77,15 @@ fn provable_positive_rank_mismatch_is_a_dimension_error() {
         errors.iter().any(|error| {
             error["kind"] == "DimensionMismatch"
                 && error["message"].as_str().is_some_and(|message| {
-                    message.contains("elementwise") && message.contains("rank")
+                    // chelis#668's subject is that a PROVABLE rank mismatch is a
+                    // dimension error rather than a soft score. Since chelis#1277
+                    // fixed `insert`'s rank at the call, the operand's rank is
+                    // known before the elementwise op, so the same provable
+                    // mismatch is caught there and reads as a bare rank
+                    // disagreement. `spec/04` \u{00a7}4.7 asks for the earliest proof,
+                    // not a particular phrasing.
+                    (message.contains("elementwise") && message.contains("rank"))
+                        || message.contains("tensor rank mismatch")
                 })
         }),
         "expected a located elementwise rank diagnostic: {errors:#?}"

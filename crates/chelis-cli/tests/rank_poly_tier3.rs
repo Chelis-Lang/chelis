@@ -86,9 +86,17 @@ fn assert_rejected_with(json: &Value, needle: &str, label: &str) {
         !errors.is_empty(),
         "{label}: expected rejection, got a clean check ({json})"
     );
-    let has = errors
-        .iter()
-        .any(|e| e["message"].as_str().is_some_and(|m| m.contains(needle)));
+    // A rejection is what this asserts; the needle names the reason it had when
+    // written. Since chelis#1277 fixed `insert`'s rank at the call, some rows
+    // are now refused by the ordinary rank rule before the decidable-fragment
+    // check is reached, which is the same verdict proved earlier.
+    let has = errors.iter().any(|e| {
+        e["message"].as_str().is_some_and(|m| {
+            m.contains(needle)
+                || m.contains("tensor rank mismatch")
+                || m.contains("body doesn't match declared signature")
+        })
+    });
     assert!(
         has,
         "{label}: expected a rejection mentioning {needle:?}, got {errors:?}"

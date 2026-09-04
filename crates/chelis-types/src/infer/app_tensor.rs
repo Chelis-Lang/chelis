@@ -939,7 +939,7 @@ pub(super) fn check_expand_signature(
                 errors,
                 CheckError::new(
                     CheckErrorKind::TypeMismatch,
-                    format!("expand expects tensor input, got {other}"),
+                    format!("{builtin} expects tensor input, got {other}"),
                     vec![],
                 ),
             );
@@ -961,6 +961,7 @@ pub(super) fn check_expand_signature(
         && let Some(new_name) = arg_exprs.get(1).and_then(symbolic_dim_ref_name)
     {
         return check_named_expand_signature(
+            builtin,
             new_name,
             arg_exprs,
             &input_dims,
@@ -1019,7 +1020,7 @@ pub(super) fn check_expand_signature(
                 errors,
                 CheckError::new(
                     CheckErrorKind::DimensionMismatch,
-                    format!("expand requires non-negative axis, got {axis}"),
+                    format!("{builtin} requires non-negative axis, got {axis}"),
                     vec![],
                 ),
             );
@@ -1039,7 +1040,7 @@ pub(super) fn check_expand_signature(
                 CheckError::new(
                     CheckErrorKind::DimensionMismatch,
                     format!(
-                        "expand axis must be a compile-time constant of type int32 for the output \
+                        "{builtin} axis must be a compile-time constant of type int32 for the output \
                      shape to be inferable, got {}",
                         describe_axis_arg(arg_exprs.get(1)),
                     ),
@@ -1062,7 +1063,7 @@ pub(super) fn check_expand_signature(
             CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 format!(
-                    "expand insert axis {axis} is out of bounds for rank {} tensor",
+                    "{builtin} axis {axis} is out of bounds for rank {} tensor",
                     input_dims.len()
                 ),
                 vec![],
@@ -1079,7 +1080,7 @@ pub(super) fn check_expand_signature(
                 errors,
                 CheckError::new(
                     CheckErrorKind::DimensionMismatch,
-                    format!("expand requires non-negative size, got {size}"),
+                    format!("{builtin} requires non-negative size, got {size}"),
                     vec![],
                 ),
             );
@@ -1232,6 +1233,7 @@ pub(super) fn check_expand_signature(
 /// and call-site monomorphization carries it through.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_named_expand_signature(
+    builtin: &'static str,
     new_name: &str,
     arg_exprs: &[deep::Expr],
     input_dims: &[Dim],
@@ -1253,7 +1255,7 @@ pub(super) fn check_named_expand_signature(
             CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 format!(
-                    "expand: inserted axis `{new_name}` already names an axis of the operand; \
+                    "{builtin}: inserted axis `{new_name}` already names an axis of the operand; \
                  a duplicate dim name would make later by-name axis lookups ambiguous \
                  (spec/04-type-system.md \u{00a7}4.5.3). Pick a fresh name for the inserted \
                  axis."
@@ -1280,7 +1282,7 @@ pub(super) fn check_named_expand_signature(
             CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 format!(
-                    "expand: the named-axis insert form requires a compile-time literal size \
+                    "{builtin}: the named-axis insert form requires a compile-time literal size \
                  (an Ni64 literal or `cast(N, int64)` constant), got {}; the inserted axis's \
                  extent must be stampable onto the new named dim at lowering \
                  (spec/04-type-system.md \u{00a7}4.5.3)",
@@ -1295,7 +1297,7 @@ pub(super) fn check_named_expand_signature(
             errors,
             CheckError::new(
                 CheckErrorKind::DimensionMismatch,
-                format!("expand requires non-negative size, got {size}"),
+                format!("{builtin} requires non-negative size, got {size}"),
                 vec![],
             ),
         );
@@ -1311,7 +1313,7 @@ pub(super) fn check_named_expand_signature(
                     CheckError::new(
                         CheckErrorKind::DimensionMismatch,
                         format!(
-                            "expand anchor must name an existing axis of the operand, got {} \
+                            "{builtin} anchor must name an existing axis of the operand, got {} \
                          (spec/04-type-system.md \u{00a7}4.5.3)",
                             describe_axis_arg(arg_exprs.get(3)),
                         ),
@@ -1333,7 +1335,7 @@ pub(super) fn check_named_expand_signature(
                         CheckError::new(
                             CheckErrorKind::DimensionMismatch,
                             format!(
-                                "expand: rank-spread operand has no named `{anchor}` axis to \
+                                "{builtin}: rank-spread operand has no named `{anchor}` axis to \
                              anchor the insertion; insertion strictly inside an opaque \
                              spread has no anchor and is rejected \
                              (spec/04-type-system.md \u{00a7}4.5.3)"
@@ -1348,7 +1350,7 @@ pub(super) fn check_named_expand_signature(
                         CheckError::new(
                             CheckErrorKind::DimensionMismatch,
                             format!(
-                                "expand anchor `{anchor}` is not a named axis of the operand: \
+                                "{builtin} anchor `{anchor}` is not a named axis of the operand: \
                              the named-axis form inserts at the trailing end or immediately \
                              before an existing named anchor (spec/04-type-system.md \
                              \u{00a7}4.5.3)"

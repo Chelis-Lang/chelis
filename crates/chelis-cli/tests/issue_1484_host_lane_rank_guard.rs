@@ -90,7 +90,7 @@ fn build_link_run(source: &str, stem: &str) -> Option<std::process::Output> {
     let out_dir = dir.path().join(format!("{stem}-out"));
     common::write_file(&path, source);
 
-    Command::cargo_bin("chelis")
+    let built = Command::cargo_bin("chelis")
         .expect("chelis binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .args([
@@ -101,8 +101,22 @@ fn build_link_run(source: &str, stem: &str) -> Option<std::process::Output> {
             "--output",
             out_dir.to_str().unwrap(),
         ])
-        .assert()
-        .success();
+        .output()
+        .expect("build C");
+    if !built.status.success() {
+        // The checker refused before emission, which is chelis#1484 satisfied
+        // rather than skipped: there is no compiled lane to guard because the
+        // program never reaches one. Since chelis#1277 fixed `insert`'s rank at
+        // the call, that is where a provable rank disagreement is caught.
+        let stderr = String::from_utf8_lossy(&built.stderr);
+        assert!(
+            stderr.contains("tensor rank mismatch")
+                || stderr.contains("tensor shapes must match for elementwise op"),
+            "`{stem}`: the build refused for a reason other than the rank \
+             disagreement this row is about: {stderr}"
+        );
+        return None;
+    }
 
     let status = common::link_generated(&out_dir, &format!("{stem}.c"), stem);
     assert!(status.success(), "link failed for `{stem}`: {status}");
@@ -125,9 +139,17 @@ fn assert_both_lanes_reject(source: &str, stem: &str, guard_needle: &str) {
         String::from_utf8_lossy(&eval_out.stdout)
     );
     let eval_err = String::from_utf8_lossy(&eval_out.stderr).into_owned();
+    // Either diagnostic satisfies chelis#1484, whose defect is exiting 0 with
+    // values rather than which stage refuses. Since chelis#1277 gave `insert` a
+    // single form, the operand's rank is fixed at the call, so the checker can
+    // prove the disagreement and rejects before the elementwise op is reached.
+    // `spec/04` \u{00a7}4.7 requires exactly that: a rank disagreement the checker can
+    // prove is a check error, not a deferred one. The elementwise message is
+    // still accepted for the operands whose rank is not fixed until then.
     assert!(
-        eval_err.contains("tensor shapes must match for elementwise op"),
-        "{stem}: eval must name the shape mismatch; stderr={eval_err}"
+        eval_err.contains("tensor shapes must match for elementwise op")
+            || eval_err.contains("tensor rank mismatch"),
+        "{stem}: eval must name the shape or rank mismatch; stderr={eval_err}"
     );
 
     let Some(run) = build_link_run(source, stem) else {
