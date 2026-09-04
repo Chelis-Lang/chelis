@@ -405,3 +405,61 @@ fn c_independent_trap_after_a_mismatch_loses() {
         "the later independent trap must not be reached: {out}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// HIP prologue.
+// ---------------------------------------------------------------------------
+
+/// chelis#616 left the HIP prologue walking `symbolic_occurrences` and
+/// asserting a `Load` source for every occurrence, with a `panic!` backstop
+/// (`require_load_source`) for the op-declared case on the reasoning that
+/// `reject_unsupported_hip_ops` had already refused it. It had not:
+/// `examples/transformer_block.ch` reaches that panic on `main`, so the whole
+/// program emits nothing on HIP.
+///
+/// The derived interface witnesses contain only `Load` sources by
+/// construction - `symbolic_bindings_interface` maps `ExternalAxis` members
+/// and nothing else - so the prologue never meets an op-declared occurrence
+/// and the backstop is unreachable rather than merely unhit. This row asserts
+/// what the user gets: the program emits.
+///
+/// EVIDENTIARY STATUS: regression test. Measured red by restoring the HIP
+/// emitter's two call sites to `symbolic_bindings()`, which reproduces the
+/// panic on this exact program.
+#[test]
+fn an_op_declared_witness_reaches_the_hip_prologue_without_panicking() {
+    let example = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root")
+        .join("examples/transformer_block.ch");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out_dir = dir.path().join("hip-out");
+    let build = Command::cargo_bin("chelis")
+        .expect("chelis")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            "--allow-style-violations",
+            example.to_str().unwrap(),
+            "--target",
+            "hip",
+            "-o",
+            out_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("build");
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        !stderr.contains("op-declared runtime dim"),
+        "the prologue must not reach chelis#616's backstop: {stderr}"
+    );
+    assert!(build.status.success(), "the HIP build must succeed: {stderr}");
+    let emitted = fs::read_to_string(out_dir.join("transformer_block_hip.cpp"))
+        .expect("HIP host source is written");
+    assert!(
+        emitted.contains("int64_t seq = chelis_tensor_shape("),
+        "and the interface binding is declared from its Load axis: {}",
+        &emitted[..emitted.len().min(400)]
+    );
+}
