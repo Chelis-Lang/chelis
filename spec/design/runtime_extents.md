@@ -477,8 +477,21 @@ pattern binding transfer the selected token; record update constrains an
 updated field only when its resolved schema is independent.
 
 One tripwire test walks the builtin registry and asserts that every builtin
-consuming a tensor either unifies its operands against the pending result or
-propagates it; a builtin without a disposition fails that test. The
+consuming a tensor declares which of the dispositions below it takes, and that
+one representative per inference family behaves as its family declares; a
+builtin without a disposition fails that test. The declared set is larger than
+the three actions above, because enumerating the surface found behavior they do
+not describe. Beyond `Constrains`, `Propagates` and `Freezes`, a builtin may
+declare `NoTensorOperand`, meaning no operand slot admits a tensor, or
+`RejectsUnresolved`, meaning it refuses an unresolved operand outright rather
+than considering its candidate forms. `RejectsUnresolved` is not conforming:
+§4.7.2 enumerates rejection as the outcome of admitting no candidate form,
+while these routes reject before looking at the forms at all. The class is any
+checked route whose first act is a positive test on the operand, because an
+unresolved variable satisfies no positive test; it is tracked as [#1489] and
+the variant is deleted when that issue is resolved by making those routes
+defer. The three-action set was written before anyone had enumerated the
+builtin surface, which is why it did not cover these two cases. The
 semantic tests execute both candidate outcomes and a contradictory shape for
 every `Constrain` context, propagation followed by later selection for every
 `Propagate` context, and the documented default for every `Freeze` context.
