@@ -165,11 +165,13 @@ fn undeclared_cast_target_remains_unknown() {
 
 #[test]
 fn unbounded_binder_is_not_a_dtype_target() {
-    let (_dir, root) = make_package(
-        "unbounded-binder",
-        "module Bind.Main\nexport (main)\ndef scale[p](x: p) -> p = mul(x, cast(0.1, p))\ndef main() -> f64 = scale(3.0f64)\n",
-    );
-    assert_all_lanes_reject(&root, "[04-DTYPE-1]");
+    for (name, literal) in [("unsuffixed", "0.1"), ("suffixed", "0.1f64")] {
+        let source = format!(
+            "module Bind.Main\nexport (main)\ndef scale[p](x: p) -> p = mul(x, cast({literal}, p))\ndef main() -> f64 = scale(3.0f64)\n"
+        );
+        let (_dir, root) = make_package(&format!("unbounded-binder-{name}"), &source);
+        assert_all_lanes_reject(&root, "[04-DTYPE-1]");
+    }
 }
 
 #[test]
