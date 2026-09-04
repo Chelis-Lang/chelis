@@ -16,6 +16,11 @@ PINNED_CONTAINER = (
     "sha256:df0bd610af061603b29d63eb82027b64d5a3f15506e39270422b10b2a55079fc"
 )
 SNAPSHOT_FLAG = "--debian-bullseye-snapshot"
+RAW_APT_COMMAND = re.compile(r"(?<![\w.-])(?:apt-get|apt|aptitude)(?=\s)")
+PIP_INSTALL_COMMAND = re.compile(
+    r"(?<![\w.-])(?:python(?:3(?:\.\d+)?)?\s+-m\s+)?"
+    r"pip(?:3(?:\.\d+)?)?\s+install(?=\s|$)"
+)
 
 GLIBC231_JOBS = (
     (REPO_ROOT / ".github/workflows/ci.yml", "smt-build-glibc231"),
@@ -30,6 +35,13 @@ def job_block(workflow: Path, job_name: str) -> str:
     match = re.search(r"^  [A-Za-z0-9_-]+:\n", text[start + 1 :], re.MULTILINE)
     end = len(text) if match is None else start + 1 + match.start()
     return text[start:end]
+
+
+def executable_job_text(block: str) -> str:
+    """Return job text without YAML-only comment lines."""
+    return "\n".join(
+        line for line in block.splitlines() if not line.lstrip().startswith("#")
+    )
 
 
 class Glibc231WorkflowTests(unittest.TestCase):
@@ -61,13 +73,35 @@ class Glibc231WorkflowTests(unittest.TestCase):
                 self.assertEqual(len(apt_invocations), 1)
                 self.assertIn(SNAPSHOT_FLAG, apt_invocations[0])
 
-    def test_python_image_removes_the_unpinned_pypi_bootstrap(self):
+    def test_jobs_have_no_package_install_escape_hatches(self):
         for workflow, job_name in GLIBC231_JOBS:
             with self.subTest(workflow=workflow.name, job=job_name):
                 block = job_block(workflow, job_name)
-                self.assertNotIn("pip3 install", block)
-                self.assertNotIn("python3-pip", block)
-                self.assertNotIn("python3-venv", block)
+                executable = executable_job_text(block)
+                self.assertNotRegex(executable, RAW_APT_COMMAND)
+                self.assertNotRegex(executable, PIP_INSTALL_COMMAND)
+                self.assertNotIn("python3-pip", executable)
+                self.assertNotIn("python3-venv", executable)
+
+    def test_escape_hatch_patterns_cover_realistic_command_spellings(self):
+        for command in (
+            "apt-get update && apt-get install -y jq",
+            "sudo apt install -y jq",
+            "aptitude install -y jq",
+        ):
+            with self.subTest(command=command):
+                self.assertRegex(command, RAW_APT_COMMAND)
+
+        for command in (
+            "pip install tomli",
+            "pip3 install tomli",
+            "python -m pip install tomli",
+            "python3 -m pip install tomli",
+            "python3.11 -m pip install tomli",
+            "uv pip install tomli",
+        ):
+            with self.subTest(command=command):
+                self.assertRegex(command, PIP_INSTALL_COMMAND)
 
 
 if __name__ == "__main__":
