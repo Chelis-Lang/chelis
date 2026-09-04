@@ -1,7 +1,8 @@
-//! Private ownership IR scaffold for compiled-value-ownership Phase 2.
+//! Private ownership IR boundary for compiled-value-ownership Phase 2.
 //!
-//! Construction remains private until checked-host lowering lands. The only
-//! transition to a backend-admissible value is [`verify_ownership`].
+//! [`lower_ownership`] is the only public constructor for the unverified form,
+//! and [`verify_ownership`] is the only transition to a backend-admissible
+//! value.
 //!
 //! ```compile_fail
 //! use chelis_ir::ownership::OwnershipProgram;
@@ -17,15 +18,12 @@
 
 #[expect(
     dead_code,
-    reason = "the private IR becomes constructible only when checked-host lowering lands"
+    reason = "the closed heap census includes planner-only TensorStorage"
 )]
 mod classify;
 mod error;
-#[expect(
-    dead_code,
-    reason = "the private IR becomes constructible only when checked-host lowering lands"
-)]
 mod ir;
+mod lower;
 mod render;
 mod verify;
 
@@ -36,6 +34,16 @@ pub struct OwnershipProgram(ir::OwnershipProgram);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct VerifiedOwnershipProgram(OwnershipProgram);
+
+/// Lower a checked, concretely typed host program to the private ownership
+/// representation. Verification remains a separate mandatory transition.
+pub fn lower_ownership(
+    checked: &chelis_types::CheckedProgram,
+    host: &crate::host::ConcreteHostProgram,
+    manifest: &chelis_types::manifest::RootManifest,
+) -> Result<OwnershipProgram, OwnershipError> {
+    lower::lower(checked, host, manifest).map(OwnershipProgram)
+}
 
 pub fn verify_ownership(
     program: OwnershipProgram,

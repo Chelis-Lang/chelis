@@ -79,6 +79,21 @@ fn render_terminator(terminator: &Terminator) -> String {
             edge(then_edge),
             edge(else_edge)
         ),
+        Terminator::Match { scrutinee, arms } => format!(
+            "match {} [{}]",
+            operand(scrutinee),
+            arms.iter().map(edge).collect::<Vec<_>>().join(", ")
+        ),
+        Terminator::Loop {
+            list,
+            body_edge,
+            exit_edge,
+        } => format!(
+            "loop {} body {} exit {}",
+            operand(list),
+            edge(body_edge),
+            edge(exit_edge)
+        ),
         Terminator::Exit => "exit".to_string(),
     }
 }

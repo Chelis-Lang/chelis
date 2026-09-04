@@ -189,7 +189,13 @@ fn successors(terminator: &Terminator) -> Vec<BlockId> {
             then_edge,
             else_edge,
             ..
+        }
+        | Terminator::Loop {
+            body_edge: then_edge,
+            exit_edge: else_edge,
+            ..
         } => vec![then_edge.target, else_edge.target],
+        Terminator::Match { arms, .. } => arms.iter().map(|edge| edge.target).collect(),
     }
 }
 
@@ -342,6 +348,65 @@ fn verify_terminator(
                 unit,
                 block,
                 else_edge,
+                definitions,
+                blocks,
+                &next,
+                incoming,
+                queue,
+            )
+        }
+        Terminator::Match { scrutinee, arms } => {
+            let mut next = live.clone();
+            use_operand(
+                unit,
+                block.id,
+                scrutinee,
+                Some(OwnershipUse::Borrow),
+                definitions,
+                &mut next,
+            )?;
+            for edge in arms {
+                transfer(
+                    unit,
+                    block,
+                    edge,
+                    definitions,
+                    blocks,
+                    &next,
+                    incoming,
+                    queue,
+                )?;
+            }
+            Ok(())
+        }
+        Terminator::Loop {
+            list,
+            body_edge,
+            exit_edge,
+        } => {
+            let mut next = live.clone();
+            use_operand(
+                unit,
+                block.id,
+                list,
+                Some(OwnershipUse::Borrow),
+                definitions,
+                &mut next,
+            )?;
+            transfer(
+                unit,
+                block,
+                body_edge,
+                definitions,
+                blocks,
+                &next,
+                incoming,
+                queue,
+            )?;
+            transfer(
+                unit,
+                block,
+                exit_edge,
                 definitions,
                 blocks,
                 &next,

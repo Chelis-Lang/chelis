@@ -37,6 +37,10 @@ impl ValueClass {
     pub(crate) fn is_heap(self) -> bool {
         matches!(self, Self::Heap(_))
     }
+
+    pub(crate) fn is_callback(self) -> bool {
+        matches!(self, Self::NonHeap(NonHeapKind::ContextualCallback))
+    }
 }
 
 impl fmt::Display for ValueClass {

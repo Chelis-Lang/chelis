@@ -2,6 +2,33 @@ use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum OwnershipError {
+    #[error("ownership lowering has no checked signature for `{function}`")]
+    MissingSignature { function: String },
+    #[error("call to `{callee}` in `{unit}` supplies {supplied} arguments, expected {declared}")]
+    CallArityMismatch {
+        unit: String,
+        callee: String,
+        supplied: usize,
+        declared: usize,
+    },
+    #[error("ownership lowering in `{unit}` names unknown callee `{callee}`")]
+    UnknownCallee { unit: String, callee: String },
+    #[error("ownership lowering in `{unit}` references unbound name `{name}`")]
+    UnboundName { unit: String, name: String },
+    #[error("manifest root `{root}` names missing host binding `{def_name}`")]
+    ManifestRootWithoutBinding { root: String, def_name: String },
+    #[error("match-option scrutinee in `{unit}` has type `{ty}`")]
+    MatchScrutineeNotOption { unit: String, ty: String },
+    #[error("host loop source in `{unit}` has type `{ty}`, expected a list")]
+    LoopListNotList { unit: String, ty: String },
+    #[error("first-class function value `{name}` is not representable in `{unit}` (chelis#879)")]
+    FirstClassFunctionValue { unit: String, name: String },
+    #[error("container type `{ty}` in `{unit}` holds a function value (chelis#879)")]
+    FunctionContainer { unit: String, ty: String },
+    #[error("ownership lowering in `{unit}` has no implementation for `{variant}`")]
+    UnloweredExprKind { unit: String, variant: String },
+    #[error("ownership lowering invariant failed in `{unit}`: {detail}")]
+    LoweringInvariant { unit: String, detail: String },
     #[error("ownership program has {actual} roots units, expected exactly one")]
     RootUnitCount { actual: usize },
     #[error("duplicate {kind} {id} in `{unit}`")]

@@ -35,6 +35,29 @@ pub(crate) struct Operand {
     pub(crate) use_: OwnershipUse,
 }
 
+impl Operand {
+    pub(crate) fn borrow(owner: OwnerId) -> Self {
+        Self {
+            owner,
+            use_: OwnershipUse::Borrow,
+        }
+    }
+
+    pub(crate) fn move_(owner: OwnerId) -> Self {
+        Self {
+            owner,
+            use_: OwnershipUse::Move,
+        }
+    }
+
+    pub(crate) fn clone_(owner: OwnerId) -> Self {
+        Self {
+            owner,
+            use_: OwnershipUse::Clone,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ParamMode {
     Owned,
@@ -115,6 +138,20 @@ pub(crate) enum Terminator {
         condition: Operand,
         then_edge: Edge,
         else_edge: Edge,
+    },
+    /// Borrow a tagged scrutinee and select exactly one successor. Payload
+    /// projection happens inside the selected block; the result itself still
+    /// joins through an owned block parameter.
+    Match {
+        scrutinee: Operand,
+        arms: Vec<Edge>,
+    },
+    /// Borrow the source list and move the carried owner to either the body
+    /// or exit edge. A body back-edge supplies the next carried owner.
+    Loop {
+        list: Operand,
+        body_edge: Edge,
+        exit_edge: Edge,
     },
     Exit,
 }
