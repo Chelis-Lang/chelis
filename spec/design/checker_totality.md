@@ -385,25 +385,35 @@ The exact Deep grammar and binder rules are normative in spec/03 §2.5.1/§2.6.
    memory of this document; with §C3 in place it should be structurally
    impossible to trip, and it stays on precisely to verify that claim.
 
-   **Scope note (2026-07-24): both halves of this invariant are tag-keyed
-   and therefore quantify over the checked result, not over the source
-   program.** A node with no recognized tag is exempt from the stamp
-   requirement (`infer.rs`, `requires_stamp = tag.is_some_and(...)`), from
-   child ownership classification (the untagged arm of the
-   `child_stamp_role` match, which recurses without registering), and from
-   owner registration (`register_annotation_owners`'s `if let Some(tag)`) -
-   so a node the checker never visits satisfies the invariant vacuously.
-   [#858] is the instance that made this concrete; [#874] tracks the class.
-   Phase 3 closes the known *top-level* path to the exemption - a loud
-   `UnknownForm` where `infer_top_level` used to skip silently, with
-   rejection parity for that input class on both `.dp` validator surfaces -
-   without removing the exemption itself; nested bare lists stay legal by
-   design (empty guards, `loc` metadata values), so the untagged arm
-   remains reachable below the top level. The complementary obligation -
-   every runtime node in the *parsed program* is stamped, dispositioned, or
-   diagnosed - is not part of §C4.1. `DeepTag` exhaustiveness (Phase 3)
-   does not close it either: an untagged list has no tag to be exhaustive
-   over.
+   **Scope note (2026-07-24, corrected 2026-09-03): this invariant
+   quantifies over the checked result, not over the submitted program, so a
+   node inference never visited satisfies it vacuously.** The original note
+   attributed that gap entirely to tag-keying. Tag-keying is one route and
+   it is real: a node with no recognized tag is exempt from the stamp
+   requirement (`requires_stamp = tag.is_some_and(...)`,
+   `infer/validate.rs`), from child ownership classification (the `None`
+   arm of the `child_stamp_role` match, which recurses without
+   registering), and from owner registration
+   (`register_annotation_owners`'s `if let Some(tag)`). Phase 3 closed the
+   known *top-level* path - a loud `UnknownForm` where `infer_top_level`
+   used to skip silently, with rejection parity on both `.dp` validator
+   surfaces - without removing the exemption itself; nested bare lists stay
+   legal by design (empty guards, `loc` metadata values), so the untagged
+   arm remains reachable below the top level.
+
+   Tag-keying is not the only route, and PP8 records the ones that are
+   live. **The walk also skips whole child slots by ROLE.** Both halves of
+   the walk recurse only into `RuntimeExpr`, `ExplicitInferenceBypass`, and
+   untagged children; the `Syntax`, `Selector`, `EffectHandler`, `Binder`,
+   and `Type` arms return without descending. A node in one of those slots
+   is therefore exempt whether or not it carries a tag, and a `var` node is
+   doubly exempt because `should_attach_type_metadata(Var)` is `false`, so
+   even a walk that reached it would require nothing of it. The
+   complementary obligation - every node the submitted program's forms
+   semantically read is consumed or diagnosed - is [04-TOT-4] and is not
+   part of §C4.1. `DeepTag` exhaustiveness (Phase 3) does not close it
+   either: exhausting the tag of the PARENT says nothing about whether the
+   parent's disposition read the child.
 2. **`DeepTag` at the chokepoints is decode-once** (Phase 3, MANDATED at
    the 2026-07-24 rework per [#730] §C4.2's doctrine: raw strings exist
    only at serialization boundaries; decode once, then exhaust). The
@@ -2604,6 +2614,345 @@ rather than an absent subtree. Before that atom, no numbered spec required
 the two entries to agree except [04-INF-4]'s clause for top-level value scope,
 so PP7 could not have decided the rule for itself.
 
+### PP8. Source-coverage totality ([#874], [#887])
+
+**Opened 2026-09-03.** §C4.1's invariant quantifies over the checked result.
+[#874] proposed the complementary obligation over the submitted program and
+recorded three tag-keyed routes to the vacuity. This item establishes three
+things by execution. The vacuity is **live on `main` today**. The live routes
+are **role-keyed, not tag-keyed**: every one sits in a child slot the walk
+declines to enter, and the tags involved are ordinary vocabulary tags with
+ordinary dispositions. And the mechanism the class needs is a typed read at
+the slot, **not** a further tightening of the stamp walk, because no stamp
+walk can reach a node that legitimately carries no stamp in either the
+accepted or the rejected case.
+
+#### The live instances
+
+Executed 2026-09-03 against `6fd95fd52` on the `.dp` CLI ingress
+(`chelis check --allow-style-violations <file>`). Each row is a complete
+program; "vacuous" means score 1.0 with an empty error vector on a program the
+spec says is ill-formed. The paired loud row is the same slot with a readable
+child, so each pair isolates the extraction failure rather than the form.
+
+| # | form and slot | probe child | verdict |
+|---|---|---|---|
+| R1 | `vmap` axis, `child_stamp_role(Vmap, 1) = Selector` | `(var {} nonexistent_name_zzz)` | **vacuous**, score 1.0 |
+| R1 | same | `(lit {type: (t-prim {} f32)} 1.5)` | **vacuous**, score 1.0 |
+| R1 | same | `(t-prim {} f32)`, a type node in a value slot | **vacuous**, score 1.0 |
+| R1 | same | `(app {} (var {} missing_fn_qqq) (var {} missing_arg_www))` | **vacuous**, score 1.0 |
+| R1 control | same | `(lit {type: (t-prim {} int32)} 2)`, rank-1 operand | loud: `vmap axis 2 is out of bounds for rank 1 tensor` |
+| R1 control | same | `(lit {type: (t-prim {} int32)} -7)` | loud: `vmap axis must be non-negative, got -7` |
+| R2 | `pat-ctor` head, `child_stamp_role(PatCtor, 0) = Selector` | `(app {} (var {} missing_fn_qqq) (var {} missing_arg_www))` | **vacuous**, score 1.0 |
+| R2 control | same | `NoSuchCtorZZZ`, a bare symbol | loud: `unknown constructor: NoSuchCtorZZZ` |
+| R3 | `pat-record` head, `child_stamp_role(PatRecord, 0) = Selector` | `(var {} nonexistent_name_zzz)` | **vacuous**, score 1.0 |
+| R4 | `grad` operand, `child_stamp_role(Grad, 0) = RuntimeExpr` | an `f32`-typed non-function | **vacuous**, score 1.0 |
+| R4 control | `vmap` operand, same role | an `f32`-typed non-function | loud: `vmap expects a function, got f32` |
+| R5 | `kv` key, `child_stamp_role(Kv, 0) = Selector` | `(var {} nonexistent_name_zzz)` | loud, but misattributed: `internal: annotation owner-stamp invariant violated: missing authoritative type stamp for metadata-eligible expression `lit`` |
+| R5 control | same | `f`, the declared field name | clean pass |
+| R5 control | same | `nosuchfield` | loud: `unknown record field 'nosuchfield' in construction of R` |
+
+The comparison rows matter more than the vacuous ones, and the `Selector`
+role is small enough to enumerate exhaustively. `child_stamp_role` is total
+over `DeepTag`, and six of its match arms yield `Selector` at some child
+index. Because `PatCtor | PatRecord` and `Grad | Vmap` each cover two tags,
+those six arms are eight tag-and-index slots. All eight were probed:
+
+| slot | unreadable child | verdict |
+|---|---|---|
+| `access` index >= 1 | a two-child expression | loud: `malformed 'access': expected a symbol field name as its second child` |
+| `tuple-get` index >= 1 | a `var` | loud: `invalid tuple index: expected a non-negative integer literal, found a non-literal expression` |
+| `cast` index >= 2 | a `var` | loud: `(var {} nonexistent_name_zzz)` is not a recognized cast mode selector |
+| `grad` index >= 1 | a `var`, operand a function | loud: ``grad `wrt` must be an integer parameter index or tuple of indices`` |
+| `kv` index 0 | a `var` | loud, misattributed (R5) |
+| `vmap` index >= 1 | a `var`, an `f32` literal, a type node, an application | **silent** |
+| `pat-ctor` index 0 | an application | **silent** |
+| `pat-record` index 0 | a `var` | **silent** |
+
+Five of the eight reject, three accept. The three that reject with a good
+diagnostic all spell the read as a total decision over the child; the three
+that accept all spell it as a partial extraction whose failure branch is a
+default. `record`'s constructor head is a `Type` slot rather than a
+`Selector` one and rejects with the same shape of message, which is the
+point: the obligation is met under two different roles and unmet under a
+third, so the class is not the role. It is the spelling of the read.
+
+R5 is the instructive middle case. The `kv` key is unreadable, the field is
+never resolved, and the program IS rejected - but by §C4.1's own tripwire
+firing on the unstamped `lit` in the value slot, reported as an `internal:`
+owner-stamp violation naming `lit`. The invariant caught a coverage gap only
+because the collateral node happened to require a stamp, and the diagnostic
+it produced blames a node the author did not write wrongly. That is the
+invariant working at the edge of its reach and still not being the right
+instrument: it detects, but it cannot say what went wrong.
+
+#### The four defect sites
+
+1. `crates/chelis-types/src/infer/expr_transform.rs:308` -
+   `let axis = kids.get(1).and_then(extract_int_for_dim).unwrap_or(0);`.
+   One `unwrap_or` serves two different inputs: `kids.get(1) == None`, where
+   the default is correct because spec/02 §0.1 writes the zero axis as bare
+   `vmap(f)`, and `Some(child)` that `extract_int_for_dim` cannot
+   read, where the default silently discards a node the program submitted.
+   The comment above it claims defense-in-depth for Deep-direct callers; it
+   peels casts and screens negatives, and passes everything else through as
+   axis 0.
+2. `crates/chelis-types/src/infer/expr_pattern.rs:190` (and its three
+   siblings at `:176`, `:259`, `:282`) -
+   `if let Some(ctor_name) = kids.first().and_then(|e| symbol_name(e))` with
+   no `else`. A non-symbol head falls off the binding and the whole pattern
+   is skipped, so the arm neither binds nor rejects.
+3. `crates/chelis-types/src/infer/expr_transform.rs`, `infer_grad`'s
+   `_ => { vg.fresh_type() }` arm, commented "Can't determine function
+   structure, return fresh var". R4's primary class is therefore the silent
+   fallback of [04-TOT-1], not coverage; its coverage consequence is
+   secondary, since `kids[1]` is never reached on that path. It is listed
+   here because the sibling `vmap` rejects the identical input and the two
+   were written to the same template.
+4. `crates/chelis-types/src/infer/expr_record.rs:335` (and its sibling at
+   `:676`) -
+   `let (Some(field_name), Some(value)) = (kv_kids.first().and_then(symbol_name), kv_kids.get(1)) else { continue; };`.
+   R5's site. The `continue` skips the `infer_expr(value, ..)` two lines
+   below, which is why the value goes unstamped and §C4.1 fires on it.
+
+Three spellings, one defect: `unwrap_or(default)`, `if let Some(..)` with no
+`else`, and `else { continue }`. Each converts "I could not read this child"
+into "there was no child", and that conversion is what [04-TOT-4] forbids.
+Naming the three spellings is what makes the class greppable, and it is why
+the fix belongs at the read rather than in a walk.
+
+#### Why §C4.1 cannot see any of them, and why Phase 3 does not help
+
+Both halves of the walk - `annotated_totality_invariant_traces`
+(`infer/validate.rs:~2816`) and `register_annotation_owners`
+(`infer/checked.rs:~977`) - recurse only into `RuntimeExpr`,
+`ExplicitInferenceBypass`, and untagged children. The `Syntax`, `Selector`,
+`EffectHandler`, `Binder`, and `Type` arms return without descending. R1
+through R3 sit in `Selector` slots, so the walk never arrives. Even if it
+did, it would require nothing: `should_attach_type_metadata(DeepTag::Var)` is
+`false` (`infer/annotate.rs:~556`), so a `var` node carries no stamp
+obligation in any slot, and a hand-written `.dp` supplies its own `type:`
+metadata for the nodes that do.
+
+Phase 3's `DeepTag` exhaustiveness does not close it either, and the reason
+generalizes past [#874]'s original wording. That wording says an untagged
+list has no tag to be exhaustive over. The stronger statement is that
+exhausting the tag of the **parent** says nothing about whether the parent's
+disposition **read the child**. `vmap` has a disposition, that disposition is
+exhaustive over `DeepTag`, and it still discards its axis.
+
+**Relation to PP2.** PP2 is a node the checker visits and learns nothing
+from, because the disposition it reaches is a generic signature. PP8 is a
+node the checker never reads at all, because the disposition it reaches
+defaults instead. Neither subsumes the other, and R4 sits on the seam: a
+visited node whose silent disposition causes a second node to go unread.
+
+#### The fitness ratio is measured over the walk's own image
+
+`CheckResult.total_nodes` is `InferStats::total_nodes`, incremented once per
+`infer_expr` entry (`infer/expr.rs:90`) and surfaced by
+`clean_fitness_from_stats` (`fitness.rs:~202`). It counts nodes inference
+**visited**, not nodes the program **contains**. `typed_nodes/total_nodes` is
+therefore a tautology over the visited set - "every node I looked at, I
+typed" - and cannot fall when a node goes unlooked-at. Executed: the valid
+`axis=0` program and the R1 unbound-variable program are byte-identical in
+the report, both `typed_nodes: 4, untyped_nodes: 0, total_nodes: 4`. The
+`fitness.rs:166-190` comment promising "its counts are now the checked truth"
+holds only for the nodes the walk reached.
+
+A parsed count does exist in the same function. `analyze_ir_program`
+(`fitness.rs:~172`) computes `structural_stats(exprs)`, whose `total_nodes`
+is `count_nodes` over the parsed tree, and hands it to
+`clean_fitness_from_stats` (`fitness.rs:190`) alongside the inference stats,
+which uses it only for the validator-warning structure score and never
+compares the two. That comparison is not the repair, and this item does not
+propose it: the two populations are not directly comparable, since the
+structural count includes atoms, maps, and metadata values inference never
+visits by design. The paragraph is here to explain why the ratio is silent,
+not to argue for a second counter.
+
+#### Relation to [04-TOT-3], and what [04-TOT-4] adds
+
+[04-TOT-3] governs this class already, and the implementation agrees. The
+`access` and `record` rejections are abbreviated in the tables above; in full
+each ends `(spec/03-deep-syntax.md; chelis#731 [04-TOT-3])`, so an unreadable
+child in a selector-shaped slot is an [04-TOT-3] rejection wherever it is
+implemented. R1 through R3 are **unimplemented [04-TOT-3] cases, not a hole
+in [04-TOT-3]'s wording**, and an implementer fixing them cites [04-TOT-3],
+the same as the adjacent shipped code.
+
+[04-TOT-4] therefore extends rather than replaces. It carries [04-TOT-3]'s
+obligation from the form down to each of the form's slots, and it adds two
+sentences no earlier atom states:
+
+1. **An omitted optional child and a present unreadable one are distinct
+   inputs, and only the omission may default.** Nothing before this says so,
+   and R1 is exactly the conflation: one `unwrap_or(0)` serving both.
+2. **Coverage quantifies over the submitted program, not the checked
+   result.** This is the one [04-TOT-2] structurally cannot express, and R1
+   is the proof: R1 satisfies [04-TOT-2] completely - empty error vector, no
+   `Type::Error` anywhere - and is still wrong. A missing quantifier, not a
+   missing rule.
+
+#### What we deliver
+
+**The primary mechanism is a typed selector read, not another walk.** No
+stamp-walk tightening can reach R1 through R3: the walk inspects stamps, and
+the discarded nodes legitimately carry none in either the accepted or the
+rejected case. What distinguishes the four correctly-rejecting slots
+(`access`, `tuple-get`, `cast`, `grad`) from the three silent ones is the
+spelling of the read. So the structural fix belongs at the read:
+
+1. **Every role-slot read returns a result, never an `Option` with a
+   default.** A `Selector`, `Binder`, `EffectHandler`, or `Type` child is
+   read through one seam that takes the parent tag, the child index, and the
+   expected shape, and returns either the extracted value or a pushed
+   `MalformedForm` naming the form and the shape. The three defect
+   spellings named above do not survive it: there is no `Option` at the
+   call site to default, skip, or `continue` past.
+2. **Absence and unreadability become different types at the seam.** The
+   `vmap(f)` default axis is legitimate and stays; it is expressed as
+   `kids.get(1)` being `None`, which the seam distinguishes from a present
+   child it could not read. This is the whole of R1, and it is why the repair
+   is not "delete the default".
+3. **Both Deep carriers reach the same read.** `infer_expr` dispatches
+   `Expr::List` and `Expr::Node` to the same `infer_vmap` and `infer_grad`
+   (`infer/expr.rs:143-144` and `:442-443`), so a typed read placed at the
+   `Selector` slot inside those functions is reached from both carriers
+   through that dispatch. That is the whole of the claim: PP8's oracle runs
+   its rows through `chelis check` only and claims nothing about the two
+   ingresses agreeing. Ingress agreement is PP7's axis under [04-TOT-5], and
+   an ingress-parity row for a PP8 program belongs in PP7's parity set
+   rather than here.
+
+**Explicitly not delivered here.** Two things. Any change to which slots are
+legal bare lists: the sanctioned set stays exactly as `desugar.rs`'s
+`bare_list()` builds it, enumerated below. And the parsed-vs-checked census,
+which closes none of R1 through R5 and is recorded as an open question rather
+than a deliverable - see decision row 18.
+
+#### Oracle and ratchet
+
+**Oracle:** `cargo nextest run -p chelis-types --test
+issue_874_source_coverage_totality`, a new file whose rows are the probe
+table above driven through the programmatic ingress, plus the positive
+controls.
+
+**Negative rows (regression tests, red on `6fd95fd52` before any fix).** R1's
+four unreadable axes, R2's non-symbol constructor head, R3's non-symbol
+record-pattern head, and R4's non-function `grad` operand each assert a
+pushed diagnostic naming the form and the expected shape. All seven are red
+on the current head by construction: the probes above show them accepting at
+score 1.0 today, so the assertion cannot pass until the seam lands. They need
+no revert step to be proven red, and this design PR does not run them - it
+specifies them.
+
+R5 needs a different assertion, because it is already rejected. Its row
+asserts the diagnostic's *identity*: an unreadable `kv` key must produce a
+`MalformedForm` naming `kv` and the expected symbol key, not the `internal:`
+owner-stamp violation naming `lit` that it produces today. That row is red
+now for the reason that matters - the message is wrong - and it is the row
+that would otherwise be skipped, because the program already fails and a
+coarser test would call that good enough.
+
+**Positive controls (disposition locks, green in both states).** The
+sanctioned bare-list slots must stay accepted, enumerated from
+`crates/chelis-surf/src/desugar.rs`'s `bare_list()` (defined `:465`):
+`fn` parameter lists (`:1115`, `:1452`), import name lists (`:1202`),
+the `import-all` empty list (`:1212`), the empty match guard (`:1711`), and
+`:1743`'s empty list. Add `loc` metadata values, ADT type-parameter lists,
+`vmap(f)` with no axis child at all, `vmap(f, axis=0)`, and a `pat-ctor`
+whose head is a legitimate in-scope constructor. Their job is to prove the
+seam rejects unreadability rather than non-tagged-ness; without them the
+cheapest wrong fix - rejecting every bare list - passes the negatives.
+
+**Mutation receipt.** Four staged mutations, each run before and after.
+Restoring `unwrap_or(0)` at `expr_transform.rs:308` must redden exactly R1's
+four rows and leave the positives green. Reverting the read at
+`expr_pattern.rs:190`, the `DeepTag::PatCtor` arm, must redden R2 and only
+R2. Reverting `expr_pattern.rs:282`, the `DeepTag::PatRecord` arm, must
+redden R3 and only R3; the two arms are separate and a mutation at one leaves
+the other's row green. Reverting the `continue` at `expr_record.rs:335` must
+redden R5's attribution row while leaving the program rejected, which is the
+mutation most likely to be mis-run, because a coarser assertion passes in
+both states.
+
+**Prove-red-first is free here and must not be skipped anyway.** Record each
+negative's exact failing command and output on the pre-fix tree in the
+implementation PR; the probe transcript in this PR's body is the design-time
+evidence, not that record.
+
+#### Scope, slices, and overlap
+
+Roughly 150 to 250 hand-written lines across two slices, each shippable
+alone:
+
+- **Slice 1 - the four instances.** `expr_transform.rs:308` and
+  `infer_grad`'s fallback arm; `expr_pattern.rs:176/190/259/282`;
+  `expr_record.rs:335/676`. The negative and positive rows above. Smallest
+  honest unit, and it closes the named live instances without any new
+  mechanism.
+- **Slice 2 - the selector-read seam.** One helper, then migrate the four
+  slots that already reject correctly (`access`, `tuple-get`, `cast`,
+  `grad`) onto it, so the seam is proven against known-good behavior before
+  it is trusted for new rejections. `kv` is not in that set: it rejects, but
+  by the wrong instrument, so it migrates with Slice 1's repair. `chelis-deep/src/role.rs`
+  gains the expected-shape half beside `bypass_child_expectation`
+  (`role.rs:~232`), which already names exactly this concept for
+  `ExplicitInferenceBypass` and needs extending to `Selector`.
+
+**Overlap.** `chelis-deep/src/role.rs` is shared with [#908]'s carrier work;
+Slice 2 extends `bypass_child_expectation`'s neighbourhood rather than
+`child_stamp_role` itself, so the role table's totality test is untouched.
+`normalize_nodes_to_lists` (`infer/program.rs:~1931`) rewrites `BareList` to
+a tagless `Expr::List` at the serialized-IR ingress while the typed ingress
+keeps `BareList`; [#1125]'s ingress-parity work may unify those, and PP7
+owns that axis. Neither slice here depends on the outcome. Every Slice 1 site
+sits under a function `infer_expr` dispatches from both carrier arms -
+`infer_vmap` and `infer_grad` (`expr.rs:143-144`, `:442-443`), `infer_record`
+(`:134`, `:436`), and `infer_match` (`:127`, `:430`), which reaches the two
+pattern reads through `pattern_bindings`, itself keyed on the carrier-total
+`stamped_parts`. Nothing here depends on the [#1085] BareList
+disposition work,
+which governs expression position where the checker is already loud.
+
+#### What this does not establish
+
+The `Selector` role IS enumerated: `child_stamp_role` is total over
+`DeepTag`, its eight `Selector` arms were read off that table, and each was
+probed, so "three of the eight accept an unreadable child" is a claim about
+the whole role and not a sample. Nothing else here is.
+
+No claim is made about the `Binder`, `EffectHandler`, `Syntax`, or `Type`
+slots, which the walk skips on the same footing and which were spot-checked
+at four points, not enumerated: `deftype`'s type-parameter list, `params`
+entries, `handle-effect`'s kind child, and `record`'s constructor head all
+rejected, which is evidence of health and not proof of it. Nor is any claim
+made about `ExplicitInferenceBypass` slots, where a dedicated owner is
+supposed to visit and this design did not verify that one does. Converting
+the remaining roles from spot checks into a statement needs an enumerator
+this item does not deliver (decision row 18); until one exists, the honest
+scope is the eight `Selector` slots.
+
+One ingress was exercised: the `.dp` CLI path, which is
+`chelis-compiler-api`'s `check` beneath. `chelis prove`, the typed
+`check_typed_program` ingress that preserves `BareList` where the serialized
+ingress normalizes it away, and the `check_in_context` surface - which
+hardcodes `score: 1.0` and an empty error vector for any compile that
+returns `Ok` (`compiler.rs:2398`) - were not probed. That last one is worth
+a look under this class's lens and is not claimed either way here.
+
+The cancellation route [#874] records as its fourth, coverage-keyed door was
+checked and is **closed at the surface it named**. PR #934 never merged. The
+cancellation work that did land came in under [#930] and carries an explicit
+`bail_if_cancelled("check")` after fitness is computed
+(`crates/chelis-compiler-api/src/compiler.rs:829`) whose comment - cited to
+chelis#930, not #934 - names this exact failure: "a cancelled walk must not
+become a CheckResult". Whether
+every other `Ok`-returning front-end entry has the same guard was not
+audited. That audit is not this item's, and it is not needed for the four
+named instances, none of which involves cancellation.
+
 ### Later residue: kinded nominal applications ([#1247], with [#1258])
 
 **Delivered by PR [#1406].** This is a separately landable #731 residue
@@ -3016,6 +3365,7 @@ vacuity, or [#1076]/[#672]'s independently owned name-precedence work.
 | PP6 (decided, not delivered) | [#1486] (a hole is never quantified and no reference observes it before the body; an authored binder is rigid), [#1487] (lambda bodies and applied values are eager references), [#1485] (every reference-graph component is inferred as one group; the three spellings reject as `CycleDetected` identically at both ingresses); [#1134] closes when all three are dispositioned as PP6 states |
 | PP7 | [#1125]'s carrier axis: the seven probed divergences receive the same verdict from `check_ir_program` and `check_typed_program`, and one shared total accessor plus the lint make a carrier a reader cannot decode a diagnostic rather than an absent subtree. Axis B (`validate_ir_program` runs on the serialized-IR entry only), owned by [#1537], and the unswept guarded-arm inventory are named residue, not claims |
 | [#1134] forward-reference residual | both checker ingresses reject eager forward values, accept backward values from value initializers and from function bodies wherever the schedule places them except the [#1485] shape, accept declaration-local explicitly typed external inputs, retain sequential local scope, and reject bare self-reference/eager value cycles identically; the schedule's order invariants are asserted directly |
+| PP8 | [#874]'s class statement, restated as coverage rather than tag-keying, and [#887]'s Tier 1 residue. Seven named programs over `vmap`'s axis, `pat-ctor`/`pat-record` heads, and `grad`'s operand are rejected instead of scoring 1.0, and `kv`'s unreadable key reports its own form instead of an `internal:` stamp violation naming a different node; the selector-read seam makes a silently-defaulted slot unspellable, and `infer_expr` reaches it from either Deep carrier. The `Selector` role is enumerated and all eight of its slots are claimed; the other roles are spot-checked only, and converting them into a claim needs an enumerator this item does not deliver (decision row 18) |
 
 ## Decisions and remaining questions
 
@@ -3037,6 +3387,8 @@ vacuity, or [#1076]/[#672]'s independently owned name-precedence work.
 | 14 | whether the seven comparison identities admit a scalar beside a tensor ([#1506]) | DECIDED 2026-09-03: no; the checker rejects and the spec wins. `[05-OP-36]` ("Mixed surfaces ... are type errors"), `spec/05` §1.2, and `spec/04` §4.2-§4.3 already decide it, and `add`/`max_elem` reject the same pair today, the `spec/05` §2.1 prose above `[05-OP-40]` naming their scalar form "the rank-zero instance of the tensor rule, not scalar/tensor broadcasting". The rewrite at `infer/app.rs:457-506` goes; the three accepting `issue5_cmp_broadcast_both_forms` rows and `coral_comparison_ops_broadcast_tensor_scalar` become negative controls; scalar-scalar and same-shape tensor-tensor forms stay; the diagnostic names `[05-OP-36]` and the explicit `expand(to_tensor([c]), axis, shape(x, axis))` spelling. ALTERNATIVE, not taken and requiring the user's explicit choice: amend `[05-OP-36]` to admit one active-numeric scalar beside one tensor of the same dtype, comparing every element against the scalar and returning `tensor[D, bool]`. Its cost: it contradicts §1.2's "hard rule" and §4.2's rationale; it must explain why comparison broadcasts when `add`, `max_elem`, and `[05-OP-17..19]` do not, or extend them too; it leaves a rank-0 tensor beside a tensor undecided; the evaluator already implements it, so the runtime cost is nil; and Coral depends on the accepting behaviour today (`coral_prerequisites.rs:315`), so the rejection has a downstream migration cost that the alternative avoids. Sequencing under the decision taken: the explicit spelling executes as an insertion on every lane until [#597] closes (Slice B2a item b2.5 for C, Slice B2h for eval), so PR B of PP5 D8 lands after both or states the gap | PP5 D4/D8 + `[05-OP-36]` |
 | 15 | whether PP5's identity-rank validator stays as a second rank model beside unification | DECIDED 2026-09-03 by `spec/04` §4.7.2 and the D1-D5 evidence: it goes. **What the user is asked to confirm, in one sentence:** for `s = stride(x, 2i64); e = expand(x, 0i32, 2i64); add(s, e)` on `x: tensor[n, f32]`, the checker accepts the program with `e` at `tensor[2, f32]`, the only shape the language assigns to `expand` (row 16, [#1532]; the `f5ec5ca63` checker already stamps it), and PP5 stops rejecting it; the loud outcome for `n != 1` is the `Domain` trap `spec/05` §2.4.1 states ([#1523], merged; narrowed by [#1532]) once Slice B2a item b2.5 carries its guard, a literal operand extent other than 1 being a check-time type error instead. Today, for this program, eval rejects with `[3] vs [2, 6]` and the C insertion path trips R3's rank guard, because the runtime still inserts ([#597]) and the consumer `add` exposes the inserted axis; that loudness is the consumer's, not the language's: the bare spelling `sig f: tensor[6, f32] -> tensor[2, f32]; def f(x) = expand(x, 0, 2i64)` with no consumer is silent on both lanes today (`chelis check` score 1 at `-> tensor[2, f32]`, `chelis eval` and the compiled C both print `shape=[2, 6]` with no diagnostic; measured by the [#1277] owner and re-measured here on the f5ec5ca63 build and the 09-01 binary), which is [#597] as filed, and under the single-meaning rule plainly so. Unification is the one rank authority; the validator's `expand` derivation, input rank plus one, is a rank the language never assigns to `expand`, and it rejects programs whose stamped types agree (measured, D2 third row). The checker half of [#668] resolves into [#597] (the runtime must execute `expand` as the unit-extent broadcast, with §2.4.1's guard), [#1512] (reductions over a genuinely unresolved operand), and [#1506]. Because this flips ten whole [#1463] rows, the control half of an eleventh, and the corpus row in `issue_731_fitness_honesty_corpus.rs` from rejection to acceptance, the implementation PR (D8 PR A) states the flip in its body, lands after S2a (the [#1277] stream's `insert` builtin plus mechanical rename, branch `agent/1277-s2a-insert-rename`; [#1532] itself is merged as `b8e08e5b9`), and lands only after the user confirms the sentence above. The single-meaning decision (row 16) removed the earlier alternative reading of positional `expand` as insertion-only; that meaning is now `insert`'s | PP5 D6 (d) |
 | 16 | whether positional `expand` is one operation or two | DECIDED 2026-09-03 by the user: "I don't want ambiguity that is resolved at runtime. Make expand canonically only insert or increase the number of dimension (whichever is more canonical). Use something else (e.g. insert) for alternative. I don't want overloaded uses like this." Confirmed as: `expand` keeps only the same-rank singleton broadcast (rank unchanged; the operand's extent at `axis` must be 1; a literal violation is a check-time type error; a symbolic extent is a §4.7 runtime `Domain` guard, per [#1523]); a new primitive `insert` adds an axis of extent `size` at `axis`; `spec/04` §4.7.2's two-candidate deferred model is deleted. Recorded in PR [#1532], merged as `b8e08e5b9` (`spec/02`, `spec/03`, `spec/04`, `spec/05`, `spec/06`, `spec/08`, `runtime_extents.md`; `spec/05` §2.4 rows and adjoints for both primitives under `[05-AXIS-1]`/`[05-MOV-1]`, §4.7.2 without the two-candidate model, §4.5.3's named forms as `insert`; no new `[05-OP-N]`). PP5 consumes the decision and adds nothing to it | [#1532] + PP5 D2 |
+| 17 | whether the source-coverage obligation is a new atom or a tightening of an existing one, and whether [#887] closes | DECIDED 2026-09-03: a new atom that EXTENDS [04-TOT-3] rather than replacing it. [04-TOT-3] already governs the live instances and the shipped `access`/`record` rejections cite it, so R1 through R3 are unimplemented [04-TOT-3] cases and an implementer fixing them cites [04-TOT-3]. [04-TOT-4] carries that obligation from the form to each of the form's slots and adds the two sentences no earlier atom states: an omitted optional child and a present unreadable one are distinct inputs with only the omission permitted to default, and coverage quantifies over the submitted program rather than the checked result. The second is the one [04-TOT-2] structurally cannot express, and R1 proves it by satisfying [04-TOT-2] completely while being wrong. [#887] is RE-SCOPED, not closed: its Tier 2 shipped via [#998]/[#1019]/[#1041], and its Tier 1 consumption-boundary residue is this item's Slice 2 | [04-TOT-4] + PP8 |
+| 18 | whether a parsed-vs-checked coverage census belongs at `finalize_checked_program` | OPEN, recorded 2026-09-03, no deliverable attached. It closes none of PP8's five named instances, which Slices 1 and 2 close between them, and its three candidate justifications do not survive a necessity trace: the roles it would guard have no demonstrated defect, `child_stamp_role` already makes an unclassified tag a compile error, and the cancellation route it would subsume is closed at the surface [#874] named. It is also the only proposal here touching the public fitness surface. Revisit if a coverage-keyed instance appears that the selector-read seam does not reach | PP8 + [#874] |
 
 ## Contract summary
 
@@ -3129,6 +3481,11 @@ silent exemption to be diagnosed rather than an empty subtree to be skipped.
 [#1537]: https://github.com/Chelis-Lang/chelis/issues/1537
 [#1134]: https://github.com/Chelis-Lang/chelis/issues/1134
 [#887]: https://github.com/Chelis-Lang/chelis/issues/887
+[#930]: https://github.com/Chelis-Lang/chelis/issues/930
+[#1085]: https://github.com/Chelis-Lang/chelis/issues/1085
+[#998]: https://github.com/Chelis-Lang/chelis/issues/998
+[#1019]: https://github.com/Chelis-Lang/chelis/issues/1019
+[#1041]: https://github.com/Chelis-Lang/chelis/issues/1041
 [#1485]: https://github.com/Chelis-Lang/chelis/issues/1485
 [#1486]: https://github.com/Chelis-Lang/chelis/issues/1486
 [#1487]: https://github.com/Chelis-Lang/chelis/issues/1487
