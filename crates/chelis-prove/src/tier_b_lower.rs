@@ -644,13 +644,26 @@ fn float_lit_node(value: f64) -> Expr {
     )
 }
 
+/// Rebuild `template`'s form around new children.
+///
+/// This is the one reader in the PP7 slice that does NOT return the carrier it
+/// was handed: it emits the list form for either template, as it always has,
+/// and the decoded tag is what makes that safe, because `tag` and `children`
+/// read the result on either carrier. The metadata map is dropped for both
+/// carriers alike, which is pre-existing behavior on the list carrier and
+/// inert at all three call sites (`access`, `record`, `if`), none of whose
+/// metadata anything downstream reads. Reconstructing a `Node` here belongs
+/// with the shared total accessor, not with this slice.
 fn rebuild(template: &Expr, new_children: Vec<Expr>) -> Expr {
     use chelis_deep::Span;
     use chelis_deep::ast::List;
     // chelis#1125 PP7: take the DECODED tag rather than copying element 0,
     // which exists only on the list carrier. A stamped `Expr::Node` template
     // fell to the `?` placeholder, and every downstream `tag()` read of the
-    // rebuilt form then failed, so the obligation could not lower.
+    // rebuilt form then failed, so the obligation could not lower. All three
+    // call sites guard on an explicit `tag(expr) == Some(..)` test, so the
+    // placeholder arm below is now unreachable; it is kept as the total
+    // match's other half rather than as a live path.
     let tag_sym = match tag(template) {
         Some(decoded) => Expr::Atom(Atom::Tag(decoded), Span::new(0, 0)),
         None => Expr::Atom(Atom::Name("?".to_string()), Span::new(0, 0)),
