@@ -6,8 +6,8 @@ host-value lane's operand guard under [#1484], and makes no claim beyond
 them; its completion design (2026-09-03, in that section) retires the rank
 side channel in favour of unification and routes the residue to [#597],
 [#1512], and [#1506] under the single-meaning `expand` rule of [#1532], with
-implementation pending. PP6 is decided in its own section and not delivered;
-its three issues remain open until its oracle is green. PR [#1406] delivered the
+implementation pending. PP6 is delivered by Slice A and Slices B/C; its shared reference graph,
+schedule, paired-ingress, and public CLI oracles are green. PR [#1406] delivered the
 separately owned [#1247] kinded nominal-application residue; the bounded
 [#1125] nominal-rank ingress repair and [#1134] forward-reference parity are
 also delivered residue rather than additional phases. Phase 3 first shipped
@@ -1978,7 +1978,7 @@ statement about unification, and the runtime half about the guards.
 
 ### PP6. Schedule and header honesty ([#1486], [#1487], [#1485]; closes [#1134])
 
-**Opened 2026-09-03; decided below, not delivered.** PR [#1457] delivered
+**Opened 2026-09-03; delivered by PRs [#1542] and [#1551].** PR [#1457] delivered
 [04-INF-4] and recorded three defects as ratcheted residue. They share one
 mechanism: the checker lets a top-level reference observe a declaration
 before that declaration's own body has been checked, or fails to see that a
@@ -3175,8 +3175,9 @@ mirror edge returns to round 10's `defsig`-less form; the cycle is an eager
 value cycle under [04-INF-7]; and a component the reference graph still
 closes is inferred as one group so the rejection is identical at both
 ingresses.
-Until PP6 lands, the schedule stays total by releasing the hoist-order-least
-remaining vertex, so a callee is still inferred before its caller.
+The delivered scheduler contracts the complete reference graph before
+ordering components; the former hoist-order-least stall release no longer
+exists.
 
 Two properties follow and are the reason this design is trusted where the
 chained ones were not. First, the hoist order is itself a linear extension of
@@ -3376,9 +3377,9 @@ vacuity, or [#1076]/[#672]'s independently owned name-precedence work.
 | PP5 (partial) | [#668]; the checker derives a rank fact for `ShapeClass::Identity` plus `conv2d`/`stride`/`expand`/`softmax` and rejects a positive-rank disagreement where it has one, on unforgeable rank-only facts; the tensor-DAG C emitter aborts on a positive-rank operand disagreement, and under [#1484] so does the host-value emitter for its six binary elementwise builtins. No claim is made for operations outside that set, nor for any checker verdict on the host-lane programs; see PP5. The 2026-09-03 completion design retires that side channel (unification is the rank authority) under the single-meaning `expand` rule of [#1532] and routes the residue to [#597] (the runtime lanes execute `expand` as the unit-extent broadcast the language assigns, with §2.4.1's guard), [#1512] (reductions over a genuinely unresolved operand), and [#1506] (comparison scalar rewrite); the row stays partial until the acceptance list in PP5 holds |
 | [#1247] residue | integer nominal arguments are kind-checked and concrete dimensions constrain every checker/test/compiler lane; [#1258] round trips the same representation |
 | [#1125] nominal-rank ingress residual | ordinary `.dp` ingress, `surf`, and `validate --deep` reject `d-rank` in nominal argument slots while preserving legal dimension arguments and tensor rank spreads; the broader reader-audit/lint issue remains open |
-| PP6 (decided, not delivered) | [#1486] (a hole is never quantified and no reference observes it before the body; an authored binder is rigid), [#1487] (lambda bodies and applied values are eager references), [#1485] (every reference-graph component is inferred as one group; the three spellings reject as `CycleDetected` identically at both ingresses); [#1134] closes when all three are dispositioned as PP6 states |
+| PP6 | [#1486] (a hole is never quantified and no reference observes it before the body; an authored binder is rigid), [#1487] (lambda bodies and applied values are eager references), and [#1485] (every reference-graph component is inferred as one group; the three spellings reject as `CycleDetected` identically at both ingresses) are delivered with the shared-graph, schedule, paired-ingress, and CLI oracles |
 | PP7 | [#1125]'s carrier axis: the seven probed divergences receive the same verdict from `check_ir_program` and `check_typed_program`, and one shared total accessor plus the lint make a carrier a reader cannot decode a diagnostic rather than an absent subtree. Axis B (`validate_ir_program` runs on the serialized-IR entry only), owned by [#1537], and the unswept guarded-arm inventory are named residue, not claims |
-| [#1134] forward-reference residual | both checker ingresses reject eager forward values, accept backward values from value initializers and from function bodies wherever the schedule places them except the [#1485] shape, accept declaration-local explicitly typed external inputs, retain sequential local scope, and reject bare self-reference/eager value cycles identically; the schedule's order invariants are asserted directly |
+| [#1134] forward-reference parity | both checker ingresses reject eager forward values, accept backward values from value initializers and function bodies where allowed, accept declaration-local explicitly typed external inputs, retain sequential local scope, and reject bare self-reference and every [04-INF-7] eager value cycle identically; the schedule's order invariants are asserted directly |
 | PP8 | [#874]'s class statement, restated as coverage rather than tag-keying, and [#887]'s Tier 1 residue. Seven named programs over `vmap`'s axis, `pat-ctor`/`pat-record` heads, and `grad`'s operand are rejected instead of scoring 1.0, and `kv`'s unreadable key reports its own form instead of an `internal:` stamp violation naming a different node; the selector-read seam makes a silently-defaulted slot unspellable, and `infer_expr` reaches it from either Deep carrier. The `Selector` role is enumerated and all eight of its slots are claimed; the other roles are spot-checked only, and converting them into a claim needs an enumerator this item does not deliver (decision row 18) |
 
 ## Decisions and remaining questions

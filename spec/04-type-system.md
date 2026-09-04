@@ -807,8 +807,6 @@ recursive binding group, whether the recursion is direct or mutual.
 > inference groups remain governed by [04-INF-2] and [04-INF-3], and an eager
 > value cycle remains a type error reported as `CycleDetected`.
 
-(Not fully implemented; see chelis#1485, chelis#1486, and chelis#1487.)
-
 #### 3.1.3 Signature holes and authored binders
 
 A signature's type expression can carry two kinds of variable. A wildcard,
@@ -836,8 +834,6 @@ differently.
 > reference is typed at the member's provisional monomorphic type, as
 > [04-INF-2] provides for a recursive call.
 
-(Not fully implemented; see chelis#1486.)
-
 > **[04-INF-6]** An authored type variable of a declaration's signature,
 > whether listed in its binder list or introduced by §5.8.1's implicit
 > quantification, is a universally quantified binder and is rigid within the
@@ -851,8 +847,6 @@ differently.
 > ([04-DTYPE-2]) restricts the admissible instantiations without making the
 > binder concrete. The dimension parameter rule of §4.4 is this rule for
 > dimension binders.
-
-(Not fully implemented; see chelis#1486.)
 
 An unsuffixed literal binds at its default primitive type
 (`spec/02-surf-syntax.md` §P10), so `lt(x, 0.0)` with `x: p` identifies the
@@ -880,8 +874,6 @@ spelling is the `cast(0.0, p)` override that §P10 names.
 > or not the receiving callee applies it. The rule depends only on the
 > program's declarations, never on the checker entry that receives the
 > program or on the order in which declaration bodies are inferred.
-
-(Not fully implemented; see chelis#1487 and chelis#1485.)
 
 A program rejected only by the over-approximation, one whose initializer
 stores a function value that reads the initialized binding and that no
