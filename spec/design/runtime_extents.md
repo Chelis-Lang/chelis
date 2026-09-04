@@ -956,6 +956,33 @@ naming here rather than leaving to the corpus file:
     op-computed extent is DECLARED, and its bucket-4c sweep still panics. The
     row closes with C4.4's declaration-consumer replacement, not with a guard.
 
+- **The `shrink.elementwise_const.build` row's remaining const case, sized but
+  not confirmed.** S2a's single-meaning `insert` makes an instance of [#1482]
+  reachable from source that the old spelling avoided: the failing node is a
+  synthesized `Const` with a rank-2 output whose second dim is anonymous with
+  no value, so `declared_shape_sources` yields one source for two axes and
+  codegen produces the registered receipt.
+
+  The fix is the smallest of the three candidates. `declared_shape_sources`
+  already yields a source for a `Named(_, None)` axis when the name is
+  non-anonymous OR the node carries a rank-matching `shape_dep`, returning
+  `None` only for an anonymous name with neither, so giving that const its
+  `shape_dep` at the lowering site turns it into a source with no change to
+  the derivation. It is not the derivation reading the const's folded value: a
+  `Const` is a scalar payload splatted to a shape, so its value carries no
+  extent and cannot supply one. It is not C4.4's declaration-by-axis-source
+  either, which names an extent the emitter already has rather than sourcing
+  an axis that has none. One site, and the same shape as [#1313]'s repair,
+  which removed the mechanism for ReLU rather than sourcing the const.
+
+  **Unconfirmed, and deliberately so.** `insert` does not exist on the branch
+  that sized this, the `expand` spelling of the witness builds cleanly there,
+  and [#1313] already removed ReLU's synthesized zero, so the const that
+  survives in the `insert` spelling was never observed. If its sibling is not
+  in scope at its lowering site the answer becomes "the checker must stamp the
+  extent", which is a different owner and a different size. The row does not
+  move on this estimate.
+
   [#597]'s `.c` row likewise stays at baseline and belongs to S2b, with the
   three unit-source rows below: it fails at lowering with a RANK mismatch,
   which is `fallback_expand_type` having no replacement branch.
