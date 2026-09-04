@@ -174,7 +174,14 @@ pub(super) fn schedule(
             scheduler_expand_block_entry(unit, &mut owner_placements)?;
             owner_placements.sort();
             owner_placements.dedup();
-            check_single_postdominating_frontier(unit, &cfg, block, after, &owner_placements)?;
+            check_complete_postdominating_frontier(
+                unit,
+                &cfg,
+                seed.owner,
+                block,
+                after,
+                &owner_placements,
+            )?;
             for (index, point) in owner_placements.into_iter().enumerate() {
                 let id = if index == 0 {
                     seed.id
@@ -263,7 +270,7 @@ pub(super) fn verify_canonical(program: &OwnershipProgram) -> Result<(), Ownersh
             verifier_expand_block_entry(unit, &mut expected)?;
             expected.sort();
             expected.dedup();
-            check_single_postdominating_frontier(unit, &cfg, block, after, &expected)?;
+            check_complete_postdominating_frontier(unit, &cfg, owner, block, after, &expected)?;
             let mut actual = actual_placements(unit, owner);
             actual.sort();
             if actual != expected {
@@ -836,11 +843,18 @@ fn rebuild_host_sites(
     }
     let ids = placed
         .iter()
-        .flat_map(|(_, terminals)| terminals.iter().map(|terminal| terminal.id))
+        .flat_map(|(unit, terminals)| terminals.iter().map(move |terminal| (*unit, terminal.id)))
         .collect::<BTreeSet<_>>();
     for record in &mut sites.records {
         record.actions.retain(|action| {
-            !matches!(action, HostSiteAction::Operation { operation, .. } if ids.contains(operation))
+            !matches!(
+                action,
+                HostSiteAction::Operation {
+                    unit,
+                    operation,
+                    ..
+                } if ids.contains(&(*unit, *operation))
+            )
         });
     }
     for (unit_index, terminals) in placed {
@@ -1139,9 +1153,10 @@ fn expected_terminal(unit: &Unit, owner: OwnerId) -> Result<Terminal, OwnershipE
     })
 }
 
-fn check_single_postdominating_frontier(
+fn check_complete_postdominating_frontier(
     unit: &Unit,
     cfg: &ExpandedCfg,
+    owner: OwnerId,
     definition_block: BlockId,
     definition_after: usize,
     placements: &[Placement],
@@ -1152,7 +1167,13 @@ fn check_single_postdominating_frontier(
         // rather than a point following the merged BlockEntry node.
         return Ok(());
     }
-    if let [placement] = placements {
+    let mut frontier = placements
+        .iter()
+        .copied()
+        .map(|placement| placement_point(unit, placement))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    frontier.extend(fixed_consume_points(unit, owner));
+    if frontier.len() == 1 {
         let definition = placement_point(
             unit,
             Placement::InBlock {
@@ -1160,7 +1181,9 @@ fn check_single_postdominating_frontier(
                 after: definition_after,
             },
         )?;
-        let terminal = placement_point(unit, *placement)?;
+        let terminal = *frontier
+            .first()
+            .expect("single complete terminal frontier has one point");
         if !cfg
             .postdominators
             .get(&definition)
@@ -1173,6 +1196,29 @@ fn check_single_postdominating_frontier(
         }
     }
     Ok(())
+}
+
+fn fixed_consume_points(unit: &Unit, owner: OwnerId) -> BTreeSet<SchedulePoint> {
+    let mut points = BTreeSet::new();
+    for block in &unit.blocks {
+        for operation in non_scheduled_ops(block) {
+            if operation_fixed_consume(&operation.kind, owner) {
+                points.insert(SchedulePoint::AfterOperation {
+                    block: block.id,
+                    operation: operation.id,
+                });
+            }
+        }
+        if terminator_fixed_consume(&block.terminator, owner) {
+            points.insert(SchedulePoint::BeforeTerminator(block.id));
+        }
+        for edge in block.terminator.edges() {
+            if edge_fixed_consume(edge, owner) {
+                points.insert(SchedulePoint::Edge(edge.id));
+            }
+        }
+    }
+    points
 }
 
 fn placement_point(unit: &Unit, placement: Placement) -> Result<SchedulePoint, OwnershipError> {

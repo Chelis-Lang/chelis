@@ -1932,6 +1932,77 @@ fn scheduler_splits_one_arm_death_and_rejects_omission_or_hoisting() {
 }
 
 #[test]
+fn branch_frontier_combines_a_fixed_consume_with_an_inserted_drop() {
+    let entry = Block {
+        id: BlockId(0),
+        params: vec![BlockParam {
+            owner: OwnerId(1),
+            mode: ParamMode::EntryBorrow,
+        }],
+        ops: vec![Operation {
+            id: OpId(0),
+            role: OperationRole::Semantic,
+            kind: define(0),
+        }],
+        terminator: Terminator::Branch {
+            condition: Operand::borrow(OwnerId(1)),
+            then_edge: Edge::new(EdgeId(10), BlockId(1), vec![]),
+            else_edge: Edge::new(EdgeId(11), BlockId(2), vec![]),
+        },
+    };
+    let fixed = block(
+        1,
+        vec![],
+        vec![Op::Drop {
+            owner: Operand::move_(OwnerId(0)),
+        }],
+        Terminator::Exit,
+    );
+    let mut needs_inserted = block(2, vec![], vec![], Terminator::Exit);
+    needs_inserted.ops.push(provisional(90, 0, true));
+    let mut program = roots(
+        vec![entry, fixed, needs_inserted],
+        BTreeMap::from([
+            (OwnerId(0), info(Prim::String, OwnerOrigin::Owned)),
+            (OwnerId(1), info(Prim::Bool, OwnerOrigin::ExternalBorrow)),
+        ]),
+    );
+
+    schedule(&mut program).unwrap();
+    assert!(matches!(
+        program.units[0].blocks[1].ops.as_slice(),
+        [Operation {
+            role: OperationRole::Semantic,
+            kind: Op::Drop { owner },
+            ..
+        }] if owner.owner == OwnerId(0)
+    ));
+    let inserted = program.units[0].blocks[0]
+        .terminator
+        .edges()
+        .find(|edge| edge.id == EdgeId(11))
+        .unwrap();
+    assert_eq!(
+        inserted.terminals,
+        vec![edge_terminal(90, Terminal::Drop(OwnerId(0)))]
+    );
+    super::last_use::verify_canonical(&program).unwrap();
+
+    let mut omitted = program;
+    omitted.units[0].blocks[0]
+        .terminator
+        .edges_mut()
+        .find(|edge| edge.id == EdgeId(11))
+        .unwrap()
+        .terminals
+        .clear();
+    assert!(matches!(
+        super::last_use::verify_canonical(&omitted),
+        Err(OwnershipError::NonCanonicalTerminal { owner: 0, .. })
+    ));
+}
+
+#[test]
 fn scheduler_preserves_owned_join_moves_and_rejects_drop_plus_move() {
     let mut program = roots(
         vec![
@@ -2416,6 +2487,81 @@ fn scheduler_rebuilds_host_sites_from_stable_operation_and_edge_identities() {
                 ..
             }
         ] if *operation == edge_terminal
+    ));
+}
+
+#[test]
+fn host_site_rebuild_qualifies_equal_operation_ids_by_unit() {
+    let mut root_block = block(0, vec![], vec![define(0)], Terminator::Exit);
+    root_block.ops.push(provisional(90, 0, true));
+    let mut function_block = block(
+        0,
+        vec![],
+        vec![define(0)],
+        Terminator::Return {
+            result: Operand::move_(OwnerId(0)),
+        },
+    );
+    function_block.ops[0].id = OpId(90);
+    let mut program = roots(
+        vec![root_block],
+        BTreeMap::from([(OwnerId(0), info(Prim::String, OwnerOrigin::Owned))]),
+    );
+    program.units.push(Unit {
+        id: UnitId(1),
+        name: "function".into(),
+        kind: UnitKind::Function,
+        schedule: ScheduleState::Phase2ScopeExit,
+        callable_body: Some(CallableBody::new(BlockId(0))),
+        entry: BlockId(0),
+        blocks: vec![function_block],
+        owners: BTreeMap::from([(OwnerId(0), info(Prim::String, OwnerOrigin::Owned))]),
+    });
+    let record = |index, unit, operation| HostSiteRecord {
+        id: HostSiteId::from_index(index),
+        unit,
+        kind: HostSiteKind::Expression,
+        actions: vec![HostSiteAction::Operation {
+            unit,
+            block: BlockId(0),
+            operation,
+        }],
+    };
+    let mut sites = HostSiteMap {
+        records: vec![
+            record(0, 0, OpId(90)),
+            record(1, 0, OpId(0)),
+            record(2, 1, OpId(90)),
+        ],
+    };
+
+    super::last_use::schedule(&mut program, &mut sites).unwrap();
+    assert!(
+        sites.records[0].actions.is_empty(),
+        "the roots unit's provisional o90 must be removed"
+    );
+    assert!(matches!(
+        sites.records[1].actions.as_slice(),
+        [
+            HostSiteAction::Operation {
+                unit: 0,
+                operation: OpId(0),
+                ..
+            },
+            HostSiteAction::Operation {
+                unit: 0,
+                operation: OpId(90),
+                ..
+            }
+        ]
+    ));
+    assert!(matches!(
+        sites.records[2].actions.as_slice(),
+        [HostSiteAction::Operation {
+            unit: 1,
+            operation: OpId(90),
+            ..
+        }]
     ));
 }
 
