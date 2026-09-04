@@ -878,11 +878,20 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
         # literal, and the classes disappear, so guard placement and rendering
         # on C are proved by DRIVEN rows that compile the exported kernel and
         # call it with runtime inputs. This target is where those rows live.
+        # `exec_compile` is a large shared binary, so this target names its
+        # four rows with `--exact` rather than running the whole file: the
+        # receipt check requires the observed set to EQUAL the expected one,
+        # and an unfiltered run would tie this phase's oracle to every
+        # unrelated numeric row in that file.
         TestTarget(
             "exec_c",
             (
                 "cargo", "test", "-p", "chelis-backend-c", "--test",
-                "exec_compile", "--", "--nocapture",
+                "exec_compile", "--", "--nocapture", "--exact",
+                "a_literal_claim_over_a_runtime_read_traps_at_entry_on_c",
+                "an_all_interface_class_runs_when_its_witnesses_agree",
+                "an_all_interface_class_traps_at_entry_when_its_witnesses_disagree",
+                "entry_guards_run_in_assigned_slot_order_not_claim_name_order",
             ),
             (
                 "a_literal_claim_over_a_runtime_read_traps_at_entry_on_c",
