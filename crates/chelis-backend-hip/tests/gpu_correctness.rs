@@ -318,7 +318,7 @@ fn append_case_lines(
                 .collect::<Vec<_>>()
                 .join(", ");
             lines.push(format!(
-                "    int {prefix}_shape_{slot}[{ndim}] = {{ {dims} }};"
+                "    int64_t {prefix}_shape_{slot}[{ndim}] = {{ {dims} }};"
             ));
             lines.push(format!(
                 "    {prefix}_input_storage[{slot}] = chelis_alloc({ndim}, {prefix}_shape_{slot}, {dtype});",
@@ -332,37 +332,46 @@ fn append_case_lines(
                     other => panic!("unsupported manual HIP test dtype {}", other.name()),
                 }
             ));
+            lines.push(format!(
+                "    chelis_tensor_write *{prefix}_input_guard_{slot} = chelis_tensor_begin_write({prefix}_input_storage[{slot}]);"
+            ));
+            lines.push(format!(
+                "    chelis_write_view {prefix}_input_view_{slot} = chelis_tensor_write_view({prefix}_input_guard_{slot});"
+            ));
             for (idx, value) in input.data.iter().enumerate() {
                 match input.dtype {
                     // Sibling of #250/#251/#252: exact f32 bit pattern via
                     // `chelis_f32_from_bits` (from the included
                     // `chelis_runtime.h`), not a lossy `{:.8}f` decimal.
                     Prim::F32 => lines.push(format!(
-                        "    ((float *){prefix}_input_storage[{slot}]->data)[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);",
+                        "    ((float *){prefix}_input_view_{slot}.data)[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);",
                         bits = value.to_bits()
                     )),
                     // WS-A4: i8/i16 inputs are written via reinterpret cast on
                     // `t->data` so the harness exercises the same memory layout
                     // the generated HIP code reads from.
                     Prim::Int8 => lines.push(format!(
-                        "    ((int8_t*){prefix}_input_storage[{slot}]->data)[{idx}] = {};",
+                        "    ((int8_t*){prefix}_input_view_{slot}.data)[{idx}] = {};",
                         *value as i8
                     )),
                     Prim::Int16 => lines.push(format!(
-                        "    ((int16_t*){prefix}_input_storage[{slot}]->data)[{idx}] = {};",
+                        "    ((int16_t*){prefix}_input_view_{slot}.data)[{idx}] = {};",
                         *value as i16
                     )),
                     Prim::Int32 => lines.push(format!(
-                        "    ((int*){prefix}_input_storage[{slot}]->data)[{idx}] = {};",
+                        "    ((int*){prefix}_input_view_{slot}.data)[{idx}] = {};",
                         *value as i32
                     )),
                     Prim::Int64 => lines.push(format!(
-                        "    ((int64_t*){prefix}_input_storage[{slot}]->data)[{idx}] = {}LL;",
+                        "    ((int64_t*){prefix}_input_view_{slot}.data)[{idx}] = {}LL;",
                         *value as i64
                     )),
                     other => panic!("unsupported manual HIP test dtype {}", other.name()),
                 }
             }
+            lines.push(format!(
+                "    chelis_tensor_end_write({prefix}_input_guard_{slot});"
+            ));
         }
     }
 
@@ -377,20 +386,25 @@ fn append_case_lines(
         "    for (int {prefix}_out_idx = 0; {prefix}_out_idx < {n_out}; {prefix}_out_idx++) {{"
     ));
     lines.push(format!(
-        "        for (int {prefix}_i = 0; {prefix}_i < {prefix}_outputs[{prefix}_out_idx]->size; {prefix}_i++) {{"
+        "        chelis_read_view {prefix}_output_view = chelis_tensor_read_view({prefix}_outputs[{prefix}_out_idx]);"
+    ));
+    lines.push(format!(
+        "        for (int {prefix}_i = 0; {prefix}_i < chelis_tensor_numel({prefix}_outputs[{prefix}_out_idx]); {prefix}_i++) {{"
     ));
     lines.push(format!("            if ({prefix}_i > 0) printf(\" \");"));
     lines.push(format!(
-        "            printf(\"%.6f\", ((float *){prefix}_outputs[{prefix}_out_idx]->data)[{prefix}_i]);"
+        "            printf(\"%.6f\", ((const float *){prefix}_output_view.data)[{prefix}_i]);"
     ));
     lines.push("        }".to_string());
     lines.push("        printf(\"\\n\");".to_string());
     lines.push(format!(
-        "        chelis_free({prefix}_outputs[{prefix}_out_idx]);"
+        "        chelis_tensor_release({prefix}_outputs[{prefix}_out_idx]);"
     ));
     lines.push("    }".to_string());
     for slot in 0..input_labels.len() {
-        lines.push(format!("    chelis_free({prefix}_input_storage[{slot}]);"));
+        lines.push(format!(
+            "    chelis_tensor_release({prefix}_input_storage[{slot}]);"
+        ));
     }
 }
 
@@ -467,7 +481,7 @@ fn build_caller_preservation_main_cpp(
         .enumerate()
         .map(|(index, value)| {
             format!(
-                "    ((float *)host_input->data)[{index}] = chelis_f32_from_bits(0x{:08x}u);",
+                "    ((float *)host_input_view.data)[{index}] = chelis_f32_from_bits(0x{:08x}u);",
                 value.to_bits()
             )
         })
@@ -482,7 +496,10 @@ int main(void) {{
     int64_t host_shape[1] = {{ 4 }};
     int device_shape[1] = {{ 4 }};
     chelis_tensor *host_input = chelis_alloc(1, host_shape, CHELIS_DTYPE_F32);
+    chelis_tensor_write *host_input_guard = chelis_tensor_begin_write(host_input);
+    chelis_write_view host_input_view = chelis_tensor_write_view(host_input_guard);
 {initialization}
+    chelis_tensor_end_write(host_input_guard);
     chelis_gpu_tensor *device_input = chelis_gpu_alloc(1, device_shape, CHELIS_DTYPE_F32);
     chelis_host_to_device(device_input, host_input);
     chelis_gpu_tensor *device_inputs[1] = {{ device_input }};
@@ -493,20 +510,22 @@ int main(void) {{
     chelis_tensor *host_after = chelis_alloc(1, host_shape, CHELIS_DTYPE_F32);
     chelis_device_to_host(host_output, device_outputs[0]);
     chelis_device_to_host(host_after, device_input);
+    chelis_read_view host_output_view = chelis_tensor_read_view(host_output);
+    chelis_read_view host_after_view = chelis_tensor_read_view(host_after);
     for (int i = 0; i < 4; i++) {{
         if (i > 0) printf(" ");
-        printf("%.6f", ((float *)host_output->data)[i]);
+        printf("%.6f", ((const float *)host_output_view.data)[i]);
     }}
     printf("\n");
     for (int i = 0; i < 4; i++) {{
         if (i > 0) printf(" ");
-        printf("%.6f", ((float *)host_after->data)[i]);
+        printf("%.6f", ((const float *)host_after_view.data)[i]);
     }}
     printf("\n");
 
-    chelis_free(host_input);
-    chelis_free(host_output);
-    chelis_free(host_after);
+    chelis_tensor_release(host_input);
+    chelis_tensor_release(host_output);
+    chelis_tensor_release(host_after);
     chelis_gpu_free(device_outputs[0]);
     chelis_gpu_free(device_input);
     return 0;
@@ -676,17 +695,24 @@ fn compile_and_run_float_output_bits(
         setup.push(format!(
             "    inputs[{slot}] = chelis_alloc(1, shape, {dtype});"
         ));
+        setup.push(format!(
+            "    chelis_tensor_write *input_guard_{slot} = chelis_tensor_begin_write(inputs[{slot}]);"
+        ));
+        setup.push(format!(
+            "    chelis_write_view input_view_{slot} = chelis_tensor_write_view(input_guard_{slot});"
+        ));
         for (index, value) in bits.iter().enumerate() {
             setup.push(if prim == Prim::F32 {
                 format!(
-                    "    inputs[{slot}]->data[{index}] = chelis_f32_from_bits(0x{value:08x}u);"
+                    "    ((float *)input_view_{slot}.data)[{index}] = chelis_f32_from_bits(0x{value:08x}u);"
                 )
             } else {
                 format!(
-                    "    ((double *)inputs[{slot}]->data)[{index}] = chelis_f64_from_bits(0x{value:016x}uLL);"
+                    "    ((double *)input_view_{slot}.data)[{index}] = chelis_f64_from_bits(0x{value:016x}uLL);"
                 )
             });
         }
+        setup.push(format!("    chelis_tensor_end_write(input_guard_{slot});"));
     }
     setup.push(format!(
         "    chelis_tensor *outputs[{}] = {{0}};",
@@ -701,21 +727,24 @@ fn compile_and_run_float_output_bits(
         "    for (int out = 0; out < {}; out++) {{",
         result.output_labels.len()
     ));
-    setup.push("        for (int i = 0; i < outputs[out]->size; i++) {".to_string());
+    setup.push(
+        "        chelis_read_view output_view = chelis_tensor_read_view(outputs[out]);".to_string(),
+    );
+    setup.push("        for (int i = 0; i < chelis_tensor_numel(outputs[out]); i++) {".to_string());
     setup.push("            if (i > 0) printf(\" \" );".to_string());
     setup.push(if prim == Prim::F32 {
-        "            uint32_t bits; memcpy(&bits, &outputs[out]->data[i], sizeof(bits)); printf(\"0x%08x\", bits);"
+        "            uint32_t bits; memcpy(&bits, &((const float *)output_view.data)[i], sizeof(bits)); printf(\"0x%08x\", bits);"
             .to_string()
     } else {
-        "            uint64_t bits; memcpy(&bits, &((double *)outputs[out]->data)[i], sizeof(bits)); printf(\"0x%016llx\", (unsigned long long)bits);"
+        "            uint64_t bits; memcpy(&bits, &((const double *)output_view.data)[i], sizeof(bits)); printf(\"0x%016llx\", (unsigned long long)bits);"
             .to_string()
     });
     setup.push("        }".to_string());
     setup.push("        printf(\"\\n\");".to_string());
-    setup.push("        chelis_free(outputs[out]);".to_string());
+    setup.push("        chelis_tensor_release(outputs[out]);".to_string());
     setup.push("    }".to_string());
     setup.push(format!(
-        "    for (int i = 0; i < {}; i++) chelis_free(inputs[i]);",
+        "    for (int i = 0; i < {}; i++) chelis_tensor_release(inputs[i]);",
         result.input_labels.len()
     ));
 
@@ -973,15 +1002,16 @@ extern "C" void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **ou
 int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     {func_name}(nullptr, 0, outputs, 1);
-    for (int i = 0; i < outputs[0]->size; i++) {{
+    chelis_read_view output_view = chelis_tensor_read_view(outputs[0]);
+    for (int i = 0; i < chelis_tensor_numel(outputs[0]); i++) {{
         if (i > 0) printf(" ");
-        float v = ((float *)outputs[0]->data)[i];
+        float v = ((const float *)output_view.data)[i];
         uint32_t bits;
         memcpy(&bits, &v, sizeof(bits));
         printf("0x%08x", bits);
     }}
     printf("\n");
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -1051,15 +1081,16 @@ extern "C" void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **ou
 int main(void) {{
     chelis_tensor *outputs[1] = {{0}};
     {func_name}(nullptr, 0, outputs, 1);
-    double *data = (double *)outputs[0]->data;
-    for (int i = 0; i < outputs[0]->size; i++) {{
+    chelis_read_view output_view = chelis_tensor_read_view(outputs[0]);
+    const double *data = (const double *)output_view.data;
+    for (int i = 0; i < chelis_tensor_numel(outputs[0]); i++) {{
         if (i > 0) printf(" ");
         uint64_t bits;
         memcpy(&bits, &data[i], sizeof(bits));
         printf("0x%016llx", (unsigned long long)bits);
     }}
     printf("\n");
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#
@@ -2750,7 +2781,7 @@ fn append_case_lines_f64(
                 .collect::<Vec<_>>()
                 .join(", ");
             lines.push(format!(
-                "    int {prefix}_shape_{slot}[{ndim}] = {{ {dims} }};"
+                "    int64_t {prefix}_shape_{slot}[{ndim}] = {{ {dims} }};"
             ));
             lines.push(format!(
                 "    {prefix}_input_storage[{slot}] = chelis_alloc({ndim}, {prefix}_shape_{slot}, {dtype});",
@@ -2758,6 +2789,12 @@ fn append_case_lines_f64(
                     Prim::F64 => "CHELIS_DTYPE_F64",
                     other => panic!("f64 harness expected f64 input, got {}", other.name()),
                 }
+            ));
+            lines.push(format!(
+                "    chelis_tensor_write *{prefix}_input_guard_{slot} = chelis_tensor_begin_write({prefix}_input_storage[{slot}]);"
+            ));
+            lines.push(format!(
+                "    chelis_write_view {prefix}_input_view_{slot} = chelis_tensor_write_view({prefix}_input_guard_{slot});"
             ));
             for (idx, value) in input.data.iter().enumerate() {
                 // Cast through `double *` because the C struct's
@@ -2767,10 +2804,13 @@ fn append_case_lines_f64(
                 // #250/#251/#252: exact f64 bit pattern via
                 // `chelis_f64_from_bits`, not a lossy `{:.17e}` decimal.
                 lines.push(format!(
-                    "    ((double*){prefix}_input_storage[{slot}]->data)[{idx}] = chelis_f64_from_bits(0x{bits:016x}uLL);",
+                    "    ((double*){prefix}_input_view_{slot}.data)[{idx}] = chelis_f64_from_bits(0x{bits:016x}uLL);",
                     bits = value.to_bits()
                 ));
             }
+            lines.push(format!(
+                "    chelis_tensor_end_write({prefix}_input_guard_{slot});"
+            ));
         }
     }
 
@@ -2785,20 +2825,25 @@ fn append_case_lines_f64(
         "    for (int {prefix}_out_idx = 0; {prefix}_out_idx < {n_out}; {prefix}_out_idx++) {{"
     ));
     lines.push(format!(
-        "        for (int {prefix}_i = 0; {prefix}_i < {prefix}_outputs[{prefix}_out_idx]->size; {prefix}_i++) {{"
+        "        chelis_read_view {prefix}_output_view = chelis_tensor_read_view({prefix}_outputs[{prefix}_out_idx]);"
+    ));
+    lines.push(format!(
+        "        for (int {prefix}_i = 0; {prefix}_i < chelis_tensor_numel({prefix}_outputs[{prefix}_out_idx]); {prefix}_i++) {{"
     ));
     lines.push(format!("            if ({prefix}_i > 0) printf(\" \");"));
     lines.push(format!(
-        "            printf(\"%.17e\", ((double*){prefix}_outputs[{prefix}_out_idx]->data)[{prefix}_i]);"
+        "            printf(\"%.17e\", ((const double*){prefix}_output_view.data)[{prefix}_i]);"
     ));
     lines.push("        }".to_string());
     lines.push("        printf(\"\\n\");".to_string());
     lines.push(format!(
-        "        chelis_free({prefix}_outputs[{prefix}_out_idx]);"
+        "        chelis_tensor_release({prefix}_outputs[{prefix}_out_idx]);"
     ));
     lines.push("    }".to_string());
     for slot in 0..input_labels.len() {
-        lines.push(format!("    chelis_free({prefix}_input_storage[{slot}]);"));
+        lines.push(format!(
+            "    chelis_tensor_release({prefix}_input_storage[{slot}]);"
+        ));
     }
 }
 
@@ -3353,16 +3398,23 @@ fn compile_and_run_single_output_typed_i64(
             break;
         }
     }
-    prefix_lines.push("    for (int i = 0; i < case0_outputs[0]->size; i++) {".to_string());
+    prefix_lines.push(
+        "    chelis_read_view case0_output_view = chelis_tensor_read_view(case0_outputs[0]);"
+            .to_string(),
+    );
+    prefix_lines
+        .push("    for (int i = 0; i < chelis_tensor_numel(case0_outputs[0]); i++) {".to_string());
     prefix_lines.push("        if (i > 0) printf(\" \");".to_string());
     prefix_lines.push(format!(
-        "        printf(\"{out_printf_spec}\", (long long)(({out_c_ty}*)case0_outputs[0]->data)[i]);"
+        "        printf(\"{out_printf_spec}\", (long long)((const {out_c_ty}*)case0_output_view.data)[i]);"
     ));
     prefix_lines.push("    }".to_string());
     prefix_lines.push("    printf(\"\\n\");".to_string());
-    prefix_lines.push("    chelis_free(case0_outputs[0]);".to_string());
+    prefix_lines.push("    chelis_tensor_release(case0_outputs[0]);".to_string());
     for slot in 0..result.input_labels.len() {
-        prefix_lines.push(format!("    chelis_free(case0_input_storage[{slot}]);"));
+        prefix_lines.push(format!(
+            "    chelis_tensor_release(case0_input_storage[{slot}]);"
+        ));
     }
 
     let main_src = format!(

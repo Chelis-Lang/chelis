@@ -258,15 +258,19 @@ static inline void chelis_gpu_free_view(chelis_gpu_tensor *t) {
 /* ---- Host ↔ Device transfer ---- */
 
 static inline void chelis_host_to_device(chelis_gpu_tensor *dst, const chelis_tensor *src) {
-    CHELIS_HIP_CHECK(hipMemcpy(dst->data, src->data,
+    chelis_read_view view = chelis_tensor_read_view(src);
+    CHELIS_HIP_CHECK(hipMemcpy(dst->data, view.data,
                                dst->size * chelis_gpu_dtype_size(dst->dtype),
                                hipMemcpyHostToDevice));
 }
 
 static inline void chelis_device_to_host(chelis_tensor *dst, const chelis_gpu_tensor *src) {
-    CHELIS_HIP_CHECK(hipMemcpy(dst->data, src->data,
-                               dst->size * chelis_gpu_dtype_size(src->dtype),
+    chelis_tensor_write *guard = chelis_tensor_begin_write(dst);
+    chelis_write_view view = chelis_tensor_write_view(guard);
+    CHELIS_HIP_CHECK(hipMemcpy(view.data, src->data,
+                               view.count * chelis_gpu_dtype_size(src->dtype),
                                hipMemcpyDeviceToHost));
+    chelis_tensor_end_write(guard);
 }
 
 static inline chelis_gpu_tensor* chelis_gpu_clone(const chelis_gpu_tensor *src) {

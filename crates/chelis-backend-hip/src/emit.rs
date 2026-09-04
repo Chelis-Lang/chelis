@@ -680,12 +680,12 @@ impl HipEmitter {
             self.indent -= 1;
             self.line("}");
             self.line(&format!(
-                "if (inputs[{slot}]->ndim != {}) {{",
+                "if (chelis_tensor_rank(inputs[{slot}]) != {}) {{",
                 Self::ndim(ty)
             ));
             self.indent += 1;
             self.line(&format!(
-                "fprintf(stderr, \"{func_name_fmt}: input `{label_fmt}` expected rank {}, got %d\\n\", inputs[{slot}]->ndim);",
+                "fprintf(stderr, \"{func_name_fmt}: input `{label_fmt}` expected rank {}, got %d\\n\", chelis_tensor_rank(inputs[{slot}]));",
                 Self::ndim(ty)
             ));
             self.line("abort();");
@@ -694,11 +694,11 @@ impl HipEmitter {
             for (axis, dim) in ty.dims.iter().enumerate() {
                 if let Some(expected) = Self::known_dim_size(dim) {
                     self.line(&format!(
-                        "if (inputs[{slot}]->shape[{axis}] != {expected}) {{"
+                        "if (chelis_tensor_shape(inputs[{slot}], {axis}) != {expected}) {{"
                     ));
                     self.indent += 1;
                     self.line(&format!(
-                        "fprintf(stderr, \"{func_name_fmt}: input `{label_fmt}` axis {axis} expected {expected}, got %lld\\n\", (long long)inputs[{slot}]->shape[{axis}]);"
+                        "fprintf(stderr, \"{func_name_fmt}: input `{label_fmt}` axis {axis} expected {expected}, got %lld\\n\", (long long)chelis_tensor_shape(inputs[{slot}], {axis}));"
                     ));
                     self.line("abort();");
                     self.indent -= 1;
@@ -714,7 +714,7 @@ impl HipEmitter {
             let binding_name_fmt =
                 chelis_ir::span_sanitize::sanitize_for_format_string(&binding.name);
             self.line(&format!(
-                "int64_t {} = inputs[{canonical_slot}]->shape[{canonical_axis}];",
+                "int64_t {} = chelis_tensor_shape(inputs[{canonical_slot}], {canonical_axis});",
                 binding.name
             ));
             for occurrence in &binding.others {
@@ -722,12 +722,12 @@ impl HipEmitter {
                 let slot = input_slots[occ_label];
                 let occ_label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(occ_label);
                 self.line(&format!(
-                    "if (inputs[{slot}]->shape[{occ_axis}] != {}) {{",
+                    "if (chelis_tensor_shape(inputs[{slot}], {occ_axis}) != {}) {{",
                     binding.name
                 ));
                 self.indent += 1;
                 self.line(&format!(
-                    "fprintf(stderr, \"{func_name_fmt}: symbolic dim `{binding_name_fmt}` mismatch: {occ_label_fmt}[{occ_axis}]=%lld but {binding_name_fmt}=%lld\\n\", (long long)inputs[{slot}]->shape[{occ_axis}], (long long){});",
+                    "fprintf(stderr, \"{func_name_fmt}: symbolic dim `{binding_name_fmt}` mismatch: {occ_label_fmt}[{occ_axis}]=%lld but {binding_name_fmt}=%lld\\n\", (long long)chelis_tensor_shape(inputs[{slot}], {occ_axis}), (long long){});",
                     binding.name
                 ));
                 self.line("abort();");

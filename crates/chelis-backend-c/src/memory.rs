@@ -75,11 +75,10 @@ impl MemoryPlan {
     ///
     /// Read this before choosing any tensor as an in-place destination.
     /// Reading a borrowed buffer is fine; writing to one hands the
-    /// caller back a mutated argument. Ownership is not visible in the
-    /// runtime `chelis_tensor` at all: `chelis_alloc_view` sets
-    /// `owns_data = 0` for every intermediate view as well, so the
-    /// runtime flag cannot distinguish the two and this plan-level fact
-    /// is the only place the distinction exists.
+    /// caller back a mutated argument. The opaque runtime descriptor does
+    /// defend entry-borrowed storage at the write boundary, while this
+    /// plan-level fact prevents code generation from requesting the
+    /// invalid in-place optimization in the first place.
     pub fn borrows_caller_storage(&self, id: NodeId) -> bool {
         let mut cursor = id;
         loop {
@@ -115,10 +114,7 @@ impl MemoryPlan {
             {
                 continue;
             }
-            lines.push(format!("    chelis_free(t{idx});"));
-        }
-        for slot in &self.slots {
-            lines.push(format!("    chelis_free(chelis_slot{});", slot.id));
+            lines.push(format!("    chelis_tensor_release(t{idx});"));
         }
         lines
     }
@@ -471,7 +467,7 @@ mod tests {
             !plan
                 .emit_cleanup(&[y])
                 .iter()
-                .any(|line| line == "    chelis_free(t0);")
+                .any(|line| line == "    chelis_tensor_release(t0);")
         );
     }
 
@@ -809,7 +805,7 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_frees_wrappers_at_epilogue_then_slots() {
+    fn cleanup_releases_non_root_descriptors_at_epilogue() {
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(vec_f32(4).precision, 1.0),
@@ -822,8 +818,6 @@ mod tests {
 
         let plan = build_plan(&dag, &[b]);
         let lines = plan.emit_cleanup(&[b]);
-        assert_eq!(lines[0], "    chelis_free(t0);");
-        assert!(lines[1].starts_with("    chelis_free(chelis_slot"));
-        assert!(lines[2].starts_with("    chelis_free(chelis_slot"));
+        assert_eq!(lines, ["    chelis_tensor_release(t0);"]);
     }
 }

@@ -1268,7 +1268,7 @@ extern "C" void test_compile(chelis_tensor **inputs, int n_in, chelis_tensor **o
 int main(void) {
     chelis_tensor *outputs[1] = {0};
     test_compile(NULL, 0, outputs, 1);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }
 "#;

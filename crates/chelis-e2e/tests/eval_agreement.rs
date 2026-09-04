@@ -216,7 +216,7 @@ int main(void) {{
     {func_name}(NULL, 0, outputs, 1);
     {render_result}
     printf("\n");
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#

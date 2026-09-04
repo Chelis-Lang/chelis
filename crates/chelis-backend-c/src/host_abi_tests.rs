@@ -67,7 +67,7 @@ fn options_of_active_scalars_share_the_exact_tagged_scalar_carrier() {
             .expect("every active runtime scalar has an exact Option ABI");
         assert_eq!(
             abi.c_type_name(),
-            Some("chelis_option_scalar"),
+            Some("chelis_option*"),
             "Option<{precision:?}> must not retain a per-dtype compatibility struct"
         );
     }
@@ -75,7 +75,7 @@ fn options_of_active_scalars_share_the_exact_tagged_scalar_carrier() {
     let string_option = ConcreteHostType::Option(Box::new(ConcreteHostType::Scalar(Prim::String)));
     let abi = HostAbiType::try_from_concrete(&string_option)
         .expect("strings use the generic exact value carrier");
-    assert_eq!(abi.c_type_name(), Some("chelis_option_value"));
+    assert_eq!(abi.c_type_name(), Some("chelis_option*"));
 }
 
 /// Once Phase 3 supplies exact scalar storage, every container recursively

@@ -97,6 +97,11 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: _Bool chelis_option_is_some ( const chelis_option * option ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_string_contains ( chelis_string haystack , chelis_string needle ) ;",
       "flags": []
     },
@@ -130,9 +135,8 @@
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_adt * chelis_value_as_adt ( chelis_value value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "id": "chelis_runtime.h: chelis_adt * chelis_adt_take_value ( chelis_value value ) ;",
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -159,9 +163,8 @@
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_dict * chelis_value_as_dict ( chelis_value value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "id": "chelis_runtime.h: chelis_dict * chelis_dict_take_value ( chelis_value value ) ;",
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -250,6 +253,11 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_take_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_zip ( const chelis_list * lhs , const chelis_list * rhs ) ;",
       "flags": [],
       "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
@@ -295,9 +303,8 @@
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_list * chelis_value_as_list ( chelis_value value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "id": "chelis_runtime.h: chelis_mapped_file * chelis_mapped_file_take_value ( chelis_value value ) ;",
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -306,23 +313,42 @@
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_option_scalar chelis_dict_get_scalar ( const chelis_dict * dict , chelis_value key , chelis_dtype dtype ) ;",
+      "id": "chelis_runtime.h: chelis_option * chelis_dict_get ( const chelis_dict * dict , chelis_value key ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_option * chelis_dict_get_scalar ( const chelis_dict * dict , chelis_value key , chelis_dtype dtype ) ;",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_option_scalar chelis_parse_scalar ( chelis_string text , chelis_dtype dtype ) ;",
+      "id": "chelis_runtime.h: chelis_option * chelis_option_none ( void ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_option * chelis_option_some ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_option * chelis_option_take_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_option * chelis_parse_scalar ( chelis_string text , chelis_dtype dtype ) ;",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_option_value chelis_dict_get ( const chelis_dict * dict , chelis_value key ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "id": "chelis_runtime.h: chelis_read_view chelis_tensor_read_view ( const chelis_tensor * tensor ) ;",
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -338,7 +364,7 @@
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_scalar chelis_value_as_scalar ( chelis_value value ) ;",
+      "id": "chelis_runtime.h: chelis_scalar chelis_value_unbox_scalar ( chelis_value value ) ;",
       "flags": []
     },
     {
@@ -349,6 +375,11 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_string chelis_read_file ( chelis_string path ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_string_borrow_value ( chelis_value value ) ;",
       "flags": []
     },
     {
@@ -376,25 +407,17 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_string_take_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_string chelis_string_trim ( chelis_string value ) ;",
       "flags": []
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_string chelis_value_as_string ( chelis_value value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_tensor * chelis_alloc ( int32_t rank , const int64_t * shape , chelis_dtype dtype ) ;",
-      "flags": [
-        "numeric-op"
-      ]
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_alloc_view ( int32_t rank , const int64_t * shape , chelis_dtype dtype , void * data , int64_t byte_capacity ) ;",
       "flags": [
         "numeric-op"
       ]
@@ -461,6 +484,13 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_entry_borrow ( int32_t rank , const int64_t * shape , chelis_dtype dtype , const void * data , int64_t byte_capacity ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_from_values ( const chelis_list * list , chelis_dtype dtype ) ;",
       "flags": [
         "numeric-op"
@@ -489,6 +519,11 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_take_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_trace ( const chelis_tensor * tensor , int32_t axis1 , int32_t axis2 ) ;",
       "flags": [
         "numeric-op"
@@ -501,9 +536,8 @@
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_value_as_tensor ( chelis_value value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "id": "chelis_runtime.h: chelis_tensor_write * chelis_tensor_begin_write ( chelis_tensor * tensor ) ;",
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -522,9 +556,8 @@
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tuple * chelis_value_as_tuple ( chelis_value value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "id": "chelis_runtime.h: chelis_tuple * chelis_tuple_take_value ( chelis_value value ) ;",
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -544,6 +577,11 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_option_unwrap ( const chelis_option * option ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_value chelis_tuple_get ( const chelis_tuple * tuple , int64_t index ) ;",
       "flags": [
         "numeric-op"
@@ -552,48 +590,97 @@
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_value chelis_value_from_adt ( chelis_adt * value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_value chelis_value_from_dict ( chelis_dict * value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_value chelis_value_from_list ( chelis_list * value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_value chelis_value_from_scalar ( chelis_scalar value ) ;",
+      "id": "chelis_runtime.h: chelis_value chelis_value_box_scalar ( chelis_scalar value ) ;",
       "flags": []
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_value chelis_value_from_string ( chelis_string value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "id": "chelis_runtime.h: chelis_value chelis_value_clone ( chelis_value value ) ;",
+      "flags": []
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_value chelis_value_from_tensor ( chelis_tensor * value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "id": "chelis_runtime.h: chelis_value chelis_value_take_adt ( chelis_adt * adt ) ;",
+      "flags": []
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_value chelis_value_from_tuple ( chelis_tuple * value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "id": "chelis_runtime.h: chelis_value chelis_value_take_dict ( chelis_dict * dict ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_take_list ( chelis_list * list ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_take_mapped_file ( chelis_mapped_file * mapped ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_take_option ( chelis_option * option ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_take_string ( chelis_string value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_take_tensor ( chelis_tensor * tensor ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_take_tuple ( chelis_tuple * tuple ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_write_view chelis_tensor_write_view ( const chelis_tensor_write * guard ) ;",
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: const char * chelis_string_data ( chelis_string value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: const chelis_adt * chelis_adt_borrow_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: const chelis_dict * chelis_dict_borrow_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: const chelis_list * chelis_list_borrow_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: const chelis_mapped_file * chelis_mapped_file_borrow_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: const chelis_option * chelis_option_borrow_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: const chelis_tensor * chelis_tensor_borrow_value ( chelis_value value ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: const chelis_tuple * chelis_tuple_borrow_value ( chelis_value value ) ;",
       "flags": []
     },
     {
@@ -698,14 +785,8 @@
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: void chelis_fill_scalar ( chelis_tensor * tensor , chelis_scalar value ) ;",
+      "id": "chelis_runtime.h: void chelis_fill_scalar ( chelis_tensor_write * guard , chelis_scalar value ) ;",
       "flags": []
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: void chelis_free ( chelis_tensor * t ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -718,6 +799,26 @@
       "id": "chelis_runtime.h: void chelis_list_retain ( const chelis_list * list ) ;",
       "flags": [],
       "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_mapped_file_release ( const chelis_mapped_file * mapped ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_mapped_file_retain ( const chelis_mapped_file * mapped ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_option_release ( const chelis_option * option ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_option_retain ( const chelis_option * option ) ;",
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -757,6 +858,21 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_tensor_end_write ( chelis_tensor_write * guard ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_tensor_release ( const chelis_tensor * tensor ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_tensor_retain ( const chelis_tensor * tensor ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_tuple_release ( const chelis_tuple * tuple ) ;",
       "flags": [],
       "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
@@ -775,18 +891,12 @@
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: void chelis_value_retain ( chelis_value value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_write_file ( chelis_string path , chelis_string contents ) ;",
       "flags": []
     },
     {
       "kind": "header-struct",
-      "id": "chelis_runtime.h: enum { CHELIS_VALUE_UNIT = 0 , CHELIS_VALUE_SCALAR = 1 , CHELIS_VALUE_STRING = 2 , CHELIS_VALUE_TENSOR = 3 , CHELIS_VALUE_LIST = 4 , CHELIS_VALUE_TUPLE = 5 , CHELIS_VALUE_DICT = 6 , CHELIS_VALUE_ADT = 7 }",
+      "id": "chelis_runtime.h: enum { CHELIS_VALUE_UNIT = 0 , CHELIS_VALUE_SCALAR = 1 , CHELIS_VALUE_STRING = 2 , CHELIS_VALUE_TENSOR = 3 , CHELIS_VALUE_LIST = 4 , CHELIS_VALUE_TUPLE = 5 , CHELIS_VALUE_DICT = 6 , CHELIS_VALUE_ADT = 7 , CHELIS_VALUE_OPTION = 8 , CHELIS_VALUE_MAPPED_FILE = 9 }",
       "flags": []
     },
     {
@@ -811,21 +921,14 @@
     },
     {
       "kind": "header-struct",
-      "id": "chelis_runtime.h: typedef struct { uint8_t is_some ; uint8_t reserved [ 7 ] ; chelis_scalar value ; } chelis_option_scalar",
+      "id": "chelis_runtime.h: typedef struct { const void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_read_view",
       "flags": [
         "numeric-op"
       ]
     },
     {
       "kind": "header-struct",
-      "id": "chelis_runtime.h: typedef struct { uint8_t is_some ; uint8_t reserved [ 7 ] ; chelis_value value ; } chelis_option_value",
-      "flags": [
-        "numeric-op"
-      ]
-    },
-    {
-      "kind": "header-struct",
-      "id": "chelis_runtime.h: typedef struct { void * data ; const int64_t * shape ; const int64_t * strides ; int64_t size ; int64_t byte_capacity ; int32_t rank ; chelis_dtype dtype ; uint8_t owns_data ; uint8_t reserved [ 2 ] ; } chelis_tensor",
+      "id": "chelis_runtime.h: typedef struct { void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_write_view",
       "flags": [
         "numeric-op"
       ]

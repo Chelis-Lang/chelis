@@ -190,6 +190,13 @@ const HARNESS_INCLUDES: &str = r#"
 #include <string.h>
 #include <stdint.h>
 #include "chelis_runtime.h"
+
+static chelis_dtype harness_dtype(const chelis_tensor *tensor) {
+    return chelis_tensor_read_view(tensor).dtype;
+}
+static const void *harness_data(const chelis_tensor *tensor) {
+    return chelis_tensor_read_view(tensor).data;
+}
 "#;
 
 /// `add(cast(t, f64), cast(t, f64))` from f32 source.  The host
@@ -217,12 +224,12 @@ extern chelis_tensor* composed(chelis_tensor* x);
 int main(void) {{
     float in_data[3] = {{1.5f, 2.5f, 3.5f}};
     int64_t in_shape[1] = {{3}};
-    chelis_tensor* t = chelis_alloc_view(
+    chelis_tensor* t = chelis_tensor_entry_borrow(
         1, in_shape, CHELIS_DTYPE_F32, in_data, (int64_t)sizeof(in_data));
 
     chelis_tensor* out = composed(t);
-    if (out->dtype != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
-    double* d = (double*)out->data;
+    if (harness_dtype(out) != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", harness_dtype(out)); return 1; }}
+    double* d = (const double*)harness_data(out);
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);
     return 0;
 }}
@@ -263,12 +270,12 @@ extern chelis_tensor* composed(chelis_tensor* x);
 int main(void) {{
     float in_data[3] = {{1.5f, 2.5f, 3.5f}};
     int64_t in_shape[1] = {{3}};
-    chelis_tensor* t = chelis_alloc_view(
+    chelis_tensor* t = chelis_tensor_entry_borrow(
         1, in_shape, CHELIS_DTYPE_F32, in_data, (int64_t)sizeof(in_data));
 
     chelis_tensor* out = composed(t);
-    if (out->dtype != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
-    double* d = (double*)out->data;
+    if (harness_dtype(out) != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", harness_dtype(out)); return 1; }}
+    double* d = (const double*)harness_data(out);
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);
     return 0;
 }}
@@ -309,12 +316,12 @@ extern chelis_tensor* composed(chelis_tensor* x);
 int main(void) {{
     float in_data[3] = {{1.5f, 2.5f, 3.5f}};
     int64_t in_shape[1] = {{3}};
-    chelis_tensor* t = chelis_alloc_view(
+    chelis_tensor* t = chelis_tensor_entry_borrow(
         1, in_shape, CHELIS_DTYPE_F32, in_data, (int64_t)sizeof(in_data));
 
     chelis_tensor* out = composed(t);
-    if (out->dtype != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
-    double* d = (double*)out->data;
+    if (harness_dtype(out) != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", harness_dtype(out)); return 1; }}
+    double* d = (const double*)harness_data(out);
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);
     return 0;
 }}
@@ -355,14 +362,14 @@ int main(void) {{
     float in_x[3] = {{2.0f, 3.0f, 4.0f}};
     double in_y[3] = {{0.5, 0.25, 0.125}};
     int64_t in_shape[1] = {{3}};
-    chelis_tensor* tx = chelis_alloc_view(
+    chelis_tensor* tx = chelis_tensor_entry_borrow(
         1, in_shape, CHELIS_DTYPE_F32, in_x, (int64_t)sizeof(in_x));
-    chelis_tensor* ty = chelis_alloc_view(
+    chelis_tensor* ty = chelis_tensor_entry_borrow(
         1, in_shape, CHELIS_DTYPE_F64, in_y, (int64_t)sizeof(in_y));
 
     chelis_tensor* out = composed(tx, ty);
-    if (out->dtype != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
-    double* d = (double*)out->data;
+    if (harness_dtype(out) != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", harness_dtype(out)); return 1; }}
+    double* d = (const double*)harness_data(out);
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);
     return 0;
 }}
@@ -404,12 +411,12 @@ extern chelis_tensor* composed(chelis_tensor* x);
 int main(void) {{
     int32_t in_data[3] = {{7, 11, 13}};
     int64_t in_shape[1] = {{3}};
-    chelis_tensor* t = chelis_alloc_view(
+    chelis_tensor* t = chelis_tensor_entry_borrow(
         1, in_shape, CHELIS_DTYPE_I32, in_data, (int64_t)sizeof(in_data));
 
     chelis_tensor* out = composed(t);
-    if (out->dtype != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
-    double* d = (double*)out->data;
+    if (harness_dtype(out) != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", harness_dtype(out)); return 1; }}
+    double* d = (const double*)harness_data(out);
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);
     return 0;
 }}

@@ -517,12 +517,14 @@ void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int 
 int main() {{
     chelis_tensor *outputs[1] = {{0}};
     {func_name}(NULL, 0, outputs, 1);
-    for (int i = 0; i < outputs[0]->size; i++) {{
+    chelis_read_view output_view = chelis_tensor_read_view(outputs[0]);
+    const float *output_data = (const float *)output_view.data;
+    for (int64_t i = 0; i < output_view.count; i++) {{
         if (i > 0) printf(" ");
-        printf("%.6f", ((float *)outputs[0]->data)[i]);
+        printf("%.6f", output_data[i]);
     }}
     printf("\n");
-    chelis_free(outputs[0]);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }}
 "#

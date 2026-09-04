@@ -10,9 +10,10 @@
 //!   * Zero `memcpy` calls. Explicit copies materialize through the same
 //!     contiguous realization loop used by `realize`, not through raw byte
 //!     copying.
-//!   * Six large `chelis_slot*` backing allocations for the current
-//!     conservative planner: explicit copy materialization plus fused fan-in
-//!     intermediates.
+//!   * Ten independently owned tensor allocations in the Phase 1 baseline:
+//!     explicit copy materialization plus fused fan-in intermediates. Borrowed
+//!     `chelis_slot*` / `chelis_alloc_view` wrappers are absent; shared-storage
+//!     reuse remains disabled until Phase 3's proof-bearing planner.
 //!   * Multiple `parallel for simd` blocks — kernel fusion combines the
 //!     elementwise unary results and the add chain into SIMD-vectorized
 //!     loops without source-level add intermediates.
@@ -20,24 +21,24 @@
 //!     qualifier. This is the linearity → no-aliasing guarantee surfacing in
 //!     the C codegen so the host compiler can vectorize aggressively.
 //!
-//! Net: explicit `copy()` is now visible to the IR/cost surface. The planner
-//! may still reuse backing slots when liveness proves non-overlap, but this
-//! canary no longer asserts that source copies are free.
+//! Net: explicit `copy()` is visible to the IR/cost surface. Phase 1 keeps each
+//! allocation independently owned; Phase 3 may reuse storage only after its
+//! shared proof establishes safe non-overlap.
 //!
 //! ## Cost profile (computed from emitted C)
 //!
 //! For the probe shape `tensor[1024, 1024, f32]` (~4 MiB per buffer):
-//!   * 6 backing slots × (1024×1024×4 B) = **24 MiB allocated by helper**.
+//!   * 10 owned buffers × (1024×1024×4 B) = **40 MiB peak helper storage**.
 //!   * The input `x` itself is borrowed (not allocated) so it does not
 //!     contribute to the helper's allocation footprint.
-//!   * Metadata wrappers are still freed at function epilogue, but backing
-//!     slots are reused as soon as planned liveness permits.
+//!   * Every temporary remains live until the function epilogue. Phase 3 owns
+//!     the shared proof that may safely reintroduce storage reuse.
 //!
 //! Linear projection to a 2 GiB input (~22300×22300 f32 ≈ 2 GiB):
 //!   * Caller-side: 1 × 2 GiB input.
-//!   * Helper-side: 6 × 2 GiB backing slots = **12 GiB peak working set**.
-//!   * Total RAM with the input: ~14 GiB. A later fan-in/in-place fusion pass
-//!     could collapse this further, but that is not part of M2a.
+//!   * Helper-side: 10 × 2 GiB owned buffers = **20 GiB peak working set**.
+//!   * Total RAM with the input: ~22 GiB. Phase 3's shared reuse proof may
+//!     collapse this further; Phase 1 deliberately does not.
 
 use std::fs;
 use std::process::Command;
@@ -68,8 +69,8 @@ fn build_copy_elision_c_source() -> String {
 }
 
 /// Sum of bytes allocated by every `chelis_alloc(N, (int64_t[]){...}, CHELIS_<T>)`
-/// call in the C source. After M2a this approximates the slot-planned helper
-/// working set because slot backing allocations still use `chelis_alloc`.
+/// call in the C source. In the Phase 1 no-reuse baseline every owned temporary
+/// remains live through the final allocation, so this is the helper peak.
 ///
 /// Returns (total_bytes, allocation_count, per_alloc_bytes).
 pub fn measure_alloc_footprint(c_source: &str) -> (usize, usize, Vec<usize>) {
@@ -151,6 +152,8 @@ fn copy_probe_materializes_explicit_copies_without_memcpy() {
     let memcpy_calls = source.matches("memcpy(").count();
     let fused_kernels = source.matches("parallel for simd").count();
     let restrict_qualifiers = source.matches("restrict").count();
+    let borrowed_slot_wrappers = source.matches("chelis_slot").count();
+    let legacy_view_allocations = source.matches("chelis_alloc_view").count();
 
     assert_eq!(
         memcpy_calls, 0,
@@ -159,10 +162,17 @@ fn copy_probe_materializes_explicit_copies_without_memcpy() {
     );
 
     assert_eq!(
-        alloc_calls, 6,
-        "expected 6 C backing-slot allocations after explicit Copy reached \
-         IR. Fewer means copy materialization was optimized away; more means \
-         slot reuse regressed."
+        alloc_calls, 10,
+        "expected the Phase 1 no-reuse baseline to materialize 10 independently \
+         owned C tensor allocations. A different count changes the temporary \
+         ownership/cost profile."
+    );
+
+    assert_eq!(
+        (borrowed_slot_wrappers, legacy_view_allocations),
+        (0, 0),
+        "Phase 1 must not synthesize borrowed slot wrappers or the removed \
+         chelis_alloc_view path; shared-storage reuse requires Phase 3's proof"
     );
 
     assert!(
@@ -189,22 +199,32 @@ fn copy_probe_materializes_explicit_copies_without_memcpy() {
          ({mib:.2} MiB). Per-alloc bytes: {per:?}"
     );
 
-    // For tensor[1024, 1024, f32], each backing slot is 4 MiB. Explicit
-    // copy materialization currently brings this probe to six slots.
-    let expected = 6 * 1024 * 1024 * 4; // 24 MiB
+    // For tensor[1024, 1024, f32], each owned buffer is 4 MiB. Phase 1
+    // materializes ten and releases the nine non-result owners at epilogue.
+    let expected = 10 * 1024 * 1024 * 4; // 40 MiB
     assert_eq!(
         total_bytes, expected,
-        "expected peak C backing-slot footprint of 24 MiB (6 slots × 4 MiB), \
+        "expected peak C owned-buffer footprint of 40 MiB (10 × 4 MiB), \
          got {total_bytes} bytes ({mib:.2} MiB). Per-alloc bytes: {per:?}"
     );
 
+    let last_allocation = source.rfind("chelis_alloc(").expect("owned allocation");
+    let first_terminal_release = source
+        .find("    chelis_tensor_release(t")
+        .expect("terminal tensor release");
+    assert!(
+        first_terminal_release > last_allocation,
+        "the summed allocation footprint is a peak only while every temporary \
+         survives through the final allocation"
+    );
+
     // Linear projection: scale input from 4 MiB (1024×1024 f32) to 2 GiB
-    // (~512× larger). Six backing slots scale to 12 GiB helper-side peak.
+    // (~512× larger). Ten owned buffers scale to a 20 GiB helper-side peak.
     let scale_to_2gib = (2_u64 * 1024 * 1024 * 1024) / (1024 * 1024 * 4);
     let projected_2gib_peak_bytes = (total_bytes as u64) * scale_to_2gib;
     let projected_2gib_peak_gib = projected_2gib_peak_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     eprintln!(
-        "Linear projection to 2 GiB input: helper-side slot footprint ≈ {projected_2gib_peak_gib:.1} GiB \
+        "Linear projection to 2 GiB input: helper-side owned-buffer footprint ≈ {projected_2gib_peak_gib:.1} GiB \
          (excludes the 2 GiB input itself). With the borrowed input: ~{:.1} GiB total.",
         projected_2gib_peak_gib + 2.0
     );

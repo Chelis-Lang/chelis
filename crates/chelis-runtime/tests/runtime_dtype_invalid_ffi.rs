@@ -2,8 +2,8 @@ use std::process::Command;
 use std::ptr;
 
 use chelis_runtime::{
-    chelis_alloc, chelis_alloc_view, chelis_dims, chelis_dtype, chelis_dtype_size, chelis_tensor,
-    chelis_tensor_from_values, chelis_tensor_to_scalar,
+    chelis_alloc, chelis_dtype, chelis_dtype_size, chelis_tensor_entry_borrow,
+    chelis_tensor_from_values,
 };
 
 const CHILD_CASE_ENV: &str = "CHELIS_RUNTIME_DTYPE_INVALID_CHILD_CASE";
@@ -18,28 +18,14 @@ fn invalid_dtype_child() {
         "alloc" => unsafe {
             chelis_alloc(0, ptr::null(), INVALID_DTYPE);
         },
-        "alloc_view" => unsafe {
-            chelis_alloc_view(0, ptr::null(), INVALID_DTYPE, ptr::null_mut(), 0);
+        "entry_borrow" => unsafe {
+            chelis_tensor_entry_borrow(0, ptr::null(), INVALID_DTYPE, ptr::null_mut(), 0);
         },
         "dtype_size" => {
             chelis_dtype_size(INVALID_DTYPE);
         }
         "tensor_from_values" => unsafe {
             chelis_tensor_from_values(ptr::null(), INVALID_DTYPE);
-        },
-        "tensor_field_read" => unsafe {
-            let tensor = chelis_tensor {
-                data: ptr::null_mut(),
-                shape: chelis_dims(ptr::null()),
-                strides: chelis_dims(ptr::null()),
-                size: 1,
-                byte_capacity: 0,
-                rank: 0,
-                dtype: INVALID_DTYPE,
-                owns_data: 0,
-                reserved: [0; 2],
-            };
-            chelis_tensor_to_scalar(&tensor);
         },
         other => panic!("unknown child case {other}"),
     }
@@ -49,13 +35,7 @@ fn invalid_dtype_child() {
 #[test]
 fn every_raw_dtype_ffi_boundary_rejects_before_returning_a_value() {
     let test_binary = std::env::current_exe().expect("current test binary");
-    for case in [
-        "alloc",
-        "alloc_view",
-        "dtype_size",
-        "tensor_from_values",
-        "tensor_field_read",
-    ] {
+    for case in ["alloc", "entry_borrow", "dtype_size", "tensor_from_values"] {
         let output = Command::new(&test_binary)
             .args(["--exact", "invalid_dtype_child", "--nocapture"])
             .env(CHILD_CASE_ENV, case)

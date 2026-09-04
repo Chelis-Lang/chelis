@@ -27,7 +27,7 @@ identity; row order is not semantic and no ordinal is part of any identity.
 | dictionary length | `int64_t chelis_dict_len(const chelis_dict *dict)` |
 | dictionary construction | `chelis_dict *chelis_dict_from_pairs(const chelis_list *pairs)` |
 | dictionary membership | `bool chelis_dict_contains(const chelis_dict *dict, chelis_value key)` |
-| dictionary lookup | `chelis_option_value chelis_dict_get(const chelis_dict *dict, chelis_value key)` |
+| dictionary lookup | `chelis_option *chelis_dict_get(const chelis_dict *dict, chelis_value key)` |
 | dictionary removal | `chelis_dict *chelis_dict_remove(const chelis_dict *dict, chelis_value key)` |
 | dictionary insertion | `chelis_dict *chelis_dict_insert(const chelis_dict *dict, chelis_value key, chelis_value value)` |
 | dictionary merge | `chelis_dict *chelis_dict_merge(const chelis_dict *left, const chelis_dict *right)` |

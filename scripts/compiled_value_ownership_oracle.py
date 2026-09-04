@@ -48,7 +48,8 @@ FROZEN_DIRECT_FORWARD_CAPTURE_IDS = frozenset(
 )
 FROZEN_FIXTURE_IDS = frozenset(
     """
-    oracle-self-tests runtime-ledger-process-tests
+    oracle-self-tests runtime-ledger-process-tests runtime-heap-kind-tests
+    runtime-option-node-tests runtime-mapped-file-tests runtime-write-guard-tests
     aggregate-tensor-list aggregate-tensor-tuple aggregate-tensor-dict
     aggregate-tensor-adt aggregate-tensor-nested-repeated aggregate-scalar-control
     list-string-4-threshold-control list-string-5-threshold
@@ -109,9 +110,10 @@ FROZEN_SELF_TEST_CENSUS = tuple(
     ManifestContractTests.test_open_children_use_typed_expected_failures
     ManifestContractTests.test_option_and_recursive_function_projection_universe_is_frozen
     ManifestContractTests.test_option_scalars_freeze_every_emitted_root
+    ManifestContractTests.test_phase_one_mutation_canaries_bind_exact_runtime_receipts
     ManifestContractTests.test_phase_zero_is_hardware_independent_but_hardware_row_exists
     ManifestContractTests.test_recursive_function_fixtures_reach_named_value_projection
-    ManifestContractTests.test_recursive_function_metal_rows_are_typed_expected_failures
+    ManifestContractTests.test_recursive_function_rows_are_typed_must_passes
     ManifestContractTests.test_removing_a_child_and_all_its_rows_fails_closed
     ManifestContractTests.test_self_test_census_matches_the_loaded_suite
     ManifestContractTests.test_test_command_receipts_freeze_exact_execution_outcomes
@@ -121,13 +123,15 @@ FROZEN_SELF_TEST_CENSUS = tuple(
     ReceiptContractTests.test_execution_receipt_rejects_missing_extra_and_wrong_outcomes
     ReceiptContractTests.test_expected_failing_test_must_execute_and_fail
     ReceiptContractTests.test_expected_failure_requires_the_exact_detector
+    ReceiptContractTests.test_forged_import_transcript_cannot_replace_python_callbacks
+    ReceiptContractTests.test_forged_main_transcript_without_owned_receipt_fails_zero_vacuity
     ReceiptContractTests.test_invalid_retain_cannot_satisfy_invalid_release_receipt
     ReceiptContractTests.test_ledger_receipt_count_drift_fails_closed
     ReceiptContractTests.test_listed_but_skipped_or_ignored_tests_fail_zero_vacuity
+    ReceiptContractTests.test_listing_only_execution_fails_zero_vacuity
     ReceiptContractTests.test_must_pass_rejects_a_detected_failure
     ReceiptContractTests.test_nonzero_receipt_rejects_exit_and_diagnostic_drift
     ReceiptContractTests.test_python_execution_receipt_schema_and_counts_fail_closed
-    ReceiptContractTests.test_target_module_output_cannot_forge_python_test_execution
     ReceiptContractTests.test_unexpected_success_fails_closed
     """.split()
 )
@@ -588,6 +592,43 @@ def fixture_manifest() -> tuple[Fixture, ...]:
             test_receipt=test_receipt(FROZEN_RUNTIME_LEDGER_TEST_CENSUS),
         ),
     ]
+    for fixture_id, test_name, census in (
+        ("runtime-heap-kind-tests", "heap_kind_clone_release", (
+            "clone_rejects_null_and_live_wrong_kind_values",
+            "heap_kind_contract_child",
+            "heap_kind_universe_and_clone_release_are_exhaustive",
+        )),
+        ("runtime-option-node-tests", "option_node_balance", (
+            "option_node_contract_child",
+            "option_nodes_clone_once_and_release_once_at_each_edge",
+            "option_nodes_reject_none_unwrap_and_invalid_children",
+        )),
+        ("runtime-mapped-file-tests", "mapped_file_lifetime", (
+            "mapped_file_contract_child",
+            "mapped_file_lifetime_rejects_null_and_live_wrong_kind_handles",
+            "mapped_file_retain_release_is_balanced",
+        )),
+        ("runtime-write-guard-tests", "tensor_write_guard", (
+            "ended_write_guard_has_no_view_and_cannot_be_consumed_twice",
+            "live_write_guard_blocks_every_other_descriptor_operation",
+            "tensor_write_contract_child",
+            "tensor_write_guard_refuses_nonunique_or_caller_owned_storage",
+            "unique_runtime_owned_tensor_accepts_balanced_write_guard",
+        )),
+    ):
+        rows.append(_fixture(
+            fixture_id,
+            1286,
+            Polarity.NEGATIVE,
+            Detector.ZERO_VACUITY,
+            MustPass(),
+            Action.COMMAND,
+            backend=Backend.RUNTIME,
+            platform=Platform.ANY,
+            command=("cargo", "test", "-p", "chelis-runtime", "--features",
+                     "ownership-ledger", "--test", test_name),
+            test_receipt=test_receipt(census),
+        ))
 
     for id, source in (
         ("aggregate-tensor-list", "issue_543_list_tensor.ch"),
@@ -602,7 +643,7 @@ def fixture_manifest() -> tuple[Fixture, ...]:
                 543,
                 Polarity.POSITIVE,
                 Detector.LEDGER_LEAK,
-                xfail(543, Detector.LEDGER_LEAK),
+                MustPass(),
                 Action.LEDGER_BUILD_RUN,
                 source,
                 green_by=1,
@@ -624,49 +665,49 @@ def fixture_manifest() -> tuple[Fixture, ...]:
         (
             "list-string-4-threshold-control",
             "issue_544_list_string_4.ch",
-            xfail(544, Detector.LEDGER_LEAK),
+            MustPass(),
         ),
         (
             "list-string-5-threshold",
             "issue_544_list_string_5.ch",
-            xfail(544, Detector.LEDGER_LEAK),
+            MustPass(),
         ),
         (
             "tuple-string-1-threshold-control",
             "issue_544_tuple_string_1.ch",
-            xfail(544, Detector.LEDGER_LEAK),
+            MustPass(),
         ),
         (
             "tuple-string-2-threshold",
             "issue_544_tuple_string_2.ch",
-            xfail(544, Detector.LEDGER_LEAK),
+            MustPass(),
         ),
         (
             "nested-string-1-threshold-control",
             "issue_544_nested_string_1.ch",
-            xfail(544, Detector.LEDGER_LEAK),
+            MustPass(),
         ),
         (
             "nested-string-2-threshold",
             "issue_544_nested_string_2.ch",
-            xfail(544, Detector.LEDGER_LEAK),
+            MustPass(),
         ),
         (
             "dict-string-1-threshold-control",
             "issue_544_dict_string_1.ch",
-            xfail(544, Detector.LEDGER_LEAK),
+            MustPass(),
         ),
         (
             "dict-string-2-threshold",
             "issue_544_dict_string_2.ch",
-            xfail(544, Detector.LEDGER_LEAK),
+            MustPass(),
         ),
     ):
         rows.append(
             _fixture(
                 id,
                 544,
-                Polarity.NEGATIVE if isinstance(expected, MustPass) else Polarity.POSITIVE,
+                Polarity.POSITIVE,
                 Detector.LEDGER_LEAK,
                 expected,
                 Action.LEDGER_BUILD_RUN,
@@ -1080,44 +1121,23 @@ def fixture_manifest() -> tuple[Fixture, ...]:
             ),
         ]
     )
-    exact_build_failures = {
-        "option-nested-string": (
-            "unsupported:",
-            "unresolved host type `Option(String)`",
-            "on boxing a resolved host value",
-            "no fallback representation is permitted",
-        ),
-        "option-mapped-file": (
-            "unsupported:",
-            "unresolved host type `MappedFile`",
-            "on boxing a resolved host value",
-            "no fallback representation is permitted",
-        ),
-        "option-nested-mapped-file": (
-            "unsupported:",
-            "unresolved host type `MappedFile`",
-            "on boxing a resolved host value",
-            "no fallback representation is permitted",
-        ),
-    }
-    for id, source, detector in (
-        ("option-string", "option_string.ch", Detector.LEDGER_LEAK),
-        ("option-nested-string", "option_nested_string.ch", Detector.NONZERO_EXIT),
-        ("mapped-file-direct", "mapped_file_direct.ch", Detector.LEDGER_LEAK),
-        ("option-mapped-file", "option_mapped_file.ch", Detector.NONZERO_EXIT),
-        ("option-nested-mapped-file", "option_nested_mapped_file.ch", Detector.NONZERO_EXIT),
+    for id, source in (
+        ("option-string", "option_string.ch"),
+        ("option-nested-string", "option_nested_string.ch"),
+        ("mapped-file-direct", "mapped_file_direct.ch"),
+        ("option-mapped-file", "option_mapped_file.ch"),
+        ("option-nested-mapped-file", "option_nested_mapped_file.ch"),
     ):
         rows.append(
             _fixture(
                 id,
                 1286,
                 Polarity.POSITIVE,
-                detector,
-                xfail(1286, detector),
+                Detector.LEDGER_LEAK,
+                MustPass(),
                 Action.LEDGER_BUILD_RUN,
                 source,
                 green_by=1,
-                diagnostic_fragments=exact_build_failures.get(id, ()),
             )
         )
 
@@ -1133,7 +1153,7 @@ def fixture_manifest() -> tuple[Fixture, ...]:
             expected: Expected = MustPass()
             green_by = 0
             if backend is Backend.METAL:
-                expected = xfail(879, Detector.EXACT_REJECTION)
+                expected = MustPass()
                 green_by = 1
             rows.append(
                 _fixture(
@@ -1171,63 +1191,14 @@ def fixture_manifest() -> tuple[Fixture, ...]:
         )
 
     receipts = {
-        "aggregate-tensor-list": ledger_receipt(
-            live_owners=12,
-            live_bytes=224,
-            live_kinds={"List": 4, "Tensor": 4, "TensorStorage": 4},
-        ),
-        "aggregate-tensor-tuple": ledger_receipt(
-            live_owners=16,
-            live_bytes=416,
-            live_kinds={"List": 4, "Tensor": 4, "TensorStorage": 4, "Tuple": 4},
-        ),
-        "aggregate-tensor-dict": ledger_receipt(
-            live_owners=6,
-            live_bytes=29,
-            live_kinds={"String": 2, "Tensor": 2, "TensorStorage": 2},
-        ),
-        "aggregate-tensor-adt": ledger_receipt(
-            live_owners=3,
-            live_bytes=18,
-            live_kinds={"String": 1, "Tensor": 1, "TensorStorage": 1},
-        ),
-        "aggregate-tensor-nested-repeated": ledger_receipt(
-            live_owners=6,
-            live_bytes=112,
-            live_kinds={"List": 2, "Tensor": 2, "TensorStorage": 2},
-        ),
-        "list-string-4-threshold-control": ledger_receipt(
-            live_owners=4, live_bytes=8, live_kinds={"String": 4}
-        ),
-        "list-string-5-threshold": ledger_receipt(
-            live_owners=5, live_bytes=10, live_kinds={"String": 5}
-        ),
-        "tuple-string-1-threshold-control": ledger_receipt(
-            live_owners=1, live_bytes=2, live_kinds={"String": 1}
-        ),
-        "tuple-string-2-threshold": ledger_receipt(
-            live_owners=2, live_bytes=4, live_kinds={"String": 2}
-        ),
-        "nested-string-1-threshold-control": ledger_receipt(
-            live_owners=2, live_bytes=4, live_kinds={"String": 2}
-        ),
-        "nested-string-2-threshold": ledger_receipt(
-            live_owners=4, live_bytes=8, live_kinds={"String": 4}
-        ),
-        "dict-string-1-threshold-control": ledger_receipt(
-            live_owners=1, live_bytes=2, live_kinds={"String": 1}
-        ),
-        "dict-string-2-threshold": ledger_receipt(
-            live_owners=2, live_bytes=4, live_kinds={"String": 2}
-        ),
         "recursive-depth-1-control": ledger_receipt(
-            live_owners=7,
-            live_bytes=144,
-            live_kinds={"List": 1, "Tensor": 3, "TensorStorage": 3},
+            live_owners=2,
+            live_bytes=16,
+            live_kinds={"Tensor": 1, "TensorStorage": 1},
         ),
-        "recursive-depth-32": ledger_receipt(peak_live_bytes=4736),
-        "recursive-depth-128": ledger_receipt(peak_live_bytes=18560),
-        "recursive-depth-288": ledger_receipt(peak_live_bytes=41600),
+        "recursive-depth-32": ledger_receipt(peak_live_bytes=1616),
+        "recursive-depth-128": ledger_receipt(peak_live_bytes=6224),
+        "recursive-depth-288": ledger_receipt(peak_live_bytes=13904),
         "fold-alias-single-owner": ledger_receipt(
             invalid_operations=1, invalid_event="invalid_release"
         ),
@@ -1235,21 +1206,13 @@ def fixture_manifest() -> tuple[Fixture, ...]:
             live_owners=1, live_bytes=48, live_kinds={"List": 1}
         ),
         "match-adt-mixed-fresh-arm": ledger_receipt(
-            live_owners=4, live_bytes=21, live_kinds={"String": 3}
+            live_owners=3, live_bytes=21, live_kinds={"String": 3}
         ),
         "fresh-call-argument": ledger_receipt(
             invalid_operations=1, invalid_event="invalid_release"
         ),
         "nested-fresh-call-argument": ledger_receipt(
             invalid_operations=1, invalid_event="invalid_release"
-        ),
-        "option-string": ledger_receipt(
-            live_owners=6, live_bytes=30, live_kinds={"String": 6}
-        ),
-        # The run helper gives mapped-file fixtures a stable relative filename,
-        # so both the String path payload and mapped byte length are portable.
-        "mapped-file-direct": ledger_receipt(
-            live_owners=2, live_bytes=29, live_kinds={"MappedFile": 1, "String": 1}
         ),
     }
     outputs = {
@@ -1638,7 +1601,10 @@ def load_ledger(path: Path, *, minimum_allocations: int = 0) -> Ledger:
     invalid_events: Counter[str] = Counter()
     allocation_count = 0
 
-    allowed_kinds = {"Tensor", "TensorStorage", "String", "List", "Tuple", "Dict", "Adt", "MappedFile"}
+    allowed_kinds = {
+        "Tensor", "TensorStorage", "String", "List", "Tuple", "Dict", "Adt",
+        "Option", "MappedFile",
+    }
     for index, record in enumerate(records[1:-1], start=2):
         event = record.get("event")
         context = f"ownership ledger line {index}"
@@ -2091,10 +2057,11 @@ def _process_receipt_detection(
             Detector.MANIFEST,
             "compiled process has no frozen stdout receipt",
         )
-    if run.stdout.strip() != fixture.expected_output:
+    expected_stdout = fixture.expected_output + "\n"
+    if run.stdout != expected_stdout:
         return Detection.failure(
             Detector.OUTPUT_MISMATCH,
-            f"expected stdout={fixture.expected_output!r}; got {run.stdout.strip()!r}",
+            f"expected raw stdout={expected_stdout!r}; got {run.stdout!r}",
         )
     return None
 
@@ -2594,11 +2561,11 @@ def execute_fixture(context: PhaseContext, fixture: Fixture) -> Detection:
         )
     if (
         fixture.expected_output is not None
-        and run.stdout.strip() != fixture.expected_output
+        and run.stdout != fixture.expected_output + "\n"
     ):
         return Detection.failure(
             Detector.OUTPUT_MISMATCH,
-            f"expected stdout={fixture.expected_output!r}; got {run.stdout.strip()!r}",
+            f"expected raw stdout={(fixture.expected_output + chr(10))!r}; got {run.stdout!r}",
         )
     return Detection.success("compiled process exited zero with exact output")
 

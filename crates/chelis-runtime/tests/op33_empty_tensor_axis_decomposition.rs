@@ -26,8 +26,10 @@
 //! ~1.6e19 iterations the unguarded loop would attempt.
 
 use chelis_runtime::{
-    chelis_alloc, chelis_tensor, chelis_tensor_cumsum, chelis_tensor_sort, chelis_tensor_trace,
-    chelis_tuple_get, chelis_value_as_tensor, CHELIS_DTYPE_F32,
+    chelis_alloc, chelis_tensor, chelis_tensor_begin_write, chelis_tensor_borrow_value,
+    chelis_tensor_cumsum, chelis_tensor_end_write, chelis_tensor_numel, chelis_tensor_rank,
+    chelis_tensor_read_view, chelis_tensor_sort, chelis_tensor_trace, chelis_tensor_write_view,
+    chelis_tuple_get, CHELIS_DTYPE_F32,
 };
 use std::env;
 use std::process::{Command, Stdio};
@@ -47,28 +49,43 @@ unsafe fn tensor(shape: &[i64]) -> *mut chelis_tensor {
     chelis_alloc(shape.len() as i32, shape.as_ptr(), CHELIS_DTYPE_F32)
 }
 
+unsafe fn write_f32(tensor: *mut chelis_tensor, values: &[f32]) {
+    let guard = chelis_tensor_begin_write(tensor);
+    let view = chelis_tensor_write_view(guard);
+    assert_eq!(view.count as usize, values.len());
+    view.data
+        .cast::<f32>()
+        .copy_from(values.as_ptr(), values.len());
+    chelis_tensor_end_write(guard);
+}
+
+unsafe fn read_view<T: Copy>(tensor: *const chelis_tensor) -> Vec<T> {
+    let view = chelis_tensor_read_view(tensor);
+    std::slice::from_raw_parts(view.data.cast::<T>(), view.count as usize).to_vec()
+}
+
 fn run_case(case: &str) {
     unsafe {
         match case {
             "cumsum-overflow-axis" => {
                 let input = tensor(&[OVERFLOW_EXTENT, OVERFLOW_EXTENT, 0]);
                 let out = chelis_tensor_cumsum(input, 2);
-                assert_eq!((*out).size, 0);
+                assert_eq!(chelis_tensor_numel(out), 0);
             }
             "cumsum-overflow-negative-axis" => {
                 let input = tensor(&[OVERFLOW_EXTENT, OVERFLOW_EXTENT, 0]);
                 let out = chelis_tensor_cumsum(input, -1);
-                assert_eq!((*out).size, 0);
+                assert_eq!(chelis_tensor_numel(out), 0);
             }
             "cumsum-int64-max-extents" => {
                 let input = tensor(&[i64::MAX, i64::MAX, 0]);
                 let out = chelis_tensor_cumsum(input, 2);
-                assert_eq!((*out).size, 0);
+                assert_eq!(chelis_tensor_numel(out), 0);
             }
             "cumsum-hang-axis" => {
                 let input = tensor(&[HANG_EXTENT, HANG_EXTENT, 0]);
                 let out = chelis_tensor_cumsum(input, 2);
-                assert_eq!((*out).size, 0);
+                assert_eq!(chelis_tensor_numel(out), 0);
             }
             // A middle axis reaches the same prefix product through `outer`
             // alone, with no multiplication to overflow: the spin is the whole
@@ -78,27 +95,27 @@ fn run_case(case: &str) {
             "cumsum-spin-middle-axis" => {
                 let input = tensor(&[i64::MAX, 2, 0]);
                 let out = chelis_tensor_cumsum(input, 1);
-                assert_eq!((*out).size, 0);
+                assert_eq!(chelis_tensor_numel(out), 0);
             }
             "sort-overflow-axis" => {
                 let input = tensor(&[OVERFLOW_EXTENT, OVERFLOW_EXTENT, 0]);
                 let sorted = chelis_tensor_sort(input, 2);
-                let values = chelis_value_as_tensor(chelis_tuple_get(sorted, 0));
-                let indices = chelis_value_as_tensor(chelis_tuple_get(sorted, 1));
-                assert_eq!((*values).size, 0);
-                assert_eq!((*indices).size, 0);
+                let values = chelis_tensor_borrow_value(chelis_tuple_get(sorted, 0));
+                let indices = chelis_tensor_borrow_value(chelis_tuple_get(sorted, 1));
+                assert_eq!(chelis_tensor_numel(values), 0);
+                assert_eq!(chelis_tensor_numel(indices), 0);
             }
             "sort-int64-max-extents" => {
                 let input = tensor(&[i64::MAX, i64::MAX, 0]);
                 let sorted = chelis_tensor_sort(input, 2);
-                let values = chelis_value_as_tensor(chelis_tuple_get(sorted, 0));
-                assert_eq!((*values).size, 0);
+                let values = chelis_tensor_borrow_value(chelis_tuple_get(sorted, 0));
+                assert_eq!(chelis_tensor_numel(values), 0);
             }
             "sort-hang-axis" => {
                 let input = tensor(&[HANG_EXTENT, HANG_EXTENT, 0]);
                 let sorted = chelis_tensor_sort(input, 2);
-                let values = chelis_value_as_tensor(chelis_tuple_get(sorted, 0));
-                assert_eq!((*values).size, 0);
+                let values = chelis_tensor_borrow_value(chelis_tuple_get(sorted, 0));
+                assert_eq!(chelis_tensor_numel(values), 0);
             }
             // `diagonal` puts the diagonal in axis1's slot and drops axis2, so
             // the zero has to sit after the reduced axis for the empty result
@@ -106,68 +123,50 @@ fn run_case(case: &str) {
             "trace-overflow-axis" => {
                 let input = tensor(&[OVERFLOW_EXTENT, OVERFLOW_EXTENT, 1, 0, 1]);
                 let out = chelis_tensor_trace(input, 2, 4);
-                assert_eq!((*out).size, 0);
+                assert_eq!(chelis_tensor_numel(out), 0);
             }
             "trace-int64-max-extents" => {
                 let input = tensor(&[i64::MAX, i64::MAX, 1, 0, 1]);
                 let out = chelis_tensor_trace(input, 2, 4);
-                assert_eq!((*out).size, 0);
+                assert_eq!(chelis_tensor_numel(out), 0);
             }
             "trace-hang-axis" => {
                 let input = tensor(&[HANG_EXTENT, HANG_EXTENT, 1, 0, 1]);
                 let out = chelis_tensor_trace(input, 2, 4);
-                assert_eq!((*out).size, 0);
+                assert_eq!(chelis_tensor_numel(out), 0);
             }
             // Positive controls: nonempty operands with the same operations
             // must still compute exactly.
             "legal-cumsum" => {
                 let input = tensor(&[2, 3]);
-                (*input)
-                    .data
-                    .cast::<f32>()
-                    .copy_from([1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0].as_ptr(), 6);
+                write_f32(input, &[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0]);
                 let out = chelis_tensor_cumsum(input, 1);
-                assert_eq!(
-                    std::slice::from_raw_parts((*out).data.cast::<f32>(), 6),
-                    &[1.0, 3.0, 6.0, 4.0, 9.0, 15.0]
-                );
+                assert_eq!(read_view::<f32>(out), &[1.0, 3.0, 6.0, 4.0, 9.0, 15.0]);
             }
             "legal-sort" => {
                 let input = tensor(&[4]);
-                (*input)
-                    .data
-                    .cast::<f32>()
-                    .copy_from([3.0_f32, 1.0, 4.0, 2.0].as_ptr(), 4);
+                write_f32(input, &[3.0_f32, 1.0, 4.0, 2.0]);
                 let sorted = chelis_tensor_sort(input, 0);
-                let values = chelis_value_as_tensor(chelis_tuple_get(sorted, 0));
-                let indices = chelis_value_as_tensor(chelis_tuple_get(sorted, 1));
-                assert_eq!(
-                    std::slice::from_raw_parts((*values).data.cast::<f32>(), 4),
-                    &[1.0, 2.0, 3.0, 4.0]
-                );
-                assert_eq!(
-                    std::slice::from_raw_parts((*indices).data.cast::<i64>(), 4),
-                    &[1, 3, 0, 2]
-                );
+                let values = chelis_tensor_borrow_value(chelis_tuple_get(sorted, 0));
+                let indices = chelis_tensor_borrow_value(chelis_tuple_get(sorted, 1));
+                assert_eq!(read_view::<f32>(values), &[1.0, 2.0, 3.0, 4.0]);
+                assert_eq!(read_view::<i64>(indices), &[1, 3, 0, 2]);
             }
             "legal-trace" => {
                 let input = tensor(&[3, 3]);
-                (*input).data.cast::<f32>().copy_from(
-                    [1.0_f32, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 4.0].as_ptr(),
-                    9,
-                );
+                write_f32(input, &[1.0_f32, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 4.0]);
                 let out = chelis_tensor_trace(input, 0, 1);
-                assert_eq!((*out).rank, 0);
-                assert_eq!(*(*out).data.cast::<f32>(), 7.0_f32);
+                assert_eq!(chelis_tensor_rank(out), 0);
+                assert_eq!(read_view::<f32>(out), &[7.0_f32]);
             }
             // A zero-extent operand whose other extents are ordinary: the
             // empty path must be correct, not merely fast.
             "legal-empty-small" => {
                 let input = tensor(&[2, 0, 3]);
                 let out = chelis_tensor_cumsum(input, 2);
-                assert_eq!((*out).size, 0);
-                assert_eq!((*out).rank, 3);
-                assert!((*out).data.is_null());
+                assert_eq!(chelis_tensor_numel(out), 0);
+                assert_eq!(chelis_tensor_rank(out), 3);
+                assert!(chelis_tensor_read_view(out).data.is_null());
             }
             other => panic!("unknown empty-axis case: {other}"),
         }

@@ -206,6 +206,13 @@ const HARNESS_INCLUDES: &str = r#"
 
 extern chelis_tensor* chelis_host_reshape_tensor(
     chelis_tensor* input, const chelis_list* shape_values);
+
+static chelis_dtype harness_dtype(const chelis_tensor *tensor) {
+    return chelis_tensor_read_view(tensor).dtype;
+}
+static const void *harness_data(const chelis_tensor *tensor) {
+    return chelis_tensor_read_view(tensor).data;
+}
 "#;
 
 /// Build a `chelis_list` of int64 shape values in the harness.
@@ -213,7 +220,7 @@ const BUILD_SHAPE_LIST_HELPER: &str = r#"
 static chelis_list* build_shape_list_i64(const int64_t* dims, int64_t len) {
     chelis_value* items = (chelis_value*)malloc(sizeof(chelis_value) * (size_t)len);
     for (int64_t i = 0; i < len; ++i) {
-        items[i] = chelis_value_from_scalar(
+        items[i] = chelis_value_box_scalar(
             chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)dims[i]));
     }
     chelis_list* list = chelis_list_from_values(items, len);
@@ -246,15 +253,15 @@ fn cbackend_reshape_tensor_f64() {
 int main(void) {{
     double in_data[4] = {{1.5, 2.5, 3.5, 4.5}};
     int64_t input_shape[1] = {{4}};
-    chelis_tensor* t = chelis_alloc_view(1, input_shape, CHELIS_DTYPE_F64,
+    chelis_tensor* t = chelis_tensor_entry_borrow(1, input_shape, CHELIS_DTYPE_F64,
                                          in_data, sizeof(in_data));
 
     int64_t dims[2] = {{2, 2}};
     chelis_list* shape = build_shape_list_i64(dims, 2);
     chelis_tensor* out = chelis_host_reshape_tensor(t, shape);
-    if (out->dtype != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
-    if (out->size != 4) {{ printf("FAIL_SIZE %lld\n", (long long)out->size); return 1; }}
-    double* d = (double*)out->data;
+    if (harness_dtype(out) != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", harness_dtype(out)); return 1; }}
+    if (chelis_tensor_numel(out) != 4) {{ printf("FAIL_SIZE %lld\n", (long long)chelis_tensor_numel(out)); return 1; }}
+    double* d = (const double*)harness_data(out);
     printf("%.17g %.17g %.17g %.17g\n", d[0], d[1], d[2], d[3]);
     return 0;
 }}
@@ -306,15 +313,15 @@ int main(void) {{
         0x0011223344556677LL
     }};
     int64_t input_shape[1] = {{4}};
-    chelis_tensor* t = chelis_alloc_view(1, input_shape, CHELIS_DTYPE_I64,
+    chelis_tensor* t = chelis_tensor_entry_borrow(1, input_shape, CHELIS_DTYPE_I64,
                                          in_data, sizeof(in_data));
 
     int64_t dims[2] = {{2, 2}};
     chelis_list* shape = build_shape_list_i64(dims, 2);
     chelis_tensor* out = chelis_host_reshape_tensor(t, shape);
-    if (out->dtype != CHELIS_DTYPE_I64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
-    if (out->size != 4) {{ printf("FAIL_SIZE %lld\n", (long long)out->size); return 1; }}
-    int64_t* d = (int64_t*)out->data;
+    if (harness_dtype(out) != CHELIS_DTYPE_I64) {{ printf("FAIL_DTYPE %d\n", harness_dtype(out)); return 1; }}
+    if (chelis_tensor_numel(out) != 4) {{ printf("FAIL_SIZE %lld\n", (long long)chelis_tensor_numel(out)); return 1; }}
+    int64_t* d = (const int64_t*)harness_data(out);
     printf("%llx %llx %llx %llx\n",
         (long long)d[0], (long long)d[1], (long long)d[2], (long long)d[3]);
     return 0;
@@ -356,15 +363,15 @@ fn cbackend_reshape_tensor_f32_control() {
 int main(void) {{
     float in_data[4] = {{1.5f, 2.5f, 3.5f, 4.5f}};
     int64_t input_shape[1] = {{4}};
-    chelis_tensor* t = chelis_alloc_view(1, input_shape, CHELIS_DTYPE_F32,
+    chelis_tensor* t = chelis_tensor_entry_borrow(1, input_shape, CHELIS_DTYPE_F32,
                                          in_data, sizeof(in_data));
 
     int64_t dims[2] = {{2, 2}};
     chelis_list* shape = build_shape_list_i64(dims, 2);
     chelis_tensor* out = chelis_host_reshape_tensor(t, shape);
-    if (out->dtype != CHELIS_DTYPE_F32) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
-    if (out->size != 4) {{ printf("FAIL_SIZE %lld\n", (long long)out->size); return 1; }}
-    float* d = (float*)out->data;
+    if (harness_dtype(out) != CHELIS_DTYPE_F32) {{ printf("FAIL_DTYPE %d\n", harness_dtype(out)); return 1; }}
+    if (chelis_tensor_numel(out) != 4) {{ printf("FAIL_SIZE %lld\n", (long long)chelis_tensor_numel(out)); return 1; }}
+    float* d = (const float*)harness_data(out);
     printf("%.9g %.9g %.9g %.9g\n", d[0], d[1], d[2], d[3]);
     return 0;
 }}
@@ -420,17 +427,17 @@ int main(void) {{
     /* A rank-1 tensor of zero elements. The exact view contract represents
      * empty storage with a null pointer and zero capacity. */
     int64_t input_shape[1] = {{0}};
-    chelis_tensor* t = chelis_alloc_view(1, input_shape, CHELIS_DTYPE_F32,
+    chelis_tensor* t = chelis_tensor_entry_borrow(1, input_shape, CHELIS_DTYPE_F32,
                                          NULL, 0);
 
     int64_t dims[2] = {{4294967296LL, 0}};
     chelis_list* shape = build_shape_list_i64(dims, 2);
     chelis_tensor* out = chelis_host_reshape_tensor(t, shape);
     printf("%d %lld %lld %lld\n",
-           out->rank,
-           (long long)out->shape[0],
-           (long long)out->shape[1],
-           (long long)out->size);
+           chelis_tensor_rank(out),
+           (long long)chelis_tensor_shape(out, 0),
+           (long long)chelis_tensor_shape(out, 1),
+           (long long)chelis_tensor_numel(out));
     return 0;
 }}
 "#

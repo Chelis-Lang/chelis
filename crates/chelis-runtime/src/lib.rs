@@ -12,6 +12,7 @@ use std::ffi::{CStr, CString};
 use std::fs;
 use std::fs::File;
 use std::ptr;
+use std::sync::atomic::{fence, AtomicU8, AtomicUsize, Ordering};
 
 mod decimal_parse;
 pub mod dtype_header;
@@ -78,8 +79,12 @@ pub unsafe trait TensorElement: Sized + Copy {
     ///
     /// # Safety
     ///
-    /// `tensor` must point to a live `chelis_tensor` and remain
-    /// valid for the lifetime of the returned pointer.
+    /// `tensor` must point to a live runtime-owned `chelis_tensor` and remain
+    /// valid for the lifetime of the returned pointer. The caller must hold
+    /// exclusive access to both descriptor and storage for that lifetime:
+    /// there may be no other strong owner, active C write lease, or concurrent
+    /// read/write. This Rust-only escape hatch is intentionally absent from
+    /// the published C header; C callers must use the guarded view API.
     #[inline]
     unsafe fn data_ptr(tensor: *mut chelis_tensor) -> Result<*mut Self, DtypeMismatch> {
         let actual = unsafe { tensor_dtype(tensor, "typed tensor data access") };
@@ -89,7 +94,7 @@ pub unsafe trait TensorElement: Sized + Copy {
                 actual,
             });
         }
-        Ok(unsafe { (*tensor).data as *mut Self })
+        Ok(unsafe { tensor_data(tensor) as *mut Self })
     }
 
     /// Unchecked typed access for hot loops where the caller already
@@ -97,15 +102,15 @@ pub unsafe trait TensorElement: Sized + Copy {
     ///
     /// # Safety
     ///
-    /// As `data_ptr`, plus: caller asserts `(*tensor).dtype ==
-    /// Self::DTYPE`.
+    /// As `data_ptr`, plus: caller asserts the descriptor dtype is
+    /// `Self::DTYPE`.
     #[inline]
     unsafe fn data_ptr_unchecked(tensor: *mut chelis_tensor) -> *mut Self {
         debug_assert_eq!(
             unsafe { tensor_dtype(tensor, "unchecked typed tensor data access") },
             Self::DTYPE
         );
-        unsafe { (*tensor).data as *mut Self }
+        unsafe { tensor_data(tensor) as *mut Self }
     }
 
     /// Element-wise fill.  Default lifts the cast-then-loop pattern
@@ -242,7 +247,10 @@ unsafe impl TensorElement for Bool8 {
 ///
 /// # Safety
 ///
-/// `tensor` must point to a live F32 tensor.
+/// `tensor` must point to a live runtime-owned F32 tensor. The caller must
+/// hold exclusive access to its descriptor and storage, with no other strong
+/// owner or active C write lease. This Rust-only escape hatch is intentionally
+/// absent from `chelis_runtime.h`.
 #[inline]
 pub unsafe fn data_as_f32(tensor: *mut chelis_tensor) -> *mut f32 {
     #[cfg(debug_assertions)]
@@ -250,16 +258,19 @@ pub unsafe fn data_as_f32(tensor: *mut chelis_tensor) -> *mut f32 {
         let dtype = unsafe { tensor_dtype(tensor, "data_as_f32") };
         debug_assert_eq!(dtype, RuntimeDType::F32, "data_as_f32 requires f32 storage");
     }
-    unsafe { (*tensor).data as *mut f32 }
+    unsafe { tensor_data(tensor) as *mut f32 }
 }
 
 /// Const-pointer variant of [`data_as_f32`] for read-side access.
 ///
 /// # Safety
 ///
-/// `tensor` must point to a live F32 tensor.
+/// `tensor` must point to a live F32 tensor and remain valid while the returned
+/// pointer is used. The caller must prevent concurrent mutation for that
+/// duration. This Rust-only escape hatch is intentionally absent from
+/// `chelis_runtime.h`.
 #[inline]
-pub unsafe fn data_as_f32_const(tensor: *const chelis_tensor) -> *mut f32 {
+pub unsafe fn data_as_f32_const(tensor: *const chelis_tensor) -> *const f32 {
     #[cfg(debug_assertions)]
     {
         let dtype = unsafe { tensor_dtype(tensor, "data_as_f32_const") };
@@ -269,7 +280,7 @@ pub unsafe fn data_as_f32_const(tensor: *const chelis_tensor) -> *mut f32 {
             "data_as_f32_const requires f32 storage"
         );
     }
-    unsafe { (*tensor).data as *mut f32 }
+    unsafe { tensor_data(tensor) as *const f32 }
 }
 
 macro_rules! runtime_fail {
@@ -564,6 +575,15 @@ unsafe fn tensor_dtype(tensor: *const chelis_tensor, context: &str) -> RuntimeDT
     unsafe { validate_tensor(tensor, context) }
 }
 
+/// Validate immutable descriptor metadata without consulting the write lease.
+/// Rank, shape, and element count stay readable while a guard is live; only
+/// data observation and owner transitions are excluded by [05-OP-44].
+#[inline]
+unsafe fn tensor_metadata_dtype(tensor: *const chelis_tensor, context: &str) -> RuntimeDType {
+    require_live_kind(tensor.cast(), ownership_ledger::Kind::Tensor, context);
+    unsafe { validate_tensor_metadata(&*tensor, context) }
+}
+
 /// Validate a complete operation input set before any caller reads shape or
 /// data fields. Public [05-OP-33] entries use this route so adding a second or
 /// third operand cannot accidentally reintroduce validate-after-dereference.
@@ -772,11 +792,6 @@ fn validate_data_contract(
         runtime_fail!("Domain: {context} has negative byte capacity {byte_capacity}");
     }
     if required_bytes == 0 {
-        if !data.is_null() || byte_capacity != 0 {
-            runtime_fail!(
-                "Domain: {context} zero-size tensor requires null data and zero capacity"
-            );
-        }
         return;
     }
     if data.is_null() {
@@ -796,25 +811,41 @@ fn validate_data_contract(
     }
 }
 
+struct TensorMetadata {
+    shape: Box<[i64]>,
+    strides: Box<[i64]>,
+    size: i64,
+    rank: c_int,
+    dtype: RuntimeDType,
+    required_bytes: i64,
+}
+
 unsafe fn checked_tensor_metadata(
     rank: c_int,
     shape: *const i64,
     dtype: RuntimeDType,
     context: &str,
-) -> (chelis_dims, chelis_dims, i64, i64) {
+) -> TensorMetadata {
     if rank < 0 {
         runtime_fail!("Domain: {context} has negative rank {rank}");
     }
     if rank == 0 {
         let bytes = i64::try_from(tensor_elem_size(dtype)).expect("dtype widths fit i64");
-        return (chelis_dims(ptr::null()), chelis_dims(ptr::null()), 1, bytes);
+        return TensorMetadata {
+            shape: Box::new([]),
+            strides: Box::new([]),
+            size: 1,
+            rank,
+            dtype,
+            required_bytes: bytes,
+        };
     }
     if shape.is_null() {
         runtime_fail!("Domain: {context} positive rank has null shape");
     }
-    let rank = rank as usize;
-    let mut owned_shape = Vec::with_capacity(rank);
-    for axis in 0..rank {
+    let rank_usize = rank as usize;
+    let mut owned_shape = Vec::with_capacity(rank_usize);
+    for axis in 0..rank_usize {
         let extent = *shape.add(axis);
         if extent < 0 {
             runtime_fail!("Domain: {context} has negative extent {extent} at axis {axis}");
@@ -828,9 +859,9 @@ unsafe fn checked_tensor_metadata(
     // tensor (`[0, i64::MAX, i64::MAX]` has an unrepresentable axis-0 stride),
     // which is an `Overflow` the shape product must not mask.
     let size = checked_extent_product(owned_shape.iter().copied(), context);
-    let mut owned_strides = vec![0_i64; rank];
+    let mut owned_strides = vec![0_i64; rank_usize];
     let mut stride = 1_i64;
-    for axis in (0..rank).rev() {
+    for axis in (0..rank_usize).rev() {
         owned_strides[axis] = stride;
         stride = stride
             .checked_mul(owned_shape[axis])
@@ -841,51 +872,58 @@ unsafe fn checked_tensor_metadata(
         .unwrap_or_else(|| runtime_fail!("Overflow: {context} byte size exceeds int64"));
     usize::try_from(byte_capacity)
         .unwrap_or_else(|_| runtime_fail!("Overflow: {context} byte size exceeds usize"));
-    let shape = chelis_dims(Box::into_raw(owned_shape.into_boxed_slice()).cast::<i64>());
-    let strides = chelis_dims(Box::into_raw(owned_strides.into_boxed_slice()).cast::<i64>());
-    (shape, strides, size, byte_capacity)
-}
-
-unsafe fn release_tensor_metadata(shape: chelis_dims, strides: chelis_dims, rank: c_int) {
-    if rank <= 0 {
-        return;
+    TensorMetadata {
+        shape: owned_shape.into_boxed_slice(),
+        strides: owned_strides.into_boxed_slice(),
+        size,
+        rank,
+        dtype,
+        required_bytes: byte_capacity,
     }
-    let rank = rank as usize;
-    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
-        shape.0 as *mut i64,
-        rank,
-    )));
-    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
-        strides.0 as *mut i64,
-        rank,
-    )));
 }
 
 unsafe fn validate_tensor(tensor: *const chelis_tensor, context: &str) -> RuntimeDType {
-    if tensor.is_null() {
-        runtime_fail!("Domain: {context}: null tensor");
-    }
+    require_live_kind(tensor.cast(), ownership_ledger::Kind::Tensor, context);
     let tensor = &*tensor;
+    if tensor.access.load(Ordering::Acquire) == TENSOR_ACCESS_WRITING {
+        runtime_fail!("Domain: {context}: tensor has an active write guard");
+    }
+    validate_tensor_contents(tensor, context)
+}
+
+unsafe fn validate_tensor_contents(tensor: &chelis_tensor, context: &str) -> RuntimeDType {
+    let dtype = validate_tensor_metadata(tensor, context);
+    if dtype == RuntimeDType::Bool {
+        let data = tensor_storage_data(tensor.storage);
+        for index in 0..tensor.size as usize {
+            let byte = *data.add(index);
+            if Bool8::from_u8(byte).is_none() {
+                runtime_fail!(
+                    "Domain: {context}: bool tensor contains noncanonical byte {byte} at element {index}"
+                );
+            }
+        }
+    }
+    dtype
+}
+
+unsafe fn validate_tensor_metadata(tensor: &chelis_tensor, context: &str) -> RuntimeDType {
     let dtype = require_runtime_dtype(tensor.dtype, context);
-    if tensor.reserved != [0; 2] {
-        runtime_fail!("Domain: {context}: tensor reserved bytes must be zero");
-    }
-    if tensor.owns_data > 1 {
-        runtime_fail!("Domain: {context}: tensor ownership tag must be zero or one");
-    }
     if tensor.rank < 0 {
         runtime_fail!("Domain: {context}: tensor rank is negative");
     }
     if tensor.rank == 0 {
-        if !tensor.shape.is_null() || !tensor.strides.is_null() {
-            runtime_fail!("Domain: {context}: rank-zero tensor metadata must be null");
+        if !tensor.shape.is_empty() || !tensor.strides.is_empty() {
+            runtime_fail!("Domain: {context}: rank-zero tensor metadata must be empty");
         }
         if tensor.size != 1 {
             runtime_fail!("Domain: {context}: rank-zero tensor must contain one element");
         }
     } else {
-        if tensor.shape.is_null() || tensor.strides.is_null() {
-            runtime_fail!("Domain: {context}: positive-rank tensor metadata is null");
+        if tensor.shape.len() != tensor.rank as usize
+            || tensor.strides.len() != tensor.rank as usize
+        {
+            runtime_fail!("Domain: {context}: tensor metadata length does not match rank");
         }
         let mut size = 1_i64;
         let mut stride = 1_i64;
@@ -910,80 +948,88 @@ unsafe fn validate_tensor(tensor: *const chelis_tensor, context: &str) -> Runtim
         .size
         .checked_mul(tensor_elem_size(dtype) as i64)
         .unwrap_or_else(|| runtime_fail!("Overflow: {context}: tensor byte size overflow"));
-    validate_data_contract(
-        tensor.data,
-        tensor.byte_capacity,
-        required_bytes,
-        dtype,
+    require_live_kind(
+        tensor.storage.cast(),
+        ownership_ledger::Kind::TensorStorage,
         context,
     );
-    if dtype == RuntimeDType::Bool {
-        for index in 0..tensor.size as usize {
-            let byte = *tensor.data.add(index);
-            if Bool8::from_u8(byte).is_none() {
-                runtime_fail!(
-                    "Domain: {context}: bool tensor contains noncanonical byte {byte} at element {index}"
-                );
-            }
-        }
-    }
+    let storage = &*tensor.storage;
+    let data = tensor_storage_data(tensor.storage);
+    validate_data_contract(data, storage.byte_capacity, required_bytes, dtype, context);
     dtype
 }
 
-#[repr(transparent)]
-#[derive(Clone, Copy)]
-pub struct chelis_dims(pub *const i64);
-
-impl chelis_dims {
-    #[inline]
-    pub const fn as_ptr(self) -> *const i64 {
-        self.0
-    }
-
-    #[inline]
-    pub const fn is_null(self) -> bool {
-        self.0.is_null()
-    }
-
-    #[inline]
-    pub const fn add(self, count: usize) -> *const i64 {
-        self.0.wrapping_add(count)
-    }
+#[repr(C)]
+struct HeapHeader {
+    kind: ownership_ledger::Kind,
+    strong: AtomicUsize,
 }
 
-impl std::ops::Index<usize> for chelis_dims {
-    type Output = i64;
-
-    #[inline]
-    fn index(&self, index: usize) -> &Self::Output {
-        unsafe { &*self.0.add(index) }
+impl HeapHeader {
+    fn new(kind: ownership_ledger::Kind) -> Self {
+        Self {
+            kind,
+            strong: AtomicUsize::new(1),
+        }
     }
 }
 
 #[repr(C)]
 pub struct chelis_tensor {
-    /// Raw byte pointer to the tensor's data buffer.  Decode via
-    /// `TensorElement::data_ptr` or `TensorElement::data_ptr_unchecked`
-    /// after dispatching on `dtype`.  The pre-PR-1 typing as `*mut
-    /// f32` silently produced wrong reads for any dtype with element
-    /// size != 4 bytes (the `CRuntime-F32Coupling` bug class).  ABI
-    /// compatible with the C header's `float *data` (both 8-byte
-    /// pointers); the C side casts at use.
-    pub data: *mut u8,
-    /// chelis#1112: extents, strides, and the element count carry `i64`,
-    /// mirroring the header's `int64_t` fields. The language's extent dtype
-    /// is int64 ([05-DIM-2]), so a shape crosses this boundary at its
-    /// declared dtype ([04-NUM-11]) instead of being truncated into a
-    /// 32-bit carrier. `rank` and `dtype` stay `c_int`: rank and the dtype
-    /// tag are axis-domain quantities ([05-DIM-1]).
-    pub shape: chelis_dims,
-    pub strides: chelis_dims,
-    pub size: i64,
-    pub byte_capacity: i64,
-    pub rank: c_int,
+    header: HeapHeader,
+    storage: *mut TensorStorage,
+    shape: Box<[i64]>,
+    strides: Box<[i64]>,
+    size: i64,
+    rank: c_int,
+    dtype: chelis_dtype,
+    /// Serializes descriptor lifetime operations with the embedded write
+    /// lease. IDLE -> LOCKED is a transient runtime transition; WRITING is
+    /// the public guard lifetime.
+    access: AtomicU8,
+    write_guard: chelis_tensor_write,
+}
+
+const TENSOR_ACCESS_IDLE: u8 = 0;
+const TENSOR_ACCESS_LOCKED: u8 = 1;
+const TENSOR_ACCESS_WRITING: u8 = 2;
+
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TensorStorageProvenance {
+    RuntimeOwned,
+    EntryBorrowed,
+}
+
+#[repr(C)]
+struct TensorStorage {
+    header: HeapHeader,
+    data: *mut u8,
+    byte_capacity: i64,
+    provenance: TensorStorageProvenance,
+}
+
+#[repr(C)]
+pub struct chelis_tensor_write {
+    tensor: *mut chelis_tensor,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct chelis_read_view {
+    pub data: *const libc::c_void,
+    pub count: i64,
     pub dtype: chelis_dtype,
-    pub owns_data: u8,
-    pub reserved: [u8; 2],
+    pub reserved: [u8; 7],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct chelis_write_view {
+    pub data: *mut libc::c_void,
+    pub count: i64,
+    pub dtype: chelis_dtype,
+    pub reserved: [u8; 7],
 }
 
 #[repr(C)]
@@ -1000,14 +1046,6 @@ pub struct chelis_scalar {
     pub bits: u64,
 }
 
-#[repr(C)]
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct chelis_option_scalar {
-    pub is_some: u8,
-    pub reserved: [u8; 7],
-    pub value: chelis_scalar,
-}
-
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct chelis_value_tag(pub u8);
@@ -1020,6 +1058,8 @@ pub const CHELIS_VALUE_LIST: chelis_value_tag = chelis_value_tag(4);
 pub const CHELIS_VALUE_TUPLE: chelis_value_tag = chelis_value_tag(5);
 pub const CHELIS_VALUE_DICT: chelis_value_tag = chelis_value_tag(6);
 pub const CHELIS_VALUE_ADT: chelis_value_tag = chelis_value_tag(7);
+pub const CHELIS_VALUE_OPTION: chelis_value_tag = chelis_value_tag(8);
+pub const CHELIS_VALUE_MAPPED_FILE: chelis_value_tag = chelis_value_tag(9);
 
 impl chelis_value_tag {
     pub const CHELIS_VALUE_UNIT: Self = CHELIS_VALUE_UNIT;
@@ -1030,6 +1070,8 @@ impl chelis_value_tag {
     pub const CHELIS_VALUE_TUPLE: Self = CHELIS_VALUE_TUPLE;
     pub const CHELIS_VALUE_DICT: Self = CHELIS_VALUE_DICT;
     pub const CHELIS_VALUE_ADT: Self = CHELIS_VALUE_ADT;
+    pub const CHELIS_VALUE_OPTION: Self = CHELIS_VALUE_OPTION;
+    pub const CHELIS_VALUE_MAPPED_FILE: Self = CHELIS_VALUE_MAPPED_FILE;
 }
 
 #[repr(C)]
@@ -1045,6 +1087,8 @@ pub union chelis_value_payload {
     pub tuple: *mut chelis_tuple,
     pub dict: *mut chelis_dict,
     pub adt: *mut chelis_adt,
+    pub option: *mut chelis_option,
+    pub mapped_file: *mut chelis_mapped_file,
 }
 
 unsafe fn chelis_flat_to_indices(flat: i64, shape: *const i64, rank: c_int, out: *mut i64) {
@@ -1070,10 +1114,10 @@ unsafe fn chelis_indices_to_flat(indices: *const i64, strides: *const i64, rank:
 /// bytes/elem this needs to dispatch on dtype.
 unsafe fn read_index_slot(t: *const chelis_tensor, linear: usize, dtype: RuntimeDType) -> i64 {
     match dtype {
-        RuntimeDType::I64 => *((*t).data as *const i64).add(linear),
-        RuntimeDType::I32 => *((*t).data as *const i32).add(linear) as i64,
-        RuntimeDType::I16 => *((*t).data as *const i16).add(linear) as i64,
-        RuntimeDType::I8 => *((*t).data as *const i8).add(linear) as i64,
+        RuntimeDType::I64 => *(tensor_data(t) as *const i64).add(linear),
+        RuntimeDType::I32 => *(tensor_data(t) as *const i32).add(linear) as i64,
+        RuntimeDType::I16 => *(tensor_data(t) as *const i16).add(linear) as i64,
+        RuntimeDType::I8 => *(tensor_data(t) as *const i8).add(linear) as i64,
         RuntimeDType::Bool
         | RuntimeDType::Bf16
         | RuntimeDType::F16
@@ -1111,20 +1155,6 @@ pub struct chelis_dict_entry {
     pub value: chelis_value,
 }
 
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct chelis_option_value {
-    pub is_some: u8,
-    pub reserved: [u8; 7],
-    pub value: chelis_value,
-}
-
-const ZERO_SCALAR: chelis_scalar = chelis_scalar {
-    dtype: CHELIS_DTYPE_F32,
-    reserved: [0; 7],
-    bits: 0,
-};
-
 fn scalar_used_bits(dtype: RuntimeDType) -> u32 {
     match dtype {
         RuntimeDType::F64 | RuntimeDType::I64 => 64,
@@ -1153,6 +1183,18 @@ unsafe fn payload_bytes(value: &chelis_value_payload) -> &[u8; 16] {
     &*(value as *const chelis_value_payload).cast::<[u8; 16]>()
 }
 
+unsafe fn validate_heap_payload(value: chelis_value, context: &str) {
+    let handle = value.payload.handle;
+    if handle.is_null() {
+        runtime_fail!("Domain: {context}: heap value has null handle");
+    }
+    let mut canonical: chelis_value_payload = std::mem::zeroed();
+    canonical.handle = handle;
+    if payload_bytes(&value.payload) != payload_bytes(&canonical) {
+        runtime_fail!("Domain: {context}: unused heap payload bytes must be zero");
+    }
+}
+
 unsafe fn validate_value(value: chelis_value, context: &str) {
     if value.reserved != [0; 7] {
         runtime_fail!("Domain: {context}: value reserved bytes must be zero");
@@ -1166,18 +1208,49 @@ unsafe fn validate_value(value: chelis_value, context: &str) {
         CHELIS_VALUE_SCALAR => {
             validate_scalar(value.payload.scalar, context);
         }
-        CHELIS_VALUE_STRING | CHELIS_VALUE_TENSOR | CHELIS_VALUE_LIST | CHELIS_VALUE_TUPLE
-        | CHELIS_VALUE_DICT | CHELIS_VALUE_ADT => {
-            let bytes = payload_bytes(&value.payload);
-            if value.payload.handle.is_null() {
-                runtime_fail!("Domain: {context}: heap value has null handle");
-            }
-            if bytes[std::mem::size_of::<*mut libc::c_void>()..]
-                .iter()
-                .any(|byte| *byte != 0)
-            {
-                runtime_fail!("Domain: {context}: unused heap payload bytes must be zero");
-            }
+        CHELIS_VALUE_STRING => {
+            validate_heap_payload(value, context);
+            require_live_kind(
+                value.payload.handle,
+                ownership_ledger::Kind::String,
+                context,
+            );
+        }
+        CHELIS_VALUE_TENSOR => {
+            validate_heap_payload(value, context);
+            validate_tensor(value.payload.tensor, context);
+        }
+        CHELIS_VALUE_LIST => {
+            validate_heap_payload(value, context);
+            require_live_kind(value.payload.handle, ownership_ledger::Kind::List, context);
+        }
+        CHELIS_VALUE_TUPLE => {
+            validate_heap_payload(value, context);
+            require_live_kind(value.payload.handle, ownership_ledger::Kind::Tuple, context);
+        }
+        CHELIS_VALUE_DICT => {
+            validate_heap_payload(value, context);
+            require_live_kind(value.payload.handle, ownership_ledger::Kind::Dict, context);
+        }
+        CHELIS_VALUE_ADT => {
+            validate_heap_payload(value, context);
+            require_live_kind(value.payload.handle, ownership_ledger::Kind::Adt, context);
+        }
+        CHELIS_VALUE_OPTION => {
+            validate_heap_payload(value, context);
+            require_live_kind(
+                value.payload.handle,
+                ownership_ledger::Kind::Option,
+                context,
+            );
+        }
+        CHELIS_VALUE_MAPPED_FILE => {
+            validate_heap_payload(value, context);
+            require_live_kind(
+                value.payload.handle,
+                ownership_ledger::Kind::MappedFile,
+                context,
+            );
         }
         other => runtime_fail!("Domain: {context}: invalid value tag {}", other.0),
     }
@@ -1198,32 +1271,38 @@ unsafe fn value_from_handle(tag: chelis_value_tag, handle: *mut libc::c_void) ->
 
 #[repr(C)]
 pub struct chelis_list {
-    refcount: usize,
+    header: HeapHeader,
     items: Vec<chelis_value>,
 }
 
 #[repr(C)]
 pub struct chelis_tuple {
-    refcount: usize,
+    header: HeapHeader,
     items: Vec<chelis_value>,
 }
 
 #[repr(C)]
 pub struct chelis_dict {
-    refcount: usize,
+    header: HeapHeader,
     entries: Vec<chelis_dict_entry>,
 }
 
 #[repr(C)]
 pub struct chelis_adt {
-    refcount: usize,
+    header: HeapHeader,
     ctor: chelis_string,
     fields: Vec<chelis_value>,
 }
 
 #[repr(C)]
+pub struct chelis_option {
+    header: HeapHeader,
+    value: Option<chelis_value>,
+}
+
+#[repr(C)]
 pub struct chelis_mapped_file {
-    refcount: usize,
+    header: HeapHeader,
     mmap: Mmap,
 }
 
@@ -1245,16 +1324,44 @@ fn ledger_allocation(
     }
 }
 
+unsafe fn require_live_kind(
+    pointer: *const libc::c_void,
+    expected: ownership_ledger::Kind,
+    site: &str,
+) -> &'static HeapHeader {
+    if pointer.is_null() {
+        runtime_fail!("Domain: {site}: null heap handle");
+    }
+    let header = &*pointer.cast::<HeapHeader>();
+    if header.kind != expected {
+        runtime_fail!(
+            "Domain: {site}: heap kind mismatch (expected {}, got {})",
+            expected.name(),
+            header.kind.name()
+        );
+    }
+    if header.strong.load(Ordering::Relaxed) == 0 {
+        runtime_fail!("Domain: {site}: heap handle has no live strong owner");
+    }
+    header
+}
+
 fn new_list(items: Vec<chelis_value>, site: &str) -> *mut chelis_list {
     let bytes = (items.capacity() as u64).saturating_mul(LEDGER_VALUE_SLOT_BYTES);
-    let pointer = Box::into_raw(Box::new(chelis_list { refcount: 1, items }));
+    let pointer = Box::into_raw(Box::new(chelis_list {
+        header: HeapHeader::new(ownership_ledger::Kind::List),
+        items,
+    }));
     ledger_allocation(pointer.cast(), ownership_ledger::Kind::List, bytes, site);
     pointer
 }
 
 fn new_tuple(items: Vec<chelis_value>, site: &str) -> *mut chelis_tuple {
     let bytes = (items.capacity() as u64).saturating_mul(LEDGER_VALUE_SLOT_BYTES);
-    let pointer = Box::into_raw(Box::new(chelis_tuple { refcount: 1, items }));
+    let pointer = Box::into_raw(Box::new(chelis_tuple {
+        header: HeapHeader::new(ownership_ledger::Kind::Tuple),
+        items,
+    }));
     ledger_allocation(pointer.cast(), ownership_ledger::Kind::Tuple, bytes, site);
     pointer
 }
@@ -1262,7 +1369,7 @@ fn new_tuple(items: Vec<chelis_value>, site: &str) -> *mut chelis_tuple {
 fn new_dict(entries: Vec<chelis_dict_entry>, site: &str) -> *mut chelis_dict {
     let bytes = (entries.capacity() as u64).saturating_mul(LEDGER_DICT_ENTRY_BYTES);
     let pointer = Box::into_raw(Box::new(chelis_dict {
-        refcount: 1,
+        header: HeapHeader::new(ownership_ledger::Kind::Dict),
         entries,
     }));
     ledger_allocation(pointer.cast(), ownership_ledger::Kind::Dict, bytes, site);
@@ -1272,7 +1379,7 @@ fn new_dict(entries: Vec<chelis_dict_entry>, site: &str) -> *mut chelis_dict {
 fn new_adt(ctor: chelis_string, fields: Vec<chelis_value>, site: &str) -> *mut chelis_adt {
     let bytes = (fields.capacity() as u64).saturating_mul(LEDGER_VALUE_SLOT_BYTES);
     let pointer = Box::into_raw(Box::new(chelis_adt {
-        refcount: 1,
+        header: HeapHeader::new(ownership_ledger::Kind::Adt),
         ctor,
         fields,
     }));
@@ -1280,9 +1387,26 @@ fn new_adt(ctor: chelis_string, fields: Vec<chelis_value>, site: &str) -> *mut c
     pointer
 }
 
+fn new_option(value: Option<chelis_value>, site: &str) -> *mut chelis_option {
+    let pointer = Box::into_raw(Box::new(chelis_option {
+        header: HeapHeader::new(ownership_ledger::Kind::Option),
+        value,
+    }));
+    ledger_allocation(
+        pointer.cast(),
+        ownership_ledger::Kind::Option,
+        value.map_or(0, |_| LEDGER_VALUE_SLOT_BYTES),
+        site,
+    );
+    pointer
+}
+
 fn new_mapped_file(mmap: Mmap, site: &str) -> *mut chelis_mapped_file {
     let bytes = mmap.len() as u64;
-    let pointer = Box::into_raw(Box::new(chelis_mapped_file { refcount: 1, mmap }));
+    let pointer = Box::into_raw(Box::new(chelis_mapped_file {
+        header: HeapHeader::new(ownership_ledger::Kind::MappedFile),
+        mmap,
+    }));
     ledger_allocation(
         pointer.cast(),
         ownership_ledger::Kind::MappedFile,
@@ -1303,8 +1427,9 @@ fn resize_list_ledger(list: *mut chelis_list, site: &str) {
     }
 }
 
+#[repr(C)]
 struct RuntimeString {
-    refcount: usize,
+    header: HeapHeader,
     value: String,
     cstring: CString,
     /// Unicode scalar values in `value`, counted once at construction.
@@ -1321,145 +1446,230 @@ struct RuntimeString {
     char_count: usize,
 }
 
-unsafe fn retain_string_handle(handle: *mut RuntimeString) {
-    if !handle.is_null() {
-        if !ownership_ledger::retain(handle.cast(), "retain_string_handle") {
-            runtime_fail!("compiled ownership ledger rejected string retain");
+unsafe fn retain_header(
+    pointer: *const libc::c_void,
+    expected: ownership_ledger::Kind,
+    site: &str,
+) {
+    let header = require_live_kind(pointer, expected, site);
+    let mut current = header.strong.load(Ordering::Relaxed);
+    loop {
+        if current == 0 {
+            runtime_fail!("Domain: {site}: retain requires a live strong owner");
         }
-        (*handle).refcount += 1;
+        if current == usize::MAX {
+            runtime_fail!("Overflow: {site}: strong-owner count overflow");
+        }
+        match header.strong.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
+    }
+    if !ownership_ledger::retain(pointer, site) {
+        runtime_fail!("compiled ownership ledger rejected retain at {site}");
     }
 }
 
-unsafe fn release_string_handle(handle: *mut RuntimeString) {
-    if !handle.is_null() {
-        if !ownership_ledger::release(handle.cast(), "release_string_handle") {
-            runtime_fail!("compiled ownership ledger detected invalid string release");
+unsafe fn release_header(
+    pointer: *const libc::c_void,
+    expected: ownership_ledger::Kind,
+    site: &str,
+    ledger_failure: &str,
+) -> bool {
+    // The optional ledger goes first so its Phase-0 tombstone can record a
+    // post-final-release probe without this runtime dereferencing a stale
+    // pointer. That probe is instrumentation only: without the feature the
+    // caller's live-handle precondition remains authoritative.
+    if !ownership_ledger::release(pointer, site) {
+        runtime_fail!("{ledger_failure}");
+    }
+    let header = require_live_kind(pointer, expected, site);
+    let previous = header
+        .strong
+        .fetch_update(Ordering::Release, Ordering::Relaxed, |current| {
+            current.checked_sub(1)
+        })
+        .unwrap_or_else(|_| runtime_fail!("Domain: {site}: release without a strong owner"));
+    if previous == 1 {
+        fence(Ordering::Acquire);
+        true
+    } else {
+        false
+    }
+}
+
+unsafe fn finish_finalization(
+    pointer: *const libc::c_void,
+    _kind: ownership_ledger::Kind,
+    site: &str,
+) {
+    if !ownership_ledger::finalize(pointer, site) {
+        runtime_fail!("compiled ownership ledger rejected finalization at {site}");
+    }
+}
+
+unsafe fn finalize_heap(kind: ownership_ledger::Kind, pointer: *mut libc::c_void, site: &str) {
+    match kind {
+        ownership_ledger::Kind::String => {
+            finish_finalization(pointer, kind, site);
+            drop(Box::from_raw(pointer.cast::<RuntimeString>()));
         }
-        let inner = &mut *handle;
-        inner.refcount -= 1;
-        if inner.refcount == 0 {
-            if !ownership_ledger::finalize(handle.cast(), "release_string_handle") {
-                runtime_fail!("compiled ownership ledger rejected string finalization");
+        ownership_ledger::Kind::Tensor => {
+            let tensor = Box::from_raw(pointer.cast::<chelis_tensor>());
+            release_tensor_storage(tensor.storage, "chelis_tensor descriptor finalizer");
+            finish_finalization(pointer, kind, site);
+            drop(tensor);
+        }
+        ownership_ledger::Kind::TensorStorage => {
+            let storage = Box::from_raw(pointer.cast::<TensorStorage>());
+            let data = tensor_storage_data(&*storage);
+            if storage.provenance == TensorStorageProvenance::RuntimeOwned && !data.is_null() {
+                libc::free(data.cast());
             }
-            drop(Box::from_raw(handle));
+            finish_finalization(pointer, kind, site);
+            drop(storage);
         }
-    }
-}
-
-unsafe fn retain_list_ptr(list: *mut chelis_list) {
-    if !list.is_null() {
-        if !ownership_ledger::retain(list.cast(), "retain_list_ptr") {
-            runtime_fail!("compiled ownership ledger rejected list retain");
-        }
-        (*list).refcount += 1;
-    }
-}
-
-unsafe fn retain_tuple_ptr(tuple: *mut chelis_tuple) {
-    if !tuple.is_null() {
-        if !ownership_ledger::retain(tuple.cast(), "retain_tuple_ptr") {
-            runtime_fail!("compiled ownership ledger rejected tuple retain");
-        }
-        (*tuple).refcount += 1;
-    }
-}
-
-unsafe fn retain_dict_ptr(dict: *mut chelis_dict) {
-    if !dict.is_null() {
-        if !ownership_ledger::retain(dict.cast(), "retain_dict_ptr") {
-            runtime_fail!("compiled ownership ledger rejected dict retain");
-        }
-        (*dict).refcount += 1;
-    }
-}
-
-unsafe fn retain_adt_ptr(adt: *mut chelis_adt) {
-    if !adt.is_null() {
-        if !ownership_ledger::retain(adt.cast(), "retain_adt_ptr") {
-            runtime_fail!("compiled ownership ledger rejected adt retain");
-        }
-        (*adt).refcount += 1;
-    }
-}
-
-unsafe fn release_list_ptr(list: *mut chelis_list) {
-    if !list.is_null() {
-        if !ownership_ledger::release(list.cast(), "release_list_ptr") {
-            runtime_fail!("compiled ownership ledger detected invalid list release");
-        }
-        let inner = &mut *list;
-        inner.refcount -= 1;
-        if inner.refcount == 0 {
-            for value in &inner.items {
+        ownership_ledger::Kind::List => {
+            let list = Box::from_raw(pointer.cast::<chelis_list>());
+            for value in &list.items {
                 chelis_value_release(*value);
             }
-            if !ownership_ledger::finalize(list.cast(), "release_list_ptr") {
-                runtime_fail!("compiled ownership ledger rejected list finalization");
-            }
-            drop(Box::from_raw(list));
+            finish_finalization(pointer, kind, site);
+            drop(list);
         }
-    }
-}
-
-unsafe fn release_tuple_ptr(tuple: *mut chelis_tuple) {
-    if !tuple.is_null() {
-        if !ownership_ledger::release(tuple.cast(), "release_tuple_ptr") {
-            runtime_fail!("compiled ownership ledger detected invalid tuple release");
-        }
-        let inner = &mut *tuple;
-        inner.refcount -= 1;
-        if inner.refcount == 0 {
-            for value in &inner.items {
+        ownership_ledger::Kind::Tuple => {
+            let tuple = Box::from_raw(pointer.cast::<chelis_tuple>());
+            for value in &tuple.items {
                 chelis_value_release(*value);
             }
-            if !ownership_ledger::finalize(tuple.cast(), "release_tuple_ptr") {
-                runtime_fail!("compiled ownership ledger rejected tuple finalization");
-            }
-            drop(Box::from_raw(tuple));
+            finish_finalization(pointer, kind, site);
+            drop(tuple);
         }
-    }
-}
-
-unsafe fn release_dict_ptr(dict: *mut chelis_dict) {
-    if !dict.is_null() {
-        if !ownership_ledger::release(dict.cast(), "release_dict_ptr") {
-            runtime_fail!("compiled ownership ledger detected invalid dict release");
-        }
-        let inner = &mut *dict;
-        inner.refcount -= 1;
-        if inner.refcount == 0 {
-            for entry in &inner.entries {
+        ownership_ledger::Kind::Dict => {
+            let dict = Box::from_raw(pointer.cast::<chelis_dict>());
+            for entry in &dict.entries {
                 chelis_value_release(entry.key);
                 chelis_value_release(entry.value);
             }
-            if !ownership_ledger::finalize(dict.cast(), "release_dict_ptr") {
-                runtime_fail!("compiled ownership ledger rejected dict finalization");
-            }
-            drop(Box::from_raw(dict));
+            finish_finalization(pointer, kind, site);
+            drop(dict);
         }
-    }
-}
-
-unsafe fn release_adt_ptr(adt: *mut chelis_adt) {
-    if !adt.is_null() {
-        if !ownership_ledger::release(adt.cast(), "release_adt_ptr") {
-            runtime_fail!("compiled ownership ledger detected invalid adt release");
-        }
-        let inner = &mut *adt;
-        inner.refcount -= 1;
-        if inner.refcount == 0 {
-            chelis_string_release(inner.ctor);
-            for field in &inner.fields {
+        ownership_ledger::Kind::Adt => {
+            let adt = Box::from_raw(pointer.cast::<chelis_adt>());
+            chelis_string_release(adt.ctor);
+            for field in &adt.fields {
                 chelis_value_release(*field);
             }
-            if !ownership_ledger::finalize(adt.cast(), "release_adt_ptr") {
-                runtime_fail!("compiled ownership ledger rejected adt finalization");
+            finish_finalization(pointer, kind, site);
+            drop(adt);
+        }
+        ownership_ledger::Kind::Option => {
+            let option = Box::from_raw(pointer.cast::<chelis_option>());
+            if let Some(value) = option.value {
+                chelis_value_release(value);
             }
-            drop(Box::from_raw(adt));
+            finish_finalization(pointer, kind, site);
+            drop(option);
+        }
+        ownership_ledger::Kind::MappedFile => {
+            finish_finalization(pointer, kind, site);
+            drop(Box::from_raw(pointer.cast::<chelis_mapped_file>()));
         }
     }
 }
 
+unsafe fn release_tensor_storage(storage: *mut TensorStorage, site: &str) {
+    if release_header(
+        storage.cast(),
+        ownership_ledger::Kind::TensorStorage,
+        site,
+        "compiled ownership ledger detected invalid tensor-storage release",
+    ) {
+        finalize_heap(ownership_ledger::Kind::TensorStorage, storage.cast(), site);
+    }
+}
+
+macro_rules! heap_ref_ops {
+    ($retain:ident, $release:ident, $ty:ty, $kind:ident, $ledger_failure:literal) => {
+        unsafe fn $retain(pointer: *mut $ty) {
+            retain_header(
+                pointer.cast(),
+                ownership_ledger::Kind::$kind,
+                stringify!($retain),
+            );
+        }
+
+        unsafe fn $release(pointer: *mut $ty) {
+            if release_header(
+                pointer.cast(),
+                ownership_ledger::Kind::$kind,
+                stringify!($release),
+                $ledger_failure,
+            ) {
+                finalize_heap(
+                    ownership_ledger::Kind::$kind,
+                    pointer.cast(),
+                    stringify!($release),
+                );
+            }
+        }
+    };
+}
+
+heap_ref_ops!(
+    retain_string_handle,
+    release_string_handle,
+    RuntimeString,
+    String,
+    "compiled ownership ledger detected invalid string release"
+);
+heap_ref_ops!(
+    retain_list_ptr,
+    release_list_ptr,
+    chelis_list,
+    List,
+    "compiled ownership ledger detected invalid list release"
+);
+heap_ref_ops!(
+    retain_tuple_ptr,
+    release_tuple_ptr,
+    chelis_tuple,
+    Tuple,
+    "compiled ownership ledger detected invalid tuple release"
+);
+heap_ref_ops!(
+    retain_dict_ptr,
+    release_dict_ptr,
+    chelis_dict,
+    Dict,
+    "compiled ownership ledger detected invalid dict release"
+);
+heap_ref_ops!(
+    retain_adt_ptr,
+    release_adt_ptr,
+    chelis_adt,
+    Adt,
+    "compiled ownership ledger detected invalid adt release"
+);
+heap_ref_ops!(
+    retain_option_ptr,
+    release_option_ptr,
+    chelis_option,
+    Option,
+    "compiled ownership ledger detected invalid option release"
+);
+heap_ref_ops!(
+    retain_mapped_file_ptr,
+    release_mapped_file_ptr,
+    chelis_mapped_file,
+    MappedFile,
+    "compiled ownership ledger detected invalid mapped-file release"
+);
 fn cstr_to_string(ptr_: *const c_char) -> String {
     if ptr_.is_null() {
         String::new()
@@ -1478,7 +1688,7 @@ fn new_runtime_string(value: String) -> chelis_string {
     // `chelis_string_len` and O(1) ASCII detection in `chelis_string_slice`.
     let char_count = value.chars().count();
     let inner = Box::new(RuntimeString {
-        refcount: 1,
+        header: HeapHeader::new(ownership_ledger::Kind::String),
         value,
         cstring,
         char_count,
@@ -1494,9 +1704,11 @@ fn new_runtime_string(value: String) -> chelis_string {
 }
 
 unsafe fn string_value(value: chelis_string) -> &'static RuntimeString {
-    if value.handle.is_null() {
-        runtime_fail!("null string handle");
-    }
+    require_live_kind(
+        value.handle.cast(),
+        ownership_ledger::Kind::String,
+        "string access",
+    );
     &*value.handle
 }
 
@@ -1522,8 +1734,7 @@ unsafe fn clone_items(items: &[chelis_value]) -> Vec<chelis_value> {
 unsafe fn clone_items_reserving(items: &[chelis_value], extra: usize) -> Vec<chelis_value> {
     let mut out = Vec::with_capacity(items.len() + extra);
     for item in items {
-        chelis_value_retain(*item);
-        out.push(*item);
+        out.push(chelis_value_clone(*item));
     }
     out
 }
@@ -1574,7 +1785,7 @@ unsafe fn dict_find(dict: *const chelis_dict, key: chelis_value) -> Option<usize
 }
 
 unsafe fn tensor_normalize_axis(tensor: *const chelis_tensor, axis: i32, op: &str) -> usize {
-    let _ = tensor_dtype(tensor, op);
+    let _ = tensor_metadata_dtype(tensor, op);
     let axis64 = i64::from(axis);
     let normalized = if axis64 < 0 {
         axis64
@@ -1597,7 +1808,7 @@ unsafe fn tensor_clone(tensor: *const chelis_tensor) -> *mut chelis_tensor {
         dtype.id() as chelis_dtype,
     );
     let bytes = (*tensor).size as usize * tensor_elem_size(dtype);
-    ptr::copy_nonoverlapping((*tensor).data as *const u8, (*out).data, bytes);
+    ptr::copy_nonoverlapping(tensor_data(tensor) as *const u8, tensor_data(out), bytes);
     out
 }
 
@@ -1638,7 +1849,7 @@ unsafe fn int_list_value(list: *const chelis_list, index: i64, op: &str) -> i64 
     if list.is_null() || index < 0 || index >= (*list).items.len() as i64 {
         runtime_fail!("{op} expects a list of int64 values");
     }
-    chelis_value_as_int64((*list).items[index as usize])
+    internal_value_as_i64((*list).items[index as usize])
 }
 
 #[no_mangle]
@@ -1648,8 +1859,8 @@ pub unsafe extern "C" fn chelis_alloc(
     dtype: chelis_dtype,
 ) -> *mut chelis_tensor {
     let dtype = require_runtime_dtype(dtype, "chelis_alloc");
-    let (shape, strides, size, byte_capacity) =
-        unsafe { checked_tensor_metadata(rank, shape, dtype, "chelis_alloc") };
+    let metadata = unsafe { checked_tensor_metadata(rank, shape, dtype, "chelis_alloc") };
+    let byte_capacity = metadata.required_bytes;
     let data = if byte_capacity == 0 {
         ptr::null_mut()
     } else {
@@ -1661,31 +1872,64 @@ pub unsafe extern "C" fn chelis_alloc(
         libc::memset(allocation, 0, byte_capacity as usize);
         allocation.cast::<u8>()
     };
-    let tensor = Box::into_raw(Box::new(chelis_tensor {
+    new_tensor(
+        metadata,
         data,
-        shape,
-        strides,
-        size,
         byte_capacity,
-        rank,
-        dtype: dtype.id() as chelis_dtype as chelis_dtype,
-        owns_data: 1,
-        reserved: [0; 2],
+        TensorStorageProvenance::RuntimeOwned,
+        "chelis_alloc",
+    )
+}
+
+unsafe fn new_tensor(
+    metadata: TensorMetadata,
+    data: *mut u8,
+    byte_capacity: i64,
+    provenance: TensorStorageProvenance,
+    site: &str,
+) -> *mut chelis_tensor {
+    let storage = Box::into_raw(Box::new(TensorStorage {
+        header: HeapHeader::new(ownership_ledger::Kind::TensorStorage),
+        data,
+        byte_capacity,
+        provenance,
     }));
+    ledger_allocation(
+        storage.cast(),
+        ownership_ledger::Kind::TensorStorage,
+        if provenance == TensorStorageProvenance::RuntimeOwned {
+            byte_capacity as u64
+        } else {
+            0
+        },
+        &format!("{site} storage"),
+    );
+    if provenance == TensorStorageProvenance::EntryBorrowed {
+        ownership_ledger::borrow(storage.cast(), &format!("{site} caller storage"));
+    }
+
+    let mut tensor = Box::new(chelis_tensor {
+        header: HeapHeader::new(ownership_ledger::Kind::Tensor),
+        storage,
+        shape: metadata.shape,
+        strides: metadata.strides,
+        size: metadata.size,
+        rank: metadata.rank,
+        dtype: metadata.dtype.id() as chelis_dtype,
+        access: AtomicU8::new(TENSOR_ACCESS_IDLE),
+        write_guard: chelis_tensor_write {
+            tensor: ptr::null_mut(),
+        },
+    });
+    let tensor_pointer: *mut chelis_tensor = &mut *tensor;
+    tensor.write_guard.tensor = tensor_pointer;
+    let tensor = Box::into_raw(tensor);
     ledger_allocation(
         tensor.cast(),
         ownership_ledger::Kind::Tensor,
         0,
-        "chelis_alloc descriptor",
+        &format!("{site} descriptor"),
     );
-    if !data.is_null() {
-        ledger_allocation(
-            data.cast(),
-            ownership_ledger::Kind::TensorStorage,
-            byte_capacity as u64,
-            "chelis_alloc storage",
-        );
-    }
     tensor
 }
 
@@ -1702,68 +1946,190 @@ pub extern "C" fn chelis_dtype_size(dtype: chelis_dtype) -> i64 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn chelis_alloc_view(
+pub unsafe extern "C" fn chelis_tensor_entry_borrow(
     rank: c_int,
     shape: *const i64,
     dtype: chelis_dtype,
-    data: *mut libc::c_void,
+    data: *const libc::c_void,
     byte_capacity: i64,
 ) -> *mut chelis_tensor {
-    let dtype = require_runtime_dtype(dtype, "chelis_alloc_view");
-    let (shape, strides, size, required_bytes) =
-        unsafe { checked_tensor_metadata(rank, shape, dtype, "chelis_alloc_view") };
+    let dtype = require_runtime_dtype(dtype, "chelis_tensor_entry_borrow");
+    let metadata =
+        unsafe { checked_tensor_metadata(rank, shape, dtype, "chelis_tensor_entry_borrow") };
     validate_data_contract(
-        data.cast::<u8>(),
+        data.cast_mut().cast::<u8>(),
         byte_capacity,
-        required_bytes,
+        metadata.required_bytes,
         dtype,
-        "chelis_alloc_view",
+        "chelis_tensor_entry_borrow",
     );
-    let tensor = Box::new(chelis_tensor {
-        data: data.cast::<u8>(),
-        shape,
-        strides,
-        size,
+    let tensor = new_tensor(
+        metadata,
+        data.cast_mut().cast(),
         byte_capacity,
-        rank,
-        dtype: dtype.id() as chelis_dtype as chelis_dtype,
-        owns_data: 0,
-        reserved: [0; 2],
-    });
-    let tensor = Box::into_raw(tensor);
-    ledger_allocation(
-        tensor.cast(),
-        ownership_ledger::Kind::Tensor,
-        0,
-        "chelis_alloc_view descriptor",
+        TensorStorageProvenance::EntryBorrowed,
+        "chelis_tensor_entry_borrow",
     );
-    ownership_ledger::borrow(tensor.cast(), "chelis_alloc_view entry borrow");
-    unsafe { validate_tensor(tensor, "chelis_alloc_view") };
+    unsafe { validate_tensor(tensor, "chelis_tensor_entry_borrow") };
     tensor
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn chelis_free(t: *mut chelis_tensor) {
-    if !t.is_null() {
-        if !ownership_ledger::release(t.cast(), "chelis_free descriptor") {
-            runtime_fail!("compiled ownership ledger detected invalid tensor release");
-        }
-        unsafe { validate_tensor(t, "chelis_free") };
-        if (*t).owns_data != 0 && !(*t).data.is_null() {
-            if !ownership_ledger::release((*t).data.cast(), "chelis_free storage") {
-                runtime_fail!("compiled ownership ledger detected invalid tensor-storage release");
+unsafe fn lock_tensor_idle<'a>(tensor: *const chelis_tensor, site: &str) -> &'a chelis_tensor {
+    require_live_kind(tensor.cast(), ownership_ledger::Kind::Tensor, site);
+    let tensor = &*tensor;
+    loop {
+        match tensor.access.compare_exchange_weak(
+            TENSOR_ACCESS_IDLE,
+            TENSOR_ACCESS_LOCKED,
+            Ordering::Acquire,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return tensor,
+            Err(TENSOR_ACCESS_WRITING) => {
+                runtime_fail!("Domain: {site}: tensor has an active write guard")
             }
-            if !ownership_ledger::finalize((*t).data.cast(), "chelis_free storage") {
-                runtime_fail!("compiled ownership ledger rejected tensor-storage finalization");
-            }
-            libc::free((*t).data.cast());
+            Err(TENSOR_ACCESS_LOCKED) => std::hint::spin_loop(),
+            Err(other) => runtime_fail!("Domain: {site}: invalid tensor access state {other}"),
         }
-        release_tensor_metadata((*t).shape, (*t).strides, (*t).rank);
-        if !ownership_ledger::finalize(t.cast(), "chelis_free descriptor") {
-            runtime_fail!("compiled ownership ledger rejected tensor finalization");
-        }
-        drop(Box::from_raw(t));
     }
+}
+
+fn unlock_tensor(tensor: &chelis_tensor, next: u8) {
+    tensor.access.store(next, Ordering::Release);
+}
+
+unsafe fn tensor_data(tensor: *const chelis_tensor) -> *mut u8 {
+    tensor_storage_data((*tensor).storage)
+}
+
+unsafe fn tensor_storage_data(storage: *const TensorStorage) -> *mut u8 {
+    (*storage).data
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_retain(tensor: *const chelis_tensor) {
+    let tensor_ref = lock_tensor_idle(tensor, "chelis_tensor_retain");
+    retain_header(
+        tensor.cast(),
+        ownership_ledger::Kind::Tensor,
+        "chelis_tensor_retain",
+    );
+    unlock_tensor(tensor_ref, TENSOR_ACCESS_IDLE);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_release(tensor: *const chelis_tensor) {
+    let tensor_ref = lock_tensor_idle(tensor, "chelis_tensor_release");
+    let final_release = release_header(
+        tensor.cast(),
+        ownership_ledger::Kind::Tensor,
+        "chelis_tensor_release",
+        "compiled ownership ledger detected invalid tensor release",
+    );
+    if final_release {
+        finalize_heap(
+            ownership_ledger::Kind::Tensor,
+            tensor.cast_mut().cast(),
+            "chelis_tensor_release",
+        );
+    } else {
+        unlock_tensor(tensor_ref, TENSOR_ACCESS_IDLE);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_read_view(tensor: *const chelis_tensor) -> chelis_read_view {
+    let tensor_ref = lock_tensor_idle(tensor, "chelis_tensor_read_view");
+    validate_tensor_contents(tensor_ref, "chelis_tensor_read_view");
+    let view = chelis_read_view {
+        data: if tensor_ref.size == 0 {
+            ptr::null()
+        } else {
+            tensor_data(tensor).cast()
+        },
+        count: tensor_ref.size,
+        dtype: tensor_ref.dtype,
+        reserved: [0; 7],
+    };
+    unlock_tensor(tensor_ref, TENSOR_ACCESS_IDLE);
+    view
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_begin_write(
+    tensor: *mut chelis_tensor,
+) -> *mut chelis_tensor_write {
+    let tensor_ref = lock_tensor_idle(tensor, "chelis_tensor_begin_write");
+    validate_tensor_contents(tensor_ref, "chelis_tensor_begin_write");
+    if tensor_ref.header.strong.load(Ordering::Relaxed) != 1 {
+        runtime_fail!("Domain: chelis_tensor_begin_write requires a unique tensor owner");
+    }
+    let storage = &*tensor_ref.storage;
+    if storage.header.strong.load(Ordering::Relaxed) != 1 {
+        runtime_fail!("Domain: chelis_tensor_begin_write requires unique tensor storage");
+    }
+    if storage.provenance != TensorStorageProvenance::RuntimeOwned {
+        runtime_fail!("Domain: chelis_tensor_begin_write requires runtime-owned storage");
+    }
+    let guard = ptr::addr_of_mut!((*tensor).write_guard);
+    unlock_tensor(tensor_ref, TENSOR_ACCESS_WRITING);
+    guard
+}
+
+unsafe fn lock_live_write_guard<'a>(
+    guard: *const chelis_tensor_write,
+    site: &str,
+) -> &'a chelis_tensor {
+    if guard.is_null() {
+        runtime_fail!("Domain: {site}: null tensor write guard");
+    }
+    let tensor = (*guard).tensor;
+    require_live_kind(tensor.cast(), ownership_ledger::Kind::Tensor, site);
+    if !ptr::eq(guard, ptr::addr_of!((*tensor).write_guard)) {
+        runtime_fail!("Domain: {site}: write guard does not belong to its tensor");
+    }
+    let tensor_ref = &*tensor;
+    loop {
+        match tensor_ref.access.compare_exchange_weak(
+            TENSOR_ACCESS_WRITING,
+            TENSOR_ACCESS_LOCKED,
+            Ordering::Acquire,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return tensor_ref,
+            Err(TENSOR_ACCESS_IDLE) => {
+                runtime_fail!("Domain: {site}: tensor write guard has ended")
+            }
+            Err(TENSOR_ACCESS_LOCKED) => std::hint::spin_loop(),
+            Err(other) => runtime_fail!("Domain: {site}: invalid tensor access state {other}"),
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_write_view(
+    guard: *const chelis_tensor_write,
+) -> chelis_write_view {
+    let tensor = lock_live_write_guard(guard, "chelis_tensor_write_view");
+    let view = chelis_write_view {
+        data: if tensor.size == 0 {
+            ptr::null_mut()
+        } else {
+            tensor_data(tensor).cast()
+        },
+        count: tensor.size,
+        dtype: tensor.dtype,
+        reserved: [0; 7],
+    };
+    unlock_tensor(tensor, TENSOR_ACCESS_WRITING);
+    view
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_end_write(guard: *mut chelis_tensor_write) {
+    let tensor = lock_live_write_guard(guard, "chelis_tensor_end_write");
+    validate_tensor_contents(tensor, "chelis_tensor_end_write");
+    unlock_tensor(tensor, TENSOR_ACCESS_IDLE);
 }
 
 /// Internal helper mirroring the `chelis_f32_to_f16` static inline in
@@ -1823,7 +2189,11 @@ pub unsafe extern "C" fn chelis_scalar_tensor(value: chelis_scalar) -> *mut chel
     let dtype = validate_scalar(value, "chelis_scalar_tensor");
     let tensor = chelis_alloc(0, ptr::null(), dtype.id() as chelis_dtype);
     let width = tensor_elem_size(dtype);
-    ptr::copy_nonoverlapping(value.bits.to_ne_bytes().as_ptr(), (*tensor).data, width);
+    ptr::copy_nonoverlapping(
+        value.bits.to_ne_bytes().as_ptr(),
+        tensor_data(tensor),
+        width,
+    );
     tensor
 }
 
@@ -1835,27 +2205,33 @@ pub unsafe extern "C" fn chelis_tensor_to_scalar(t: *const chelis_tensor) -> che
     }
     let width = tensor_elem_size(dtype);
     let mut bytes = [0_u8; 8];
-    ptr::copy_nonoverlapping((*t).data, bytes.as_mut_ptr(), width);
+    ptr::copy_nonoverlapping(tensor_data(t), bytes.as_mut_ptr(), width);
     chelis_scalar_from_bits(dtype.id() as chelis_dtype, u64::from_ne_bytes(bytes))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn chelis_fill_scalar(t: *mut chelis_tensor, value: chelis_scalar) {
-    let tensor_dtype = tensor_dtype(t, "chelis_fill_scalar tensor");
+pub unsafe extern "C" fn chelis_fill_scalar(guard: *mut chelis_tensor_write, value: chelis_scalar) {
+    let tensor = lock_live_write_guard(guard, "chelis_fill_scalar");
+    let tensor_dtype = require_runtime_dtype(tensor.dtype, "chelis_fill_scalar tensor");
     let scalar_dtype = validate_scalar(value, "chelis_fill_scalar value");
     if tensor_dtype != scalar_dtype {
         runtime_fail!("Domain: chelis_fill_scalar dtype mismatch");
     }
     let width = tensor_elem_size(tensor_dtype);
     let bytes = value.bits.to_ne_bytes();
-    for index in 0..(*t).size as usize {
-        ptr::copy_nonoverlapping(bytes.as_ptr(), (*t).data.add(index * width), width);
+    for index in 0..tensor.size as usize {
+        ptr::copy_nonoverlapping(
+            bytes.as_ptr(),
+            tensor_data(tensor).add(index * width),
+            width,
+        );
     }
+    unlock_tensor(tensor, TENSOR_ACCESS_WRITING);
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_tensor_rank(t: *const chelis_tensor) -> i32 {
-    tensor_dtype(t, "chelis_tensor_rank");
+    tensor_metadata_dtype(t, "chelis_tensor_rank");
     (*t).rank
 }
 
@@ -1871,7 +2247,7 @@ pub unsafe extern "C" fn chelis_tensor_shape(t: *const chelis_tensor, axis: i32)
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_tensor_numel(t: *const chelis_tensor) -> i64 {
-    tensor_dtype(t, "chelis_tensor_numel");
+    tensor_metadata_dtype(t, "chelis_tensor_numel");
     (*t).size
 }
 
@@ -2031,23 +2407,6 @@ pub extern "C" fn chelis_string_from_scalar(value: chelis_scalar) -> chelis_stri
     new_runtime_string(render_scalar(value))
 }
 
-fn option_scalar_none() -> chelis_option_scalar {
-    chelis_option_scalar {
-        is_some: 0,
-        reserved: [0; 7],
-        value: ZERO_SCALAR,
-    }
-}
-
-fn option_scalar_some(value: chelis_scalar) -> chelis_option_scalar {
-    validate_scalar(value, "chelis_option_scalar");
-    chelis_option_scalar {
-        is_some: 1,
-        reserved: [0; 7],
-        value,
-    }
-}
-
 fn valid_signed_decimal(text: &str) -> bool {
     let digits = text
         .strip_prefix('+')
@@ -2155,7 +2514,7 @@ fn parse_float_scalar(text: &str, dtype: RuntimeDType) -> Option<chelis_scalar> 
 pub unsafe extern "C" fn chelis_parse_scalar(
     text: chelis_string,
     dtype: chelis_dtype,
-) -> chelis_option_scalar {
+) -> *mut chelis_option {
     let dtype = require_runtime_dtype(dtype, "chelis_parse_scalar");
     let text = string_value(text)
         .value
@@ -2173,9 +2532,10 @@ pub unsafe extern "C" fn chelis_parse_scalar(
             parse_float_scalar(text, dtype)
         }
     };
-    parsed
-        .map(option_scalar_some)
-        .unwrap_or_else(option_scalar_none)
+    match parsed {
+        Some(value) => new_option(Some(chelis_value_box_scalar(value)), "chelis_parse_scalar"),
+        None => new_option(None, "chelis_parse_scalar"),
+    }
 }
 
 #[no_mangle]
@@ -2246,6 +2606,60 @@ pub unsafe extern "C" fn chelis_adt_release(adt: *const chelis_adt) {
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn chelis_option_retain(option: *const chelis_option) {
+    retain_option_ptr(option as *mut chelis_option);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_option_release(option: *const chelis_option) {
+    release_option_ptr(option as *mut chelis_option);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_option_none() -> *mut chelis_option {
+    new_option(None, "chelis_option_none")
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_option_some(value: chelis_value) -> *mut chelis_option {
+    validate_value(value, "chelis_option_some");
+    new_option(Some(chelis_value_clone(value)), "chelis_option_some")
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_option_is_some(option: *const chelis_option) -> bool {
+    require_live_kind(
+        option.cast(),
+        ownership_ledger::Kind::Option,
+        "chelis_option_is_some",
+    );
+    (*option).value.is_some()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_option_unwrap(option: *const chelis_option) -> chelis_value {
+    require_live_kind(
+        option.cast(),
+        ownership_ledger::Kind::Option,
+        "chelis_option_unwrap",
+    );
+    let value = (*option)
+        .value
+        .unwrap_or_else(|| runtime_fail!("Domain: chelis_option_unwrap received None"));
+    chelis_value_clone(value)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_mapped_file_retain(mapped: *const chelis_mapped_file) {
+    retain_mapped_file_ptr(mapped as *mut chelis_mapped_file);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_mapped_file_release(mapped: *const chelis_mapped_file) {
+    release_mapped_file_ptr(mapped as *mut chelis_mapped_file);
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn chelis_adt_construct(
     ctor: chelis_string,
     fields: *const chelis_value,
@@ -2294,47 +2708,45 @@ pub unsafe extern "C" fn chelis_adt_get_field(adt: *const chelis_adt, index: i64
     if adt.is_null() || index < 0 || index >= (*adt).fields.len() as i64 {
         runtime_fail!("adt field index out of bounds");
     }
-    let value = (*adt).fields[index as usize];
-    chelis_value_retain(value);
-    value
+    chelis_value_clone((*adt).fields[index as usize])
 }
 
-unsafe fn chelis_value_from_int64(value: i64) -> chelis_value {
-    chelis_value_from_scalar(chelis_scalar_from_bits(
+unsafe fn internal_value_from_i64(value: i64) -> chelis_value {
+    internal_value_from_scalar(chelis_scalar_from_bits(
         CHELIS_DTYPE_I64,
         u64::from_ne_bytes(value.to_ne_bytes()),
     ))
 }
 
-unsafe fn chelis_value_from_f64(value: f64) -> chelis_value {
-    chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_F64, value.to_bits()))
+unsafe fn internal_value_from_f64(value: f64) -> chelis_value {
+    internal_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_F64, value.to_bits()))
 }
 
 #[inline]
-unsafe fn chelis_value_from_f32(value: f32) -> chelis_value {
-    chelis_value_from_scalar(chelis_scalar_from_bits(
+unsafe fn internal_value_from_f32(value: f32) -> chelis_value {
+    internal_value_from_scalar(chelis_scalar_from_bits(
         CHELIS_DTYPE_F32,
         u64::from(value.to_bits()),
     ))
 }
 
 #[inline]
-unsafe fn chelis_value_from_f16_bits(value: u16) -> chelis_value {
-    chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_F16, u64::from(value)))
+unsafe fn internal_value_from_f16_bits(value: u16) -> chelis_value {
+    internal_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_F16, u64::from(value)))
 }
 
 #[inline]
-unsafe fn chelis_value_from_bf16_bits(value: u16) -> chelis_value {
-    chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_BF16, u64::from(value)))
+unsafe fn internal_value_from_bf16_bits(value: u16) -> chelis_value {
+    internal_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_BF16, u64::from(value)))
 }
 
-unsafe fn chelis_value_from_bool(value: bool) -> chelis_value {
-    chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_BOOL, u64::from(value)))
+unsafe fn internal_value_from_bool(value: bool) -> chelis_value {
+    internal_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_BOOL, u64::from(value)))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn chelis_value_from_scalar(value: chelis_scalar) -> chelis_value {
-    validate_scalar(value, "chelis_value_from_scalar");
+pub unsafe extern "C" fn chelis_value_box_scalar(value: chelis_scalar) -> chelis_value {
+    validate_scalar(value, "chelis_value_box_scalar");
     chelis_value {
         tag: CHELIS_VALUE_SCALAR,
         reserved: [0; 7],
@@ -2343,55 +2755,199 @@ pub unsafe extern "C" fn chelis_value_from_scalar(value: chelis_scalar) -> cheli
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn chelis_value_as_scalar(value: chelis_value) -> chelis_scalar {
-    validate_value(value, "chelis_value_as_scalar");
+pub unsafe extern "C" fn chelis_value_unbox_scalar(value: chelis_value) -> chelis_scalar {
+    validate_value(value, "chelis_value_unbox_scalar");
     if value.tag != CHELIS_VALUE_SCALAR {
-        runtime_fail!("Domain: chelis_value_as_scalar expected scalar value");
+        runtime_fail!("Domain: chelis_value_unbox_scalar expected scalar value");
     }
     value.payload.scalar
 }
 
+unsafe fn internal_value_from_scalar(value: chelis_scalar) -> chelis_value {
+    chelis_value_box_scalar(value)
+}
+
+unsafe fn internal_value_as_scalar(value: chelis_value) -> chelis_scalar {
+    chelis_value_unbox_scalar(value)
+}
+
 #[no_mangle]
-pub unsafe extern "C" fn chelis_value_from_string(value: chelis_string) -> chelis_value {
+pub unsafe extern "C" fn chelis_value_take_string(value: chelis_string) -> chelis_value {
+    string_value(value);
     value_from_handle(CHELIS_VALUE_STRING, value.handle.cast())
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn chelis_value_from_tensor(value: *mut chelis_tensor) -> chelis_value {
-    validate_tensor(value, "chelis_value_from_tensor");
+pub unsafe extern "C" fn chelis_string_take_value(value: chelis_value) -> chelis_string {
+    validate_value(value, "chelis_string_take_value");
+    if value.tag != CHELIS_VALUE_STRING {
+        runtime_fail!("Domain: chelis_string_take_value expected String");
+    }
+    value.payload.string
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_string_borrow_value(value: chelis_value) -> chelis_string {
+    chelis_string_take_value(value)
+}
+
+unsafe fn internal_value_from_string(value: chelis_string) -> chelis_value {
+    chelis_value_take_string(value)
+}
+
+macro_rules! value_pointer_conversions {
+    (
+        $take_into:ident,
+        $take_out:ident,
+        $borrow:ident,
+        $ty:ty,
+        $tag:ident,
+        $field:ident,
+        $kind:ident
+    ) => {
+        #[no_mangle]
+        pub unsafe extern "C" fn $take_into(pointer: *mut $ty) -> chelis_value {
+            require_live_kind(
+                pointer.cast(),
+                ownership_ledger::Kind::$kind,
+                stringify!($take_into),
+            );
+            value_from_handle($tag, pointer.cast())
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C" fn $take_out(value: chelis_value) -> *mut $ty {
+            validate_value(value, stringify!($take_out));
+            if value.tag != $tag {
+                runtime_fail!(
+                    "Domain: {} received the wrong value tag",
+                    stringify!($take_out)
+                );
+            }
+            value.payload.$field
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C" fn $borrow(value: chelis_value) -> *const $ty {
+            $take_out(value)
+        }
+    };
+}
+
+value_pointer_conversions!(
+    chelis_value_take_list,
+    chelis_list_take_value,
+    chelis_list_borrow_value,
+    chelis_list,
+    CHELIS_VALUE_LIST,
+    list,
+    List
+);
+value_pointer_conversions!(
+    chelis_value_take_tuple,
+    chelis_tuple_take_value,
+    chelis_tuple_borrow_value,
+    chelis_tuple,
+    CHELIS_VALUE_TUPLE,
+    tuple,
+    Tuple
+);
+value_pointer_conversions!(
+    chelis_value_take_dict,
+    chelis_dict_take_value,
+    chelis_dict_borrow_value,
+    chelis_dict,
+    CHELIS_VALUE_DICT,
+    dict,
+    Dict
+);
+value_pointer_conversions!(
+    chelis_value_take_adt,
+    chelis_adt_take_value,
+    chelis_adt_borrow_value,
+    chelis_adt,
+    CHELIS_VALUE_ADT,
+    adt,
+    Adt
+);
+value_pointer_conversions!(
+    chelis_value_take_option,
+    chelis_option_take_value,
+    chelis_option_borrow_value,
+    chelis_option,
+    CHELIS_VALUE_OPTION,
+    option,
+    Option
+);
+value_pointer_conversions!(
+    chelis_value_take_mapped_file,
+    chelis_mapped_file_take_value,
+    chelis_mapped_file_borrow_value,
+    chelis_mapped_file,
+    CHELIS_VALUE_MAPPED_FILE,
+    mapped_file,
+    MappedFile
+);
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_value_take_tensor(value: *mut chelis_tensor) -> chelis_value {
+    validate_tensor(value, "chelis_value_take_tensor");
     value_from_handle(CHELIS_VALUE_TENSOR, value.cast())
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn chelis_value_from_list(value: *mut chelis_list) -> chelis_value {
-    value_from_handle(CHELIS_VALUE_LIST, value.cast())
+pub unsafe extern "C" fn chelis_tensor_take_value(value: chelis_value) -> *mut chelis_tensor {
+    validate_value(value, "chelis_tensor_take_value");
+    if value.tag != CHELIS_VALUE_TENSOR {
+        runtime_fail!("Domain: chelis_tensor_take_value received the wrong value tag");
+    }
+    value.payload.tensor
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn chelis_value_from_tuple(value: *mut chelis_tuple) -> chelis_value {
-    value_from_handle(CHELIS_VALUE_TUPLE, value.cast())
+pub unsafe extern "C" fn chelis_tensor_borrow_value(value: chelis_value) -> *const chelis_tensor {
+    chelis_tensor_take_value(value)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn chelis_value_from_dict(value: *mut chelis_dict) -> chelis_value {
-    value_from_handle(CHELIS_VALUE_DICT, value.cast())
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn chelis_value_from_adt(value: *mut chelis_adt) -> chelis_value {
-    value_from_handle(CHELIS_VALUE_ADT, value.cast())
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn chelis_value_retain(value: chelis_value) {
-    validate_value(value, "chelis_value_retain");
+pub unsafe extern "C" fn chelis_value_clone(value: chelis_value) -> chelis_value {
+    validate_value(value, "chelis_value_clone");
     match value.tag {
-        chelis_value_tag::CHELIS_VALUE_STRING => retain_string_handle(value.payload.string.handle),
-        chelis_value_tag::CHELIS_VALUE_LIST => retain_list_ptr(value.payload.list),
-        chelis_value_tag::CHELIS_VALUE_TUPLE => retain_tuple_ptr(value.payload.tuple),
-        chelis_value_tag::CHELIS_VALUE_DICT => retain_dict_ptr(value.payload.dict),
-        chelis_value_tag::CHELIS_VALUE_ADT => retain_adt_ptr(value.payload.adt),
-        _ => {}
+        CHELIS_VALUE_UNIT => value,
+        CHELIS_VALUE_SCALAR => value,
+        CHELIS_VALUE_STRING => {
+            retain_string_handle(value.payload.string.handle);
+            value
+        }
+        CHELIS_VALUE_TENSOR => {
+            chelis_tensor_retain(value.payload.tensor);
+            value
+        }
+        CHELIS_VALUE_LIST => {
+            retain_list_ptr(value.payload.list);
+            value
+        }
+        CHELIS_VALUE_TUPLE => {
+            retain_tuple_ptr(value.payload.tuple);
+            value
+        }
+        CHELIS_VALUE_DICT => {
+            retain_dict_ptr(value.payload.dict);
+            value
+        }
+        CHELIS_VALUE_ADT => {
+            retain_adt_ptr(value.payload.adt);
+            value
+        }
+        CHELIS_VALUE_OPTION => {
+            retain_option_ptr(value.payload.option);
+            value
+        }
+        CHELIS_VALUE_MAPPED_FILE => {
+            retain_mapped_file_ptr(value.payload.mapped_file);
+            value
+        }
+        other => runtime_fail!("Domain: chelis_value_clone invalid value tag {}", other.0),
     }
 }
 
@@ -2399,75 +2955,26 @@ pub unsafe extern "C" fn chelis_value_retain(value: chelis_value) {
 pub unsafe extern "C" fn chelis_value_release(value: chelis_value) {
     validate_value(value, "chelis_value_release");
     match value.tag {
-        chelis_value_tag::CHELIS_VALUE_STRING => release_string_handle(value.payload.string.handle),
-        chelis_value_tag::CHELIS_VALUE_LIST => release_list_ptr(value.payload.list),
-        chelis_value_tag::CHELIS_VALUE_TUPLE => release_tuple_ptr(value.payload.tuple),
-        chelis_value_tag::CHELIS_VALUE_DICT => release_dict_ptr(value.payload.dict),
-        chelis_value_tag::CHELIS_VALUE_ADT => release_adt_ptr(value.payload.adt),
-        _ => {}
+        CHELIS_VALUE_UNIT => {}
+        CHELIS_VALUE_SCALAR => {}
+        CHELIS_VALUE_STRING => release_string_handle(value.payload.string.handle),
+        CHELIS_VALUE_TENSOR => chelis_tensor_release(value.payload.tensor),
+        CHELIS_VALUE_LIST => release_list_ptr(value.payload.list),
+        CHELIS_VALUE_TUPLE => release_tuple_ptr(value.payload.tuple),
+        CHELIS_VALUE_DICT => release_dict_ptr(value.payload.dict),
+        CHELIS_VALUE_ADT => release_adt_ptr(value.payload.adt),
+        CHELIS_VALUE_OPTION => release_option_ptr(value.payload.option),
+        CHELIS_VALUE_MAPPED_FILE => release_mapped_file_ptr(value.payload.mapped_file),
+        other => runtime_fail!("Domain: chelis_value_release invalid value tag {}", other.0),
     }
 }
 
-unsafe fn chelis_value_as_int64(value: chelis_value) -> i64 {
-    let scalar = chelis_value_as_scalar(value);
+unsafe fn internal_value_as_i64(value: chelis_value) -> i64 {
+    let scalar = internal_value_as_scalar(value);
     if validate_scalar(scalar, "internal int64 extraction") != RuntimeDType::I64 {
         runtime_fail!("Domain: expected int64 value");
     }
     i64::from_ne_bytes(scalar.bits.to_ne_bytes())
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn chelis_value_as_string(value: chelis_value) -> chelis_string {
-    validate_value(value, "chelis_value_as_string");
-    if value.tag != chelis_value_tag::CHELIS_VALUE_STRING {
-        runtime_fail!("expected string value");
-    }
-    value.payload.string
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn chelis_value_as_tensor(value: chelis_value) -> *mut chelis_tensor {
-    validate_value(value, "chelis_value_as_tensor");
-    if value.tag != chelis_value_tag::CHELIS_VALUE_TENSOR {
-        runtime_fail!("expected tensor value");
-    }
-    value.payload.tensor
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn chelis_value_as_list(value: chelis_value) -> *mut chelis_list {
-    validate_value(value, "chelis_value_as_list");
-    if value.tag != chelis_value_tag::CHELIS_VALUE_LIST {
-        runtime_fail!("expected list value");
-    }
-    value.payload.list
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn chelis_value_as_tuple(value: chelis_value) -> *mut chelis_tuple {
-    validate_value(value, "chelis_value_as_tuple");
-    if value.tag != chelis_value_tag::CHELIS_VALUE_TUPLE {
-        runtime_fail!("expected tuple value");
-    }
-    value.payload.tuple
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn chelis_value_as_dict(value: chelis_value) -> *mut chelis_dict {
-    validate_value(value, "chelis_value_as_dict");
-    if value.tag != chelis_value_tag::CHELIS_VALUE_DICT {
-        runtime_fail!("expected dict value");
-    }
-    value.payload.dict
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn chelis_value_as_adt(value: chelis_value) -> *mut chelis_adt {
-    validate_value(value, "chelis_value_as_adt");
-    if value.tag != chelis_value_tag::CHELIS_VALUE_ADT {
-        runtime_fail!("expected adt value");
-    }
-    value.payload.adt
 }
 
 #[no_mangle]
@@ -2493,9 +3000,7 @@ pub unsafe extern "C" fn chelis_list_index(list: *const chelis_list, index: i64)
     if list.is_null() || index < 0 || index >= (*list).items.len() as i64 {
         runtime_fail!("list index out of bounds");
     }
-    let value = (*list).items[index as usize];
-    chelis_value_retain(value);
-    value
+    chelis_value_clone((*list).items[index as usize])
 }
 
 #[no_mangle]
@@ -2517,8 +3022,7 @@ pub unsafe extern "C" fn chelis_list_append(
     } else {
         clone_items_reserving(&(*list).items, 1)
     };
-    chelis_value_retain(value);
-    items.push(value);
+    items.push(chelis_value_clone(value));
     new_list(items, "chelis_list_append")
 }
 
@@ -2540,11 +3044,10 @@ pub unsafe extern "C" fn chelis_list_push(list: *mut chelis_list, value: chelis_
     if list.is_null() {
         runtime_fail!("chelis_list_push on a null list");
     }
-    if (*list).refcount != 1 {
+    if (*list).header.strong.load(Ordering::Relaxed) != 1 {
         runtime_fail!("chelis_list_push requires exclusive ownership (refcount 1)");
     }
-    chelis_value_retain(value);
-    (*list).items.push(value);
+    (*list).items.push(chelis_value_clone(value));
     resize_list_ledger(list, "chelis_list_push");
 }
 
@@ -2557,15 +3060,14 @@ pub unsafe extern "C" fn chelis_list_extend(list: *mut chelis_list, src: *const 
     if std::ptr::eq(list as *const chelis_list, src) {
         runtime_fail!("chelis_list_extend source aliases destination");
     }
-    if (*list).refcount != 1 {
+    if (*list).header.strong.load(Ordering::Relaxed) != 1 {
         runtime_fail!("chelis_list_extend requires exclusive ownership (refcount 1)");
     }
     if src.is_null() {
         return;
     }
     for &value in &(*src).items {
-        chelis_value_retain(value);
-        (*list).items.push(value);
+        (*list).items.push(chelis_value_clone(value));
     }
     resize_list_ledger(list, "chelis_list_extend");
 }
@@ -2582,8 +3084,7 @@ pub unsafe extern "C" fn chelis_list_concat(
     };
     if !rhs.is_null() {
         for item in &(*rhs).items {
-            chelis_value_retain(*item);
-            items.push(*item);
+            items.push(chelis_value_clone(*item));
         }
     }
     new_list(items, "chelis_list_concat")
@@ -2638,7 +3139,7 @@ pub unsafe extern "C" fn chelis_list_chunk(
     };
     for chunk in items.chunks(size as usize) {
         let inner = new_list(clone_items(chunk), "chelis_list_chunk inner");
-        outer.push(chelis_value_from_list(inner));
+        outer.push(chelis_value_take_list(inner));
     }
     new_list(outer, "chelis_list_chunk outer")
 }
@@ -2654,8 +3155,7 @@ pub unsafe extern "C" fn chelis_list_flatten(list: *const chelis_list) -> *mut c
             let inner = item.payload.list;
             if !inner.is_null() {
                 for value in &(*inner).items {
-                    chelis_value_retain(*value);
-                    out.push(*value);
+                    out.push(chelis_value_clone(*value));
                 }
             }
         }
@@ -2667,7 +3167,7 @@ pub unsafe extern "C" fn chelis_list_flatten(list: *const chelis_list) -> *mut c
 pub unsafe extern "C" fn chelis_range_i64(start: i64, end: i64) -> *mut chelis_list {
     let mut items = Vec::new();
     for value in start..end {
-        items.push(chelis_value_from_int64(value));
+        items.push(internal_value_from_i64(value));
     }
     new_list(items, "chelis_range_i64")
 }
@@ -2690,9 +3190,7 @@ pub unsafe extern "C" fn chelis_tuple_get(tuple: *const chelis_tuple, index: i64
     if tuple.is_null() || index < 0 || index >= (*tuple).items.len() as i64 {
         runtime_fail!("tuple index out of bounds");
     }
-    let value = (*tuple).items[index as usize];
-    chelis_value_retain(value);
-    value
+    chelis_value_clone((*tuple).items[index as usize])
 }
 
 #[no_mangle]
@@ -2714,7 +3212,7 @@ pub unsafe extern "C" fn chelis_list_zip(
     for (left, right) in lhs_items.iter().zip(rhs_items.iter()) {
         let pair = [*left, *right];
         let tuple = chelis_tuple_from_values(pair.as_ptr(), 2);
-        out.push(chelis_value_from_tuple(tuple));
+        out.push(chelis_value_take_tuple(tuple));
     }
     new_list(out, "chelis_list_zip")
 }
@@ -2724,9 +3222,9 @@ pub unsafe extern "C" fn chelis_list_enumerate(list: *const chelis_list) -> *mut
     let mut out = Vec::new();
     if !list.is_null() {
         for (index, item) in (*list).items.iter().enumerate() {
-            let pair = [chelis_value_from_int64(index as i64), *item];
+            let pair = [internal_value_from_i64(index as i64), *item];
             let tuple = chelis_tuple_from_values(pair.as_ptr(), 2);
-            out.push(chelis_value_from_tuple(tuple));
+            out.push(chelis_value_take_tuple(tuple));
         }
     }
     new_list(out, "chelis_list_enumerate")
@@ -2752,12 +3250,12 @@ pub unsafe extern "C" fn chelis_dict_from_pairs(pairs: *const chelis_list) -> *m
                 .position(|existing| value_key_eq(existing.key, key))
             {
                 chelis_value_release(entries[pos].value);
-                chelis_value_retain(value);
-                entries[pos].value = value;
+                entries[pos].value = chelis_value_clone(value);
             } else {
-                chelis_value_retain(key);
-                chelis_value_retain(value);
-                entries.push(chelis_dict_entry { key, value });
+                entries.push(chelis_dict_entry {
+                    key: chelis_value_clone(key),
+                    value: chelis_value_clone(value),
+                });
             }
         }
     }
@@ -2770,40 +3268,17 @@ pub unsafe extern "C" fn chelis_dict_contains(dict: *const chelis_dict, key: che
     dict_find(dict, key).is_some()
 }
 
-fn zero_value() -> chelis_value {
-    chelis_value {
-        tag: CHELIS_VALUE_UNIT,
-        reserved: [0; 7],
-        payload: chelis_value_payload {
-            handle: ptr::null_mut(),
-        },
-    }
-}
-
-fn option_value_none() -> chelis_option_value {
-    chelis_option_value {
-        is_some: 0,
-        reserved: [0; 7],
-        value: zero_value(),
-    }
-}
-
 #[no_mangle]
 pub unsafe extern "C" fn chelis_dict_get(
     dict: *const chelis_dict,
     key: chelis_value,
-) -> chelis_option_value {
+) -> *mut chelis_option {
     validate_dict_key(key, "chelis_dict_get key");
     if let Some(index) = dict_find(dict, key) {
-        let value = (*dict).entries[index].value;
-        chelis_value_retain(value);
-        chelis_option_value {
-            is_some: 1,
-            reserved: [0; 7],
-            value,
-        }
+        let value = chelis_value_clone((*dict).entries[index].value);
+        new_option(Some(value), "chelis_dict_get")
     } else {
-        option_value_none()
+        new_option(None, "chelis_dict_get")
     }
 }
 
@@ -2812,21 +3287,22 @@ pub unsafe extern "C" fn chelis_dict_get_scalar(
     dict: *const chelis_dict,
     key: chelis_value,
     dtype: chelis_dtype,
-) -> chelis_option_scalar {
+) -> *mut chelis_option {
     let dtype = require_runtime_dtype(dtype, "chelis_dict_get_scalar dtype");
-    let value = chelis_dict_get(dict, key);
-    if value.is_some == 0 {
-        return option_scalar_none();
-    }
-    if value.value.tag != CHELIS_VALUE_SCALAR {
-        chelis_value_release(value.value);
+    let option = chelis_dict_get(dict, key);
+    let Some(value) = (*option).value else {
+        return option;
+    };
+    if value.tag != CHELIS_VALUE_SCALAR {
+        chelis_option_release(option);
         runtime_fail!("Domain: chelis_dict_get_scalar present value is not scalar");
     }
-    let scalar = value.value.payload.scalar;
+    let scalar = value.payload.scalar;
     if validate_scalar(scalar, "chelis_dict_get_scalar value") != dtype {
+        chelis_option_release(option);
         runtime_fail!("Domain: chelis_dict_get_scalar dtype mismatch");
     }
-    option_scalar_some(scalar)
+    option
 }
 
 #[no_mangle]
@@ -2839,9 +3315,10 @@ pub unsafe extern "C" fn chelis_dict_remove(
     if !dict.is_null() {
         for entry in &(*dict).entries {
             if !value_key_eq(entry.key, key) {
-                chelis_value_retain(entry.key);
-                chelis_value_retain(entry.value);
-                entries.push(*entry);
+                entries.push(chelis_dict_entry {
+                    key: chelis_value_clone(entry.key),
+                    value: chelis_value_clone(entry.value),
+                });
             }
         }
     }
@@ -2861,9 +3338,10 @@ pub unsafe extern "C" fn chelis_dict_insert(
     } else {
         let mut out = Vec::with_capacity((*dict).entries.len() + 1);
         for entry in &(*dict).entries {
-            chelis_value_retain(entry.key);
-            chelis_value_retain(entry.value);
-            out.push(*entry);
+            out.push(chelis_dict_entry {
+                key: chelis_value_clone(entry.key),
+                value: chelis_value_clone(entry.value),
+            });
         }
         out
     };
@@ -2872,12 +3350,12 @@ pub unsafe extern "C" fn chelis_dict_insert(
         .position(|entry| value_key_eq(entry.key, key))
     {
         chelis_value_release(entries[index].value);
-        chelis_value_retain(value);
-        entries[index].value = value;
+        entries[index].value = chelis_value_clone(value);
     } else {
-        chelis_value_retain(key);
-        chelis_value_retain(value);
-        entries.push(chelis_dict_entry { key, value });
+        entries.push(chelis_dict_entry {
+            key: chelis_value_clone(key),
+            value: chelis_value_clone(value),
+        });
     }
     new_dict(entries, "chelis_dict_insert")
 }
@@ -2890,9 +3368,10 @@ pub unsafe extern "C" fn chelis_dict_merge(
     let mut entries = Vec::new();
     if !lhs.is_null() {
         for entry in &(*lhs).entries {
-            chelis_value_retain(entry.key);
-            chelis_value_retain(entry.value);
-            entries.push(*entry);
+            entries.push(chelis_dict_entry {
+                key: chelis_value_clone(entry.key),
+                value: chelis_value_clone(entry.value),
+            });
         }
     }
     if !rhs.is_null() {
@@ -2902,12 +3381,12 @@ pub unsafe extern "C" fn chelis_dict_merge(
                 .position(|existing| value_key_eq(existing.key, entry.key))
             {
                 chelis_value_release(entries[index].value);
-                chelis_value_retain(entry.value);
-                entries[index].value = entry.value;
+                entries[index].value = chelis_value_clone(entry.value);
             } else {
-                chelis_value_retain(entry.key);
-                chelis_value_retain(entry.value);
-                entries.push(*entry);
+                entries.push(chelis_dict_entry {
+                    key: chelis_value_clone(entry.key),
+                    value: chelis_value_clone(entry.value),
+                });
             }
         }
     }
@@ -2919,8 +3398,7 @@ pub unsafe extern "C" fn chelis_dict_keys(dict: *const chelis_dict) -> *mut chel
     let mut items = Vec::new();
     if !dict.is_null() {
         for entry in &(*dict).entries {
-            chelis_value_retain(entry.key);
-            items.push(entry.key);
+            items.push(chelis_value_clone(entry.key));
         }
     }
     new_list(items, "chelis_dict_keys")
@@ -2931,8 +3409,7 @@ pub unsafe extern "C" fn chelis_dict_values(dict: *const chelis_dict) -> *mut ch
     let mut items = Vec::new();
     if !dict.is_null() {
         for entry in &(*dict).entries {
-            chelis_value_retain(entry.value);
-            items.push(entry.value);
+            items.push(chelis_value_clone(entry.value));
         }
     }
     new_list(items, "chelis_dict_values")
@@ -2945,7 +3422,7 @@ pub unsafe extern "C" fn chelis_dict_entries(dict: *const chelis_dict) -> *mut c
         for entry in &(*dict).entries {
             let pair = [entry.key, entry.value];
             let tuple = chelis_tuple_from_values(pair.as_ptr(), 2);
-            items.push(chelis_value_from_tuple(tuple));
+            items.push(chelis_value_take_tuple(tuple));
         }
     }
     new_list(items, "chelis_dict_entries")
@@ -3031,7 +3508,7 @@ pub unsafe extern "C" fn chelis_tensor_from_values(
     let out = chelis_alloc(rank, shape.as_ptr(), dtype.id() as chelis_dtype);
     if (*out).size != 0 {
         let mut index = 0;
-        flatten_exact_scalars(list, dtype, (*out).data, &mut index);
+        flatten_exact_scalars(list, dtype, tensor_data(out), &mut index);
         if index != (*out).size as usize {
             runtime_fail!("Domain: chelis_tensor_from_values leaf count does not match shape");
         }
@@ -3047,39 +3524,48 @@ pub unsafe extern "C" fn chelis_tensor_elements(tensor: *const chelis_tensor) ->
         let value = match dtype {
             RuntimeDType::Bool => {
                 let raw = *Bool8::data_ptr_unchecked(tensor as *mut chelis_tensor).add(i);
-                chelis_value_from_bool(raw.get())
+                internal_value_from_bool(raw.get())
             }
             RuntimeDType::I64 => {
-                let v = *((*tensor).data as *const i64).add(i);
-                chelis_value_from_int64(v)
+                let v = *(tensor_data(tensor) as *const i64).add(i);
+                internal_value_from_i64(v)
             }
             RuntimeDType::I32 => {
-                let bits = *((*tensor).data as *const u32).add(i);
-                chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_I32, u64::from(bits)))
+                let bits = *(tensor_data(tensor) as *const u32).add(i);
+                internal_value_from_scalar(chelis_scalar_from_bits(
+                    CHELIS_DTYPE_I32,
+                    u64::from(bits),
+                ))
             }
             RuntimeDType::I16 => {
-                let bits = *((*tensor).data as *const u16).add(i);
-                chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_I16, u64::from(bits)))
+                let bits = *(tensor_data(tensor) as *const u16).add(i);
+                internal_value_from_scalar(chelis_scalar_from_bits(
+                    CHELIS_DTYPE_I16,
+                    u64::from(bits),
+                ))
             }
             RuntimeDType::I8 => {
-                let bits = *((*tensor).data as *const u8).add(i);
-                chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_I8, u64::from(bits)))
+                let bits = *(tensor_data(tensor) as *const u8).add(i);
+                internal_value_from_scalar(chelis_scalar_from_bits(
+                    CHELIS_DTYPE_I8,
+                    u64::from(bits),
+                ))
             }
             RuntimeDType::F64 => {
-                let v = *((*tensor).data as *const f64).add(i);
-                chelis_value_from_f64(v)
+                let v = *(tensor_data(tensor) as *const f64).add(i);
+                internal_value_from_f64(v)
             }
             RuntimeDType::F32 => {
-                let raw = *((*tensor).data as *const f32).add(i);
-                chelis_value_from_f32(raw)
+                let raw = *(tensor_data(tensor) as *const f32).add(i);
+                internal_value_from_f32(raw)
             }
             RuntimeDType::Bf16 => {
-                let bits = *((*tensor).data as *const u16).add(i);
-                chelis_value_from_bf16_bits(bits)
+                let bits = *(tensor_data(tensor) as *const u16).add(i);
+                internal_value_from_bf16_bits(bits)
             }
             RuntimeDType::F16 => {
-                let bits = *((*tensor).data as *const u16).add(i);
-                chelis_value_from_f16_bits(bits)
+                let bits = *(tensor_data(tensor) as *const u16).add(i);
+                internal_value_from_f16_bits(bits)
             }
         };
         items.push(value);
@@ -3119,7 +3605,7 @@ pub unsafe extern "C" fn chelis_pad_sequences(
                     if value.tag != CHELIS_VALUE_SCALAR {
                         runtime_fail!("Domain: chelis_pad_sequences elements must be scalars");
                     }
-                    let scalar = chelis_value_as_scalar(value);
+                    let scalar = internal_value_as_scalar(value);
                     if validate_scalar(scalar, "chelis_pad_sequences element") != dtype {
                         runtime_fail!("Domain: chelis_pad_sequences scalar dtype mismatch");
                     }
@@ -3127,7 +3613,7 @@ pub unsafe extern "C" fn chelis_pad_sequences(
                 } else {
                     pad_value
                 };
-                write_scalar_bits((*out).data, flat, scalar);
+                write_scalar_bits(tensor_data(out), flat, scalar);
             }
         }
     }
@@ -3162,7 +3648,7 @@ pub unsafe extern "C" fn chelis_pad_sequences_to(
                     if value.tag != CHELIS_VALUE_SCALAR {
                         runtime_fail!("Domain: chelis_pad_sequences_to elements must be scalars");
                     }
-                    let scalar = chelis_value_as_scalar(value);
+                    let scalar = internal_value_as_scalar(value);
                     if validate_scalar(scalar, "chelis_pad_sequences_to element") != dtype {
                         runtime_fail!("Domain: chelis_pad_sequences_to scalar dtype mismatch");
                     }
@@ -3170,7 +3656,7 @@ pub unsafe extern "C" fn chelis_pad_sequences_to(
                 } else {
                     pad_value
                 };
-                write_scalar_bits((*out).data, flat, scalar);
+                write_scalar_bits(tensor_data(out), flat, scalar);
             }
         }
     }
@@ -3188,7 +3674,7 @@ pub unsafe extern "C" fn chelis_tensor_concat(
     let tensors = (*parts)
         .items
         .iter()
-        .map(|item| chelis_value_as_tensor(*item) as *const chelis_tensor)
+        .map(|item| chelis_tensor_borrow_value(*item))
         .collect::<Vec<_>>();
     let dtypes = tensors
         .iter()
@@ -3239,8 +3725,8 @@ pub unsafe extern "C" fn chelis_tensor_concat(
             // full bit pattern for every supported dtype (f32, f64,
             // i32, i64, bool) without depending on per-element typed
             // dispatch.
-            let dst = (*out).data.add(out_linear as usize * elem_size);
-            let src = (*tensor).data.add(linear as usize * elem_size) as *const u8;
+            let dst = tensor_data(out).add(out_linear as usize * elem_size);
+            let src = tensor_data(tensor).add(linear as usize * elem_size) as *const u8;
             ptr::copy_nonoverlapping(src, dst, elem_size);
             indices[axis_i] -= axis_offset;
         }
@@ -3304,15 +3790,15 @@ pub unsafe extern "C" fn chelis_tensor_split(
             // Byte-stride copy of a single element; correct for every
             // supported dtype (4-byte f32/i32/bool and 8-byte
             // f64/i64).
-            let dst = (*part).data.add(linear as usize * elem_size);
-            let src_ptr = ((*tensor).data as *const u8).add(src as usize * elem_size);
+            let dst = tensor_data(part).add(linear as usize * elem_size);
+            let src_ptr = (tensor_data(tensor) as *const u8).add(src as usize * elem_size);
             ptr::copy_nonoverlapping(src_ptr, dst, elem_size);
             indices[axis_i] -= axis_offset;
         }
         axis_offset = axis_offset
             .checked_add(part_size)
             .unwrap_or_else(|| runtime_fail!("Overflow: split axis offset exceeds int64"));
-        items.push(chelis_value_from_tensor(part));
+        items.push(chelis_value_take_tensor(part));
     }
     new_list(items, "chelis_tensor_split")
 }
@@ -3389,8 +3875,8 @@ pub unsafe extern "C" fn chelis_tensor_gather(
         );
         // Byte-stride copy of a single element preserves the bit
         // pattern for every supported dtype.
-        let dst = (*out).data.add(linear as usize * elem_size);
-        let src = ((*tensor).data as *const u8).add(src_linear as usize * elem_size);
+        let dst = tensor_data(out).add(linear as usize * elem_size);
+        let src = (tensor_data(tensor) as *const u8).add(src_linear as usize * elem_size);
         ptr::copy_nonoverlapping(src, dst, elem_size);
     }
     out
@@ -3463,7 +3949,7 @@ unsafe fn tensor_scatter(
     let axis_i = tensor_normalize_axis(base, axis, "scatter");
     let expected = chelis_tensor_gather(base, indices, axis);
     require_same_tensor_shape_validated(expected, updates, "scatter");
-    chelis_free(expected);
+    chelis_tensor_release(expected);
     let out = tensor_clone(base);
     if dtype != updates_dtype {
         runtime_fail!("Domain: scatter expects matching base and update dtypes");
@@ -3529,8 +4015,8 @@ unsafe fn tensor_scatter(
                 as usize;
         if !add_mode {
             // Replace = byte-copy of one element from updates to out.
-            let dst = (*out).data.add(out_linear * elem_size);
-            let src = ((*updates).data as *const u8).add(linear as usize * elem_size);
+            let dst = tensor_data(out).add(out_linear * elem_size);
+            let src = (tensor_data(updates) as *const u8).add(linear as usize * elem_size);
             ptr::copy_nonoverlapping(src, dst, elem_size);
         } else {
             additive_leaves.as_mut().unwrap()[out_linear].push(linear as usize);
@@ -3621,8 +4107,8 @@ pub unsafe extern "C" fn chelis_tensor_where(
             } else {
                 else_tensor
             };
-            let dst = (*out).data.add(i * elem_size);
-            let src = ((*pick).data as *const u8).add(i * elem_size);
+            let dst = tensor_data(out).add(i * elem_size);
+            let src = (tensor_data(pick) as *const u8).add(i * elem_size);
             ptr::copy_nonoverlapping(src, dst, elem_size);
         }
     }
@@ -3736,8 +4222,8 @@ pub unsafe extern "C" fn chelis_tensor_sort(
     // [05-OP-33] owes.
     if (*tensor).size == 0 {
         let items = [
-            chelis_value_from_tensor(values),
-            chelis_value_from_tensor(indices),
+            chelis_value_take_tensor(values),
+            chelis_value_take_tensor(indices),
         ];
         return chelis_tuple_from_values(items.as_ptr(), 2);
     }
@@ -3756,7 +4242,7 @@ pub unsafe extern "C" fn chelis_tensor_sort(
     // compares and swaps at its native width. Pre-migration f32-only
     // read silently corrupted F64 / I64 sort orderings. Bool is
     // semantically undefined per Contract 3.
-    let indices_data = (*indices).data as *mut i64;
+    let indices_data = tensor_data(indices) as *mut i64;
     unsafe fn sort_loop<T: RuntimeOrdered>(
         values: *mut chelis_tensor,
         indices_data: *mut i64,
@@ -3805,8 +4291,8 @@ pub unsafe extern "C" fn chelis_tensor_sort(
         RuntimeDType::Bool => runtime_fail!("sort is undefined for bool tensors"),
     }
     let items = [
-        chelis_value_from_tensor(values),
-        chelis_value_from_tensor(indices),
+        chelis_value_take_tensor(values),
+        chelis_value_take_tensor(indices),
     ];
     chelis_tuple_from_values(items.as_ptr(), 2)
 }
@@ -3891,8 +4377,8 @@ pub unsafe extern "C" fn chelis_tensor_diagonal(
         );
         // Byte-stride copy of one element; preserves the full bit
         // pattern for every supported dtype.
-        let dst = (*out).data.add(linear as usize * elem_size);
-        let src_ptr = ((*tensor).data as *const u8).add(src as usize * elem_size);
+        let dst = tensor_data(out).add(linear as usize * elem_size);
+        let src_ptr = (tensor_data(tensor) as *const u8).add(src as usize * elem_size);
         ptr::copy_nonoverlapping(src_ptr, dst, elem_size);
     }
     out
@@ -3945,7 +4431,7 @@ pub unsafe extern "C" fn chelis_tensor_trace(
     // overflowing, spin the empty loop for hours. Neither is the empty result
     // [05-OP-33] owes.
     if (*out).size == 0 {
-        chelis_free(diag);
+        chelis_tensor_release(diag);
         return out;
     }
     let mut inner = 1usize;
@@ -4011,11 +4497,11 @@ pub unsafe extern "C" fn chelis_tensor_trace(
             diag, out, outer, axis_size, inner,
         ),
         RuntimeDType::Bool => {
-            chelis_free(diag);
+            chelis_tensor_release(diag);
             runtime_fail!("trace is undefined for bool tensors");
         }
     }
-    chelis_free(diag);
+    chelis_tensor_release(diag);
     out
 }
 
@@ -4525,7 +5011,7 @@ pub unsafe extern "C" fn chelis_fail(message: chelis_string) -> ! {
 fn bytes_to_value_list(bytes: &[u8]) -> *mut chelis_list {
     let items = bytes
         .iter()
-        .map(|byte| unsafe { chelis_value_from_int64(i64::from(*byte)) })
+        .map(|byte| unsafe { internal_value_from_i64(i64::from(*byte)) })
         .collect::<Vec<_>>();
     new_list(items, "bytes_to_value_list")
 }
@@ -4552,7 +5038,7 @@ pub unsafe extern "C" fn chelis_read_lines(path: chelis_string) -> *mut chelis_l
         .unwrap_or_else(|err| runtime_fail!("read_lines failed for `{path_text}`: {err}"));
     let items = contents
         .lines()
-        .map(|line| chelis_value_from_string(new_runtime_string(line.to_string())))
+        .map(|line| internal_value_from_string(new_runtime_string(line.to_string())))
         .collect::<Vec<_>>();
     new_list(items, "chelis_read_lines")
 }
@@ -4590,7 +5076,7 @@ pub unsafe extern "C" fn chelis_list_dir(path: chelis_string) -> *mut chelis_lis
     let items = names
         .into_iter()
         .map(|name| {
-            chelis_value_from_string(new_runtime_string(name.to_string_lossy().into_owned()))
+            internal_value_from_string(new_runtime_string(name.to_string_lossy().into_owned()))
         })
         .collect();
     new_list(items, "chelis_list_dir")
@@ -4612,8 +5098,13 @@ pub unsafe extern "C" fn chelis_mmap_read(
     offset: i64,
     len: i64,
 ) -> *mut chelis_list {
-    if mapped.is_null() || offset < 0 || len < 0 {
-        runtime_fail!("mmap_read requires non-null mapping and non-negative offsets");
+    require_live_kind(
+        mapped.cast(),
+        ownership_ledger::Kind::MappedFile,
+        "chelis_mmap_read",
+    );
+    if offset < 0 || len < 0 {
+        runtime_fail!("mmap_read requires non-negative offsets");
     }
     let mapped = &*mapped;
     let offset = offset as usize;
@@ -4627,9 +5118,11 @@ pub unsafe extern "C" fn chelis_mmap_read(
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_mmap_len(mapped: *const chelis_mapped_file) -> i64 {
-    if mapped.is_null() {
-        runtime_fail!("mmap_len requires non-null mapping");
-    }
+    require_live_kind(
+        mapped.cast(),
+        ownership_ledger::Kind::MappedFile,
+        "chelis_mmap_len",
+    );
     (*mapped).mmap.len() as i64
 }
 
@@ -4648,10 +5141,10 @@ pub unsafe extern "C" fn chelis_contiguous(t: *const chelis_tensor) -> *mut chel
     if chelis_is_contiguous(t) != 0 {
         let out = chelis_alloc((*t).rank, (*t).shape.as_ptr(), dtype.id() as chelis_dtype);
         let bytes = (*t).size as usize * elem_size;
-        // `(*t).data` and `(*out).data` are both `*mut u8`
+        // `tensor_data(t)` and `tensor_data(out)` are both `*mut u8`
         // post-PR-1; cast the source to `*const u8` so
         // `copy_nonoverlapping` infers the const-reduced type.
-        ptr::copy_nonoverlapping((*t).data as *const u8, (*out).data, bytes);
+        ptr::copy_nonoverlapping(tensor_data(t) as *const u8, tensor_data(out), bytes);
         return out;
     }
     let out = chelis_alloc((*t).rank, (*t).shape.as_ptr(), dtype.id() as chelis_dtype);
@@ -4661,8 +5154,8 @@ pub unsafe extern "C" fn chelis_contiguous(t: *const chelis_tensor) -> *mut chel
         let src = chelis_indices_to_flat(indices.as_ptr(), (*t).strides.as_ptr(), (*t).rank);
         // `chelis_tensor.data` is `*mut u8` post-PR-1; the casts
         // previously normalized the field from `*mut f32`.
-        let dst_byte = (*out).data.add(i as usize * elem_size);
-        let src_byte = ((*t).data as *const u8).add(src as usize * elem_size);
+        let dst_byte = tensor_data(out).add(i as usize * elem_size);
+        let src_byte = (tensor_data(t) as *const u8).add(src as usize * elem_size);
         ptr::copy_nonoverlapping(src_byte, dst_byte, elem_size);
     }
     out
@@ -4784,11 +5277,11 @@ unsafe fn tensor_elem_to_string(t: *const chelis_tensor, dtype: RuntimeDType, i:
         // chelis#732 Phase 2 (chelis#749's f16-as-f32 shape): read the
         // 2-byte storage and format at the value's own width.
         RuntimeDType::Bf16 => {
-            let bits = *((*t).data as *const u16).add(i);
+            let bits = *(tensor_data(t) as *const u16).add(i);
             format_shortest(f64::from(half::bf16::from_bits(bits)), RuntimeDType::Bf16)
         }
         RuntimeDType::F16 => {
-            let bits = *((*t).data as *const u16).add(i);
+            let bits = *(tensor_data(t) as *const u16).add(i);
             format_shortest(f64::from(half::f16::from_bits(bits)), RuntimeDType::F16)
         }
     }
@@ -4870,10 +5363,10 @@ mod tests {
     fn list_append_and_index_round_trip() {
         unsafe {
             let base = chelis_list_empty();
-            let list = chelis_list_append(base, chelis_value_from_int64(41));
-            let list = chelis_list_append(list, chelis_value_from_int64(42));
+            let list = chelis_list_append(base, internal_value_from_i64(41));
+            let list = chelis_list_append(list, internal_value_from_i64(42));
             let item = chelis_list_index(list, 1);
-            assert_eq!(chelis_value_as_int64(item), 42);
+            assert_eq!(internal_value_as_i64(item), 42);
             chelis_value_release(item);
             chelis_list_release(list);
             chelis_list_release(base);
@@ -4885,13 +5378,13 @@ mod tests {
         unsafe {
             let list = chelis_list_with_capacity(2);
             assert!((*list).items.capacity() >= 2);
-            chelis_list_push(list, chelis_value_from_int64(1));
-            chelis_list_push(list, chelis_value_from_int64(2));
-            chelis_list_push(list, chelis_value_from_int64(3));
+            chelis_list_push(list, internal_value_from_i64(1));
+            chelis_list_push(list, internal_value_from_i64(2));
+            chelis_list_push(list, internal_value_from_i64(3));
             assert_eq!(chelis_list_len(list), 3);
             assert!((*list).items.capacity() >= 3);
             let item = chelis_list_index(list, 2);
-            assert_eq!(chelis_value_as_int64(item), 3);
+            assert_eq!(internal_value_as_i64(item), 3);
             chelis_value_release(item);
             chelis_list_release(list);
         }
@@ -4901,11 +5394,11 @@ mod tests {
     fn list_push_retains_heap_values_like_append() {
         unsafe {
             let list = chelis_list_with_capacity(1);
-            let value = chelis_value_from_string(runtime_str("owned"));
+            let value = internal_value_from_string(runtime_str("owned"));
             chelis_list_push(list, value);
             chelis_value_release(value);
             let item = chelis_list_index(list, 0);
-            assert_eq!(string_text(chelis_value_as_string(item)), "owned");
+            assert_eq!(string_text(chelis_string_borrow_value(item)), "owned");
             chelis_value_release(item);
             chelis_list_release(list);
         }
@@ -4915,16 +5408,16 @@ mod tests {
     fn list_extend_appends_all_source_items() {
         unsafe {
             let dst = chelis_list_with_capacity(0);
-            chelis_list_push(dst, chelis_value_from_int64(1));
-            let value = chelis_value_from_string(runtime_str("retained"));
-            let items = [chelis_value_from_int64(7), value];
+            chelis_list_push(dst, internal_value_from_i64(1));
+            let value = internal_value_from_string(runtime_str("retained"));
+            let items = [internal_value_from_i64(7), value];
             let src = chelis_list_from_values(items.as_ptr(), 2);
             chelis_value_release(value);
             chelis_list_extend(dst, src);
             assert_eq!(chelis_list_len(dst), 3);
             chelis_list_release(src);
             let last = chelis_list_index(dst, 2);
-            assert_eq!(string_text(chelis_value_as_string(last)), "retained");
+            assert_eq!(string_text(chelis_string_borrow_value(last)), "retained");
             chelis_value_release(last);
             chelis_list_release(dst);
         }
@@ -4933,19 +5426,19 @@ mod tests {
     #[test]
     fn dict_insert_replaces_without_reordering() {
         unsafe {
-            let key_a = chelis_value_from_string(runtime_str("a"));
-            let key_b = chelis_value_from_string(runtime_str("b"));
-            let dict = chelis_dict_insert(std::ptr::null(), key_a, chelis_value_from_int64(1));
-            let dict = chelis_dict_insert(dict, key_b, chelis_value_from_int64(2));
-            let dict = chelis_dict_insert(dict, key_a, chelis_value_from_int64(3));
+            let key_a = internal_value_from_string(runtime_str("a"));
+            let key_b = internal_value_from_string(runtime_str("b"));
+            let dict = chelis_dict_insert(std::ptr::null(), key_a, internal_value_from_i64(1));
+            let dict = chelis_dict_insert(dict, key_b, internal_value_from_i64(2));
+            let dict = chelis_dict_insert(dict, key_a, internal_value_from_i64(3));
             let entries = chelis_dict_entries(dict);
             assert_eq!(chelis_list_len(entries), 2);
             let first = chelis_list_index(entries, 0);
-            let pair = chelis_value_as_tuple(first);
+            let pair = chelis_tuple_borrow_value(first);
             let first_key = chelis_tuple_get(pair, 0);
             let first_value = chelis_tuple_get(pair, 1);
-            assert_eq!(string_text(chelis_value_as_string(first_key)), "a");
-            assert_eq!(chelis_value_as_int64(first_value), 3);
+            assert_eq!(string_text(chelis_string_borrow_value(first_key)), "a");
+            assert_eq!(internal_value_as_i64(first_value), 3);
             chelis_value_release(first_value);
             chelis_value_release(first_key);
             chelis_value_release(first);
@@ -4965,7 +5458,7 @@ mod tests {
             assert_eq!(chelis_tensor_shape(tensor, 0), 2);
             assert_eq!(chelis_tensor_shape(tensor, 1), 3);
             assert_eq!(chelis_tensor_numel(tensor), 6);
-            chelis_free(tensor);
+            chelis_tensor_release(tensor);
         }
     }
 
@@ -4986,14 +5479,13 @@ mod tests {
         }
     }
 
-    /// The exact public tensor carrier stores dynamic shape and stride
-    /// pointers rather than embedding a rank limit. The lock makes every
-    /// layout change explicit; `dim_carrier_int64.rs` independently checks
-    /// the same bytes against the published header.
+    /// Tensor descriptors and storage are private, but both must begin with
+    /// the common header so wrong-kind validation is defined before any
+    /// kind-specific cast. The public C test independently locks opacity.
     #[test]
-    fn tensor_layout_stays_stable() {
-        assert_eq!(std::mem::size_of::<chelis_tensor>(), 48);
-        assert_eq!(std::mem::align_of::<chelis_tensor>(), 8);
+    fn tensor_descriptor_and_storage_are_header_first() {
+        assert_eq!(std::mem::offset_of!(chelis_tensor, header), 0);
+        assert_eq!(std::mem::offset_of!(TensorStorage, header), 0);
     }
 
     /// [05-OP-33] defines trace as diagonal followed by [05-OP-30]'s
@@ -5013,8 +5505,8 @@ mod tests {
             assert_eq!(chelis_tensor_rank(out), 0, "trace is a scalar");
             let got = *data_as_f32(out);
             assert_eq!(got.to_bits(), 1.0_f32.to_bits());
-            chelis_free(out);
-            chelis_free(matrix);
+            chelis_tensor_release(out);
+            chelis_tensor_release(matrix);
         }
     }
 
@@ -5025,16 +5517,16 @@ mod tests {
         unsafe {
             let shape = [5_i64, 5];
             let matrix = chelis_alloc(2, shape.as_ptr(), CHELIS_DTYPE_F64);
-            let data = (*matrix).data as *mut f64;
+            let data = tensor_data(matrix) as *mut f64;
             for (i, &v) in diag.iter().enumerate() {
                 *data.add(i * 5 + i) = v;
             }
             let out = chelis_tensor_trace(matrix, 0, 1);
             assert_eq!(chelis_tensor_rank(out), 0, "trace is a scalar");
-            let got = *((*out).data as *const f64);
+            let got = *(tensor_data(out) as *const f64);
             assert_eq!(got.to_bits(), 1.0_f64.to_bits());
-            chelis_free(out);
-            chelis_free(matrix);
+            chelis_tensor_release(out);
+            chelis_tensor_release(matrix);
         }
     }
 
@@ -5044,7 +5536,7 @@ mod tests {
             let shape = [1000i64];
             let result = chelis_alloc(1, shape.as_ptr(), CHELIS_DTYPE_F32);
             assert!(
-                !(*result).data.is_null(),
+                !tensor_data(result).is_null(),
                 "chelis_alloc must return non-null data"
             );
             assert_eq!(
@@ -5052,7 +5544,7 @@ mod tests {
                 0,
                 "chelis_alloc must return 32-byte aligned data"
             );
-            chelis_free(result);
+            chelis_tensor_release(result);
         }
     }
 
@@ -5069,12 +5561,12 @@ mod tests {
                 CHELIS_DTYPE_F32,
                 "the f32 tag must advertise f32 storage"
             );
-            assert_eq!(*((*tensor).data as *const f32), 2.5_f32);
+            assert_eq!(*(tensor_data(tensor) as *const f32), 2.5_f32);
             // The whole 4-byte slot must equal the f32 bit pattern, with no
             // stray bytes a wider read could misinterpret.
-            assert_eq!(*((*tensor).data as *const u32), 2.5_f32.to_bits());
+            assert_eq!(*(tensor_data(tensor) as *const u32), 2.5_f32.to_bits());
             assert_eq!(chelis_tensor_to_scalar(tensor), value);
-            chelis_free(tensor);
+            chelis_tensor_release(tensor);
         }
     }
 
@@ -5084,9 +5576,9 @@ mod tests {
             let value = chelis_scalar_from_bits(CHELIS_DTYPE_F32, u64::from(0.1_f32.to_bits()));
             let tensor = chelis_scalar_tensor(value);
             assert_eq!((*tensor).dtype, CHELIS_DTYPE_F32);
-            assert_eq!(*((*tensor).data as *const f32), 0.1_f32);
+            assert_eq!(*(tensor_data(tensor) as *const f32), 0.1_f32);
             assert_eq!(chelis_tensor_to_scalar(tensor), value);
-            chelis_free(tensor);
+            chelis_tensor_release(tensor);
         }
     }
 
@@ -5101,14 +5593,14 @@ mod tests {
                 CHELIS_DTYPE_F64,
                 "the f64 tag must advertise f64 storage"
             );
-            assert_eq!(*((*tensor).data as *const f64), 1.1_f64);
+            assert_eq!(*(tensor_data(tensor) as *const f64), 1.1_f64);
             assert_ne!(
-                *((*tensor).data as *const f64),
+                *(tensor_data(tensor) as *const f64),
                 1.1_f32 as f64,
                 "f64 store must not collapse to the f32-truncated value"
             );
             assert_eq!(chelis_tensor_to_scalar(tensor), value);
-            chelis_free(tensor);
+            chelis_tensor_release(tensor);
         }
     }
 
@@ -5132,7 +5624,7 @@ mod tests {
             let mut list = chelis_list_empty();
             assert_eq!((*list).items.capacity(), 0, "empty list holds no buffer");
             for expected_len in 1..=8usize {
-                let grown = chelis_list_append(list, chelis_value_from_int64(1));
+                let grown = chelis_list_append(list, internal_value_from_i64(1));
                 chelis_list_release(list);
                 list = grown;
                 assert_eq!((*list).items.len(), expected_len);
@@ -5162,12 +5654,12 @@ mod tests {
     fn append_leaves_the_source_list_untouched() {
         unsafe {
             let source = chelis_list_empty();
-            chelis_list_push(source, chelis_value_from_int64(10));
-            chelis_list_push(source, chelis_value_from_int64(20));
+            chelis_list_push(source, internal_value_from_i64(10));
+            chelis_list_push(source, internal_value_from_i64(20));
             let source_len_before = chelis_list_len(source);
             let source_buffer_before = (*source).items.as_ptr();
 
-            let appended = chelis_list_append(source, chelis_value_from_int64(30));
+            let appended = chelis_list_append(source, internal_value_from_i64(30));
 
             assert_ne!(
                 appended as *const chelis_list, source,
@@ -5205,19 +5697,23 @@ mod tests {
     fn append_retains_elements_and_release_balances() {
         unsafe {
             let element = chelis_list_empty();
-            chelis_list_push(element, chelis_value_from_int64(7));
-            assert_eq!((*element).refcount, 1, "sole owner at construction");
-
-            let source = chelis_list_append(std::ptr::null(), chelis_value_from_list(element));
+            chelis_list_push(element, internal_value_from_i64(7));
             assert_eq!(
-                (*element).refcount,
+                (*element).header.strong.load(Ordering::Relaxed),
+                1,
+                "sole owner at construction"
+            );
+
+            let source = chelis_list_append(std::ptr::null(), chelis_value_take_list(element));
+            assert_eq!(
+                (*element).header.strong.load(Ordering::Relaxed),
                 2,
                 "append retains the value it stores; the caller still owns its reference"
             );
 
-            let grown = chelis_list_append(source, chelis_value_from_int64(1));
+            let grown = chelis_list_append(source, internal_value_from_i64(1));
             assert_eq!(
-                (*element).refcount,
+                (*element).header.strong.load(Ordering::Relaxed),
                 3,
                 "cloning the source into the grown list retains every element it copied"
             );
@@ -5228,13 +5724,13 @@ mod tests {
             // free it outright while `source` still points at it.
             chelis_list_release(grown);
             assert_eq!(
-                (*element).refcount,
+                (*element).header.strong.load(Ordering::Relaxed),
                 2,
                 "one release drops exactly one reference"
             );
             chelis_list_release(source);
             assert_eq!(
-                (*element).refcount,
+                (*element).header.strong.load(Ordering::Relaxed),
                 1,
                 "the caller's own reference survives"
             );
@@ -5250,9 +5746,9 @@ mod tests {
             let tensor = chelis_scalar_tensor(value);
             assert_eq!((*tensor).rank, 0, "rank-0 scalar tensor");
             assert_eq!((*tensor).dtype, CHELIS_DTYPE_I64);
-            assert_eq!(*((*tensor).data as *const i64), 7);
+            assert_eq!(*(tensor_data(tensor) as *const i64), 7);
             assert_eq!(chelis_tensor_to_scalar(tensor), value);
-            chelis_free(tensor);
+            chelis_tensor_release(tensor);
         }
     }
 }

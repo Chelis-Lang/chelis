@@ -74,9 +74,6 @@ fn target_debug_dir() -> PathBuf {
 /// copies the hashed artifact into place on first use. Idempotent and
 /// thread-safe.
 fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
-    if canonical.exists() {
-        return Ok(());
-    }
     let deps_dir = canonical
         .parent()
         .expect("canonical lib path has no parent")
@@ -106,6 +103,9 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
             })?
         }
     };
+    if canonical.exists() && canonical.metadata()?.modified()? >= hashed.metadata()?.modified()? {
+        return Ok(());
+    }
     // Use a PID-suffixed tmp filename so concurrent test binaries (this
     // file and dtype_matrix_bf16_f16.rs both call into this helper, and
     // nextest runs them in parallel) do not race on a shared tmp path.
@@ -245,24 +245,14 @@ const HARNESS_HEADER: &str = r#"
 #include <math.h>
 #include "chelis_runtime.h"
 
-static chelis_tensor make_view_typed_1d(void* data, int64_t n, chelis_dtype dtype) {
-    static int64_t shape[1];
-    static const int64_t strides[1] = {1};
-    shape[0] = n;
-    return (chelis_tensor){
-        .data = data,
-        .shape = shape,
-        .strides = strides,
-        .size = n,
-        .byte_capacity = n * chelis_dtype_size(dtype),
-        .rank = 1,
-        .dtype = dtype,
-        .owns_data = 0,
-        .reserved = {0, 0},
-    };
+static chelis_tensor *make_view_typed_1d(void* data, int64_t n, chelis_dtype dtype) {
+    int64_t shape[1] = {n};
+    return chelis_tensor_entry_borrow(
+        1, shape, dtype, data, n * chelis_dtype_size(dtype)
+    );
 }
 
-static chelis_tensor make_view_1d(float* data, int64_t n) {
+static chelis_tensor *make_view_1d(float* data, int64_t n) {
     return make_view_typed_1d(data, n, CHELIS_DTYPE_F32);
 }
 "#;
@@ -310,8 +300,8 @@ extern void test_exp_none(chelis_tensor** inputs, int n_in, chelis_tensor** outp
 
 int main() {{
     float in_data[4] = {{0.0f, 1.0f, 2.0f, -1.0f}};
-    chelis_tensor in_t = make_view_1d(in_data, 4);
-    chelis_tensor* in_ptr = &in_t;
+    chelis_tensor *in_t = make_view_1d(in_data, 4);
+    chelis_tensor* in_ptr = in_t;
     chelis_tensor* inputs[1] = {{in_ptr}};
     chelis_tensor* out_slot = NULL;
     chelis_tensor* outputs[1] = {{out_slot}};
@@ -321,7 +311,7 @@ int main() {{
     float expected[4] = {{1.0f, 2.718282f, 7.389056f, 0.367879f}};
     int ok = 1;
     for (int i = 0; i < 4; i++) {{
-        float got = ((float*)outputs[0]->data)[i];
+        float got = ((float*)chelis_tensor_read_view(outputs[0]).data)[i];
         float reldiff = fabsf(got - expected[i]) / (fabsf(expected[i]) + 1e-6f);
         if (reldiff > 1e-4f) {{
             printf("MISMATCH at %d: got %.6f expected %.6f\n", i, got, expected[i]);
@@ -386,8 +376,8 @@ extern void test_exp_sleef(chelis_tensor** inputs, int n_in, chelis_tensor** out
 
 int main() {{
     float in_data[9] = {{0.0f, 1.0f, -1.0f, 0.5f, 2.0f, -2.0f, 0.1f, 3.0f, -0.5f}};
-    chelis_tensor in_t = make_view_1d(in_data, 9);
-    chelis_tensor* in_ptr = &in_t;
+    chelis_tensor *in_t = make_view_1d(in_data, 9);
+    chelis_tensor* in_ptr = in_t;
     chelis_tensor* inputs[1] = {{in_ptr}};
     chelis_tensor* out_slot = NULL;
     chelis_tensor* outputs[1] = {{out_slot}};
@@ -398,7 +388,7 @@ int main() {{
     for (int i = 0; i < 9; i++) {{
         // The 2-op chain is exp->neg, so expected = -expf(x)
         float expected = -expf(in_data[i]);
-        float got = ((float*)outputs[0]->data)[i];
+        float got = ((float*)chelis_tensor_read_view(outputs[0]).data)[i];
         float reldiff = fabsf(got - expected) / (fabsf(expected) + 1e-6f);
         if (reldiff > 1e-4f) {{
             printf("MISMATCH at %d: got %.6f expected %.6f\n", i, got, expected);
@@ -465,15 +455,15 @@ int main() {{
         in_data[i] = (float)(i + 1);
         scalar_sum += in_data[i];
     }}
-    chelis_tensor in_t = make_view_1d(in_data, 100);
-    chelis_tensor* in_ptr = &in_t;
+    chelis_tensor *in_t = make_view_1d(in_data, 100);
+    chelis_tensor* in_ptr = in_t;
     chelis_tensor* inputs[1] = {{in_ptr}};
     chelis_tensor* out_slot = NULL;
     chelis_tensor* outputs[1] = {{out_slot}};
 
     test_reduce_sum(inputs, 1, outputs, 1);
 
-    float got = ((float*)outputs[0]->data)[0];
+    float got = ((float*)chelis_tensor_read_view(outputs[0]).data)[0];
     float diff = fabsf(got - scalar_sum);
     printf("sum(1..100): got=%.2f expected=%.2f diff=%.6f\n", got, scalar_sum, diff);
     printf("%s\n", diff < 0.5f ? "PASS" : "FAIL");
@@ -520,7 +510,7 @@ fn exec_count_multi_axis_matches_exact_int64_result() {
     assert!(generated.c_source.contains("chelis_int_checked_add"));
     assert!(generated.c_source.contains("CHELIS_DTYPE_BOOL"));
     assert!(!generated.c_source.contains("CHELIS_BOOL"));
-    assert!(generated.c_source.contains("t0->rank"));
+    assert!(generated.c_source.contains("chelis_tensor_rank(t0)"));
     assert!(!generated.c_source.contains("t0->ndim"));
     for balanced_tree_fragment in [
         "while (__level_n_1 > 1)",
@@ -541,17 +531,17 @@ extern void test_count_multi(chelis_tensor** inputs, int n_in, chelis_tensor** o
 int main() {{
     uint8_t bits[12] = {{1,0,1,1,0,0,1,1,0,1,1,1}};
     int64_t shape[3] = {{2, 3, 2}};
-    chelis_tensor* x = chelis_alloc_view(3, shape, CHELIS_DTYPE_BOOL, bits, sizeof(bits));
+    chelis_tensor* x = chelis_tensor_entry_borrow(3, shape, CHELIS_DTYPE_BOOL, bits, sizeof(bits));
     if (x == NULL) return 2;
     chelis_tensor* inputs[1] = {{x}};
     chelis_tensor* outputs[1] = {{NULL}};
     test_count_multi(inputs, 1, outputs, 1);
     int64_t expected[3] = {{3, 3, 2}};
-    int64_t* got = (int64_t*)outputs[0]->data;
-    int ok = outputs[0]->dtype == CHELIS_DTYPE_I64 && outputs[0]->size == 3;
+    int64_t* got = (int64_t*)chelis_tensor_read_view(outputs[0]).data;
+    int ok = chelis_tensor_read_view(outputs[0]).dtype == CHELIS_DTYPE_I64 && chelis_tensor_numel(outputs[0]) == 3;
     for (int i = 0; i < 3; i++) if (got[i] != expected[i]) ok = 0;
-    chelis_free(x);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(x);
+    chelis_tensor_release(outputs[0]);
     printf("%s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }}
@@ -597,16 +587,16 @@ extern void test_count_empty(chelis_tensor** inputs, int n_in, chelis_tensor** o
 
 int main() {{
     int64_t shape[3] = {{2, 0, 3}};
-    chelis_tensor* x = chelis_alloc_view(3, shape, CHELIS_DTYPE_BOOL, NULL, 0);
+    chelis_tensor* x = chelis_tensor_entry_borrow(3, shape, CHELIS_DTYPE_BOOL, NULL, 0);
     if (x == NULL) return 2;
     chelis_tensor* inputs[1] = {{x}};
     chelis_tensor* outputs[1] = {{NULL}};
     test_count_empty(inputs, 1, outputs, 1);
-    int64_t* got = (int64_t*)outputs[0]->data;
-    int ok = outputs[0]->dtype == CHELIS_DTYPE_I64 && outputs[0]->size == 6;
+    int64_t* got = (int64_t*)chelis_tensor_read_view(outputs[0]).data;
+    int ok = chelis_tensor_read_view(outputs[0]).dtype == CHELIS_DTYPE_I64 && chelis_tensor_numel(outputs[0]) == 6;
     for (int i = 0; i < 6; i++) if (got[i] != 0) ok = 0;
-    chelis_free(x);
-    chelis_free(outputs[0]);
+    chelis_tensor_release(x);
+    chelis_tensor_release(outputs[0]);
     printf("%s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }}
@@ -658,20 +648,11 @@ fn reduce_window_3x3_dag(reducer: ReduceWindowKind, kernel: &str) -> String {
 
 // Build a contiguous 1x1x3x3 input view holding [[1..9]] row-major.
 const RW_HARNESS_4D_HEADER: &str = r#"
-static chelis_tensor make_view_1x1x3x3(float* data) {
-    static const int64_t shape[4] = {1, 1, 3, 3};
-    static const int64_t strides[4] = {9, 9, 3, 1};
-    return (chelis_tensor){
-        .data = data,
-        .shape = shape,
-        .strides = strides,
-        .size = 9,
-        .byte_capacity = 9 * (int64_t)sizeof(float),
-        .rank = 4,
-        .dtype = CHELIS_DTYPE_F32,
-        .owns_data = 0,
-        .reserved = {0, 0},
-    };
+static chelis_tensor *make_view_1x1x3x3(float* data) {
+    int64_t shape[4] = {1, 1, 3, 3};
+    return chelis_tensor_entry_borrow(
+        4, shape, CHELIS_DTYPE_F32, data, 9 * (int64_t)sizeof(float)
+    );
 }
 "#;
 
@@ -684,18 +665,18 @@ extern void test_rw_max(chelis_tensor** inputs, int n_in, chelis_tensor** output
 
 int main() {{
     float in_data[9] = {{1,2,3,4,5,6,7,8,9}};
-    chelis_tensor in_t = make_view_1x1x3x3(in_data);
-    chelis_tensor* inputs[1] = {{&in_t}};
+    chelis_tensor *in_t = make_view_1x1x3x3(in_data);
+    chelis_tensor* inputs[1] = {{in_t}};
     chelis_tensor* outputs[1] = {{NULL}};
 
     test_rw_max(inputs, 1, outputs, 1);
 
     // 2x2 maxes of [[1,2,3],[4,5,6],[7,8,9]]: [5,6,8,9].
     float expected[4] = {{5.0f, 6.0f, 8.0f, 9.0f}};
-    int ok = (outputs[0]->size == 4);
+    int ok = (chelis_tensor_numel(outputs[0]) == 4);
     for (int i = 0; i < 4; i++) {{
-        if (fabsf(((float*)outputs[0]->data)[i] - expected[i]) > 1e-5f) {{
-            printf("MISMATCH at %d: got %.4f expected %.4f\n", i, ((float*)outputs[0]->data)[i], expected[i]);
+        if (fabsf(((float*)chelis_tensor_read_view(outputs[0]).data)[i] - expected[i]) > 1e-5f) {{
+            printf("MISMATCH at %d: got %.4f expected %.4f\n", i, ((float*)chelis_tensor_read_view(outputs[0]).data)[i], expected[i]);
             ok = 0;
         }}
     }}
@@ -722,18 +703,18 @@ extern void test_rw_mean(chelis_tensor** inputs, int n_in, chelis_tensor** outpu
 
 int main() {{
     float in_data[9] = {{1,2,3,4,5,6,7,8,9}};
-    chelis_tensor in_t = make_view_1x1x3x3(in_data);
-    chelis_tensor* inputs[1] = {{&in_t}};
+    chelis_tensor *in_t = make_view_1x1x3x3(in_data);
+    chelis_tensor* inputs[1] = {{in_t}};
     chelis_tensor* outputs[1] = {{NULL}};
 
     test_rw_mean(inputs, 1, outputs, 1);
 
     // 2x2 means: sums [12,16,24,28] / 4 = [3,4,6,7].
     float expected[4] = {{3.0f, 4.0f, 6.0f, 7.0f}};
-    int ok = (outputs[0]->size == 4);
+    int ok = (chelis_tensor_numel(outputs[0]) == 4);
     for (int i = 0; i < 4; i++) {{
-        if (fabsf(((float*)outputs[0]->data)[i] - expected[i]) > 1e-5f) {{
-            printf("MISMATCH at %d: got %.4f expected %.4f\n", i, ((float*)outputs[0]->data)[i], expected[i]);
+        if (fabsf(((float*)chelis_tensor_read_view(outputs[0]).data)[i] - expected[i]) > 1e-5f) {{
+            printf("MISMATCH at %d: got %.4f expected %.4f\n", i, ((float*)chelis_tensor_read_view(outputs[0]).data)[i], expected[i]);
             ok = 0;
         }}
     }}
@@ -787,20 +768,11 @@ fn reduce_window_grad_dag(reducer: ReduceWindowKind, kernel: &str) -> String {
 }
 
 const RW_GRAD_HARNESS_HEADER: &str = r#"
-static chelis_tensor make_view_1x1x2x2(float* data) {
-    static const int64_t shape[4] = {1, 1, 2, 2};
-    static const int64_t strides[4] = {4, 4, 2, 1};
-    return (chelis_tensor){
-        .data = data,
-        .shape = shape,
-        .strides = strides,
-        .size = 4,
-        .byte_capacity = 4 * (int64_t)sizeof(float),
-        .rank = 4,
-        .dtype = CHELIS_DTYPE_F32,
-        .owns_data = 0,
-        .reserved = {0, 0},
-    };
+static chelis_tensor *make_view_1x1x2x2(float* data) {
+    int64_t shape[4] = {1, 1, 2, 2};
+    return chelis_tensor_entry_borrow(
+        4, shape, CHELIS_DTYPE_F32, data, 4 * (int64_t)sizeof(float)
+    );
 }
 "#;
 
@@ -814,9 +786,9 @@ extern void test_rwg_sum(chelis_tensor** inputs, int n_in, chelis_tensor** outpu
 int main() {{
     float x_data[9] = {{1,2,3,4,5,6,7,8,9}};
     float g_data[4] = {{1,1,1,1}};
-    chelis_tensor x_t = make_view_1x1x3x3(x_data);
-    chelis_tensor g_t = make_view_1x1x2x2(g_data);
-    chelis_tensor* inputs[2] = {{&x_t, &g_t}};
+    chelis_tensor *x_t = make_view_1x1x3x3(x_data);
+    chelis_tensor *g_t = make_view_1x1x2x2(g_data);
+    chelis_tensor* inputs[2] = {{x_t, g_t}};
     chelis_tensor* outputs[1] = {{NULL}};
 
     test_rwg_sum(inputs, 2, outputs, 1);
@@ -824,10 +796,10 @@ int main() {{
     // Sum adjoint with g=ones is the per-position window-cover count for
     // 2x2 windows / stride 1 over a 3x3 grid: corners 1, edges 2, center 4.
     float expected[9] = {{1,2,1, 2,4,2, 1,2,1}};
-    int ok = (outputs[0]->size == 9);
+    int ok = (chelis_tensor_numel(outputs[0]) == 9);
     for (int i = 0; i < 9; i++) {{
-        if (fabsf(((float*)outputs[0]->data)[i] - expected[i]) > 1e-5f) {{
-            printf("MISMATCH at %d: got %.4f expected %.4f\n", i, ((float*)outputs[0]->data)[i], expected[i]);
+        if (fabsf(((float*)chelis_tensor_read_view(outputs[0]).data)[i] - expected[i]) > 1e-5f) {{
+            printf("MISMATCH at %d: got %.4f expected %.4f\n", i, ((float*)chelis_tensor_read_view(outputs[0]).data)[i], expected[i]);
             ok = 0;
         }}
     }}
@@ -855,9 +827,9 @@ extern void test_rwg_max(chelis_tensor** inputs, int n_in, chelis_tensor** outpu
 int main() {{
     float x_data[9] = {{1,2,3,4,5,6,7,8,9}};
     float g_data[4] = {{1,1,1,1}};
-    chelis_tensor x_t = make_view_1x1x3x3(x_data);
-    chelis_tensor g_t = make_view_1x1x2x2(g_data);
-    chelis_tensor* inputs[2] = {{&x_t, &g_t}};
+    chelis_tensor *x_t = make_view_1x1x3x3(x_data);
+    chelis_tensor *g_t = make_view_1x1x2x2(g_data);
+    chelis_tensor* inputs[2] = {{x_t, g_t}};
     chelis_tensor* outputs[1] = {{NULL}};
 
     test_rwg_max(inputs, 2, outputs, 1);
@@ -865,10 +837,10 @@ int main() {{
     // Each 2x2 window's max (distinct values) routes its g to the argmax:
     // windows pick (1,1),(1,2),(2,1),(2,2) of the 3x3 grid.
     float expected[9] = {{0,0,0, 0,1,1, 0,1,1}};
-    int ok = (outputs[0]->size == 9);
+    int ok = (chelis_tensor_numel(outputs[0]) == 9);
     for (int i = 0; i < 9; i++) {{
-        if (fabsf(((float*)outputs[0]->data)[i] - expected[i]) > 1e-5f) {{
-            printf("MISMATCH at %d: got %.4f expected %.4f\n", i, ((float*)outputs[0]->data)[i], expected[i]);
+        if (fabsf(((float*)chelis_tensor_read_view(outputs[0]).data)[i] - expected[i]) > 1e-5f) {{
+            printf("MISMATCH at %d: got %.4f expected %.4f\n", i, ((float*)chelis_tensor_read_view(outputs[0]).data)[i], expected[i]);
             ok = 0;
         }}
     }}
@@ -920,13 +892,13 @@ extern void test_div_ieee(chelis_tensor** inputs, int n_in, chelis_tensor** outp
 int main() {{
     float a_data[4] = {{ 5.0f,  1.0f, -1.0f, 0.0f }};
     float b_data[4] = {{-2.0f,  0.0f,  0.0f, 0.0f }};
-    chelis_tensor a_t = make_view_1d(a_data, 4);
-    chelis_tensor b_t = make_view_1d(b_data, 4);
-    chelis_tensor* inputs[2] = {{&a_t, &b_t}};
+    chelis_tensor *a_t = make_view_1d(a_data, 4);
+    chelis_tensor *b_t = make_view_1d(b_data, 4);
+    chelis_tensor* inputs[2] = {{a_t, b_t}};
     chelis_tensor* outputs[1] = {{NULL}};
     test_div_ieee(inputs, 2, outputs, 1);
 
-    float* o = outputs[0]->data;
+    float* o = chelis_tensor_read_view(outputs[0]).data;
     int ok = 1;
     if (o[0] != -2.5f) {{ printf("MISMATCH 5/-2: got %f want -2.5\n", o[0]); ok = 0; }}
     if (!(isinf(o[1]) && o[1] > 0)) {{ printf("MISMATCH 1/0: got %f want +inf\n", o[1]); ok = 0; }}
@@ -972,12 +944,12 @@ extern void test_recip_ieee(chelis_tensor** inputs, int n_in, chelis_tensor** ou
 
 int main() {{
     float a_data[3] = {{-2.0f, 0.0f, 4.0f}};
-    chelis_tensor a_t = make_view_1d(a_data, 3);
-    chelis_tensor* inputs[1] = {{&a_t}};
+    chelis_tensor *a_t = make_view_1d(a_data, 3);
+    chelis_tensor* inputs[1] = {{a_t}};
     chelis_tensor* outputs[1] = {{NULL}};
     test_recip_ieee(inputs, 1, outputs, 1);
 
-    float* o = outputs[0]->data;
+    float* o = chelis_tensor_read_view(outputs[0]).data;
     int ok = 1;
     if (o[0] != -0.5f) {{ printf("MISMATCH recip(-2): got %f want -0.5\n", o[0]); ok = 0; }}
     if (!(isinf(o[1]) && o[1] > 0)) {{ printf("MISMATCH recip(0): got %f want +inf\n", o[1]); ok = 0; }}
@@ -1070,18 +1042,18 @@ int main() {{
     {c_type} b_data[4] = {{ 2, -2,  2, -2}};
     {c_type} expected[4] = {{ {e0}, {e1}, {e2}, {e3} }};
 
-    chelis_tensor a_t = make_view_typed_1d(a_data, 4, {dtype_macro});
-    chelis_tensor b_t = make_view_typed_1d(b_data, 4, {dtype_macro});
+    chelis_tensor *a_t = make_view_typed_1d(a_data, 4, {dtype_macro});
+    chelis_tensor *b_t = make_view_typed_1d(b_data, 4, {dtype_macro});
 
-    chelis_tensor* inputs[2] = {{&a_t, &b_t}};
+    chelis_tensor* inputs[2] = {{a_t, b_t}};
     chelis_tensor* outputs[1] = {{NULL}};
     {fn_name}(inputs, 2, outputs, 1);
 
     int ok = 1;
-    {c_type}* o = ({c_type}*)outputs[0]->data;
-    if (outputs[0]->dtype != {dtype_macro}) {{
+    {c_type}* o = ({c_type}*)chelis_tensor_read_view(outputs[0]).data;
+    if (chelis_tensor_read_view(outputs[0]).dtype != {dtype_macro}) {{
         printf("FAIL: output dtype %d, expected {dtype_macro} (%d)\n",
-               outputs[0]->dtype, {dtype_macro});
+               chelis_tensor_read_view(outputs[0]).dtype, {dtype_macro});
         ok = 0;
     }}
     for (int i = 0; i < 4 && ok; i++) {{
@@ -1271,7 +1243,7 @@ fn compile_and_capture_run(test_name: &str, c_source: &str, harness: &str) -> st
 // chelis#550 F2: a COMPILED floor_div zero-divisor trap. The existing
 // backend trap coverage was trunc_div-only; floor_div emits the SAME
 // portable `chelis_int_div_guard` and must abort identically. The divisor
-// arrives through a runtime Load (`inputs[1]->data`), so gcc cannot
+// arrives through a runtime Load (`chelis_tensor_read_view(inputs[1]).data`), so gcc cannot
 // constant-fold the zero and elide the guard. Spec/05-risc-primitives.md
 // §2.1 scopes the `integer division or remainder by zero` trap to the C
 // backend (and the evaluator); this is the fail-closed end-to-end proof.
@@ -1319,10 +1291,10 @@ int main() {{
     int64_t a_data[2] = {{ 10, 7 }};
     int64_t b_data[2] = {{ 2, 0 }};
 
-    chelis_tensor a_t = make_view_typed_1d(a_data, 2, CHELIS_DTYPE_I64);
-    chelis_tensor b_t = make_view_typed_1d(b_data, 2, CHELIS_DTYPE_I64);
+    chelis_tensor *a_t = make_view_typed_1d(a_data, 2, CHELIS_DTYPE_I64);
+    chelis_tensor *b_t = make_view_typed_1d(b_data, 2, CHELIS_DTYPE_I64);
 
-    chelis_tensor* inputs[2] = {{&a_t, &b_t}};
+    chelis_tensor* inputs[2] = {{a_t, b_t}};
     chelis_tensor* outputs[1] = {{NULL}};
     test_floor_div_trap(inputs, 2, outputs, 1);
 
@@ -1406,14 +1378,14 @@ int main() {{
         0.7682217955589294f,
         0.49625658988952637f,
     }};
-    chelis_tensor in_t = make_view_1d(in_data, 11);
-    chelis_tensor* inputs[1] = {{ &in_t }};
+    chelis_tensor *in_t = make_view_1d(in_data, 11);
+    chelis_tensor* inputs[1] = {{ in_t }};
     chelis_tensor* out_slot = NULL;
     chelis_tensor* outputs[1] = {{ out_slot }};
 
     test_issue_163_sum(inputs, 1, outputs, 1);
 
-    float got = ((float*)outputs[0]->data)[0];
+    float got = ((float*)chelis_tensor_read_view(outputs[0]).data)[0];
     uint32_t got_bits;
     memcpy(&got_bits, &got, sizeof(got_bits));
     // 4.218893527984619_f32 is the stride-4 ILP cascade result the
@@ -1466,15 +1438,15 @@ extern void test_exp_zero(chelis_tensor** inputs, int n_in, chelis_tensor** outp
 int main() {{
     // zero-element 1D tensor
     float dummy = 0.0f;
-    chelis_tensor in_t = make_view_1d(&dummy, 0);
+    chelis_tensor *in_t = make_view_1d(&dummy, 0);
 
-    chelis_tensor* in_ptr = &in_t;
+    chelis_tensor* in_ptr = in_t;
     chelis_tensor* inputs[1] = {{in_ptr}};
     chelis_tensor* out_slot = NULL;
     chelis_tensor* outputs[1] = {{out_slot}};
 
     test_exp_zero(inputs, 1, outputs, 1);
-    printf("zero-size exp returned, output_size=%lld\n", (long long)(outputs[0] ? outputs[0]->size : -1));
+    printf("zero-size exp returned, output_size=%lld\n", (long long)(outputs[0] ? chelis_tensor_numel(outputs[0]) : -1));
     printf("PASS\n");
     return 0;
 }}
@@ -1834,7 +1806,9 @@ fn ws_a1_exec_f64_reduce_sum_matches_reference() {
         "f64 reduce_sum must allocate an f64 output tensor:\n{src}"
     );
     assert!(
-        src.contains("chelis_fill_scalar(t1, chelis_scalar_from_bits(CHELIS_DTYPE_F64,"),
+        src.contains(
+            "chelis_fill_scalar(t1_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_F64,"
+        ),
         "f64 reduce_sum must zero through an exact tagged f64 scalar:\n{src}"
     );
     assert!(
@@ -1863,16 +1837,16 @@ int main() {{
         in_data[i] = (double)(i + 1);
         scalar_sum += in_data[i];
     }}
-    chelis_tensor in_t = make_view_typed_1d(in_data, 100, CHELIS_DTYPE_F64);
+    chelis_tensor *in_t = make_view_typed_1d(in_data, 100, CHELIS_DTYPE_F64);
 
-    chelis_tensor* in_ptr = &in_t;
+    chelis_tensor* in_ptr = in_t;
     chelis_tensor* inputs[1] = {{in_ptr}};
     chelis_tensor* out_slot = NULL;
     chelis_tensor* outputs[1] = {{out_slot}};
 
     test_reduce_sum_f64(inputs, 1, outputs, 1);
 
-    double got = ((double*)outputs[0]->data)[0];
+    double got = ((double*)chelis_tensor_read_view(outputs[0]).data)[0];
     double diff = fabs(got - scalar_sum);
     printf("sum_f64(1..100): got=%.6f expected=%.6f diff=%.12f\n", got, scalar_sum, diff);
     printf("%s\n", diff < 1e-9 ? "PASS" : "FAIL");
@@ -1949,21 +1923,21 @@ int main() {{
     // exact integer.
     int32_t expected_sum = 16777215 * 5;
 
-    chelis_tensor in_t = make_view_typed_1d(in_data, 5, CHELIS_DTYPE_I32);
+    chelis_tensor *in_t = make_view_typed_1d(in_data, 5, CHELIS_DTYPE_I32);
 
-    chelis_tensor* in_ptr = &in_t;
+    chelis_tensor* in_ptr = in_t;
     chelis_tensor* inputs[1] = {{in_ptr}};
     chelis_tensor* out_slot = NULL;
     chelis_tensor* outputs[1] = {{out_slot}};
 
     test_reduce_sum_i32(inputs, 1, outputs, 1);
 
-    if (outputs[0]->dtype != CHELIS_DTYPE_I32) {{
+    if (chelis_tensor_read_view(outputs[0]).dtype != CHELIS_DTYPE_I32) {{
         printf("FAIL: output dtype is %d, expected CHELIS_DTYPE_I32 (%d)\n",
-               outputs[0]->dtype, CHELIS_DTYPE_I32);
+               chelis_tensor_read_view(outputs[0]).dtype, CHELIS_DTYPE_I32);
         return 1;
     }}
-    int32_t got = ((int32_t*)outputs[0]->data)[0];
+    int32_t got = ((int32_t*)chelis_tensor_read_view(outputs[0]).data)[0];
     printf("sum_i32(5x 2^24-1): got=%d expected=%d\n", got, expected_sum);
     printf("%s\n", got == expected_sum ? "PASS" : "FAIL");
     return got == expected_sum ? 0 : 1;
@@ -2058,23 +2032,17 @@ int main() {{
     double a_data[6] = {{1.5, 2.5, 3.5, 4.5, 5.5, 6.5}};
     double b_data[12] = {{1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0}};
 
-    static const int64_t a_shape[2] = {{2, 3}};
-    static const int64_t a_strides[2] = {{3, 1}};
-    chelis_tensor a_t = {{
-        .data = a_data, .shape = a_shape, .strides = a_strides,
-        .size = 6, .byte_capacity = 6 * (int64_t)sizeof(double), .rank = 2,
-        .dtype = CHELIS_DTYPE_F64, .owns_data = 0, .reserved = {{0, 0}},
-    }};
+    const int64_t a_shape[2] = {{2, 3}};
+    chelis_tensor *a_t = chelis_tensor_entry_borrow(
+        2, a_shape, CHELIS_DTYPE_F64, a_data, 6 * (int64_t)sizeof(double)
+    );
 
-    static const int64_t b_shape[2] = {{3, 4}};
-    static const int64_t b_strides[2] = {{4, 1}};
-    chelis_tensor b_t = {{
-        .data = b_data, .shape = b_shape, .strides = b_strides,
-        .size = 12, .byte_capacity = 12 * (int64_t)sizeof(double), .rank = 2,
-        .dtype = CHELIS_DTYPE_F64, .owns_data = 0, .reserved = {{0, 0}},
-    }};
+    const int64_t b_shape[2] = {{3, 4}};
+    chelis_tensor *b_t = chelis_tensor_entry_borrow(
+        2, b_shape, CHELIS_DTYPE_F64, b_data, 12 * (int64_t)sizeof(double)
+    );
 
-    chelis_tensor* inputs[2] = {{&a_t, &b_t}};
+    chelis_tensor* inputs[2] = {{a_t, b_t}};
     chelis_tensor* out_slot = NULL;
     chelis_tensor* outputs[1] = {{out_slot}};
 
@@ -2093,12 +2061,12 @@ int main() {{
         4.5*3 + 5.5*7 + 6.5*11,   // = 13.5 + 38.5 + 71.5 = 123.5
         4.5*4 + 5.5*8 + 6.5*12    // = 18 + 44 + 78 = 140
     }};
-    if (outputs[0]->dtype != CHELIS_DTYPE_F64) {{
+    if (chelis_tensor_read_view(outputs[0]).dtype != CHELIS_DTYPE_F64) {{
         printf("FAIL: output dtype is %d, expected CHELIS_DTYPE_F64 (%d)\n",
-               outputs[0]->dtype, CHELIS_DTYPE_F64);
+               chelis_tensor_read_view(outputs[0]).dtype, CHELIS_DTYPE_F64);
         return 1;
     }}
-    double* got = (double*)outputs[0]->data;
+    double* got = (double*)chelis_tensor_read_view(outputs[0]).data;
     int ok = 1;
     for (int i = 0; i < 8; i++) {{
         double diff = fabs(got[i] - expected[i]);
@@ -2230,25 +2198,25 @@ int main() {{
     double f_expected = 1.5 + 2.5 + 3.5 + 4.5;          // 12.0
     int32_t i_expected = 100 + 200 + 300 + 400;         // 1000
 
-    chelis_tensor f_t = make_view_typed_1d(f_data, 4, CHELIS_DTYPE_F64);
-    chelis_tensor i_t = make_view_typed_1d(i_data, 4, CHELIS_DTYPE_I32);
+    chelis_tensor *f_t = make_view_typed_1d(f_data, 4, CHELIS_DTYPE_F64);
+    chelis_tensor *i_t = make_view_typed_1d(i_data, 4, CHELIS_DTYPE_I32);
 
-    chelis_tensor* inputs[2] = {{&f_t, &i_t}};
+    chelis_tensor* inputs[2] = {{f_t, i_t}};
     chelis_tensor* outputs[2] = {{NULL, NULL}};
 
     test_mixed(inputs, 2, outputs, 2);
 
     int ok = 1;
-    if (outputs[0]->dtype != CHELIS_DTYPE_F64) {{
-        printf("FAIL: f_out dtype is %d, expected CHELIS_DTYPE_F64\n", outputs[0]->dtype);
+    if (chelis_tensor_read_view(outputs[0]).dtype != CHELIS_DTYPE_F64) {{
+        printf("FAIL: f_out dtype is %d, expected CHELIS_DTYPE_F64\n", chelis_tensor_read_view(outputs[0]).dtype);
         ok = 0;
     }}
-    if (outputs[1]->dtype != CHELIS_DTYPE_I32) {{
-        printf("FAIL: i_out dtype is %d, expected CHELIS_DTYPE_I32\n", outputs[1]->dtype);
+    if (chelis_tensor_read_view(outputs[1]).dtype != CHELIS_DTYPE_I32) {{
+        printf("FAIL: i_out dtype is %d, expected CHELIS_DTYPE_I32\n", chelis_tensor_read_view(outputs[1]).dtype);
         ok = 0;
     }}
-    double f_got = ((double*)outputs[0]->data)[0];
-    int32_t i_got = ((int32_t*)outputs[1]->data)[0];
+    double f_got = ((double*)chelis_tensor_read_view(outputs[0]).data)[0];
+    int32_t i_got = ((int32_t*)chelis_tensor_read_view(outputs[1]).data)[0];
     double f_diff = fabs(f_got - f_expected);
     printf("mixed: f_got=%.6f expected=%.6f diff=%.12f i_got=%d expected=%d\n",
            f_got, f_expected, f_diff, i_got, i_expected);
@@ -2382,7 +2350,7 @@ fn ws_a3_bf16_f16_matmul_admitted_at_ir_validation() {
 }
 
 /// Header for i8/i16-typed harnesses. Reuses the runtime tensor view
-/// shape but reinterprets `t->data` as the narrow integer pointer.
+/// shape but reinterprets `chelis_tensor_read_view(t).data` as the narrow integer pointer.
 const WS_A4_HARNESS_HEADER: &str = r#"
 #include <stdio.h>
 #include <stdlib.h>
@@ -2390,33 +2358,25 @@ const WS_A4_HARNESS_HEADER: &str = r#"
 #include <stdint.h>
 #include "chelis_runtime.h"
 
-static chelis_tensor make_view_1d_i8(int8_t* data, int n) {
-    static int64_t shape[1];
-    static const int64_t strides[1] = {1};
-    shape[0] = n;
-    return (chelis_tensor){
-        .data = data, .shape = shape, .strides = strides, .size = n,
-        .byte_capacity = n * (int64_t)sizeof(int8_t), .rank = 1,
-        .dtype = CHELIS_DTYPE_I8, .owns_data = 0, .reserved = {0, 0},
-    };
+static chelis_tensor *make_view_1d_i8(int8_t* data, int n) {
+    int64_t shape[1] = {n};
+    return chelis_tensor_entry_borrow(
+        1, shape, CHELIS_DTYPE_I8, data, n * (int64_t)sizeof(int8_t)
+    );
 }
 
-static chelis_tensor make_view_1d_i16(int16_t* data, int n) {
-    static int64_t shape[1];
-    static const int64_t strides[1] = {1};
-    shape[0] = n;
-    return (chelis_tensor){
-        .data = data, .shape = shape, .strides = strides, .size = n,
-        .byte_capacity = n * (int64_t)sizeof(int16_t), .rank = 1,
-        .dtype = CHELIS_DTYPE_I16, .owns_data = 0, .reserved = {0, 0},
-    };
+static chelis_tensor *make_view_1d_i16(int16_t* data, int n) {
+    int64_t shape[1] = {n};
+    return chelis_tensor_entry_borrow(
+        1, shape, CHELIS_DTYPE_I16, data, n * (int64_t)sizeof(int16_t)
+    );
 }
 "#;
 
 /// Build a `Load → Op → Op` DAG with two same-precision i8 inputs and
 /// emit the C source. Covers the i8 add path through the dtype-aware
 /// `elem_type` and `dtype_macro`. Tensors are vec_i8(N) so the codegen
-/// reinterpret-casts `t->data` to `int8_t*`.
+/// reinterpret-casts `chelis_tensor_read_view(t).data` to `int8_t*`.
 #[test]
 fn exec_i8_add_correct_output() {
     let mut dag = Dag::new();
@@ -2428,7 +2388,7 @@ fn exec_i8_add_correct_output() {
     let result = chelis_backend_c::codegen(&dag, "test_i8_add").unwrap();
     let src = &result.c_source;
 
-    // The kernel must emit `int8_t*` access against `t->data` (not float*).
+    // The kernel must emit `int8_t*` access against `chelis_tensor_read_view(t).data` (not float*).
     assert!(
         src.contains("int8_t"),
         "i8 add codegen must mention int8_t element type; got:\n{src}"
@@ -2451,14 +2411,14 @@ int main() {{
         // backend's `int8_t + int8_t` semantics.
         expected[i] = (int8_t)((int)a_data[i] + (int)b_data[i]);
     }}
-    chelis_tensor at = make_view_1d_i8(a_data, 8);
-    chelis_tensor bt = make_view_1d_i8(b_data, 8);
-    chelis_tensor* in_ptrs[2] = {{ &at, &bt }};
+    chelis_tensor *at = make_view_1d_i8(a_data, 8);
+    chelis_tensor *bt = make_view_1d_i8(b_data, 8);
+    chelis_tensor* in_ptrs[2] = {{ at, bt }};
     chelis_tensor* outs[1] = {{ NULL }};
     test_i8_add(in_ptrs, 2, outs, 1);
     int ok = 1;
     for (int i = 0; i < 8; i++) {{
-        int8_t got = ((int8_t*)outs[0]->data)[i];
+        int8_t got = ((int8_t*)chelis_tensor_read_view(outs[0]).data)[i];
         if (got != expected[i]) {{
             printf("MISMATCH at %d: got %d expected %d\n", i, (int)got, (int)expected[i]);
             ok = 0;
@@ -2498,9 +2458,9 @@ int main() {{
     // Both elements overflow int8 and must trap before store-back.
     int8_t a_data[2] = {{ 100, 127 }};
     int8_t b_data[2] = {{ 50, 1 }};
-    chelis_tensor at = make_view_1d_i8(a_data, 2);
-    chelis_tensor bt = make_view_1d_i8(b_data, 2);
-    chelis_tensor* in_ptrs[2] = {{ &at, &bt }};
+    chelis_tensor *at = make_view_1d_i8(a_data, 2);
+    chelis_tensor *bt = make_view_1d_i8(b_data, 2);
+    chelis_tensor* in_ptrs[2] = {{ at, bt }};
     chelis_tensor* outs[1] = {{ NULL }};
     test_i8_add_wrap(in_ptrs, 2, outs, 1);
     return 0;
@@ -2541,9 +2501,9 @@ int main() {{
     int8_t a_data[2] = {{ 12, 16 }};
     int8_t b_data[2] = {{ 10, 8 }};
     // 12*10 = 120 fits; 16*8 = 128 overflows int8 and must trap.
-    chelis_tensor at = make_view_1d_i8(a_data, 2);
-    chelis_tensor bt = make_view_1d_i8(b_data, 2);
-    chelis_tensor* in_ptrs[2] = {{ &at, &bt }};
+    chelis_tensor *at = make_view_1d_i8(a_data, 2);
+    chelis_tensor *bt = make_view_1d_i8(b_data, 2);
+    chelis_tensor* in_ptrs[2] = {{ at, bt }};
     chelis_tensor* outs[1] = {{ NULL }};
     test_i8_mul(in_ptrs, 2, outs, 1);
     return 0;
@@ -2597,14 +2557,14 @@ int main() {{
     for (int i = 0; i < 4; i++) {{
         expected[i] = (int16_t)((int)a_data[i] + (int)b_data[i]);
     }}
-    chelis_tensor at = make_view_1d_i16(a_data, 4);
-    chelis_tensor bt = make_view_1d_i16(b_data, 4);
-    chelis_tensor* in_ptrs[2] = {{ &at, &bt }};
+    chelis_tensor *at = make_view_1d_i16(a_data, 4);
+    chelis_tensor *bt = make_view_1d_i16(b_data, 4);
+    chelis_tensor* in_ptrs[2] = {{ at, bt }};
     chelis_tensor* outs[1] = {{ NULL }};
     test_i16_add(in_ptrs, 2, outs, 1);
     int ok = 1;
     for (int i = 0; i < 4; i++) {{
-        int16_t got = ((int16_t*)outs[0]->data)[i];
+        int16_t got = ((int16_t*)chelis_tensor_read_view(outs[0]).data)[i];
         if (got != expected[i]) {{
             printf("MISMATCH at %d: got %d expected %d\n", i, (int)got, (int)expected[i]);
             ok = 0;
@@ -2660,12 +2620,12 @@ extern void test_i8_reduce_sum(chelis_tensor** inputs, int n_in, chelis_tensor**
 int main() {{
     int8_t in_data[200];
     for (int i = 0; i < 200; i++) in_data[i] = 1;
-    chelis_tensor in_t = make_view_1d_i8(in_data, 200);
-    chelis_tensor* in_ptrs[1] = {{ &in_t }};
+    chelis_tensor *in_t = make_view_1d_i8(in_data, 200);
+    chelis_tensor* in_ptrs[1] = {{ in_t }};
     chelis_tensor* outs[1] = {{ NULL }};
     test_i8_reduce_sum(in_ptrs, 1, outs, 1);
 
-    int32_t got = ((int32_t*)outs[0]->data)[0];
+    int32_t got = ((int32_t*)chelis_tensor_read_view(outs[0]).data)[0];
     int32_t expected = 200;
     printf("sum(200 i8 ones): got=%d expected=%d\n", got, expected);
     printf("%s\n", got == expected ? "PASS" : "FAIL");
@@ -2715,12 +2675,12 @@ extern void test_i16_reduce_sum(chelis_tensor** inputs, int n_in, chelis_tensor*
 int main() {{
     int16_t in_data[200];
     for (int i = 0; i < 200; i++) in_data[i] = 1000;
-    chelis_tensor in_t = make_view_1d_i16(in_data, 200);
-    chelis_tensor* in_ptrs[1] = {{ &in_t }};
+    chelis_tensor *in_t = make_view_1d_i16(in_data, 200);
+    chelis_tensor* in_ptrs[1] = {{ in_t }};
     chelis_tensor* outs[1] = {{ NULL }};
     test_i16_reduce_sum(in_ptrs, 1, outs, 1);
 
-    int32_t got = ((int32_t*)outs[0]->data)[0];
+    int32_t got = ((int32_t*)chelis_tensor_read_view(outs[0]).data)[0];
     int32_t expected = 200000; // overflows i16 (max +32767), fits in i32
     printf("sum(200 i16 1000s): got=%d expected=%d\n", got, expected);
     printf("%s\n", got == expected ? "PASS" : "FAIL");
@@ -2861,22 +2821,22 @@ extern void cmplt_{tag}(chelis_tensor** inputs, int n_in, chelis_tensor** output
 int main() {{
     {c_elem} a_data[{n}] = {{{a_init}}};
     {c_elem} b_data[{n}] = {{{b_init}}};
-    chelis_tensor a_t = make_view_typed_1d(a_data, {n}, {c_dtype});
-    chelis_tensor b_t = make_view_typed_1d(b_data, {n}, {c_dtype});
-    chelis_tensor* inputs[2] = {{&a_t, &b_t}};
+    chelis_tensor *a_t = make_view_typed_1d(a_data, {n}, {c_dtype});
+    chelis_tensor *b_t = make_view_typed_1d(b_data, {n}, {c_dtype});
+    chelis_tensor* inputs[2] = {{a_t, b_t}};
     chelis_tensor* outputs[1] = {{NULL}};
 
     cmplt_{tag}(inputs, 2, outputs, 1);
 
     uint8_t expected[{n}] = {{{exp_init}}};
     int ok = 1;
-    if (outputs[0]->dtype != CHELIS_DTYPE_BOOL) {{
+    if (chelis_tensor_read_view(outputs[0]).dtype != CHELIS_DTYPE_BOOL) {{
         printf("MISMATCH dtype: got %u expected CHELIS_DTYPE_BOOL (%u)\n",
-               (unsigned)outputs[0]->dtype, (unsigned)CHELIS_DTYPE_BOOL);
+               (unsigned)chelis_tensor_read_view(outputs[0]).dtype, (unsigned)CHELIS_DTYPE_BOOL);
         ok = 0;
     }}
     for (int i = 0; i < {n}; i++) {{
-        uint8_t got = ((uint8_t*)outputs[0]->data)[i];
+        uint8_t got = ((uint8_t*)chelis_tensor_read_view(outputs[0]).data)[i];
         if (got != expected[i]) {{
             printf("MISMATCH at %d: got %u expected %u\n",
                    i, (unsigned)got, (unsigned)expected[i]);
@@ -2973,12 +2933,12 @@ int main(void) {{
     {c_type} a_data[4] = {{ {lhs} }};
     {c_type} b_data[4] = {{ {rhs} }};
     {c_type} expected[4] = {{ {expected} }};
-    chelis_tensor a = make_view_typed_1d(a_data, 4, {c_dtype});
-    chelis_tensor b = make_view_typed_1d(b_data, 4, {c_dtype});
-    chelis_tensor *inputs[2] = {{ &a, &b }};
+    chelis_tensor *a = make_view_typed_1d(a_data, 4, {c_dtype});
+    chelis_tensor *b = make_view_typed_1d(b_data, 4, {c_dtype});
+    chelis_tensor *inputs[2] = {{ a, b }};
     chelis_tensor *outputs[1] = {{ NULL }};
     {function}(inputs, 2, outputs, 1);
-    {c_type} *got = ({c_type} *)outputs[0]->data;
+    {c_type} *got = ({c_type} *)chelis_tensor_read_view(outputs[0]).data;
     for (int i = 0; i < 4; i++) {{
         if (got[i] != expected[i]) return 1;
     }}
@@ -3076,9 +3036,9 @@ fn direct_checked_subtraction_traps_true_overflow_at_every_signed_width() {
 extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
 int main(void) {{
     {c_type} av[1] = {{ {max} }}; {c_type} bv[1] = {{ -1 }};
-    chelis_tensor a = make_view_typed_1d(av, 1, {c_dtype});
-    chelis_tensor b = make_view_typed_1d(bv, 1, {c_dtype});
-    chelis_tensor *inputs[2] = {{ &a, &b }}; chelis_tensor *outputs[1] = {{ NULL }};
+    chelis_tensor *a = make_view_typed_1d(av, 1, {c_dtype});
+    chelis_tensor *b = make_view_typed_1d(bv, 1, {c_dtype});
+    chelis_tensor *inputs[2] = {{ a, b }}; chelis_tensor *outputs[1] = {{ NULL }};
     {function}(inputs, 2, outputs, 1); return 0;
 }}
 "#
@@ -3134,13 +3094,13 @@ int main(void) {{
     {c_type} b_data[4] = {{ -4, 7, -9, 5 }};
     {c_type} c_data[4] = {{ -6, 6, 4, 5 }};
     {c_type} expected[4] = {{ -6, 6, 3, 5 }};
-    chelis_tensor a = make_view_typed_1d(a_data, 4, {c_dtype});
-    chelis_tensor b = make_view_typed_1d(b_data, 4, {c_dtype});
-    chelis_tensor c = make_view_typed_1d(c_data, 4, {c_dtype});
-    chelis_tensor *inputs[3] = {{ &a, &b, &c }};
+    chelis_tensor *a = make_view_typed_1d(a_data, 4, {c_dtype});
+    chelis_tensor *b = make_view_typed_1d(b_data, 4, {c_dtype});
+    chelis_tensor *c = make_view_typed_1d(c_data, 4, {c_dtype});
+    chelis_tensor *inputs[3] = {{ a, b, c }};
     chelis_tensor *outputs[1] = {{ NULL }};
     {function}(inputs, 3, outputs, 1);
-    {c_type} *got = ({c_type} *)outputs[0]->data;
+    {c_type} *got = ({c_type} *)chelis_tensor_read_view(outputs[0]).data;
     for (int i = 0; i < 4; i++) if (got[i] != expected[i]) return 1;
     puts("PASS");
     return 0;
@@ -3174,12 +3134,12 @@ int main(void) {{
     uint8_t a_data[4] = {{ 0, 0, 1, 1 }};
     uint8_t b_data[4] = {{ 0, 1, 0, 1 }};
     uint8_t expected[4] = {{ 0, 1, 1, 1 }};
-    chelis_tensor a = make_view_typed_1d(a_data, 4, CHELIS_DTYPE_BOOL);
-    chelis_tensor b = make_view_typed_1d(b_data, 4, CHELIS_DTYPE_BOOL);
-    chelis_tensor *inputs[2] = {{ &a, &b }};
+    chelis_tensor *a = make_view_typed_1d(a_data, 4, CHELIS_DTYPE_BOOL);
+    chelis_tensor *b = make_view_typed_1d(b_data, 4, CHELIS_DTYPE_BOOL);
+    chelis_tensor *inputs[2] = {{ a, b }};
     chelis_tensor *outputs[1] = {{ NULL }};
     {function}(inputs, 2, outputs, 1);
-    uint8_t *got = (uint8_t *)outputs[0]->data;
+    uint8_t *got = (uint8_t *)chelis_tensor_read_view(outputs[0]).data;
     for (int i = 0; i < 4; i++) if (got[i] != expected[i]) return 1;
     puts("PASS");
     return 0;
@@ -3239,19 +3199,16 @@ fn direct_fused_runtime_shape_mismatch_traps_before_indexing() {
         "fused codegen dropped the deferred operand-shape guard:\n{src}"
     );
     assert!(
-        src.contains("if (t1->rank == t2->rank)"),
+        src.contains("if (t1_rank == t2_rank)"),
         "fused codegen must compare every equal-rank external-input pair:\n{src}"
     );
 
     let harness = format!(
         r#"{HARNESS_HEADER}
-static chelis_tensor make_distinct_view(float *data, int64_t *shape) {{
-    static const int64_t strides[1] = {{1}};
-    return (chelis_tensor){{
-        .data = data, .shape = shape, .strides = strides, .size = shape[0],
-        .byte_capacity = shape[0] * (int64_t)sizeof(float), .rank = 1,
-        .dtype = CHELIS_DTYPE_F32, .owns_data = 0, .reserved = {{0, 0}},
-    }};
+static chelis_tensor *make_distinct_view(float *data, int64_t *shape) {{
+    return chelis_tensor_entry_borrow(
+        1, shape, CHELIS_DTYPE_F32, data, shape[0] * (int64_t)sizeof(float)
+    );
 }}
 extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
 int main(void) {{
@@ -3259,10 +3216,10 @@ int main(void) {{
     float b_data[2] = {{ 1, 2 }};
     float c_data[3] = {{ 4, 5, 6 }};
     int64_t a_shape[1] = {{3}}, b_shape[1] = {{2}}, c_shape[1] = {{3}};
-    chelis_tensor a = make_distinct_view(a_data, a_shape);
-    chelis_tensor b = make_distinct_view(b_data, b_shape);
-    chelis_tensor c = make_distinct_view(c_data, c_shape);
-    chelis_tensor *inputs[3] = {{ &a, &b, &c }};
+    chelis_tensor *a = make_distinct_view(a_data, a_shape);
+    chelis_tensor *b = make_distinct_view(b_data, b_shape);
+    chelis_tensor *c = make_distinct_view(c_data, c_shape);
+    chelis_tensor *inputs[3] = {{ a, b, c }};
     chelis_tensor *outputs[1] = {{ NULL }};
     {function}(inputs, 3, outputs, 1);
     puts("UNREACHABLE");
@@ -3318,14 +3275,13 @@ fn direct_positive_rank_mismatch_traps_before_indexing() {
 
     let harness = format!(
         r#"{HARNESS_HEADER}
-static chelis_tensor make_ranked_view(
+static chelis_tensor *make_ranked_view(
     float *data, int rank, int64_t *shape, int64_t *strides, int64_t size
 ) {{
-    return (chelis_tensor){{
-        .data = data, .shape = shape, .strides = strides, .size = size,
-        .byte_capacity = size * (int64_t)sizeof(float), .rank = rank,
-        .dtype = CHELIS_DTYPE_F32, .owns_data = 0, .reserved = {{0, 0}},
-    }};
+    (void)strides;
+    return chelis_tensor_entry_borrow(
+        rank, shape, CHELIS_DTYPE_F32, data, size * (int64_t)sizeof(float)
+    );
 }}
 extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
 int main(void) {{
@@ -3333,9 +3289,9 @@ int main(void) {{
     float b_data[3] = {{4, 5, 6}};
     int64_t a_shape[1] = {{3}}, a_strides[1] = {{1}};
     int64_t b_shape[2] = {{3, 1}}, b_strides[2] = {{1, 1}};
-    chelis_tensor a = make_ranked_view(a_data, 1, a_shape, a_strides, 3);
-    chelis_tensor b = make_ranked_view(b_data, 2, b_shape, b_strides, 3);
-    chelis_tensor *inputs[2] = {{&a, &b}};
+    chelis_tensor *a = make_ranked_view(a_data, 1, a_shape, a_strides, 3);
+    chelis_tensor *b = make_ranked_view(b_data, 2, b_shape, b_strides, 3);
+    chelis_tensor *inputs[2] = {{a, b}};
     chelis_tensor *outputs[1] = {{NULL}};
     {function}(inputs, 2, outputs, 1);
     puts("UNREACHABLE");
@@ -3433,14 +3389,13 @@ const HOST_GUARD_HARNESS: &str = r#"
 #include <math.h>
 #include "chelis_runtime.h"
 
-static chelis_tensor make_ranked_view(
+static chelis_tensor *make_ranked_view(
     float *data, int32_t rank, const int64_t *shape, const int64_t *strides, int64_t size
 ) {
-    return (chelis_tensor){
-        .data = data, .shape = shape, .strides = strides, .size = size,
-        .byte_capacity = size * (int64_t)sizeof(float), .rank = rank,
-        .dtype = CHELIS_DTYPE_F32, .owns_data = 0, .reserved = {0, 0},
-    };
+    (void)strides;
+    return chelis_tensor_entry_borrow(
+        rank, shape, CHELIS_DTYPE_F32, data, size * (int64_t)sizeof(float)
+    );
 }
 
 extern chelis_tensor *the_fn(chelis_tensor *, chelis_tensor *);
@@ -3458,6 +3413,14 @@ fn host_lane_positive_rank_mismatch_traps_before_indexing() {
         src.contains("elementwise operand rank mismatch"),
         "host-lane codegen omitted the positive-rank mismatch guard:\n{src}"
     );
+    assert!(
+        src.contains("chelis_host_require_elementwise_agreement(__arg0_"),
+        "host-lane rank guard must call the shared opaque-tensor guard:\n{src}"
+    );
+    assert!(
+        !src.contains("->rank"),
+        "host-lane rank guard must not reopen the opaque tensor descriptor:\n{src}"
+    );
 
     let harness = format!(
         r#"{HOST_GUARD_HARNESS}
@@ -3466,9 +3429,9 @@ int main(void) {{
     float b_data[6] = {{1, 2, 3, 4, 5, 6}};
     static const int64_t a_shape[1] = {{3}}, a_strides[1] = {{1}};
     static const int64_t b_shape[2] = {{2, 3}}, b_strides[2] = {{3, 1}};
-    chelis_tensor a = make_ranked_view(a_data, 1, a_shape, a_strides, 3);
-    chelis_tensor b = make_ranked_view(b_data, 2, b_shape, b_strides, 6);
-    the_fn(&a, &b);
+    chelis_tensor *a = make_ranked_view(a_data, 1, a_shape, a_strides, 3);
+    chelis_tensor *b = make_ranked_view(b_data, 2, b_shape, b_strides, 6);
+    the_fn(a, b);
     puts("UNREACHABLE");
     return 0;
 }}
@@ -3508,9 +3471,9 @@ int main(void) {{
     float b_data[6] = {{6, 5, 4, 3, 2, 1}};
     static const int64_t a_shape[1] = {{3}}, a_strides[1] = {{1}};
     static const int64_t b_shape[2] = {{2, 3}}, b_strides[2] = {{3, 1}};
-    chelis_tensor a = make_ranked_view(a_data, 1, a_shape, a_strides, 3);
-    chelis_tensor b = make_ranked_view(b_data, 2, b_shape, b_strides, 6);
-    the_fn(&a, &b);
+    chelis_tensor *a = make_ranked_view(a_data, 1, a_shape, a_strides, 3);
+    chelis_tensor *b = make_ranked_view(b_data, 2, b_shape, b_strides, 6);
+    the_fn(a, b);
     puts("UNREACHABLE");
     return 0;
 }}
@@ -3542,6 +3505,14 @@ fn host_lane_equal_rank_shape_mismatch_traps_before_indexing() {
         src.contains("elementwise operand shape mismatch"),
         "host-lane codegen omitted the equal-rank shape guard:\n{src}"
     );
+    assert!(
+        src.contains("chelis_host_require_elementwise_agreement(__arg0_"),
+        "host-lane shape guard must call the shared opaque-tensor guard:\n{src}"
+    );
+    assert!(
+        !src.contains("->shape"),
+        "host-lane shape guard must not reopen the opaque tensor descriptor:\n{src}"
+    );
 
     let harness = format!(
         r#"{HOST_GUARD_HARNESS}
@@ -3550,9 +3521,9 @@ int main(void) {{
     float b_data[6] = {{1, 2, 3, 4, 5, 6}};
     static const int64_t a_shape[1] = {{3}}, a_strides[1] = {{1}};
     static const int64_t b_shape[1] = {{2}}, b_strides[1] = {{1}};
-    chelis_tensor a = make_ranked_view(a_data, 1, a_shape, a_strides, 3);
-    chelis_tensor b = make_ranked_view(b_data, 1, b_shape, b_strides, 2);
-    the_fn(&a, &b);
+    chelis_tensor *a = make_ranked_view(a_data, 1, a_shape, a_strides, 3);
+    chelis_tensor *b = make_ranked_view(b_data, 1, b_shape, b_strides, 2);
+    the_fn(a, b);
     puts("UNREACHABLE");
     return 0;
 }}
@@ -3588,13 +3559,16 @@ int main(void) {{
     float a_data[6] = {{1, 2, 3, 4, 5, 6}};
     float b_data[6] = {{10, 20, 30, 40, 50, 60}};
     static const int64_t shape[2] = {{2, 3}}, strides[2] = {{3, 1}};
-    chelis_tensor a = make_ranked_view(a_data, 2, shape, strides, 6);
-    chelis_tensor b = make_ranked_view(b_data, 2, shape, strides, 6);
-    chelis_tensor *out = the_fn(&a, &b);
-    const float *values = (const float *)out->data;
-    for (int64_t i = 0; i < out->size; i++) {{
+    chelis_tensor *a = make_ranked_view(a_data, 2, shape, strides, 6);
+    chelis_tensor *b = make_ranked_view(b_data, 2, shape, strides, 6);
+    chelis_tensor *out = the_fn(a, b);
+    const float *values = (const float *)chelis_tensor_read_view(out).data;
+    for (int64_t i = 0; i < chelis_tensor_numel(out); i++) {{
         printf("%.1f\n", (double)values[i]);
     }}
+    chelis_tensor_release(a);
+    chelis_tensor_release(b);
+    chelis_tensor_release(out);
     return 0;
 }}
 "#
@@ -3706,7 +3680,7 @@ fn direct_fused_reduction_runtime_shape_guard_case(reduce_kind: &str) {
         "inlined {reduce_kind} must guard before allocation or indexing:\n{src}"
     );
     assert!(
-        function_body.contains("if (t1->rank == t2->rank)"),
+        function_body.contains("if (t1_rank == t2_rank)"),
         "scalar-first ordering must still compare the later tensor pair:\n{src}"
     );
     assert_eq!(
@@ -3721,22 +3695,19 @@ fn direct_fused_reduction_runtime_shape_guard_case(reduce_kind: &str) {
         "16.0f, 49.0f"
     };
     let harness_support = r#"
-static chelis_tensor make_scalar_view(float *data) {
-    return (chelis_tensor){
-        .data = data, .shape = NULL, .strides = NULL, .size = 1,
-        .byte_capacity = (int64_t)sizeof(float), .rank = 0,
-        .dtype = CHELIS_DTYPE_F32, .owns_data = 0, .reserved = {0, 0},
-    };
+static chelis_tensor *make_scalar_view(float *data) {
+    return chelis_tensor_entry_borrow(
+        0, NULL, CHELIS_DTYPE_F32, data, (int64_t)sizeof(float)
+    );
 }
-static chelis_tensor make_matrix_view(
+static chelis_tensor *make_matrix_view(
     float *data, int64_t *shape, int64_t *strides, int64_t backing_elements
 ) {
-    return (chelis_tensor){
-        .data = data, .shape = shape, .strides = strides,
-        .size = shape[0] * shape[1],
-        .byte_capacity = backing_elements * (int64_t)sizeof(float), .rank = 2,
-        .dtype = CHELIS_DTYPE_F32, .owns_data = 0, .reserved = {0, 0},
-    };
+    (void)strides;
+    return chelis_tensor_entry_borrow(
+        2, shape, CHELIS_DTYPE_F32, data,
+        backing_elements * (int64_t)sizeof(float)
+    );
 }
 "#;
     let positive_harness = format!(
@@ -3745,17 +3716,17 @@ extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
 int main(void) {{
     float scalar_data[1] = {{1.0f}};
     float a_data[6] = {{1, 2, 3, 4, 5, 6}};
-    float b_data[7] = {{2, 3, 4, -99, 5, 6, 7}};
+    float b_data[6] = {{2, 3, 4, 5, 6, 7}};
     int64_t a_shape[2] = {{2, 3}}, a_strides[2] = {{3, 1}};
-    int64_t b_shape[2] = {{2, 3}}, b_strides[2] = {{4, 1}};
-    chelis_tensor scalar = make_scalar_view(scalar_data);
-    chelis_tensor a = make_matrix_view(a_data, a_shape, a_strides, 6);
-    chelis_tensor b = make_matrix_view(b_data, b_shape, b_strides, 7);
-    chelis_tensor *inputs[3] = {{&scalar, &a, &b}};
+    int64_t b_shape[2] = {{2, 3}}, b_strides[2] = {{3, 1}};
+    chelis_tensor *scalar = make_scalar_view(scalar_data);
+    chelis_tensor *a = make_matrix_view(a_data, a_shape, a_strides, 6);
+    chelis_tensor *b = make_matrix_view(b_data, b_shape, b_strides, 6);
+    chelis_tensor *inputs[3] = {{scalar, a, b}};
     chelis_tensor *outputs[1] = {{NULL}};
     {function}(inputs, 3, outputs, 1);
     float expected[2] = {{{expected}}};
-    float *got = (float *)outputs[0]->data;
+    float *got = (float *)chelis_tensor_read_view(outputs[0]).data;
     for (int i = 0; i < 2; i++) if (fabsf(got[i] - expected[i]) > 1e-6f) return 1;
     puts("PASS");
     return 0;
@@ -3776,13 +3747,13 @@ extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
 int main(void) {{
     float scalar_data[1] = {{1.0f}};
     float a_data[6] = {{1, 2, 3, 4, 5, 6}};
-    float b_data[5] = {{2, 3, -99, 5, 6}};
+    float b_data[4] = {{2, 3, 5, 6}};
     int64_t a_shape[2] = {{2, 3}}, a_strides[2] = {{3, 1}};
-    int64_t b_shape[2] = {{2, 2}}, b_strides[2] = {{3, 1}};
-    chelis_tensor scalar = make_scalar_view(scalar_data);
-    chelis_tensor a = make_matrix_view(a_data, a_shape, a_strides, 6);
-    chelis_tensor b = make_matrix_view(b_data, b_shape, b_strides, 5);
-    chelis_tensor *inputs[3] = {{&scalar, &a, &b}};
+    int64_t b_shape[2] = {{2, 2}}, b_strides[2] = {{2, 1}};
+    chelis_tensor *scalar = make_scalar_view(scalar_data);
+    chelis_tensor *a = make_matrix_view(a_data, a_shape, a_strides, 6);
+    chelis_tensor *b = make_matrix_view(b_data, b_shape, b_strides, 4);
+    chelis_tensor *inputs[3] = {{scalar, a, b}};
     chelis_tensor *outputs[1] = {{NULL}};
     {function}(inputs, 3, outputs, 1);
     puts("UNREACHABLE");
@@ -3869,17 +3840,17 @@ fn direct_extrema_bit_case(
             Prim::F64 => (
                 "double",
                 "double a_data[N]; double b_data[N]; memcpy(a_data, a_bits, sizeof(a_bits)); memcpy(b_data, b_bits, sizeof(b_bits));",
-                "uint64_t got; memcpy(&got, &((double *)outputs[0]->data)[i], sizeof(got));",
+                "uint64_t got; memcpy(&got, &((double *)chelis_tensor_read_view(outputs[0]).data)[i], sizeof(got));",
             ),
             Prim::F32 => (
                 "float",
                 "float a_data[N]; float b_data[N]; memcpy(a_data, a_bits, sizeof(a_bits)); memcpy(b_data, b_bits, sizeof(b_bits));",
-                "uint32_t got; memcpy(&got, &((float *)outputs[0]->data)[i], sizeof(got));",
+                "uint32_t got; memcpy(&got, &((float *)chelis_tensor_read_view(outputs[0]).data)[i], sizeof(got));",
             ),
             Prim::F16 | Prim::Bf16 => (
                 "uint16_t",
                 "uint16_t *a_data = a_bits; uint16_t *b_data = b_bits;",
-                "uint16_t got = ((uint16_t *)outputs[0]->data)[i];",
+                "uint16_t got = ((uint16_t *)chelis_tensor_read_view(outputs[0]).data)[i];",
             ),
             _ => unreachable!(),
         };
@@ -3894,9 +3865,9 @@ int main(void) {{
     {bits_type} expected[N] = {{ {expected} }};
     {setup}
     (void)sizeof({value_type});
-    chelis_tensor a = make_view_typed_1d(a_data, N, {c_dtype});
-    chelis_tensor b = make_view_typed_1d(b_data, N, {c_dtype});
-    chelis_tensor *inputs[2] = {{ &a, &b }}; chelis_tensor *outputs[1] = {{ NULL }};
+    chelis_tensor *a = make_view_typed_1d(a_data, N, {c_dtype});
+    chelis_tensor *b = make_view_typed_1d(b_data, N, {c_dtype});
+    chelis_tensor *inputs[2] = {{ a, b }}; chelis_tensor *outputs[1] = {{ NULL }};
     {function}(inputs, 2, outputs, 1);
     for (int i = 0; i < N; i++) {{ {got} if (got != expected[i]) return 1; }}
     puts("PASS"); return 0;
@@ -4051,9 +4022,15 @@ fn direct_extrema_adjoint_bit_case(
         _ => unreachable!(),
     };
     let read_got = match prim {
-        Prim::F64 => "uint64_t got; memcpy(&got, &((double *)outputs[out]->data)[i], sizeof(got));",
-        Prim::F32 => "uint32_t got; memcpy(&got, &((float *)outputs[out]->data)[i], sizeof(got));",
-        Prim::F16 | Prim::Bf16 => "uint16_t got = ((uint16_t *)outputs[out]->data)[i];",
+        Prim::F64 => {
+            "uint64_t got; memcpy(&got, &((double *)chelis_tensor_read_view(outputs[out]).data)[i], sizeof(got));"
+        }
+        Prim::F32 => {
+            "uint32_t got; memcpy(&got, &((float *)chelis_tensor_read_view(outputs[out]).data)[i], sizeof(got));"
+        }
+        Prim::F16 | Prim::Bf16 => {
+            "uint16_t got = ((uint16_t *)chelis_tensor_read_view(outputs[out]).data)[i];"
+        }
         _ => unreachable!(),
     };
     let expected_rows = expected
@@ -4072,10 +4049,10 @@ int main(void) {{
     {bits_type} g_bits[N] = {{ {gradient} }};
     {bits_type} expected[4][N] = {{ {expected_rows} }};
     {setup}
-    chelis_tensor a = make_view_typed_1d(a_data, N, {c_dtype});
-    chelis_tensor b = make_view_typed_1d(b_data, N, {c_dtype});
-    chelis_tensor g = make_view_typed_1d(g_data, N, {c_dtype});
-    chelis_tensor *inputs[3] = {{ &a, &b, &g }};
+    chelis_tensor *a = make_view_typed_1d(a_data, N, {c_dtype});
+    chelis_tensor *b = make_view_typed_1d(b_data, N, {c_dtype});
+    chelis_tensor *g = make_view_typed_1d(g_data, N, {c_dtype});
+    chelis_tensor *inputs[3] = {{ a, b, g }};
     chelis_tensor *outputs[4] = {{ NULL, NULL, NULL, NULL }};
     {function}(inputs, 3, outputs, 4);
     for (int out = 0; out < 4; out++) {{

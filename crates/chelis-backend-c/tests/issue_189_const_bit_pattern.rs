@@ -52,7 +52,9 @@ fn issue_189_f32_const_emits_exact_bit_pattern() {
     // The exact tagged scalar keeps the bit pattern and dtype coupled
     // through the single public fill entry point.
     assert!(
-        src.contains("chelis_fill_scalar(t0, chelis_scalar_from_bits(CHELIS_DTYPE_F32,"),
+        src.contains(
+            "chelis_fill_scalar(t0_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_F32,"
+        ),
         "F32 const must dispatch through the exact tagged fill; emitted source:\n{src}"
     );
 }
@@ -79,7 +81,9 @@ fn issue_189_f64_const_emits_exact_bit_pattern() {
         "F64 const must round-trip via exact bit pattern `{needle}`; emitted source:\n{src}"
     );
     assert!(
-        src.contains("chelis_fill_scalar(t0, chelis_scalar_from_bits(CHELIS_DTYPE_F64,"),
+        src.contains(
+            "chelis_fill_scalar(t0_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_F64,"
+        ),
         "F64 const must dispatch through the exact tagged fill; emitted source:\n{src}"
     );
 }
@@ -359,11 +363,13 @@ extern void test_const_f32(chelis_tensor** inputs, int n_in, chelis_tensor** out
 int main(void) {
     chelis_tensor* outputs[1] = { NULL };
     test_const_f32(NULL, 0, outputs, 1);
+    chelis_read_view view = chelis_tensor_read_view(outputs[0]);
     float v;
-    memcpy(&v, outputs[0]->data, sizeof(float));
+    memcpy(&v, view.data, sizeof(float));
     uint32_t bits;
     memcpy(&bits, &v, sizeof(uint32_t));
     printf("0x%08x\n", bits);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }
 "#;
@@ -418,11 +424,13 @@ extern void test_const_f64(chelis_tensor** inputs, int n_in, chelis_tensor** out
 int main(void) {
     chelis_tensor* outputs[1] = { NULL };
     test_const_f64(NULL, 0, outputs, 1);
+    chelis_read_view view = chelis_tensor_read_view(outputs[0]);
     double v;
-    memcpy(&v, outputs[0]->data, sizeof(double));
+    memcpy(&v, view.data, sizeof(double));
     uint64_t bits;
     memcpy(&bits, &v, sizeof(uint64_t));
     printf("0x%016lx\n", (unsigned long)bits);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }
 "#;

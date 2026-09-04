@@ -8,6 +8,6 @@ int main(void) {
     if (tensor == NULL) {
         return 1;
     }
-    chelis_free(tensor);
+    chelis_tensor_release(tensor);
     return 0;
 }

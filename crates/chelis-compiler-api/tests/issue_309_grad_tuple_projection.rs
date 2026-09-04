@@ -64,7 +64,7 @@ fn issue309_multi_wrt_grad_projection_reads_from_real_tuple() {
          outputs, got:\n{c}"
     );
     assert!(
-        c.contains("chelis_value_from_tensor"),
+        c.contains("chelis_value_take_tensor"),
         "each grad-helper output tensor must be boxed into a chelis_value \
          before tuple assembly, got:\n{c}"
     );
@@ -77,7 +77,7 @@ fn issue309_multi_wrt_grad_projection_reads_from_real_tuple() {
         "the `.0` projection must still go through chelis_tuple_get, got:\n{c}"
     );
     assert!(
-        c.contains("chelis_value_as_tensor"),
+        c.contains("chelis_tensor_take_value"),
         "the projected tuple element must be unboxed to a tensor, got:\n{c}"
     );
 }

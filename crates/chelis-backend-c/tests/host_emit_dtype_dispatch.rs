@@ -3,9 +3,9 @@
 //! W2 PR 3 of the 0.7.8 compiler cleanup workstream
 //! (`CRuntime-F32Coupling`). Locks the invariant that the six
 //! `host_emit.rs` code-generation sites listed below emit C code
-//! that accesses `chelis_tensor->data` through dtype-typed pointers
-//! (e.g. `((double*)t->data)[i]`) rather than the legacy untyped
-//! `t->data[i]` form. The legacy form is a 4-byte float load
+//! that accesses the opaque tensor's guarded/read view through dtype-typed
+//! pointers (e.g. `((double*)view.data)[i]`) rather than a public descriptor
+//! field. The legacy untyped form was a 4-byte float load
 //! regardless of dtype against the public `float *data` declaration
 //! in `crates/chelis-runtime/include/chelis_runtime.h`, mirroring
 //! the bug class closed by PR #64 (CastMemcpy), PR #67
@@ -420,19 +420,19 @@ fn binary_elementwise_emits_dtype_switch_at_f32() {
     let program = make_binary_program("add", Prim::F32);
     let src = emit_host_program(&program, "binop_f32").unwrap();
     assert!(
-        src.contains("switch (") && src.contains("->dtype)"),
+        src.contains("switch (") && src.contains(".dtype)"),
         "binary elementwise must emit an outer switch on dtype; got:\n{src}"
     );
     assert!(
-        src.contains("(float*)") && src.contains("->data"),
-        "binary elementwise must cast `->data` through a typed pointer for f32; got:\n{src}"
+        src.contains("(float*)") && src.contains(".data"),
+        "binary elementwise must cast view data through a typed pointer for f32; got:\n{src}"
     );
     assert!(
         !src.contains("    {target}->data[i] ="),
         "raw `{{target}}->data[i]` template token must be substituted; got:\n{src}"
     );
     // The legacy untyped pattern `t->data[idx] OP t->data[idx]` reads
-    // 4 bytes as float. The new code paths cast `->data` to a typed
+    // 4 bytes as float. The new code paths cast view data to a typed
     // pointer before indexing.
     let buggy_pattern = "->data[i] = ";
     let bare_lhs_rhs = src.lines().any(|l| {
@@ -452,8 +452,8 @@ fn binary_elementwise_emits_dtype_switch_at_f64() {
     let program = make_binary_program("add", Prim::F64);
     let src = emit_host_program(&program, "binop_f64").unwrap();
     assert!(
-        src.contains("(double*)") && src.contains("->data"),
-        "binary elementwise at f64 must cast `->data` through `(double*)`; got:\n{src}"
+        src.contains("(double*)") && src.contains(".data"),
+        "binary elementwise at f64 must cast view data through `(double*)`; got:\n{src}"
     );
 }
 
@@ -462,8 +462,8 @@ fn binary_elementwise_emits_dtype_switch_at_i64() {
     let program = make_binary_program("add", Prim::Int64);
     let src = emit_host_program(&program, "binop_i64").unwrap();
     assert!(
-        src.contains("(int64_t*)") && src.contains("->data"),
-        "binary elementwise at i64 must cast `->data` through `(int64_t*)`; got:\n{src}"
+        src.contains("(int64_t*)") && src.contains(".data"),
+        "binary elementwise at i64 must cast view data through `(int64_t*)`; got:\n{src}"
     );
 }
 
@@ -587,12 +587,12 @@ fn unary_elementwise_emits_dtype_switch_at_f32() {
     let program = make_unary_program("neg", Prim::F32);
     let src = emit_host_program(&program, "unop_f32").unwrap();
     assert!(
-        src.contains("switch (") && src.contains("->dtype)"),
+        src.contains("switch (") && src.contains(".dtype)"),
         "unary elementwise must emit an outer switch on dtype; got:\n{src}"
     );
     assert!(
         src.contains("(float*)"),
-        "unary elementwise must cast `->data` to typed pointer; got:\n{src}"
+        "unary elementwise must cast view data to a typed pointer; got:\n{src}"
     );
 }
 
@@ -650,9 +650,9 @@ fn unary_func_int32_arm_aborts_without_binary32_conversion() {
 //
 // `assign_tensor_call` handles the case where a host helper takes a
 // scalar argument; the emitter allocates a rank-0 tensor and writes
-// the scalar through `tensor_name->data[0]`.  Three arms today: int64
+// the scalar through a guarded write view. Three arms today: int64
 // (already typed via `(int64_t*)` cast), bool, and the f32-default
-// fallback.  The bool and f32 arms must cast `->data` to a typed
+// fallback. The bool and f32 arms must cast the view data to a typed
 // pointer.  Sites 5 and 6 are exercised together by a single fixture
 // that constructs a TensorCall taking a scalar arg of each type.
 
@@ -719,6 +719,10 @@ fn to_tensor_list_ingress_uses_only_the_exact_registered_constructor() {
         source.contains("chelis_tensor_from_values(") && source.contains("CHELIS_DTYPE_F64"),
         "to_tensor must emit the registered exact tagged constructor:\n{source}"
     );
+    assert!(
+        source.contains("chelis_list_release(__arg0_"),
+        "the exact constructor borrows its fresh list-literal argument, so the temporary must be released:\n{source}"
+    );
     for retired in [
         "chelis_tensor_from_value_list_typed(",
         "chelis_tensor_from_value_list(",
@@ -740,7 +744,7 @@ fn scalar_to_tensor_coercion_bool_uses_typed_pointer() {
     // the two valid Bool8 bit patterns.
     assert!(
         src.contains("((uint8_t*)")
-            && src.contains("->data)[0]")
+            && src.contains("_write.data)[0]")
             && src.contains("? UINT8_C(1) : UINT8_C(0)"),
         "bool scalar-to-tensor coercion must write canonical Bool8 bytes; got:\n{src}"
     );
@@ -768,13 +772,13 @@ fn scalar_to_tensor_coercion_f64_uses_f64_typed_pointer() {
         "f64 scalar-to-tensor coercion must allocate a CHELIS_DTYPE_F64 rank-0 tensor (#381); got:\n{src}"
     );
     assert!(
-        src.contains("(double*)") && src.contains("->data"),
-        "f64 scalar-to-tensor coercion must cast `->data` to a `(double*)` (#381); got:\n{src}"
+        src.contains("(double*)") && src.contains("_write.data"),
+        "f64 scalar-to-tensor coercion must cast guarded view data to a `(double*)` (#381); got:\n{src}"
     );
     // Must NOT pack an f64 scalar through the f32 path (the pre-fix bug).
     assert!(
         !src.lines()
-            .any(|l| l.contains("->data[0] = (float)(") && !l.contains("(double*)")),
+            .any(|l| l.contains("_write.data)[0] = (float)(") && !l.contains("(double*)")),
         "f64 scalar-to-tensor coercion must not pack through the f32 `(float)(...)` path (#381); got:\n{src}"
     );
 }
@@ -787,14 +791,14 @@ fn scalar_to_tensor_coercion_f64_uses_f64_typed_pointer() {
 
 #[test]
 fn scalar_to_tensor_coercion_int64_keeps_typed_pointer() {
-    // Already-typed today: `((int64_t*)tensor_name->data)[0] =
+    // Already-typed today: `((int64_t*)tensor_name_write.data)[0] =
     // value;`.  Locks the invariant that this arm's typed cast
     // survives the host_emit migration.
     let program =
         make_tensor_call_with_scalar_arg(HostType::Int64, HostExpr::new(HostExprKind::Int(42)));
     let src = emit_host_program(&program, "scalar_i64").unwrap();
     assert!(
-        src.contains("(int64_t*)") && src.contains("->data"),
+        src.contains("(int64_t*)") && src.contains("_write.data"),
         "int64 scalar-to-tensor coercion must use `(int64_t*)` cast; got:\n{src}"
     );
 }

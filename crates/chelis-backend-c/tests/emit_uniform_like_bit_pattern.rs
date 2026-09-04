@@ -60,12 +60,12 @@ fn issue_937_uniform_like_emits_dtype_specific_sampler_and_storage() {
     )
     .unwrap();
     assert!(f64_src.contains("static inline double chelis_uniform_sample_f64("));
-    assert!(f64_src.contains("((double*)t1->data)[i] = chelis_uniform_sample_f64("));
+    assert!(f64_src.contains("((double*)t1_data)[i] = chelis_uniform_sample_f64("));
     assert!(f64_src.contains("chelis_f64_from_bits("));
     assert!(
         !f64_src
             .lines()
-            .any(|line| line.contains("t1->data)[i]") && line.contains("sample_f32")),
+            .any(|line| line.contains("t1_data)[i]") && line.contains("sample_f32")),
         "f64 output must never widen an f32 sample:\n{f64_src}"
     );
 
@@ -79,7 +79,7 @@ fn issue_937_uniform_like_emits_dtype_specific_sampler_and_storage() {
         )
         .unwrap();
         assert!(src.contains("chelis_uniform_sample_f32("));
-        assert!(src.contains(&format!("((uint16_t*)t1->data)[i] = {conversion}(")));
+        assert!(src.contains(&format!("((uint16_t*)t1_data)[i] = {conversion}(")));
     }
 }
 
@@ -347,11 +347,13 @@ extern void test_uniform_like(chelis_tensor** inputs, int n_in, chelis_tensor** 
 int main(void) {
     chelis_tensor* outputs[1] = { NULL };
     test_uniform_like(NULL, 0, outputs, 1);
+    chelis_read_view view = chelis_tensor_read_view(outputs[0]);
     float v;
-    memcpy(&v, outputs[0]->data, sizeof(float));
+    memcpy(&v, view.data, sizeof(float));
     uint32_t bits;
     memcpy(&bits, &v, sizeof(uint32_t));
     printf("0x%08x\n", bits);
+    chelis_tensor_release(outputs[0]);
     return 0;
 }
 "#;
@@ -386,13 +388,15 @@ extern void test_uniform_like_f64(chelis_tensor** inputs, int n_in, chelis_tenso
 int main(void) {
     chelis_tensor* outputs[1] = { NULL };
     test_uniform_like_f64(NULL, 0, outputs, 1);
-    double *data = (double *)outputs[0]->data;
-    for (int i = 0; i < outputs[0]->size; i++) {
+    chelis_read_view view = chelis_tensor_read_view(outputs[0]);
+    const double *data = (const double *)view.data;
+    for (int64_t i = 0; i < view.count; i++) {
         uint64_t bits;
         memcpy(&bits, &data[i], sizeof(bits));
         printf(i == 0 ? "%016llx" : " %016llx", (unsigned long long)bits);
     }
     printf("\n");
+    chelis_tensor_release(outputs[0]);
     return 0;
 }
 "#;

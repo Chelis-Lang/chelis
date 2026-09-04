@@ -162,7 +162,12 @@ fn count_gather_out_index_lines(body: &str) -> usize {
 }
 
 fn count_gather_dtype_dispatch(body: &str) -> usize {
-    body.matches("->dtype == CHELIS_DTYPE_I64) ? (int64_t)((const int64_t*)")
+    body.lines()
+        .filter(|line| {
+            line.contains("chelis_host_tensor_dtype(")
+                && line.contains("== CHELIS_DTYPE_I64")
+                && line.contains("chelis_host_tensor_data(")
+        })
         .count()
 }
 

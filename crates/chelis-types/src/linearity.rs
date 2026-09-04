@@ -1966,7 +1966,8 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
     // runtime implementations (`chelis_list_from_tensor`, `chelis_tensor_to_f64`,
     // `chelis_tensor_rank`, `chelis_tensor_shape`,
     // `chelis_tensor_numel`, `tensor_to_string`) all read via the pointer and
-    // never call `chelis_free`, so the caller still owns the input afterwards.
+    // never call `chelis_tensor_release`, so the caller still owns the input
+    // afterwards.
     // Keeping these observational avoids forcing callers to sprinkle
     // `copy(x)` before every query or host-lane conversion.
     //

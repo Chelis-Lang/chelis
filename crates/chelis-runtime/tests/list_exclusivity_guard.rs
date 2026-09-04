@@ -26,13 +26,13 @@ use std::process::Command;
 use chelis_runtime::{
     chelis_list_empty, chelis_list_extend, chelis_list_push, chelis_list_release,
     chelis_list_retain, chelis_list_with_capacity, chelis_scalar_from_bits, chelis_value,
-    chelis_value_from_scalar, CHELIS_DTYPE_I64,
+    chelis_value_box_scalar, CHELIS_DTYPE_I64,
 };
 
 const CHILD_CASE_ENV: &str = "CHELIS_LIST_EXCLUSIVITY_CHILD_CASE";
 
 unsafe fn int_value(value: i64) -> chelis_value {
-    chelis_value_from_scalar(chelis_scalar_from_bits(
+    chelis_value_box_scalar(chelis_scalar_from_bits(
         CHELIS_DTYPE_I64,
         u64::from_ne_bytes(value.to_ne_bytes()),
     ))

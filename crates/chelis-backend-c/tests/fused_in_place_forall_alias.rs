@@ -1,17 +1,14 @@
-//! Perf-F2(c): C in-place fused-elementwise aliasing must admit scoped
-//! same-property `forall` / binder-equivalent aliases, not just literal
-//! `DimInfo`-PartialEq matches.
+//! Perf-F2(c): preserve the shape-equivalence probes while ownership Phase 1
+//! disables C in-place reuse until the shared Phase 3 proof exists.
 //!
-//! Wire format expectations are pinned with exact `contains` strings (not
-//! pattern fragments) so a regression that drops the in-place alias or
-//! reshapes the wrapper preamble is immediately visible.
+//! Wire-format expectations pin the safe Phase 1 boundary: a reuse hint is
+//! never enough to alias storage, regardless of whether dimensions are
+//! literal-equal, binder-equivalent, or incompatible.
 //!
 //! Boundary: this file exercises only the in-place fusion gate in
-//! `chelis-backend-c::emit::fused_in_place_spec`. The slot planner in
-//! `chelis-backend-c::memory` is the M2a peer and intentionally out of
-//! scope; the fan-in shapes used here construct a deduplicated FusedElem
-//! whose `reusable_input` is set by the test, mirroring what fusion does
-//! after the linearity analyzer attaches the reuse hint.
+//! `chelis-backend-c::emit::fused_in_place_spec`. Phase 3 restores proven
+//! reuse through a shared C/HIP planner; these tests ensure Phase 1 cannot
+//! accidentally revive the deleted unproved `chelis_alloc_view` path.
 
 use chelis_ir::dag::{Dag, DimInfo, FusedInput, FusedStep, FusedStepOp, RiscOp, TensorType};
 use chelis_types::types::Prim;
@@ -105,11 +102,34 @@ fn fan_in_dag(
     (dag, fused, a)
 }
 
-/// Pinning regression: fan-in with literal-equal shapes still aliases the
-/// FusedElem's output to the reusable input's data. This is the existing
-/// in-place wire format the gate already produces; it must not change.
+fn assert_reuse_deferred(c: &str, fused: chelis_ir::dag::NodeId, reusable: chelis_ir::dag::NodeId) {
+    let fused_id = fused.0;
+    let reusable_id = reusable.0;
+    assert!(
+        !c.contains("chelis_alloc_view"),
+        "Phase 1 must not emit the deleted unproved view allocator; got:\n{c}"
+    );
+    assert!(
+        c.contains(&format!("chelis_tensor *t{fused_id} = chelis_alloc(")),
+        "fused output must own fresh storage while reuse proof is deferred; got:\n{c}"
+    );
+    assert!(
+        c.contains(&format!(
+            "float* restrict __out_{fused_id} = (float*)t{fused_id}_data;"
+        )),
+        "fresh fused output must remain restrict-qualified; got:\n{c}"
+    );
+    assert!(
+        c.contains(&format!(
+            "const float* restrict __ext0_{fused_id} = (const float*)t{reusable_id}_data;"
+        )),
+        "reusable hint must remain a non-overlapping input until Phase 3; got:\n{c}"
+    );
+}
+
+/// Literal equality does not substitute for the missing ownership proof.
 #[test]
-fn fan_in_literal_equal_shapes_aliases_reusable_input() {
+fn fan_in_literal_equal_shapes_defer_reuse_without_shared_proof() {
     let (dag, fused, a) = fan_in_dag(
         vec_lit_f32(4),
         vec_lit_f32(4),
@@ -117,34 +137,7 @@ fn fan_in_literal_equal_shapes_aliases_reusable_input() {
         vec_lit_f32(4),
     );
     let c = CEmitter::emit_dag(&dag, "test_fan_in_literal").unwrap();
-    let fused_id = fused.0;
-    let a_id = a.0;
-
-    // Exact-shape: the in-place wrapper must alias the FusedElem output
-    // view to the reusable input's data buffer.
-    let expected_alias = format!(
-        "t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 4 }}, CHELIS_DTYPE_F32, t{a_id}->data, t{a_id}->byte_capacity);"
-    );
-    assert!(
-        c.contains(&expected_alias),
-        "expected literal-shape fan-in to alias t{fused_id} onto t{a_id}->data; got:\n{c}"
-    );
-
-    // Exact-shape: the non-aliased fast-path output pointer must NOT use
-    // restrict (it points at the same buffer as ext0).
-    let expected_out = format!("float* __out_{fused_id} = (float*)t{fused_id}->data;");
-    assert!(
-        c.contains(&expected_out),
-        "expected non-restrict __out_{fused_id} pointer; got:\n{c}"
-    );
-
-    // Exact-shape: the reusable input is the non-restrict ext0; the other
-    // two external inputs remain restrict-qualified.
-    let expected_ext0 = format!("const float* __ext0_{fused_id} = (const float*)t{a_id}->data;");
-    assert!(
-        c.contains(&expected_ext0),
-        "expected non-restrict __ext0_{fused_id} pointer for reusable input t{a_id}; got:\n{c}"
-    );
+    assert_reuse_deferred(&c, fused, a);
 }
 
 /// Positive — binder-equivalent: FusedElem output uses
@@ -159,7 +152,7 @@ fn fan_in_literal_equal_shapes_aliases_reusable_input() {
 /// carrying the source binder name), and the C backend must not fall
 /// back just because the structural `DimInfo` representations differ.
 #[test]
-fn fan_in_binder_equivalent_lit_to_named_aliases_reusable_input() {
+fn fan_in_binder_equivalent_lit_to_named_defers_reuse_without_shared_proof() {
     let (dag, fused, a) = fan_in_dag(
         vec_lit_f32(4),
         vec_named_f32("seq", 4),
@@ -167,37 +160,14 @@ fn fan_in_binder_equivalent_lit_to_named_aliases_reusable_input() {
         vec_named_f32("seq", 4),
     );
     let c = CEmitter::emit_dag(&dag, "test_fan_in_binder_lit_to_named").unwrap();
-    let fused_id = fused.0;
-    let a_id = a.0;
-
-    // Shape literal: `Named("seq", Some(4))` lowers to `DimExpr::Concrete(4)`
-    // so the emitted shape array is `(int64_t[]){ 4 }`, not `(int64_t[]){ seq }`.
-    let expected_alias = format!(
-        "t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 4 }}, CHELIS_DTYPE_F32, t{a_id}->data, t{a_id}->byte_capacity);"
-    );
-    assert!(
-        c.contains(&expected_alias),
-        "binder-equivalent Lit->Named fan-in must alias t{fused_id} onto t{a_id}->data; got:\n{c}"
-    );
-
-    let expected_out = format!("float* __out_{fused_id} = (float*)t{fused_id}->data;");
-    assert!(
-        c.contains(&expected_out),
-        "expected non-restrict __out_{fused_id} pointer for binder-equivalent in-place; got:\n{c}"
-    );
-
-    let expected_ext0 = format!("const float* __ext0_{fused_id} = (const float*)t{a_id}->data;");
-    assert!(
-        c.contains(&expected_ext0),
-        "expected non-restrict __ext0_{fused_id} pointer for binder-equivalent reusable input; got:\n{c}"
-    );
+    assert_reuse_deferred(&c, fused, a);
 }
 
 /// Positive — binder-equivalent the other direction: FusedElem output
 /// uses `Lit(4)` while reusable input is `Named("seq", Some(4))`. The
 /// alias must still fire — the binder-equivalent predicate is symmetric.
 #[test]
-fn fan_in_binder_equivalent_named_to_lit_aliases_reusable_input() {
+fn fan_in_binder_equivalent_named_to_lit_defers_reuse_without_shared_proof() {
     let (dag, fused, a) = fan_in_dag(
         vec_named_f32("seq", 4),
         vec_lit_f32(4),
@@ -205,28 +175,13 @@ fn fan_in_binder_equivalent_named_to_lit_aliases_reusable_input() {
         vec_lit_f32(4),
     );
     let c = CEmitter::emit_dag(&dag, "test_fan_in_binder_named_to_lit").unwrap();
-    let fused_id = fused.0;
-    let a_id = a.0;
-
-    let expected_alias = format!(
-        "t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 4 }}, CHELIS_DTYPE_F32, t{a_id}->data, t{a_id}->byte_capacity);"
-    );
-    assert!(
-        c.contains(&expected_alias),
-        "binder-equivalent Named->Lit fan-in must alias t{fused_id} onto t{a_id}->data; got:\n{c}"
-    );
-
-    let expected_out = format!("float* __out_{fused_id} = (float*)t{fused_id}->data;");
-    assert!(
-        c.contains(&expected_out),
-        "expected non-restrict __out_{fused_id} for binder-equivalent in-place; got:\n{c}"
-    );
+    assert_reuse_deferred(&c, fused, a);
 }
 
 /// Positive — same Named binder name on both sides with matching known
 /// size: this is the canonical binder-equivalent case and must alias.
 #[test]
-fn fan_in_same_named_binder_aliases_reusable_input() {
+fn fan_in_same_named_binder_defers_reuse_without_shared_proof() {
     let (dag, fused, a) = fan_in_dag(
         vec_named_f32("seq", 4),
         vec_named_f32("seq", 4),
@@ -234,16 +189,7 @@ fn fan_in_same_named_binder_aliases_reusable_input() {
         vec_named_f32("seq", 4),
     );
     let c = CEmitter::emit_dag(&dag, "test_fan_in_same_named_binder").unwrap();
-    let fused_id = fused.0;
-    let a_id = a.0;
-
-    let expected_alias = format!(
-        "t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 4 }}, CHELIS_DTYPE_F32, t{a_id}->data, t{a_id}->byte_capacity);"
-    );
-    assert!(
-        c.contains(&expected_alias),
-        "same-binder Named fan-in must alias t{fused_id} onto t{a_id}->data; got:\n{c}"
-    );
+    assert_reuse_deferred(&c, fused, a);
 }
 
 /// Positive — same Named binder name with unsized binder on the reusable
@@ -252,7 +198,7 @@ fn fan_in_same_named_binder_aliases_reusable_input() {
 /// *name* matches (the alias proof relies on the binder identity, not
 /// the resolved size that was concretized later).
 #[test]
-fn fan_in_named_binder_with_unknown_size_aliases() {
+fn fan_in_named_binder_with_unknown_size_defers_reuse_without_shared_proof() {
     let (dag, fused, a) = fan_in_dag(
         vec_named_unsized_f32("seq"),
         vec_named_f32("seq", 4),
@@ -260,18 +206,7 @@ fn fan_in_named_binder_with_unknown_size_aliases() {
         vec_named_f32("seq", 4),
     );
     let c = CEmitter::emit_dag(&dag, "test_fan_in_named_unsized").unwrap();
-    let fused_id = fused.0;
-    let a_id = a.0;
-
-    // The FusedElem's output_type is `Named("seq", Some(4))`, so the
-    // shape array lowers to `(int64_t[]){ 4 }` from the FusedElem side.
-    let expected_alias = format!(
-        "t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 4 }}, CHELIS_DTYPE_F32, t{a_id}->data, t{a_id}->byte_capacity);"
-    );
-    assert!(
-        c.contains(&expected_alias),
-        "binder-equivalent Named(unsized)->Named(sized) fan-in must alias t{fused_id} onto t{a_id}->data; got:\n{c}"
-    );
+    assert_reuse_deferred(&c, fused, a);
 }
 
 /// Negative — different binder names: the alias proof does NOT consider
@@ -287,33 +222,7 @@ fn fan_in_different_named_binders_does_not_alias() {
         vec_named_f32("seq", 4),
     );
     let c = CEmitter::emit_dag(&dag, "test_fan_in_different_binders").unwrap();
-    let fused_id = fused.0;
-    let a_id = a.0;
-
-    // No in-place alias: the FusedElem output must be slot-backed, not
-    // view-aliased to the reusable input. Shape lowers to `(int64_t[]){ 4 }`
-    // because every Named dim has a known size of 4.
-    let forbidden_alias = format!(
-        "t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 4 }}, CHELIS_DTYPE_F32, t{a_id}->data, t{a_id}->byte_capacity);"
-    );
-    assert!(
-        !c.contains(&forbidden_alias),
-        "different-binder fan-in must NOT alias t{fused_id} onto t{a_id}->data; got:\n{c}"
-    );
-
-    // The standard slot-backed wrapper must still be present.
-    let expected_slot = format!("chelis_tensor *t{fused_id} = chelis_alloc_view");
-    assert!(
-        c.contains(&expected_slot),
-        "expected slot-backed t{fused_id} wrapper in fall-back path; got:\n{c}"
-    );
-
-    // Fall-back path: output is restrict-qualified (no overlap with any input).
-    let expected_out = format!("float* restrict __out_{fused_id} = (float*)t{fused_id}->data;");
-    assert!(
-        c.contains(&expected_out),
-        "expected restrict __out_{fused_id} pointer in fall-back path; got:\n{c}"
-    );
+    assert_reuse_deferred(&c, fused, a);
 }
 
 /// Negative — different concrete sizes on the same binder name: a
