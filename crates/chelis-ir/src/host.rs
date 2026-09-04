@@ -3302,6 +3302,20 @@ impl UncarriableWalk<'_> {
                                 .to_string(),
                         );
                     }
+                    // A bare name handed directly to a builtin that the program
+                    // does not define is a dimension name (a named axis of a
+                    // reduction or `expand`, spec/04-type-system.md section
+                    // 4.5.3), which the lowering resolves against the operand;
+                    // the checker has already bound every value name. A callee
+                    // that is neither a builtin nor a definition is walked as a
+                    // name and reported as unresolvable.
+                    if BUILTIN_NAMES.contains(&name) {
+                        return kids
+                            .iter()
+                            .skip(1)
+                            .filter(|kid| !is_bare_lowercase_var(kid))
+                            .find_map(|kid| self.expr(kid));
+                    }
                 }
                 kids.iter().find_map(|kid| self.expr(kid))
             }
@@ -3487,6 +3501,17 @@ const HOST_ONLY_BUILTINS: &[&str] = &[
     "trace",
     "clamp",
 ];
+
+/// A `(var name)` whose name starts lowercase: the shape a dimension-name
+/// argument takes in a builtin call.
+fn is_bare_lowercase_var(expr: &Expr) -> bool {
+    let Some((DeepTag::Var, _, kids)) = stamped_parts(expr) else {
+        return false;
+    };
+    kids.first()
+        .and_then(symbol_name)
+        .is_some_and(|name| name.chars().next().is_some_and(char::is_lowercase))
+}
 
 fn fn_param_names(params: &Expr) -> Vec<String> {
     let Some(list) = as_list(params) else {
