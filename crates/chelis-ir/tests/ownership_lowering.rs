@@ -1,4 +1,4 @@
-//! Phase 2 ownership-lowering acceptance tests (chelis#1286).
+//! Verified ownership-lowering acceptance tests (chelis#1286).
 //!
 //! The fixtures and inline programs pass through Surf parsing, type/effect/
 //! linearity checking, the real root manifest, and concrete host lowering
@@ -169,6 +169,24 @@ fn line_index(text: &str, needle: &str) -> usize {
         .unwrap_or_else(|| panic!("missing {needle:?} in:\n{text}"))
 }
 
+fn projected_owner_terminal(text: &str) -> (usize, usize) {
+    let (project_index, project_line) = text
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.contains("project borrow"))
+        .unwrap_or_else(|| panic!("missing projected owner in:\n{text}"));
+    let owner = project_line
+        .split_whitespace()
+        .next_back()
+        .expect("project operation carries an owner identity");
+    let terminal = format!("drop move {owner}");
+    let terminal_index = text
+        .lines()
+        .position(|line| line.trim() == terminal)
+        .unwrap_or_else(|| panic!("missing terminal {terminal:?} in:\n{text}"));
+    (project_index, terminal_index)
+}
+
 #[test]
 fn real_phase2_corpus_lowers_and_verifies() {
     for name in [
@@ -238,7 +256,7 @@ fn aliased_roots_copy_the_earlier_sink_in_manifest_order() {
 }
 
 #[test]
-fn non_root_heap_value_gets_a_scope_exit_drop() {
+fn non_root_heap_value_drops_at_its_verified_last_use() {
     let mut front = front("kept = [1i64]\nout = len(kept)\n");
     front
         .manifest
@@ -250,8 +268,31 @@ fn non_root_heap_value_gets_a_scope_exit_drop() {
     assert_eq!(count(&roots, "root out move"), 1, "{roots}");
     assert_eq!(count(&roots, "drop move"), 1, "{roots}");
     assert!(
-        line_index(&roots, "root out move") < line_index(&roots, "drop move"),
-        "{roots}"
+        line_index(&roots, "drop move") < line_index(&roots, "root out move"),
+        "the unused container must be released before the unrelated root sink:\n{roots}"
+    );
+}
+
+#[test]
+fn recursive_tail_frame_drops_precede_the_direct_call() {
+    let step = unit_text(&verified_fixture("issue_1206_depth_1"), "step");
+    let recursive_call = line_index(&step, "call:step");
+    let drops = step
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| line.contains("drop move").then_some(index))
+        .collect::<Vec<_>>();
+    assert!(
+        !drops.is_empty(),
+        "the recursive frame must own temporaries:\n{step}"
+    );
+    assert!(
+        drops.iter().all(|drop| *drop < recursive_call),
+        "every non-carried frame owner must die before the typed tail call:\n{step}"
+    );
+    assert!(
+        step.lines().any(|line| line.contains("return move")),
+        "{step}"
     );
 }
 
@@ -260,8 +301,9 @@ fn nested_scope_escape_projects_the_same_owner_into_the_outer_payload_slot() {
     let verified = verified_source("b = {\n  q = to_tensor([1.0f32, 2.0f32])\n  q\n}\n");
     let body = unit_text(&verified, "roots");
     assert_eq!(count(&body, "project borrow"), 1, "{body}");
+    let (project, projected_owner_drop) = projected_owner_terminal(&body);
     assert!(
-        line_index(&body, "project borrow") < line_index(&body, "drop move"),
+        project < projected_owner_drop,
         "the outer payload slot must be bound before the projected owner reaches its terminal:\n{body}"
     );
 
@@ -282,9 +324,19 @@ fn nested_scope_escape_projects_the_same_owner_into_the_outer_payload_slot() {
         2,
         "each lexical boundary must project the owner into the next outer payload slot:\n{doubly_nested}"
     );
+    let (first_project, projected_owner_drop) = projected_owner_terminal(&doubly_nested);
     assert!(
-        line_index(&doubly_nested, "project borrow") < line_index(&doubly_nested, "drop move"),
+        first_project < projected_owner_drop,
         "both payload projections must precede the owner's terminal:\n{doubly_nested}"
+    );
+    assert_eq!(
+        doubly_nested
+            .lines()
+            .take(projected_owner_drop)
+            .filter(|line| line.contains("project borrow"))
+            .count(),
+        2,
+        "both projections of the same owner must precede its typed terminal:\n{doubly_nested}"
     );
 }
 

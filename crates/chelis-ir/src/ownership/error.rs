@@ -172,8 +172,16 @@ pub enum OwnershipError {
         owner: u32,
         block: u32,
     },
-    #[error("last-use scheduling for `{unit}` defers {feature} to the next milestone")]
-    LastUseSchedulingDeferred { unit: String, feature: &'static str },
+    #[error("last-use scheduling for `{unit}` does not support {feature}")]
+    LastUseSchedulingUnsupported { unit: String, feature: &'static str },
+    #[error("verified live-byte bound overflow while {context}")]
+    LiveByteBoundOverflow { context: String },
+    #[error("verified live-byte bound for `{unit}` owner %{owner} cannot size dtype `{dtype}`")]
+    LiveByteBoundDType {
+        unit: String,
+        owner: u32,
+        dtype: &'static str,
+    },
     #[error("owner %{owner} in `{unit}` has a noncanonical terminal: {detail}")]
     NonCanonicalTerminal {
         unit: String,
