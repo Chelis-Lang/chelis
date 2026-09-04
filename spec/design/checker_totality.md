@@ -1956,7 +1956,7 @@ enum a traversal must exhaust, not an `Option` it may drop.
 
 #### You deliver
 
-- **E5a, the reproducers (lands first).** The six programs above - the four
+- **E5a, the reproducers (lands first). Delivered by PR [#1543].** The six programs above - the four
   in-checker divergences and their two controls - as rows in
   `crates/chelis-types/tests/issue_1107_stamped_node_ingress_parity.rs`, whose
   `agreed_diagnostics` helper already asserts the exact invariant. Each row
@@ -2576,6 +2576,7 @@ silent exemption to be diagnosed rather than an empty subtree to be skipped.
 [#1320]: https://github.com/Chelis-Lang/chelis/issues/1320
 [#1362]: https://github.com/Chelis-Lang/chelis/issues/1362
 [#1537]: https://github.com/Chelis-Lang/chelis/issues/1537
+[#1543]: https://github.com/Chelis-Lang/chelis/pull/1543
 [#1134]: https://github.com/Chelis-Lang/chelis/issues/1134
 [#887]: https://github.com/Chelis-Lang/chelis/issues/887
 [#1485]: https://github.com/Chelis-Lang/chelis/issues/1485
