@@ -13,6 +13,7 @@ wait.
 
 import importlib.util
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -105,6 +106,60 @@ class CommandShapeTests(unittest.TestCase):
         with mock.patch.object(cag.subprocess, "run") as run:
             self.assertEqual(cag.apt_get([], sleep=lambda _s: None), 0)
         run.assert_not_called()
+
+
+class BullseyeSnapshotTests(unittest.TestCase):
+    def test_snapshot_sources_are_immutable_and_complete(self):
+        expected = (
+            "deb [check-valid-until=no] "
+            "https://snapshot.debian.org/archive/debian/20260901T000000Z/ "
+            "bullseye main\n"
+            "deb [check-valid-until=no] "
+            "https://snapshot.debian.org/archive/debian/20260901T000000Z/ "
+            "bullseye-updates main\n"
+            "deb [check-valid-until=no] "
+            "https://snapshot.debian.org/archive/debian-security/20260901T000000Z/ "
+            "bullseye-security main\n"
+        )
+        self.assertEqual(cag.bullseye_snapshot_sources(), expected)
+
+    def test_configure_snapshot_replaces_every_moving_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            apt_root = Path(tmp)
+            fragments = apt_root / "sources.list.d"
+            fragments.mkdir()
+            (apt_root / "sources.list").write_text(
+                "deb http://deb.debian.org/debian bullseye main\n",
+                encoding="utf-8",
+            )
+            (fragments / "debian.list").write_text(
+                "deb http://security.debian.org bullseye-security main\n",
+                encoding="utf-8",
+            )
+            (fragments / "debian.sources").write_text(
+                "URIs: http://deb.debian.org/debian\n",
+                encoding="utf-8",
+            )
+            (fragments / "README").write_text("keep me\n", encoding="utf-8")
+
+            cag.configure_bullseye_snapshot(apt_root)
+
+            self.assertEqual(
+                (apt_root / "sources.list").read_text(encoding="utf-8"),
+                cag.bullseye_snapshot_sources(),
+            )
+            self.assertFalse((fragments / "debian.list").exists())
+            self.assertFalse((fragments / "debian.sources").exists())
+            self.assertEqual(
+                (fragments / "README").read_text(encoding="utf-8"), "keep me\n"
+            )
+
+    def test_configure_snapshot_requires_an_apt_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            absent = Path(tmp) / "missing-apt"
+            with self.assertRaises(FileNotFoundError):
+                cag.configure_bullseye_snapshot(absent)
+            self.assertFalse(absent.exists())
 
 
 class RetryTests(unittest.TestCase):
@@ -331,6 +386,25 @@ class CliTests(unittest.TestCase):
         with mock.patch.object(cag, "apt_get", fake_apt_get):
             cag.main(["--timeout", "0", "gcc"])
         self.assertIsNone(captured["timeout"])
+
+    def test_main_configures_snapshot_before_apt(self):
+        events = []
+
+        def fake_configure():
+            events.append("snapshot")
+
+        def fake_apt_get(packages, *, sudo, no_install_recommends, attempts, timeout):
+            events.append("apt")
+            return 0
+
+        with (
+            mock.patch.object(cag, "configure_bullseye_snapshot", fake_configure),
+            mock.patch.object(cag, "apt_get", fake_apt_get),
+        ):
+            rc = cag.main(["--debian-bullseye-snapshot", "--no-sudo", "cmake"])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(events, ["snapshot", "apt"])
 
 
 if __name__ == "__main__":
