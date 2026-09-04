@@ -78,6 +78,21 @@ WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 CARCARA_FULL_SUITE_COMMAND = (
     "cargo test -p chelis-prove --features carcara -- --test-threads=1"
 )
+SMT_FULL_SYSTEM_PACKAGES = (
+    "gcc",
+    "g++",
+    "cmake",
+    "libclang-dev",
+    "m4",
+    "make",
+    "libz3-dev",
+)
+SMT_FULL_VENDORED_SYSTEM_PACKAGES = (
+    "libgmp-dev",
+    "libmpfr-dev",
+    "libmpc-dev",
+    "libopenblas-dev",
+)
 
 
 def _read_nix_packages_workflow(path: Path | None = None) -> str:
@@ -282,14 +297,68 @@ def _assert_carcara_full_suite_command(workflow: str) -> None:
         )
 
 
-def _assert_carcara_feature_tree_is_gmp_only(feature_tree: str) -> None:
+def _assert_full_smt_system_packages(workflow: str) -> None:
+    block = _workflow_job_blocks(workflow).get("full-smt-prove")
+    if block is None:
+        raise AssertionError("missing full-smt-prove job")
+    commands = [
+        line.strip().removeprefix("run: ")
+        for line in block.splitlines()
+        if line.strip().startswith("run: python3 scripts/ci_apt_get.py ")
+    ]
+    forbidden = sorted(
+        {
+            package
+            for command in commands
+            for package in SMT_FULL_VENDORED_SYSTEM_PACKAGES
+            if package in shlex.split(command)
+        }
+    )
+    if forbidden:
+        raise AssertionError(
+            "full-smt-prove must build its locked native dependencies instead "
+            "of installing distribution packages: " + ", ".join(forbidden)
+        )
+    expected = "python3 scripts/ci_apt_get.py " + " ".join(SMT_FULL_SYSTEM_PACKAGES)
+    if commands.count(expected) != 1:
+        raise AssertionError(
+            "full-smt-prove system dependency set must provision the headers "
+            f"needed by its unified all-features build; expected {expected!r}, "
+            f"found {commands!r}"
+        )
+
+
+def _assert_prove_uses_vendored_gmp_family(
+    manifest: str, carcara_feature_tree: str, all_feature_tree: str
+) -> None:
+    active_manifest = "\n".join(
+        line.split("#", 1)[0] for line in manifest.splitlines()
+    )
+    if (
+        "use-system-libs" in active_manifest
+        or "use-system-libs" in carcara_feature_tree
+        or "use-system-libs" in all_feature_tree
+    ):
+        raise AssertionError(
+            "chelis-prove must build the locked GMP/MPFR/MPC sources instead "
+            "of forcing distribution system-library versions"
+        )
+    direct_dependency = re.search(
+        r"^gmp-mpfr-sys\s*=", active_manifest, re.MULTILINE
+    )
+    if direct_dependency is not None:
+        raise AssertionError(
+            "chelis-prove must not retain a direct gmp-mpfr-sys dependency "
+            "whose only purpose was forcing system libraries"
+        )
+
     forbidden = (
         'gmp-mpfr-sys feature "mpfr"',
         'gmp-mpfr-sys feature "mpc"',
         'rug feature "float"',
         'rug feature "complex"',
     )
-    active = [feature for feature in forbidden if feature in feature_tree]
+    active = [feature for feature in forbidden if feature in carcara_feature_tree]
     if active:
         raise AssertionError(
             "Carcara feature graph must stay GMP-only; activated "
@@ -3632,19 +3701,33 @@ class SmtCiSplitTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "complete serialized Carcara suite"):
             _assert_carcara_full_suite_command(conditional)
 
-    def test_carcara_dependency_stays_gmp_only(self):
+    def test_full_smt_uses_vendored_gmp_family(self):
+        text = SMT_FULL_PROVE_YML.read_text()
+        _assert_full_smt_system_packages(text)
+
+        for package in SMT_FULL_VENDORED_SYSTEM_PACKAGES:
+            for location, mutated in (
+                (
+                    "primary",
+                    text.replace(" libz3-dev", f" {package} libz3-dev"),
+                ),
+                (
+                    "later",
+                    text.replace(
+                        "ci_apt_get.py gappa",
+                        f"ci_apt_get.py gappa {package}",
+                    ),
+                ),
+            ):
+                with self.subTest(package=package, location=location):
+                    with self.assertRaisesRegex(
+                        AssertionError, "locked native dependencies"
+                    ):
+                        _assert_full_smt_system_packages(mutated)
+
+    def test_prove_feature_graph_uses_vendored_gmp_family(self):
         text = CHELIS_PROVE_TOML.read_text()
-        dependency = next(
-            line
-            for line in text.splitlines()
-            if line.startswith("gmp-mpfr-sys = ")
-        )
-        self.assertIn("default-features = false", dependency)
-        self.assertIn("optional = true", dependency)
-        self.assertNotIn(", features =", dependency)
-        self.assertNotIn("gmp-mpfr-sys/mpfr", text)
-        self.assertNotIn("gmp-mpfr-sys/mpc", text)
-        result = subprocess.run(
+        carcara_result = subprocess.run(
             [
                 "cargo",
                 "tree",
@@ -3663,10 +3746,32 @@ class SmtCiSplitTests(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        _assert_carcara_feature_tree_is_gmp_only(result.stdout)
-        with self.assertRaisesRegex(AssertionError, "must stay GMP-only"):
-            _assert_carcara_feature_tree_is_gmp_only(
-                result.stdout + '\ngmp-mpfr-sys feature "mpfr"\nrug feature "float"'
+        all_result = subprocess.run(
+            [
+                "cargo",
+                "tree",
+                "-p",
+                "chelis-prove",
+                "--all-features",
+                "-e",
+                "features",
+                "--prefix",
+                "none",
+            ],
+            cwd=REPO_ROOT,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        _assert_prove_uses_vendored_gmp_family(
+            text, carcara_result.stdout, all_result.stdout
+        )
+        with self.assertRaisesRegex(AssertionError, "locked GMP/MPFR/MPC sources"):
+            _assert_prove_uses_vendored_gmp_family(
+                text,
+                carcara_result.stdout,
+                all_result.stdout + '\ngmp-mpfr-sys feature "use-system-libs"',
             )
 
     def test_full_smt_workflow_shares_smoke_cache_key(self):

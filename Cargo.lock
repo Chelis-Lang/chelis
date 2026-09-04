@@ -750,7 +750,6 @@ dependencies = [
  "chelis-unord",
  "clarabel",
  "cvc5-rs",
- "gmp-mpfr-sys",
  "num-bigint",
  "num-rational",
  "num-traits",
