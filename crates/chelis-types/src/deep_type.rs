@@ -380,14 +380,6 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
         vars
     }
 
-    /// The source name bound to each dimension variable this resolver
-    /// minted, as `DimVar -> name` (chelis#260).
-    ///
-    /// `dim_vars` above discards the names, which is why a declared-dim
-    /// diagnostic could only render the internal `d{N}` id. These are the
-    /// PRE-generalization variables: a consumer that reports on an
-    /// instantiated signature must compose this with the instantiation's
-    /// original-to-fresh mapping.
     /// The source spelling of each type variable this resolution minted
     /// (chelis#260 Site 2).
     ///
@@ -406,6 +398,14 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             .collect()
     }
 
+    /// The source name bound to each dimension variable this resolver
+    /// minted, as `DimVar -> name` (chelis#260).
+    ///
+    /// `dim_vars` above discards the names, which is why a declared-dim
+    /// diagnostic could only render the internal `d{N}` id. These are the
+    /// PRE-generalization variables: a consumer that reports on an
+    /// instantiated signature must compose this with the instantiation's
+    /// original-to-fresh mapping.
     pub(crate) fn dim_var_names(&self) -> UnordMap<DimVar, String> {
         // `to_sorted` rather than an unordered walk: `UnordMap` deliberately
         // offers no `iter`, because hash order must not reach observable

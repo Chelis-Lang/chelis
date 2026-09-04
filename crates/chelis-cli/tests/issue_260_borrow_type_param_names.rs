@@ -85,6 +85,17 @@ fn the_named_parameter_is_the_borrowed_one() {
     // arbitrary entry from the recorded map. Two parameters make the choice
     // observable: `y` has type `b`, so naming `a` would be a confidently
     // wrong answer, which is worse than an opaque id.
+    //
+    // The property holds up to unification, and no further. Where the body
+    // unifies two declared parameters the lookup reports the substitution's
+    // representative, which tracks quantifier order rather than the borrow:
+    // measured, `def go[a, b](x: a, y: b)` borrowing `x` under `a ~ b`
+    // prints `b`, and the same program with the parameters declared in the
+    // other order prints `a`. Both spell the one type the two names now
+    // denote, so neither is false under [04-FIT-9] -- but the attribution is
+    // arbitrary. Naming every co-unified parameter, the way Site 1 already
+    // does for collapsed dimensions, is recorded as residual scope on
+    // chelis#260 rather than done here.
     let message = borrow_message(&check_stdout(concat!(
         "def go[a, b](x: a, y: b) -> int32 = {\n",
         "  z = &y\n",
@@ -125,9 +136,11 @@ fn names_do_not_leak_between_signatures() {
 
 #[test]
 fn a_concrete_type_still_renders_itself() {
-    // spec/04 [04-FIT-10]: where no source provenance exists the identity
-    // renders as it is, without an invented name. A concrete `f32` has no
-    // declared parameter to name and must not acquire one.
+    // Guards the renderer's non-variable arm: a concrete type has no
+    // declared parameter to look up and must keep rendering itself.
+    //
+    // This is NOT [04-FIT-10]. `f32` is a spelling the user wrote, not an
+    // inference identity, so the atom's subject is the test below.
     let message = borrow_message(&check_stdout(concat!(
         "def go(x: f32) -> int32 = {\n",
         "  y = &x\n",
@@ -137,5 +150,37 @@ fn a_concrete_type_still_renders_itself() {
     assert!(
         message.contains("got f32"),
         "a concrete type renders itself; got: {message}"
+    );
+}
+
+#[test]
+fn an_inference_identity_with_no_source_name_renders_as_synthesized() {
+    // spec/04 [04-FIT-10]: "Where provenance genuinely does not exist, a
+    // diagnostic SHALL render the inference identity as synthesized,
+    // distinguishably from a spelling the user wrote, and SHALL NOT invent a
+    // source name for it."
+    //
+    // An unannotated parameter has no declared spelling to recover, so the
+    // fallback arm is the atom's subject and `?N` is the compliant answer.
+    // The residual is deliberate: Site 2 names DECLARED type parameters, and
+    // this shape is what remains outside that.
+    let message = borrow_message(&check_stdout(concat!(
+        "def go(x) -> int32 = {\n",
+        "  y = &x\n",
+        "  1i32\n",
+        "}\n",
+    )));
+    let identity = message
+        .rsplit_once("got ")
+        .expect("the borrow diagnostic reports what it got")
+        .1
+        .to_string();
+    assert!(
+        identity.starts_with('?'),
+        "an identity with no provenance must render as synthesized; got: {message}"
+    );
+    assert!(
+        !identity.contains('`'),
+        "[04-FIT-10] forbids inventing a source name for it; got: {message}"
     );
 }

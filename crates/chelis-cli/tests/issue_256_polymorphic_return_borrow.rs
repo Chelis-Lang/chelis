@@ -405,8 +405,11 @@ fn borrow_of_unit_is_rejected_at_inference() {
 /// recorded variable that did not become a tensor or tensor carrier.
 ///
 /// The diagnostic is the same `borrow requires tensor or tensor-carrying
-/// input, got ?N` the borrow arm emits for a concretely-non-tensor inner;
-/// here `?N` is the unresolved variable.
+/// input` the borrow arm emits for a concretely-non-tensor inner. Since
+/// chelis#260 Site 2 it renders the declared spelling of the variable, so
+/// this fixture reports ``got `a` `` rather than the `got ?N` it emitted
+/// when this test was written. The assertion is on the error kind, so the
+/// wording is documented here rather than pinned.
 #[test]
 fn borrow_of_free_var_against_polymorphic_consumer_is_rejected() {
     let dir = tempdir().expect("tempdir");

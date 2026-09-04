@@ -136,7 +136,7 @@ pub struct Env {
     /// Recorded when a `defsig` is resolved, where the names are still in
     /// scope, and consumed after instantiation so a declared-dim diagnostic
     /// can say `n` and `m` rather than `d44` and `d45`. The `DimVar` keys are
-    /// PRE-generalization; `instantiate_with_dvar_mapping` supplies the
+    /// PRE-generalization; `instantiate_scheme` supplies the
     /// original-to-fresh hop that makes them comparable to what a check on an
     /// instantiated signature actually sees. Checker state only, never
     /// serialized.
@@ -468,8 +468,8 @@ impl Env {
     /// Resolve a definition's declared dim-parameter names against the fresh
     /// variables a given instantiation minted (chelis#260).
     ///
-    /// `dvar_mapping` is the original-to-fresh pairing from
-    /// [`Self::instantiate_with_dvar_mapping`]. The result is keyed by the
+    /// `dvar_mapping` is the original-to-fresh pairing returned by
+    /// [`Self::instantiate_scheme`]. The result is keyed by the
     /// FRESH variables, which is what a post-instantiation check reports on.
     /// An empty map means the names were never recorded; callers fall back to
     /// the internal id rather than inventing a name.
@@ -578,8 +578,8 @@ impl Env {
     /// rejected type-checking.
     ///
     /// Callable directly by a site that needs more than one of the renamings
-    /// at once, which is why it is crate-visible rather than a fourth
-    /// projection beside the three above.
+    /// at once, which is why it is crate-visible rather than a further
+    /// projection beside the ones above.
     pub(crate) fn instantiate_scheme(
         &self,
         scheme: &Scheme,
@@ -1134,7 +1134,7 @@ mod tests {
         let via_tvar_mapping = restrictions_after(&|subst, var_gen| {
             env.instantiate_with_tvar_mapping(&scheme, var_gen, subst);
         });
-        let via_dvar_mapping = restrictions_after(&|subst, var_gen| {
+        let via_instantiate_scheme = restrictions_after(&|subst, var_gen| {
             env.instantiate_scheme(&scheme, var_gen, subst);
         });
 
@@ -1153,8 +1153,8 @@ mod tests {
             "the tvar-mapping route must install the same restrictions as the plain route"
         );
         assert_eq!(
-            via_instantiate, via_dvar_mapping,
-            "the dvar-mapping route must install the same restrictions as the plain route"
+            via_instantiate, via_instantiate_scheme,
+            "the instantiate_scheme route must install the same restrictions as the plain route"
         );
     }
 
