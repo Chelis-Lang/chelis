@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+SMT_BUILD_DOC = REPO_ROOT / "docs/smt_build_setup.md"
 PINNED_CONTAINER = (
     "python:3.11.13-bullseye@"
     "sha256:df0bd610af061603b29d63eb82027b64d5a3f15506e39270422b10b2a55079fc"
@@ -20,6 +21,10 @@ RAW_APT_COMMAND = re.compile(r"(?<![\w.-])(?:apt-get|apt|aptitude)(?=\s)")
 PIP_INSTALL_COMMAND = re.compile(
     r"(?<![\w.-])(?:python(?:3(?:\.\d+)?)?\s+-m\s+)?"
     r"pip(?:3(?:\.\d+)?)?\s+install(?=\s|$)"
+)
+NO_PYPI_BOOTSTRAP_CLAIM = re.compile(
+    r"\b(?:no|without)\b[^\n.;]{0,80}\bPyPI\b[^\n.;]{0,40}\bbootstrap\b",
+    re.IGNORECASE,
 )
 
 GLIBC231_JOBS = (
@@ -42,6 +47,18 @@ def executable_job_text(block: str) -> str:
     return "\n".join(
         line for line in block.splitlines() if not line.lstrip().startswith("#")
     )
+
+
+def markdown_h2_section(path: Path, heading: str) -> str:
+    text = path.read_text(encoding="utf-8")
+    match = re.search(
+        rf"^## {re.escape(heading)}\n(?P<body>.*?)(?=^## |\Z)",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    if match is None:
+        raise AssertionError(f"missing H2 section {heading!r} in {path}")
+    return match.group("body")
 
 
 class Glibc231WorkflowTests(unittest.TestCase):
@@ -82,6 +99,35 @@ class Glibc231WorkflowTests(unittest.TestCase):
                 self.assertNotRegex(executable, PIP_INSTALL_COMMAND)
                 self.assertNotIn("python3-pip", executable)
                 self.assertNotIn("python3-venv", executable)
+
+    def test_release_docs_name_active_bullseye_snapshot_bootstrap(self):
+        release_docs = markdown_h2_section(
+            SMT_BUILD_DOC, "Release builds (chelis#422)"
+        )
+
+        for contract_term in ("Python 3.11", "Bullseye", "snapshot"):
+            with self.subTest(contract_term=contract_term):
+                self.assertRegex(
+                    release_docs, re.compile(contract_term, re.IGNORECASE)
+                )
+
+    def test_release_docs_do_not_name_retired_container_or_pypi_dependency(self):
+        release_docs = markdown_h2_section(
+            SMT_BUILD_DOC, "Release builds (chelis#422)"
+        )
+
+        self.assertNotRegex(release_docs, re.compile(r"debian:11", re.IGNORECASE))
+        self.assertNotRegex(
+            release_docs,
+            re.compile(r"(?<![A-Za-z0-9_])tomli(?![A-Za-z0-9_])", re.IGNORECASE),
+        )
+
+    def test_release_docs_explicitly_deny_separate_pypi_bootstrap(self):
+        release_docs = markdown_h2_section(
+            SMT_BUILD_DOC, "Release builds (chelis#422)"
+        )
+
+        self.assertRegex(release_docs, NO_PYPI_BOOTSTRAP_CLAIM)
 
     def test_escape_hatch_patterns_cover_realistic_command_spellings(self):
         for command in (
