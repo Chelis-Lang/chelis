@@ -4218,7 +4218,7 @@ fn direct_relu_bit_case(case: DirectExtremaBitCase<'_>, expected: [&[u64]; 2]) {
     dag.add_root(relu);
     dag.add_root(adjoint);
     let function = format!("direct_relu_{tag}");
-    let src = chelis_backend_c::codegen(&dag, &function).unwrap().c_source;
+    let src = codegen(&dag, &function).unwrap().c_source;
     assert!(!src.contains("fmax"), "{tag}: {src}");
 
     let setup = match prim {
