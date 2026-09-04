@@ -71,54 +71,79 @@ DEEP_PROGRAM = """\
 MIN_DEEP_SPAN_COUNT = 1
 
 
-_OUTPUT_WRITE_BEGIN = re.compile(
-    r"chelis_tensor_write\s+\*(?P<prefix>root|store)_guard_(?P<guard_index>\d+)\s*=\s*"
-    r"chelis_tensor_begin_write\(outputs\[(?P<output_index>\d+)\]\);"
+_GENERATED_ENTRY_FUNCTION = re.compile(
+    # `_mask_non_code` turns the exact three-character `"C"` linkage literal
+    # into three NUL barriers while leaving the surrounding code searchable.
+    r"extern\s+\x00{3}\s+void\s+(?P<entry_name>[A-Za-z_][A-Za-z0-9_]*)\s*\("
+    r"\s*chelis_tensor\s*\*\*\s*inputs\s*,\s*int\s+n_in\s*,"
+    r"\s*chelis_tensor\s*\*\*\s*outputs\s*,\s*int\s+n_out\s*\)\s*\{"
+)
+_GENERATED_ENTRY_END = re.compile(r"^}\s*$", re.MULTILINE)
+_NON_CODE_TOKEN = re.compile(
+    r"//[^\r\n]*|/\*.*?\*/|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'",
+    re.DOTALL,
+)
+_HOST_PREPROCESSOR_DIRECTIVE = re.compile(
+    r"^[ \t]*#[ \t]*(?P<name>[A-Za-z_][A-Za-z0-9_]*)",
+    re.MULTILINE,
+)
+_GUARDED_OUTPUT_WRITEBACK = re.compile(
+    r"outputs\[(?P<output_index>\d+)\]\s*=\s*chelis_alloc\([^;\n]+\);"
+    r"(?:[ \t]*})?\s*"
+    r"chelis_tensor_write\s+\*(?P<prefix>root|store)_guard_(?P=output_index)\s*=\s*"
+    r"chelis_tensor_begin_write\(outputs\[(?P=output_index)\]\);\s*"
+    r"chelis_write_view\s+(?P=prefix)_view_(?P=output_index)\s*=\s*"
+    r"chelis_tensor_write_view\((?P=prefix)_guard_(?P=output_index)\);\s*"
+    r"chelis_metal_device_to_host\((?P=prefix)_view_(?P=output_index)\.data\s*,"
+    r"[^;\n]+\);\s*"
+    r"chelis_tensor_end_write\((?P=prefix)_guard_(?P=output_index)\);"
 )
 
 
-def guarded_output_writeback_indices(mm_text: str) -> set[int]:
-    """Return outputs initialized through one complete opaque-ABI write lease.
+def _mask_non_code(text: str) -> str:
+    """Turn non-code tokens into offset-preserving barriers."""
 
-    A device-to-host call alone is not evidence that an output was initialized:
-    it must follow allocation, begin-write, and the matching write-view, then be
-    followed by the matching end-write. Matching the generated root/store stem
-    and numeric suffix binds all five operations to the same output.
+    return _NON_CODE_TOKEN.sub(
+        lambda token: "".join(
+            "\n" if character == "\n" else "\0" for character in token.group(0)
+        ),
+        text,
+    )
+
+
+def guarded_output_writeback_indices(mm_text: str, entry_name: str) -> set[int]:
+    """Return outputs the named entry initializes through an opaque write lease.
+
+    A device-to-host call alone is not evidence that an output was initialized.
+    The allocation, begin-write, matching write-view, transfer, and matching
+    end-write must be one contiguous generated sequence inside one exported
+    tensor entry-function body whose symbol is ``entry_name``. Matching the
+    generated root/store stem and numeric suffix binds all five operations to
+    the same output without allowing unrelated functions to contribute
+    individual operations or a complete proof for a different exported symbol.
     """
 
     initialized: set[int] = set()
-    for begin in _OUTPUT_WRITE_BEGIN.finditer(mm_text):
-        prefix = begin.group("prefix")
-        guard_index = int(begin.group("guard_index"))
-        output_index = int(begin.group("output_index"))
-        if guard_index != output_index:
+    code_text = _mask_non_code(mm_text)
+    if any(
+        directive.group("name") not in {"include", "import"}
+        for directive in _HOST_PREPROCESSOR_DIRECTIVE.finditer(code_text)
+    ):
+        # Generated host code has no conditional or macro-definition surface.
+        # Refuse rather than accepting writeback evidence disabled or synthesized
+        # by the preprocessor. Directives in embedded MSL literals were masked.
+        return initialized
+    for entry in _GENERATED_ENTRY_FUNCTION.finditer(code_text):
+        if entry.group("entry_name") != entry_name:
             continue
-        allocation = f"outputs[{output_index}] = chelis_alloc("
-        if mm_text.rfind(allocation, 0, begin.start()) < 0:
+        entry_end = _GENERATED_ENTRY_END.search(code_text, entry.end())
+        if entry_end is None:
             continue
-        guard = f"{prefix}_guard_{output_index}"
-        view = f"{prefix}_view_{output_index}"
-        view_match = re.search(
-            rf"chelis_write_view\s+{re.escape(view)}\s*=\s*"
-            rf"chelis_tensor_write_view\({re.escape(guard)}\);",
-            mm_text[begin.end() :],
+        body = code_text[entry.end() : entry_end.start()]
+        initialized.update(
+            int(writeback.group("output_index"))
+            for writeback in _GUARDED_OUTPUT_WRITEBACK.finditer(body)
         )
-        if view_match is None:
-            continue
-        after_view = begin.end() + view_match.end()
-        transfer_match = re.search(
-            rf"chelis_metal_device_to_host\({re.escape(view)}\.data\s*,",
-            mm_text[after_view:],
-        )
-        if transfer_match is None:
-            continue
-        after_transfer = after_view + transfer_match.end()
-        if mm_text.find(
-            f"chelis_tensor_end_write({guard});",
-            after_transfer,
-        ) < 0:
-            continue
-        initialized.add(output_index)
     return initialized
 
 
@@ -186,7 +211,7 @@ def smoke_one(
                 file=sys.stderr,
             )
             return 4
-    if 0 not in guarded_output_writeback_indices(mm_text):
+    if 0 not in guarded_output_writeback_indices(mm_text, "simple_add"):
         print(
             f"smoke_macos_metal[{label}]: emitted .mm does not initialize outputs[0] "
             "through allocation + begin-write + matching write-view + device copy + "
