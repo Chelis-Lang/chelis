@@ -3097,6 +3097,19 @@ Reading notes:
 > expected shape; deferring the failure to a later stage is not a
 > disposition.
 
+> **[04-TOT-4]** Every child of a Deep form whose content that form's
+> semantics reads SHALL be consumed by that form's checker disposition or
+> rejected with a pushed diagnostic. Where a form reads such a child
+> through a partial extraction - an integer axis, a symbol constructor
+> head, a function-typed operand - a failed extraction SHALL push a
+> diagnostic naming the form and the shape it expected. An omitted
+> optional child and a present child the form cannot read are distinct
+> inputs: only the omission MAY take the form's declared default.
+> Coverage is a property of the submitted program rather than of the
+> checked result, so a node inference never visited SHALL NOT be reported
+> as successfully checked on the ground that the result it is absent from
+> contains no error.
+
 > **[04-TOT-5]** A Deep program's checker verdict SHALL NOT depend on which
 > checker entry receives it, nor on which admitted representation carries it.
 > For one program, every entry SHALL accept or reject alike and SHALL report
