@@ -3173,3 +3173,13 @@ Reading notes:
 > checker SHALL be rejected with a diagnostic naming the tag and the
 > expected shape; deferring the failure to a later stage is not a
 > disposition.
+
+> **[04-TOT-4]** A Deep program's checker verdict SHALL NOT depend on which
+> checker entry receives it, nor on which admitted representation carries it.
+> For one program, every entry SHALL accept or reject alike and SHALL report
+> the same defects; a check that one admitted representation receives SHALL be
+> applied to every other admitted representation of the same program. A
+> representation the checker admits but a check cannot read is a silent
+> exemption under [04-TOT-1] and SHALL be diagnosed rather than skipped.
+
+(Not fully implemented; see chelis#1125.)
