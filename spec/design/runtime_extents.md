@@ -354,10 +354,22 @@ the defect class this slice removes.
     iteration or display name. `spec/04` §4.7 decides the order the entry
     guards of a class with interface members run in, and gives an entry that
     declares no signature its ABI input-slot order;
-  - no guard is ever discharged: an all-interface class runs its guard at
-    entry regardless of data use, and a local member's producer is an
-    observable root under `spec/06` §5.2 because the guard can trap, so DCE
-    keeps every member's operands live;
+  - no guard is ever discharged, and the two member kinds reach that
+    differently. An INTERFACE witness (a `Load` axis a class groups) is an
+    observable root under `spec/06` §5.2 because its guard runs at entry
+    regardless of data use, so dead-code elimination keeps it live even when
+    nothing reads the tensor; without that its claim is left with one witness,
+    the class dissolves and the guard silently disappears, which is [#1376]'s
+    shape from the emitter's side. A LOCAL member needs no such forcing,
+    because its guard exists only if the operation introducing the extent is
+    in the DAG a lane consumes after the last rewrite (C4.5): a claim on a
+    dead local intermediate produces no guard, since the value it claims is
+    never produced, and a claim on a node a rewrite REPLACED re-forms on the
+    replacement's axis rather than keeping the replaced node alive. Forcing
+    local members live instead makes liveness circular - a dead node carrying
+    a claim becomes a member, and the membership then keeps it alive - which
+    resurrects the dense-product path that `specialize` has just replaced with
+    a `BlasMatmul`;
   - two classes may share a node, each with its own guard, and derivation
     yields one member per `(node, axis)`, so `splice_dag` mapping both
     parameters of `f(n, n)` to one `NodeId` (`lower.rs:7830-7838`) produces

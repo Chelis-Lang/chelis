@@ -970,3 +970,73 @@ fn a_class_fed_by_computed_arithmetic_is_a_local_guard() {
     );
     let _ = declaring;
 }
+
+// ---------------------------------------------------------------------------
+// A claim on a DEAD local intermediate owes no guard.
+//
+// C2.4 rule 2 forces only INTERFACE witnesses live. A local member's guard
+// exists only if the operation introducing the extent is in the DAG a lane
+// consumes after the last rewrite (C4.5), so a claim on an intermediate that
+// nothing reaches produces no guard: the value it claims is never produced,
+// and there is nothing to compare. Forcing local members live instead makes
+// liveness circular, because a dead node carrying a claim becomes a member and
+// the membership then keeps it alive.
+// ---------------------------------------------------------------------------
+
+/// A dead ascribed intermediate contributes no member, so its claim is left
+/// with the declaring `Load` alone and forms no class.
+#[test]
+fn a_claim_on_a_dead_local_intermediate_owes_no_guard() {
+    let mut dag = Dag::new();
+    let x = f32_load(&mut dag, "x", vec![named("n")]);
+    let base = f32_load(&mut dag, "b", vec![]);
+    let size = f32_load(&mut dag, "k", vec![]);
+    let dead = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::Node(1),
+        },
+        vec![base, size],
+        ty(vec![named("n")], Prim::F32),
+        None,
+    );
+    // Only `x` is a root; the ascribed intermediate reaches nothing.
+    dag.add_root(x);
+    let pruned = chelis_ir::optimize::dead_code_eliminate(&dag);
+    let classes = derive_runtime_dim_classes(&pruned);
+    assert!(
+        classes.is_empty(),
+        "the dead intermediate is gone, so `n` has one witness: {:?}",
+        claims(&classes),
+    );
+    let _ = dead;
+}
+
+/// The discriminating twin: the SAME ascription on a live intermediate keeps
+/// its member and its local guard. Without this row, a rule that dropped every
+/// local member would satisfy the row above and delete chelis#1379's guard.
+#[test]
+fn the_same_claim_on_a_live_local_intermediate_keeps_its_guard() {
+    let mut dag = Dag::new();
+    let x = f32_load(&mut dag, "x", vec![named("n")]);
+    let base = f32_load(&mut dag, "b", vec![]);
+    let size = f32_load(&mut dag, "k", vec![]);
+    let live = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::Node(1),
+        },
+        vec![base, size],
+        ty(vec![named("n")], Prim::F32),
+        None,
+    );
+    dag.add_root(x);
+    dag.add_root(live);
+    let pruned = chelis_ir::optimize::dead_code_eliminate(&dag);
+    let classes = derive_runtime_dim_classes(&pruned);
+    assert_eq!(
+        members_of(&classes, DimClaim::Name("n".into())).len(),
+        2,
+        "the declaring Load and the live intermediate both witness `n`",
+    );
+}
