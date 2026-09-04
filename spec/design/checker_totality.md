@@ -1840,9 +1840,10 @@ never passes `--features smt`, `ci.yml`'s smt job builds `chelis-cli` and then
 tests only `chelis-prove`, and `smt-full-prove.yml` runs `chelis-prove` lanes
 nightly and never names `chelis-cli`. A merged test that pins the correct
 behavior has no invocation anywhere, so the regression it was written to catch
-landed green. The lint E5d delivers is worth nothing on the same terms; PP7's
-oracle therefore runs in the default suite, and E5c owes this test a runner as
-part of its change set.
+landed green. The lint E5d delivers is worth nothing on the same terms. Three of
+the PP7 parity set's four commands therefore run in the default suite; the
+fourth is the smt-gated one, and the CI step E5c owes is what makes it run at
+all.
 
 #### Two axes, and the audit conflates them
 
@@ -1955,12 +1956,13 @@ enum a traversal must exhaust, not an `Option` it may drop.
 
 #### You deliver
 
-- **E5a, the reproducers (lands first).** The six programs above and the tide
-  `/lower` differential, as rows in
+- **E5a, the reproducers (lands first).** The six programs above - the four
+  in-checker divergences and their two controls - as rows in
   `crates/chelis-types/tests/issue_1107_stamped_node_ingress_parity.rs`, whose
   `agreed_diagnostics` helper already asserts the exact invariant. Each row
-  proved red on the pre-fix tree before its site is touched. Then the sites the
-  rows cover: the `type:` metadata reader in `infer/expr.rs`, the `t-prim`
+  proved red on the pre-fix tree before its site is touched. The three
+  divergences outside the checker are E5c's rows, in E5c's crates. Then the
+  sites the rows cover: the `type:` metadata reader in `infer/expr.rs`, the `t-prim`
   read and `param_name_and_inline_type` in `infer/validate.rs`, the four
   private helpers in `invariants.rs`, and `tuple_get_index` in
   `infer/expr_record.rs`. Roughly 300 hand-written lines.
@@ -1974,7 +1976,9 @@ enum a traversal must exhaust, not an `Option` it may drop.
   `count_invariant_opaque_deep`, whose raw-tag read also owes a decode-once
   regression row. It also owes `prove_deep_obligations.rs` a runner: that file
   already asserts the correct tier and nothing invokes it, so E5c's own fix
-  would land unverified on the same terms. Roughly 180 lines plus the CI step.
+  would land unverified on the same terms. E5c therefore carries all three
+  outside-the-checker rows, each in the crate that can reach it. Roughly 180
+  lines plus the CI step.
 - **E5d, the lint and its corpus.** Roughly 250 lines.
 - **E5e, the remaining sites.** The 59 unadjudicated guarded-arm sites and the
   19 never-adjudicated ones the audit inventories, swept behind E5b so the
@@ -1982,20 +1986,35 @@ enum a traversal must exhaust, not an `Option` it may drop.
   estimate it before then.
 
 The five slices exceed one pull request's hand-written budget together. E5a is
-one pull request; E5b with E5c is a second; E5d with E5e is a third.
+one pull request; E5b with E5c is a second; E5d is a third. E5e is its own,
+sliced on the evidence E5b produces, because a slice with no estimate cannot
+be budgeted against the size cap alongside one that has an estimate.
 
 #### The oracle
 
-```sh
-cargo nextest run -p chelis-types --test issue_1107_stamped_node_ingress_parity --no-fail-fast
-```
+PP7's authoritative completion oracle is one named set, the **PP7 parity set**:
+four commands, one per group of rows. A single command cannot span it, for the
+same reason that decided the mechanism: three of the seven divergences sit
+outside every checker entry, and no `-p chelis-types` run reaches them.
 
-Acceptance is every row green, including the seven PP7 rows. The mutation
-receipt for E5d is a planted bare `Expr::List` destructure in a guarded match
-arm inside `infer/`, which the lint must reject; restoring the file must make
-the same command green. The tide `/lower` differential is a
-`chelis-compiler-api` row rather than a checker row, because it exercises a
-pre-checker consumer.
+| rows | the command that owns them |
+|---|---|
+| the four in-checker divergences and their two controls (E5a) | `cargo nextest run -p chelis-types --test issue_1107_stamped_node_ingress_parity --no-fail-fast` |
+| the tide `/lower` entry-pruning row (E5c) | `cargo nextest run -p chelis-compiler-api --lib prune --no-fail-fast` |
+| the Tier-B downgrade row (E5c) | `CVC5_DIR=<cvc5 store> cargo nextest run -p chelis-cli --features smt --test prove_deep_obligations --no-fail-fast` |
+| the `count_invariant_opaque_deep` decode-once row (E5c) | `cargo nextest run -p chelis-cli --test prove_type_check_gate --no-fail-fast` |
+
+Acceptance is every row green under the command that owns it. The tide row is a
+`chelis-compiler-api` row because it exercises a pre-checker consumer, and
+`chelis-compiler-api` already depends on `chelis-types`, so it cannot be a
+`chelis-types` row. The last row runs in the default build by construction: the
+warning it exercises fires only when `smt` is off. The third is the CI step E5c
+owes, and today nothing runs it.
+
+E5d's ratchet is proved by a different command again, because a lint is not a
+test: plant a bare `Expr::List` destructure in a guarded match arm inside
+`infer/`, and `chelis lint --check .` must reject it; removing the plant must
+make that command green.
 
 #### What PP7 does not establish
 
