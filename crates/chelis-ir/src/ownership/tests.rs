@@ -1017,10 +1017,6 @@ fn verified_live_byte_bound_uses_exact_tensor_payload_costs() {
         LiveByteBound::Exact(8),
         "two f32 elements carry eight logical TensorStorage bytes; the descriptor is zero-byte ledger metadata"
     );
-    assert_eq!(
-        verified.live_set_bound().artifact_json(),
-        r#"{"schema":"compiled-value-ownership-live-bound-v1","kind":"exact","max_live_bytes":8}"#
-    );
 }
 
 #[test]
@@ -1045,10 +1041,6 @@ fn verified_live_byte_bound_marks_dynamic_heap_costs_unknown() {
         verified.live_set_bound().max_live_bytes,
         LiveByteBound::Unknown,
         "a string's runtime len+1 allocation cannot be derived from its owner type"
-    );
-    assert_eq!(
-        verified.live_set_bound().artifact_json(),
-        r#"{"schema":"compiled-value-ownership-live-bound-v1","kind":"unknown"}"#
     );
 }
 
@@ -1316,10 +1308,6 @@ fn positive_carry_recursive_scc_is_verified_unbounded() {
     assert_eq!(
         verified.live_set_bound().max_live_bytes,
         LiveByteBound::Unbounded
-    );
-    assert_eq!(
-        verified.live_set_bound().artifact_json(),
-        r#"{"schema":"compiled-value-ownership-live-bound-v1","kind":"unbounded"}"#
     );
 }
 

@@ -1305,34 +1305,16 @@ impl LiveByteBound {
 #[derive(Debug)]
 pub struct VerifiedLiveSetBound {
     max_live_heap_owners: usize,
+    #[expect(
+        dead_code,
+        reason = "Phase 3 physical-storage and ledger handoff awaits chelis#893 CapacityKey"
+    )]
     max_live_bytes: LiveByteBound,
 }
 
 impl VerifiedLiveSetBound {
     pub fn max_live_heap_owners(&self) -> usize {
         self.max_live_heap_owners
-    }
-
-    /// Render the sealed verifier result for Phase 3 integration tests.
-    ///
-    /// Exact values are conservative owner-summed upper bounds: retained
-    /// aliases can name one ledger allocation more than once, but can never
-    /// make this number smaller than the observed live storage. The final
-    /// artifact schema remains intentionally unfrozen until the reuse proof
-    /// supplies physical slot capacity for reused tensor storage.
-    pub fn artifact_json(&self) -> String {
-        const SCHEMA: &str = "compiled-value-ownership-live-bound-v1";
-        match self.max_live_bytes {
-            LiveByteBound::Exact(max_live_bytes) => format!(
-                "{{\"schema\":\"{SCHEMA}\",\"kind\":\"exact\",\"max_live_bytes\":{max_live_bytes}}}"
-            ),
-            LiveByteBound::Unknown => {
-                format!("{{\"schema\":\"{SCHEMA}\",\"kind\":\"unknown\"}}")
-            }
-            LiveByteBound::Unbounded => {
-                format!("{{\"schema\":\"{SCHEMA}\",\"kind\":\"unbounded\"}}")
-            }
-        }
     }
 }
 
