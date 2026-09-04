@@ -166,7 +166,7 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
         "crates/chelis-ir/src/lower.rs",
         28,
         3,
-        "the lowering dispatch carries both. The surplus is embedded Deep fixtures spelling `(var {} expand)` and ten lowering diagnostics that still name `expand` on the shared arm. Those ten are fatal internal-desync raises and one registry-bound `deliberate_rejection!` construct string; reaching them from an `insert` program is not established, and the rejection registry is amended under a different discipline, so they are residual work rather than part of this change",
+        "the lowering dispatch carries both. The surplus is embedded Deep fixtures spelling `(var {} expand)` and ten lowering diagnostics that still name `expand` on the shared arm. Those ten are fatal internal-desync raises and one registry-bound `deliberate_rejection!` construct string; reaching them from an `insert` program is not established, and the rejection registry is amended under a different discipline, so they are residual work rather than part of this change. Reachability is conditional, not settled: an `insert` program cannot get there only while the checker refuses the non-literal-axis and sourceless-size cases ahead of lowering. B2b's widening deletes the sourceless-size rejection and S2b's flip changes what `expand` admits, so re-check this row at both",
     ),
     (
         "crates/chelis-ir/src/tier2.rs",
