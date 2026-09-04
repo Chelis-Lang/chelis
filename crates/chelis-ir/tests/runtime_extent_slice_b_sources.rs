@@ -527,9 +527,11 @@ fn input_axis_and_scalar_input_sources_validate_their_slots() {
 /// ICE and never substitutes an input extent.
 #[test]
 fn unsupported_but_well_typed_mapping_yields_the_registered_receipt_not_an_ice() {
-    // chelis#1482's shape: a uniform-fill `Const` operand of an elementwise
-    // op whose declared extent is an anonymous runtime extent. No literal,
-    // no input, and no shape dependency supplies it.
+    // chelis#1482's remaining class: an elementwise lowering-synthesized
+    // uniform-fill `Const` whose declared extent is anonymous at runtime. No
+    // literal, input, or shape dependency supplies it. Chelis#1313 removed
+    // this shape from ReLU specifically, but sigmoid and sibling composite
+    // lowerings still exercise the class.
     let mut dag = Dag::new();
     let operand = load(&mut dag, "x", vec![named("n")]);
     let shrunk = dag.add_node(
@@ -591,8 +593,8 @@ fn unsupported_but_well_typed_mapping_yields_the_registered_receipt_not_an_ice()
     assert!(check_axis_sources(&sized, Stage::Codegen("c")).is_ok());
 
     // A named extent that an equality class supplies is likewise not a
-    // sourceless axis: `relu` over `tensor[n, f32]` builds on main and must
-    // keep building.
+    // sourceless axis: a direct max/zero composition over `tensor[n, f32]`
+    // builds and must keep building.
     let mut symbolic = Dag::new();
     let operand = load(&mut symbolic, "x", vec![named("n")]);
     let fill = symbolic.add_node(

@@ -144,8 +144,8 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
         "hip",
         "error: unsupported: narrow-float compute at lowered node 2 (`Add` with `f16`) on \
          `chelis build --target hip` early capability gate (codegen:hip); unimplemented \
-         chelis#729: `f16` is implemented only for HIP tensor load/store and `BlasMatmul` \
-         operands; this operation needs a typed bf16/f16 kernel \
+         chelis#729: `f16` is implemented only for HIP tensor load/store, `BlasMatmul`, and the \
+         dedicated [05-OP-43] ReLU identities; this operation needs a typed bf16/f16 kernel \
          (spec/04-type-system.md §5.7.1)\n",
     ),
     (
@@ -154,8 +154,8 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
         "hip",
         "error: unsupported: narrow-float compute at lowered node 2 (`Add` with `bf16`) on \
          `chelis build --target hip` early capability gate (codegen:hip); unimplemented \
-         chelis#729: `bf16` is implemented only for HIP tensor load/store and `BlasMatmul` \
-         operands; this operation needs a typed bf16/f16 kernel \
+         chelis#729: `bf16` is implemented only for HIP tensor load/store, `BlasMatmul`, and the \
+         dedicated [05-OP-43] ReLU identities; this operation needs a typed bf16/f16 kernel \
          (spec/04-type-system.md §5.7.1)\n",
     ),
     (
@@ -167,8 +167,8 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
          not a direct load of a helper input; callsite=<no-span>, helper-body=surf:95..115\n\
          error: unsupported: narrow-float compute at lowered node 3 (`Add` with `f16`) on \
          `chelis build --target hip` early capability gate (codegen:hip); unimplemented \
-         chelis#729: `f16` is implemented only for HIP tensor load/store and `BlasMatmul` \
-         operands; this operation needs a typed bf16/f16 kernel \
+         chelis#729: `f16` is implemented only for HIP tensor load/store, `BlasMatmul`, and the \
+         dedicated [05-OP-43] ReLU identities; this operation needs a typed bf16/f16 kernel \
          (spec/04-type-system.md §5.7.1)\n",
     ),
     (
@@ -180,8 +180,8 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
          not a direct load of a helper input; callsite=<no-span>, helper-body=surf:99..119\n\
          error: unsupported: narrow-float compute at lowered node 3 (`Add` with `bf16`) on \
          `chelis build --target hip` early capability gate (codegen:hip); unimplemented \
-         chelis#729: `bf16` is implemented only for HIP tensor load/store and `BlasMatmul` \
-         operands; this operation needs a typed bf16/f16 kernel \
+         chelis#729: `bf16` is implemented only for HIP tensor load/store, `BlasMatmul`, and the \
+         dedicated [05-OP-43] ReLU identities; this operation needs a typed bf16/f16 kernel \
          (spec/04-type-system.md §5.7.1)\n",
     ),
     (
