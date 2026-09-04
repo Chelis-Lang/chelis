@@ -81,7 +81,7 @@ Current implementation:
 - shapes/strides passed as individual int kernel parameters (not device pointers)
 - debug builds reset/check a per-module `chelis_gpu_failure` flag after every kernel launch
 - views preserve backing allocation size so debug index guards validate against real storage
-- movement ops (reshape, permute, expand, stride) are host-side metadata operations
+- movement ops (reshape, permute, expand, insert, stride) are host-side metadata operations
 - naive reductions (one thread per output element, inner loop over axis)
 - `chelis_gpu_free` for allocations, `chelis_gpu_free_view` for views
 - `chelis build app.ch --target hip` emits compilable `*_hip.cpp` host output
@@ -306,7 +306,7 @@ plan-driven slot allocation). MSL replaces HIP C/C++ syntax for kernel
 declarations, thread indexing, buffer qualifiers, and math built-ins.
 
 Coverage: add/sub/mul/div/neg/exp/log/sqrt/sin/cast/clamp/where, fill,
-fused elementwise chains, reshape (metadata-only), permute, expand.
+fused elementwise chains, reshape (metadata-only), permute, expand, insert.
 
 Authoritative oracle:
 
@@ -342,7 +342,7 @@ cargo test -p chelis-backend-metal --test codegen_structure -- reduction
 
 Custom 16×16 tiled MSL matmul kernel (no MPS dep). The specialization rule
 mirrors the original HIP hipBLAS detection: rank-2 contiguous f32 matmul
-subgraphs (`expand + mul + sum(axis=1)`) route to
+subgraphs (`insert + mul + sum(axis=1)`) route to
 `chelis_metal_matmul_tiled`. Rank ≥ 3 and symbolic batched matmul remain a
 Metal follow-up.
 

@@ -749,8 +749,9 @@ Standard Algorithm W with extensions for tensor types. The flow:
 
 The replay requirement applies to every operation whose result or admission
 depends on the resolved operand shape, not to a hand-maintained exception for
-one builtin. In particular, a `matmul`, reduction, `expand`, `layer_norm`,
-`conv2d`, or `scatter_elements` reached through a bare lambda parameter is
+one builtin. In particular, a `matmul`, reduction, `expand`, `insert`,
+`layer_norm`, `conv2d`, or `scatter_elements` reached through a bare lambda
+parameter is
 checked again after the parameter binds. The check used on replay is the
 operation's ordinary typing rule, so immediate and deferred applications
 cannot acquire different semantics.
@@ -1004,14 +1005,14 @@ Tensor operations require strict dimension matching. Two dimension lists are com
 
 ### 4.2 No Broadcasting
 
-Chelis does NOT support implicit broadcasting. All rank and dimension manipulation must be explicit via `expand`, `reshape`, `permute`.
+Chelis does NOT support implicit broadcasting. All rank and dimension manipulation must be explicit via `insert`, `expand`, `reshape`, `permute`.
 
 ```scheme
 ;; WRONG: dimensions don't match
 ;; tensor[batch, hidden, f32] + tensor[hidden, f32]  →  TYPE ERROR
 
-;; CORRECT: explicit expand
-;; tensor[batch, hidden, f32] + expand(tensor[hidden, f32], [batch, hidden])
+;; CORRECT: explicit insert
+;; tensor[batch, hidden, f32] + insert(tensor[hidden, f32], 0, batch)
 ```
 
 Rationale: Broadcasting masks fatal dimension errors in AI-generated code. Named dimensions + no broadcasting means the type checker catches transposition bugs, broadcasting bugs, and shape mismatches at compile time.
@@ -1038,7 +1039,8 @@ Rationale: Broadcasting masks fatal dimension errors in AI-generated code. Named
 | `einsum(equation, left, right, accumulator=a)` | two `tensor[..., p]` operands | `tensor[D_output, sum_result(p,a)]` | Explicit output labels define `D_output`; [05-OP-33] owns label/extent legality |
 | `reshape(x, shape)` | `tensor[D_old, p]` | `tensor[D_new, p]` | Product of dims must match. New dims are `d-lit` or `d-name` (user-specified) |
 | `permute(x, axes)` | `tensor[d₁,...,dₙ, p]` | `tensor[d_{axes[0]},...,d_{axes[n-1]}, p]` | Reorder dimensions |
-| `expand(x, shape)` | `tensor[D_small, p]` | `tensor[D_large, p]` | Add dimensions. Each new dim is explicit. |
+| `expand(x, axis, size)` | `tensor[D, p]` | `tensor[D', p]` | Set the size-1 dimension at `axis` to `size`; rank unchanged |
+| `insert(x, axis, size)` | `tensor[D, p]` | `tensor[D_plus, p]` | Add one dimension of extent `size` at `axis`; rank increases by one |
 | `pad(x, ...)` | `tensor[D, p]` | `tensor[D', p]` | Padded dimensions get new sizes (d-lit) |
 | `cast(x, new_p)` | `tensor[D, p]` | `tensor[D, new_p]` | Dimensions preserved, precision changes |
 
@@ -1361,25 +1363,25 @@ most-general unifier:
   position (e.g. a reduction's `tensor[..pre, ..post]` result), which is only
   ever matched against an identical row or expanded after its spreads are bound.
 
-**Named-axis expand (`R+1`).** The inverse arithmetic direction: `expand`
-inserts a *named* axis in a rank-polymorphic way when its axis argument is a
+**Named-axis insert (`R+1`).** The inverse arithmetic direction: `insert`
+adds a *named* axis in a rank-polymorphic way when its axis argument is a
 dimension name rather than an integer. Two call forms are admitted:
 
 ```chelis
 ;; insert a trailing named axis (the new axis goes after every existing axis):
-;; def add_axis(x: &tensor[..rest, f32]) -> tensor[..rest, one, f32] = expand(x, one, 1)
+;; def add_axis(x: &tensor[..rest, f32]) -> tensor[..rest, one, f32] = insert(x, one, 1)
 ;; insert immediately BEFORE an existing named anchor (4-arg form):
 ;; def widen(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, c, seq, ..post, f32]
-;;   = expand(x, c, 5, seq)
+;;   = insert(x, c, 5, seq)
 ```
 
-- `expand(x, new, size)` — `new` is a bare dimension name: insert a new
+- `insert(x, new, size)` — `new` is a bare dimension name: add a new
   **trailing** axis named `new` with extent `size`. The symbolic output is the
   operand's row form with `new` appended.
-- `expand(x, new, size, anchor)` — additionally name an **anchor**, an existing
+- `insert(x, new, size, anchor)` — additionally name an **anchor**, an existing
   named axis of the operand; the new axis is inserted immediately *before* the
   anchor. Leading-end insertion is expressible exactly when the row begins with
-  a named anchor (`tensor[first, ..rest]` + `expand(x, c, k, first)`); a row
+  a named anchor (`tensor[first, ..rest]` + `insert(x, c, k, first)`); a row
   that begins with a spread has no leading anchor and admits trailing or
   anchored insertion only.
 
@@ -1409,7 +1411,7 @@ The inserted axis is a *named* dim: declared result types refer to it by name
 (`tensor[..rest, one, f32]`). A bare identifier in the axis slot is read as a
 dimension name only when it is **not bound in the value environment**: a bound
 `int32` variable is a runtime value and keeps the static-axis rule:
-`expand(x, ax, 4i64)` with `ax: int32` is an error, never a trailing insert
+`insert(x, ax, 4i64)` with `ax: int32` is an error, never a trailing insert
 of an axis named `ax`. The `size` argument is any expression of exactly type
 `int64`. A static negative value is a type error; a runtime negative value
 traps `Domain`. The inserted named dimension carries the executed extent. A
@@ -1423,7 +1425,7 @@ anchored → the anchor's index), mirroring named-axis reduction.
 sequences — never unordered "rows"); the reduced axis is a retained name; and a
 rank-poly def body is restricted by the §4.2 Body-Discipline check to
 *name-trackable* operations only — shape-identity (elementwise) ops,
-named-axis reductions, and named-axis expand. A *positional* shape-rewriter
+named-axis reductions, and named-axis insert. A *positional* shape-rewriter
 (`permute`, `reshape`, `matmul`, positional `gather`) is rejected inside a
 `..r` body: its output shape is not name-trackable at symbolic rank, so it
 could hide an untracked transposition. For the name-tracked ops the procedural
@@ -1499,12 +1501,14 @@ built-ins are:
   `int64` value (`spec/05-risc-primitives.md` [05-DIM-2]). `axis` is any
   expression of exactly type `int32`. The result is a runtime scalar, not a
   symbolic dim reference.
-- `expand(x, axis, size)`: insert or set a dimension at position `axis`
-  with width `size`, where `size` is any expression of exactly type `int64`.
-  When `axis` is a dimension *name* instead of an integer, the call is the
-  named-axis expand form (§4.5.3): it inserts a new named axis at the trailing
-  end, or — with a fourth `anchor` argument — immediately before an existing
-  named axis.
+- `expand(x, axis, size)`: set the size-1 dimension at position `axis` to
+  width `size`, where `size` is any expression of exactly type `int64`. The
+  rank is unchanged.
+- `insert(x, axis, size)`: add a new dimension of width `size` at position
+  `axis`, where `size` is any expression of exactly type `int64`. When `axis`
+  is a dimension *name* instead of an integer, the call is the named-axis
+  insert form (§4.5.3): it adds a new named axis at the trailing end, or —
+  with a fourth `anchor` argument — immediately before an existing named axis.
 - `reshape(x, shape_list)`: reinterpret the memory of `x` against
   `shape_list`, a `List<int64>`; every element may be computed at runtime.
 - `reduce_window_*`: consume runtime `List[int64]` window and stride values
@@ -1592,105 +1596,24 @@ type is not exactly `int32` is a type error; no width is inferred or coerced.
 The zero-cotangent and target-independent execution rules are [05-OP-7] and
 [05-SHAPE-1].
 
-#### 4.7.2 `expand` with a runtime size
+#### 4.7.2 `expand` and `insert` with a runtime size
 
-`expand(x, axis, size)` accepts any `int64` `size`. A literal produces a
-literal result extent; an in-scope symbolic dimension may preserve its name;
-and every other expression produces a fresh runtime extent. A static negative
-size is a type error. A runtime negative size traps `Domain` before allocation
-or access.
+`expand(x, axis, size)` and `insert(x, axis, size)` each accept any `int64`
+`size`. A literal produces a literal result extent; an in-scope symbolic
+dimension may preserve its name; and every other expression produces a fresh
+runtime extent. A static negative size is a type error. A runtime negative
+size traps `Domain` before allocation or access.
 
-For a positional three-argument call, a declared result tensor or the first
-shape-bearing consumer fixes which of the two shapes applies: a same-rank
-result sets the extent at `axis`, a form `spec/05-risc-primitives.md` §2.4.1
-admits only over a unit operand extent at `axis`, while a result of rank
-`rank(x) + 1` inserts the new extent at `axis`. The result remains one
-monomorphic value while that choice is deferred; separate uses cannot choose
-different shapes for the same binding. If a shape-neutral consumer such as
-`cast` requires the tensor type before any shape-bearing context fixes it, an
-axis within the input rank selects the established same-rank replacement
-form. `axis == rank(x)` has no replacement form and therefore selects
-trailing insertion. An axis greater than `rank(x)` is a type error.
-
-When no consumer in the complete program fixes the shape, the same default is
-materialized once every consumer in the complete program, a reusable library
-context and its downstream program together, has been considered; that point
-is the program's freeze point. When several positional `expand` results remain
-unresolved at the same freeze point, their defaults settle in source order:
-the result introduced into the checked program first settles first, one result
-at a time, and each later settlement observes the shapes fixed by the earlier
-ones. Introduction order is the source order of the `expand` expressions in
-the canonical Deep program; Surf inherits that order through desugaring
-(`spec/02-surf-syntax.md` §2 and §5). Within one program, definitions follow
-their written order, and within a definition `expand` applications follow
-their written order: left to right, with an enclosing application before any
-application nested in its arguments, and the children of every node that is
-not an application in their written order. A result carried from a reusable
-library context is introduced at its instantiation site in the downstream
-program, which for a shared monomorphic result is its first reference; a
-carried result the program never references settles after the program's own
-results, in the library's source order, and composed contexts keep their
-composition order. A result that carries several deferred obligations, because
-unification identified the results of several positional `expand` calls, takes
-the position of the earliest of its `expand` expressions and settles to the
-first candidate shape that satisfies every one of its obligations, taking the
-obligations in the source order of their `expand` expressions and, within one
-obligation, the same-rank replacement form before the insertion form; when no
-candidate satisfies every obligation, the program is rejected. A consumer
-that supplies no complete shape equation still eliminates candidates by its
-own typing rule: the result keeps only the forms that consumer admits, so a
-consumer admitting exactly one form fixes the result, a consumer admitting
-both leaves the choice open, and a consumer admitting neither rejects the
-program. A rank
-requirement alone can decide it: `matmul` admits only operands of rank at
-least two (`spec/05-risc-primitives.md` §4.1), so a positional `expand` over
-a rank-1 input is fixed to the insertion form even though `matmul` constrains
-none of its extents. A
-consumer that fixes its operand this way types its own result from the fixed
-form and does not publish an unresolved candidate as its checked result type.
-A `reshape` whose input is a deferred positional-`expand` result is one
-instance of that rule: it has the rank and extents that §4.7.3 assigns from
-its shape list and is therefore shape-bearing for its own consumers while its
-input's choice is open, and that input keeps only the forms whose element
-count §4.7.3 admits. A
-`shape` read of a result whose choice is open, inside a `reshape` shape list
-or anywhere else, requires the tensor type and therefore selects the form the
-shape-neutral rule above selects; an axis outside that form's rank is a type
-error. Settling one result propagates at once through every consumer of that
-result; a consumer that thereby becomes shape-bearing fixes a later result
-before that result's own default is considered. The element-count relations of
-the `reshape` expressions that consume one settled result resolve in the
-source order of those expressions before the next result settles. Settlement
-order is a property of the program text and never of an implementation's
-storage, allocation, or iteration order, so the selected shapes and the
-resulting acceptance or rejection are the same across runs and
-implementations. A reusable library context carries the unresolved choice to
-its downstream program rather than deciding it early.
-
-A comparison relates its operands' and its result's shapes and the result's
-dtype under `spec/05-risc-primitives.md` [05-OP-36]. While a
-positional-`expand` operand's choice is open, the comparison result carries
-that same open choice and supplies no evidence back to the operand. An
-independently resolved shape on the other operand, or one independently
-supplied to the comparison result, fixes the operand, because [05-OP-36] makes
-all three shapes one equation. Two deferred operands of one comparison are
-solved together as one linked equation rather than settling separately;
-because [05-OP-36] constrains the dimensions they produce and not the forms
-that produce them, the forms they select need not be the same.
-
-A carrier of a deferred result either supplies an independent shape equation
-or does not. An anonymous tuple field, a closure capture, a fresh generic
-field or parameter, a singleton `List`, the seed element of an inferred
-`List`, and an undeclared closure return carry the unresolved choice unchanged
-and add no evidence; none of them may select a form, and none may split one
-result into two that settle differently. A concrete declared record or ADT
-field, an already-instantiated generic field, a declared `List` element type,
-and a later `List` element facing an independently resolved accumulated
-element shape each supply an independent equation and fix the result. Tuple,
-record, and ADT projection and pattern binding transfer whichever form the
-result has selected and add no evidence of their own. A record update fixes an
-updated field only when that field's resolved schema is independent of the
-result being carried.
+Each operation has exactly one result shape. `expand` sets the extent at
+`axis` and leaves the rank unchanged; `insert` adds an axis of extent `size`
+at `axis` and produces rank `rank(x) + 1`. No result is deferred, no consumer
+selects between shapes, and no context supplies a default. `expand` requires
+`axis` within `rank(x)` and an operand extent at `axis` of 1, which
+`spec/05-risc-primitives.md` §2.4.1 states as a claim: a literal operand
+extent other than 1 is a type error, and a symbolic or runtime one is checked
+by a §4.7 runtime extent guard. `insert` admits `axis` in `0..=rank(x)`, so
+`axis == rank(x)` appends a trailing axis. An axis outside its operation's
+range is a type error.
 
 When a declared or inferred result dimension claims a literal or named extent
 that is not statically proven equal to `size`, execution checks equality and
@@ -3173,3 +3096,26 @@ Reading notes:
 > checker SHALL be rejected with a diagnostic naming the tag and the
 > expected shape; deferring the failure to a later stage is not a
 > disposition.
+
+> **[04-TOT-4]** Every child of a Deep form whose content that form's
+> semantics reads SHALL be consumed by that form's checker disposition or
+> rejected with a pushed diagnostic. Where a form reads such a child
+> through a partial extraction - an integer axis, a symbol constructor
+> head, a function-typed operand - a failed extraction SHALL push a
+> diagnostic naming the form and the shape it expected. An omitted
+> optional child and a present child the form cannot read are distinct
+> inputs: only the omission MAY take the form's declared default.
+> Coverage is a property of the submitted program rather than of the
+> checked result, so a node inference never visited SHALL NOT be reported
+> as successfully checked on the ground that the result it is absent from
+> contains no error.
+
+> **[04-TOT-5]** A Deep program's checker verdict SHALL NOT depend on which
+> checker entry receives it, nor on which admitted representation carries it.
+> For one program, every entry SHALL accept or reject alike and SHALL report
+> the same defects; a check that one admitted representation receives SHALL be
+> applied to every other admitted representation of the same program. A
+> representation the checker admits but a check cannot read is a silent
+> exemption under [04-TOT-1] and SHALL be diagnosed rather than skipped.
+
+(Not fully implemented; see chelis#1125.)
