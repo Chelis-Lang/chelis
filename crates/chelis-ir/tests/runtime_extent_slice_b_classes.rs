@@ -699,10 +699,20 @@ fn an_all_interface_class_is_an_entry_guard() {
     );
 }
 
-/// chelis#1377's inlined-root case: the class has one `InputAxis`-sourced
-/// member, so its guard is local at the `Expand` site rather than at entry.
+/// A folded `shape(...)` read is an INTERFACE value, so a class whose members
+/// are all such reads is an ENTRY guard.
+///
+/// Section 4.7 keys on the guard's operands - "an input tensor's axis, a
+/// scalar parameter, or a literal" - and `spec/05` section 2.4.1 admits
+/// `InputAxis` as an `expand` extent read "directly from that tensor's shape
+/// metadata". So the quantity compared is an input tensor's axis, which is
+/// the first item in that list. An earlier draft of this row asserted
+/// `Local`, confusing "is this axis a `Load`'s own" with "is this operand an
+/// input's axis"; that reading made every folded cross-tensor read a local
+/// guard and would have put chelis#1374's guard at the wrong place under the
+/// wrong `<op>`.
 #[test]
-fn a_class_with_an_input_axis_sourced_member_is_a_local_guard() {
+fn a_class_whose_members_are_folded_input_axis_reads_is_an_entry_guard() {
     let mut dag = Dag::new();
     let base = f32_load(&mut dag, "b", vec![]);
     let x = f32_load(&mut dag, "x", vec![named("n")]);
@@ -721,7 +731,7 @@ fn a_class_with_an_input_axis_sourced_member_is_a_local_guard() {
     let classes = derive_runtime_dim_classes(&dag);
     assert_eq!(
         class_for(&classes, DimClaim::Literal(4)).placement(),
-        GuardPlacement::Local,
+        GuardPlacement::Entry,
     );
 }
 

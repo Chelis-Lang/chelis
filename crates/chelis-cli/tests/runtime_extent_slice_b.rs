@@ -467,13 +467,7 @@ fn issue_1374_cross_tensor_read_traps_on_c() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (ok, out) = c_run_result(&dir, "r1374_c", REPRO_1374);
     assert!(!ok, "n = 2 and m = 3 must not execute silently: {out}");
-    // NOT `load`. This class is not all-interface: its second member is the
-    // `Expand`'s set axis, sourced from a folded read of `y`, which is a
-    // locally computed value, so section 4.7 places the guard at the
-    // introducing operation and names THAT operation. An earlier draft
-    // asserted `load` by applying the all-interface sentence without
-    // checking that this class qualifies for it.
-    assert!(out.contains(&domain_trap_line("expand")), "{out}");
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
 }
 
 /// chelis#1376, baseline `silent_unguarded`: the inserted axis is claimed as

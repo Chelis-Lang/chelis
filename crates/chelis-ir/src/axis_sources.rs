@@ -775,11 +775,30 @@ impl RuntimeDimClass {
     /// at least one locally computed value and takes the source position of
     /// the operation that introduces the guarded extent.
     pub fn placement(&self) -> GuardPlacement {
-        if self
-            .members
-            .iter()
-            .all(|member| matches!(member.source, AxisSource::ExternalAxis { .. }))
-        {
+        // Section 4.7 keys on the guard's OPERANDS, not on whether the axis
+        // belongs to a `Load`: "a guard whose operands are all interface
+        // values (an input tensor's axis, a scalar parameter, or a literal)
+        // is evaluated at function entry", against "a guard that compares a
+        // locally computed value (checked integer arithmetic, a
+        // user-function result, or an extent an operation computes)".
+        //
+        // So a folded `shape(y, k)` read is an INTERFACE value: `spec/05`
+        // section 2.4.1 admits `InputAxis` as an `expand` extent read
+        // "directly from that tensor's shape metadata", so the quantity the
+        // guard compares is an input tensor's axis, exactly the first item in
+        // section 4.7's list. Treating only `ExternalAxis` as interface
+        // confused "is this axis a `Load`'s own" with "is this operand an
+        // input's axis", and made every folded cross-tensor read a local
+        // guard.
+        let interface = |source: &AxisSource| {
+            matches!(
+                source,
+                AxisSource::ExternalAxis { .. }
+                    | AxisSource::InputAxis { .. }
+                    | AxisSource::Literal { .. }
+            )
+        };
+        if self.members.iter().all(|member| interface(&member.source)) {
             GuardPlacement::Entry
         } else {
             GuardPlacement::Local
