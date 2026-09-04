@@ -14366,16 +14366,17 @@ mod tests {
     }
 
     #[test]
-    fn lower_relu_decomposes() {
+    fn lower_relu_preserves_identity() {
         let src = r#"
             (def {} x (lit {type: (t-tensor {} (t-prim {} f32))} -2.0))
             (def {} y (app {} (var {} relu) (var {} x)))
         "#;
         let dag = parse_and_lower(src);
-        // x=Const(-2), Const(0), MaxElem(x, 0)
-        assert_eq!(non_drop_len(&dag), 3);
+        // x=Const(-2), Relu(x). The identity must survive until AD applies
+        // [05-OP-43]'s dedicated zero-at-zero rule.
+        assert_eq!(non_drop_len(&dag), 2);
         assert!(verify::verify(&dag).is_empty());
-        assert_eq!(root_node(&dag).op, RiscOp::MaxElem);
+        assert_eq!(root_node(&dag).op, RiscOp::Relu);
     }
 
     #[test]

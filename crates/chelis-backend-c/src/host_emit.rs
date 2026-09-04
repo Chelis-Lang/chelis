@@ -970,7 +970,7 @@ fn append_json_canonical_object_helpers(out: &mut Vec<String>) {
 
 /// Instantiate the scalar host-expression path at each concrete float ABI.
 ///
-/// Tensor activations decompose through `chelis_ir::tier2`; scalar calls in a
+/// Tensor activations lower through `chelis_ir::tier2`; scalar calls in a
 /// Surf `def` reach this emitter after host-ABI projection instead. Reduced
 /// floats need distinct per-node finalizers even though both compute as C
 /// `float`, so one generated specialization cannot serve every source dtype.
@@ -980,7 +980,6 @@ fn append_activation_helpers(
     c_type: &str,
     literal_suffix: &str,
     exp: &str,
-    max: &str,
     finalizer: Option<&str>,
 ) {
     let literal = |value: &str| match suffix {
@@ -997,8 +996,9 @@ fn append_activation_helpers(
         "static inline {c_type} chelis_host_relu_{suffix}({c_type} x) {{"
     ));
     out.push(format!(
-        "    return {};",
-        finalize(format!("{max}({}, x)", literal("0.0")))
+        "    return x < {} ? {} : x;",
+        literal("0.0"),
+        literal("0.0")
     ));
     out.push("}".to_string());
 
@@ -1120,7 +1120,6 @@ fn append_tensor_math_helpers(out: &mut Vec<String>) {
         "float",
         "f",
         "expf",
-        "fmaxf",
         Some("chelis_host_finalize_f16"),
     );
     append_activation_helpers(
@@ -1129,11 +1128,10 @@ fn append_tensor_math_helpers(out: &mut Vec<String>) {
         "float",
         "f",
         "expf",
-        "fmaxf",
         Some("chelis_host_finalize_bf16"),
     );
-    append_activation_helpers(out, "f32", "float", "f", "expf", "fmaxf", None);
-    append_activation_helpers(out, "f64", "double", "", "exp", "fmax", None);
+    append_activation_helpers(out, "f32", "float", "f", "expf", None);
+    append_activation_helpers(out, "f64", "double", "", "exp", None);
 }
 
 /// Private scalar-cast helpers for the generated translation unit.
@@ -8789,6 +8787,16 @@ mod expression_dispatch_tests {
                     "missing {width} helper for {op}:\n{emitted}"
                 );
             }
+        }
+        for width in ["f16", "bf16", "f32", "f64"] {
+            let start = emitted
+                .find(&format!("chelis_host_relu_{width}"))
+                .expect("ReLU helper start");
+            let body = &emitted[start..];
+            let end = body.find("}\n").expect("ReLU helper end");
+            let body = &body[..end];
+            assert!(body.contains("return x <"), "{width}: {body}");
+            assert!(!body.contains("fmax"), "{width}: {body}");
         }
         assert!(emitted.contains("chelis_host_finalize_f16"));
         assert!(emitted.contains("chelis_host_finalize_bf16"));

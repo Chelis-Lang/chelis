@@ -199,16 +199,17 @@ host-lane `scatter` (§3).
 
 ## 2. Tier-2 derived built-ins (DAG)
 
-Convenience functions the desugarer emits and the IR pass decomposes into Tier-1
-during construction (`crates/chelis-ir/src/tier2.rs`). They are **not** separate DAG
-nodes — they exist in Deep AST only and end up as Tier-1 compositions, so they reach
-all backends and differentiate via their decomposition. `spec/05` §3–4.
+Convenience functions emitted by the desugarer (`crates/chelis-ir/src/tier2.rs`).
+Most decompose into Tier-1 operations during construction. `relu` is the
+[05-OP-43] exception: its dedicated DAG identity survives semantic transforms
+and AD so its zero-boundary rule cannot be confused with `max_elem`'s tie rule.
+`spec/05` §3–4.
 
 | Name | Lowering | AD |
 |---|---|---|
 | `eq`,`neq`,`gt`,`gte`,`lte`,`lt` | `cmplt` compositions (`spec/05` §3.2) | zero-grad (bool out) |
 | `and`,`or`,`not` | Spec: bool-only truth tables ([05-OP-26..28]); the pre-v0.19 IR still uses numeric aliases, tracked by #1284 | `grad` rejects |
-| `relu` | `max_elem(x, 0)` | differentiable (subgradient) |
+| `relu` | dedicated `RiscOp::Relu`; forward equals stored-bit `max_elem(x, 0)` | `g` only where `0 < x`; exact +0 at both zeros and NaN |
 | `sigmoid` | `recip(add(1, exp(neg(x))))` | differentiable |
 | `tanh`,`silu`,`gelu` | `tier2.rs` decompositions | differentiable |
 | `matmul` | `expand`+`mul`+`sum`, pattern-matched to BLAS (`spec/05` §4.1); optional `accumulator` | differentiable |

@@ -401,6 +401,77 @@ fn direct_extrema_and_adjoint_emit_bit_preserving_kernels() {
 }
 
 #[test]
+fn dedicated_relu_and_adjoint_emit_strict_bit_preserving_kernels() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], vec_f32(4), None);
+    let relu = dag.add_node(RiscOp::Relu, vec![x], vec_f32(4), None);
+    let adjoint = dag.add_node(RiscOp::ReluAdjoint, vec![x, g], vec_f32(4), None);
+    dag.add_root(relu);
+    dag.add_root(adjoint);
+
+    let source = codegen_hip(&dag, "relu_structure").unwrap().c_source;
+    for kernel in ["kernel_relu", "kernel_relu_adjoint"] {
+        assert!(source.contains(kernel), "missing {kernel}: {source}");
+    }
+    assert!(
+        source.contains("out[i] = value < 0.0f ? 0.0f : value;"),
+        "{source}"
+    );
+    assert!(
+        source.contains("out[i] = 0.0f < a[idx_a] ? g[idx_g] : 0.0f;"),
+        "{source}"
+    );
+    assert!(!source.contains("fmax"), "{source}");
+    assert!(
+        source.contains("int64_t chelis_output_shape_0[1] = { 4 };")
+            && source.contains("int64_t chelis_output_shape_1[1] = { 4 };")
+            && source
+                .contains("outputs[0] = chelis_alloc(1, chelis_output_shape_0, CHELIS_DTYPE_F32);")
+            && source
+                .contains("outputs[1] = chelis_alloc(1, chelis_output_shape_1, CHELIS_DTYPE_F32);"),
+        "host output shapes must match chelis_alloc's int64_t ABI: {source}"
+    );
+    assert!(
+        !source.contains("(int64_t[])"),
+        "host shape ownership must stay in the classified input/output preamble: {source}"
+    );
+    assert!(
+        source.contains("chelis_gpu_alloc(1, (int[]){ 4 }, CHELIS_DTYPE_F32)"),
+        "device shape arrays must retain the GPU runtime's int ABI: {source}"
+    );
+
+    for (precision, suffix, exponent_mask, fraction_mask) in [
+        (Prim::F16, "f16", "0x7c00", "0x03ff"),
+        (Prim::Bf16, "bf16", "0x7f80", "0x007f"),
+    ] {
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision,
+        };
+        let mut narrow = Dag::new();
+        let x = narrow.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let g = narrow.add_node(RiscOp::Load { name: "g".into() }, vec![], ty.clone(), None);
+        let relu = narrow.add_node(RiscOp::Relu, vec![x], ty.clone(), None);
+        let adjoint = narrow.add_node(RiscOp::ReluAdjoint, vec![x, g], ty, None);
+        narrow.add_root(relu);
+        narrow.add_root(adjoint);
+        let source = codegen_hip(&narrow, &format!("relu_{suffix}"))
+            .unwrap()
+            .c_source;
+        assert!(
+            source.contains(&format!("kernel_relu_{suffix}")),
+            "{source}"
+        );
+        assert!(source.contains(&format!("{exponent_mask}u")), "{source}");
+        assert!(source.contains(&format!("{fraction_mask}u")), "{source}");
+        assert!(source.contains("is_positive ? g[idx_g] : (unsigned short)0"));
+        assert!(!source.contains("uint16_t"), "HIPRTC source: {source}");
+        assert!(!source.contains("UINT16_C"), "HIPRTC source: {source}");
+    }
+}
+
+#[test]
 fn direct_signed_integer_extrema_chains_stay_on_typed_hip_kernels() {
     for (precision, suffix) in [
         (Prim::Int8, "i8"),

@@ -315,6 +315,8 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::MaxElem
         | RiscOp::MinElem
         | RiscOp::ExtremaAdjoint { .. }
+        | RiscOp::Relu
+        | RiscOp::ReluAdjoint
         | RiscOp::Neg
         | RiscOp::Abs
         | RiscOp::Floor
@@ -614,7 +616,7 @@ fn agreement_relu() {
         return;
     }
 
-    // relu(x) = max(x, 0) -- test with negative input
+    // Dedicated ReLU identity with negative input.
     {
         let mut dag = Dag::new();
         let x = dag.add_node(
@@ -623,13 +625,7 @@ fn agreement_relu() {
             scalar_f32(),
             None,
         );
-        let zero = dag.add_node(
-            RiscOp::synth_const(scalar_f32().precision, 0.0),
-            vec![],
-            scalar_f32(),
-            None,
-        );
-        dag.add_node(RiscOp::MaxElem, vec![x, zero], scalar_f32(), None);
+        dag.add_node(RiscOp::Relu, vec![x], scalar_f32(), None);
 
         let result = assert_agrees(&dag, "test_relu_neg", "relu(-2)");
         assert_expected("relu(-2) expected", &result, "0.0");
@@ -644,13 +640,7 @@ fn agreement_relu() {
             scalar_f32(),
             None,
         );
-        let zero = dag.add_node(
-            RiscOp::synth_const(scalar_f32().precision, 0.0),
-            vec![],
-            scalar_f32(),
-            None,
-        );
-        dag.add_node(RiscOp::MaxElem, vec![x, zero], scalar_f32(), None);
+        dag.add_node(RiscOp::Relu, vec![x], scalar_f32(), None);
 
         let result = assert_agrees(&dag, "test_relu_pos", "relu(3)");
         assert_expected("relu(3) expected", &result, "3.0");

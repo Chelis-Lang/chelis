@@ -4156,6 +4156,8 @@ fn risc_op_canonical_name(op: &RiscOp) -> &'static str {
         RiscOp::Mul => "mul",
         RiscOp::MaxElem => "max_elem",
         RiscOp::MinElem => "min_elem",
+        RiscOp::Relu => "relu",
+        RiscOp::ReluAdjoint => "relu_adjoint",
         RiscOp::Neg => "neg",
         RiscOp::Abs => "abs",
         RiscOp::Reshape { .. } => "reshape",
@@ -10515,7 +10517,21 @@ fn actualize_tensor_helper_types(
                         })
                         .unwrap_or(forward)
                 }),
+            crate::dag::RiscOp::ReluAdjoint => node
+                .inputs
+                .first()
+                .and_then(|input| inferred.get(input))
+                .map(|input| {
+                    node.inputs
+                        .get(1)
+                        .and_then(|gradient| inferred.get(gradient))
+                        .map(|gradient| {
+                            merge_binary_tensor_types(input, gradient, node.output_type.precision)
+                        })
+                        .unwrap_or_else(|| precision_like(input, node.output_type.precision))
+                }),
             crate::dag::RiscOp::Neg
+            | crate::dag::RiscOp::Relu
             | crate::dag::RiscOp::Exp
             | crate::dag::RiscOp::Log
             | crate::dag::RiscOp::Sin

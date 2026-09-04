@@ -1941,6 +1941,85 @@ pub fn float_extrema_adjoint(
     }
 }
 
+/// Evaluate [05-OP-43] ReLU without re-encoding retained elements. Negative
+/// values become exact positive zero; positive values, both signed zeros, and
+/// NaNs retain their stored bits exactly.
+pub fn float_relu(input: &TensorStorage) -> Result<TensorStorage, NumericKernelError> {
+    const NAME: &str = "relu";
+    if !input.prim().is_float() {
+        return Err(NumericKernelError::WrongFamily {
+            op: NAME,
+            expected: NumericFamily::Float,
+            actual: input.prim(),
+        });
+    }
+
+    macro_rules! apply {
+        ($values:expr, $variant:ident, $zero:expr) => {{
+            let values = $values
+                .iter()
+                .copied()
+                .map(|value| if value < $zero { $zero } else { value })
+                .collect();
+            Ok(TensorStorage {
+                buf: Buf::$variant(values),
+            })
+        }};
+    }
+
+    match &input.buf {
+        Buf::F16(values) => apply!(values, F16, half::f16::ZERO),
+        Buf::Bf16(values) => apply!(values, Bf16, half::bf16::ZERO),
+        Buf::F32(values) => apply!(values, F32, 0.0_f32),
+        Buf::F64(values) => apply!(values, F64, 0.0_f64),
+        _ => unreachable!("family check makes float relu exhaustive"),
+    }
+}
+
+/// Evaluate [05-OP-43]'s dedicated ReLU adjoint. The complete incoming
+/// cotangent is selected only where `0 < input`; every other row constructs
+/// exact positive zero, including both input zeros and NaN. Selection rather
+/// than multiplication is required so rejected infinite and NaN cotangents do
+/// not contaminate zero rows.
+pub fn float_relu_adjoint(
+    input: &TensorStorage,
+    cotangent: &TensorStorage,
+) -> Result<TensorStorage, NumericKernelError> {
+    const NAME: &str = "relu_adjoint";
+    for value in [input, cotangent] {
+        if !value.prim().is_float() {
+            return Err(NumericKernelError::WrongFamily {
+                op: NAME,
+                expected: NumericFamily::Float,
+                actual: value.prim(),
+            });
+        }
+    }
+    require_same_storage_shape(NAME, input, cotangent)?;
+
+    macro_rules! route {
+        ($input:expr, $g:expr, $variant:ident, $zero:expr) => {{
+            let values = $input
+                .iter()
+                .copied()
+                .zip($g.iter().copied())
+                .map(|(input, g)| if $zero < input { g } else { $zero })
+                .collect();
+            Ok(TensorStorage {
+                buf: Buf::$variant(values),
+            })
+        }};
+    }
+
+    match (&input.buf, &cotangent.buf) {
+        (Buf::F16(input), Buf::F16(g)) => route!(input, g, F16, half::f16::ZERO),
+        (Buf::Bf16(input), Buf::Bf16(g)) => route!(input, g, Bf16, half::bf16::ZERO),
+        (Buf::F32(input), Buf::F32(g)) => route!(input, g, F32, 0.0_f32),
+        (Buf::F64(input), Buf::F64(g)) => route!(input, g, F64, 0.0_f64),
+        _ => unreachable!("same-dtype checks make float relu adjoint exhaustive"),
+    }
+}
+
 fn float_vec_unop_f32<T: Copy>(
     op: FloatUnOp,
     values: &[T],
@@ -2017,7 +2096,6 @@ trait ActivationElement: Copy {
     fn recip(self) -> Self;
     fn add(self, rhs: Self) -> Self;
     fn mul(self, rhs: Self) -> Self;
-    fn max(self, rhs: Self) -> Self;
 }
 
 macro_rules! impl_native_activation_element {
@@ -2045,10 +2123,6 @@ macro_rules! impl_native_activation_element {
 
             fn mul(self, rhs: Self) -> Self {
                 self * rhs
-            }
-
-            fn max(self, rhs: Self) -> Self {
-                self.max(rhs)
             }
         }
     };
@@ -2083,10 +2157,6 @@ macro_rules! impl_reduced_activation_element {
             fn mul(self, rhs: Self) -> Self {
                 Self::from_f32(self.to_f32() * rhs.to_f32())
             }
-
-            fn max(self, rhs: Self) -> Self {
-                Self::from_f32(self.to_f32().max(rhs.to_f32()))
-            }
         }
     };
 }
@@ -2105,14 +2175,7 @@ fn activation_tanh<T: ActivationElement>(value: T, one: T, two: T, neg_one: T) -
 
 fn float_vec_activation<T: ActivationElement>(op: FloatUnOp, values: &[T]) -> Vec<T> {
     match op {
-        FloatUnOp::Relu => {
-            let zero = T::constant(0.0);
-            values
-                .iter()
-                .copied()
-                .map(|value| value.max(zero))
-                .collect()
-        }
+        FloatUnOp::Relu => unreachable!("ReLU routes through the stored-bit selector"),
         FloatUnOp::Sigmoid => {
             let one = T::constant(1.0);
             values
@@ -2174,6 +2237,9 @@ pub fn float_tensor_unop(
             expected: NumericFamily::Float,
             actual: value.prim(),
         });
+    }
+    if op == FloatUnOp::Relu {
+        return float_relu(value);
     }
     if op.is_activation() {
         let buf = match &value.buf {
@@ -5755,5 +5821,198 @@ mod tests {
             3.0_f64,
             4.0_f64
         );
+    }
+
+    #[test]
+    fn relu_preserves_positive_nan_and_negative_zero_bits_at_every_float_width() {
+        macro_rules! assert_width {
+            ($variant:ident, $nan:expr, $neg_zero:expr, $negative:expr, $positive:expr, $zero:expr) => {{
+                let input = TensorStorage {
+                    buf: Buf::$variant(vec![$nan, $neg_zero, $negative, $positive]),
+                };
+                let output = float_relu(&input).unwrap();
+                let expected = [$nan, $neg_zero, $zero, $positive];
+                let Buf::$variant(actual) = &output.buf else {
+                    unreachable!()
+                };
+                assert_eq!(
+                    actual
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    expected
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>()
+                );
+
+                let legacy = float_tensor_unop(FloatUnOp::Relu, &input).unwrap();
+                let Buf::$variant(legacy) = &legacy.buf else {
+                    unreachable!()
+                };
+                assert_eq!(
+                    legacy
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    actual
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    "the legacy activation entry must route through the exact selector"
+                );
+
+                for (index, expected) in expected.iter().enumerate() {
+                    let ScalarValue {
+                        bits: Bits::$variant(scalar),
+                    } = float_unop(FloatUnOp::Relu, input.scalar_at(index)).unwrap()
+                    else {
+                        unreachable!()
+                    };
+                    assert_eq!(
+                        scalar.to_bits(),
+                        expected.to_bits(),
+                        "the scalar activation entry must keep selected operand bits"
+                    );
+                }
+            }};
+        }
+
+        assert_width!(
+            F16,
+            half::f16::from_bits(0xfe01),
+            half::f16::NEG_ZERO,
+            half::f16::from_f32(-1.0),
+            half::f16::from_bits(1),
+            half::f16::ZERO
+        );
+        assert_width!(
+            Bf16,
+            half::bf16::from_bits(0xffc1),
+            half::bf16::NEG_ZERO,
+            half::bf16::from_f32(-1.0),
+            half::bf16::from_bits(1),
+            half::bf16::ZERO
+        );
+        assert_width!(
+            F32,
+            f32::from_bits(0xffc1_2345),
+            -0.0_f32,
+            -1.0_f32,
+            f32::from_bits(1),
+            0.0_f32
+        );
+        assert_width!(
+            F64,
+            f64::from_bits(0xfff8_1234_5678_9abc),
+            -0.0_f64,
+            -1.0_f64,
+            f64::from_bits(1),
+            0.0_f64
+        );
+    }
+
+    #[test]
+    fn relu_adjoint_selects_complete_cotangent_only_for_strictly_positive_inputs() {
+        macro_rules! assert_width {
+            ($variant:ident, $nan:expr, $neg_zero:expr, $negative:expr, $positive:expr, $subnormal:expr, $g_nan:expr, $g_inf:expr, $g_neg_zero:expr, $zero:expr) => {{
+                let input = TensorStorage {
+                    buf: Buf::$variant(vec![
+                        $nan, $neg_zero, $zero, $negative, $positive, $subnormal,
+                    ]),
+                };
+                let cotangent = TensorStorage {
+                    buf: Buf::$variant(vec![
+                        $g_nan,
+                        $g_inf,
+                        $g_neg_zero,
+                        $g_nan,
+                        $g_neg_zero,
+                        $g_inf,
+                    ]),
+                };
+                assert_eq!(
+                    float_relu_adjoint(&input, &cotangent).unwrap(),
+                    TensorStorage {
+                        buf: Buf::$variant(vec![$zero, $zero, $zero, $zero, $g_neg_zero, $g_inf]),
+                    }
+                );
+            }};
+        }
+
+        assert_width!(
+            F16,
+            half::f16::from_bits(0xfe01),
+            half::f16::NEG_ZERO,
+            half::f16::from_f32(-1.0),
+            half::f16::ONE,
+            half::f16::from_bits(1),
+            half::f16::from_bits(0x7e55),
+            half::f16::INFINITY,
+            half::f16::NEG_ZERO,
+            half::f16::ZERO
+        );
+        assert_width!(
+            Bf16,
+            half::bf16::from_bits(0xffc1),
+            half::bf16::NEG_ZERO,
+            half::bf16::from_f32(-1.0),
+            half::bf16::ONE,
+            half::bf16::from_bits(1),
+            half::bf16::from_bits(0x7fe5),
+            half::bf16::INFINITY,
+            half::bf16::NEG_ZERO,
+            half::bf16::ZERO
+        );
+        assert_width!(
+            F32,
+            f32::from_bits(0xffc1_2345),
+            -0.0_f32,
+            -1.0_f32,
+            1.0_f32,
+            f32::from_bits(1),
+            f32::from_bits(0x7fc5_4321),
+            f32::INFINITY,
+            -0.0_f32,
+            0.0_f32
+        );
+        assert_width!(
+            F64,
+            f64::from_bits(0xfff8_1234_5678_9abc),
+            -0.0_f64,
+            -1.0_f64,
+            1.0_f64,
+            f64::from_bits(1),
+            f64::from_bits(0x7ff8_abcd_1234_5678),
+            f64::INFINITY,
+            -0.0_f64,
+            0.0_f64
+        );
+    }
+
+    #[test]
+    fn relu_kernels_reject_non_float_and_mismatched_cotangent_storage() {
+        let integers = finalize_tensor("test", Prim::Int32, RawTensor::Int(vec![1])).unwrap();
+        let floats = finalize_tensor("test", Prim::F32, RawTensor::Float(vec![1.0])).unwrap();
+        let doubles = finalize_tensor("test", Prim::F64, RawTensor::Float(vec![1.0])).unwrap();
+
+        assert!(matches!(
+            float_relu(&integers),
+            Err(NumericKernelError::WrongFamily { op: "relu", .. })
+        ));
+        assert!(matches!(
+            float_relu_adjoint(&integers, &integers),
+            Err(NumericKernelError::WrongFamily {
+                op: "relu_adjoint",
+                ..
+            })
+        ));
+        assert!(matches!(
+            float_relu_adjoint(&floats, &doubles),
+            Err(NumericKernelError::DtypeMismatch {
+                op: "relu_adjoint",
+                ..
+            })
+        ));
     }
 }

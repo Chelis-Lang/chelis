@@ -593,10 +593,11 @@ impl Emitter {
             | RiscOp::Abs
             | RiscOp::Floor
             | RiscOp::Ceil
-            | RiscOp::Round => self.emit_unary(dag, node),
+            | RiscOp::Round
+            | RiscOp::Relu => self.emit_unary(dag, node),
 
             // Binary elementwise (M2 first cut: add, mul).
-            RiscOp::Add | RiscOp::Mul => self.emit_binary(dag, node),
+            RiscOp::Add | RiscOp::Mul | RiscOp::ReluAdjoint => self.emit_binary(dag, node),
 
             // chelis#1306: these identities are rejected by the shared typed
             // Metal capability gate. Keep explicit backend arms so no new
@@ -861,6 +862,7 @@ impl Emitter {
                 | RiscOp::Tan
                 | RiscOp::Atan
                 | RiscOp::Sqrt
+                | RiscOp::Relu
         );
         if needs_float && !matches!(prec, Prim::F32 | Prim::F16 | Prim::Bf16) {
             return Err(format!(
@@ -876,6 +878,9 @@ impl Emitter {
         let pso_var = format!("pso_{}", node.id.0);
         let body = match &node.op {
             RiscOp::Neg => "    out[tid] = -a[tid];".to_string(),
+            RiscOp::Relu => {
+                format!("    out[tid] = a[tid] < ({msl_ty})0 ? ({msl_ty})0 : a[tid];")
+            }
             other => {
                 let f = kernels::unary_func(other).ok_or_else(|| {
                     format!(
@@ -943,18 +948,21 @@ impl Emitter {
             .clone();
         let (n, prec) = self.require_static_rank1(&node.output_type, "binary")?;
         let msl_ty = dtype::msl_type(prec);
+        if matches!(node.op, RiscOp::ReluAdjoint)
+            && !matches!(prec, Prim::F32 | Prim::F16 | Prim::Bf16)
+        {
+            return Err(format!(
+                "Metal emit ReLU adjoint node {} requires a target-admitted precision; got `{}`",
+                node.id.0,
+                prec.name()
+            ));
+        }
         if a_plan.n != n || b_plan.n != n || a_plan.prec != prec || b_plan.prec != prec {
             return Err(format!(
                 "Metal M2 emit binary node {}: shape/type mismatch (M2 first cut: same-shape contiguous only)",
                 node.id.0
             ));
         }
-        let op = kernels::binary_op(&node.op).ok_or_else(|| {
-            format!(
-                "Metal M2 emit binary node {}: op {:?} unsupported",
-                node.id.0, node.op
-            )
-        })?;
         let suffix = dtype::kernel_suffix(prec);
         let kernel_name = format!("k_binary{suffix}_{}", node.id.0);
         let pso_var = format!("pso_{}", node.id.0);
@@ -963,7 +971,17 @@ impl Emitter {
             kernels::input_param(1, msl_ty, "b"),
             kernels::output_param(2, msl_ty, "out"),
         ];
-        let body = format!("    out[tid] = a[tid] {op} b[tid];");
+        let body = if matches!(node.op, RiscOp::ReluAdjoint) {
+            format!("    out[tid] = ({msl_ty})0 < a[tid] ? b[tid] : ({msl_ty})0;")
+        } else {
+            let op = kernels::binary_op(&node.op).ok_or_else(|| {
+                format!(
+                    "Metal M2 emit binary node {}: op {:?} unsupported",
+                    node.id.0, node.op
+                )
+            })?;
+            format!("    out[tid] = a[tid] {op} b[tid];")
+        };
         let src = kernels::elementwise_kernel_for(&kernel_name, &params, &body, &[prec]);
         let src = Self::prepend_span_comments_to_kernel_source(node, src);
         self.kernels

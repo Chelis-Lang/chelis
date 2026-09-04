@@ -512,13 +512,13 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/capability_table.md",
         "## Seed dispositions the table must ship with",
         "## New numeric ops before the table lands (added 2026-07-30)",
-        "1f30b0e2a015b226a6c2eb5b0a18d27a9ae0c027cef5378ed963811a8b2fbe7f",
+        "b236eef3448e4147a85f531b7d8b1a7bfcc8b9d933f96470deff2a305a7c011b",
     ),
     "Phase 4 handoff": (
         "spec/design/dtype_semantics.md",
         "## Phase 4 - the capability table becomes the permanent guard",
         "## I1. Interlock with loud unsupported ([#730])",
-        "3c19e7a262100f1798e41ef5910a8022488ddaf6bb669bc9beb710e9620021f3",
+        "ba1662900de06295d99f6b5fd00875a8eac6a7b8d9e3fc5d2806929d6cdf9469",
     ),
     "compiled stdlib consumer": (
         "spec/design/loud_unsupported.md",
@@ -2924,6 +2924,15 @@ def validate_schema_and_consumers(
         (
             ("introduces `IO`", "surface IO spelling"),
             ("| `IO` | file ops", "surface IO spelling"),
+            (
+                "dedicated `RiscOp::Relu`; forward equals stored-bit "
+                "`max_elem(x, 0)`",
+                "surface dedicated ReLU identity",
+            ),
+            (
+                "`g` only where `0 < x`; exact +0 at both zeros and NaN",
+                "surface ReLU adjoint",
+            ),
         ),
         violations,
     )
@@ -3021,6 +3030,20 @@ def validate_schema_and_consumers(
             (
                 "`eval | c-host | c-dag | hip | metal`",
                 "exact backend product",
+            ),
+            (
+                "HIP code generation implements all four widths (raw stored-bit "
+                "predicates for f16/bf16)",
+                "ReLU HIP completion receipt",
+            ),
+            (
+                "Metal f64 remains the deliberate target rejection, not an "
+                "unimplemented ReLU cell",
+                "ReLU Metal target boundary",
+            ),
+            (
+                "No backend cell cites [#1313] after it closes",
+                "ReLU closed-issue receipt removal",
             ),
             (
                 "(`BuiltinId`, `SiblingDomain`, `SiblingCaseId`, `SemanticParams`)",
@@ -3199,6 +3222,15 @@ def validate_schema_and_consumers(
             (
                 "checker grammar, dedicated non-alias\n`Count` IR",
                 "Count child oracle ownership",
+            ),
+            (
+                ".venv/bin/python\nscripts/dtype_relu_oracle.py",
+                "ReLU child oracle command",
+            ),
+            ("DTYPE RELU ORACLE:\nPASS", "ReLU child oracle success line"),
+            (
+                "f16/bf16/f32/f64 raw-bit inputs and outputs",
+                "ReLU HIP execution width matrix",
             ),
             (
                 "(ExternalCallableFamily, CanonicalCallableId, "

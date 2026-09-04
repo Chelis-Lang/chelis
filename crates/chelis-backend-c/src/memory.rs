@@ -156,6 +156,8 @@ fn classify_nodes(dag: &Dag, skipped: &UnordSet<NodeId>) -> Vec<NodeMemoryKind> 
                 | RiscOp::MaxElem
                 | RiscOp::MinElem
                 | RiscOp::ExtremaAdjoint { .. }
+                | RiscOp::Relu
+                | RiscOp::ReluAdjoint
                 | RiscOp::Neg
                 | RiscOp::Recip
                 | RiscOp::Exp

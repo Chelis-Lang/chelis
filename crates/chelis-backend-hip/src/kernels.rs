@@ -424,6 +424,129 @@ extern \"C\" __global__ void {kernel_name}(
     )
 }
 
+/// Generate the dedicated ReLU kernel. The selected input is assigned
+/// unchanged, preserving NaN payloads/signs and negative zero bits.
+pub fn relu(kernel_name: &str, kind: ElemKind) -> String {
+    let ty = kind.c_type();
+    let zero = kind.zero_lit_bool();
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const {ty} *a, {a_strides}, int a_ndim, int a_size,
+    {ty} *out, {out_shape}, int out_ndim, int out_size) {{
+{build_a_s}
+{build_out_sh}
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+  int indices[{MAX_DIM}];
+  chelis_flat_to_indices(i, out_sh, out_ndim, indices);
+  int idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  {ty} value = a[idx];
+  out[i] = value < {zero} ? {zero} : value;
+}}
+",
+        a_strides = stride_params("a"),
+        out_shape = shape_params("out"),
+        build_a_s = build_array("a_s", "a", "s"),
+        build_out_sh = build_array("out_sh", "out", "sh"),
+    )
+}
+
+/// Generate the AD-only ReLU cotangent kernel. The incoming cotangent is
+/// copied exactly only for strictly positive inputs; every rejected lane is
+/// exact positive zero, including both zeros and NaNs.
+pub fn relu_adjoint(kernel_name: &str, kind: ElemKind) -> String {
+    let ty = kind.c_type();
+    let zero = kind.zero_lit_bool();
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const {ty} *a, {a_strides}, int a_ndim, int a_size,
+    const {ty} *g, {g_strides}, int g_ndim, int g_size,
+    {ty} *out, {out_shape}, int out_ndim, int out_size) {{
+{build_a_s}
+{build_g_s}
+{build_out_sh}
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+  int indices[{MAX_DIM}];
+  chelis_flat_to_indices(i, out_sh, out_ndim, indices);
+  int idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  int idx_g = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, g_s, g_ndim), g_size, 1);
+  out[i] = {zero} < a[idx_a] ? g[idx_g] : {zero};
+}}
+",
+        a_strides = stride_params("a"),
+        g_strides = stride_params("g"),
+        out_shape = shape_params("out"),
+        build_a_s = build_array("a_s", "a", "s"),
+        build_g_s = build_array("g_s", "g", "s"),
+        build_out_sh = build_array("out_sh", "out", "sh"),
+    )
+}
+
+/// Raw IEEE-754 binary16/bfloat16 ReLU. HIP's narrow tensors use a tagged
+/// 16-bit unsigned carrier outside matmul, so the predicate is expressed on the
+/// sign/exponent/fraction fields and the selected stored bits are copied.
+pub fn relu_reduced(kernel_name: &str, exponent_mask: u16, fraction_mask: u16) -> String {
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const unsigned short *a, {a_strides}, int a_ndim, int a_size,
+    unsigned short *out, {out_shape}, int out_ndim, int out_size) {{
+{build_a_s}
+{build_out_sh}
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+  int indices[{MAX_DIM}];
+  chelis_flat_to_indices(i, out_sh, out_ndim, indices);
+  int idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  unsigned short value = a[idx];
+  bool is_nan = (value & 0x{exponent_mask:04x}u) == 0x{exponent_mask:04x}u && (value & 0x{fraction_mask:04x}u) != 0;
+  bool is_negative = (value & 0x8000u) != 0 && (value & 0x7fffu) != 0 && !is_nan;
+  out[i] = is_negative ? (unsigned short)0 : value;
+}}
+",
+        a_strides = stride_params("a"),
+        out_shape = shape_params("out"),
+        build_a_s = build_array("a_s", "a", "s"),
+        build_out_sh = build_array("out_sh", "out", "sh"),
+    )
+}
+
+/// Raw IEEE-754 binary16/bfloat16 ReLU adjoint. `0 < x` is true exactly
+/// for positive, nonzero, non-NaN encodings; selected cotangent bits survive.
+pub fn relu_adjoint_reduced(kernel_name: &str, exponent_mask: u16, fraction_mask: u16) -> String {
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const unsigned short *a, {a_strides}, int a_ndim, int a_size,
+    const unsigned short *g, {g_strides}, int g_ndim, int g_size,
+    unsigned short *out, {out_shape}, int out_ndim, int out_size) {{
+{build_a_s}
+{build_g_s}
+{build_out_sh}
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+  int indices[{MAX_DIM}];
+  chelis_flat_to_indices(i, out_sh, out_ndim, indices);
+  int idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  int idx_g = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, g_s, g_ndim), g_size, 1);
+  unsigned short value = a[idx_a];
+  bool is_nan = (value & 0x{exponent_mask:04x}u) == 0x{exponent_mask:04x}u && (value & 0x{fraction_mask:04x}u) != 0;
+  bool is_positive = (value & 0x8000u) == 0 && (value & 0x7fffu) != 0 && !is_nan;
+  out[i] = is_positive ? g[idx_g] : (unsigned short)0;
+}}
+",
+        a_strides = stride_params("a"),
+        g_strides = stride_params("g"),
+        out_shape = shape_params("out"),
+        build_a_s = build_array("a_s", "a", "s"),
+        build_g_s = build_array("g_s", "g", "s"),
+        build_out_sh = build_array("out_sh", "out", "sh"),
+    )
+}
+
 /// Generate kernel source for cmplt. Returns the in-precision boolean
 /// constants (`1.0f`/`0.0f` for f32; `1.0`/`0.0` for f64).
 pub fn cmplt(kernel_name: &str, kind: ElemKind) -> String {

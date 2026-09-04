@@ -661,7 +661,7 @@ fn compile_and_run_single_output(dag: &Dag, func_name: &str, inputs: &[TestInput
         .collect()
 }
 
-/// Compile a direct-arithmetic DAG with f32/f64 inputs initialized from raw
+/// Compile a direct-arithmetic DAG with float inputs initialized from raw
 /// bits and return every root's output bits. This is the manual HIP proof for
 /// stored-operand extrema and adjoints, where decimal/tolerance comparison
 /// would erase NaN payload and signed-zero evidence.
@@ -672,12 +672,15 @@ fn compile_and_run_float_output_bits(
     inputs: &[(&str, &[u64])],
 ) -> Vec<Vec<u64>> {
     require_hipcc();
-    assert!(matches!(prim, Prim::F32 | Prim::F64));
+    assert!(matches!(
+        prim,
+        Prim::F16 | Prim::Bf16 | Prim::F32 | Prim::F64
+    ));
     let result = codegen_hip(dag, func_name).unwrap();
     let n = inputs.first().expect("bit harness needs inputs").1.len();
     assert!(inputs.iter().all(|(_, bits)| bits.len() == n));
 
-    let mut setup = vec![format!("    int shape[1] = {{ {n} }};")];
+    let mut setup = vec![format!("    int64_t shape[1] = {{ {n} }};")];
     setup.push(format!(
         "    chelis_tensor *inputs[{}] = {{0}};",
         result.input_labels.len()
@@ -687,10 +690,12 @@ fn compile_and_run_float_output_bits(
             .iter()
             .find_map(|(name, bits)| (*name == label).then_some(*bits))
             .unwrap_or_else(|| panic!("missing bit input {label}"));
-        let dtype = if prim == Prim::F32 {
-            "CHELIS_F32"
-        } else {
-            "CHELIS_F64"
+        let dtype = match prim {
+            Prim::F16 => "CHELIS_DTYPE_F16",
+            Prim::Bf16 => "CHELIS_DTYPE_BF16",
+            Prim::F32 => "CHELIS_DTYPE_F32",
+            Prim::F64 => "CHELIS_DTYPE_F64",
+            _ => unreachable!(),
         };
         setup.push(format!(
             "    inputs[{slot}] = chelis_alloc(1, shape, {dtype});"
@@ -702,14 +707,17 @@ fn compile_and_run_float_output_bits(
             "    chelis_write_view input_view_{slot} = chelis_tensor_write_view(input_guard_{slot});"
         ));
         for (index, value) in bits.iter().enumerate() {
-            setup.push(if prim == Prim::F32 {
-                format!(
+            setup.push(match prim {
+                Prim::F16 | Prim::Bf16 => format!(
+                    "    ((uint16_t *)input_view_{slot}.data)[{index}] = UINT16_C(0x{value:04x});"
+                ),
+                Prim::F32 => format!(
                     "    ((float *)input_view_{slot}.data)[{index}] = chelis_f32_from_bits(0x{value:08x}u);"
-                )
-            } else {
-                format!(
+                ),
+                Prim::F64 => format!(
                     "    ((double *)input_view_{slot}.data)[{index}] = chelis_f64_from_bits(0x{value:016x}uLL);"
-                )
+                ),
+                _ => unreachable!(),
             });
         }
         setup.push(format!("    chelis_tensor_end_write(input_guard_{slot});"));
@@ -732,12 +740,20 @@ fn compile_and_run_float_output_bits(
     );
     setup.push("        for (int i = 0; i < chelis_tensor_numel(outputs[out]); i++) {".to_string());
     setup.push("            if (i > 0) printf(\" \" );".to_string());
-    setup.push(if prim == Prim::F32 {
-        "            uint32_t bits; memcpy(&bits, &((const float *)output_view.data)[i], sizeof(bits)); printf(\"0x%08x\", bits);"
-            .to_string()
-    } else {
-        "            uint64_t bits; memcpy(&bits, &((const double *)output_view.data)[i], sizeof(bits)); printf(\"0x%016llx\", (unsigned long long)bits);"
-            .to_string()
+    setup.push(match prim {
+        Prim::F16 | Prim::Bf16 => {
+            "            uint16_t bits = ((const uint16_t *)output_view.data)[i]; printf(\"0x%04x\", bits);"
+                .to_string()
+        }
+        Prim::F32 => {
+            "            uint32_t bits; memcpy(&bits, &((const float *)output_view.data)[i], sizeof(bits)); printf(\"0x%08x\", bits);"
+                .to_string()
+        }
+        Prim::F64 => {
+            "            uint64_t bits; memcpy(&bits, &((const double *)output_view.data)[i], sizeof(bits)); printf(\"0x%016llx\", (unsigned long long)bits);"
+                .to_string()
+        }
+        _ => unreachable!(),
     });
     setup.push("        }".to_string());
     setup.push("        printf(\"\\n\");".to_string());
@@ -1468,6 +1484,77 @@ fn direct_extrema_and_adjoints_preserve_exact_f32_and_f64_bits_on_gpu() {
             0x8000_0000_0000_0000,
             0x4008_0000_0000_0000,
             0xc010_0000_0000_0000,
+        ],
+    );
+}
+
+fn direct_relu_gpu_bit_case(prim: Prim, x_bits: &[u64; 6], gradient: &[u64; 6]) {
+    let ty = TensorType {
+        dims: vec![DimInfo::Lit(6)],
+        precision: prim,
+    };
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+    let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], ty.clone(), None);
+    let relu = dag.add_node(RiscOp::Relu, vec![x], ty.clone(), None);
+    let adjoint = dag.add_node(RiscOp::ReluAdjoint, vec![x, g], ty, None);
+    dag.add_root(relu);
+    dag.add_root(adjoint);
+    let expected = vec![
+        vec![x_bits[0], x_bits[1], 0, 0, x_bits[4], x_bits[5]],
+        vec![0, 0, 0, 0, gradient[4], gradient[5]],
+    ];
+    let actual = compile_and_run_float_output_bits(
+        &dag,
+        &format!("direct_relu_{}_bits", prim.name()),
+        prim,
+        &[("x", x_bits), ("g", gradient)],
+    );
+    assert_eq!(actual, expected);
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn direct_relu_and_adjoint_preserve_exact_bits_at_every_float_width_on_gpu() {
+    direct_relu_gpu_bit_case(
+        Prim::F16,
+        &[0x7e11, 0x8000, 0, 0xbc00, 0x3c00, 1],
+        &[0x7e33, 0x7c00, 0x8000, 0xfe33, 0xbc00, 0x7c00],
+    );
+    direct_relu_gpu_bit_case(
+        Prim::Bf16,
+        &[0x7fc1, 0x8000, 0, 0xbf80, 0x3f80, 1],
+        &[0x7fc3, 0x7f80, 0x8000, 0xffc3, 0xbf80, 0x7f80],
+    );
+    direct_relu_gpu_bit_case(
+        Prim::F32,
+        &[0x7fc1_2345, 0x8000_0000, 0, 0xbf80_0000, 0x3f80_0000, 1],
+        &[
+            0x7fc6_789a,
+            0x7f80_0000,
+            0x8000_0000,
+            0xffc6_789a,
+            0xbf80_0000,
+            0x7f80_0000,
+        ],
+    );
+    direct_relu_gpu_bit_case(
+        Prim::F64,
+        &[
+            0x7ff8_1111_2222_3333,
+            0x8000_0000_0000_0000,
+            0,
+            0xbff0_0000_0000_0000,
+            0x3ff0_0000_0000_0000,
+            1,
+        ],
+        &[
+            0x7ff8_abcd_1234_5678,
+            0x7ff0_0000_0000_0000,
+            0x8000_0000_0000_0000,
+            0xfff8_abcd_1234_5678,
+            0xbff0_0000_0000_0000,
+            0x7ff0_0000_0000_0000,
         ],
     );
 }

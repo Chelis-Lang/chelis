@@ -383,6 +383,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                 }
             }
             RiscOp::Neg
+            | RiscOp::Relu
             | RiscOp::Recip
             | RiscOp::Exp
             | RiscOp::Log
@@ -414,6 +415,14 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                 if arity != 1 {
                     errors.push(format!(
                         "unary op at node {} has {} inputs (expected 1)",
+                        node.id.0, arity
+                    ));
+                }
+            }
+            RiscOp::ReluAdjoint => {
+                if arity != 2 {
+                    errors.push(format!(
+                        "relu adjoint at node {} has {} inputs (expected 2)",
                         node.id.0, arity
                     ));
                 }
@@ -472,6 +481,26 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             RiscOp::FusedElem { ops } => {
                 if ops.is_empty() {
                     errors.push(format!("fused elem at node {} has no steps", node.id.0));
+                }
+            }
+        }
+
+        if matches!(node.op, RiscOp::Relu | RiscOp::ReluAdjoint) {
+            if !node.output_type.precision.is_float() {
+                errors.push(format!(
+                    "relu op at node {} requires a float output, got {:?}",
+                    node.id.0, node.output_type.precision
+                ));
+            }
+            for input in &node.inputs {
+                if let Some(input) = dag.get(*input)
+                    && (input.output_type != node.output_type
+                        || !input.output_type.precision.is_float())
+                {
+                    errors.push(format!(
+                        "relu op at node {} requires same-shape, same-dtype float inputs",
+                        node.id.0
+                    ));
                 }
             }
         }
