@@ -1339,23 +1339,19 @@ impl CEmitter {
         input_slots: &chelis_unord::UnordMap<String, usize>,
         member: &chelis_ir::axis_sources::ClassMember,
     ) -> Option<(usize, i32)> {
-        let chelis_ir::axis_sources::AxisSource::InputAxis { input, axis } = member.source else {
+        // Only the folded-read spelling is emitted here: a `Load`'s own axis
+        // is already declared and guarded by the binding loop above.
+        if !matches!(
+            member.source,
+            chelis_ir::axis_sources::AxisSource::InputAxis { .. }
+        ) {
+            return None;
+        }
+        let (load, read_axis) = dag.member_load_axis(member)?;
+        let RiscOp::Load { name: label } = &dag.get(load)?.op else {
             return None;
         };
-        // `RtAxis` carries only `Lit` on this head; the node-valued axis the
-        // plan describes arrives with chelis#1298, and adding that variant
-        // will make this destructuring fail to compile, which is where its
-        // handling belongs.
-        let RtAxis::Lit(read_axis) = axis;
-        let label = dag
-            .get(member.node)
-            .and_then(|node| node.inputs.get(input))
-            .and_then(|id| dag.get(*id))
-            .and_then(|producer| match &producer.op {
-                RiscOp::Load { name } => Some(name.as_str().to_string()),
-                _ => None,
-            })?;
-        Some((*input_slots.get(label.as_str())?, read_axis))
+        Some((*input_slots.get(label.as_str())?, read_axis as i32))
     }
 
     fn emit_input_shape_preamble(
@@ -1465,11 +1461,40 @@ impl CEmitter {
         // value with itself. Neither is a guard: one is noise, the other is a
         // condition that cannot hold.
         let mut guarded = chelis_unord::UnordSet::<(String, usize, i32)>::new();
+        // Where each name was declared, so a guard reads the same witness the
+        // context line names.
+        let mut declared_from = chelis_unord::UnordMap::<String, (usize, usize)>::new();
 
-        for binding in dag.symbolic_bindings_interface() {
-            // chelis#616: an op-declared dim is declared inline at its
-            // owning op (the bound scalars are computed tensors that do not
-            // exist here at prologue time); see `runtime_dim_sites`.
+        // Slot-indexed labels, so a guard names the tensor it reads without
+        // re-walking the DAG for a name the slot map already keys.
+        let mut input_labels = vec![String::new(); input_slots.len()];
+        for (label, slot) in input_slots.to_sorted() {
+            if let Some(entry) = input_labels.get_mut(*slot) {
+                *entry = label.clone();
+            }
+        }
+
+        // DECLARATIONS come from the occurrence walk, and that split is a
+        // measured limit rather than a leftover.
+        //
+        // The emitter allocates by NAME: `chelis_alloc(1, (int64_t[]){
+        // _anon_dim_1_0 })`. The lowerer stamps a fresh name on many axes
+        // whose extent is simply an input's - chelis#631's avgpool program
+        // has a `Load` typed `[2, _anon_dim_0_1]` and a `Sum` over axis 0
+        // typed `[_anon_dim_1_0]` - and C2.4 is right that the second is not
+        // a witness, because a pass-through axis neither declares nor
+        // disagrees: it IS the first. The derivation therefore reports one
+        // extent where the emitted text uses two names, and routing
+        // declarations through it left `_anon_dim_1_0` undeclared and the
+        // emitted C not compiling on eight shipped programs.
+        //
+        // The fix for that is to allocate from the axis SOURCE instead of
+        // from the stamped name, which is C4.4's remaining half and what
+        // closes chelis#665. Until then the walk keeps the declarations - its
+        // bucket-4c sweep recovers the second name from the same input axis -
+        // and the derivation keeps what it is for: which sites GUARD, against
+        // what, in what order.
+        for binding in dag.symbolic_bindings() {
             let SymbolicDimSource::Load {
                 input_label: canonical_label,
                 axis: canonical_axis,
@@ -1478,6 +1503,28 @@ impl CEmitter {
                 continue;
             };
             let canonical_slot = input_slots[canonical_label];
+            self.line(&format!(
+                "int64_t {} = chelis_tensor_shape(inputs[{canonical_slot}], {canonical_axis});",
+                binding.name
+            ));
+            // The declaring witness is the pair a guard must not compare
+            // against, so the dedupe is seeded from the DECLARATION rather
+            // than from the derivation's canonical: those can differ, and a
+            // guard reporting one witness while reading another would name
+            // the wrong tensor in its context line.
+            guarded.insert((binding.name.clone(), canonical_slot, *canonical_axis as i32));
+            declared_from.insert(binding.name.clone(), (canonical_slot, *canonical_axis));
+        }
+
+        for binding in dag.symbolic_bindings_interface() {
+            // chelis#616: an op-declared dim is declared inline at its
+            // owning op (the bound scalars are computed tensors that do not
+            // exist here at prologue time); see `runtime_dim_sites`.
+            let Some((canonical_slot, canonical_axis)) = declared_from.get(&binding.name).copied()
+            else {
+                continue;
+            };
+            let canonical_label = &input_labels[canonical_slot];
             // `binding.name` flows into BOTH an identifier context (the
             // emitted `int {name} = ...;` declarator) and a format-string
             // context (the fprintf below). The identifier emission is
@@ -1488,12 +1535,7 @@ impl CEmitter {
             // architectural pattern.
             let binding_name_fmt =
                 chelis_ir::span_sanitize::sanitize_for_format_string(&binding.name);
-            self.line(&format!(
-                "int64_t {} = chelis_tensor_shape(inputs[{canonical_slot}], {canonical_axis});",
-                binding.name
-            ));
-            guarded.insert((binding.name.clone(), canonical_slot, *canonical_axis as i32));
-            for occurrence in binding.others {
+            for occurrence in std::iter::once(binding.canonical).chain(binding.others) {
                 // Op-declared guard sites are emitted at their owning op.
                 let SymbolicDimSource::Load { input_label, axis } = &occurrence.source else {
                     continue;
@@ -1548,15 +1590,6 @@ impl CEmitter {
         // that yields 5. And an `InputAxis`-sourced member reads an input
         // tensor's axis directly, which section 4.7 lists as an interface
         // value, so its guard belongs at entry too; that is chelis#1376.
-        // Slot-indexed labels, so a member's guard names the tensor it reads
-        // without re-walking the DAG for a name the slot map already keys.
-        let mut input_labels = vec![String::new(); input_slots.len()];
-        for (label, slot) in input_slots.to_sorted() {
-            if let Some(entry) = input_labels.get_mut(*slot) {
-                *entry = label.clone();
-            }
-        }
-
         for class in dag.entry_dim_classes() {
             let (canonical_expr, claim_text) = match &class.claim {
                 chelis_ir::axis_sources::DimClaim::Literal(value) => {

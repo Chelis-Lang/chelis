@@ -2351,15 +2351,19 @@ pub fn symbolic_bindings_interface(dag: &Dag) -> Vec<SymbolicDimBinding> {
             let crate::axis_sources::DimClaim::Name(name) = class.claim else {
                 return None;
             };
+            // Both spellings of "an input tensor's axis" bind here, through
+            // the one predicate that answers it. Accepting only the `Load`'s
+            // own axis dropped the DECLARATION for a name whose sole
+            // interface witness is a folded `shape(t, k)` read - measured on
+            // chelis#631's avgpool program, where `main` declares
+            // `int64_t _anon_dim_1_0 = chelis_tensor_shape(inputs[0], 1);`
+            // beside the Load's own `_anon_dim_0_1` from the same axis, and
+            // the emitted C stopped compiling without it.
             let mut occurrences = class
                 .members
                 .iter()
                 .filter_map(|member| {
-                    let crate::axis_sources::AxisSource::ExternalAxis { load, axis } =
-                        member.source
-                    else {
-                        return None;
-                    };
+                    let (load, axis) = crate::axis_sources::member_load_axis(dag, member)?;
                     let RiscOp::Load { name: label } = &dag.get(load)?.op else {
                         return None;
                     };

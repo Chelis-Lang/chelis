@@ -766,6 +766,68 @@ pub struct RuntimeDimClass {
     pub members: Vec<ClassMember>,
 }
 
+/// The `Load` whose axis this operand names, and that axis, when the operand
+/// is an input tensor's axis at all.
+///
+/// `spec/04-type-system.md` section 4.7 lists "an input tensor's axis" as an
+/// interface value, and the DAG spells one two ways: a `Load`'s own output
+/// axis, recorded as [`AxisSource::ExternalAxis`], and a folded
+/// `shape(t, k)` read of that same tensor, recorded as
+/// [`AxisSource::InputAxis`]. `spec/05` section 2.4.1 admits the second as an
+/// extent read "directly from that tensor's shape metadata", so the two are
+/// one category and every consumer asking "is this operand an input tensor's
+/// axis" must accept both.
+///
+/// Three consumers ask it - guard placement, the interface bindings the C and
+/// HIP prologues declare and guard from, and the C emitter's entry sites - and
+/// they ask it HERE so they cannot drift. Answering it separately at each site
+/// is what produced four instances of one defect: `placement` classified a
+/// folded read as local, then `symbolic_bindings_interface` dropped the
+/// declaration for a name whose only interface witness is a folded read,
+/// which stopped the emitted C compiling.
+///
+/// "A `cast` takes the placement of the value it casts" (section 4.7, same
+/// paragraph), so the walk looks through `Cast`/`CastTrunc` to the value cast:
+/// an `int32` parameter reaching an extent through `cast(m, int64)` lands its
+/// carrier at the Cast, not at the `Load`, and classifying by the immediate
+/// producer would place one claim two ways depending on a width conversion.
+/// The walk is bounded by the node count, so a malformed graph cannot spin.
+///
+/// `None` means the operand is not an input tensor's axis: a computed
+/// producer, an extent an operation computes, or a literal.
+pub fn member_load_axis(dag: &Dag, member: &ClassMember) -> Option<(NodeId, usize)> {
+    match member.source {
+        AxisSource::ExternalAxis { load, axis } => {
+            matches!(dag.get(load)?.op, RiscOp::Load { .. }).then_some((load, axis))
+        }
+        AxisSource::InputAxis { input, axis } => {
+            let RtAxis::Lit(read_axis) = axis;
+            let load = load_through_casts(dag, member.node, input)?;
+            Some((load, read_axis as usize))
+        }
+        _ => None,
+    }
+}
+
+/// The `Load` reachable from `node`'s input `slot` through zero or more
+/// width conversions, if any. Shared by [`member_load_axis`] and by
+/// `RuntimeDimClass::placement`'s `ScalarInput` arm, which asks the same
+/// question of a scalar rather than of an axis.
+pub(crate) fn load_through_casts(dag: &Dag, node: NodeId, slot: usize) -> Option<NodeId> {
+    let mut current = *dag.get(node)?.inputs.get(slot)?;
+    for _ in 0..dag.nodes().len() {
+        let producer = dag.get(current)?;
+        match producer.op {
+            RiscOp::Load { .. } => return Some(current),
+            RiscOp::Cast { .. } | RiscOp::CastTrunc { .. } => {
+                current = *producer.inputs.first()?;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
 impl RuntimeDimClass {
     /// C1.3's placement for this class.
     ///
@@ -814,30 +876,16 @@ impl RuntimeDimClass {
         //
         // The walk is bounded by the node count, so a malformed graph cannot
         // spin here.
-        let slot_is_input = |member: &ClassMember, slot: usize| {
-            let mut current = match dag.get(member.node).and_then(|n| n.inputs.get(slot)) {
-                Some(id) => *id,
-                None => return false,
-            };
-            for _ in 0..dag.nodes().len() {
-                let Some(node) = dag.get(current) else {
-                    return false;
-                };
-                match node.op {
-                    RiscOp::Load { .. } => return true,
-                    RiscOp::Cast { .. } | RiscOp::CastTrunc { .. } => match node.inputs.first() {
-                        Some(inner) => current = *inner,
-                        None => return false,
-                    },
-                    _ => return false,
-                }
-            }
-            false
-        };
         let interface = |member: &ClassMember| match member.source {
-            AxisSource::ExternalAxis { .. } | AxisSource::Literal { .. } => true,
-            AxisSource::InputAxis { input, .. } => slot_is_input(member, input),
-            AxisSource::ScalarInput { input } => slot_is_input(member, input),
+            AxisSource::Literal { .. } => true,
+            AxisSource::ExternalAxis { .. } | AxisSource::InputAxis { .. } => {
+                member_load_axis(dag, member).is_some()
+            }
+            // `ScalarInput` asks the same question of a scalar rather than of
+            // an axis, so it shares the walk but not the axis it resolves to.
+            AxisSource::ScalarInput { input } => {
+                load_through_casts(dag, member.node, input).is_some()
+            }
             AxisSource::OpComputed { .. } | AxisSource::ClassSupplied { .. } => false,
         };
         if self.members.iter().all(interface) {

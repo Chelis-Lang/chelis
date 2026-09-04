@@ -202,6 +202,20 @@ impl<'a> VerifiedDagView<'a> {
     /// needs the derivation narrowed first, because the claim over a
     /// statically determined operation output (a matmul's `Literal(64)` axis)
     /// would guard a value against itself.
+    /// The `Load` whose axis a class member's operand names, and that axis.
+    ///
+    /// The view is where the C and HIP lanes ask every class question under
+    /// chelis#1538's discipline, so this one is asked here too rather than by
+    /// reaching around the facade for a raw `Dag`; see
+    /// [`crate::axis_sources::member_load_axis`] for what it answers and why
+    /// three consumers share it.
+    pub fn member_load_axis(
+        self,
+        member: &crate::axis_sources::ClassMember,
+    ) -> Option<(NodeId, usize)> {
+        crate::axis_sources::member_load_axis(self.dag, member)
+    }
+
     pub fn local_dim_guard_sites(self) -> Vec<(LocalGuardSite, LocalGuardClaim)> {
         let mut sites = Vec::new();
         for class in crate::axis_sources::derive_runtime_dim_classes(self.dag) {
