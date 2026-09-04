@@ -470,7 +470,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/05-risc-primitives.md",
         "### 2.1 Elementwise Binary",
         "### 2.4 Movement",
-        "90fdc968d6de13e06f0908da4666d98d6e68258195eed3123e30b2c57dda7485",
+        "738386512053177cd5a5802a8dd4e58f4aa87ef8344c06b741d7406cc8edffce",
     ),
     "logical builtin contract": (
         "spec/05-risc-primitives.md",
@@ -482,7 +482,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/04-type-system.md",
         "#### 4.5.3 Name-Preserving Rank Polymorphism",
         "#### 4.5.4 Concat Result Typing",
-        "8f7ed49ec2a00115a9fc9d423c0e56040f68b42d31580b259597da98ec859733",
+        "3c84ab77716d7d9f2d5f2024141086c209f3f094a1949a3bdd06685d65b25aea",
     ),
     "window extrema contract": (
         "spec/05-risc-primitives.md",
@@ -1746,12 +1746,18 @@ def validate_normative_contract(
                 "runtime extent guard trap line",
             ),
             (
-                "the result keeps only the forms that consumer admits",
-                "deferred expand candidate elimination",
+                "Each operation has exactly one result shape. `expand` sets "
+                "the extent at\n`axis` and leaves the rank unchanged; `insert` adds an axis of extent `size`\nat `axis` and produces rank `rank(x) + 1`. No result is deferred, no consumer\nselects between shapes, and no context supplies a default.",
+                "expand and insert each have one result shape",
             ),
             (
-                "their defaults settle in source order",
-                "positional expand settlement order",
+                "`insert` admits `axis` in `0..=rank(x)`, so\n`axis == rank(x)` appends a trailing axis. An axis outside its operation's\nrange is a type error.",
+                "insert axis range",
+            ),
+            (
+                "**Named-axis insert (`R+1`).** The inverse arithmetic "
+                "direction: `insert`\nadds a *named* axis",
+                "named-axis form belongs to insert",
             ),
             (
                 "| Ordered comparison (`cmplt`, `lt`, `gt`, `gte`, `lte`) | any "
@@ -2740,16 +2746,32 @@ def validate_normative_contract(
                 "ToEnd shrink end requires a zero start",
             ),
             (
-                "is well formed only\nwhen the operand's extent at `axis` is 1",
-                "expand same-rank form requires a unit source extent",
+                "`expand` sets the extent at `axis` and is well formed only "
+                "when the operand's\nextent at `axis` is 1",
+                "expand requires a unit source extent",
             ),
             (
-                "the form is a claim that the operand's extent at `axis` is "
-                "1. A\nruntime operand extent at `axis` other than 1 under "
-                "the same-rank form fails\nthat claim's runtime extent guard "
-                "and traps `Domain`, placed and rendered per\n"
-                "`spec/04-type-system.md` §4.7 and [04-NUM-9].",
-                "expand same-rank non-unit source extent traps Domain",
+                "A reduction axis, `expand`'s broadcast axis, and `insert`'s"
+                "\n> new-axis position SHALL be",
+                "axis atom names both movement primitives",
+            ),
+            (
+                "| `insert` | `(&tensor[D,p], axis: int32, size: int64) -> "
+                "tensor[D_plus,p]` | Insert a new dimension of width `size` "
+                "at position `axis`, producing rank `rank(x) + 1`.",
+                "insert movement row",
+            ),
+            (
+                "A literal operand extent at\n`axis` other than 1 is a type error. A symbolic or runtime operand extent at\n`axis` other than 1 fails that claim's runtime extent guard and traps\n`Domain`, placed and rendered per `spec/04-type-system.md` §4.7 and\n[04-NUM-9].",
+                "expand non-unit source extent is rejected or traps",
+            ),
+            (
+                "| `expand` | `insert(sum(g, axis), axis, 1i64)`",
+                "expand adjoint restores the unit axis",
+            ),
+            (
+                "| `insert` | `sum(g, axis)`",
+                "insert adjoint collapses the inserted axis",
             ),
             (
                 "| `cmplt(a, b)` | `cmplt(a, b)` | "

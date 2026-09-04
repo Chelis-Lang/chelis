@@ -2419,12 +2419,6 @@ class ContractValidationTests(unittest.TestCase):
                 "runtime extent guard placement in every execution mode",
             ),
             (
-                Path("spec/04-type-system.md"),
-                "their defaults settle in source order",
-                "their defaults settle in any order",
-                "positional expand settlement order",
-            ),
-            (
                 Path("spec/05-risc-primitives.md"),
                 "`InputAxis(t, a)`",
                 "`AxisRead(t, a)`",
@@ -2449,12 +2443,6 @@ class ContractValidationTests(unittest.TestCase):
                 "runtime extent guard trap line",
             ),
             (
-                Path("spec/04-type-system.md"),
-                "the result keeps only the forms that consumer admits",
-                "the result keeps every form",
-                "deferred expand candidate elimination",
-            ),
-            (
                 Path("spec/05-risc-primitives.md"),
                 "well formed only when the start\n  paired with it is `Lit(0)`",
                 "well formed with any start",
@@ -2462,21 +2450,64 @@ class ContractValidationTests(unittest.TestCase):
             ),
             (
                 Path("spec/05-risc-primitives.md"),
-                "is well formed only\nwhen the operand's extent at `axis` is 1",
-                "is well formed for any operand extent",
-                "expand same-rank form requires a unit source extent",
+                "`expand` sets the extent at `axis` and is well formed only "
+                "when the operand's\nextent at `axis` is 1",
+                "`expand` sets the extent at `axis` for any operand extent",
+                "expand requires a unit source extent",
             ),
             (
                 Path("spec/05-risc-primitives.md"),
-                "the form is a claim that the operand's extent at `axis` is "
-                "1. A\nruntime operand extent at `axis` other than 1 under "
-                "the same-rank form fails\nthat claim's runtime extent guard "
-                "and traps `Domain`, placed and rendered per\n"
-                "`spec/04-type-system.md` §4.7 and [04-NUM-9].",
-                "the form makes no claim about the operand. A\n"
-                "runtime operand extent at `axis` other than 1 under the "
-                "same-rank form is accepted.",
-                "expand same-rank non-unit source extent traps Domain",
+                "A literal operand extent at\n`axis` other than 1 is a type error. A symbolic or runtime operand extent at\n`axis` other than 1 fails that claim's runtime extent guard and traps\n`Domain`, placed and rendered per `spec/04-type-system.md` §4.7 and\n[04-NUM-9].",
+                "Any operand extent at\n`axis` is accepted.",
+                "expand non-unit source extent is rejected or traps",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "| `expand` | `insert(sum(g, axis), axis, 1i64)`",
+                "| `expand` | `sum(g, axis)` |",
+                "expand adjoint restores the unit axis",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "| `insert` | `sum(g, axis)`",
+                "| `insert` | `insert(g, axis, 1i64)` |",
+                "insert adjoint collapses the inserted axis",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "A reduction axis, `expand`'s broadcast axis, and `insert`'s"
+                "\n> new-axis position SHALL be",
+                "A reduction axis SHALL be",
+                "axis atom names both movement primitives",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
+                "| `insert` | `(&tensor[D,p], axis: int32, size: int64) -> "
+                "tensor[D_plus,p]` | Insert a new dimension of width `size` "
+                "at position `axis`, producing rank `rank(x) + 1`.",
+                "| `insert` | unspecified |",
+                "insert movement row",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "Each operation has exactly one result shape. `expand` sets "
+                "the extent at\n`axis` and leaves the rank unchanged; `insert` adds an axis of extent `size`\nat `axis` and produces rank `rank(x) + 1`. No result is deferred, no consumer\nselects between shapes, and no context supplies a default.",
+                "A consumer selects between two candidate shapes, and an unconsumed result\ntakes a default at the freeze point.",
+                "expand and insert each have one result shape",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "`insert` admits `axis` in `0..=rank(x)`, so\n`axis == rank(x)` appends a trailing axis. An axis outside its operation's\nrange is a type error.",
+                "`insert` admits any `axis`.",
+                "insert axis range",
+            ),
+            (
+                Path("spec/04-type-system.md"),
+                "**Named-axis insert (`R+1`).** The inverse arithmetic "
+                "direction: `insert`\nadds a *named* axis",
+                "**Named-axis expand (`R+1`).** The inverse arithmetic "
+                "direction: `expand`\nadds a *named* axis",
+                "named-axis form belongs to insert",
             ),
             (
                 Path("spec/06-transformations.md"),

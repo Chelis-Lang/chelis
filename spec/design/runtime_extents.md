@@ -804,6 +804,22 @@ every pass.
 
 ### Slice C - deferral totality and deterministic settlement
 
+**Superseded.** The language decision recorded in `spec/04` §4.7.2 gives
+`expand` and `insert` exactly one result shape each, so the two-candidate
+model this slice resolves no longer exists. Slice C's merged deliverables -
+the deferral executor, the comparison mirror, the `matmul` rank elimination,
+the carrier evidence rules, and the settlement registry - are superseded with
+it, along with its freeze point, its three-action protocol, its cancelled
+oracle phase, and its entry requirement on [#1341]'s ordered-store mechanism;
+they are scheduled for removal in the implementation work, not here. [#1338]
+is resolved by construction once that lands: coupled defaults cannot settle
+nondeterministically when there is nothing to settle. [#1512] narrows to its
+non-`expand` sources, because the unresolved-operand early return it reports
+no longer has a deferred `expand` result to be unresolved about. [#1265] and
+[#1380] need re-reading against the amended §4.7.2 before this slice is
+rewritten. `hash_order_determinism.md` and `dtype_semantics.md` record the
+superseded model and are corrected when the code is removed.
+
 **Entry requirements:** the Slice A oracle runner; the `spec/04` §4.7.2
 settlement-order rule; [#1341]'s ordered-store mechanism, landed by its
 Phase A, which records a source ordinal on each deferred obligation and
@@ -882,7 +898,7 @@ class completion oracle and ends with `RUNTIME EXTENT ORACLE: PASS`.
 | [#1367] | stale `int32` extent and Form-3 guidance | A |
 | [#1266] | record projection rejected by provenance walk | B |
 | [#569] | real lint/fmt transformation breaks a legal extent | B |
-| [#597] | positional same-rank replacement never executes: lowering always inserts | B |
+| [#597] | positional same-rank replacement never executes: lowering always inserts | B; `expand` and `insert` are separate primitives under §4.7.2 |
 | [#609] | wrong-rank ascription is accepted | A |
 | [#665] | movement-op runtime wildcard is lost across Expand | B |
 | [#592] | grad-backward Expand size could not be traced to a Load; exact Eval/C reproducer is green | A (closed by the size carrier) |
@@ -896,9 +912,9 @@ class completion oracle and ends with `RUNTIME EXTENT ORACLE: PASS`.
 | [#1397] | shape-derived bound erases a declared result; wildcard root masks #1378 | B (claim erasure); separately tracked root boundary |
 | [#1480] | a `ToEnd` shrink end is never checked against a `Lit(0)` start | B |
 | [#1482] | runtime-bound `shrink` consumed elementwise: the `Const` operand's axis has no declared dim source and C build ICEs | B |
-| [#1265] | comparison consumer never selects the deferred shape | C |
-| [#1380] | `matmul` over two deferred positional `expand` results publishes `?0` as the checked result type | C |
-| [#1338] | coupled defaults settle nondeterministically | C / [#1341] Phase A |
+| [#1265] | comparison consumer never selects the deferred shape | superseded; re-read against §4.7.2 |
+| [#1380] | `matmul` over two deferred positional `expand` results publishes `?0` as the checked result type | superseded; re-read against §4.7.2 |
+| [#1338] | coupled defaults settle nondeterministically | superseded; resolved by construction under §4.7.2's single result shape |
 | [#578] | mechanism evidence only; full rank-polymorphic repro stays open | external rank-polymorphism work |
 | [#1112] | HIP metadata-carrier width; Slice B HIP guard rows | [#729] |
 | [#1298] | runtime axes and windows; `RtAxis::Node` rows and wire ordering | [#729] |

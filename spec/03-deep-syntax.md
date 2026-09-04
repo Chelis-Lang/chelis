@@ -547,7 +547,7 @@ The irreducible computational basis. All tensor computation decomposes to these 
 **Elementwise:** `add`, `mul`, `exp`, `log`, `sin`, `sqrt`, `cmplt`, `max_elem`
 **Reduce:** `sum`, `count`, `max_reduce` (over one-or-more positional or
 one-or-more named axes, never a mixture)
-**Movement:** `reshape`, `permute`, `expand`, `pad`, `shrink`, `stride`
+**Movement:** `reshape`, `permute`, `expand`, `insert`, `pad`, `shrink`, `stride`
 **Memory:** `const`, `load`
 
 ### 3.2 Derived Functions

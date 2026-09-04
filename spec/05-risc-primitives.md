@@ -435,7 +435,8 @@ primitive — the reductions here, `softmax`, `mean`, `gather`,
 `scatter`, and the movement and ordering ops — and is the convention
 the formula examples below already use (`axis=-1` for the last axis).
 
-> **[05-AXIS-1]** A reduction axis and `expand`'s insert axis SHALL be
+> **[05-AXIS-1]** A reduction axis, `expand`'s broadcast axis, and `insert`'s
+> new-axis position SHALL be
 > statically resolvable either as an integer constant (a literal or a literal
 > wrapped in an integer cast) or as a named dimension of the operand. A
 > runtime integer expression and an unknown dimension name are type errors at
@@ -450,7 +451,8 @@ dimension is dropped from a runtime integer value. A reduction whose axis is
 a runtime expression (for example a function-parameter `int32`) is rejected
 at the reduction call site with a diagnostic naming the constant-or-named-axis
 requirement, rather than leaving the output shape unresolved (chelis#259).
-The same constraint and diagnostic apply to `expand`'s insert axis.
+The same constraint and diagnostic apply to `expand`'s broadcast axis and
+to `insert`'s new-axis position.
 
 **Output dimensions:** The dimension at position `axis` is removed. All other dimensions are preserved.
 
@@ -646,18 +648,21 @@ tree, or compatibility mode is not conforming.
 |---|---|---|
 | `reshape` | `(&tensor[D_old,p], shape: List<int64>) -> tensor[D_new,p]` | Reinterpret memory layout. Product of dimensions must match. |
 | `permute` | `(&tensor[d1,...,dn,p], axes: int32...) -> tensor[d_axes,p]` | Reorder dimensions. `axes` is a permutation of 0..n-1, passed as one scalar argument per axis. |
-| `expand` | `(&tensor[D_small,p], axis: int32, size: int64) -> tensor[D_large,p]` | Insert or set a dimension at position `axis` with width `size` (size-1 broadcast). Does NOT copy data. Named-axis and anchored forms: `spec/04-type-system.md` §4.5.3. |
+| `expand` | `(&tensor[D,p], axis: int32, size: int64) -> tensor[D',p]` | Set the size-1 dimension at position `axis` to width `size`. Rank is unchanged and the operand's extent at `axis` is 1. Does NOT copy data. |
+| `insert` | `(&tensor[D,p], axis: int32, size: int64) -> tensor[D_plus,p]` | Insert a new dimension of width `size` at position `axis`, producing rank `rank(x) + 1`. Does NOT copy data. Named-axis and anchored forms: `spec/04-type-system.md` §4.5.3. |
 | `pad` | `(&tensor[D,p], padding: List<List<int64>>, fill) -> tensor[D',p]` | Add elements at boundaries. `padding` specifies (before, after) per axis. |
 | `shrink` | `(&tensor[D,p], bounds: List<List<int64>>) -> tensor[D',p]` | Slice: extract a contiguous sub-tensor. `bounds` specifies (start, end) per axis. |
 | `stride` | `(&tensor[D,p], strides: int64...) -> tensor[D',p]` | Strided access: take every n-th element along each axis. |
 
-`expand`'s positional form is the (tensor, axis, size) triop; a
-two-argument list form is an arity error. The named-axis form
-(`expand(x, new, size)` with a dimension name) and the four-argument
-anchored form remain as `spec/04-type-system.md` §4.5.3 states them.
-Where the axis is positional it is axis-domain `int32`; `size` is
-extent-domain `int64` in every form, which makes the canonical broadcast
-idiom `expand(b, axis, shape(x, axis))` well-typed by construction.
+`expand` and `insert` each take the (tensor, axis, size) triop
+positionally; a two-argument list form is an arity error. `expand` sets an
+existing size-1 axis and leaves the rank alone; `insert` adds an axis and
+raises the rank by one. The named-axis form (`insert(x, new, size)` with a
+dimension name) and the four-argument anchored form belong to `insert` and
+remain as `spec/04-type-system.md` §4.5.3 states them. Where the axis is
+positional it is axis-domain `int32`; `size` is extent-domain `int64` in
+every form, which makes the canonical broadcast idiom
+`insert(b, axis, shape(x, axis))` well-typed by construction.
 
 **Movement AD adjoints:**
 
@@ -665,7 +670,8 @@ idiom `expand(b, axis, shape(x, axis))` well-typed by construction.
 |---|---|
 | `reshape` | `reshape(g, original_shape)` |
 | `permute` | `permute(g, inverse_permutation)` |
-| `expand` | `sum(g, expanded_axes)` — collapse the expanded dimensions |
+| `expand` | `insert(sum(g, axis), axis, 1i64)` — sum over the broadcast axis, then restore its extent-1 slot so the adjoint keeps the operand's rank |
+| `insert` | `sum(g, axis)` — collapse the inserted dimension |
 | `pad` | `shrink(g, inverse_padding)` — extract the non-padded region |
 | `shrink` | `pad(g, inverse_bounds)` — pad gradient back to original size |
 | `stride` | [05-MOV-1]'s exact zero-filled inverse sampling map at the original shape; runtime steps have zero cotangent |
@@ -732,8 +738,8 @@ synthesized-arithmetic clause, not by this section.
 #### 2.4.1 Runtime (node-valued) bounds and reshape targets
 
 A movement bound (`pad` before/after, `shrink` start/end, `stride` step), an
-`expand` size, and a `reshape` target extent are each represented as a
-`RtDim`:
+`expand` or `insert` size, and a `reshape` target extent are each represented
+as a `RtDim`:
 
 - `Lit(n)` — a compile-time-constant extent.
 - `ToEnd` — the full-axis sentinel; legal only as a `shrink` end (the identity
@@ -754,9 +760,10 @@ A movement bound (`pad` before/after, `shrink` start/end, `stride` step), an
   `int32` axis literal in `0..rank(t)` (spec/04-type-system.md §4.7.1
   normalizes a negative literal statically) or an absolute input index naming
   a rank-0 `int32` scalar (a computed axis under [05-OP-7]). Legal only as an
-  `expand` size or a `reshape` target. It is the folded extent-argument form
-  of §2.5.1 for a direct `shape(x, axis)` extent argument and, in an `expand`
-  size, for an in-scope dimension binder instantiated by a tensor axis; a
+  `expand` or `insert` size or a `reshape` target. It is the folded
+  extent-argument form of §2.5.1 for a direct `shape(x, axis)` extent
+  argument and, in an `expand` or `insert` size, for an in-scope dimension
+  binder instantiated by a tensor axis; a
   `reshape` target that restates such a binder is `Sym`, and the same read
   bound to a `pad`, `shrink`, or `stride` position is the rank-0 `Node` form.
   The read carries no identity: whether the resulting axis keeps the source
@@ -764,16 +771,17 @@ A movement bound (`pad` before/after, `shrink` start/end, `stride` step), an
   (spec/04-type-system.md §4.7.3), and an unproved identity is a fresh extent
   under an equality guard.
 
-`reshape` admits `Lit`, `Node`, `InputAxis`, and `Sym`; `expand` admits `Lit`,
-`Node`, and `InputAxis`; `pad`, `shrink`, and `stride` admit `Lit` and `Node`,
-plus `ToEnd` for a `shrink` end.
+`reshape` admits `Lit`, `Node`, `InputAxis`, and `Sym`; `expand` and `insert`
+admit `Lit`, `Node`, and `InputAxis`; `pad`, `shrink`, and `stride` admit
+`Lit` and `Node`, plus `ToEnd` for a `shrink` end.
 
-`expand`'s same-rank form sets the extent at `axis` and is well formed only
-when the operand's extent at `axis` is 1 (the size-1 broadcast of §2.4's
-table); the form is a claim that the operand's extent at `axis` is 1. A
-runtime operand extent at `axis` other than 1 under the same-rank form fails
-that claim's runtime extent guard and traps `Domain`, placed and rendered per
-`spec/04-type-system.md` §4.7 and [04-NUM-9].
+`expand` sets the extent at `axis` and is well formed only when the operand's
+extent at `axis` is 1 (the size-1 broadcast of §2.4's table); the operation is
+a claim that the operand's extent at `axis` is 1. A literal operand extent at
+`axis` other than 1 is a type error. A symbolic or runtime operand extent at
+`axis` other than 1 fails that claim's runtime extent guard and traps
+`Domain`, placed and rendered per `spec/04-type-system.md` §4.7 and
+[04-NUM-9].
 
 Runtime bounds are validated in every execution mode with matching language
 errors: a negative bound, a shrink range overshoot, a non-positive stride
@@ -815,8 +823,9 @@ they are discrete index math, carry exact zero cotangent, and do not pull their
 producers (for example a window-count `floor_div`) into a structural
 differentiability rejection.
 
-> **[05-MOV-1]** Runtime movement bounds, `expand` sizes, and reshape targets,
-> their validation, and the exact adjoints above SHALL be available in every
+> **[05-MOV-1]** Runtime movement bounds, `expand` and `insert` sizes, and
+> reshape targets, their validation, and the exact adjoints above SHALL be
+> available in every
 > language execution mode for every active tensor dtype admitted by the owning movement
 > operation. Eval, C, HIP, and Metal execute the same runtime values and
 > traps. No lowering may erase a runtime value, substitute a literal bound,
@@ -871,7 +880,8 @@ per [05-DIM-2] — extent-domain out, axis-domain in.
 
 Two semantic use shapes exist, and they are distinct:
 
-- **As an extent argument** to `expand` / `reshape`, a `shape()` read is folded
+- **As an extent argument** to `expand` / `insert` / `reshape`, a `shape()`
+  read is folded
   into the movement node's `InputAxis` carrier (§2.4.1), not materialized as
   a value node.
 - **As a scalar VALUE** (used in arithmetic, a `mean` divisor, or any other
