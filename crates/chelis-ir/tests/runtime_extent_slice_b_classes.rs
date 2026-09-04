@@ -1040,3 +1040,39 @@ fn the_same_claim_on_a_live_local_intermediate_keeps_its_guard() {
         "the declaring Load and the live intermediate both witness `n`",
     );
 }
+
+/// An `InputAxis` is an interface value only when the slot it names holds an
+/// input tensor.
+///
+/// Section 4.7's list says "an input tensor's AXIS". A folded read of a
+/// COMPUTED tensor's axis is not that: the value does not exist until the
+/// producing operation runs, so its guard cannot be evaluated at entry
+/// "before any other operation of the function". Treating every `InputAxis`
+/// as interface would hoist such a guard to a point where its operand has not
+/// been produced.
+#[test]
+fn an_input_axis_naming_a_computed_tensor_is_a_local_guard() {
+    let mut dag = Dag::new();
+    let base = f32_load(&mut dag, "b", vec![]);
+    let x = f32_load(&mut dag, "x", vec![named("n")]);
+    // A computed tensor, not an input: its axis is not available at entry.
+    let computed = dag.add_node(RiscOp::Neg, vec![x], ty(vec![named("n")], Prim::F32), None);
+    dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+        },
+        vec![base, computed],
+        ty(vec![DimInfo::Lit(4)], Prim::F32),
+        None,
+    );
+    let classes = derive_runtime_dim_classes(&dag);
+    assert_eq!(
+        class_for(&classes, DimClaim::Literal(4)).placement(&dag),
+        GuardPlacement::Local,
+        "the read tensor is computed, so its axis is not an interface value",
+    );
+}

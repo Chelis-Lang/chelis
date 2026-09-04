@@ -796,15 +796,22 @@ impl RuntimeDimClass {
         // The DAG keeps the difference - the slot names a node and that node
         // has an op - so this is decided by reading it, not by adding a
         // second representation to carry it.
+        // A slot holds an interface value only when its producer is a `Load`.
+        // Section 4.7's list says "an input TENSOR's axis" and "a scalar
+        // PARAMETER": a folded read of a COMPUTED tensor's axis, like a
+        // computed scalar, does not exist until its producer runs, so its
+        // guard cannot be evaluated at entry "before any other operation of
+        // the function".
+        let slot_is_input = |member: &ClassMember, slot: usize| {
+            dag.get(member.node)
+                .and_then(|node| node.inputs.get(slot))
+                .and_then(|id| dag.get(*id))
+                .is_some_and(|producer| matches!(producer.op, RiscOp::Load { .. }))
+        };
         let interface = |member: &ClassMember| match member.source {
-            AxisSource::ExternalAxis { .. }
-            | AxisSource::InputAxis { .. }
-            | AxisSource::Literal { .. } => true,
-            AxisSource::ScalarInput { input } => dag
-                .get(member.node)
-                .and_then(|node| node.inputs.get(input))
-                .and_then(|slot| dag.get(*slot))
-                .is_some_and(|producer| matches!(producer.op, RiscOp::Load { .. })),
+            AxisSource::ExternalAxis { .. } | AxisSource::Literal { .. } => true,
+            AxisSource::InputAxis { input, .. } => slot_is_input(member, input),
+            AxisSource::ScalarInput { input } => slot_is_input(member, input),
             AxisSource::OpComputed { .. } | AxisSource::ClassSupplied { .. } => false,
         };
         if self.members.iter().all(interface) {
