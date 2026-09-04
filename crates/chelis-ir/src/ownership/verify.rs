@@ -11,9 +11,9 @@ use crate::host::{
 use super::classify::{Placement, ValueClass, classify, render_type};
 use super::error::OwnershipError;
 use super::ir::{
-    ApplyKind, Block, BlockId, Edge, HostSiteAction, HostSiteMap, Op, OpId, Operand, OwnerId,
-    OwnerOrigin, OwnershipProgram, OwnershipUse, ParamMode, Terminal, Terminator, Unit, UnitId,
-    UnitKind,
+    ApplyKind, Block, BlockId, Edge, EdgeId, HostSiteAction, HostSiteMap, Op, OpId, Operand,
+    OperationRole, OwnerId, OwnerOrigin, OwnershipProgram, OwnershipUse, ParamMode, Terminal,
+    Terminator, Unit, UnitId, UnitKind,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +39,9 @@ impl HostVerification {
 }
 
 pub(super) fn verify(program: &OwnershipProgram) -> Result<HostVerification, OwnershipError> {
+    if super::last_use::has_schedule(program) {
+        super::last_use::verify_canonical(program)?;
+    }
     let mut names = BTreeSet::new();
     let mut units = BTreeMap::new();
     let mut roots = 0;
@@ -177,28 +180,28 @@ pub(super) fn verify_host_actions(
                     block,
                     operation,
                 } => {
-                    if !matches!(
+                    let ordinary_site = matches!(
                         site.kind,
                         super::ir::HostSiteKind::Expression
                             | super::ir::HostSiteKind::FunctionEntry
                             | super::ir::HostSiteKind::FunctionReturn
                             | super::ir::HostSiteKind::ManifestRoot
-                    ) {
-                        return Err(site_error(index, "operation has inappropriate site kind"));
-                    }
+                    );
                     let Some(unit_ref) = program.units.get(unit) else {
                         return Err(site_error(index, "operation names missing unit"));
                     };
-                    let Some(block_ref) = unit_ref.blocks.iter().find(|item| item.id == block)
-                    else {
+                    if !unit_ref.blocks.iter().any(|item| item.id == block) {
                         return Err(site_error(index, "operation names missing block"));
-                    };
-                    if !block_ref
-                        .ops
-                        .iter()
-                        .any(|candidate| candidate.id == operation)
-                    {
+                    }
+                    if !operation_exists_in_block(unit_ref, block, operation) {
                         return Err(site_error(index, "operation identity is outside its block"));
+                    }
+                    let is_edge_terminal = edge_for_operation(unit_ref, block, operation).is_some();
+                    if (is_edge_terminal
+                        && !operation_is_on_site_edge(program, site, unit, block, operation))
+                        || (!is_edge_terminal && !ordinary_site)
+                    {
+                        return Err(site_error(index, "operation has inappropriate site kind"));
                     }
                     if !operations.insert((unit, block, operation)) {
                         return Err(site_error(index, "operation belongs to two sites"));
@@ -254,10 +257,11 @@ pub(super) fn verify_host_actions(
                 }
                 HostSiteAction::ControlEdge {
                     unit,
+                    edge,
                     source,
                     target,
                 } => {
-                    let expected_kind = expected_control_kind(program, unit, source, target)
+                    let expected_kind = expected_control_kind(program, unit, edge, source, target)
                         .ok_or_else(|| {
                             site_error(index, "edge is not a typed control successor")
                         })?;
@@ -274,25 +278,32 @@ pub(super) fn verify_host_actions(
                     else {
                         return Err(site_error(index, "edge names missing source block"));
                     };
-                    if !successors(&block_ref.terminator).contains(&target) {
+                    if !block_ref
+                        .terminator
+                        .edges()
+                        .any(|candidate| candidate.id == edge && candidate.target == target)
+                    {
                         return Err(site_error(index, "edge target is not a successor"));
                     }
-                    if controls.insert((unit, source, target), site.kind).is_some() {
+                    if controls.insert((unit, edge), site.kind).is_some() {
                         return Err(site_error(index, "control edge belongs to two sites"));
                     }
                 }
             }
         }
-        if matches!(
-            site.kind,
-            super::ir::HostSiteKind::BranchEdge
-                | super::ir::HostSiteKind::MatchArm
-                | super::ir::HostSiteKind::LoopEdge
-        ) && site.actions.len() != 1
+        if is_control_site(site.kind)
+            && (!matches!(
+                site.actions.first(),
+                Some(HostSiteAction::ControlEdge { .. })
+            ) || site
+                .actions
+                .iter()
+                .skip(1)
+                .any(|action| !matches!(action, HostSiteAction::Operation { .. })))
         {
             return Err(site_error(
                 index,
-                "control-edge site does not carry exactly one action",
+                "control-edge site must carry its edge before edge-local terminals",
             ));
         }
     }
@@ -306,6 +317,13 @@ pub(super) fn verify_host_actions(
                     .ops
                     .iter()
                     .map(move |operation| (unit, block.id, operation.id))
+                    .chain(
+                        block
+                            .terminator
+                            .edges()
+                            .flat_map(|edge| &edge.terminals)
+                            .map(move |terminal| (unit, block.id, terminal.id)),
+                    )
             })
         })
         .collect::<BTreeSet<_>>();
@@ -413,21 +431,91 @@ pub(super) fn verify_host_actions(
     Ok(())
 }
 
+fn is_control_site(kind: super::ir::HostSiteKind) -> bool {
+    matches!(
+        kind,
+        super::ir::HostSiteKind::BranchEdge
+            | super::ir::HostSiteKind::MatchArm
+            | super::ir::HostSiteKind::LoopEdge
+    )
+}
+
+fn operation_is_on_site_edge(
+    program: &OwnershipProgram,
+    site: &super::ir::HostSiteRecord,
+    unit: usize,
+    block: BlockId,
+    operation: OpId,
+) -> bool {
+    let Some(unit_ref) = program.units.get(unit) else {
+        return false;
+    };
+    let Some(edge) = edge_for_operation(unit_ref, block, operation) else {
+        return false;
+    };
+    let Some(operation_index) = site.actions.iter().position(
+        |action| matches!(action, HostSiteAction::Operation { operation: id, .. } if *id == operation),
+    ) else {
+        return false;
+    };
+    site.actions[..operation_index]
+        .iter()
+        .any(|action| match *action {
+            HostSiteAction::ControlEdge {
+                unit: action_unit,
+                edge: action_edge,
+                source,
+                target,
+            } => {
+                action_unit == unit
+                    && source == block
+                    && action_edge == edge.id
+                    && target == edge.target
+            }
+            HostSiteAction::Terminator {
+                unit: action_unit,
+                block: action_block,
+            } => {
+                action_unit == unit
+                    && action_block == block
+                    && matches!(
+                        unit_ref
+                            .blocks
+                            .iter()
+                            .find(|candidate| candidate.id == block)
+                            .map(|block| &block.terminator),
+                        Some(Terminator::Jump(jump)) if jump.id == edge.id
+                    )
+            }
+            _ => false,
+        })
+}
+
+fn edge_for_operation(unit: &Unit, block: BlockId, operation: OpId) -> Option<&Edge> {
+    unit.blocks
+        .iter()
+        .find(|candidate| candidate.id == block)?
+        .terminator
+        .edges()
+        .find(|edge| {
+            edge.terminals
+                .iter()
+                .any(|terminal| terminal.id == operation)
+        })
+}
+
 fn collect_expected_controls(
     program: &OwnershipProgram,
-) -> Result<BTreeMap<(usize, BlockId, BlockId), super::ir::HostSiteKind>, OwnershipError> {
+) -> Result<BTreeMap<(usize, EdgeId), super::ir::HostSiteKind>, OwnershipError> {
     let mut result = BTreeMap::new();
     for (unit_index, unit) in program.units.iter().enumerate() {
         for block in &unit.blocks {
-            let mut insert = |target: BlockId, kind: super::ir::HostSiteKind| {
-                if result
-                    .insert((unit_index, block.id, target), kind)
-                    .is_some()
-                {
+            let mut insert = |edge: &Edge, kind: super::ir::HostSiteKind| {
+                if result.insert((unit_index, edge.id), kind).is_some() {
                     Err(OwnershipError::HostSiteMap {
                         detail: format!(
-                            "unit {unit_index} block b{} repeats control target b{}",
-                            block.id.0, target.0
+                            "unit {unit_index} repeats control edge e{} from b{} to b{}",
+                            edge.id.0, block.id.0, edge.target.0
                         ),
                     })
                 } else {
@@ -440,12 +528,12 @@ fn collect_expected_controls(
                     else_edge,
                     ..
                 } => {
-                    insert(then_edge.target, super::ir::HostSiteKind::BranchEdge)?;
-                    insert(else_edge.target, super::ir::HostSiteKind::BranchEdge)?;
+                    insert(then_edge, super::ir::HostSiteKind::BranchEdge)?;
+                    insert(else_edge, super::ir::HostSiteKind::BranchEdge)?;
                 }
                 Terminator::Match { arms, .. } => {
                     for arm in arms {
-                        insert(arm.target, super::ir::HostSiteKind::MatchArm)?;
+                        insert(arm, super::ir::HostSiteKind::MatchArm)?;
                     }
                 }
                 Terminator::Loop {
@@ -453,8 +541,8 @@ fn collect_expected_controls(
                     exit_edge,
                     ..
                 } => {
-                    insert(body_edge.target, super::ir::HostSiteKind::LoopEdge)?;
-                    insert(exit_edge.target, super::ir::HostSiteKind::LoopEdge)?;
+                    insert(body_edge, super::ir::HostSiteKind::LoopEdge)?;
+                    insert(exit_edge, super::ir::HostSiteKind::LoopEdge)?;
                 }
                 Terminator::Jump(_) | Terminator::Return { .. } | Terminator::Exit => {}
             }
@@ -466,12 +554,19 @@ fn collect_expected_controls(
 fn expected_control_kind(
     program: &OwnershipProgram,
     unit: usize,
+    edge: EdgeId,
     source: BlockId,
     target: BlockId,
 ) -> Option<super::ir::HostSiteKind> {
+    let unit_ref = program.units.get(unit)?;
+    let block = unit_ref.blocks.iter().find(|block| block.id == source)?;
+    block
+        .terminator
+        .edges()
+        .find(|candidate| candidate.id == edge && candidate.target == target)?;
     collect_expected_controls(program)
         .ok()?
-        .get(&(unit, source, target))
+        .get(&(unit, edge))
         .copied()
 }
 
@@ -866,6 +961,21 @@ fn verify_unit(
     }
     let definitions = definitions(unit)?;
     check_operation_ids(unit)?;
+    for block in &unit.blocks {
+        for operation in &block.ops {
+            if operation.role != OperationRole::Semantic
+                && !matches!(operation.kind, Op::Drop { .. } | Op::Discard { .. })
+            {
+                return Err(OwnershipError::LoweringInvariant {
+                    unit: unit.name.clone(),
+                    detail: format!(
+                        "operation o{} marks a non-terminal as a scope exit",
+                        operation.id.0
+                    ),
+                });
+            }
+        }
+    }
     for owner in unit.owners.keys() {
         if !definitions.contains(owner) {
             return Err(incomplete(unit, *owner, "definition"));
@@ -1052,16 +1162,51 @@ fn derive_callable_schema(unit: &Unit) -> Result<Option<CallableSchema>, Ownersh
 
 fn check_operation_ids(unit: &Unit) -> Result<(), OwnershipError> {
     let mut operations = BTreeSet::new();
-    for operation in unit.blocks.iter().flat_map(|block| &block.ops) {
-        if !operations.insert(operation.id) {
-            return Err(OwnershipError::DuplicateIdentity {
-                unit: unit.name.clone(),
-                kind: "operation",
-                id: operation.id.0,
-            });
+    let mut edges = BTreeSet::new();
+    for block in &unit.blocks {
+        for operation in &block.ops {
+            if !operations.insert(operation.id) {
+                return Err(OwnershipError::DuplicateIdentity {
+                    unit: unit.name.clone(),
+                    kind: "operation",
+                    id: operation.id.0,
+                });
+            }
+        }
+        for edge in block.terminator.edges() {
+            if edge.id == EdgeId::UNASSIGNED || !edges.insert(edge.id) {
+                return Err(OwnershipError::DuplicateIdentity {
+                    unit: unit.name.clone(),
+                    kind: "edge",
+                    id: edge.id.0,
+                });
+            }
+            for terminal in &edge.terminals {
+                if !operations.insert(terminal.id) {
+                    return Err(OwnershipError::DuplicateIdentity {
+                        unit: unit.name.clone(),
+                        kind: "operation",
+                        id: terminal.id.0,
+                    });
+                }
+            }
         }
     }
     Ok(())
+}
+
+fn operation_exists_in_block(unit: &Unit, block: BlockId, operation: OpId) -> bool {
+    unit.blocks
+        .iter()
+        .find(|candidate| candidate.id == block)
+        .is_some_and(|block| {
+            block.ops.iter().any(|candidate| candidate.id == operation)
+                || block
+                    .terminator
+                    .edges()
+                    .flat_map(|edge| &edge.terminals)
+                    .any(|terminal| terminal.id == operation)
+        })
 }
 
 fn live_heap_count(unit: &Unit, live: &BTreeSet<OwnerId>) -> usize {
@@ -1216,7 +1361,7 @@ fn owner_reaches_return(unit: &Unit, owner: OwnerId, visiting: &mut BTreeSet<Own
             if edge
                 .terminals
                 .iter()
-                .any(|terminal| terminal.owner() == owner)
+                .any(|terminal| terminal.kind.owner() == owner)
             {
                 visiting.remove(&owner);
                 return false;
@@ -1743,10 +1888,10 @@ fn transfer(
             next.remove(&param.owner);
         }
     }
-    for terminal in &edge.terminals {
-        verify_edge_terminal(unit, block.id, *terminal, definitions, &mut next)?;
-    }
     next.extend(target.params.iter().map(|p| p.owner));
+    for terminal in &edge.terminals {
+        verify_edge_terminal(unit, block.id, terminal.kind, definitions, &mut next)?;
+    }
     check_borrows(unit, target.id, &next)?;
     if let Some(expected) = incoming.get(&target.id) {
         if expected != &next {

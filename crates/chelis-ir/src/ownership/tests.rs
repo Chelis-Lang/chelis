@@ -9,10 +9,11 @@ use chelis_types::types::Prim;
 use super::OwnershipError;
 use super::classify::{HeapKind, NonHeapKind, Placement, ValueClass, classify};
 use super::ir::{
-    ApplyKind, Block, BlockId, BlockParam, CallableBody, Edge, HostSiteAction, HostSiteId,
-    HostSiteKind, HostSiteMap, HostSiteRecord, Op, OpId, Operand, Operation, OperationSchema,
-    OwnerId, OwnerInfo, OwnerOrigin, OwnershipProgram as RawProgram, OwnershipUse, ParamMode,
-    Terminal, Terminator, Unit, UnitId, UnitKind,
+    ApplyKind, Block, BlockId, BlockParam, CallableBody, Edge, EdgeId, EdgeTerminal,
+    HostSiteAction, HostSiteId, HostSiteKind, HostSiteMap, HostSiteRecord, Op, OpId, Operand,
+    Operation, OperationRole, OperationSchema, OwnerId, OwnerInfo, OwnerOrigin,
+    OwnershipProgram as RawProgram, OwnershipUse, ParamMode, ScheduleState, Terminal, Terminator,
+    Unit, UnitId, UnitKind,
 };
 use super::{DagDirective, DagOwnershipPlan};
 use crate::host::{
@@ -48,7 +49,12 @@ fn parameter_info(prim: Prim, origin: OwnerOrigin) -> OwnerInfo {
     }
 }
 
-fn block(id: u32, params: Vec<BlockParam>, ops: Vec<Op>, terminator: Terminator) -> Block {
+fn block(id: u32, params: Vec<BlockParam>, ops: Vec<Op>, mut terminator: Terminator) -> Block {
+    for (edge_index, edge) in terminator.edges_mut().enumerate() {
+        if edge.id == EdgeId::UNASSIGNED {
+            edge.id = EdgeId((id << 8) | u32::try_from(edge_index).unwrap());
+        }
+    }
     Block {
         id: BlockId(id),
         params,
@@ -57,6 +63,7 @@ fn block(id: u32, params: Vec<BlockParam>, ops: Vec<Op>, terminator: Terminator)
             .enumerate()
             .map(|(index, kind)| Operation {
                 id: OpId((id << 16) | u32::try_from(index).unwrap()),
+                role: OperationRole::Semantic,
                 kind,
             })
             .collect(),
@@ -70,6 +77,7 @@ fn roots(blocks: Vec<Block>, owners: BTreeMap<OwnerId, OwnerInfo>) -> RawProgram
             id: UnitId(0),
             name: "roots".into(),
             kind: UnitKind::Roots,
+            schedule: ScheduleState::Phase2ScopeExit,
             callable_body: None,
             entry: BlockId(0),
             blocks,
@@ -80,10 +88,15 @@ fn roots(blocks: Vec<Block>, owners: BTreeMap<OwnerId, OwnerInfo>) -> RawProgram
 
 fn edge(target: u32, args: Vec<Operand>) -> Edge {
     Edge {
+        id: EdgeId::UNASSIGNED,
         target: BlockId(target),
         args,
         terminals: Vec::new(),
     }
+}
+
+fn edge_terminal(id: u32, kind: Terminal) -> EdgeTerminal {
+    EdgeTerminal { id: OpId(id), kind }
 }
 
 fn verify_raw(program: RawProgram) -> Result<RawProgram, OwnershipError> {
@@ -105,6 +118,32 @@ fn root(id: u32) -> Op {
             owner: OwnerId(id),
             use_: OwnershipUse::Move,
         },
+    }
+}
+
+fn provisional(id: u32, owner: u32, heap: bool) -> Operation {
+    Operation {
+        id: OpId(id),
+        role: OperationRole::ProvisionalScopeExit,
+        kind: if heap {
+            Op::Drop {
+                owner: Operand::move_(OwnerId(owner)),
+            }
+        } else {
+            Op::Discard {
+                owner: OwnerId(owner),
+            }
+        },
+    }
+}
+
+fn borrow_op(owner: u32) -> Op {
+    Op::Apply {
+        dest: None,
+        label: "observe".into(),
+        kind: ApplyKind::Intrinsic,
+        schema: OperationSchema::new(vec![OwnershipUse::Borrow], None),
+        args: vec![Operand::borrow(OwnerId(owner))],
     }
 }
 
@@ -385,14 +424,16 @@ fn edge_terminals_are_closed_path_local_consumes() {
                     Terminator::Branch {
                         condition: Operand::borrow(OwnerId(0)),
                         then_edge: Edge {
+                            id: EdgeId::UNASSIGNED,
                             target: BlockId(1),
                             args: Vec::new(),
                             terminals: vec![
-                                Terminal::Drop(OwnerId(1)),
-                                Terminal::Discard(OwnerId(2)),
+                                edge_terminal(90, Terminal::Drop(OwnerId(1))),
+                                edge_terminal(91, Terminal::Discard(OwnerId(2))),
                             ],
                         },
                         else_edge: Edge {
+                            id: EdgeId::UNASSIGNED,
                             target: BlockId(1),
                             args: Vec::new(),
                             terminals: else_terminals,
@@ -410,8 +451,8 @@ fn edge_terminals_are_closed_path_local_consumes() {
     };
 
     verify_raw(make(vec![
-        Terminal::Drop(OwnerId(1)),
-        Terminal::Discard(OwnerId(2)),
+        edge_terminal(92, Terminal::Drop(OwnerId(1))),
+        edge_terminal(93, Terminal::Discard(OwnerId(2))),
     ]))
     .unwrap();
     assert!(matches!(
@@ -429,9 +470,10 @@ fn edge_arguments_are_transferred_before_path_local_terminals() {
                 vec![],
                 vec![define(0)],
                 Terminator::Jump(Edge {
+                    id: EdgeId::UNASSIGNED,
                     target: BlockId(1),
                     args: vec![Operand::borrow(OwnerId(0))],
-                    terminals: vec![Terminal::Drop(OwnerId(0))],
+                    terminals: vec![edge_terminal(90, Terminal::Drop(OwnerId(0)))],
                 }),
             ),
             block(
@@ -454,9 +496,10 @@ fn edge_arguments_are_transferred_before_path_local_terminals() {
     );
     assert!(matches!(
         verify_raw(program),
-        Err(OwnershipError::OwnerNotLive {
+        Err(OwnershipError::LiveBorrowAtConsume {
             owner: 0,
-            block: 1,
+            borrow: 1,
+            block: 0,
             ..
         })
     ));
@@ -472,9 +515,10 @@ fn edge_terminal_kind_is_derived_from_the_owner_class() {
                     vec![],
                     vec![define(0)],
                     Terminator::Jump(Edge {
+                        id: EdgeId::UNASSIGNED,
                         target: BlockId(1),
                         args: vec![],
-                        terminals: vec![terminal],
+                        terminals: vec![edge_terminal(90, terminal)],
                     }),
                 ),
                 block(1, vec![], vec![], Terminator::Exit),
@@ -556,6 +600,7 @@ fn direct_call_program(transform_result: bool, callee: UnitId) -> RawProgram {
                 id: UnitId(0),
                 name: "roots".into(),
                 kind: UnitKind::Roots,
+                schedule: ScheduleState::Phase2ScopeExit,
                 callable_body: None,
                 entry: BlockId(0),
                 blocks: vec![block(0, vec![], vec![], Terminator::Exit)],
@@ -565,6 +610,7 @@ fn direct_call_program(transform_result: bool, callee: UnitId) -> RawProgram {
                 id: UnitId(1),
                 name: "caller".into(),
                 kind: UnitKind::Function,
+                schedule: ScheduleState::Phase2ScopeExit,
                 callable_body: Some(CallableBody::new(BlockId(0))),
                 entry: BlockId(0),
                 blocks: caller_blocks,
@@ -574,6 +620,7 @@ fn direct_call_program(transform_result: bool, callee: UnitId) -> RawProgram {
                 id: UnitId(2),
                 name: "callee".into(),
                 kind: UnitKind::Function,
+                schedule: ScheduleState::Phase2ScopeExit,
                 callable_body: Some(CallableBody::new(BlockId(0))),
                 entry: BlockId(0),
                 blocks: vec![block(
@@ -673,14 +720,16 @@ fn direct_call_schema_is_derived_from_the_actual_callable_body() {
             Terminator::Branch {
                 condition: Operand::borrow(OwnerId(0)),
                 then_edge: Edge {
+                    id: EdgeId::UNASSIGNED,
                     target: BlockId(1),
                     args: vec![],
-                    terminals: vec![Terminal::Discard(OwnerId(0))],
+                    terminals: vec![edge_terminal(90, Terminal::Discard(OwnerId(0)))],
                 },
                 else_edge: Edge {
+                    id: EdgeId::UNASSIGNED,
                     target: BlockId(2),
                     args: vec![],
-                    terminals: vec![Terminal::Discard(OwnerId(0))],
+                    terminals: vec![edge_terminal(91, Terminal::Discard(OwnerId(0)))],
                 },
             },
         ),
@@ -726,6 +775,7 @@ fn direct_call_argument_class_matches_the_callable_body_parameter() {
         0,
         Operation {
             id: OpId(20),
+            role: OperationRole::Semantic,
             kind: define(2),
         },
     );
@@ -736,6 +786,7 @@ fn direct_call_argument_class_matches_the_callable_body_parameter() {
     args.push(Operand::borrow(OwnerId(2)));
     program.units[1].blocks[0].ops.push(Operation {
         id: OpId(21),
+        role: OperationRole::Semantic,
         kind: Op::Discard { owner: OwnerId(2) },
     });
     program.units[2].blocks[0].params.push(BlockParam {
@@ -966,6 +1017,7 @@ fn entry_borrow_can_be_copied_but_not_consumed() {
 #[test]
 fn owned_edges_join_through_one_fresh_block_parameter() {
     let join = Edge {
+        id: EdgeId::UNASSIGNED,
         target: BlockId(1),
         args: vec![Operand {
             owner: OwnerId(1),
@@ -1008,6 +1060,7 @@ fn owned_edges_join_through_one_fresh_block_parameter() {
 #[test]
 fn owned_edge_rejects_a_borrow_disposition() {
     let edge = |use_| Edge {
+        id: EdgeId::UNASSIGNED,
         target: BlockId(1),
         args: vec![Operand {
             owner: OwnerId(1),
@@ -1346,6 +1399,7 @@ fn host_payload_sites_and_actions_are_bound_to_their_structural_unit() {
                 id: UnitId(0),
                 name: "roots".into(),
                 kind: UnitKind::Roots,
+                schedule: ScheduleState::Phase2ScopeExit,
                 callable_body: None,
                 entry: BlockId(0),
                 blocks: vec![block(0, vec![], vec![], Terminator::Exit)],
@@ -1355,6 +1409,7 @@ fn host_payload_sites_and_actions_are_bound_to_their_structural_unit() {
                 id: UnitId(1),
                 name: "identity".into(),
                 kind: UnitKind::Function,
+                schedule: ScheduleState::Phase2ScopeExit,
                 callable_body: Some(CallableBody::new(BlockId(0))),
                 entry: BlockId(0),
                 blocks: vec![block(0, vec![], vec![], Terminator::Exit)],
@@ -1405,11 +1460,13 @@ fn control_and_root_actions_are_complete_unique_and_kind_checked() {
                 Terminator::Branch {
                     condition: Operand::borrow(OwnerId(0)),
                     then_edge: Edge {
+                        id: EdgeId::UNASSIGNED,
                         target: BlockId(1),
                         args: vec![],
                         terminals: Vec::new(),
                     },
                     else_edge: Edge {
+                        id: EdgeId::UNASSIGNED,
                         target: BlockId(2),
                         args: vec![],
                         terminals: Vec::new(),
@@ -1442,6 +1499,7 @@ fn control_and_root_actions_are_complete_unique_and_kind_checked() {
                 HostSiteKind::BranchEdge,
                 vec![HostSiteAction::ControlEdge {
                     unit: 0,
+                    edge: EdgeId(0),
                     source: BlockId(0),
                     target: BlockId(1),
                 }],
@@ -1451,6 +1509,7 @@ fn control_and_root_actions_are_complete_unique_and_kind_checked() {
                 HostSiteKind::BranchEdge,
                 vec![HostSiteAction::ControlEdge {
                     unit: 0,
+                    edge: EdgeId(1),
                     source: BlockId(0),
                     target: BlockId(2),
                 }],
@@ -1642,4 +1701,861 @@ fn store_terminal_can_be_an_exported_root_but_drop_cannot() {
             .to_string()
             .contains("terminal and cannot be a DAG root")
     );
+}
+
+fn schedule(program: &mut RawProgram) -> Result<super::last_use::ScheduleFacts, OwnershipError> {
+    super::last_use::schedule(
+        program,
+        &mut HostSiteMap {
+            records: Vec::new(),
+        },
+    )
+}
+
+fn scheduled_block_terminal(block: &Block, owner: u32) -> Option<usize> {
+    block.ops.iter().position(|operation| {
+        operation.role == OperationRole::ScheduledScopeExit
+            && match &operation.kind {
+                Op::Drop { owner: dropped } => dropped.owner == OwnerId(owner),
+                Op::Discard { owner: discarded } => *discarded == OwnerId(owner),
+                _ => false,
+            }
+    })
+}
+
+fn typed_info(ty: ConcreteHostType, origin: OwnerOrigin) -> OwnerInfo {
+    OwnerInfo {
+        class: classify(&ty, Placement::Value).unwrap(),
+        ty,
+        placement: Placement::Value,
+        origin,
+        names: Vec::new(),
+    }
+}
+
+#[test]
+fn scheduler_places_straight_line_and_unused_owners_at_their_death_frontiers() {
+    let mut entry = block(
+        0,
+        vec![],
+        vec![define(0), borrow_op(0), define(1)],
+        Terminator::Exit,
+    );
+    entry
+        .ops
+        .extend([provisional(90, 1, false), provisional(91, 0, true)]);
+    let mut program = roots(
+        vec![entry],
+        BTreeMap::from([
+            (OwnerId(0), info(Prim::String, OwnerOrigin::Owned)),
+            (OwnerId(1), info(Prim::Int64, OwnerOrigin::Owned)),
+        ]),
+    );
+
+    schedule(&mut program).unwrap();
+    super::last_use::verify_canonical(&program).unwrap();
+    let ops = &program.units[0].blocks[0].ops;
+    assert_eq!(
+        scheduled_block_terminal(&program.units[0].blocks[0], 0),
+        Some(2)
+    );
+    assert_eq!(
+        scheduled_block_terminal(&program.units[0].blocks[0], 1),
+        Some(4)
+    );
+    assert_eq!(ops[2].id, OpId(91));
+    assert_eq!(ops[4].id, OpId(90));
+
+    let delayed = program.units[0].blocks[0].ops.remove(2);
+    program.units[0].blocks[0].ops.push(delayed);
+    assert!(matches!(
+        super::last_use::verify_canonical(&program),
+        Err(OwnershipError::NonCanonicalTerminal { owner: 0, .. })
+    ));
+}
+
+#[test]
+fn scheduler_splits_one_arm_death_and_rejects_omission_or_hoisting() {
+    let branch = Block {
+        id: BlockId(0),
+        params: vec![BlockParam {
+            owner: OwnerId(0),
+            mode: ParamMode::EntryBorrow,
+        }],
+        ops: vec![Operation {
+            id: OpId(0),
+            role: OperationRole::Semantic,
+            kind: define(1),
+        }],
+        terminator: Terminator::Branch {
+            condition: Operand::borrow(OwnerId(0)),
+            then_edge: Edge::new(EdgeId(10), BlockId(1), vec![]),
+            else_edge: Edge::new(EdgeId(11), BlockId(2), vec![]),
+        },
+    };
+    let then_block = block(
+        1,
+        vec![],
+        vec![borrow_op(1)],
+        Terminator::Jump(Edge::new(EdgeId(12), BlockId(3), vec![])),
+    );
+    let else_block = block(
+        2,
+        vec![],
+        vec![],
+        Terminator::Jump(Edge::new(EdgeId(13), BlockId(3), vec![])),
+    );
+    let mut join = block(3, vec![], vec![], Terminator::Exit);
+    join.ops.push(provisional(90, 1, true));
+    let base = roots(
+        vec![branch, then_block, else_block, join],
+        BTreeMap::from([
+            (OwnerId(0), info(Prim::Bool, OwnerOrigin::ExternalBorrow)),
+            (OwnerId(1), info(Prim::String, OwnerOrigin::Owned)),
+        ]),
+    );
+
+    let mut duplicate_edge = base.clone();
+    duplicate_edge.units[0].blocks[0]
+        .terminator
+        .edges_mut()
+        .find(|edge| edge.id == EdgeId(11))
+        .unwrap()
+        .id = EdgeId(10);
+    assert!(matches!(
+        super::verify::verify(&duplicate_edge),
+        Err(OwnershipError::DuplicateIdentity {
+            kind: "edge",
+            id: 10,
+            ..
+        })
+    ));
+
+    let mut scheduled = base.clone();
+    schedule(&mut scheduled).unwrap();
+    super::last_use::verify_canonical(&scheduled).unwrap();
+    assert_eq!(
+        scheduled_block_terminal(&scheduled.units[0].blocks[1], 1),
+        Some(1)
+    );
+    assert_eq!(
+        scheduled.units[0].blocks[0]
+            .terminator
+            .edges()
+            .find(|edge| edge.id == EdgeId(11))
+            .unwrap()
+            .terminals
+            .iter()
+            .map(|terminal| terminal.kind.owner())
+            .collect::<Vec<_>>(),
+        vec![OwnerId(1)]
+    );
+
+    let mut omitted = scheduled.clone();
+    omitted.units[0].blocks[0]
+        .terminator
+        .edges_mut()
+        .find(|edge| edge.id == EdgeId(11))
+        .unwrap()
+        .terminals
+        .clear();
+    assert!(matches!(
+        super::last_use::verify_canonical(&omitted),
+        Err(OwnershipError::NonCanonicalTerminal { owner: 1, .. })
+    ));
+
+    let mut duplicated = scheduled.clone();
+    let terminal = duplicated.units[0].blocks[0]
+        .terminator
+        .edges()
+        .find(|edge| edge.id == EdgeId(11))
+        .unwrap()
+        .terminals[0];
+    duplicated.units[0].blocks[0]
+        .terminator
+        .edges_mut()
+        .find(|edge| edge.id == EdgeId(11))
+        .unwrap()
+        .terminals
+        .push(EdgeTerminal {
+            id: OpId(99),
+            ..terminal
+        });
+    assert!(matches!(
+        super::last_use::verify_canonical(&duplicated),
+        Err(OwnershipError::NonCanonicalTerminal { owner: 1, .. })
+    ));
+
+    let mut wrong_edge = scheduled.clone();
+    let terminal = wrong_edge.units[0].blocks[0]
+        .terminator
+        .edges_mut()
+        .find(|edge| edge.id == EdgeId(11))
+        .unwrap()
+        .terminals
+        .pop()
+        .unwrap();
+    wrong_edge.units[0].blocks[0]
+        .terminator
+        .edges_mut()
+        .find(|edge| edge.id == EdgeId(10))
+        .unwrap()
+        .terminals
+        .push(terminal);
+    assert!(matches!(
+        super::last_use::verify_canonical(&wrong_edge),
+        Err(OwnershipError::NonCanonicalTerminal { owner: 1, .. })
+    ));
+
+    let mut both_arms = base;
+    both_arms.units[0].blocks[2].ops.push(Operation {
+        id: OpId(2 << 16),
+        role: OperationRole::Semantic,
+        kind: borrow_op(1),
+    });
+    schedule(&mut both_arms).unwrap();
+    let late_arm_terminal = both_arms.units[0].blocks[2].ops.pop().unwrap();
+    assert_eq!(late_arm_terminal.role, OperationRole::ScheduledScopeExit);
+    let edge = both_arms.units[0].blocks[0]
+        .terminator
+        .edges_mut()
+        .find(|edge| edge.id == EdgeId(11))
+        .unwrap();
+    edge.terminals.push(EdgeTerminal {
+        id: late_arm_terminal.id,
+        kind: Terminal::Drop(OwnerId(1)),
+    });
+    assert!(matches!(
+        super::last_use::verify_canonical(&both_arms),
+        Err(OwnershipError::NonCanonicalTerminal { owner: 1, .. })
+    ));
+}
+
+#[test]
+fn scheduler_preserves_owned_join_moves_and_rejects_drop_plus_move() {
+    let mut program = roots(
+        vec![
+            block(
+                0,
+                vec![],
+                vec![define(0)],
+                Terminator::Jump(Edge::new(
+                    EdgeId(10),
+                    BlockId(1),
+                    vec![Operand::move_(OwnerId(0))],
+                )),
+            ),
+            block(
+                1,
+                vec![BlockParam {
+                    owner: OwnerId(1),
+                    mode: ParamMode::Owned,
+                }],
+                vec![root(1)],
+                Terminator::Exit,
+            ),
+        ],
+        BTreeMap::from([
+            (OwnerId(0), info(Prim::String, OwnerOrigin::Owned)),
+            (OwnerId(1), info(Prim::String, OwnerOrigin::Owned)),
+        ]),
+    );
+    schedule(&mut program).unwrap();
+    super::last_use::verify_canonical(&program).unwrap();
+
+    program.units[0].blocks[0]
+        .terminator
+        .edges_mut()
+        .next()
+        .unwrap()
+        .terminals
+        .push(EdgeTerminal {
+            id: OpId(91),
+            kind: Terminal::Drop(OwnerId(0)),
+        });
+    assert!(matches!(
+        super::last_use::verify_canonical(&program),
+        Err(OwnershipError::CarriedOwnerDropped { owner: 0, .. })
+    ));
+}
+
+#[test]
+fn match_scrutinee_survives_projection_and_default_paths_cannot_leak() {
+    let option_ty = ConcreteHostType::Option(Box::new(ConcreteHostType::String));
+    let payload_class = classify(&ConcreteHostType::String, Placement::Value).unwrap();
+    let match_block = Block {
+        id: BlockId(0),
+        params: vec![],
+        ops: vec![Operation {
+            id: OpId(0),
+            role: OperationRole::Semantic,
+            kind: define(0),
+        }],
+        terminator: Terminator::Match {
+            scrutinee: Operand::borrow(OwnerId(0)),
+            arms: vec![
+                Edge::new(EdgeId(10), BlockId(1), vec![]),
+                Edge::new(EdgeId(11), BlockId(2), vec![]),
+            ],
+        },
+    };
+    let some = block(
+        1,
+        vec![],
+        vec![
+            Op::Apply {
+                dest: Some(OwnerId(1)),
+                label: "option_payload".into(),
+                kind: ApplyKind::Intrinsic,
+                schema: OperationSchema::new(vec![OwnershipUse::Borrow], Some(payload_class)),
+                args: vec![Operand::borrow(OwnerId(0))],
+            },
+            Op::Drop {
+                owner: Operand::move_(OwnerId(1)),
+            },
+        ],
+        Terminator::Jump(Edge::new(EdgeId(12), BlockId(3), vec![])),
+    );
+    let none = block(
+        2,
+        vec![],
+        vec![],
+        Terminator::Jump(Edge::new(EdgeId(13), BlockId(3), vec![])),
+    );
+    let mut join = block(3, vec![], vec![], Terminator::Exit);
+    join.ops.push(provisional(90, 0, true));
+    let mut program = roots(
+        vec![match_block, some, none, join],
+        BTreeMap::from([
+            (OwnerId(0), typed_info(option_ty, OwnerOrigin::Owned)),
+            (
+                OwnerId(1),
+                typed_info(ConcreteHostType::String, OwnerOrigin::Owned),
+            ),
+        ]),
+    );
+
+    schedule(&mut program).unwrap();
+    super::last_use::verify_canonical(&program).unwrap();
+    let projection = program.units[0].blocks[1]
+        .ops
+        .iter()
+        .position(|operation| matches!(&operation.kind, Op::Apply { label, .. } if label == "option_payload"))
+        .unwrap();
+    assert_eq!(
+        scheduled_block_terminal(&program.units[0].blocks[1], 0),
+        Some(projection + 1)
+    );
+    let default_edge = program.units[0].blocks[0]
+        .terminator
+        .edges_mut()
+        .find(|edge| edge.id == EdgeId(11))
+        .unwrap();
+    assert_eq!(default_edge.terminals.len(), 1);
+    default_edge.terminals.clear();
+    assert!(matches!(
+        super::last_use::verify_canonical(&program),
+        Err(OwnershipError::NonCanonicalTerminal { owner: 0, .. })
+    ));
+}
+
+#[test]
+fn match_adt_default_receives_its_own_terminal() {
+    let match_block = Block {
+        id: BlockId(0),
+        params: vec![],
+        ops: vec![Operation {
+            id: OpId(0),
+            role: OperationRole::Semantic,
+            kind: define(0),
+        }],
+        terminator: Terminator::Match {
+            scrutinee: Operand::borrow(OwnerId(0)),
+            arms: vec![
+                Edge::new(EdgeId(10), BlockId(1), vec![]),
+                Edge::new(EdgeId(11), BlockId(2), vec![]),
+                Edge::new(EdgeId(12), BlockId(3), vec![]),
+            ],
+        },
+    };
+    let payload = Op::Apply {
+        dest: None,
+        label: "adt_payload:Some:0".into(),
+        kind: ApplyKind::Intrinsic,
+        schema: OperationSchema::new(vec![OwnershipUse::Borrow], None),
+        args: vec![Operand::borrow(OwnerId(0))],
+    };
+    let mut join = block(4, vec![], vec![], Terminator::Exit);
+    join.ops.push(provisional(90, 0, true));
+    let mut program = roots(
+        vec![
+            match_block,
+            block(
+                1,
+                vec![],
+                vec![payload],
+                Terminator::Jump(Edge::new(EdgeId(13), BlockId(4), vec![])),
+            ),
+            block(
+                2,
+                vec![],
+                vec![],
+                Terminator::Jump(Edge::new(EdgeId(14), BlockId(4), vec![])),
+            ),
+            block(
+                3,
+                vec![],
+                vec![],
+                Terminator::Jump(Edge::new(EdgeId(15), BlockId(4), vec![])),
+            ),
+            join,
+        ],
+        BTreeMap::from([(OwnerId(0), info(Prim::String, OwnerOrigin::Owned))]),
+    );
+
+    schedule(&mut program).unwrap();
+    assert_eq!(
+        scheduled_block_terminal(&program.units[0].blocks[1], 0),
+        Some(1)
+    );
+    let default = program.units[0].blocks[0]
+        .terminator
+        .edges_mut()
+        .find(|edge| edge.id == EdgeId(12))
+        .unwrap();
+    assert_eq!(default.terminals.len(), 1);
+    default.terminals.clear();
+    assert!(matches!(
+        super::last_use::verify_canonical(&program),
+        Err(OwnershipError::NonCanonicalTerminal { owner: 0, .. })
+    ));
+}
+
+#[test]
+fn diamond_uses_the_post_dominating_join_instead_of_lexical_block_order() {
+    let branch = Block {
+        id: BlockId(0),
+        params: vec![BlockParam {
+            owner: OwnerId(0),
+            mode: ParamMode::EntryBorrow,
+        }],
+        ops: vec![Operation {
+            id: OpId(0),
+            role: OperationRole::Semantic,
+            kind: define(1),
+        }],
+        terminator: Terminator::Branch {
+            condition: Operand::borrow(OwnerId(0)),
+            then_edge: Edge::new(EdgeId(10), BlockId(1), vec![]),
+            else_edge: Edge::new(EdgeId(11), BlockId(2), vec![]),
+        },
+    };
+    let left = block(
+        1,
+        vec![],
+        vec![],
+        Terminator::Jump(Edge::new(EdgeId(12), BlockId(3), vec![])),
+    );
+    let right = block(
+        2,
+        vec![],
+        vec![],
+        Terminator::Jump(Edge::new(EdgeId(13), BlockId(3), vec![])),
+    );
+    let mut join = block(3, vec![], vec![borrow_op(1)], Terminator::Exit);
+    join.ops.push(provisional(90, 1, true));
+    let mut program = roots(
+        vec![branch, left, right, join],
+        BTreeMap::from([
+            (OwnerId(0), info(Prim::Bool, OwnerOrigin::ExternalBorrow)),
+            (OwnerId(1), info(Prim::String, OwnerOrigin::Owned)),
+        ]),
+    );
+
+    let facts = schedule(&mut program).unwrap();
+    assert_eq!(
+        facts.successor_count(
+            UnitId(0),
+            super::last_use::SchedulePoint::BeforeTerminator(BlockId(0)),
+        ),
+        Some(2)
+    );
+    assert_eq!(
+        facts.predecessor_count(
+            UnitId(0),
+            super::last_use::SchedulePoint::BlockEntry(BlockId(3)),
+        ),
+        Some(2)
+    );
+    assert!(facts.postdominates(
+        UnitId(0),
+        super::last_use::SchedulePoint::AfterOperation {
+            block: BlockId(3),
+            operation: OpId(3 << 16),
+        },
+        super::last_use::SchedulePoint::BeforeTerminator(BlockId(0)),
+    ));
+    assert_eq!(
+        scheduled_block_terminal(&program.units[0].blocks[3], 1),
+        Some(1)
+    );
+    super::last_use::verify_canonical(&program).unwrap();
+}
+
+#[test]
+fn excluded_loop_and_tail_shapes_fail_closed_and_stale_provisionals_are_rejected() {
+    let mut loop_program = roots(
+        vec![block(
+            0,
+            vec![],
+            vec![],
+            Terminator::Loop {
+                list: Operand::borrow(OwnerId(0)),
+                body_edge: Edge::new(EdgeId(10), BlockId(0), vec![]),
+                exit_edge: Edge::new(EdgeId(11), BlockId(0), vec![]),
+            },
+        )],
+        BTreeMap::from([(OwnerId(0), info(Prim::String, OwnerOrigin::ExternalBorrow))]),
+    );
+    assert!(matches!(
+        schedule(&mut loop_program),
+        Err(OwnershipError::LastUseSchedulingDeferred {
+            feature: "loop",
+            ..
+        })
+    ));
+
+    let mut tail_program = direct_call_program(false, UnitId(2));
+    assert!(matches!(
+        schedule(&mut tail_program),
+        Err(OwnershipError::LastUseSchedulingDeferred {
+            feature: "direct call",
+            ..
+        })
+    ));
+
+    let mut stale = roots(
+        vec![block(0, vec![], vec![define(0)], Terminator::Exit)],
+        BTreeMap::from([(OwnerId(0), info(Prim::String, OwnerOrigin::Owned))]),
+    );
+    stale.units[0].blocks[0].ops.push(provisional(90, 0, true));
+    assert!(matches!(
+        super::last_use::verify_canonical(&stale),
+        Err(OwnershipError::StaleProvisionalTerminal { owner: 0, .. })
+    ));
+}
+
+#[test]
+fn scheduler_derives_terminal_kind_and_reverse_definition_order() {
+    let observe_both = Op::Apply {
+        dest: None,
+        label: "observe-both".into(),
+        kind: ApplyKind::Intrinsic,
+        schema: OperationSchema::new(vec![OwnershipUse::Borrow, OwnershipUse::Borrow], None),
+        args: vec![Operand::borrow(OwnerId(0)), Operand::borrow(OwnerId(1))],
+    };
+    let mut entry = block(
+        0,
+        vec![],
+        vec![define(0), define(1), observe_both],
+        Terminator::Exit,
+    );
+    entry
+        .ops
+        .extend([provisional(90, 0, true), provisional(91, 1, true)]);
+    let mut program = roots(
+        vec![entry],
+        BTreeMap::from([
+            (OwnerId(0), info(Prim::String, OwnerOrigin::Owned)),
+            (OwnerId(1), info(Prim::String, OwnerOrigin::Owned)),
+        ]),
+    );
+    schedule(&mut program).unwrap();
+    assert_eq!(
+        program.units[0].blocks[0].ops[3..]
+            .iter()
+            .map(|operation| terminal_from_test_op(&operation.kind))
+            .collect::<Vec<_>>(),
+        vec![Some(OwnerId(1)), Some(OwnerId(0))]
+    );
+    super::last_use::verify_canonical(&program).unwrap();
+
+    program.units[0].blocks[0].ops.swap(3, 4);
+    assert!(matches!(
+        super::last_use::verify_canonical(&program),
+        Err(OwnershipError::NonCanonicalTerminal { .. })
+    ));
+
+    let mut wrong_kind = roots(
+        vec![block(0, vec![], vec![define(0)], Terminator::Exit)],
+        BTreeMap::from([(OwnerId(0), info(Prim::String, OwnerOrigin::Owned))]),
+    );
+    wrong_kind.units[0].blocks[0]
+        .ops
+        .push(provisional(90, 0, false));
+    assert!(matches!(
+        schedule(&mut wrong_kind),
+        Err(OwnershipError::HeapDiscard { owner: 0, .. })
+    ));
+}
+
+fn terminal_from_test_op(op: &Op) -> Option<OwnerId> {
+    match op {
+        Op::Drop { owner } => Some(owner.owner),
+        Op::Discard { owner } => Some(*owner),
+        _ => None,
+    }
+}
+
+#[test]
+fn scheduler_rebuilds_host_sites_from_stable_operation_and_edge_identities() {
+    let branch = Block {
+        id: BlockId(0),
+        params: vec![BlockParam {
+            owner: OwnerId(0),
+            mode: ParamMode::EntryBorrow,
+        }],
+        ops: vec![Operation {
+            id: OpId(0),
+            role: OperationRole::Semantic,
+            kind: define(1),
+        }],
+        terminator: Terminator::Branch {
+            condition: Operand::borrow(OwnerId(0)),
+            then_edge: Edge::new(EdgeId(10), BlockId(1), vec![]),
+            else_edge: Edge::new(EdgeId(11), BlockId(2), vec![]),
+        },
+    };
+    let then_block = block(
+        1,
+        vec![],
+        vec![borrow_op(1)],
+        Terminator::Jump(Edge::new(EdgeId(12), BlockId(3), vec![])),
+    );
+    let else_block = block(
+        2,
+        vec![],
+        vec![],
+        Terminator::Jump(Edge::new(EdgeId(13), BlockId(3), vec![])),
+    );
+    let mut join = block(3, vec![], vec![], Terminator::Exit);
+    join.ops.push(provisional(90, 1, true));
+    let mut program = roots(
+        vec![branch, then_block, else_block, join],
+        BTreeMap::from([
+            (OwnerId(0), info(Prim::Bool, OwnerOrigin::ExternalBorrow)),
+            (OwnerId(1), info(Prim::String, OwnerOrigin::Owned)),
+        ]),
+    );
+    let record = |index, kind, actions| HostSiteRecord {
+        id: HostSiteId::from_index(index),
+        unit: 0,
+        kind,
+        actions,
+    };
+    let mut sites = HostSiteMap {
+        records: vec![
+            record(
+                0,
+                HostSiteKind::Expression,
+                vec![HostSiteAction::Operation {
+                    unit: 0,
+                    block: BlockId(3),
+                    operation: OpId(90),
+                }],
+            ),
+            record(
+                1,
+                HostSiteKind::Expression,
+                vec![HostSiteAction::Operation {
+                    unit: 0,
+                    block: BlockId(1),
+                    operation: OpId(1 << 16),
+                }],
+            ),
+            record(
+                2,
+                HostSiteKind::BranchEdge,
+                vec![HostSiteAction::ControlEdge {
+                    unit: 0,
+                    edge: EdgeId(11),
+                    source: BlockId(0),
+                    target: BlockId(2),
+                }],
+            ),
+        ],
+    };
+
+    super::last_use::schedule(&mut program, &mut sites).unwrap();
+    assert!(sites.records[0].actions.is_empty());
+    assert_eq!(sites.records[1].actions.len(), 2);
+    assert!(matches!(
+        sites.records[1].actions[1],
+        HostSiteAction::Operation {
+            block: BlockId(1),
+            operation: OpId(90),
+            ..
+        }
+    ));
+    let edge_terminal = program.units[0].blocks[0]
+        .terminator
+        .edges()
+        .find(|edge| edge.id == EdgeId(11))
+        .unwrap()
+        .terminals[0]
+        .id;
+    assert!(matches!(
+        sites.records[2].actions.as_slice(),
+        [
+            HostSiteAction::ControlEdge {
+                edge: EdgeId(11),
+                ..
+            },
+            HostSiteAction::Operation {
+                operation,
+                ..
+            }
+        ] if *operation == edge_terminal
+    ));
+}
+
+#[test]
+fn unused_owned_block_parameter_dies_after_incoming_transfer_at_its_exact_site() {
+    let mut target = block(
+        1,
+        vec![BlockParam {
+            owner: OwnerId(1),
+            mode: ParamMode::Owned,
+        }],
+        vec![],
+        Terminator::Exit,
+    );
+    target.ops.push(provisional(90, 1, true));
+    let mut program = roots(
+        vec![
+            block(
+                0,
+                vec![],
+                vec![define(0)],
+                Terminator::Jump(Edge::new(
+                    EdgeId(10),
+                    BlockId(1),
+                    vec![Operand::move_(OwnerId(0))],
+                )),
+            ),
+            target,
+        ],
+        BTreeMap::from([
+            (OwnerId(0), info(Prim::String, OwnerOrigin::Owned)),
+            (OwnerId(1), info(Prim::String, OwnerOrigin::Owned)),
+        ]),
+    );
+    let record = |index, actions| HostSiteRecord {
+        id: HostSiteId::from_index(index),
+        unit: 0,
+        kind: HostSiteKind::Expression,
+        actions,
+    };
+    let mut sites = HostSiteMap {
+        records: vec![
+            record(
+                0,
+                vec![
+                    HostSiteAction::Operation {
+                        unit: 0,
+                        block: BlockId(0),
+                        operation: OpId(0),
+                    },
+                    HostSiteAction::Terminator {
+                        unit: 0,
+                        block: BlockId(0),
+                    },
+                ],
+            ),
+            record(
+                1,
+                vec![
+                    HostSiteAction::Terminator {
+                        unit: 0,
+                        block: BlockId(1),
+                    },
+                    HostSiteAction::Operation {
+                        unit: 0,
+                        block: BlockId(1),
+                        operation: OpId(90),
+                    },
+                ],
+            ),
+        ],
+    };
+
+    super::last_use::schedule(&mut program, &mut sites).unwrap();
+    assert!(program.units[0].blocks[1].ops.is_empty());
+    let edge = program.units[0].blocks[0]
+        .terminator
+        .edges()
+        .next()
+        .unwrap();
+    assert_eq!(
+        edge.terminals,
+        vec![edge_terminal(90, Terminal::Drop(OwnerId(1)))]
+    );
+    assert!(matches!(
+        sites.records[0].actions.as_slice(),
+        [
+            HostSiteAction::Operation {
+                operation: OpId(0),
+                ..
+            },
+            HostSiteAction::Terminator {
+                block: BlockId(0),
+                ..
+            },
+            HostSiteAction::Operation {
+                operation: OpId(90),
+                ..
+            }
+        ]
+    ));
+    super::verify::verify_host_actions(
+        &program,
+        &RootManifest {
+            entries: Vec::new(),
+        },
+        &sites,
+    )
+    .unwrap();
+
+    let mut before_transfer = sites;
+    before_transfer.records[0].actions.swap(1, 2);
+    assert!(matches!(
+        super::verify::verify_host_actions(
+            &program,
+            &RootManifest {
+                entries: Vec::new()
+            },
+            &before_transfer,
+        ),
+        Err(OwnershipError::HostSiteMap { .. })
+    ));
+}
+
+#[test]
+fn untyped_back_edge_shape_is_deferred_instead_of_self_certifying() {
+    let mut program = roots(
+        vec![block(
+            0,
+            vec![],
+            vec![],
+            Terminator::Jump(Edge::new(EdgeId(10), BlockId(0), vec![])),
+        )],
+        BTreeMap::new(),
+    );
+    assert!(matches!(
+        schedule(&mut program),
+        Err(OwnershipError::LastUseSchedulingDeferred {
+            feature: "cyclic control flow",
+            ..
+        })
+    ));
 }

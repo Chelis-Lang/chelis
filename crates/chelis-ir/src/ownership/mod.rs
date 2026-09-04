@@ -117,6 +117,7 @@ use crate::host::{
 mod classify;
 mod error;
 mod ir;
+mod last_use;
 mod lower;
 mod render;
 mod verify;
@@ -584,7 +585,7 @@ fn verified_edge<'a>(
         terminals: edge
             .terminals
             .iter()
-            .map(|terminal| match *terminal {
+            .map(|terminal| match terminal.kind {
                 ir::Terminal::Drop(owner) => {
                     verified_owner(program, unit, owner).map(VerifiedTerminalView::Drop)
                 }
@@ -608,11 +609,33 @@ fn verified_host_action<'a>(
             block,
             operation,
         } => {
-            let op = program
-                .units
-                .get(unit)?
+            let unit_ref = program.units.get(unit)?;
+            let block_ref = unit_ref
                 .blocks
-                .get(block.0 as usize)?
+                .iter()
+                .find(|candidate| candidate.id == block)?;
+            if let Some(terminal) = block_ref
+                .terminator
+                .edges()
+                .flat_map(|edge| &edge.terminals)
+                .find(|terminal| terminal.id == operation)
+            {
+                let operation = VerifiedOperationId { key: operation.0 };
+                let block = block_id(block);
+                return Some(VerifiedHostAction::Operation(match terminal.kind {
+                    ir::Terminal::Drop(owner) => VerifiedHostOperation::Drop {
+                        operation,
+                        block,
+                        owner: verified_operand(program, unit, &ir::Operand::move_(owner))?,
+                    },
+                    ir::Terminal::Discard(owner) => VerifiedHostOperation::Discard {
+                        operation,
+                        block,
+                        owner: verified_owner(program, unit, owner)?,
+                    },
+                }));
+            }
+            let op = block_ref
                 .ops
                 .iter()
                 .find(|candidate| candidate.id == operation)?;
@@ -741,6 +764,7 @@ fn verified_host_action<'a>(
         }
         ir::HostSiteAction::ControlEdge {
             unit,
+            edge: edge_id,
             source,
             target,
         } => {
@@ -751,27 +775,9 @@ fn verified_host_action<'a>(
                 .iter()
                 .find(|block| block.id == source)?
                 .terminator;
-            let edge = match terminator {
-                ir::Terminator::Jump(edge) if edge.target == target => edge,
-                ir::Terminator::Branch {
-                    then_edge,
-                    else_edge,
-                    ..
-                }
-                | ir::Terminator::Loop {
-                    body_edge: then_edge,
-                    exit_edge: else_edge,
-                    ..
-                } => [then_edge, else_edge]
-                    .into_iter()
-                    .find(|edge| edge.target == target)?,
-                ir::Terminator::Match { arms, .. } => {
-                    arms.iter().find(|edge| edge.target == target)?
-                }
-                ir::Terminator::Return { .. } | ir::Terminator::Jump(_) | ir::Terminator::Exit => {
-                    return None;
-                }
-            };
+            let edge = terminator
+                .edges()
+                .find(|edge| edge.id == edge_id && edge.target == target)?;
             Some(VerifiedHostAction::ControlEdge {
                 source: block_id(source),
                 edge: verified_edge(program, unit, edge)?,

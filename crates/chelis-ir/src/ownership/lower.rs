@@ -23,9 +23,10 @@ use crate::host_type_state::ConcreteHostType;
 use super::classify::{ClassifyError, Placement, ValueClass, classify, render_type};
 use super::error::OwnershipError;
 use super::ir::{
-    ApplyKind, Block, BlockId, BlockParam, CallableBody, Edge, HostSiteAction, HostSiteBuilder,
-    HostSiteId, HostSiteKind, Op, OpId, Operand, Operation, OperationSchema, OwnerId, OwnerInfo,
-    OwnerOrigin, OwnershipProgram, ParamMode, Terminator, Unit, UnitId, UnitKind,
+    ApplyKind, Block, BlockId, BlockParam, CallableBody, Edge, EdgeId, HostSiteAction,
+    HostSiteBuilder, HostSiteId, HostSiteKind, Op, OpId, Operand, Operation, OperationRole,
+    OperationSchema, OwnerId, OwnerInfo, OwnerOrigin, OwnershipProgram, ParamMode, ScheduleState,
+    Terminator, Unit, UnitId, UnitKind,
 };
 
 const ROOTS_UNIT: &str = "roots";
@@ -549,6 +550,8 @@ struct UnitLowerer<'a, 'sites> {
     callback_modes: BTreeMap<OwnerId, Vec<ParamMode>>,
     next_owner: u32,
     next_operation: u32,
+    next_edge: u32,
+    recorded_edges: BTreeSet<EdgeId>,
     current: BlockId,
     scopes: Vec<Scope>,
     moved: BTreeSet<OwnerId>,
@@ -577,6 +580,8 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             callback_modes: BTreeMap::new(),
             next_owner: 0,
             next_operation: 0,
+            next_edge: 0,
+            recorded_edges: BTreeSet::new(),
             current: BlockId(0),
             scopes: Vec::new(),
             moved: BTreeSet::new(),
@@ -619,6 +624,14 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
     }
 
     fn emit(&mut self, op: Op) {
+        self.emit_with_role(op, OperationRole::Semantic);
+    }
+
+    fn emit_scope_exit(&mut self, op: Op) {
+        self.emit_with_role(op, OperationRole::ProvisionalScopeExit);
+    }
+
+    fn emit_with_role(&mut self, op: Op, role: OperationRole) {
         let block = self.current;
         let operation = OpId(self.next_operation);
         self.next_operation = self
@@ -638,26 +651,44 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         );
         self.blocks[block.0 as usize].ops.push(Operation {
             id: operation,
+            role,
             kind: op,
         });
     }
 
     fn record_edge(&mut self, kind: HostSiteKind, target: BlockId) {
+        let edge = self.blocks[self.current.0 as usize]
+            .terminator
+            .as_ref()
+            .into_iter()
+            .flat_map(Terminator::edges)
+            .find(|edge| edge.target == target && !self.recorded_edges.contains(&edge.id))
+            .map(|edge| edge.id)
+            .expect("recorded control edge must exist on the current terminator");
+        self.recorded_edges.insert(edge);
         let site = self.sites.add(self.unit_index, kind);
         self.sites.record(
             site,
             HostSiteAction::ControlEdge {
                 unit: self.unit_index,
+                edge,
                 source: self.current,
                 target,
             },
         );
     }
 
-    fn set_terminator(&mut self, terminator: Terminator) -> Result<(), OwnershipError> {
+    fn set_terminator(&mut self, mut terminator: Terminator) -> Result<(), OwnershipError> {
         let index = self.current.0 as usize;
         if self.blocks[index].terminator.is_some() {
             return Err(self.invariant(format!("block b{} terminated twice", self.current.0)));
+        }
+        for edge in terminator.edges_mut() {
+            edge.id = EdgeId(self.next_edge);
+            self.next_edge = self
+                .next_edge
+                .checked_add(1)
+                .expect("ownership edge census exceeds u32");
         }
         self.blocks[index].terminator = Some(terminator);
         let site = self
@@ -897,11 +928,11 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 continue;
             }
             if self.info(owner)?.class.is_heap() {
-                self.emit(Op::Drop {
+                self.emit_scope_exit(Op::Drop {
                     owner: Operand::move_(owner),
                 });
             } else {
-                self.emit(Op::Discard { owner });
+                self.emit_scope_exit(Op::Discard { owner });
             }
             self.moved.insert(owner);
         }
@@ -956,6 +987,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             id: UnitId(self.unit_index as u32),
             name: self.unit_name,
             kind,
+            schedule: ScheduleState::Phase2ScopeExit,
             callable_body,
             entry,
             blocks,
@@ -1580,6 +1612,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         let result = self.consume(value, Some(depth))?;
         self.exit_scope()?;
         self.set_terminator(Terminator::Jump(Edge {
+            id: EdgeId::UNASSIGNED,
             target: join,
             args: vec![result],
             terminals: Vec::new(),
@@ -1605,11 +1638,13 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.set_terminator(Terminator::Branch {
             condition: cond,
             then_edge: Edge {
+                id: EdgeId::UNASSIGNED,
                 target: then_block,
                 args: Vec::new(),
                 terminals: Vec::new(),
             },
             else_edge: Edge {
+                id: EdgeId::UNASSIGNED,
                 target: else_block,
                 args: Vec::new(),
                 terminals: Vec::new(),
@@ -1657,11 +1692,13 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             scrutinee,
             arms: vec![
                 Edge {
+                    id: EdgeId::UNASSIGNED,
                     target: some,
                     args: Vec::new(),
                     terminals: Vec::new(),
                 },
                 Edge {
+                    id: EdgeId::UNASSIGNED,
                     target: none,
                     args: Vec::new(),
                     terminals: Vec::new(),
@@ -1722,6 +1759,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         let mut edges = arm_blocks
             .iter()
             .map(|target| Edge {
+                id: EdgeId::UNASSIGNED,
                 target: *target,
                 args: Vec::new(),
                 terminals: Vec::new(),
@@ -1729,6 +1767,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             .collect::<Vec<_>>();
         if let Some(target) = default_block {
             edges.push(Edge {
+                id: EdgeId::UNASSIGNED,
                 target,
                 args: Vec::new(),
                 terminals: Vec::new(),
@@ -1844,6 +1883,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             mode: ParamMode::Owned,
         }]);
         self.set_terminator(Terminator::Jump(Edge {
+            id: EdgeId::UNASSIGNED,
             target: header,
             args: vec![init],
             terminals: Vec::new(),
@@ -1873,11 +1913,13 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.set_terminator(Terminator::Loop {
             list,
             body_edge: Edge {
+                id: EdgeId::UNASSIGNED,
                 target: body,
                 args: vec![Operand::move_(header_owner)],
                 terminals: Vec::new(),
             },
             exit_edge: Edge {
+                id: EdgeId::UNASSIGNED,
                 target: exit,
                 args: vec![Operand::move_(header_owner)],
                 terminals: Vec::new(),
@@ -1906,6 +1948,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         let next = self.consume(next, Some(depth))?;
         self.exit_scope()?;
         self.set_terminator(Terminator::Jump(Edge {
+            id: EdgeId::UNASSIGNED,
             target: header,
             args: vec![next],
             terminals: Vec::new(),
@@ -1953,6 +1996,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             mode: ParamMode::Owned,
         }]);
         self.set_terminator(Terminator::Jump(Edge {
+            id: EdgeId::UNASSIGNED,
             target: header,
             args: vec![Operand::move_(seed)],
             terminals: Vec::new(),
@@ -1973,11 +2017,13 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.set_terminator(Terminator::Loop {
             list,
             body_edge: Edge {
+                id: EdgeId::UNASSIGNED,
                 target: body,
                 args: vec![Operand::move_(header_owner)],
                 terminals: Vec::new(),
             },
             exit_edge: Edge {
+                id: EdgeId::UNASSIGNED,
                 target: exit,
                 args: vec![Operand::move_(header_owner)],
                 terminals: Vec::new(),
@@ -2019,6 +2065,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.moved.insert(next);
         self.exit_scope()?;
         self.set_terminator(Terminator::Jump(Edge {
+            id: EdgeId::UNASSIGNED,
             target: header,
             args: vec![Operand::move_(next)],
             terminals: Vec::new(),
@@ -2057,6 +2104,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             mode: ParamMode::Owned,
         }]);
         self.set_terminator(Terminator::Jump(Edge {
+            id: EdgeId::UNASSIGNED,
             target: header,
             args: vec![Operand::move_(seed)],
             terminals: Vec::new(),
@@ -2077,11 +2125,13 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.set_terminator(Terminator::Loop {
             list,
             body_edge: Edge {
+                id: EdgeId::UNASSIGNED,
                 target: body,
                 args: vec![Operand::move_(header_owner)],
                 terminals: Vec::new(),
             },
             exit_edge: Edge {
+                id: EdgeId::UNASSIGNED,
                 target: exit,
                 args: vec![Operand::move_(header_owner)],
                 terminals: Vec::new(),
@@ -2129,6 +2179,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.moved.insert(next);
         self.exit_scope()?;
         self.set_terminator(Terminator::Jump(Edge {
+            id: EdgeId::UNASSIGNED,
             target: header,
             args: vec![Operand::move_(next)],
             terminals: Vec::new(),
@@ -2189,6 +2240,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             },
         ]);
         self.set_terminator(Terminator::Jump(Edge {
+            id: EdgeId::UNASSIGNED,
             target: header,
             args: vec![init, Operand::move_(output_seed)],
             terminals: Vec::new(),
@@ -2230,11 +2282,13 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.set_terminator(Terminator::Loop {
             list,
             body_edge: Edge {
+                id: EdgeId::UNASSIGNED,
                 target: body,
                 args: vec![Operand::move_(header_state), Operand::move_(header_output)],
                 terminals: Vec::new(),
             },
             exit_edge: Edge {
+                id: EdgeId::UNASSIGNED,
                 target: exit,
                 args: vec![Operand::move_(header_state), Operand::move_(header_output)],
                 terminals: Vec::new(),
@@ -2282,6 +2336,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.moved.insert(next_output);
         self.exit_scope()?;
         self.set_terminator(Terminator::Jump(Edge {
+            id: EdgeId::UNASSIGNED,
             target: header,
             args: vec![next_state, Operand::move_(next_output)],
             terminals: Vec::new(),
@@ -2697,6 +2752,7 @@ fn lower_function(
                 });
             }
             lowerer.set_terminator(Terminator::Jump(Edge {
+                id: EdgeId::UNASSIGNED,
                 target: body,
                 args,
                 terminals: Vec::new(),

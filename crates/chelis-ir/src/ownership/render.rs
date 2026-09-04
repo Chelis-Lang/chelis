@@ -31,7 +31,7 @@ fn edge(value: &Edge) -> String {
     let terminals = value
         .terminals
         .iter()
-        .map(|terminal| match terminal {
+        .map(|terminal| match terminal.kind {
             Terminal::Drop(owner) => format!("drop %{}", owner.0),
             Terminal::Discard(owner) => format!("discard %{}", owner.0),
         })

@@ -172,6 +172,18 @@ pub enum OwnershipError {
         owner: u32,
         block: u32,
     },
+    #[error("last-use scheduling for `{unit}` defers {feature} to the next milestone")]
+    LastUseSchedulingDeferred { unit: String, feature: &'static str },
+    #[error("owner %{owner} in `{unit}` has a noncanonical terminal: {detail}")]
+    NonCanonicalTerminal {
+        unit: String,
+        owner: u32,
+        detail: String,
+    },
+    #[error("owner %{owner} in `{unit}` retains a provisional scope-exit terminal")]
+    StaleProvisionalTerminal { unit: String, owner: u32 },
+    #[error("owner %{owner} in `{unit}` is both moved across edge e{edge} and terminated there")]
+    CarriedOwnerDropped { unit: String, owner: u32, edge: u32 },
     #[error("root sink `{root}` appears outside the roots unit `{unit}`")]
     RootSinkOutsideRoots { unit: String, root: String },
     #[error("branch condition %{owner} is not bool in `{unit}` b{block}")]
