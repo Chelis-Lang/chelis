@@ -2815,11 +2815,15 @@ spelling of the read. So the structural fix belongs at the read:
    `kids.get(1)` being `None`, which the seam distinguishes from a present
    child it could not read. This is the whole of R1, and it is why the repair
    is not "delete the default".
-3. **The seam sits beneath both ingresses.** It lives in
-   `chelis-types/src/infer/*`, below the point where the serialized `.dp`
-   ingress and the typed `check_typed_program` ingress converge, so the fix
-   is ingress-independent by construction. That is why the unvalidated
-   ingress list below does not weaken the repair, only the evidence.
+3. **Both Deep carriers reach the same read.** `infer_expr` dispatches
+   `Expr::List` and `Expr::Node` to the same `infer_vmap` and `infer_grad`
+   (`infer/expr.rs:143-144` and `:442-443`), so a typed read placed at the
+   `Selector` slot inside those functions is reached from both carriers
+   through that dispatch. That is the whole of the claim: PP8's oracle runs
+   its rows through `chelis check` only and claims nothing about the two
+   ingresses agreeing. Ingress agreement is PP7's axis under [04-TOT-5], and
+   an ingress-parity row for a PP8 program belongs in PP7's parity set
+   rather than here.
 
 **Explicitly not delivered here.** Two things. Any change to which slots are
 legal bare lists: the sanctioned set stays exactly as `desugar.rs`'s
@@ -2902,10 +2906,14 @@ Slice 2 extends `bypass_child_expectation`'s neighbourhood rather than
 `child_stamp_role` itself, so the role table's totality test is untouched.
 `normalize_nodes_to_lists` (`infer/program.rs:~1931`) rewrites `BareList` to
 a tagless `Expr::List` at the serialized-IR ingress while the typed ingress
-keeps `BareList`; [#1125]'s ingress-parity work may unify those. Neither
-slice here is affected either way, because both sit in
-`chelis-types/src/infer/*`, beneath the point where the two ingresses
-converge. Nothing here depends on the [#1085] BareList disposition work,
+keeps `BareList`; [#1125]'s ingress-parity work may unify those, and PP7
+owns that axis. Neither slice here depends on the outcome. Every Slice 1 site
+sits under a function `infer_expr` dispatches from both carrier arms -
+`infer_vmap` and `infer_grad` (`expr.rs:143-144`, `:442-443`), `infer_record`
+(`:134`, `:436`), and `infer_match` (`:127`, `:430`), which reaches the two
+pattern reads through `pattern_bindings`, itself keyed on the carrier-total
+`stamped_parts`. Nothing here depends on the [#1085] BareList
+disposition work,
 which governs expression position where the checker is already loud.
 
 #### What this does not establish
@@ -3357,7 +3365,7 @@ vacuity, or [#1076]/[#672]'s independently owned name-precedence work.
 | PP6 (decided, not delivered) | [#1486] (a hole is never quantified and no reference observes it before the body; an authored binder is rigid), [#1487] (lambda bodies and applied values are eager references), [#1485] (every reference-graph component is inferred as one group; the three spellings reject as `CycleDetected` identically at both ingresses); [#1134] closes when all three are dispositioned as PP6 states |
 | PP7 | [#1125]'s carrier axis: the seven probed divergences receive the same verdict from `check_ir_program` and `check_typed_program`, and one shared total accessor plus the lint make a carrier a reader cannot decode a diagnostic rather than an absent subtree. Axis B (`validate_ir_program` runs on the serialized-IR entry only), owned by [#1537], and the unswept guarded-arm inventory are named residue, not claims |
 | [#1134] forward-reference residual | both checker ingresses reject eager forward values, accept backward values from value initializers and from function bodies wherever the schedule places them except the [#1485] shape, accept declaration-local explicitly typed external inputs, retain sequential local scope, and reject bare self-reference/eager value cycles identically; the schedule's order invariants are asserted directly |
-| PP8 | [#874]'s class statement, restated as coverage rather than tag-keying, and [#887]'s Tier 1 residue. Seven named programs over `vmap`'s axis, `pat-ctor`/`pat-record` heads, and `grad`'s operand are rejected instead of scoring 1.0, and `kv`'s unreadable key reports its own form instead of an `internal:` stamp violation naming a different node; the selector-read seam makes a silently-defaulted slot unspellable, and sits beneath both ingresses. The `Selector` role is enumerated and all eight of its slots are claimed; the other roles are spot-checked only, and converting them into a claim needs an enumerator this item does not deliver (decision row 18) |
+| PP8 | [#874]'s class statement, restated as coverage rather than tag-keying, and [#887]'s Tier 1 residue. Seven named programs over `vmap`'s axis, `pat-ctor`/`pat-record` heads, and `grad`'s operand are rejected instead of scoring 1.0, and `kv`'s unreadable key reports its own form instead of an `internal:` stamp violation naming a different node; the selector-read seam makes a silently-defaulted slot unspellable, and `infer_expr` reaches it from either Deep carrier. The `Selector` role is enumerated and all eight of its slots are claimed; the other roles are spot-checked only, and converting them into a claim needs an enumerator this item does not deliver (decision row 18) |
 
 ## Decisions and remaining questions
 
@@ -3473,6 +3481,7 @@ silent exemption to be diagnosed rather than an empty subtree to be skipped.
 [#1537]: https://github.com/Chelis-Lang/chelis/issues/1537
 [#1134]: https://github.com/Chelis-Lang/chelis/issues/1134
 [#887]: https://github.com/Chelis-Lang/chelis/issues/887
+[#930]: https://github.com/Chelis-Lang/chelis/issues/930
 [#1085]: https://github.com/Chelis-Lang/chelis/issues/1085
 [#998]: https://github.com/Chelis-Lang/chelis/issues/998
 [#1019]: https://github.com/Chelis-Lang/chelis/issues/1019
