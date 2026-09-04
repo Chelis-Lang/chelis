@@ -2,12 +2,13 @@ use std::collections::BTreeMap;
 
 use chelis_types::types::Prim;
 
+use super::OwnershipError;
 use super::classify::{HeapKind, NonHeapKind, Placement, ValueClass, classify};
 use super::ir::{
-    Block, BlockId, BlockParam, Edge, Op, Operand, OwnerId, OwnerInfo, OwnerOrigin,
+    Block, BlockId, BlockParam, Edge, HostSiteAction, HostSiteId, HostSiteKind, HostSiteMap,
+    HostSiteRecord, Op, Operand, OperationSchema, OwnerId, OwnerInfo, OwnerOrigin,
     OwnershipProgram as RawProgram, OwnershipUse, ParamMode, Terminator, Unit, UnitKind,
 };
-use super::{OwnershipError, OwnershipProgram, verify_ownership};
 use crate::host_type_state::ConcreteHostType;
 
 fn ty(prim: Prim) -> ConcreteHostType {
@@ -34,8 +35,8 @@ fn block(id: u32, params: Vec<BlockParam>, ops: Vec<Op>, terminator: Terminator)
     }
 }
 
-fn roots(blocks: Vec<Block>, owners: BTreeMap<OwnerId, OwnerInfo>) -> OwnershipProgram {
-    OwnershipProgram(RawProgram {
+fn roots(blocks: Vec<Block>, owners: BTreeMap<OwnerId, OwnerInfo>) -> RawProgram {
+    RawProgram {
         units: vec![Unit {
             name: "roots".into(),
             kind: UnitKind::Roots,
@@ -43,7 +44,12 @@ fn roots(blocks: Vec<Block>, owners: BTreeMap<OwnerId, OwnerInfo>) -> OwnershipP
             blocks,
             owners,
         }],
-    })
+    }
+}
+
+fn verify_raw(program: RawProgram) -> Result<RawProgram, OwnershipError> {
+    super::verify::verify(&program)?;
+    Ok(program)
 }
 
 fn define(id: u32) -> Op {
@@ -70,7 +76,7 @@ fn one_owner_one_terminal_verifies_and_renders_stably() {
         BTreeMap::from([(OwnerId(0), info(Prim::String, OwnerOrigin::Owned))]),
     );
     assert_eq!(
-        verify_ownership(program).unwrap().render(),
+        super::render::render(&verify_raw(program).unwrap()),
         "unit roots Roots\n  b0 ():\n    %0 = fresh\n    root result move %0\n    exit\n"
     );
 }
@@ -82,7 +88,7 @@ fn unterminated_heap_owner_is_rejected() {
         BTreeMap::from([(OwnerId(0), info(Prim::String, OwnerOrigin::Owned))]),
     );
     assert!(matches!(
-        verify_ownership(program),
+        verify_raw(program),
         Err(OwnershipError::MissingTerminal { owner: 0, .. })
     ));
 }
@@ -112,7 +118,7 @@ fn clone_only_mints_an_owner_through_copy() {
             (OwnerId(1), info(Prim::String, OwnerOrigin::Owned)),
         ]),
     );
-    verify_ownership(program).unwrap();
+    verify_raw(program).unwrap();
 }
 
 #[test]
@@ -126,6 +132,7 @@ fn clone_disposition_outside_copy_is_rejected() {
                 Op::Apply {
                     dest: None,
                     label: "bad".into(),
+                    schema: OperationSchema::new(vec![OwnershipUse::Borrow], None),
                     args: vec![Operand {
                         owner: OwnerId(0),
                         use_: OwnershipUse::Clone,
@@ -138,9 +145,71 @@ fn clone_disposition_outside_copy_is_rejected() {
         BTreeMap::from([(OwnerId(0), info(Prim::String, OwnerOrigin::Owned))]),
     );
     assert!(matches!(
-        verify_ownership(program),
+        verify_raw(program),
         Err(OwnershipError::WrongUse { owner: 0, .. })
     ));
+}
+
+#[test]
+fn typed_apply_schema_accepts_its_exact_mode_and_rejects_a_forged_one() {
+    let make = |use_| {
+        roots(
+            vec![block(
+                0,
+                vec![],
+                vec![
+                    define(0),
+                    Op::Apply {
+                        dest: None,
+                        label: "diagnostic spelling is not semantics".into(),
+                        schema: OperationSchema::new(vec![OwnershipUse::Move], None),
+                        args: vec![Operand {
+                            owner: OwnerId(0),
+                            use_,
+                        }],
+                    },
+                ],
+                Terminator::Exit,
+            )],
+            BTreeMap::from([(OwnerId(0), info(Prim::Int64, OwnerOrigin::Owned))]),
+        )
+    };
+    verify_raw(make(OwnershipUse::Move)).unwrap();
+    assert!(matches!(
+        verify_raw(make(OwnershipUse::Borrow)),
+        Err(OwnershipError::WrongUse { owner: 0, .. })
+    ));
+}
+
+#[test]
+fn every_owned_identity_needs_a_terminal_even_when_nonheap() {
+    let bad = roots(
+        vec![block(0, vec![], vec![define(0)], Terminator::Exit)],
+        BTreeMap::from([(OwnerId(0), info(Prim::Int64, OwnerOrigin::Owned))]),
+    );
+    assert!(matches!(
+        verify_raw(bad),
+        Err(OwnershipError::MissingTerminal { owner: 0, .. })
+    ));
+
+    let good = roots(
+        vec![block(
+            0,
+            vec![],
+            vec![
+                define(0),
+                Op::Apply {
+                    dest: None,
+                    label: "discard".into(),
+                    schema: OperationSchema::new(vec![OwnershipUse::Move], None),
+                    args: vec![Operand::move_(OwnerId(0))],
+                },
+            ],
+            Terminator::Exit,
+        )],
+        BTreeMap::from([(OwnerId(0), info(Prim::Int64, OwnerOrigin::Owned))]),
+    );
+    verify_raw(good).unwrap();
 }
 
 #[test]
@@ -171,14 +240,14 @@ fn entry_borrow_can_be_copied_but_not_consumed() {
         )],
         owners.clone(),
     );
-    verify_ownership(good).unwrap();
+    verify_raw(good).unwrap();
 
     let bad = roots(
         vec![block(0, params, vec![root(0)], Terminator::Exit)],
         BTreeMap::from([(OwnerId(0), info(Prim::String, OwnerOrigin::ExternalBorrow))]),
     );
     assert!(matches!(
-        verify_ownership(bad),
+        verify_raw(bad),
         Err(OwnershipError::BorrowConsumed { owner: 0, .. })
     ));
 }
@@ -217,11 +286,19 @@ fn owned_edges_join_through_one_fresh_block_parameter() {
                 owner: OwnerId(2),
                 mode: ParamMode::Owned,
             }],
-            vec![root(2)],
+            vec![
+                Op::Apply {
+                    dest: None,
+                    label: "discard condition".into(),
+                    schema: OperationSchema::new(vec![OwnershipUse::Move], None),
+                    args: vec![Operand::move_(OwnerId(0))],
+                },
+                root(2),
+            ],
             Terminator::Exit,
         ),
     ];
-    verify_ownership(roots(blocks, owners)).unwrap();
+    verify_raw(roots(blocks, owners)).unwrap();
 }
 
 #[test]
@@ -263,7 +340,7 @@ fn owned_edge_rejects_a_borrow_disposition() {
         ),
     ];
     assert!(matches!(
-        verify_ownership(roots(blocks, owners)),
+        verify_raw(roots(blocks, owners)),
         Err(OwnershipError::WrongUse { owner: 1, .. })
     ));
 }
@@ -280,7 +357,7 @@ fn moved_owner_cannot_be_used_again() {
         BTreeMap::from([(OwnerId(0), info(Prim::String, OwnerOrigin::Owned))]),
     );
     assert!(matches!(
-        verify_ownership(program),
+        verify_raw(program),
         Err(OwnershipError::OwnerNotLive { owner: 0, .. })
     ));
 }
@@ -316,7 +393,84 @@ fn unreachable_block_is_rejected() {
         BTreeMap::new(),
     );
     assert!(matches!(
-        verify_ownership(program),
+        verify_raw(program),
         Err(OwnershipError::UnreachableBlock { block: 1, .. })
+    ));
+}
+
+#[test]
+fn host_payload_site_and_directive_universes_are_bijective() {
+    let program = roots(
+        vec![block(0, vec![], vec![define(0), root(0)], Terminator::Exit)],
+        BTreeMap::from([(OwnerId(0), info(Prim::String, OwnerOrigin::Owned))]),
+    );
+    let record = |index, actions| HostSiteRecord {
+        id: HostSiteId::from_index(index),
+        kind: HostSiteKind::Expression,
+        actions,
+    };
+    let valid = HostSiteMap {
+        records: vec![
+            record(
+                0,
+                vec![
+                    HostSiteAction::Structural,
+                    HostSiteAction::Operation {
+                        unit: 0,
+                        block: BlockId(0),
+                        operation: 0,
+                    },
+                ],
+            ),
+            record(
+                1,
+                vec![
+                    HostSiteAction::Structural,
+                    HostSiteAction::Operation {
+                        unit: 0,
+                        block: BlockId(0),
+                        operation: 1,
+                    },
+                ],
+            ),
+            record(
+                2,
+                vec![
+                    HostSiteAction::Structural,
+                    HostSiteAction::Terminator {
+                        unit: 0,
+                        block: BlockId(0),
+                    },
+                ],
+            ),
+        ],
+    };
+    super::verify::verify_host_sites(&program, &valid).unwrap();
+
+    let mut missing = valid.clone();
+    missing.records[1]
+        .actions
+        .retain(|action| !matches!(action, HostSiteAction::Operation { .. }));
+    assert!(matches!(
+        super::verify::verify_host_sites(&program, &missing),
+        Err(OwnershipError::HostSiteMap { .. })
+    ));
+
+    let mut extra = valid.clone();
+    extra.records[2].actions.push(HostSiteAction::Operation {
+        unit: 0,
+        block: BlockId(0),
+        operation: 1,
+    });
+    assert!(matches!(
+        super::verify::verify_host_sites(&program, &extra),
+        Err(OwnershipError::HostSiteMap { .. })
+    ));
+
+    let mut mismatched = valid;
+    mismatched.records.swap(0, 1);
+    assert!(matches!(
+        super::verify::verify_host_sites(&program, &mismatched),
+        Err(OwnershipError::HostSiteMap { .. })
     ));
 }

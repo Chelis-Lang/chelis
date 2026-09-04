@@ -152,33 +152,75 @@ The verifier enforces for every path:
 
 ## C2. The ownership IR boundary
 
-`chelis-ir` gains an ownership-lowered host/control-flow form with private
-constructors:
+`chelis-ir` gains a sealed, payload-typed ownership boundary with private
+constructors. Host emission and tensor-DAG emission are distinct
+specializations of the same verified transition:
 
 ```rust
-pub struct OwnershipProgram { /* private blocks, owners, uses, roots */ }
-pub struct VerifiedOwnershipProgram(OwnershipProgram);
+pub struct OwnershipProgram<P: EmissionPayload> {
+    /* private exact payload, owners, uses, roots, and directives */
+}
+pub struct VerifiedOwnershipProgram<P: EmissionPayload>(OwnershipProgram<P>);
 
-pub fn lower_ownership(
-    checked: &CheckedProgram,
-    host: &HostProgram,
-    manifest: &RootManifest,
-) -> Result<OwnershipProgram, OwnershipError>;
+pub struct HostEmissionPayload { /* private post-selection host program */ }
+pub struct DagEmissionPayload { /* private post-optimization DAG */ }
 
-pub fn verify_ownership(
-    program: OwnershipProgram,
-) -> Result<VerifiedOwnershipProgram, OwnershipError>;
+pub type VerifiedHostProgram =
+    VerifiedOwnershipProgram<HostEmissionPayload>;
+pub type VerifiedDagProgram =
+    VerifiedOwnershipProgram<DagEmissionPayload>;
+
+pub fn lower_host_ownership(
+    manifested: &ManifestedProgram,
+    host: ConcreteHostProgram,
+) -> Result<OwnershipProgram<HostEmissionPayload>, OwnershipError>;
+
+pub fn lower_dag_ownership(
+    dag: Dag,
+) -> Result<OwnershipProgram<DagEmissionPayload>, OwnershipError>;
+
+pub fn verify_ownership<P: EmissionPayload>(
+    program: OwnershipProgram<P>,
+) -> Result<VerifiedOwnershipProgram<P>, OwnershipError>;
 ```
 
-The exact crate may use references rather than owned arguments, but the type
-boundary is fixed: only `verify_ownership` constructs
-`VerifiedOwnershipProgram`, its fields are private, and every compiled backend
-entry point takes that verified type. `HostProgram` remains an earlier logical
-form and is not itself an emission contract.
+`EmissionPayload` is sealed inside `chelis-ir`; downstream crates cannot add a
+payload kind. Only `verify_ownership` constructs either verified
+specialization. A verified value owns the exact post-entry-selection,
+post-optimization payload together with its directives: a caller cannot retain
+a mutable sibling payload, extract the raw payload, or reorder it after
+lowering. Backends receive read-only verified views and every compiled backend
+entry point takes the specialization for its lane. `HostProgram` and `Dag`
+remain earlier logical forms and are not themselves emission contracts.
+
+The host payload assigns an opaque `HostSiteId` by structural traversal, never
+from an identifier's spelling. Every binding, expression, argument, branch or
+match edge, loop edge, function entry and return, and manifested root has one
+site and one directive-list entry. Ownership operations reference those sites,
+and verification proves the payload-site and directive-site universes are
+bijective before a backend can observe them. Host ABI projection preserves the
+site identities and consumes one verified payload if it must produce another;
+it cannot clone or rebuild a raw sibling program after verification.
+
+The DAG specialization uses the existing stable `NodeId` identity. Loads are
+borrowed entries; producers mint owners; `Copy` clones; roots and stores are
+explicit sinks; and `Drop` is an explicit terminal. Standalone DAGs and every
+nested `HostTensorHelper` run the same DAG ownership verifier. The host payload
+keeps each nested helper and its proof inseparable, so a backend cannot route a
+raw helper DAG around verification. Phase 2 adds no reusable-storage proof.
+
+An ownership `Apply` carries a closed typed operation schema containing its
+resolved operand modes and result class. Its free-form label exists only for
+diagnostics and stable rendering. Verification compares every operand and
+result against the schema; lowering output is not accepted merely because its
+label or self-selected disposition looks plausible.
 
 The representation contains:
 
 - stable `OwnerId` and `BlockId` identities;
+- opaque, non-spelling host-site identities and existing DAG `NodeId`s;
+- a total payload-site/directive-site bijection;
+- typed operation schemas independent of diagnostic labels;
 - explicit borrow/move/clone operands;
 - owned block parameters for joins and loops;
 - terminal consumes and drops;
@@ -729,9 +771,18 @@ and fast-gate checks pass on the same committed head.
 - `OwnershipProgram`, private construction, and the total verifier;
 - explicit use dispositions, owner joins, loop parameters, and root sinks;
 - backend signatures that accept only `VerifiedOwnershipProgram`;
+- payload-owning host and DAG verified specializations, including verified
+  nested tensor-helper DAGs;
 - owned return behavior for arguments, captures, and fresh values;
 - ownership-directed releases for heap-valued host code; and
 - deletion of C emitter ownership inference for converted forms.
+
+Phase 2 owns terminal semantics for every `RiscOp::Drop` consumer. C and HIP
+emit the same single release selected by the verified DAG directive and exclude
+that owner from epilogue cleanup. Metal consumes the verified directive through
+its typed no-reuse/no-device-owner plan and never invents a device owner or a
+reuse decision. The backend emission mechanics land after the sealed boundary
+and DAG verifier exist, but remain part of this phase's exit contract.
 
 This phase promotes exactly five oracle rows: the [#1346] fold row, the two
 [#1352] mixed fresh-arm rows, and the two [#1356] fresh-argument rows. It

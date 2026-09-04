@@ -5,8 +5,8 @@ use chelis_types::types::Prim;
 use super::classify::{classify, render_type};
 use super::error::OwnershipError;
 use super::ir::{
-    Block, BlockId, Edge, Op, Operand, OwnerId, OwnerOrigin, OwnershipProgram, OwnershipUse,
-    ParamMode, Terminator, Unit, UnitKind,
+    Block, BlockId, Edge, HostSiteAction, HostSiteMap, Op, Operand, OwnerId, OwnerOrigin,
+    OwnershipProgram, OwnershipUse, ParamMode, Terminator, Unit, UnitKind,
 };
 
 pub(super) fn verify(program: &OwnershipProgram) -> Result<(), OwnershipError> {
@@ -27,6 +27,123 @@ pub(super) fn verify(program: &OwnershipProgram) -> Result<(), OwnershipError> {
         Ok(())
     } else {
         Err(OwnershipError::RootUnitCount { actual: roots })
+    }
+}
+
+/// Prove that the exact payload-site universe and the ownership-directive
+/// universe travel together. Every operation and terminal in the ownership IR
+/// is owned by exactly one opaque host site; every structural payload site has
+/// one directive-list entry.
+pub(super) fn verify_host_sites(
+    program: &OwnershipProgram,
+    sites: &HostSiteMap,
+) -> Result<(), OwnershipError> {
+    let mut operations = BTreeSet::new();
+    let mut terminals = BTreeSet::new();
+    for (index, site) in sites.records.iter().enumerate() {
+        if site.id.index() != index {
+            return Err(OwnershipError::HostSiteMap {
+                detail: format!("site at position {index} has a different opaque identity"),
+            });
+        }
+        if site.actions.is_empty() {
+            return Err(OwnershipError::HostSiteMap {
+                detail: format!("site {index} has no directive entry"),
+            });
+        }
+        for action in &site.actions {
+            match *action {
+                HostSiteAction::Structural => {}
+                HostSiteAction::Operation {
+                    unit,
+                    block,
+                    operation,
+                } => {
+                    let Some(unit_ref) = program.units.get(unit) else {
+                        return Err(site_error(index, "operation names missing unit"));
+                    };
+                    let Some(block_ref) = unit_ref.blocks.iter().find(|item| item.id == block)
+                    else {
+                        return Err(site_error(index, "operation names missing block"));
+                    };
+                    if block_ref.ops.get(operation).is_none() {
+                        return Err(site_error(index, "operation index is outside its block"));
+                    }
+                    if !operations.insert((unit, block, operation)) {
+                        return Err(site_error(index, "operation belongs to two sites"));
+                    }
+                }
+                HostSiteAction::Terminator { unit, block } => {
+                    if !terminals.insert((unit, block)) {
+                        return Err(site_error(index, "terminator belongs to two sites"));
+                    }
+                    let Some(unit_ref) = program.units.get(unit) else {
+                        return Err(site_error(index, "terminator names missing unit"));
+                    };
+                    if !unit_ref.blocks.iter().any(|item| item.id == block) {
+                        return Err(site_error(index, "terminator names missing block"));
+                    }
+                }
+                HostSiteAction::Root(owner) => {
+                    if !program
+                        .units
+                        .iter()
+                        .any(|unit| unit.owners.contains_key(&owner))
+                    {
+                        return Err(site_error(index, "directive names missing owner"));
+                    }
+                }
+                HostSiteAction::ControlEdge {
+                    unit,
+                    source,
+                    target,
+                } => {
+                    let Some(unit_ref) = program.units.get(unit) else {
+                        return Err(site_error(index, "edge names missing unit"));
+                    };
+                    let Some(block_ref) = unit_ref.blocks.iter().find(|item| item.id == source)
+                    else {
+                        return Err(site_error(index, "edge names missing source block"));
+                    };
+                    if !successors(&block_ref.terminator).contains(&target) {
+                        return Err(site_error(index, "edge target is not a successor"));
+                    }
+                }
+            }
+        }
+    }
+    let expected_operations = program
+        .units
+        .iter()
+        .enumerate()
+        .flat_map(|(unit, value)| {
+            value.blocks.iter().flat_map(move |block| {
+                (0..block.ops.len()).map(move |operation| (unit, block.id, operation))
+            })
+        })
+        .collect::<BTreeSet<_>>();
+    if operations != expected_operations {
+        return Err(OwnershipError::HostSiteMap {
+            detail: "ownership operation/site correspondence is not bijective".to_string(),
+        });
+    }
+    let expected_terminals = program
+        .units
+        .iter()
+        .enumerate()
+        .flat_map(|(unit, value)| value.blocks.iter().map(move |block| (unit, block.id)))
+        .collect::<BTreeSet<_>>();
+    if terminals != expected_terminals {
+        return Err(OwnershipError::HostSiteMap {
+            detail: "ownership terminator/site correspondence is not bijective".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn site_error(index: usize, detail: &'static str) -> OwnershipError {
+    OwnershipError::HostSiteMap {
+        detail: format!("site {index} {detail}"),
     }
 }
 
@@ -142,6 +259,7 @@ fn check_params(unit: &Unit) -> Result<(), OwnershipError> {
                 (param.mode, origin),
                 (ParamMode::Owned, OwnerOrigin::Owned)
                     | (ParamMode::Borrowed, OwnerOrigin::BorrowedFrom(_))
+                    | (ParamMode::Borrowed, OwnerOrigin::InternalBorrow)
                     | (ParamMode::Borrowed, OwnerOrigin::ExternalBorrow)
                     | (ParamMode::EntryBorrow, OwnerOrigin::ExternalBorrow)
             ) && (param.mode != ParamMode::EntryBorrow || block.id == unit.entry);
@@ -208,13 +326,53 @@ fn verify_op(
 ) -> Result<(), OwnershipError> {
     match op {
         Op::Define { dest, .. } => define(unit, *dest, live),
-        Op::Apply { dest, args, .. } => {
-            check_mixed_uses(unit, block.id, args)?;
-            for arg in args {
-                use_operand(unit, block.id, arg, None, definitions, live)?;
+        Op::Apply {
+            dest,
+            label,
+            schema,
+            args,
+        } => {
+            if args.len() != schema.operands.len() {
+                return Err(OwnershipError::OperationArity {
+                    unit: unit.name.clone(),
+                    block: block.id.0,
+                    label: label.clone(),
+                    expected: schema.operands.len(),
+                    actual: args.len(),
+                });
             }
-            if let Some(dest) = dest {
-                define(unit, *dest, live)?;
+            check_mixed_uses(unit, block.id, args)?;
+            for (arg, expected) in args.iter().zip(&schema.operands) {
+                use_operand(unit, block.id, arg, Some(*expected), definitions, live)?;
+            }
+            match (*dest, schema.result) {
+                (Some(dest), Some(expected)) => {
+                    let actual = unit.owners[&dest].class;
+                    if actual != expected {
+                        return Err(OwnershipError::OperationResultClass {
+                            unit: unit.name.clone(),
+                            block: block.id.0,
+                            label: label.clone(),
+                            expected: expected.to_string(),
+                            actual: actual.to_string(),
+                        });
+                    }
+                    define(unit, dest, live)?;
+                }
+                (None, None) => {}
+                (Some(dest), None) => {
+                    return Err(OwnershipError::IncompleteOwner {
+                        unit: unit.name.clone(),
+                        owner: dest.0,
+                        missing: "operation result schema",
+                    });
+                }
+                (None, Some(_)) => {
+                    return Err(OwnershipError::LoweringInvariant {
+                        unit: unit.name.clone(),
+                        detail: format!("operation `{label}` schema declares an absent result"),
+                    });
+                }
             }
             Ok(())
         }
@@ -515,14 +673,17 @@ fn check_borrow_edge(
     let source_root = match unit.owners[&source].origin {
         OwnerOrigin::Owned => Some(source),
         OwnerOrigin::BorrowedFrom(owner) => Some(owner),
-        OwnerOrigin::ExternalBorrow => None,
+        OwnerOrigin::InternalBorrow | OwnerOrigin::ExternalBorrow => None,
     };
     let valid = matches!(
         (source_root, unit.owners[&target.owner].origin),
         (Some(a), OwnerOrigin::BorrowedFrom(b)) if a == b
     ) || matches!(
         (source_root, unit.owners[&target.owner].origin),
-        (None, OwnerOrigin::ExternalBorrow)
+        (
+            None,
+            OwnerOrigin::InternalBorrow | OwnerOrigin::ExternalBorrow
+        )
     );
     if valid {
         Ok(())
@@ -629,10 +790,10 @@ fn check_terminal(
     block: BlockId,
     live: &BTreeSet<OwnerId>,
 ) -> Result<(), OwnershipError> {
-    if let Some(owner) = live.iter().find(|owner| {
-        let info = &unit.owners[owner];
-        info.origin == OwnerOrigin::Owned && info.class.is_heap()
-    }) {
+    if let Some(owner) = live
+        .iter()
+        .find(|owner| unit.owners[owner].origin == OwnerOrigin::Owned)
+    {
         Err(OwnershipError::MissingTerminal {
             unit: unit.name.clone(),
             owner: owner.0,

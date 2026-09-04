@@ -10,6 +10,29 @@ pub(crate) struct OwnerId(pub(crate) u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct BlockId(pub(crate) u32);
 
+/// Opaque identity for one structurally selected host-emission site. The
+/// numeric key is private: downstream code can compare identities but cannot
+/// manufacture a carrier from an integer or derive ownership from spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct HostSiteId {
+    key: HostSiteKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct HostSiteKey(u32);
+
+impl HostSiteId {
+    pub(crate) fn from_index(index: usize) -> Self {
+        Self {
+            key: HostSiteKey(index.try_into().expect("host site census exceeds u32")),
+        }
+    }
+
+    pub(crate) fn index(self) -> usize {
+        self.key.0 as usize
+    }
+}
+
 /// The closed ownership-use algebra. No unknown or backend-specific state can
 /// cross verification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +101,7 @@ impl ParamMode {
 pub(crate) enum OwnerOrigin {
     Owned,
     BorrowedFrom(OwnerId),
+    InternalBorrow,
     ExternalBorrow,
 }
 
@@ -96,6 +120,20 @@ pub(crate) struct BlockParam {
     pub(crate) mode: ParamMode,
 }
 
+/// The verifier's semantic input for an application. `label` remains a
+/// diagnostic rendering only; it cannot choose operand ownership.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OperationSchema {
+    pub(crate) operands: Vec<OwnershipUse>,
+    pub(crate) result: Option<ValueClass>,
+}
+
+impl OperationSchema {
+    pub(crate) fn new(operands: Vec<OwnershipUse>, result: Option<ValueClass>) -> Self {
+        Self { operands, result }
+    }
+}
+
 /// Backend-neutral operations. `Apply` covers calls, constructors, and reads;
 /// lowering assigns each operand disposition before this representation exists.
 #[derive(Debug, Clone, PartialEq)]
@@ -107,6 +145,7 @@ pub(crate) enum Op {
     Apply {
         dest: Option<OwnerId>,
         label: String,
+        schema: OperationSchema,
         args: Vec<Operand>,
     },
     Copy {
@@ -182,4 +221,76 @@ pub(crate) struct Unit {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct OwnershipProgram {
     pub(crate) units: Vec<Unit>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostSiteKind {
+    Binding,
+    Expression,
+    Argument,
+    BranchEdge,
+    MatchArm,
+    LoopEdge,
+    FunctionEntry,
+    FunctionReturn,
+    ManifestRoot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostSiteAction {
+    Structural,
+    Operation {
+        unit: usize,
+        block: BlockId,
+        operation: usize,
+    },
+    Terminator {
+        unit: usize,
+        block: BlockId,
+    },
+    ControlEdge {
+        unit: usize,
+        source: BlockId,
+        target: BlockId,
+    },
+    Root(OwnerId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HostSiteRecord {
+    pub(crate) id: HostSiteId,
+    pub(crate) kind: HostSiteKind,
+    pub(crate) actions: Vec<HostSiteAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HostSiteMap {
+    pub(crate) records: Vec<HostSiteRecord>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct HostSiteBuilder {
+    records: Vec<HostSiteRecord>,
+}
+
+impl HostSiteBuilder {
+    pub(crate) fn add(&mut self, kind: HostSiteKind) -> HostSiteId {
+        let id = HostSiteId::from_index(self.records.len());
+        self.records.push(HostSiteRecord {
+            id,
+            kind,
+            actions: vec![HostSiteAction::Structural],
+        });
+        id
+    }
+
+    pub(crate) fn record(&mut self, id: HostSiteId, action: HostSiteAction) {
+        self.records[id.index()].actions.push(action);
+    }
+
+    pub(crate) fn finish(self) -> HostSiteMap {
+        HostSiteMap {
+            records: self.records,
+        }
+    }
 }

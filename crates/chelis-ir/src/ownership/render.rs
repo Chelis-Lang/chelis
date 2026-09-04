@@ -52,7 +52,9 @@ fn owner(unit: &Unit, id: OwnerId) -> String {
 fn render_op(unit: &Unit, op: &Op) -> String {
     match op {
         Op::Define { dest, label } => format!("{} = {label}", owner(unit, *dest)),
-        Op::Apply { dest, label, args } => {
+        Op::Apply {
+            dest, label, args, ..
+        } => {
             let dest = dest.map_or_else(String::new, |id| format!("%{} = ", id.0));
             format!(
                 "{dest}{label}({})",

@@ -15,15 +15,17 @@ use chelis_types::types::Lane;
 use crate::dag::RiscOp;
 use crate::host::{
     ConcreteHostCallback, ConcreteHostCallbackKind, ConcreteHostExpr, ConcreteHostExprKind,
-    ConcreteHostFunction, ConcreteHostMatchArm, ConcreteHostProgram, HostTensorHelper,
+    ConcreteHostFunction, ConcreteHostMatchArm, ConcreteHostProgram, HostBinding, HostDisplayRoot,
+    HostExpr, HostExprKind, HostFunctionOrigin, HostTensorHelper,
 };
 use crate::host_type_state::ConcreteHostType;
 
 use super::classify::{ClassifyError, Placement, ValueClass, classify, render_type};
 use super::error::OwnershipError;
 use super::ir::{
-    Block, BlockId, BlockParam, Edge, Op, Operand, OwnerId, OwnerInfo, OwnerOrigin,
-    OwnershipProgram, ParamMode, Terminator, Unit, UnitKind,
+    Block, BlockId, BlockParam, Edge, HostSiteAction, HostSiteBuilder, HostSiteId, HostSiteKind,
+    Op, Operand, OperationSchema, OwnerId, OwnerInfo, OwnerOrigin, OwnershipProgram, ParamMode,
+    Terminator, Unit, UnitKind,
 };
 
 const ROOTS_UNIT: &str = "roots";
@@ -44,6 +46,8 @@ pub(super) fn lower(
     checked: &CheckedProgram,
     host: &ConcreteHostProgram,
     manifest: &RootManifest,
+    root_bindings: &[Option<String>],
+    sites: &mut HostSiteBuilder,
 ) -> Result<OwnershipProgram, OwnershipError> {
     let signatures = build_signatures(checked, host)?;
     let ctx = Context {
@@ -60,9 +64,9 @@ pub(super) fn lower(
             .map(|function| function.name.clone())
             .collect(),
     };
-    let mut units = vec![lower_roots(&ctx, manifest)?];
-    for function in &host.functions {
-        units.push(lower_function(&ctx, function)?);
+    let mut units = vec![lower_roots(&ctx, manifest, root_bindings, sites, 0)?];
+    for (index, function) in host.functions.iter().enumerate() {
+        units.push(lower_function(&ctx, function, sites, index + 1)?);
     }
     Ok(OwnershipProgram { units })
 }
@@ -195,7 +199,7 @@ struct AdapterBlocks {
     body: BlockId,
 }
 
-struct UnitLowerer<'a> {
+struct UnitLowerer<'a, 'sites> {
     ctx: &'a Context<'a>,
     unit_name: String,
     helpers: &'a [HostTensorHelper],
@@ -209,10 +213,19 @@ struct UnitLowerer<'a> {
     moved: BTreeSet<OwnerId>,
     adapter: Option<AdapterBlocks>,
     captures: BTreeMap<String, OwnerId>,
+    sites: &'sites mut HostSiteBuilder,
+    unit_index: usize,
+    active_site: Option<HostSiteId>,
 }
 
-impl<'a> UnitLowerer<'a> {
-    fn new(ctx: &'a Context<'a>, unit_name: &str, helpers: &'a [HostTensorHelper]) -> Self {
+impl<'a, 'sites> UnitLowerer<'a, 'sites> {
+    fn new(
+        ctx: &'a Context<'a>,
+        unit_name: &str,
+        helpers: &'a [HostTensorHelper],
+        sites: &'sites mut HostSiteBuilder,
+        unit_index: usize,
+    ) -> Self {
         Self {
             ctx,
             unit_name: unit_name.to_string(),
@@ -227,6 +240,9 @@ impl<'a> UnitLowerer<'a> {
             moved: BTreeSet::new(),
             adapter: None,
             captures: BTreeMap::new(),
+            sites,
+            unit_index,
+            active_site: None,
         }
     }
 
@@ -248,8 +264,45 @@ impl<'a> UnitLowerer<'a> {
         id
     }
 
+    fn with_site<T>(
+        &mut self,
+        kind: HostSiteKind,
+        action: impl FnOnce(&mut Self) -> Result<T, OwnershipError>,
+    ) -> Result<T, OwnershipError> {
+        let site = self.sites.add(kind);
+        let previous = self.active_site.replace(site);
+        let result = action(self);
+        self.active_site = previous;
+        result
+    }
+
     fn emit(&mut self, op: Op) {
-        self.blocks[self.current.0 as usize].ops.push(op);
+        let block = self.current;
+        let operation = self.blocks[block.0 as usize].ops.len();
+        let site = self
+            .active_site
+            .expect("every ownership operation is emitted inside a host site");
+        self.sites.record(
+            site,
+            HostSiteAction::Operation {
+                unit: self.unit_index,
+                block,
+                operation,
+            },
+        );
+        self.blocks[block.0 as usize].ops.push(op);
+    }
+
+    fn record_edge(&mut self, kind: HostSiteKind, target: BlockId) {
+        let site = self.sites.add(kind);
+        self.sites.record(
+            site,
+            HostSiteAction::ControlEdge {
+                unit: self.unit_index,
+                source: self.current,
+                target,
+            },
+        );
     }
 
     fn set_terminator(&mut self, terminator: Terminator) -> Result<(), OwnershipError> {
@@ -258,6 +311,16 @@ impl<'a> UnitLowerer<'a> {
             return Err(self.invariant(format!("block b{} terminated twice", self.current.0)));
         }
         self.blocks[index].terminator = Some(terminator);
+        let site = self
+            .active_site
+            .expect("every ownership terminator is emitted inside a host site");
+        self.sites.record(
+            site,
+            HostSiteAction::Terminator {
+                unit: self.unit_index,
+                block: self.current,
+            },
+        );
         Ok(())
     }
 
@@ -466,6 +529,7 @@ impl<'a> UnitLowerer<'a> {
                 self.emit(Op::Apply {
                     dest: None,
                     label: "discard".to_string(),
+                    schema: OperationSchema::new(vec![super::ir::OwnershipUse::Move], None),
                     args: vec![Operand::move_(owner)],
                 });
             }
@@ -519,14 +583,17 @@ impl<'a> UnitLowerer<'a> {
         })
     }
 
-    fn unlowered(&self, variant: &str) -> OwnershipError {
-        OwnershipError::UnloweredExprKind {
-            unit: self.unit_name.clone(),
-            variant: variant.to_string(),
-        }
+    fn lower_expr(
+        &mut self,
+        expr: &ConcreteHostExpr,
+        tail: Option<usize>,
+    ) -> Result<Value, OwnershipError> {
+        self.with_site(HostSiteKind::Expression, |lowerer| {
+            lowerer.lower_expr_at_site(expr, tail)
+        })
     }
 
-    fn lower_expr(
+    fn lower_expr_at_site(
         &mut self,
         expr: &ConcreteHostExpr,
         tail: Option<usize>,
@@ -556,17 +623,28 @@ impl<'a> UnitLowerer<'a> {
             } => {
                 let values = args
                     .iter()
-                    .map(|arg| self.lower_expr(arg, None))
+                    .map(|arg| {
+                        self.with_site(HostSiteKind::Argument, |lowerer| {
+                            lowerer.lower_expr(arg, None)
+                        })
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 self.lower_call(function, values, ty, tail)
             }
             ConcreteHostExprKind::Builtin { name, args, ty } => {
                 let mut operands = Vec::with_capacity(args.len());
                 for arg in args {
-                    let value = self.lower_expr(arg, None)?;
+                    let value = self.with_site(HostSiteKind::Argument, |lowerer| {
+                        lowerer.lower_expr(arg, None)
+                    })?;
                     operands.push(self.borrow(value)?);
                 }
-                self.apply(ty, format!("builtin:{name}"), operands)
+                self.apply(
+                    ty,
+                    format!("builtin:{name}"),
+                    vec![super::ir::OwnershipUse::Borrow; operands.len()],
+                    operands,
+                )
             }
             ConcreteHostExprKind::AdtFieldAccess {
                 base,
@@ -575,7 +653,12 @@ impl<'a> UnitLowerer<'a> {
             } => {
                 let base = self.lower_expr(base, None)?;
                 let base = self.borrow(base)?;
-                self.apply(ty, format!("field:{field_index}"), vec![base])
+                self.apply(
+                    ty,
+                    format!("field:{field_index}"),
+                    vec![super::ir::OwnershipUse::Borrow],
+                    vec![base],
+                )
             }
             ConcreteHostExprKind::If {
                 cond,
@@ -600,8 +683,10 @@ impl<'a> UnitLowerer<'a> {
                 self.push_scope();
                 let depth = self.depth();
                 for binding in bindings {
-                    let value = self.lower_expr(&binding.value, None)?;
-                    self.bind(&binding.name, value)?;
+                    self.with_site(HostSiteKind::Binding, |lowerer| {
+                        let value = lowerer.lower_expr(&binding.value, None)?;
+                        lowerer.bind(&binding.name, value)
+                    })?;
                 }
                 let body_tail = Some(tail.map_or(depth, |outer| outer.min(depth)));
                 let value = self.lower_expr(body, body_tail)?;
@@ -619,11 +704,37 @@ impl<'a> UnitLowerer<'a> {
             ConcreteHostExprKind::TensorCall { helper, args, ty } => {
                 self.lower_tensor_call(*helper, args, ty, tail)
             }
-            ConcreteHostExprKind::Filter { .. } => Err(self.unlowered("Filter")),
-            ConcreteHostExprKind::Scan { .. } => Err(self.unlowered("Scan")),
-            ConcreteHostExprKind::Partition { .. } => Err(self.unlowered("Partition")),
-            ConcreteHostExprKind::FlatMap { .. } => Err(self.unlowered("FlatMap")),
-            ConcreteHostExprKind::WithSeed { .. } => Err(self.unlowered("WithSeed")),
+            ConcreteHostExprKind::Filter { callback, list, ty } => {
+                self.lower_filter_like("filter_step", callback, list, ty)
+            }
+            ConcreteHostExprKind::Scan {
+                callback,
+                init,
+                list,
+                ty,
+            } => self.lower_scan(callback, init, list, ty),
+            ConcreteHostExprKind::Partition { callback, list, ty } => {
+                self.lower_filter_like("partition_step", callback, list, ty)
+            }
+            ConcreteHostExprKind::FlatMap { callback, list, ty } => {
+                self.lower_flat_map(callback, list, ty)
+            }
+            ConcreteHostExprKind::WithSeed { seed, body, ty } => {
+                let seed = self.with_site(HostSiteKind::Argument, |lowerer| {
+                    lowerer.lower_expr(seed, None)
+                })?;
+                let seed = self.consume(seed, None)?;
+                let body = self.with_site(HostSiteKind::Argument, |lowerer| {
+                    lowerer.lower_expr(body, tail)
+                })?;
+                let body = self.consume(body, tail)?;
+                self.apply(
+                    ty,
+                    "with_seed".to_string(),
+                    vec![super::ir::OwnershipUse::Move; 2],
+                    vec![seed, body],
+                )
+            }
         }
     }
 
@@ -637,12 +748,16 @@ impl<'a> UnitLowerer<'a> {
         &mut self,
         ty: &ConcreteHostType,
         label: String,
+        expected: Vec<super::ir::OwnershipUse>,
         args: Vec<Operand>,
     ) -> Result<Value, OwnershipError> {
         let dest = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
+        let class = self.info(dest)?.class;
+        let schema = OperationSchema::new(expected, Some(class));
         self.emit(Op::Apply {
             dest: Some(dest),
             label,
+            schema,
             args,
         });
         Ok(Value::Fresh(dest))
@@ -657,10 +772,17 @@ impl<'a> UnitLowerer<'a> {
         self.classify_or_reject(ty, Placement::Value, None)?;
         let mut operands = Vec::with_capacity(items.len());
         for item in items {
-            let value = self.lower_expr(item, None)?;
+            let value = self.with_site(HostSiteKind::Argument, |lowerer| {
+                lowerer.lower_expr(item, None)
+            })?;
             operands.push(self.consume(value, None)?);
         }
-        self.apply(ty, label.to_string(), operands)
+        self.apply(
+            ty,
+            label.to_string(),
+            vec![super::ir::OwnershipUse::Move; operands.len()],
+            operands,
+        )
     }
 
     fn lower_var(&mut self, name: &str, ty: &ConcreteHostType) -> Result<Value, OwnershipError> {
@@ -806,6 +928,7 @@ impl<'a> UnitLowerer<'a> {
             });
         }
         let mut args = Vec::with_capacity(values.len());
+        let mut expected = Vec::with_capacity(values.len());
         for (value, spec) in values.into_iter().zip(&specs) {
             if matches!(spec.ty, ConcreteHostType::Function(_, _)) {
                 let operand = match value {
@@ -826,15 +949,19 @@ impl<'a> UnitLowerer<'a> {
                     }
                     other => self.consume(other, None)?,
                 };
+                expected.push(operand.use_);
                 args.push(operand);
                 continue;
             }
-            args.push(match spec.mode {
-                ParamMode::Owned => self.consume(value, tail)?,
-                ParamMode::Borrowed | ParamMode::EntryBorrow => self.borrow(value)?,
+            let mode = spec.mode.use_();
+            expected.push(mode);
+            args.push(match mode {
+                super::ir::OwnershipUse::Move => self.consume(value, tail)?,
+                super::ir::OwnershipUse::Borrow => self.borrow(value)?,
+                super::ir::OwnershipUse::Clone => unreachable!("parameter modes never clone"),
             });
         }
-        self.apply(ty, label, args)
+        self.apply(ty, label, expected, args)
     }
 
     fn lower_join_arm(
@@ -879,6 +1006,8 @@ impl<'a> UnitLowerer<'a> {
                 args: Vec::new(),
             },
         })?;
+        self.record_edge(HostSiteKind::BranchEdge, then_block);
+        self.record_edge(HostSiteKind::BranchEdge, else_block);
         self.current = then_block;
         self.push_scope();
         self.lower_join_arm(then_expr, join)?;
@@ -928,6 +1057,8 @@ impl<'a> UnitLowerer<'a> {
                 },
             ],
         })?;
+        self.record_edge(HostSiteKind::MatchArm, some);
+        self.record_edge(HostSiteKind::MatchArm, none);
         self.current = some;
         self.push_scope();
         let payload = self.mint(
@@ -936,9 +1067,14 @@ impl<'a> UnitLowerer<'a> {
             OwnerOrigin::Owned,
             vec![bind_name.to_string()],
         )?;
+        self.sites.add(HostSiteKind::Binding);
         self.emit(Op::Apply {
             dest: Some(payload),
             label: "option_payload".to_string(),
+            schema: OperationSchema::new(
+                vec![super::ir::OwnershipUse::Borrow],
+                Some(self.info(payload)?.class),
+            ),
             args: vec![scrutinee],
         });
         self.register(payload)?;
@@ -991,10 +1127,14 @@ impl<'a> UnitLowerer<'a> {
             scrutinee,
             arms: edges,
         })?;
+        for target in arm_blocks.iter().copied().chain(default_block) {
+            self.record_edge(HostSiteKind::MatchArm, target);
+        }
         for (arm, block) in arms.iter().zip(arm_blocks) {
             self.current = block;
             self.push_scope();
             for binding in &arm.bindings {
+                self.sites.add(HostSiteKind::Binding);
                 let owner = self.mint(
                     &binding.ty,
                     Placement::Value,
@@ -1004,6 +1144,10 @@ impl<'a> UnitLowerer<'a> {
                 self.emit(Op::Apply {
                     dest: Some(owner),
                     label: format!("adt_payload:{}:{}", arm.ctor, binding.field_index),
+                    schema: OperationSchema::new(
+                        vec![super::ir::OwnershipUse::Borrow],
+                        Some(self.info(owner)?.class),
+                    ),
                     args: vec![scrutinee],
                 });
                 self.register(owner)?;
@@ -1120,6 +1264,8 @@ impl<'a> UnitLowerer<'a> {
                 args: vec![Operand::move_(header_owner)],
             },
         })?;
+        self.record_edge(HostSiteKind::LoopEdge, body);
+        self.record_edge(HostSiteKind::LoopEdge, exit);
         self.current = body;
         let element = self.mint(
             &element_ty,
@@ -1127,9 +1273,14 @@ impl<'a> UnitLowerer<'a> {
             OwnerOrigin::Owned,
             vec![names[1].clone()],
         )?;
+        self.sites.add(HostSiteKind::Binding);
         self.emit(Op::Apply {
             dest: Some(element),
             label: "loop_item".to_string(),
+            schema: OperationSchema::new(
+                vec![super::ir::OwnershipUse::Borrow],
+                Some(self.info(element)?.class),
+            ),
             args: vec![list],
         });
         self.register(element)?;
@@ -1153,6 +1304,16 @@ impl<'a> UnitLowerer<'a> {
         callback: &ConcreteHostCallback,
         list: &ConcreteHostExpr,
         ty: &ConcreteHostType,
+    ) -> Result<Value, OwnershipError> {
+        self.lower_map_step(callback, list, ty, "list_push")
+    }
+
+    fn lower_map_step(
+        &mut self,
+        callback: &ConcreteHostCallback,
+        list: &ConcreteHostExpr,
+        ty: &ConcreteHostType,
+        step: &str,
     ) -> Result<Value, OwnershipError> {
         self.classify_or_reject(ty, Placement::Value, None)?;
         let names = Self::callback_param_names(callback);
@@ -1204,6 +1365,8 @@ impl<'a> UnitLowerer<'a> {
                 args: vec![Operand::move_(header_owner)],
             },
         })?;
+        self.record_edge(HostSiteKind::LoopEdge, body);
+        self.record_edge(HostSiteKind::LoopEdge, exit);
         self.current = body;
         let element = self.mint(
             &element_ty,
@@ -1211,9 +1374,14 @@ impl<'a> UnitLowerer<'a> {
             OwnerOrigin::Owned,
             vec![names[0].clone()],
         )?;
+        self.sites.add(HostSiteKind::Binding);
         self.emit(Op::Apply {
             dest: Some(element),
             label: "loop_item".to_string(),
+            schema: OperationSchema::new(
+                vec![super::ir::OwnershipUse::Borrow],
+                Some(self.info(element)?.class),
+            ),
             args: vec![list],
         });
         self.register(element)?;
@@ -1227,7 +1395,11 @@ impl<'a> UnitLowerer<'a> {
         let next = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
         self.emit(Op::Apply {
             dest: Some(next),
-            label: "list_push".to_string(),
+            label: step.to_string(),
+            schema: OperationSchema::new(
+                vec![super::ir::OwnershipUse::Move, super::ir::OwnershipUse::Move],
+                Some(self.info(next)?.class),
+            ),
             args: vec![carried, item],
         });
         self.moved.insert(next);
@@ -1238,6 +1410,284 @@ impl<'a> UnitLowerer<'a> {
         }))?;
         self.current = exit;
         Ok(Value::Fresh(exit_owner))
+    }
+
+    fn lower_filter_like(
+        &mut self,
+        step: &str,
+        callback: &ConcreteHostCallback,
+        list: &ConcreteHostExpr,
+        ty: &ConcreteHostType,
+    ) -> Result<Value, OwnershipError> {
+        self.classify_or_reject(ty, Placement::Value, None)?;
+        let names = Self::callback_param_names(callback);
+        if names.len() != 1 {
+            return Err(self.invariant(format!(
+                "{step} callback declares {} parameters, expected 1",
+                names.len()
+            )));
+        }
+        let element_ty = self.list_element_type(list)?;
+        let list = self.lower_expr(list, None)?;
+        let list = self.borrow(list)?;
+        let seed = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
+        self.emit(Op::Define {
+            dest: seed,
+            label: format!("{step}:empty"),
+        });
+        self.moved.insert(seed);
+        let header_owner = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
+        let header = self.new_block(vec![BlockParam {
+            owner: header_owner,
+            mode: ParamMode::Owned,
+        }]);
+        self.set_terminator(Terminator::Jump(Edge {
+            target: header,
+            args: vec![Operand::move_(seed)],
+        }))?;
+        self.push_scope();
+        let acc = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
+        self.register(acc)?;
+        let body = self.new_block(vec![BlockParam {
+            owner: acc,
+            mode: ParamMode::Owned,
+        }]);
+        let exit_owner = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
+        let exit = self.new_block(vec![BlockParam {
+            owner: exit_owner,
+            mode: ParamMode::Owned,
+        }]);
+        self.current = header;
+        self.set_terminator(Terminator::Loop {
+            list,
+            body_edge: Edge {
+                target: body,
+                args: vec![Operand::move_(header_owner)],
+            },
+            exit_edge: Edge {
+                target: exit,
+                args: vec![Operand::move_(header_owner)],
+            },
+        })?;
+        self.record_edge(HostSiteKind::LoopEdge, body);
+        self.record_edge(HostSiteKind::LoopEdge, exit);
+        self.current = body;
+        let element = self.mint(
+            &element_ty,
+            Placement::Value,
+            OwnerOrigin::Owned,
+            vec![names[0].clone()],
+        )?;
+        self.sites.add(HostSiteKind::Binding);
+        let element_class = self.info(element)?.class;
+        self.emit(Op::Apply {
+            dest: Some(element),
+            label: "loop_item".to_string(),
+            schema: OperationSchema::new(
+                vec![super::ir::OwnershipUse::Borrow],
+                Some(element_class),
+            ),
+            args: vec![list],
+        });
+        self.register(element)?;
+        self.scope_mut()?
+            .names
+            .insert(names[0].clone(), Place::Owner(element));
+        let depth = self.depth();
+        let predicate = self.lower_callback_body(callback, &[element])?;
+        let predicate = self.consume(predicate, Some(depth))?;
+        let item = self.consume(Value::Named(element), Some(depth))?;
+        let carried = self.consume(Value::Named(acc), Some(depth))?;
+        let next = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
+        let next_class = self.info(next)?.class;
+        self.emit(Op::Apply {
+            dest: Some(next),
+            label: step.to_string(),
+            schema: OperationSchema::new(
+                vec![
+                    super::ir::OwnershipUse::Move,
+                    super::ir::OwnershipUse::Move,
+                    super::ir::OwnershipUse::Move,
+                ],
+                Some(next_class),
+            ),
+            args: vec![carried, item, predicate],
+        });
+        self.moved.insert(next);
+        self.exit_scope()?;
+        self.set_terminator(Terminator::Jump(Edge {
+            target: header,
+            args: vec![Operand::move_(next)],
+        }))?;
+        self.current = exit;
+        Ok(Value::Fresh(exit_owner))
+    }
+
+    fn lower_flat_map(
+        &mut self,
+        callback: &ConcreteHostCallback,
+        list: &ConcreteHostExpr,
+        ty: &ConcreteHostType,
+    ) -> Result<Value, OwnershipError> {
+        // FlatMap has the same carried list owner as Map; the callback result
+        // is itself a list and the step consumes it through concatenation.
+        self.lower_map_step(callback, list, ty, "list_extend")
+    }
+
+    fn lower_scan(
+        &mut self,
+        callback: &ConcreteHostCallback,
+        init: &ConcreteHostExpr,
+        list: &ConcreteHostExpr,
+        ty: &ConcreteHostType,
+    ) -> Result<Value, OwnershipError> {
+        self.classify_or_reject(ty, Placement::Value, None)?;
+        let names = Self::callback_param_names(callback);
+        if names.len() != 2 {
+            return Err(self.invariant(format!(
+                "scan callback declares {} parameters, expected 2",
+                names.len()
+            )));
+        }
+        let element_ty = self.list_element_type(list)?;
+        let state_ty = expr_type(init);
+        let init = self.lower_expr(init, None)?;
+        let init = self.consume(init, None)?;
+        let list = self.lower_expr(list, None)?;
+        let list = self.borrow(list)?;
+        let output_seed = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
+        self.emit(Op::Define {
+            dest: output_seed,
+            label: "scan:empty".to_string(),
+        });
+        self.moved.insert(output_seed);
+        let header_state =
+            self.mint(&state_ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
+        let header_output = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
+        let header = self.new_block(vec![
+            BlockParam {
+                owner: header_state,
+                mode: ParamMode::Owned,
+            },
+            BlockParam {
+                owner: header_output,
+                mode: ParamMode::Owned,
+            },
+        ]);
+        self.set_terminator(Terminator::Jump(Edge {
+            target: header,
+            args: vec![init, Operand::move_(output_seed)],
+        }))?;
+        self.push_scope();
+        let body_state = self.mint(
+            &state_ty,
+            Placement::Value,
+            OwnerOrigin::Owned,
+            vec![names[0].clone()],
+        )?;
+        self.sites.add(HostSiteKind::Binding);
+        let body_output = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
+        self.register(body_state)?;
+        self.register(body_output)?;
+        let body = self.new_block(vec![
+            BlockParam {
+                owner: body_state,
+                mode: ParamMode::Owned,
+            },
+            BlockParam {
+                owner: body_output,
+                mode: ParamMode::Owned,
+            },
+        ]);
+        let exit_state = self.mint(&state_ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
+        let exit_output = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
+        let exit = self.new_block(vec![
+            BlockParam {
+                owner: exit_state,
+                mode: ParamMode::Owned,
+            },
+            BlockParam {
+                owner: exit_output,
+                mode: ParamMode::Owned,
+            },
+        ]);
+        self.current = header;
+        self.set_terminator(Terminator::Loop {
+            list,
+            body_edge: Edge {
+                target: body,
+                args: vec![Operand::move_(header_state), Operand::move_(header_output)],
+            },
+            exit_edge: Edge {
+                target: exit,
+                args: vec![Operand::move_(header_state), Operand::move_(header_output)],
+            },
+        })?;
+        self.record_edge(HostSiteKind::LoopEdge, body);
+        self.record_edge(HostSiteKind::LoopEdge, exit);
+        self.current = body;
+        self.scope_mut()?
+            .names
+            .insert(names[0].clone(), Place::Owner(body_state));
+        let element = self.mint(
+            &element_ty,
+            Placement::Value,
+            OwnerOrigin::Owned,
+            vec![names[1].clone()],
+        )?;
+        self.sites.add(HostSiteKind::Binding);
+        let element_class = self.info(element)?.class;
+        self.emit(Op::Apply {
+            dest: Some(element),
+            label: "loop_item".to_string(),
+            schema: OperationSchema::new(
+                vec![super::ir::OwnershipUse::Borrow],
+                Some(element_class),
+            ),
+            args: vec![list],
+        });
+        self.register(element)?;
+        self.scope_mut()?
+            .names
+            .insert(names[1].clone(), Place::Owner(element));
+        let depth = self.depth();
+        let next_state = self.lower_callback_body(callback, &[body_state, element])?;
+        let next_state = self.consume(next_state, Some(depth))?;
+        let output_item = self.copy(next_state.owner)?;
+        self.moved.insert(output_item);
+        let carried_output = self.consume(Value::Named(body_output), Some(depth))?;
+        let next_output = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
+        let output_class = self.info(next_output)?.class;
+        self.emit(Op::Apply {
+            dest: Some(next_output),
+            label: "list_push".to_string(),
+            schema: OperationSchema::new(
+                vec![super::ir::OwnershipUse::Move, super::ir::OwnershipUse::Move],
+                Some(output_class),
+            ),
+            args: vec![carried_output, Operand::move_(output_item)],
+        });
+        self.moved.insert(next_output);
+        self.exit_scope()?;
+        self.set_terminator(Terminator::Jump(Edge {
+            target: header,
+            args: vec![next_state, Operand::move_(next_output)],
+        }))?;
+        self.current = exit;
+        if self.info(exit_state)?.class.is_heap() {
+            self.emit(Op::Drop {
+                owner: Operand::move_(exit_state),
+            });
+        } else {
+            self.emit(Op::Apply {
+                dest: None,
+                label: "discard scan state".to_string(),
+                schema: OperationSchema::new(vec![super::ir::OwnershipUse::Move], None),
+                args: vec![Operand::move_(exit_state)],
+            });
+        }
+        self.moved.insert(exit_state);
+        Ok(Value::Fresh(exit_output))
     }
 
     fn lower_tensor_call(
@@ -1255,10 +1705,17 @@ impl<'a> UnitLowerer<'a> {
         }
         let mut operands = Vec::with_capacity(args.len());
         for arg in args {
-            let value = self.lower_expr(arg, None)?;
+            let value = self.with_site(HostSiteKind::Argument, |lowerer| {
+                lowerer.lower_expr(arg, None)
+            })?;
             operands.push(self.borrow(value)?);
         }
-        self.apply(ty, format!("tensor:{}", helper_ref.name), operands)
+        self.apply(
+            ty,
+            format!("tensor:{}", helper_ref.name),
+            vec![super::ir::OwnershipUse::Borrow; operands.len()],
+            operands,
+        )
     }
 }
 
@@ -1306,21 +1763,143 @@ fn expr_type(expr: &ConcreteHostExpr) -> ConcreteHostType {
     }
 }
 
-fn lower_roots(ctx: &Context<'_>, manifest: &RootManifest) -> Result<Unit, OwnershipError> {
-    let mut lowerer = UnitLowerer::new(ctx, ROOTS_UNIT, &ctx.host.global_tensor_helpers);
+/// Consume the manifest into the exact host payload. Callable roots are
+/// represented by compiler-owned observation bindings before site identities
+/// are assigned, so ownership sinks never rediscover them by name.
+pub(super) fn materialize_manifest_roots(
+    host: &mut ConcreteHostProgram,
+    manifest: &RootManifest,
+) -> Result<Vec<Option<String>>, OwnershipError> {
+    for binding in &mut host.globals {
+        binding.display_name = None;
+        binding.display_roots.clear();
+    }
+    let mut callable_bindings = BTreeMap::<String, String>::new();
+    let mut result = Vec::with_capacity(manifest.entries.len());
+    for (manifest_index, root) in manifest.entries.iter().enumerate() {
+        if root.lane != Lane::Host {
+            result.push(None);
+            continue;
+        }
+        if let Some(binding) = host
+            .globals
+            .iter_mut()
+            .find(|binding| binding.name == root.def_name)
+        {
+            binding.display_roots.push(display_root(root));
+            result.push(Some(binding.name.clone()));
+            continue;
+        }
+        if let Some(binding_name) = callable_bindings.get(&root.def_name) {
+            let binding = host
+                .globals
+                .iter_mut()
+                .find(|binding| binding.name == *binding_name)
+                .expect("materialized callable binding remains in payload");
+            binding.display_roots.push(display_root(root));
+            result.push(Some(binding_name.clone()));
+            continue;
+        }
+        let Some(function) = host
+            .functions
+            .iter()
+            .find(|function| function.name == root.def_name)
+        else {
+            return Err(OwnershipError::ManifestRootWithoutBinding {
+                root: root.name.clone(),
+                def_name: root.def_name.clone(),
+            });
+        };
+        if !function.params.is_empty() {
+            return Err(OwnershipError::ManifestRootWithoutBinding {
+                root: root.name.clone(),
+                def_name: root.def_name.clone(),
+            });
+        }
+        let function_name = function.name.clone();
+        let ty = function.ret_ty.clone();
+        let mut binding_name = format!("__chelis_manifest_observation_{manifest_index}");
+        while host
+            .globals
+            .iter()
+            .any(|binding| binding.name == binding_name)
+            || host
+                .functions
+                .iter()
+                .any(|function| function.name == binding_name)
+        {
+            binding_name.push('_');
+        }
+        host.globals.push(HostBinding {
+            name: binding_name.clone(),
+            display_name: None,
+            display_roots: vec![display_root(root)],
+            ty: ty.clone(),
+            value: HostExpr::new(HostExprKind::Call {
+                function: function_name,
+                args: Vec::new(),
+                arg_tys: Vec::new(),
+                ty,
+            }),
+        });
+        callable_bindings.insert(root.def_name.clone(), binding_name.clone());
+        result.push(Some(binding_name));
+    }
+    Ok(result)
+}
+
+fn display_root(root: &chelis_types::manifest::RootEntry) -> HostDisplayRoot {
+    let short_def = root
+        .def_name
+        .rsplit_once("__")
+        .map(|(_, tail)| tail)
+        .or_else(|| root.def_name.rsplit_once('.').map(|(_, tail)| tail))
+        .unwrap_or(root.def_name.as_str());
+    let suffix = root
+        .name
+        .strip_prefix(root.def_name.as_str())
+        .map_or("", |suffix| suffix);
+    HostDisplayRoot {
+        name: format!("{short_def}{suffix}"),
+        path: root.path.clone(),
+    }
+}
+
+fn lower_roots(
+    ctx: &Context<'_>,
+    manifest: &RootManifest,
+    root_bindings: &[Option<String>],
+    sites: &mut HostSiteBuilder,
+    unit_index: usize,
+) -> Result<Unit, OwnershipError> {
+    if manifest.entries.len() != root_bindings.len() {
+        return Err(OwnershipError::LoweringInvariant {
+            unit: ROOTS_UNIT.to_string(),
+            detail: "manifest/root-binding plan length mismatch".to_string(),
+        });
+    }
+    let mut lowerer = UnitLowerer::new(
+        ctx,
+        ROOTS_UNIT,
+        &ctx.host.global_tensor_helpers,
+        sites,
+        unit_index,
+    );
     let entry = lowerer.new_block(Vec::new());
     lowerer.current = entry;
     lowerer.push_scope();
     for binding in &ctx.host.globals {
-        let value = lowerer.lower_expr(&binding.value, None)?;
-        lowerer.bind(&binding.name, value)?;
+        lowerer.with_site(HostSiteKind::Binding, |lowerer| {
+            let value = lowerer.lower_expr(&binding.value, None)?;
+            lowerer.bind(&binding.name, value)
+        })?;
     }
     let mut sinks = Vec::new();
-    for root in &manifest.entries {
-        if root.lane != Lane::Host || ctx.function_names.contains(&root.def_name) {
+    for (root, binding_name) in manifest.entries.iter().zip(root_bindings) {
+        let Some(binding_name) = binding_name else {
             continue;
-        }
-        match lowerer.lookup(&root.def_name) {
+        };
+        match lowerer.lookup(binding_name) {
             Some(Place::Owner(owner)) => sinks.push((root, owner)),
             Some(Place::Callback(_)) | None => {
                 return Err(OwnershipError::ManifestRootWithoutBinding {
@@ -1331,23 +1910,34 @@ fn lower_roots(ctx: &Context<'_>, manifest: &RootManifest) -> Result<Unit, Owner
         }
     }
     for (index, (root, owner)) in sinks.iter().enumerate() {
-        let owner = *owner;
-        let later = sinks[index + 1..].iter().any(|(_, other)| *other == owner);
-        let owner = if later { lowerer.copy(owner)? } else { owner };
-        lowerer.moved.insert(owner);
-        lowerer.emit(Op::RootConsume {
-            root: root.name.clone(),
-            owner: Operand::move_(owner),
-        });
+        lowerer.with_site(HostSiteKind::ManifestRoot, |lowerer| {
+            let owner = *owner;
+            let later = sinks[index + 1..].iter().any(|(_, other)| *other == owner);
+            let owner = if later { lowerer.copy(owner)? } else { owner };
+            lowerer.moved.insert(owner);
+            lowerer.sites.record(
+                lowerer.active_site.expect("root site"),
+                HostSiteAction::Root(owner),
+            );
+            lowerer.emit(Op::RootConsume {
+                root: root.name.clone(),
+                owner: Operand::move_(owner),
+            });
+            Ok(())
+        })?;
     }
-    lowerer.exit_scope()?;
-    lowerer.set_terminator(Terminator::Exit)?;
+    lowerer.with_site(HostSiteKind::FunctionReturn, |lowerer| {
+        lowerer.exit_scope()?;
+        lowerer.set_terminator(Terminator::Exit)
+    })?;
     lowerer.finish(UnitKind::Roots, entry)
 }
 
 fn lower_function(
     ctx: &Context<'_>,
     function: &ConcreteHostFunction,
+    sites: &mut HostSiteBuilder,
+    unit_index: usize,
 ) -> Result<Unit, OwnershipError> {
     let signature =
         ctx.signatures
@@ -1355,35 +1945,46 @@ fn lower_function(
             .ok_or_else(|| OwnershipError::MissingSignature {
                 function: function.name.clone(),
             })?;
-    let mut lowerer = UnitLowerer::new(ctx, &function.name, &function.tensor_helpers);
+    let mut lowerer = UnitLowerer::new(
+        ctx,
+        &function.name,
+        &function.tensor_helpers,
+        sites,
+        unit_index,
+    );
+    let authored = function.origin == HostFunctionOrigin::Authored;
     let mut entry_params = Vec::with_capacity(function.params.len());
     let mut body_params = Vec::with_capacity(function.params.len());
     for (param, spec) in function.params.iter().zip(&signature.params) {
+        lowerer.sites.add(HostSiteKind::Binding);
         let class =
             lowerer.classify_or_reject(&spec.ty, Placement::Parameter, Some(&param.name))?;
         let heap = class.is_heap();
-        let entry_owner = lowerer.mint(
-            &spec.ty,
-            Placement::Parameter,
-            if heap {
-                OwnerOrigin::ExternalBorrow
-            } else {
-                OwnerOrigin::Owned
-            },
-            Vec::new(),
-        )?;
-        entry_params.push(BlockParam {
-            owner: entry_owner,
-            mode: if heap {
-                ParamMode::EntryBorrow
-            } else {
-                ParamMode::Owned
-            },
-        });
-        let body_origin = if heap && spec.mode == ParamMode::Borrowed {
-            OwnerOrigin::ExternalBorrow
-        } else {
-            OwnerOrigin::Owned
+        if authored {
+            let entry_owner = lowerer.mint(
+                &spec.ty,
+                Placement::Parameter,
+                if heap {
+                    OwnerOrigin::ExternalBorrow
+                } else {
+                    OwnerOrigin::Owned
+                },
+                Vec::new(),
+            )?;
+            entry_params.push(BlockParam {
+                owner: entry_owner,
+                mode: if heap {
+                    ParamMode::EntryBorrow
+                } else {
+                    ParamMode::Owned
+                },
+            });
+        }
+        let body_mode = if heap { spec.mode } else { ParamMode::Owned };
+        let body_origin = match body_mode {
+            ParamMode::Owned => OwnerOrigin::Owned,
+            ParamMode::Borrowed | ParamMode::EntryBorrow if authored => OwnerOrigin::ExternalBorrow,
+            ParamMode::Borrowed | ParamMode::EntryBorrow => OwnerOrigin::InternalBorrow,
         };
         let body_owner = lowerer.mint(
             &spec.ty,
@@ -1396,27 +1997,39 @@ fn lower_function(
         }
         body_params.push(BlockParam {
             owner: body_owner,
-            mode: if heap { spec.mode } else { ParamMode::Owned },
+            mode: body_mode,
         });
     }
-    let entry = lowerer.new_block(entry_params.clone());
-    let body = lowerer.new_block(body_params.clone());
-    lowerer.adapter = Some(AdapterBlocks { entry, body });
-    lowerer.current = entry;
-    let mut args = Vec::with_capacity(entry_params.len());
-    for (entry_param, spec) in entry_params.iter().zip(&signature.params) {
-        args.push(match (entry_param.mode, spec.mode) {
-            (ParamMode::EntryBorrow, ParamMode::Owned) => {
-                let copy = lowerer.copy(entry_param.owner)?;
-                Operand::move_(copy)
+    let (entry, body) = if authored {
+        let entry = lowerer.new_block(entry_params.clone());
+        let body = lowerer.new_block(body_params.clone());
+        lowerer.adapter = Some(AdapterBlocks { entry, body });
+        lowerer.current = entry;
+        lowerer.with_site(HostSiteKind::FunctionEntry, |lowerer| {
+            let mut args = Vec::with_capacity(entry_params.len());
+            for (entry_param, spec) in entry_params.iter().zip(&signature.params) {
+                lowerer.sites.add(HostSiteKind::Argument);
+                args.push(match (entry_param.mode, spec.mode) {
+                    (ParamMode::EntryBorrow, ParamMode::Owned) => {
+                        let copy = lowerer.copy(entry_param.owner)?;
+                        Operand::move_(copy)
+                    }
+                    (ParamMode::EntryBorrow, ParamMode::Borrowed | ParamMode::EntryBorrow) => {
+                        Operand::borrow(entry_param.owner)
+                    }
+                    (ParamMode::Owned | ParamMode::Borrowed, _) => {
+                        Operand::move_(entry_param.owner)
+                    }
+                });
             }
-            (ParamMode::EntryBorrow, ParamMode::Borrowed | ParamMode::EntryBorrow) => {
-                Operand::borrow(entry_param.owner)
-            }
-            (ParamMode::Owned | ParamMode::Borrowed, _) => Operand::move_(entry_param.owner),
-        });
-    }
-    lowerer.set_terminator(Terminator::Jump(Edge { target: body, args }))?;
+            lowerer.set_terminator(Terminator::Jump(Edge { target: body, args }))
+        })?;
+        (entry, body)
+    } else {
+        let body = lowerer.new_block(body_params.clone());
+        lowerer.sites.add(HostSiteKind::FunctionEntry);
+        (body, body)
+    };
     lowerer.current = body;
     lowerer.push_scope();
     for (param, body_param) in function.params.iter().zip(&body_params) {
@@ -1436,9 +2049,11 @@ fn lower_function(
         lowerer.owner_depth.insert(owner, 0);
         lowerer.scope_mut()?.names.insert(param.name.clone(), place);
     }
-    let value = lowerer.lower_expr(&function.body, Some(0))?;
-    let result = lowerer.consume(value, Some(0))?;
-    lowerer.exit_scope()?;
-    lowerer.set_terminator(Terminator::Return { result })?;
+    lowerer.with_site(HostSiteKind::FunctionReturn, |lowerer| {
+        let value = lowerer.lower_expr(&function.body, Some(0))?;
+        let result = lowerer.consume(value, Some(0))?;
+        lowerer.exit_scope()?;
+        lowerer.set_terminator(Terminator::Return { result })
+    })?;
     lowerer.finish(UnitKind::Function, entry)
 }

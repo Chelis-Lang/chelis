@@ -25,8 +25,6 @@ pub enum OwnershipError {
     FirstClassFunctionValue { unit: String, name: String },
     #[error("container type `{ty}` in `{unit}` holds a function value (chelis#879)")]
     FunctionContainer { unit: String, ty: String },
-    #[error("ownership lowering in `{unit}` has no implementation for `{variant}`")]
-    UnloweredExprKind { unit: String, variant: String },
     #[error("ownership lowering invariant failed in `{unit}`: {detail}")]
     LoweringInvariant { unit: String, detail: String },
     #[error("ownership program has {actual} roots units, expected exactly one")]
@@ -60,6 +58,26 @@ pub enum OwnershipError {
         block: u32,
         expected: &'static str,
         actual: &'static str,
+    },
+    #[error(
+        "operation `{label}` in `{unit}` b{block} has {actual} operands, schema requires {expected}"
+    )]
+    OperationArity {
+        unit: String,
+        block: u32,
+        label: String,
+        expected: usize,
+        actual: usize,
+    },
+    #[error(
+        "operation `{label}` result in `{unit}` b{block} has class `{actual}`, schema requires `{expected}`"
+    )]
+    OperationResultClass {
+        unit: String,
+        block: u32,
+        label: String,
+        expected: String,
+        actual: String,
     },
     #[error("borrowed owner %{owner} is consumed in `{unit}` b{block}")]
     BorrowConsumed {
@@ -121,4 +139,19 @@ pub enum OwnershipError {
         kind: &'static str,
         terminal: &'static str,
     },
+    #[error("host site map is not total: {detail}")]
+    HostSiteMap { detail: String },
+    #[error("DAG node n{node} references missing or non-dominating input n{input}")]
+    DagInput { node: usize, input: usize },
+    #[error("DAG node n{node} operation `{operation}` requires {expected} inputs, found {actual}")]
+    DagArity {
+        node: usize,
+        operation: &'static str,
+        expected: usize,
+        actual: usize,
+    },
+    #[error("DAG owner n{owner} has more than one terminal ownership directive")]
+    DagDuplicateTerminal { owner: usize },
+    #[error("DAG root n{root} does not name an owned producer")]
+    DagInvalidRoot { root: usize },
 }

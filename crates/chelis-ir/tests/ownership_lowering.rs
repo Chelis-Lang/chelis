@@ -8,17 +8,19 @@
 use std::collections::BTreeSet;
 
 use chelis_effects::realizability::{compute_root_manifest, infer_realizability};
-use chelis_ir::ConcreteHostType;
 use chelis_ir::host::{
-    ConcreteHostProgram, HostExpr, HostExprKind, try_lower_compiled_program_with_manifest,
+    ConcreteHostProgram, HostExpr, HostExprKind, HostFunctionOrigin,
+    try_lower_compiled_program_with_manifest,
 };
 use chelis_ir::ownership::{
-    OwnershipError, OwnershipProgram, VerifiedOwnershipProgram, lower_ownership, verify_ownership,
+    HostOwnershipProgram, OwnershipError, VerifiedHostProgram, lower_dag_ownership,
+    lower_host_ownership, verify_ownership,
 };
+use chelis_ir::{ConcreteHostType, Dag, DimInfo, RiscOp, TensorType};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as surf_parse;
-use chelis_types::manifest::RootManifest;
-use chelis_types::types::Prim;
+use chelis_types::manifest::{ManifestedProgram, RootManifest};
+use chelis_types::types::{Prim, Target};
 use chelis_types::{CheckedProgram, check_linearity, check_typed_program};
 
 const C_TENSOR_PRIMS: &[Prim] = &[
@@ -38,6 +40,7 @@ const FIXTURE_DIR: &str = concat!(
 struct Front {
     checked: CheckedProgram,
     manifest: RootManifest,
+    manifested: ManifestedProgram,
     host: ConcreteHostProgram,
 }
 
@@ -59,33 +62,35 @@ fn front(source: &str) -> Front {
     let compiled = try_lower_compiled_program_with_manifest(&checked, &manifest)
         .unwrap_or_else(|diagnostic| panic!("host lowering: {diagnostic:?}"));
     let host = compiled.host.expect("test source must have a host lane");
+    let manifested = ManifestedProgram::new(checked.clone(), manifest.clone(), Target::C);
     Front {
         checked,
         manifest,
+        manifested,
         host,
     }
 }
 
-fn lower_source(source: &str) -> Result<OwnershipProgram, OwnershipError> {
+fn lower_source(source: &str) -> Result<HostOwnershipProgram, OwnershipError> {
     let front = front(source);
-    lower_ownership(&front.checked, &front.host, &front.manifest)
+    lower_host_ownership(&front.manifested, front.host)
 }
 
-fn lower_fixture(name: &str) -> Result<OwnershipProgram, OwnershipError> {
+fn lower_fixture(name: &str) -> Result<HostOwnershipProgram, OwnershipError> {
     lower_source(&fixture_source(name))
 }
 
-fn verified_source(source: &str) -> VerifiedOwnershipProgram {
+fn verified_source(source: &str) -> VerifiedHostProgram {
     let lowered = lower_source(source).unwrap_or_else(|error| panic!("lowering: {error}"));
     verify_ownership(lowered).unwrap_or_else(|error| panic!("verification: {error}"))
 }
 
-fn verified_fixture(name: &str) -> VerifiedOwnershipProgram {
+fn verified_fixture(name: &str) -> VerifiedHostProgram {
     let lowered = lower_fixture(name).unwrap_or_else(|error| panic!("{name}: {error}"));
     verify_ownership(lowered).unwrap_or_else(|error| panic!("{name}: {error}"))
 }
 
-fn unit_text(program: &VerifiedOwnershipProgram, name: &str) -> String {
+fn unit_text(program: &VerifiedHostProgram, name: &str) -> String {
     let rendered = program.render();
     let header = if name == "roots" {
         "unit roots Roots\n".to_string()
@@ -155,7 +160,8 @@ fn aliased_roots_copy_the_earlier_sink_in_manifest_order() {
 
     let mut front = front(&fixture_source("issue_1222_root_alias"));
     front.manifest.entries.reverse();
-    let lowered = lower_ownership(&front.checked, &front.host, &front.manifest).unwrap();
+    let manifested = ManifestedProgram::new(front.checked, front.manifest.clone(), Target::C);
+    let lowered = lower_host_ownership(&manifested, front.host).unwrap();
     let roots = unit_text(&verify_ownership(lowered).unwrap(), "roots");
     assert!(
         line_index(&roots, "root alias move") < line_index(&roots, "root original move"),
@@ -170,7 +176,8 @@ fn non_root_heap_value_gets_a_scope_exit_drop() {
         .manifest
         .entries
         .retain(|entry| entry.def_name == "out");
-    let lowered = lower_ownership(&front.checked, &front.host, &front.manifest).unwrap();
+    let manifested = ManifestedProgram::new(front.checked, front.manifest, Target::C);
+    let lowered = lower_host_ownership(&manifested, front.host).unwrap();
     let roots = unit_text(&verify_ownership(lowered).unwrap(), "roots");
     assert_eq!(count(&roots, "root out move"), 1, "{roots}");
     assert_eq!(count(&roots, "drop move"), 1, "{roots}");
@@ -187,8 +194,9 @@ fn missing_manifest_binding_is_a_typed_lowering_error() {
     ghost.name = "ghost".to_string();
     ghost.def_name = "ghost".to_string();
     front.manifest.entries.push(ghost);
+    let manifested = ManifestedProgram::new(front.checked, front.manifest, Target::C);
     assert_eq!(
-        lower_ownership(&front.checked, &front.host, &front.manifest).unwrap_err(),
+        lower_host_ownership(&manifested, front.host).unwrap_err(),
         OwnershipError::ManifestRootWithoutBinding {
             root: "ghost".to_string(),
             def_name: "ghost".to_string(),
@@ -311,44 +319,43 @@ fn fold_accumulator_is_one_owned_block_parameter_on_both_paths() {
 }
 
 #[test]
-fn supported_map_is_positive_parity_for_rejected_list_combinators() {
+fn all_previously_supported_host_combinators_reach_the_verified_boundary() {
     let verified =
         verified_source("xs = [[1i64], [2i64]]\nys = map(fn (v: List[int64]) -> v, xs)\n");
     let roots = unit_text(&verified, "roots");
     assert!(roots.contains("empty_list"), "{roots}");
     assert!(roots.contains("list_push"), "{roots}");
     assert!(roots.contains("loop borrow"), "{roots}");
+
+    for source in [
+        "xs = [1i64, 2i64]\nys = filter(fn (v: int64) -> gte(v, 2i64), xs)\n",
+        "xs = [1i64, 2i64]\nys = scan(fn (acc: int64, v: int64) -> add(acc, v), 0i64, xs)\n",
+        "xs = [1i64, 2i64]\nys = partition(fn (v: int64) -> gt(v, 1i64), xs)\n",
+        "xs = [1i64, 2i64]\nys = flat_map(fn (v: int64) -> [v, v], xs)\n",
+        "sampled = with seed(7i64) { 1i64 }\n",
+    ] {
+        verify_ownership(lower_source(source).unwrap()).unwrap();
+    }
 }
 
-fn assert_unlowered(source: &str, variant: &str) {
-    assert_eq!(
-        lower_source(source).unwrap_err(),
-        OwnershipError::UnloweredExprKind {
-            unit: "roots".to_string(),
-            variant: variant.to_string(),
-        }
+fn assert_front_rejects(source: &str) {
+    let declarations = surf_parse(source).expect("negative twin still parses");
+    let deep = desugar_program(&declarations);
+    assert!(
+        check_typed_program(&deep).is_err(),
+        "negative twin unexpectedly checked"
     );
 }
 
 #[test]
-fn unsupported_host_combinators_reject_by_exact_variant_after_real_host_lowering() {
-    assert_unlowered(
-        "xs = [1i64, 2i64]\nys = filter(fn (v: int64) -> gte(v, 2i64), xs)\n",
-        "Filter",
+fn supported_combinators_keep_their_preexisting_typed_failure_twins() {
+    assert_front_rejects("xs = [1i64]\nys = filter(fn (v: int64) -> missing(v), xs)\n");
+    assert_front_rejects(
+        "xs = [1i64]\nys = scan(fn (acc: int64, v: int64) -> missing(acc, v), 0i64, xs)\n",
     );
-    assert_unlowered(
-        "xs = [1i64, 2i64]\nys = scan(fn (acc: int64, v: int64) -> add(acc, v), 0i64, xs)\n",
-        "Scan",
-    );
-    assert_unlowered(
-        "xs = [1i64, 2i64]\nys = partition(fn (v: int64) -> gt(v, 1i64), xs)\n",
-        "Partition",
-    );
-    assert_unlowered(
-        "xs = [1i64, 2i64]\nys = flat_map(fn (v: int64) -> [v, v], xs)\n",
-        "FlatMap",
-    );
-    assert_unlowered("sampled = with seed(7i64) { 1i64 }\n", "WithSeed");
+    assert_front_rejects("xs = [1i64]\nys = partition(fn (v: int64) -> missing(v), xs)\n");
+    assert_front_rejects("xs = [1i64]\nys = flat_map(fn (v: int64) -> missing(v), xs)\n");
+    assert_front_rejects("sampled = with seed(7i64) { missing }\n");
 }
 
 #[test]
@@ -362,7 +369,7 @@ fn malformed_real_host_programs_fail_at_typed_boundaries() {
         ty: ConcreteHostType::Int64,
     });
     assert!(matches!(
-        lower_ownership(&front.checked, &wrong_arity, &front.manifest),
+        lower_host_ownership(&front.manifested, wrong_arity),
         Err(OwnershipError::CallArityMismatch { .. })
     ));
 
@@ -372,7 +379,7 @@ fn malformed_real_host_programs_fail_at_typed_boundaries() {
         ConcreteHostType::Int64,
     ));
     assert_eq!(
-        lower_ownership(&front.checked, &unbound, &front.manifest).unwrap_err(),
+        lower_host_ownership(&front.manifested, unbound).unwrap_err(),
         OwnershipError::UnboundName {
             unit: "roots".to_string(),
             name: "nobody".to_string(),
@@ -407,9 +414,127 @@ fn every_current_concrete_host_expr_kind_has_a_closed_disposition() {
     ]
     .into_iter()
     .collect();
-    let rejected: BTreeSet<&str> = ["Filter", "Scan", "Partition", "FlatMap", "WithSeed"]
+    let successor: BTreeSet<&str> = ["Filter", "Scan", "Partition", "FlatMap", "WithSeed"]
         .into_iter()
         .collect();
-    assert!(lowered.is_disjoint(&rejected));
-    assert_eq!(lowered.len() + rejected.len(), 24);
+    assert!(lowered.is_disjoint(&successor));
+    assert_eq!(lowered.len() + successor.len(), 24);
+}
+
+#[test]
+fn callable_manifest_root_consumes_the_materialized_observation_binding() {
+    let verified = verified_source("def answer() -> string = \"owned\"\n");
+    let roots = unit_text(&verified, "roots");
+    assert!(roots.contains("call:answer"), "{roots}");
+    assert!(roots.contains("root answer move"), "{roots}");
+
+    let front = front("def answer() -> string = \"owned\"\n");
+    let mut missing = front.host;
+    missing.functions.clear();
+    assert!(matches!(
+        lower_host_ownership(&front.manifested, missing),
+        Err(OwnershipError::ManifestRootWithoutBinding { .. })
+    ));
+}
+
+#[test]
+fn authored_entries_are_borrow_adapters_but_internal_specializations_are_not() {
+    let authored = front("def id(x: string) -> string = x\nout = id(\"x\")\n");
+    let authored_verified =
+        verify_ownership(lower_host_ownership(&authored.manifested, authored.host).unwrap())
+            .unwrap();
+    assert!(unit_text(&authored_verified, "id").contains("EntryBorrow"));
+
+    let internal = front("def id(x: string) -> string = x\nout = id(\"x\")\n");
+    let mut host = internal.host;
+    host.functions[0].origin = HostFunctionOrigin::Monomorphized;
+    let internal_verified =
+        verify_ownership(lower_host_ownership(&internal.manifested, host).unwrap()).unwrap();
+    assert!(!unit_text(&internal_verified, "id").contains("EntryBorrow"));
+}
+
+#[test]
+fn host_payload_owns_a_total_site_directive_map() {
+    let verified = verified_fixture("issue_1352_if_fresh");
+    assert!(verified.host_site_count() > 0);
+    assert_eq!(
+        verified.host_site_count(),
+        verified.host_directive_site_count()
+    );
+}
+
+fn scalar_tensor() -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(2)],
+        precision: Prim::F32,
+    }
+}
+
+#[test]
+fn standalone_and_nested_dags_cross_verified_payload_boundaries() {
+    let mut dag = Dag::new();
+    let load = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        scalar_tensor(),
+        None,
+    );
+    let neg = dag.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
+    dag.add_root(neg);
+    let dag = verify_ownership(lower_dag_ownership(dag).unwrap()).unwrap();
+    assert!(dag.render().contains("borrow load n0"));
+    assert!(dag.render().contains("root move n1"));
+
+    let mut terminal_dag = Dag::new();
+    let load = terminal_dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        scalar_tensor(),
+        None,
+    );
+    let produced = terminal_dag.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
+    let copied = terminal_dag.add_node(RiscOp::Copy, vec![produced], scalar_tensor(), None);
+    terminal_dag.add_node(
+        RiscOp::Store { name: "out".into() },
+        vec![produced],
+        scalar_tensor(),
+        None,
+    );
+    terminal_dag.add_node(RiscOp::Drop, vec![copied], scalar_tensor(), None);
+    let terminal = verify_ownership(lower_dag_ownership(terminal_dag).unwrap()).unwrap();
+    let terminal = terminal.render();
+    assert!(terminal.contains("clone n2 from n1"), "{terminal}");
+    assert!(terminal.contains("store n3 move n1"), "{terminal}");
+    assert!(terminal.contains("drop n4 move n2"), "{terminal}");
+
+    let host = verified_source(
+        "def peek(x: &tensor[2, f32]) -> int64 = 1i64\n\
+         input = to_tensor([cast(1.0, f32), cast(2.0, f32)])\n\
+         out = peek(&input)\n",
+    );
+    assert!(host.nested_dag_count() > 0);
+    assert!(host.nested_dag_render(0).is_some());
+}
+
+#[test]
+fn a_dag_owner_cannot_have_two_terminal_directives() {
+    let mut dag = Dag::new();
+    let load = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        scalar_tensor(),
+        None,
+    );
+    let produced = dag.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
+    dag.add_node(
+        RiscOp::Store { name: "out".into() },
+        vec![produced],
+        scalar_tensor(),
+        None,
+    );
+    dag.add_node(RiscOp::Drop, vec![produced], scalar_tensor(), None);
+    assert!(matches!(
+        lower_dag_ownership(dag),
+        Err(OwnershipError::DagDuplicateTerminal { owner: 1 })
+    ));
 }
