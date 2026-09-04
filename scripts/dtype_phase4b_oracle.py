@@ -413,7 +413,7 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-8": "ea385826c01b7cb1d24e75e1dbb4889149f0a08441d798eafcee75fc7d9f7b4f",
     "05-OP-9": "8359a6d8688f86f3818477c4d3fd8df04018e593fab9ad7ffa6fd0ebf5c1acf1",
     "05-OP-10": "5d77be3eb92d9db44da15ea02a0706239f8f1c70b32ab0391d5dad6aff94cfa2",
-    "05-OP-11": "688952d434f31b332cd82a871a4da3e0a6e64e2d440f258ff9d24e5be8a37945",
+    "05-OP-11": "a9db7bb96766662e5c520e7714d0a6d266aebe9eb17603d4fd9750698c33133b",
     "05-OP-12": "6e99f2ecbb3c7fbf3ae4f852104b03bdf65f5edf7ead1cae02c9e1d833708353",
     "05-OP-13": "3fd84ffa594776abc51a8c277c5d9a0dbc2b7b8fc11ab1bf32209b30c7d97890",
     "05-OP-14": "cba4686a8a31fb18cf9c5213af5ac4a545b03ce548b5c7bcd96e8f7f76648a40",
@@ -435,7 +435,7 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-30": "30c8c04f547161b7c40cbe5659a0c5fee34102f34a6fc605bcde8740221b461b",
     "05-OP-31": "20100b3524f8381469ea2a24d035da89be346f7809b70bfd6698aa94b6df9031",
     "05-OP-32": "fc45b2ef829aeebdb0d524059c63452cd2d9c733a5c2cdf85b5bfdd845bda8a1",
-    "05-OP-33": "aed15eb38ef7af373b4ae96d9eb3ce182f1d55514a0c1759a6a270fdc2db5cf2",
+    "05-OP-33": "ca99addff76d91d2125e820dcadbd31c0460f9e0de6ec69bfaec5894d51b1e08",
     "05-OP-34": "0d2c7d4a051a43dc6b0c93b241434ff1d66bbd7a3e6d47e5c74b669d2fd687bf",
     "05-OP-35": "6eb9a0e1023aeed6dcf43abe8623a9b94dcb38db15224f38915320108c276ef7",
     "05-OP-36": "aeaaf9888f922b31159b8b7536444603897d649c8fb477e77bda659346177ab4",
@@ -470,7 +470,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/05-risc-primitives.md",
         "### 2.1 Elementwise Binary",
         "### 2.4 Movement",
-        "90fdc968d6de13e06f0908da4666d98d6e68258195eed3123e30b2c57dda7485",
+        "a8fc522c8db143bce747512c7c64c52f62b2fb40c18e1e7906bf03ebcf027cf0",
     ),
     "logical builtin contract": (
         "spec/05-risc-primitives.md",
@@ -482,7 +482,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/04-type-system.md",
         "#### 4.5.3 Name-Preserving Rank Polymorphism",
         "#### 4.5.4 Concat Result Typing",
-        "8f7ed49ec2a00115a9fc9d423c0e56040f68b42d31580b259597da98ec859733",
+        "3c84ab77716d7d9f2d5f2024141086c209f3f094a1949a3bdd06685d65b25aea",
     ),
     "window extrema contract": (
         "spec/05-risc-primitives.md",
@@ -1746,12 +1746,18 @@ def validate_normative_contract(
                 "runtime extent guard trap line",
             ),
             (
-                "the result keeps only the forms that consumer admits",
-                "deferred expand candidate elimination",
+                "Each operation has exactly one result shape. `expand` sets "
+                "the extent at\n`axis` and leaves the rank unchanged; `insert` adds an axis of extent `size`\nat `axis` and produces rank `rank(x) + 1`. No result is deferred, no consumer\nselects between shapes, and no context supplies a default.",
+                "expand and insert each have one result shape",
             ),
             (
-                "their defaults settle in source order",
-                "positional expand settlement order",
+                "`insert` admits `axis` in `0..=rank(x)`, so\n`axis == rank(x)` appends a trailing axis. An axis outside its operation's\nrange is a type error.",
+                "insert axis range",
+            ),
+            (
+                "**Named-axis insert (`R+1`).** The inverse arithmetic "
+                "direction: `insert`\nadds a *named* axis",
+                "named-axis form belongs to insert",
             ),
             (
                 "| Ordered comparison (`cmplt`, `lt`, `gt`, `gte`, `lte`) | any "
@@ -1940,7 +1946,7 @@ def validate_normative_contract(
             "zero-length axis is a type error when statically known",
             "execution-time extent is zero",
             "traps `Domain` as operation\n> `mean` at the result dtype",
-            "`expand(g / divisor, original_shape, axis)`",
+            "`insert(g / divisor, axis, original_extent)`",
             "no accumulator parameter of its own",
         ),
         "05-OP-12": (
@@ -2740,16 +2746,45 @@ def validate_normative_contract(
                 "ToEnd shrink end requires a zero start",
             ),
             (
-                "is well formed only\nwhen the operand's extent at `axis` is 1",
-                "expand same-rank form requires a unit source extent",
+                "`expand` sets the extent at `axis` and is well formed only "
+                "when the operand's\nextent at `axis` is 1",
+                "expand requires a unit source extent",
             ),
             (
-                "the form is a claim that the operand's extent at `axis` is "
-                "1. A\nruntime operand extent at `axis` other than 1 under "
-                "the same-rank form fails\nthat claim's runtime extent guard "
-                "and traps `Domain`, placed and rendered per\n"
-                "`spec/04-type-system.md` §4.7 and [04-NUM-9].",
-                "expand same-rank non-unit source extent traps Domain",
+                "A reduction axis, `expand`'s broadcast axis, and `insert`'s"
+                "\n> new-axis position SHALL be",
+                "axis atom names both movement primitives",
+            ),
+            (
+                "names the\n> dimension it creates, which is by construction not a dimension of the\n> operand; that name SHALL be statically resolvable in the same sense",
+                "insert names a dimension absent from the operand",
+            ),
+            (
+                "> `insert(g / divisor, axis, original_extent)` at the "
+                "operand dtype.",
+                "mean adjoint reinserts the reduced axis",
+            ),
+            (
+                "[05-AXIS-1] governs the reduction, `expand`, and `insert`\n> family",
+                "C axis family names both movement primitives",
+            ),
+            (
+                "| `insert` | `(&tensor[D,p], axis: int32, size: int64) -> "
+                "tensor[D_plus,p]` | Insert a new dimension of width `size` "
+                "at position `axis`, producing rank `rank(x) + 1`.",
+                "insert movement row",
+            ),
+            (
+                "A literal operand extent at\n`axis` other than 1 is a type error. A symbolic or runtime operand extent at\n`axis` other than 1 fails that claim's runtime extent guard and traps\n`Domain`, placed and rendered per `spec/04-type-system.md` §4.7 and\n[04-NUM-9].",
+                "expand non-unit source extent is rejected or traps",
+            ),
+            (
+                "| `expand` | `insert(sum(g, axis), axis, 1i64)`",
+                "expand adjoint restores the unit axis",
+            ),
+            (
+                "| `insert` | `sum(g, axis)`",
+                "insert adjoint collapses the inserted axis",
             ),
             (
                 "| `cmplt(a, b)` | `cmplt(a, b)` | "
