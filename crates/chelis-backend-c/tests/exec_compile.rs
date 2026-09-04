@@ -4518,35 +4518,13 @@ fn direct_relu_preserves_input_bits_and_adjoint_uses_strict_positive_mask() {
 // eval-lane finding: the lane that can observe the guard is not the lane a
 // `.ch` fixture reaches.
 //
-// The shared `make_view_typed_1d` cannot be used here: it keeps ONE `static`
-// shape array, so a second view overwrites the first and both tensors report
-// the same extent - which would make a mismatch test pass while comparing a
-// value with itself.
-
-const GUARD_HARNESS_HEADER: &str = r#"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <math.h>
-#include "chelis_runtime.h"
-
-static const int64_t guard_strides[1] = {1};
-
-static chelis_tensor guard_view(void* data, int64_t* shape, int64_t n) {
-    shape[0] = n;
-    return (chelis_tensor){
-        .data = data,
-        .shape = shape,
-        .strides = guard_strides,
-        .size = n,
-        .byte_capacity = n * chelis_dtype_size(CHELIS_DTYPE_F32),
-        .rank = 1,
-        .dtype = CHELIS_DTYPE_F32,
-        .owns_data = 0,
-        .reserved = {0, 0},
-    };
-}
-"#;
+// A note that is now history rather than a caveat: before #1509,
+// `make_view_typed_1d` kept ONE `static` shape array, so a second view
+// overwrote the first and both tensors reported the same extent - which would
+// have made a mismatch row pass while comparing a value with itself. #1509's
+// opaque-tensor cut replaced the struct literal with
+// `chelis_tensor_entry_borrow` over a LOCAL shape array, so each view now
+// carries its own extent and the shared helper is safe for this row.
 
 /// Two `Load`s declaring one symbolic dim, with only the first read for data.
 /// The class is all-interface, so `spec/04-type-system.md` section 4.7 places
@@ -4580,17 +4558,13 @@ fn an_all_interface_class_traps_at_entry_when_its_witnesses_disagree() {
     .expect("codegen");
 
     let harness = format!(
-        r#"{GUARD_HARNESS_HEADER}
+        r#"{HARNESS_HEADER}
 extern void guard_entry(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
 
 int main() {{
     float xd[2] = {{1.0f, 2.0f}};
     float pd[3] = {{1.0f, 2.0f, 3.0f}};
-    int64_t xs[1];
-    int64_t ps[1];
-    chelis_tensor xt = guard_view(xd, xs, 2);
-    chelis_tensor pt = guard_view(pd, ps, 3);
-    chelis_tensor* inputs[2] = {{&xt, &pt}};
+    chelis_tensor* inputs[2] = {{make_view_1d(xd, 2), make_view_1d(pd, 3)}};
     chelis_tensor* outputs[1] = {{NULL}};
     guard_entry(inputs, 2, outputs, 1);
     printf("NO TRAP\n");
@@ -4632,20 +4606,16 @@ fn an_all_interface_class_runs_when_its_witnesses_agree() {
     .expect("codegen");
 
     let harness = format!(
-        r#"{GUARD_HARNESS_HEADER}
+        r#"{HARNESS_HEADER}
 extern void guard_entry_ok(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
 
 int main() {{
     float xd[2] = {{1.0f, 2.0f}};
     float pd[2] = {{3.0f, 4.0f}};
-    int64_t xs[1];
-    int64_t ps[1];
-    chelis_tensor xt = guard_view(xd, xs, 2);
-    chelis_tensor pt = guard_view(pd, ps, 2);
-    chelis_tensor* inputs[2] = {{&xt, &pt}};
+    chelis_tensor* inputs[2] = {{make_view_1d(xd, 2), make_view_1d(pd, 2)}};
     chelis_tensor* outputs[1] = {{NULL}};
     guard_entry_ok(inputs, 2, outputs, 1);
-    printf("RAN %.1f\n", ((float*)outputs[0]->data)[0]);
+    printf("RAN %.1f\n", ((float*)chelis_tensor_read_view(outputs[0]).data)[0]);
     return 0;
 }}
 "#
