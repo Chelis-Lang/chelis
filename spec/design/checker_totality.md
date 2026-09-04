@@ -1759,7 +1759,7 @@ function visibility; and any change to `spec/02` §P10's literal rule.
 - *Stdlib exposure* is item 5; the census is by inspection until the rigid
   check runs.
 
-### PP7. Stamped-ingress reader parity ([#1125]; the carrier axis, with [#1134]'s pass-set residue)
+### PP7. Stamped-ingress reader parity ([#1125]; the carrier axis, with [#1537]'s pass-set residue)
 
 **Opened 2026-09-03; decided below.** [#1107] swept one reader shape - `let
 deep::Expr::List(..) = x else { continue | return }` - across
@@ -1794,7 +1794,7 @@ checker. The fail-closed row rejects a program `chelis check` accepts at score
 1.0, with `invalid tuple index: expected a non-negative integer literal, found
 a non-literal expression`.
 
-Two further probes drive the same divergence outside the checker entirely.
+Three further probes drive the same divergence outside the checker entirely.
 Through tide's `/lower`, the identical two-def program with `entry: "target"`
 lowers cleanly from Surf and fails the check stage from Deep with the
 unrelated def's `unbound variable: does_not_exist`, because
@@ -1812,6 +1812,37 @@ stamps every vocabulary tag, so element 0 is `Atom::Tag`. The function
 therefore returns zero for every input, in both carriers, so the warning cannot
 fire on the `.dp` path at all. It is the class's worst shape - a reader dead
 twice over, on a release-blocking surface, silently.
+
+The seventh divergence is the proof tier itself, and it needed a solver build to
+see. With `--features smt` against the local cvc5 store, one opaque-invariant
+module with a guarded producer verifies at two different tiers depending only on
+which spelling of the same module is submitted:
+
+| surface | `proof_tier` | `composite_verdict` | `qualifiers` |
+|---|---|---|---|
+| `chelis prove mod.ch` | `smt` | `proven_modulo_real_arithmetic` | `["real_arithmetic"]` |
+| `chelis prove mod.dp` | `fuzz` | `fuzz_validated` | `["fuzz", "fuzz_base"]` |
+
+Both report `passed`, both exit 0, both summarize `obligations: 1, passed: 1`.
+The `.dp` module was produced from the `.ch` one by `chelis deep`, so the two
+are the same program. Nothing in the summary distinguishes a proof from a
+hundred samples; only the per-obligation `proof_tier` does, and a reader who
+does not compare surfaces has no reason to look. `prove_deep_file` hands
+`run_module_obligations` the exprs from `parse_and_stamp_file`, and
+`tier_b_lower`'s `tag`, `children`, and `lookup_producer` are List-only, so the
+obligation cannot lower and `run_one` falls through to Tier C. This is the row
+[#1362] §1.I carries; it was reported from the code and is now measured.
+
+**Why this survived.** `crates/chelis-cli/tests/prove_deep_obligations.rs`
+already asserts `proof_tier == "smt"` for exactly this fixture on exactly this
+surface. The file is `#![cfg(feature = "smt")]`, and no runner exists: the gate
+never passes `--features smt`, `ci.yml`'s smt job builds `chelis-cli` and then
+tests only `chelis-prove`, and `smt-full-prove.yml` runs `chelis-prove` lanes
+nightly and never names `chelis-cli`. A merged test that pins the correct
+behavior has no invocation anywhere, so the regression it was written to catch
+landed green. The lint E5d delivers is worth nothing on the same terms; PP7's
+oracle therefore runs in the default suite, and E5c owes this test a runner as
+part of its change set.
 
 #### Two axes, and the audit conflates them
 
@@ -1844,13 +1875,15 @@ function for the [04-INF-4] cycle detector alone, so the cheap repair is to
 move the normalization above inference and let the other five entries' shape
 apply to the sixth.
 
-Reject it as the mechanism, on measurement rather than doctrine. Of the six
+Reject it as the mechanism, on measurement rather than doctrine. Of the seven
 executed divergences, normalizing inside `program.rs` reaches at most the four
 that live inside the checker. It does not reach `prune.rs`, which reads
 stamped Deep in `chelis-compiler-api::pipeline` **before** any checker entry
-runs, and it does not reach `tier_b_lower.rs`, which reads the stamped exprs
+runs; it does not reach `tier_b_lower.rs`, which reads the stamped exprs
 `prove_deep_file` hands `run_module_obligations` **after** the check
-completes. The defect is not that one checker entry forgot to normalize. It is
+completes; and it does not reach `count_invariant_opaque_deep`, which reads
+the same exprs later still, to decide whether to warn.
+The defect is not that one checker entry forgot to normalize. It is
 that every consumer of `parse_and_stamp_file` output is a potential silent
 reader, and consumers exist on both sides of the checker.
 
@@ -1939,7 +1972,9 @@ enum a traversal must exhaust, not an `Option` it may drop.
   `deep_named_decl_name`, `prune_to_entry`'s module descent,
   `tier_b_lower`'s `tag`/`children`/`lookup_producer`, and
   `count_invariant_opaque_deep`, whose raw-tag read also owes a decode-once
-  regression row. Roughly 180 lines.
+  regression row. It also owes `prove_deep_obligations.rs` a runner: that file
+  already asserts the correct tier and nothing invokes it, so E5c's own fix
+  would land unverified on the same terms. Roughly 180 lines plus the CI step.
 - **E5d, the lint and its corpus.** Roughly 250 lines.
 - **E5e, the remaining sites.** The 59 unadjudicated guarded-arm sites and the
   19 never-adjudicated ones the audit inventories, swept behind E5b so the
@@ -1964,26 +1999,26 @@ pre-checker consumer.
 
 #### What PP7 does not establish
 
-- **Axis B is not closed.** `validate_ir_program` runs on the serialized-IR
-  entry only, and the two entries drive different inference functions
-  (`infer_ir_program_with_state` against
+- **Axis B is not closed; [#1537] owns it.** `validate_ir_program` runs on the
+  serialized-IR entry only, and the two entries drive different inference
+  functions (`infer_ir_program_with_state` against
   `infer_program_with_product_in_session`). Unifying them is a driver merge,
-  not a carrier repair; it is [#1134]'s subject, it collides with the [04-INF-4]
-  schedule work in `program.rs`, and PP7 does not absorb it.
-- **No universal reader claim.** The oracle proves the seven listed rows and
+  not a carrier repair, and PP7 does not absorb it: it collides with PP6's
+  schedule work in `program.rs`, and the repair's shape depends on which
+  entry's pass set is the correct one, which is a question no probe here
+  answers. PP6 closes [#1134] on the forward-reference and schedule questions
+  and names neither `validate_ir_program` nor the pass set, so the asymmetry
+  outlived its former tracker and now has its own.
+- **No universal reader claim.** The oracle proves the listed rows and
   whatever the lint's corpus plants. It does not prove that no reader remains
   carrier-incomplete; E5e's inventory is the honest statement of what is
   unswept.
-- **The Tier B downgrade is code-verified, not executed.** `prove_deep_file`
-  hands `run_module_obligations` the stamped exprs, and `tier_b_lower`'s
-  readers are List-only, so the obligation lane cannot lower and falls to
-  Tier C. The default build resolves every obligation at Tier C regardless, so
-  the observable difference needs `--features smt` with a cvc5 store. Until
-  that is run, [#1362] §1.I's Tier B claim stands as `[code]`. The tide MCP
-  route does not share it: `run_deep_source_obligations` normalizes through
-  `deep_compat::parse_file_to_lists`, which means the comment in
-  `obligation_engine.rs` asserting that a tide prove is identical to
-  `chelis prove foo.dp` is false on this head, in the CLI's disfavour.
+- **The tide MCP prove route is not affected, and the source says otherwise.**
+  `run_deep_source_obligations` normalizes through
+  `deep_compat::parse_file_to_lists`; `prove_deep_file` does not. The comment
+  at `obligation_engine.rs` asserting that a prove through tide is identical to
+  the CLI `chelis prove foo.dp` path is therefore false on this head, in the
+  CLI's disfavour. PP7 records it; correcting it belongs with E5c.
 - **One recorded site did not reproduce.** The `pipe_stage.rs` auto-borrow
   misclassification did not diverge on
   `add(x |> shape(0), x |> shape(0))` at this head; both surfaces accept.
@@ -1999,7 +2034,7 @@ rather than deferred. [#1029]'s deletion is helped, not blocked: E5b shrinks
 the `Expr::List` reader surface that deletion needs empty, and it changes no
 producer, so [#1320]'s macro-hygiene precondition is untouched.
 
-PP7's normative authority is [04-TOT-4]: a program's verdict does not depend on
+PP7's normative authority is [04-TOT-5]: a program's verdict does not depend on
 which entry receives it or which admitted representation carries it, and a
 representation a check cannot read is a silent exemption under [04-TOT-1]
 rather than an absent subtree. Before that atom, no numbered spec required
@@ -2413,10 +2448,10 @@ vacuity, or [#1076]/[#672]'s independently owned name-precedence work.
 | PP3 | [#1209]/[#1211]/[#1212]'s name-keyed binding-identity channel |
 | PP4 | [#1264] and [#1261]'s raw-flat-test-scope residue; exact module scope in every checker/test entry |
 | PP5 (partial) | [#668]; the checker derives a rank fact for `ShapeClass::Identity` plus `conv2d`/`stride`/`expand`/`softmax` and rejects a positive-rank disagreement where it has one, on unforgeable rank-only facts; the tensor-DAG C emitter aborts on a positive-rank operand disagreement, and under [#1484] so does the host-value emitter for its six binary elementwise builtins. No claim is made for operations outside that set, nor for any checker verdict on the host-lane programs; see PP5 |
-| PP7 | [#1125]'s carrier axis: the six probed divergences receive the same verdict from `check_ir_program` and `check_typed_program`, and one shared total accessor plus the lint make a carrier a reader cannot decode a diagnostic rather than an absent subtree. Axis B (`validate_ir_program` runs on the serialized-IR entry only) and the unswept guarded-arm inventory are named residue, not claims |
 | [#1247] residue | integer nominal arguments are kind-checked and concrete dimensions constrain every checker/test/compiler lane; [#1258] round trips the same representation |
 | [#1125] nominal-rank ingress residual | ordinary `.dp` ingress, `surf`, and `validate --deep` reject `d-rank` in nominal argument slots while preserving legal dimension arguments and tensor rank spreads; the broader reader-audit/lint issue remains open |
 | PP6 (decided, not delivered) | [#1486] (a hole is never quantified and no reference observes it before the body; an authored binder is rigid), [#1487] (lambda bodies and applied values are eager references), [#1485] (every reference-graph component is inferred as one group; the three spellings reject as `CycleDetected` identically at both ingresses); [#1134] closes when all three are dispositioned as PP6 states |
+| PP7 | [#1125]'s carrier axis: the seven probed divergences receive the same verdict from `check_ir_program` and `check_typed_program`, and one shared total accessor plus the lint make a carrier a reader cannot decode a diagnostic rather than an absent subtree. Axis B (`validate_ir_program` runs on the serialized-IR entry only), owned by [#1537], and the unswept guarded-arm inventory are named residue, not claims |
 | [#1134] forward-reference residual | both checker ingresses reject eager forward values, accept backward values from value initializers and from function bodies wherever the schedule places them except the [#1485] shape, accept declaration-local explicitly typed external inputs, retain sequential local scope, and reject bare self-reference/eager value cycles identically; the schedule's order invariants are asserted directly |
 
 ## Decisions and remaining questions
@@ -2435,7 +2470,7 @@ vacuity, or [#1076]/[#672]'s independently owned name-precedence work.
 | 10 | whether a wildcard slot in a signature is a polymorphic binder, and what a reference sees before the declaration's body is inferred | DECIDED 2026-09-03: a hole, never quantified; every reference is typed at the body-determined signature wherever it sits, so readers of a hole-signature function are scheduled after its body in every region. A shared monomorphic hole was rejected because it makes a partial header monomorphic in its own dimension binders | [04-INF-5] + PP6 |
 | 11 | whether a body may narrow an authored type binder | DECIDED 2026-09-03: no; the user confirmed the rigid rule and accepted the ten-site stdlib migration (`cast(lit, p)` plus bundle regeneration) that it costs. Explicit and implicit binders are rigid in the body, as dimension parameters already are under §4.4; the scheme is the declared signature. Ten stdlib declarations that narrow a bounded binder with an unsuffixed literal migrate to `cast(literal, p)` | [04-INF-6] + PP6 |
 | 12 | which references inside a top-level value's initializer are eager for cycle detection | DECIDED 2026-09-03: all of them, lambda bodies included, transitively through every referenced top-level declaration, with an applied value required like a read one. The argument-position refinement was rejected as unsound for stored and returned closures; the over-rejection is accepted and is already the detector's treatment of a bare function reference | [04-INF-7] + PP6 |
-| 13 | whether one checker entry may check a program the other does not, when the difference is which admitted carrier represents it | DECIDED 2026-09-03: no. Verdict is independent of entry and of carrier. Normalizing at the one non-normalizing entry is rejected as the mechanism because two of the probed divergences live outside every checker entry (`prune.rs` before the check, `tier_b_lower.rs` after it); the reader, not the entry, is the unit that must be total. A carrier a reader cannot decode is diagnosed, never observed as empty | [04-TOT-4] + PP7 |
+| 13 | whether one checker entry may check a program the other does not, when the difference is which admitted carrier represents it | DECIDED 2026-09-03: no. Verdict is independent of entry and of carrier. Normalizing at the one non-normalizing entry is rejected as the mechanism because three of the seven probed divergences live outside every checker entry (`prune.rs` before the check, `tier_b_lower.rs` and `count_invariant_opaque_deep` after it); the reader, not the entry, is the unit that must be total. A carrier a reader cannot decode is diagnosed, never observed as empty | [04-TOT-5] + PP7 |
 
 ## Contract summary
 
@@ -2469,7 +2504,7 @@ inference schedule's position, decides which other values are visible.
 Explicitly typed self-reference retains its declaration-local external-input
 meaning, while bare self-reference, local forward bindings, and eager value
 cycles remain errors.
-PP7 extends the same honesty rule from the entry to the reader. [04-TOT-4] makes
+PP7 extends the same honesty rule from the entry to the reader. [04-TOT-5] makes
 a program's verdict independent of which checker entry receives it and of which
 admitted representation carries it, so a check one representation receives is a
 check every representation receives, and a carrier a reader cannot decode is a
@@ -2519,9 +2554,9 @@ silent exemption to be diagnosed rather than an empty subtree to be skipped.
 [#1125]: https://github.com/Chelis-Lang/chelis/issues/1125
 [#1126]: https://github.com/Chelis-Lang/chelis/pull/1126
 [#1107]: https://github.com/Chelis-Lang/chelis/issues/1107
-[#1277]: https://github.com/Chelis-Lang/chelis/issues/1277
 [#1320]: https://github.com/Chelis-Lang/chelis/issues/1320
 [#1362]: https://github.com/Chelis-Lang/chelis/issues/1362
+[#1537]: https://github.com/Chelis-Lang/chelis/issues/1537
 [#1134]: https://github.com/Chelis-Lang/chelis/issues/1134
 [#887]: https://github.com/Chelis-Lang/chelis/issues/887
 [#1485]: https://github.com/Chelis-Lang/chelis/issues/1485
@@ -2535,3 +2570,4 @@ silent exemption to be diagnosed rather than an empty subtree to be skipped.
 [#1457]: https://github.com/Chelis-Lang/chelis/pull/1457
 [#1512]: https://github.com/Chelis-Lang/chelis/issues/1512
 [#1339]: https://github.com/Chelis-Lang/chelis/issues/1339
+[#1277]: https://github.com/Chelis-Lang/chelis/issues/1277

@@ -3174,7 +3174,7 @@ Reading notes:
 > expected shape; deferring the failure to a later stage is not a
 > disposition.
 
-> **[04-TOT-4]** A Deep program's checker verdict SHALL NOT depend on which
+> **[04-TOT-5]** A Deep program's checker verdict SHALL NOT depend on which
 > checker entry receives it, nor on which admitted representation carries it.
 > For one program, every entry SHALL accept or reject alike and SHALL report
 > the same defects; a check that one admitted representation receives SHALL be
