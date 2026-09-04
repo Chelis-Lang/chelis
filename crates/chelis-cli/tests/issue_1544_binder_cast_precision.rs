@@ -139,10 +139,9 @@ fn a_tensor_binder_cast_binds_the_literal_at_every_instantiation() {
 /// f32 rounding this issue is about would emit `0x3fb99999a0000000`. An
 /// absence assertion would pass on any reformatting of the wrong value.
 ///
-/// Verified by compiling and running the emitted C by hand at this head:
-/// `at_f64 = 0.30000000000000004`. `chelis eval` on the same program still
-/// prints `0.30000000447034836`, so the two lanes DISAGREE and the eval row
-/// above is the one still red.
+/// Verified by compiling and running the emitted C by hand:
+/// `at_f64 = 0.30000000000000004`, which is what `chelis eval` prints for the
+/// same program. The two lanes agree; the row above pins the eval half.
 #[test]
 fn the_build_lane_agrees_with_eval_on_a_binder_cast() {
     let (_dir, root) = make_package("scalar-scale-build", SCALAR_SCALE);
@@ -199,6 +198,122 @@ fn an_undeclared_cast_target_is_still_rejected_on_both_lanes() {
             "{label} must reject an unknown cast target: {stderr}"
         );
     }
+}
+
+/// Round 1 F1, partially dispositioned; this row records what IS decided and
+/// names what is not.
+///
+/// An UNBOUNDED binder `[p]` names no dtype family, so §P10b position 4 gives
+/// its literal nothing to adopt. It keeps the `t-prim` cast-target spelling,
+/// which is the same predicate the adoption uses; at the reviewed head the two
+/// were keyed differently, the unbounded case took the new `t-var` spelling
+/// with an f32-stamped literal, and `chelis build` stopped rejecting it. The
+/// build lane's chelis#744 / [04-DTYPE-1] rejection is restored and pinned
+/// here.
+///
+/// `chelis eval` ACCEPTS the same program and returns the f32-rounded value.
+/// That is not a spelling defect and is not fixed here. The interpreter has
+/// always resolved an unbounded binder cast target through the call frame,
+/// deliberately and with tests
+/// (`chelis-compiler-api runtime::tests::generic_cast_target_uses_*` pin that
+/// each call actualizes at its own concrete precision); narrowing it broke all
+/// three. What changed is which lane sees these programs: the standalone-skip
+/// reader routes a polymorphic template to the interpreter instead of the DAG,
+/// so base's DAG rejection no longer fires first.
+///
+/// The residue is the reserved language question: what family, if any, an
+/// unsuffixed literal adopts under an unbounded binder. §P10b position 4
+/// conditions on the cast rather than on the bound, so answering it is a
+/// language decision and not this pull request's to make. Until it is
+/// answered, this row pins the two lanes as they actually behave rather than
+/// asserting an agreement that does not exist.
+#[test]
+fn an_unbounded_binder_cast_keeps_the_build_lane_rejection() {
+    let (_dir, root) = make_package(
+        "unbounded-binder",
+        "module Bind.Main\n\
+         export (main)\n\
+         def scale[p](x: p) -> p = mul(x, cast(0.1, p))\n\
+         def main() -> f64 = scale(3.0f64)\n",
+    );
+    let check = run(&root, &["check", "src/main.ch"]);
+    assert!(
+        check.status.success(),
+        "the program type-checks; the rejection is a lowering one"
+    );
+    let build = run(
+        &root,
+        &["build", "src/main.ch", "--target", "c", "--output", "out"],
+    );
+    let build_stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        !build.status.success() && build_stderr.contains("[04-DTYPE-1]"),
+        "build must keep rejecting an unbounded binder cast: {build_stderr}"
+    );
+    // Recorded, not endorsed: eval computes, and the value carries the f32
+    // rounding because no adoption was possible. This assertion exists so the
+    // split is visible and reddens the day the language question is answered.
+    let eval = run(&root, &["eval", "--file", "src/main.ch"]);
+    let eval_stdout = String::from_utf8_lossy(&eval.stdout);
+    assert!(
+        eval.status.success() && eval_stdout.contains(ROUNDED_VIA_F32),
+        "eval's current behaviour for an unbounded binder is the f32-rounded \
+         value; if this changed, the reserved language question was answered \
+         and this row needs restating: {eval_stdout}{}",
+        String::from_utf8_lossy(&eval.stderr)
+    );
+}
+
+/// Round 1 F2, regression test. An INTEGER literal adopting an `Int`-bounded
+/// binder checks clean and computes at the instantiated integer width.
+///
+/// This is `arange_values` in `packages/chelis-std/src/tensor/construct.ch`,
+/// verbatim in shape. At the reviewed head it failed `chelis check` with
+/// `literal_source: integer requires a primitive float type`, a
+/// compiler-internal diagnostic carrying no span and no action a Chelis author
+/// could take, because the adopted literal was stamped with a marker that
+/// records "an integer written where a float is wanted" and that the checker
+/// requires to sit on a primitive float.
+#[test]
+fn an_integer_literal_adopts_an_int_bounded_binder() {
+    let (_dir, root) = make_package(
+        "int-binder",
+        "module Bind.Main\n\
+         export (main)\n\
+         def addk[p: Int](x: p) -> p = add(x, cast(1, p))\n\
+         def at_i32() -> int32 = addk(41i32)\n\
+         def at_i64() -> int64 = addk(41i64)\n\
+         def main() -> int64 = at_i64()\n",
+    );
+    let stdout = check_then_eval(&root);
+    assert!(
+        stdout.contains("at_i32 = 42") && stdout.contains("at_i64 = 42"),
+        "an Int-bounded binder must compute at both integer widths: {stdout}"
+    );
+}
+
+/// The float twin of the row above, so the repair cannot be "integers never
+/// adopt". An integer literal under a `Float`-bounded binder adopts it and
+/// computes at the instantiated float width.
+///
+/// Disposition lock at f32, regression at f64: the reviewed head failed both at
+/// `chelis check` for the same marker reason.
+#[test]
+fn an_integer_literal_adopts_a_float_bounded_binder() {
+    let (_dir, root) = make_package(
+        "int-under-float-binder",
+        "module Bind.Main\n\
+         export (main)\n\
+         def addk[p: Float](x: p) -> p = add(x, cast(7, p))\n\
+         def at_f32() -> f32 = addk(1.0f32)\n\
+         def at_f64() -> f64 = addk(1.0f64)\n\
+         def main() -> f64 = at_f64()\n",
+    );
+    let stdout = check_then_eval(&root);
+    assert!(
+        stdout.contains("at_f32 = 8") && stdout.contains("at_f64 = 8"),
+        "a Float-bounded binder must adopt an integer literal at both widths: {stdout}"
+    );
 }
 
 /// Regression test. The ascription spelling reaches the same defect through a

@@ -5352,16 +5352,7 @@ impl LowerCtx {
     }
 
     fn type_from_type_expr(expr: &Expr) -> TensorType {
-        // chelis#1544: tolerant on an unbound scalar precision variable. This
-        // entry is used as a PROBE over the whole `type_env`
-        // (`lower_program_to_library_inner`'s `program_types` build), which
-        // visits every declaration including the polymorphic ones, before any
-        // call site exists. The tensor arm is tolerant there by accident (a
-        // polymorphic signature's entry is a `t-fn`, which the tensor
-        // extractor declines), and the scalar arm has to be tolerant on
-        // purpose. The substituting entry below stays fatal, which is where a
-        // genuine monomorphization gap surfaces.
-        Self::type_from_type_expr_resolving(expr, &UnordMap::new(), &UnordMap::new(), false)
+        Self::type_from_type_expr_with_subst(expr, &UnordMap::new(), &UnordMap::new())
     }
 
     /// WS-A8: precision-aware variant of [`Self::type_from_type_expr`].
@@ -5378,21 +5369,6 @@ impl LowerCtx {
         prec_subst: &UnordMap<String, Prim>,
         rank_subst: &UnordMap<String, Vec<DimInfo>>,
     ) -> TensorType {
-        Self::type_from_type_expr_resolving(expr, prec_subst, rank_subst, true)
-    }
-
-    /// chelis#1544: the one body behind the static and substituting entries.
-    ///
-    /// `unbound_scalar_is_fatal` distinguishes the two callers: the probe over
-    /// `type_env` must be total, while lowering a real node with an unbound
-    /// binder is the §5.8.1 condition and must be loud rather than silently
-    /// f32.
-    fn type_from_type_expr_resolving(
-        expr: &Expr,
-        prec_subst: &UnordMap<String, Prim>,
-        rank_subst: &UnordMap<String, Vec<DimInfo>>,
-        unbound_scalar_is_fatal: bool,
-    ) -> TensorType {
         if let Some(prim) = Self::try_extract_prim(expr) {
             return TensorType {
                 dims: vec![],
@@ -5400,12 +5376,7 @@ impl LowerCtx {
             };
         }
         if let Some(inner) = Self::try_extract_ref_type(expr) {
-            return Self::type_from_type_expr_resolving(
-                inner,
-                prec_subst,
-                rank_subst,
-                unbound_scalar_is_fatal,
-            );
+            return Self::type_from_type_expr_with_subst(inner, prec_subst, rank_subst);
         }
         // chelis#1544: a BARE SCALAR precision variable. `spec/02-surf-syntax.md`
         // §P10b position 4 binds a `cast(literal, p)` literal at `p`, and the
@@ -5416,26 +5387,33 @@ impl LowerCtx {
         // its own width. The tensor arm below has resolved its precision slot
         // through `prec_subst` all along; this is the same resolution for the
         // scalar spelling.
-        if let Some(var_name) = Self::scalar_precision_var_name(expr) {
-            let Some(prim) = prec_subst.get(&var_name).copied() else {
-                if !unbound_scalar_is_fatal {
-                    return Self::default_type();
-                }
-                // Deliberately not `default_type()`. A silent f32 default is
-                // the chelis#744 defect this whole issue is about, and
-                // `type_is_never_lowerable` skips the standalone emission of a
-                // declaration carrying a binder in a signature slot, so a
-                // binder reaching here has no concrete call site: the same
-                // §5.8.1 condition the tensor arm reports.
-                panic!(
-                    "BUG: monomorphization missed scalar precision var `{var_name}`; \
-                     this should not be reachable from properly-typed source code. \
-                     spec/04-type-system.md \u{00a7}5.8.1 requires every reachable type \
-                     to carry a concrete precision after monomorphization. Reaching \
-                     this point indicates a polymorphic signature with no concrete \
-                     call site, or an internal monomorphization gap (chelis#1544)."
-                );
-            };
+        // chelis#1544: a BARE SCALAR precision variable. `spec/02-surf-syntax.md`
+        // §P10b position 4 binds a `cast(literal, p)` literal at `p`, and the
+        // desugarer stamps the literal with the binder; this is where that
+        // stamp is read back. Without this arm the fall-through below answered
+        // `scalar_f32` and `finalize_scalar` rounded the value, so every
+        // non-f32 instantiation silently received an f32 constant widened to
+        // its own width.
+        //
+        // An UNBOUND binder keeps that fall-through, deliberately. Two routes
+        // reach this point with nothing to resolve against, and both are
+        // pre-existing and legitimate:
+        //
+        // - the `program_types` probe in `lower_program_to_library_inner`,
+        //   which walks the whole `type_env` before any call site exists;
+        // - `grad` sub-context lowering, whose own comment says a precision
+        //   var internal to a callee of the differentiated body "is NOT in
+        //   this map either; it is resolved when that callee is inlined into
+        //   the body". Measured: the substitution is empty there, so the name
+        //   is absent rather than renamed.
+        //
+        // Failing loudly on those routes turned working programs into errors
+        // (the `issue_1293_*` and `issue_369_grad_fulllike_callee` families).
+        // This arm is therefore purely additive: it resolves a binder when the
+        // call site bound one, and otherwise behaves exactly as `main` did.
+        if let Some(var_name) = Self::scalar_precision_var_name(expr)
+            && let Some(prim) = prec_subst.get(&var_name).copied()
+        {
             return TensorType {
                 dims: vec![],
                 precision: prim,

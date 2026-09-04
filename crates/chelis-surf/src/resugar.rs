@@ -2129,14 +2129,29 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                 index: 2,
                 expected: "the optional cast mode selector `trunc`",
             })?;
-            let precision =
-                primitive_type_name(&node.children[1]).ok_or(ResugarError::InvalidChild {
-                    tag: node.tag.as_str(),
-                    index: 1,
-                    expected: "a `(t-prim {} precision)` node",
-                })?;
+            // chelis#1544: a cast target is a primitive OR a declared type
+            // binder. `spec/03-deep-syntax.md` §2.5.1 forbids a `t-prim` whose
+            // child is not a language primitive, so a binder has always had to
+            // be spelled `(t-var {} p)`; the desugarer now emits that, and this
+            // boundary is total per tag (chelis#1031), so it must admit it.
+            // Both spellings resugar to the same Surf token, the binder's name,
+            // which re-desugars to the same node: that is the §0.1 retraction
+            // law this arm has to keep.
+            let target = cast_target_name(&node.children[1]).ok_or(ResugarError::InvalidChild {
+                tag: node.tag.as_str(),
+                index: 1,
+                expected: "a `(t-prim {} precision)` or `(t-var {} binder)` node",
+            })?;
+            // The default-suffix question is only meaningful at a concrete
+            // precision: it asks whether an unsuffixed literal would re-bind at
+            // a DIFFERENT dtype than the one written. Under a binder the
+            // desugarer's §P10b adoption re-applies identically on the way
+            // back, so no suffix is owed and asking would consult a name that
+            // is not a primitive.
+            let precision_target = primitive_type_name(&node.children[1]);
             let operand = if let Ok(literal) = node_ref(&node.children[0])
                 && literal.tag == DeepTag::Lit
+                && let Some(precision) = precision_target
                 && default_literal_suffix_is_semantic_in_cast(&literal, precision)?
             {
                 resugar_literal_with_default_suffix(literal)?
@@ -2145,7 +2160,7 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
             };
             Ok(Expr::Cast(
                 Box::new(operand),
-                precision.to_string(),
+                target.to_string(),
                 mode,
                 node.span,
             ))
@@ -2550,6 +2565,19 @@ fn validate_literal_type(node: &NodeRef<'_>) -> Result<(), ResugarError> {
             }),
         (DeepExpr::Atom(Atom::Float(_), _), DeepTag::TPrim) => primitive_type_name(ty)
             .is_some_and(|name| !integer_source && matches!(name, "f16" | "bf16" | "f32" | "f64")),
+        // chelis#1544: a literal that ADOPTED a declared type binder, which is
+        // what `cast(<literal>, p)` produces under `spec/02-surf-syntax.md`
+        // §P10b position 4. Its dtype is the binder's instantiation, so no
+        // primitive pairing can be checked here and none is owed: the binder's
+        // declared bound is what constrains the family, and the checker
+        // enforces that. The `literal_source: integer` marker is not carried on
+        // this path (it records "an integer written where a float is wanted",
+        // which is a primitive-float fact), so its presence here is still a
+        // malformed pairing.
+        (DeepExpr::Atom(Atom::Int(_), _), DeepTag::TVar)
+        | (DeepExpr::Atom(Atom::Float(_), _), DeepTag::TVar) => {
+            !integer_source && cast_target_name(ty).is_some()
+        }
         (DeepExpr::BareList(items, _), DeepTag::TUnit) => !integer_source && items.is_empty(),
         (DeepExpr::List(list, _), DeepTag::TUnit) => !integer_source && list.elements.is_empty(),
         _ => false,
@@ -3776,6 +3804,15 @@ fn literal_suffix(meta: &MetaMap) -> Result<Option<LiteralSuffix>, ResugarError>
     if node_ref(value).is_ok_and(|node| node.tag == DeepTag::TUnit) {
         return Ok(None);
     }
+    // chelis#1544: a literal that adopted a declared type binder carries no
+    // suffix, for the same reason a unit literal does not: `spec/02-surf-syntax.md`
+    // §P10a's suffix set is closed over PRIMITIVES, and a binder is not one.
+    // The literal prints bare inside `cast(<literal>, p)`, and the desugarer's
+    // §P10b adoption re-applies on the way back, so the retraction law holds
+    // without a suffix and there is no spelling that could carry one.
+    if node_ref(value).is_ok_and(|node| node.tag == DeepTag::TVar) {
+        return Ok(None);
+    }
     let Some(name) = primitive_type_name(value) else {
         return Err(ResugarError::InvalidChild {
             tag: DeepTag::Lit.as_str(),
@@ -3802,6 +3839,23 @@ fn literal_suffix(meta: &MetaMap) -> Result<Option<LiteralSuffix>, ResugarError>
         }
     };
     Ok(Some(suffix))
+}
+
+/// chelis#1544: the name a `cast` target resugars to, from either legal
+/// spelling: `(t-prim {} f64)` or `(t-var {} p)`.
+///
+/// `_` is excluded because `spec/03-deep-syntax.md` §2.5.1 makes it an
+/// inference hole rather than a binder, and a hole has no Surf spelling in a
+/// cast target.
+fn cast_target_name(expr: &DeepExpr) -> Option<&str> {
+    if let Some(primitive) = primitive_type_name(expr) {
+        return Some(primitive);
+    }
+    let node = node_ref(expr).ok()?;
+    (node.tag == DeepTag::TVar && node.children.len() == 1)
+        .then(|| atom_name(&node.children[0]))
+        .flatten()
+        .filter(|name| *name != "_")
 }
 
 fn primitive_type_name(expr: &DeepExpr) -> Option<&str> {

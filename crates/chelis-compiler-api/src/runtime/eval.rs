@@ -621,20 +621,16 @@ impl<'a> EvalContext<'a> {
         let meta_dtype = match meta.and_then(lit_meta_prim) {
             Some(prim) => Some(prim),
             None => match meta.and_then(lit_meta_type_var_name) {
-                Some(binder) => match self.precision_bindings.get(binder).copied() {
-                    Some(prim) => Some(prim),
-                    // Deliberately not the f32 default. A binder the frame
-                    // cannot resolve means this literal is being evaluated
-                    // outside any instantiation, and answering f32 is the
-                    // silent-wrong-answer shape chelis#744 exists to prevent.
-                    None => {
-                        return Err(format!(
-                            "literal is typed at the unresolved type binder `{binder}`; \
-                             it has no dtype outside a call that instantiates it \
-                             (chelis#1544)"
-                        ));
-                    }
-                },
+                // An UNBOUND binder keeps the §P10 default, deliberately.
+                // The sibling arm in `chelis-ir`'s `lower.rs` was written to
+                // fail loudly here and that turned working `grad` programs
+                // into errors, because a precision var internal to a callee is
+                // legitimately unbound until that callee is inlined. Nothing
+                // proves the interpreter has no equivalent route, and the cost
+                // of being wrong is the same, so this arm is purely additive
+                // too: resolve when the frame bound one, otherwise behave
+                // exactly as `main` did.
+                Some(binder) => self.precision_bindings.get(binder).copied(),
                 None => None,
             },
         };
@@ -1290,6 +1286,13 @@ impl<'a> EvalContext<'a> {
         // active dtype map. The type checker has already rejected
         // f8e4m3 (spec/04-type-system.md §1.1.1) at this point so the
         // host eval lane just needs to pick the right re-pack.
+        //
+        // chelis#1544: the name-keyed fallback covers BOTH cast-target
+        // spellings, `(t-prim {} p)` and `(t-var {} p)`, and it must. It is not
+        // a leniency: `runtime::tests::generic_cast_target_uses_*` pin that an
+        // UNBOUNDED binder target actualizes at each call site's own concrete
+        // precision, which is a capability this lane has always had. Narrowing
+        // it to the `t-var` spelling broke all three.
         let target_prim = prim_from_name(target)
             .or_else(|| self.precision_bindings.get(target).copied())
             .ok_or_else(|| format!("cast target `{target}` is not a recognized primitive type"))?;
