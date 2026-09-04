@@ -868,16 +868,23 @@ move different lanes at different times and a single-valued row cannot record
 one lane at its exit state while another waits. Three consequences are worth
 naming here rather than leaving to the corpus file:
 
-- [#1375]'s two rows (`expand.foreign_claim.same_tensor_set_axis` and
-  `reshape.named_claim.node_target`) stay at their baseline on BOTH lanes and
-  belong to a later pull request, B2r, after B2h. `reshape` is on the shared
-  kernel keep-list (`chelis-ir/src/host.rs`'s
+- [#1375] is `reshape.named_claim.node_target` alone. Both its lanes stay at
+  baseline and belong to a later pull request, B2r, after B2h: `reshape` is on
+  the shared kernel keep-list (`chelis-ir/src/host.rs`'s
   `should_keep_tensor_expr_in_host_lane`), stale since Slice A gave reshape
-  targets their `RtDim` carrier, so a reshape-rooted def is emitted into the
-  C host program rather than lowered to a kernel and no class-derived guard
-  reaches it; B2h's routing is blocked on the same list for the eval lane.
-  One pull request therefore closes [#1375] on both lanes rather than two
+  targets their `RtDim` carrier, so a reshape-rooted def is emitted into the C
+  host program rather than lowered to a kernel and no class-derived guard
+  reaches it; B2h's routing is blocked on the same list for the eval lane. One
+  pull request therefore closes [#1375] on both lanes rather than two
   half-moves.
+
+  `expand.foreign_claim.same_tensor_set_axis` is [#1376], not [#1375], and is
+  NOT part of that handover: it is the same-tensor `shape()` size under a
+  foreign named claim, its `.c` row moves with this slice's guards, and its
+  `.eval` row is B2h's like the other expand rows. An earlier revision of this
+  paragraph carried a mislabel from the corpus row's own comment; the two rows
+  differ in which operation roots the def, which is exactly what decides
+  whether a kernel exists to guard.
 - The `guard_order.effect_*` rows exist only on the eval lane. On C the
   effect is not merely unorderable against a guard, it is ABSENT: a bound
   `print` inside an `IO`-effect body emits no corresponding statement at all
