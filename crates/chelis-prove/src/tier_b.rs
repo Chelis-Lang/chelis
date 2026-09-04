@@ -443,6 +443,48 @@ fn sqrt_domain_error(detail: &str) -> String {
 }
 
 #[cfg(feature = "smt")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SolverTimeoutPlan {
+    domain_ms: Option<u64>,
+    main_ms: u64,
+}
+
+/// Allocate the caller's request-wide solver budget without creating a zero
+/// cvc5 sub-budget (where `tlimit-per=0` means no solver time limit).
+///
+/// A property without `sqrt` still has only one solver phase and therefore
+/// retains the exact historical timeout, including the zero/unlimited case.
+#[cfg(feature = "smt")]
+fn solver_timeout_plan(
+    has_sqrt_domain_phase: bool,
+    request_ms: u64,
+) -> Result<SolverTimeoutPlan, String> {
+    if !has_sqrt_domain_phase {
+        return Ok(SolverTimeoutPlan {
+            domain_ms: None,
+            main_ms: request_ms,
+        });
+    }
+    if request_ms < 2 {
+        return Err(sqrt_domain_error(
+            "the request timeout is too small to allocate positive timeouts to both solver phases",
+        ));
+    }
+
+    let domain_ms = request_ms / 2;
+    Ok(SolverTimeoutPlan {
+        domain_ms: Some(domain_ms),
+        main_ms: request_ms - domain_ms,
+    })
+}
+
+#[cfg(feature = "smt")]
+struct SqrtDomainAuthorization {
+    arguments: Vec<SmtExpr>,
+    main_timeout_ms: u64,
+}
+
+#[cfg(feature = "smt")]
 fn require_proved_sqrt_domain(result: TierBResult) -> Result<(), String> {
     match result {
         TierBResult::Proved => Ok(()),
@@ -461,17 +503,26 @@ fn require_proved_sqrt_domain(result: TierBResult) -> Result<(), String> {
 /// The one auxiliary implication uses only independent, sqrt-free conjuncts
 /// from the user's preconditions. Only UNSAT of the negated conjunction
 /// (`TierBResult::Proved`) authorizes lowering. SAT, timeout, unknown, and any
-/// lowering error all fail closed.
+/// lowering error all fail closed. The auxiliary and main solver phases split
+/// the caller's request-wide timeout so their aggregate cvc5 budget never
+/// exceeds it.
 #[cfg(feature = "smt")]
-fn authorize_sqrt_domains(property: &SmtProperty, timeout_ms: u64) -> Result<Vec<SmtExpr>, String> {
+fn authorize_sqrt_domains(
+    property: &SmtProperty,
+    timeout_ms: u64,
+) -> Result<SqrtDomainAuthorization, String> {
     let mut arguments = Vec::new();
     for precondition in &property.preconditions {
         collect_sqrt_arguments(precondition, false, &mut arguments)?;
     }
     collect_sqrt_arguments(&property.postcondition, false, &mut arguments)?;
-    if arguments.is_empty() {
-        return Ok(arguments);
-    }
+    let timeout_plan = solver_timeout_plan(!arguments.is_empty(), timeout_ms)?;
+    let Some(domain_timeout_ms) = timeout_plan.domain_ms else {
+        return Ok(SqrtDomainAuthorization {
+            arguments,
+            main_timeout_ms: timeout_plan.main_ms,
+        });
+    };
 
     let mut evidence = Vec::new();
     for precondition in &property.preconditions {
@@ -493,8 +544,11 @@ fn authorize_sqrt_domains(property: &SmtProperty, timeout_ms: u64) -> Result<Vec
         preconditions: evidence,
         postcondition: SmtExpr::Bool(BoolOp::And, obligations),
     };
-    require_proved_sqrt_domain(solve_property_cvc5(&obligation, timeout_ms))?;
-    Ok(arguments)
+    require_proved_sqrt_domain(solve_property_cvc5(&obligation, domain_timeout_ms))?;
+    Ok(SqrtDomainAuthorization {
+        arguments,
+        main_timeout_ms: timeout_plan.main_ms,
+    })
 }
 
 /// Solve a property IN-PROCESS with cvc5. This is the function the isolation
@@ -535,8 +589,11 @@ pub(crate) fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> Ti
         ));
     }
 
-    let authorized_sqrt_arguments = match authorize_sqrt_domains(property, timeout_ms) {
-        Ok(arguments) => arguments,
+    let SqrtDomainAuthorization {
+        arguments: authorized_sqrt_arguments,
+        main_timeout_ms,
+    } = match authorize_sqrt_domains(property, timeout_ms) {
+        Ok(authorization) => authorization,
         Err(reason) => return TierBResult::Error(reason),
     };
 
@@ -561,7 +618,7 @@ pub(crate) fn solve_property_cvc5(property: &SmtProperty, timeout_ms: u64) -> Ti
     };
     solver.set_logic(&logic);
     solver.set_option("produce-models", "true");
-    solver.set_option("tlimit-per", &timeout_ms.to_string());
+    solver.set_option("tlimit-per", &main_timeout_ms.to_string());
 
     // 1. Declare variables. `sorts` mirrors `vars` so the lowering knows each
     //    variable's cvc5 sort without re-querying cvc5 (and so a var absent
@@ -1583,6 +1640,54 @@ mod tests {
                 reason.contains("Tier C"),
                 "reason names the safe fallback: {reason}"
             );
+        }
+    }
+
+    #[test]
+    fn issue1475_solver_sub_budgets_never_exceed_the_request() {
+        let minimum = solver_timeout_plan(true, 2).expect("one millisecond per solver phase");
+        assert_eq!(minimum.domain_ms, Some(1));
+        assert_eq!(minimum.main_ms, 1);
+
+        let even = solver_timeout_plan(true, 5_000).expect("two positive sub-budgets");
+        assert_eq!(even.domain_ms, Some(2_500));
+        assert_eq!(even.main_ms, 2_500);
+        assert_eq!(even.domain_ms.unwrap() + even.main_ms, 5_000);
+
+        let odd = solver_timeout_plan(true, 5_001).expect("two positive sub-budgets");
+        assert_eq!(odd.domain_ms, Some(2_500));
+        assert_eq!(odd.main_ms, 2_501);
+        assert_eq!(odd.domain_ms.unwrap() + odd.main_ms, 5_001);
+
+        let maximum = solver_timeout_plan(true, u64::MAX).expect("subtraction cannot overflow");
+        assert_eq!(maximum.domain_ms, Some(u64::MAX / 2));
+        assert_eq!(maximum.main_ms, u64::MAX - (u64::MAX / 2));
+        assert_eq!(
+            maximum.domain_ms.unwrap().checked_add(maximum.main_ms),
+            Some(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn issue1475_non_sqrt_solve_retains_the_whole_request_budget() {
+        for request_ms in [0, 1, 5_000] {
+            let plan = solver_timeout_plan(false, request_ms).expect("one solver needs no split");
+            assert_eq!(plan.domain_ms, None);
+            assert_eq!(plan.main_ms, request_ms);
+        }
+    }
+
+    #[test]
+    fn issue1475_tiny_sqrt_budget_fails_instead_of_making_zero_unlimited() {
+        for request_ms in [0, 1] {
+            let reason = solver_timeout_plan(true, request_ms)
+                .expect_err("two solver phases need two positive millisecond budgets");
+            assert!(reason.contains("sqrt"), "reason names the path: {reason}");
+            assert!(
+                reason.contains("timeout"),
+                "reason names the budget: {reason}"
+            );
+            assert!(reason.contains("Tier C"), "reason names fallback: {reason}");
         }
     }
 

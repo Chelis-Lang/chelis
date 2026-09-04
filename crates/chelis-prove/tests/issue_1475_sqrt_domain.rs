@@ -126,6 +126,19 @@ fn user_nonnegative_guard_keeps_sqrt_in_tier_b() {
 }
 
 #[test]
+fn tiny_request_timeout_refuses_a_zero_sqrt_sub_budget() {
+    let property = real_property(
+        vec![cmp(CmpOp::Ge, var("x"), real(0.0))],
+        cmp(CmpOp::Ge, sqrt(var("x")), real(0.0)),
+    );
+
+    for timeout_ms in [0, 1] {
+        let result = solve_property(&property, timeout_ms);
+        assert_domain_error(result);
+    }
+}
+
+#[test]
 fn algebraically_nonnegative_argument_keeps_sqrt_in_tier_b() {
     let square = arith(ArithOp::Mul, var("x"), var("x"));
     let property = real_property(vec![], cmp(CmpOp::Ge, sqrt(square), real(0.0)));
