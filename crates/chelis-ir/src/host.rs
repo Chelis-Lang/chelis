@@ -3308,8 +3308,7 @@ impl UncarriableWalk<'_> {
             Some(DeepTag::Fn) => {
                 let params = kids
                     .first()
-                    .map(fn_param_names)
-                    .unwrap_or_default()
+                    .map_or_else(Vec::new, fn_param_names)
                     .into_iter()
                     .map(|name| (name, false))
                     .collect();
@@ -3395,8 +3394,7 @@ impl UncarriableWalk<'_> {
         }
         let params = fn_kids
             .first()
-            .map(fn_param_names)
-            .unwrap_or_default()
+            .map_or_else(Vec::new, fn_param_names)
             .into_iter()
             .map(|param| (param, false))
             .collect();
