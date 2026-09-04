@@ -971,12 +971,8 @@ fn resugar_definition(
     }
     let declared_type = outer_type.or(function_type);
 
-    // chelis#1544 / [04-INF-6]: a `(t-var)`-typed literal is not an
-    // independently printable ascription. It is provenance for the one
-    // syntax position that can create it: the direct literal operand of
-    // `cast(literal, p)`, where `p` is declared with a dtype-family bound.
-    // Validate that parent/definition relation before the context-free
-    // expression resugarer can erase it into ordinary Surf text.
+    // Validate binder-literal provenance before context-free resugaring can
+    // erase the parent relation that makes it representable in Surf.
     let bound_source = signature.map_or(definition.meta, |signature| signature.meta);
     let dtype_bounds = decode_resugar_dtype_bounds(bound_source)?;
     let mut declared_binders = Vec::new();
@@ -2158,25 +2154,14 @@ fn resugar_node(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
                 index: 2,
                 expected: "the optional cast mode selector `trunc`",
             })?;
-            // chelis#1544: a cast target is a primitive OR a declared type
-            // binder. `spec/03-deep-syntax.md` §2.5.1 forbids a `t-prim` whose
-            // child is not a language primitive, so a binder has always had to
-            // be spelled `(t-var {} p)`; the desugarer now emits that, and this
-            // boundary is total per tag (chelis#1031), so it must admit it.
-            // Both spellings resugar to the same Surf token, the binder's name,
-            // which re-desugars to the same node: that is the §0.1 retraction
-            // law this arm has to keep.
+            // A target is a primitive `t-prim` or declared-binder `t-var`.
             let target = cast_target_name(&node.children[1]).ok_or(ResugarError::InvalidChild {
                 tag: node.tag.as_str(),
                 index: 1,
                 expected: "a `(t-prim {} precision)` or `(t-var {} binder)` node",
             })?;
-            // The default-suffix question is only meaningful at a concrete
-            // precision: it asks whether an unsuffixed literal would re-bind at
-            // a DIFFERENT dtype than the one written. Under a binder the
-            // desugarer's §P10b adoption re-applies identically on the way
-            // back, so no suffix is owed and asking would consult a name that
-            // is not a primitive.
+            // Binder adoption re-applies on re-desugaring; only concrete
+            // targets can require an explicit default suffix.
             let precision_target = primitive_type_name(&node.children[1]);
             let operand = if let Ok(literal) = node_ref(&node.children[0])
                 && literal.tag == DeepTag::Lit
@@ -2594,15 +2579,8 @@ fn validate_literal_type(node: &NodeRef<'_>) -> Result<(), ResugarError> {
             }),
         (DeepExpr::Atom(Atom::Float(_), _), DeepTag::TPrim) => primitive_type_name(ty)
             .is_some_and(|name| !integer_source && matches!(name, "f16" | "bf16" | "f32" | "f64")),
-        // chelis#1544: a literal that ADOPTED a declared type binder, which is
-        // what `cast(<literal>, p)` produces under `spec/02-surf-syntax.md`
-        // §P10b position 4. Its dtype is the binder's instantiation, so no
-        // primitive pairing can be checked here and none is owed: the binder's
-        // declared bound is what constrains the family, and the checker
-        // enforces that. The `literal_source: integer` marker is not carried on
-        // this path (it records "an integer written where a float is wanted",
-        // which is a primitive-float fact), so its presence here is still a
-        // malformed pairing.
+        // Binder-typed literals are validated against their adopting cast and
+        // declared family by `validate_binder_literal_adoption`.
         (DeepExpr::Atom(Atom::Int(_), _), DeepTag::TVar)
         | (DeepExpr::Atom(Atom::Float(_), _), DeepTag::TVar) => {
             !integer_source && cast_target_name(ty).is_some()
@@ -3716,13 +3694,7 @@ fn is_infer_type(ty: &TypeExpr) -> bool {
     matches!(ty, TypeExpr::Infer(_))
 }
 
-/// Rebuild a declaration's binder list from its `dtype_bounds` metadata.
-///
-/// `quantifiers` are the names collected from the declared type, in
-/// first-occurrence order; every one of them appears in the result, carrying
-/// its bound when the metadata declares one. A bounded name the type never
-/// mentions is still emitted so the round trip does not silently drop an
-/// authored bound the checker is about to reject.
+/// Rebuild binders in first-occurrence order without dropping unused bounds.
 fn resugar_dtype_bound_binders(
     meta: &MetaMap,
     quantifiers: &[String],
@@ -3754,6 +3726,39 @@ fn decode_resugar_dtype_bounds(meta: &MetaMap) -> Result<Vec<(String, DtypeFamil
     })
 }
 
+fn binder_family_accepts_literal(family: DtypeFamily, value: Option<&DeepExpr>) -> bool {
+    match value {
+        Some(DeepExpr::Atom(Atom::Float(_), _)) => {
+            matches!(family, DtypeFamily::Float | DtypeFamily::Numeric)
+        }
+        Some(DeepExpr::Atom(Atom::Int(_), _)) => matches!(
+            family,
+            DtypeFamily::Float | DtypeFamily::Int | DtypeFamily::Numeric
+        ),
+        _ => false,
+    }
+}
+
+fn validate_binder_literal_children(
+    children: &[DeepExpr],
+    declared_binders: &[String],
+    dtype_bounds: &[(String, DtypeFamily)],
+) -> Result<(), ResugarError> {
+    children.iter().try_for_each(|child| {
+        validate_binder_literal_adoption(child, declared_binders, dtype_bounds, None)
+    })
+}
+
+fn validate_binder_literal_metadata(
+    entries: &[(String, DeepExpr)],
+    declared_binders: &[String],
+    dtype_bounds: &[(String, DtypeFamily)],
+) -> Result<(), ResugarError> {
+    entries.iter().try_for_each(|(_, value)| {
+        validate_binder_literal_adoption(value, declared_binders, dtype_bounds, None)
+    })
+}
+
 /// Reject a Deep tree that would lose type-binder provenance when printed as
 /// Surf. The only producer of a literal whose `type` is `(t-var {} p)` is the
 /// direct operand of `cast(literal, p)` under a dtype-family-bounded `p`.
@@ -3771,18 +3776,8 @@ fn validate_binder_literal_adoption(
             let family = dtype_bounds
                 .iter()
                 .find_map(|(name, family)| (name == binder).then_some(*family));
-            let compatible = family.is_some_and(|family| match node.children.first() {
-                Some(DeepExpr::Atom(Atom::Float(_), _)) => {
-                    matches!(family, DtypeFamily::Float | DtypeFamily::Numeric)
-                }
-                Some(DeepExpr::Atom(Atom::Int(_), _)) => {
-                    matches!(
-                        family,
-                        DtypeFamily::Float | DtypeFamily::Int | DtypeFamily::Numeric
-                    )
-                }
-                _ => false,
-            });
+            let compatible = family
+                .is_some_and(|family| binder_family_accepts_literal(family, node.children.first()));
             if adopting_binder != Some(binder) || !compatible {
                 return Err(ResugarError::InvalidBinderLiteralAdoption {
                     binder: binder.to_string(),
@@ -3790,9 +3785,7 @@ fn validate_binder_literal_adoption(
             }
         }
 
-        for (_, value) in &node.meta.entries {
-            validate_binder_literal_adoption(value, declared_binders, dtype_bounds, None)?;
-        }
+        validate_binder_literal_metadata(&node.meta.entries, declared_binders, dtype_bounds)?;
 
         if node.tag == DeepTag::Cast
             && node.children.len() >= 2
@@ -3811,31 +3804,23 @@ fn validate_binder_literal_adoption(
                 dtype_bounds,
                 direct_literal.then_some(binder),
             )?;
-            for child in &node.children[1..] {
-                validate_binder_literal_adoption(child, declared_binders, dtype_bounds, None)?;
-            }
-            return Ok(());
+            return validate_binder_literal_children(
+                &node.children[1..],
+                declared_binders,
+                dtype_bounds,
+            );
         }
 
-        for child in node.children {
-            validate_binder_literal_adoption(child, declared_binders, dtype_bounds, None)?;
-        }
-        return Ok(());
+        return validate_binder_literal_children(node.children, declared_binders, dtype_bounds);
     }
 
     match expr {
         DeepExpr::Atom(..) => Ok(()),
         DeepExpr::List(list, _) => {
-            for child in &list.elements {
-                validate_binder_literal_adoption(child, declared_binders, dtype_bounds, None)?;
-            }
-            Ok(())
+            validate_binder_literal_children(&list.elements, declared_binders, dtype_bounds)
         }
         DeepExpr::Map(meta, _) => {
-            for (_, value) in &meta.entries {
-                validate_binder_literal_adoption(value, declared_binders, dtype_bounds, None)?;
-            }
-            Ok(())
+            validate_binder_literal_metadata(&meta.entries, declared_binders, dtype_bounds)
         }
         DeepExpr::MetaExpr(meta, _) => {
             validate_binder_literal_adoption(
@@ -3844,26 +3829,15 @@ fn validate_binder_literal_adoption(
                 dtype_bounds,
                 adopting_binder,
             )?;
-            for (_, value) in &meta.entries {
-                validate_binder_literal_adoption(value, declared_binders, dtype_bounds, None)?;
-            }
-            Ok(())
+            validate_binder_literal_metadata(&meta.entries, declared_binders, dtype_bounds)
         }
         DeepExpr::Node(..) => unreachable!("canonical nodes are handled above"),
         DeepExpr::BareList(items, _) => {
-            for child in items {
-                validate_binder_literal_adoption(child, declared_binders, dtype_bounds, None)?;
-            }
-            Ok(())
+            validate_binder_literal_children(items, declared_binders, dtype_bounds)
         }
         DeepExpr::UnknownForm(data) => {
-            for (_, value) in &data.meta.entries {
-                validate_binder_literal_adoption(value, declared_binders, dtype_bounds, None)?;
-            }
-            for child in &data.children {
-                validate_binder_literal_adoption(child, declared_binders, dtype_bounds, None)?;
-            }
-            Ok(())
+            validate_binder_literal_metadata(&data.meta.entries, declared_binders, dtype_bounds)?;
+            validate_binder_literal_children(&data.children, declared_binders, dtype_bounds)
         }
     }
 }
@@ -3959,12 +3933,7 @@ fn literal_suffix(meta: &MetaMap) -> Result<Option<LiteralSuffix>, ResugarError>
     if node_ref(value).is_ok_and(|node| node.tag == DeepTag::TUnit) {
         return Ok(None);
     }
-    // chelis#1544: a literal that adopted a declared type binder carries no
-    // suffix, for the same reason a unit literal does not: `spec/02-surf-syntax.md`
-    // §P10a's suffix set is closed over PRIMITIVES, and a binder is not one.
-    // The literal prints bare inside `cast(<literal>, p)`, and the desugarer's
-    // §P10b adoption re-applies on the way back, so the retraction law holds
-    // without a suffix and there is no spelling that could carry one.
+    // Binder-typed literals print bare; binder adoption restores their type.
     if node_ref(value).is_ok_and(|node| node.tag == DeepTag::TVar) {
         return Ok(None);
     }
@@ -3996,12 +3965,7 @@ fn literal_suffix(meta: &MetaMap) -> Result<Option<LiteralSuffix>, ResugarError>
     Ok(Some(suffix))
 }
 
-/// chelis#1544: the name a `cast` target resugars to, from either legal
-/// spelling: `(t-prim {} f64)` or `(t-var {} p)`.
-///
-/// `_` is excluded because `spec/03-deep-syntax.md` §2.5.1 makes it an
-/// inference hole rather than a binder, and a hole has no Surf spelling in a
-/// cast target.
+/// Name a primitive or declared-binder cast target; `_` is not printable.
 fn cast_target_name(expr: &DeepExpr) -> Option<&str> {
     if let Some(primitive) = primitive_type_name(expr) {
         return Some(primitive);

@@ -1,9 +1,5 @@
-//! chelis#1544: a literal may carry a declaration binder as its type only at
-//! the explicit cast-adoption site named by P10b / spec/04 §5.6.
-//!
-//! The authored binder remains rigid under [04-INF-6]. These tests exercise
-//! both checker ingresses so a stamped program cannot bypass the structural
-//! parent relation by selecting the typed or normalized path.
+//! chelis#1544: P10b / spec/04 §5.6 binder-literal adoption at both checker
+//! ingresses, with [04-INF-6] rigidity outside the exact cast parent.
 
 use chelis_deep::{Expr, parse_and_stamp_file};
 use chelis_surf::{desugar::desugar_program, parser::parse_str as parse_surf};
@@ -103,13 +99,9 @@ fn direct_literal_ascription_to_a_rigid_binder_is_rejected() {
 fn a_literal_stamp_must_match_the_immediately_adopting_cast_binder() {
     assert_both_reject_with(
         &deep(
-            "(defsig {dtype_bounds: {p: float, q: float}} scale\n\
-               (t-fn {} (t-var {} p) (t-var {} q) (t-var {} q)))\n\
-             (def {} scale\n\
-               (fn {} (params {} (x {type: (t-var {} p)}) (y {type: (t-var {} q)}))\n\
-                 (cast {}\n\
-                   (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)\n\
-                   (t-var {} q))))\n",
+            "(defsig {dtype_bounds: {p: float, q: float}} scale (t-fn {} (t-var {} p) (t-var {} q) (t-var {} q)))\n\
+             (def {} scale (fn {} (params {} (x {type: (t-var {} p)}) (y {type: (t-var {} q)}))\n\
+               (cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1) (t-var {} q))))\n",
         ),
         "[04-INF-6]",
         "wrong literal binder",
@@ -121,12 +113,9 @@ fn adoption_does_not_leak_into_a_computed_cast_operand() {
     assert_both_reject_with(
         &deep(
             "(defsig {dtype_bounds: {p: float}} scale (t-fn {} (t-var {} p) (t-var {} p)))\n\
-             (def {} scale\n\
-               (fn {} (params {} (x {type: (t-var {} p)}))\n\
-                 (cast {}\n\
-                   (app {} (var {} add) (var {} x)\n\
-                     (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1))\n\
-                   (t-var {} p))))\n",
+             (def {} scale (fn {} (params {} (x {type: (t-var {} p)}))\n\
+               (cast {} (app {} (var {} add) (var {} x)\n\
+                 (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)) (t-var {} p))))\n",
         ),
         "[04-INF-6]",
         "computed cast operand",
@@ -138,11 +127,9 @@ fn an_undeclared_binder_cannot_author_literal_adoption() {
     assert_both_reject_with(
         &deep(
             "(defsig {} scale (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n\
-             (def {} scale\n\
-               (fn {} (params {} (x {type: (t-prim {} f32)}))\n\
-                 (cast {}\n\
-                   (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)\n\
-                   (t-var {} p))))\n",
+             (def {} scale (fn {} (params {} (x {type: (t-prim {} f32)}))\n\
+               (cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)\n\
+                 (t-var {} p))))\n",
         ),
         "[04-DTYPE-1]",
         "undeclared literal binder",
@@ -154,11 +141,9 @@ fn a_float_literal_cannot_adopt_an_int_family_binder() {
     assert_both_reject_with(
         &deep(
             "(defsig {dtype_bounds: {p: int}} trunc_to (t-fn {} (t-var {} p) (t-var {} p)))\n\
-             (def {} trunc_to\n\
-               (fn {} (params {} (x {type: (t-var {} p)}))\n\
-                 (cast {}\
-                   (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 1.9)\n\
-                   (t-var {} p))))\n",
+             (def {} trunc_to (fn {} (params {} (x {type: (t-var {} p)}))\n\
+               (cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 1.9)\n\
+                 (t-var {} p))))\n",
         ),
         "[04-INF-6]",
         "float literal under Int binder",

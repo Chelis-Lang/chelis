@@ -145,39 +145,16 @@ struct DesugarCtx {
     ///
     /// A `Cell` because the desugar walk takes `&self` throughout.
     next_destructure_temp: std::cell::Cell<usize>,
-    /// chelis#1544: the declared type binders of each declaration, keyed by
-    /// name, with the dtype family each binder was bounded to.
-    ///
-    /// Collected from `Decl::FunDef`'s inline `[..]` list and from a
-    /// same-named `Decl::Sig`'s list, because a `def` whose binders live on a
-    /// standalone `sig` carries none of its own. `None` is an unbounded
-    /// binder, which is still a binder for the `t-var` spelling below but
-    /// carries no family for literal adoption.
+    /// Each declaration's inline or standalone-signature binders. `None`
+    /// marks a declared but unbounded binder, which cannot adopt a literal.
     declared_type_binders: UnordMap<String, UnordMap<String, Option<DtypeFamily>>>,
-    /// The binders in scope for the declaration body currently being
-    /// desugared, set and restored by `desugar_fun_def`.
-    ///
-    /// `spec/03-deep-syntax.md` §2.5.1 requires this scope awareness: "Surf
-    /// declaration desugaring is scope-aware: a declared parameter becomes the
-    /// variable form selected by that fixed header kind". A `RefCell` for the
-    /// same reason `next_destructure_temp` is a `Cell`: the walk takes `&self`.
+    /// Binder scope installed while one declaration body is desugared.
     current_type_binders: std::cell::RefCell<UnordMap<String, Option<DtypeFamily>>>,
 }
 
 impl DesugarCtx {
-    /// The dtype family declared for `name` in the current declaration.
-    /// Unbounded and undeclared names both return `None` because neither can
-    /// authorize literal adoption.
-    fn current_type_binder_bound(&self, name: &str) -> Option<DtypeFamily> {
-        self.current_type_binders
-            .borrow()
-            .get(name)
-            .copied()
-            .flatten()
-    }
-
-    fn is_current_type_binder(&self, name: &str) -> bool {
-        self.current_type_binders.borrow().contains_key(name)
+    fn current_type_binder(&self, name: &str) -> Option<Option<DtypeFamily>> {
+        self.current_type_binders.borrow().get(name).copied()
     }
 
     fn new(decls: &[Decl]) -> Self {
@@ -967,15 +944,7 @@ fn collect_top_level_fn_params(decl: &Decl, out: &mut UnordMap<String, Vec<Strin
     }
 }
 
-/// Collect names that carry an explicit standalone `sig` declaration, so
-/// `desugar_fun_def` can suppress the redundant wildcard-filled `defsig` it
-/// would otherwise synthesize for a same-name annotated `def` (chelis#285).
-/// chelis#1544: collect each declaration's declared type binders with their
-/// dtype families, keyed by declaration name.
-///
-/// Both carriers are read and merged. A `def` may declare `[p: Float]` inline,
-/// or the binders may live on a standalone `sig` whose `def` lists none, and
-/// the cast target in the body means the same binder either way.
+/// Merge inline and standalone-signature binders by declaration name.
 fn collect_declared_type_binders(
     decl: &Decl,
     out: &mut UnordMap<String, UnordMap<String, Option<DtypeFamily>>>,
@@ -994,9 +963,7 @@ fn collect_declared_type_binders(
     };
     let entry = out.entry(name.clone()).or_default();
     for binder in type_binders {
-        // A bound declared on either carrier wins over an unbounded mention of
-        // the same name on the other; `spec/04-type-system.md` §5.9 makes
-        // declaring it on both an error the checker reports.
+        // Preserve a bound when the other carrier repeats the binder unbounded.
         let slot = entry.entry(binder.name.clone()).or_insert(None);
         if slot.is_none() {
             *slot = binder.bound;
@@ -1019,6 +986,12 @@ fn collect_deep_type_variable_names(
     expr: &deep::Expr,
     out: &mut UnordMap<String, Option<DtypeFamily>>,
 ) {
+    fn collect_children(children: &[deep::Expr], out: &mut UnordMap<String, Option<DtypeFamily>>) {
+        for child in children {
+            collect_deep_type_variable_names(child, out);
+        }
+    }
+
     match expr {
         deep::Expr::Node(node, _) => {
             if node.tag() == DeepTag::TVar
@@ -1028,32 +1001,20 @@ fn collect_deep_type_variable_names(
             {
                 out.entry(name.clone()).or_insert(None);
             }
-            for child in node.children_slice() {
-                collect_deep_type_variable_names(child, out);
-            }
+            collect_children(node.children_slice(), out);
         }
-        deep::Expr::List(list, _) => {
-            for child in &list.elements {
-                collect_deep_type_variable_names(child, out);
-            }
-        }
+        deep::Expr::List(list, _) => collect_children(&list.elements, out),
         deep::Expr::MetaExpr(meta, _) => {
             collect_deep_type_variable_names(&meta.expr, out);
         }
-        deep::Expr::BareList(children, _) => {
-            for child in children {
-                collect_deep_type_variable_names(child, out);
-            }
-        }
-        deep::Expr::UnknownForm(data) => {
-            for child in &data.children {
-                collect_deep_type_variable_names(child, out);
-            }
-        }
+        deep::Expr::BareList(children, _) => collect_children(children, out),
+        deep::Expr::UnknownForm(data) => collect_children(&data.children, out),
         deep::Expr::Atom(_, _) | deep::Expr::Map(_, _) => {}
     }
 }
 
+/// Collect names with a standalone `sig`, suppressing a synthesized duplicate
+/// `defsig` for the same annotated `def` (chelis#285).
 fn collect_explicit_sig_names(decl: &Decl, out: &mut UnordSet<String>) {
     if let Decl::Sig { name, .. } = decl {
         out.insert(name.clone());
@@ -1389,10 +1350,7 @@ impl DesugarCtx {
         // whose declared return type is a tensor type and whose body is
         // itself a tensor literal. Narrow numeric literals in `body` to
         // the tensor element type.
-        // chelis#1544: install this declaration's binder scope for the body
-        // walk, so a `cast(<literal>, p)` target inside it can be spelled as
-        // the type variable it is. Restored afterwards, because the context is
-        // shared across every declaration in the unit.
+        // Binder scope controls `t-var` cast targets and literal adoption.
         let restore_binders = self.current_type_binders.replace(
             self.declared_type_binders
                 .get(name)
@@ -1910,11 +1868,8 @@ impl DesugarCtx {
                 // `cast_trunc([1.9], int32)` into an int32 tensor and
                 // make the truncating cast a type error on its own
                 // argument.
-                // chelis#1544: `prec` names a declared type binder rather than
-                // a primitive when the enclosing declaration bound it. Both
-                // the target spelling and the literal-adoption rule below key
-                // off that one fact.
-                let binder_bound = self.current_type_binder_bound(prec);
+                let binder = self.current_type_binder(prec);
+                let binder_bound = binder.flatten();
                 let inner = match e.as_ref() {
                     _ if *mode == CastMode::Trunc => {
                         self.desugar_expr_with_scope(e, local_fn_params)
@@ -1973,11 +1928,9 @@ impl DesugarCtx {
                     }
                     other => self.desugar_expr_with_scope(other, local_fn_params),
                 };
-                // Spelling and capability are distinct. Every declared binder
-                // is a `t-var`; only a dtype-family bound lets its literal
-                // adopt. The checker rejects an unbounded binder in this dtype
-                // position under [04-DTYPE-1]/[04-DTYPE-2].
-                let target = if self.is_current_type_binder(prec) {
+                // Every declared binder is a `t-var`; only a bound permits
+                // literal adoption. The checker rejects unbounded targets.
+                let target = if binder.is_some() {
                     node(DeepTag::TVar, vec![sym(prec)])
                 } else {
                     node(DeepTag::TPrim, vec![sym(prec)])
@@ -2323,24 +2276,9 @@ fn desugar_literal(lit: &Literal) -> deep::Expr {
 /// suffixed literals bind at their suffix (§5.5), float→integer keeps
 /// truncation semantics, and bool/string targets are not numeric
 /// binding precisions.
-/// chelis#1544: the §P10b position-4 adoption rule for a cast target that
-/// names a DECLARED BINDER rather than a primitive.
-///
-/// `spec/02-surf-syntax.md` §P10b writes position 4 as "the first argument of
-/// an explicit `cast(literal, p)` expression - the literals bind at `p`", and
-/// §P10's authoritative default rule names that cast as one of exactly three
-/// overrides. This is that rule with `p` a binder: the literal binds at the
-/// binder, so every instantiation gets the value written in the source rather
-/// than an f32 rounding of it.
-///
-/// The family split mirrors [`scalar_literal_adopts_cast_target`] exactly,
-/// because it exists for a reason that does not change here: a float literal
-/// cannot bind at an integer type, so under an `Int`-bounded binder it keeps
-/// its float source and the checked cast applies [04-NUM-14].
-///
-/// An unbounded binder names no family, so no adoption is possible. It still
-/// has the `t-var` spelling; the checker rejects it as a cast target because
-/// [04-DTYPE-2] permits it to instantiate to non-dtype types.
+/// [02-P10b] binder-target literal adoption. Float literals require `Float`
+/// or `Numeric`; integer literals also admit `Int`. Unbounded binders cannot
+/// adopt and remain checker-rejected cast targets under [04-DTYPE-2].
 fn scalar_literal_adopts_binder_target(lit: &Literal, bound: Option<DtypeFamily>) -> bool {
     let Some(bound) = bound else {
         return false;
@@ -2355,27 +2293,14 @@ fn scalar_literal_adopts_binder_target(lit: &Literal, bound: Option<DtypeFamily>
     }
 }
 
-/// The binder-target twin of [`adopted_scalar_literal`]. The stamped type is
-/// `(t-var {} p)` rather than `(t-prim {} <primitive>)`, which is the spelling
-/// `spec/03-deep-syntax.md` §2.5.1 requires: a `t-prim` child must be a
-/// language primitive, so the binder has never had a legal `t-prim` spelling.
+/// Binder-target twin of [`adopted_scalar_literal`], stamped with `t-var`.
 fn adopted_scalar_literal_at_binder(lit: &Literal, binder: &str, negate: bool) -> deep::Expr {
     let ty = node(DeepTag::TVar, vec![sym(binder)]);
     match lit {
         Literal::Int(n) => {
             let value = if negate { fold_unary_minus_int(*n) } else { *n };
-            // NO `literal_source: integer` marker, unlike the concrete
-            // float-target path. That marker records "an integer was written
-            // where a float is wanted", and the checker requires it to
-            // accompany a primitive FLOAT type; a `t-var` is not one, so
-            // stamping it made `cast(1, p)` under `[p: Int]` fail `chelis
-            // check` with a compiler-internal diagnostic that named no span
-            // and no action a Chelis author could take (round 1 F2). That
-            // shape is `arange_values` in the shipped standard library.
-            //
-            // An integer literal adopting a binder is not that situation: the
-            // binder's own bound decides the family, and the instantiation
-            // decides the width.
+            // `literal_source: integer` describes a concrete float target;
+            // the binder's family and instantiation own this literal instead.
             node_meta(
                 DeepTag::Lit,
                 numeric_literal_meta(ty, "unsuffixed"),
@@ -3045,6 +2970,42 @@ mod tests {
         desugar_decl(decl).iter().map(print_expr).collect()
     }
 
+    fn desugar_source(source: &str) -> Vec<deep::Expr> {
+        let decls = crate::parser::parse_str(source).expect("fixture parses");
+        desugar_program(&decls)
+    }
+
+    fn compact_desugared_source(source: &str) -> String {
+        desugar_source(source)
+            .iter()
+            .map(print_expr)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn deep_without_spans(program: &[deep::Expr]) -> Vec<String> {
+        program
+            .iter()
+            .map(print_expr)
+            .map(|printed| {
+                printed
+                    .split("span: \"")
+                    .enumerate()
+                    .map(|(index, piece)| {
+                        if index == 0 {
+                            piece.to_string()
+                        } else {
+                            piece[piece.find('"').map_or(0, |end| end + 1)..].to_string()
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
     // --- Literals ---
 
     #[test]
@@ -3665,34 +3626,10 @@ mod tests {
         );
     }
 
-    /// chelis#1544: a cast target that names a DECLARED TYPE BINDER emits
-    /// `(t-var {} p)`, and the literal adopts that binder.
-    ///
-    /// `spec/03-deep-syntax.md` §2.5.1 requires the spelling: "`t-prim` has
-    /// exactly one symbol child and that symbol is in the language or
-    /// explicitly-reserved primitive vocabulary ... An unknown primitive name
-    /// is a type error, not an inference hole", so `(t-prim {} p)` for a
-    /// binder was malformed Deep. `spec/02-surf-syntax.md` §P10b position 4
-    /// requires the adoption: "the first argument of an explicit
-    /// `cast(literal, p)` expression - the literals bind at `p`".
-    ///
-    /// Regression test. Before this change the same source emitted
-    /// `(cast {} (lit {type: (t-prim {} f32)} 0.1) (t-prim {} p))`: a
-    /// malformed target, and a literal already rounded to f32 so no
-    /// instantiation could recover the authored value.
     #[test]
     fn cast_to_a_declared_binder_emits_a_type_variable_target() {
-        let decls =
-            crate::parser::parse_str("def scale[p: Float](x: p) -> p = mul(x, cast(0.1, p))\n")
-                .expect("fixture parses");
-        let printed = desugar_program(&decls)
-            .iter()
-            .map(print_expr)
-            .collect::<Vec<_>>()
-            .join("\n")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let printed =
+            compact_desugared_source("def scale[p: Float](x: p) -> p = mul(x, cast(0.1, p))\n");
         assert!(
             printed.contains("(t-var {} p))"),
             "the cast target must be a type variable: {printed}"
@@ -3707,24 +3644,13 @@ mod tests {
         );
     }
 
-    /// chelis#1544 / round 1 R1: a binder cast survives the §0.1 retraction
-    /// law. `resugar(desugar(source))` prints the binder name back, and the
-    /// result re-desugars to the same Deep.
-    ///
-    /// Regression test. At the reviewed head the resugaring boundary rejected
-    /// the new spelling outright (`Deep 'cast' child 1 must be a
-    /// '(t-prim {} precision)'`), which failed the repository corpus law on
-    /// `packages/chelis-std/src/tensor/construct.ch`. Three consumers had to
-    /// admit the binder: the `cast` arm, the literal validator, and the
-    /// literal-suffix reader.
     #[test]
     fn a_binder_cast_survives_the_resugaring_retraction_law() {
         for source in [
             "def scale[p: Float](x: p) -> p = mul(x, cast(0.1, p))\n",
             "def addk[p: Int](x: p) -> p = add(x, cast(1, p))\n",
         ] {
-            let decls = crate::parser::parse_str(source).expect("fixture parses");
-            let deep = desugar_program(&decls);
+            let deep = desugar_source(source);
             let resugared = crate::resugar::resugar_program(&deep)
                 .unwrap_or_else(|error| panic!("resugar must accept a binder cast: {error}"));
             let printed = crate::format::format_program(&resugared);
@@ -3732,59 +3658,18 @@ mod tests {
                 printed.contains(", p)"),
                 "the binder must print back as its own name: {printed}"
             );
-            let redesugared = desugar_program(
-                &crate::parser::parse_str(&printed).expect("resugared source parses"),
-            );
-            // Up to span metadata, which is what the repository corpus law
-            // means by "normalized": the resugared text is a different byte
-            // string, so every offset shifts even when the structure is
-            // identical.
-            let without_spans = |program: &[deep::Expr]| {
-                program
-                    .iter()
-                    .map(|expr| {
-                        let printed = print_expr(expr);
-                        printed
-                            .split("span: \"")
-                            .enumerate()
-                            .map(|(index, piece)| {
-                                if index == 0 {
-                                    piece.to_string()
-                                } else {
-                                    piece[piece.find('"').map_or(0, |end| end + 1)..].to_string()
-                                }
-                            })
-                            .collect::<String>()
-                    })
-                    .collect::<Vec<_>>()
-            };
+            let redesugared = desugar_source(&printed);
             assert_eq!(
-                without_spans(&redesugared),
-                without_spans(&deep),
+                deep_without_spans(&redesugared),
+                deep_without_spans(&deep),
                 "desugar(resugar(deep)) must be the identity for a binder cast"
             );
         }
     }
 
-    /// The failure twin: a target that is NOT a declared binder keeps its
-    /// `t-prim` spelling, so an unknown primitive name still reaches the
-    /// chelis#744 / [04-DTYPE-1] lowering rejection unchanged.
-    ///
-    /// Disposition lock. It was green before this change and its job is to
-    /// bound the rule above: a scope-aware spelling must not become a
-    /// "any unknown name is a binder" spelling.
     #[test]
     fn cast_to_an_undeclared_name_keeps_the_primitive_spelling() {
-        let decls = crate::parser::parse_str("def typo(x: f32) -> f32 = cast(x, flt32)\n")
-            .expect("fixture parses");
-        let printed = desugar_program(&decls)
-            .iter()
-            .map(print_expr)
-            .collect::<Vec<_>>()
-            .join("\n")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let printed = compact_desugared_source("def typo(x: f32) -> f32 = cast(x, flt32)\n");
         assert!(
             printed.contains("(t-prim {} flt32)"),
             "an undeclared cast target keeps `t-prim`: {printed}"
@@ -3801,15 +3686,7 @@ mod tests {
             "def scale[p](x: p) -> p = mul(x, cast(0.1, p))\n",
             "sig scale: p -> p\ndef scale(x) = mul(x, cast(0.1, p))\n",
         ] {
-            let decls = crate::parser::parse_str(source).expect("fixture parses");
-            let printed = desugar_program(&decls)
-                .iter()
-                .map(print_expr)
-                .collect::<Vec<_>>()
-                .join("\n")
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
+            let printed = compact_desugared_source(source);
             assert!(
                 printed.contains("type: (t-prim {} f32)} 0.1)"),
                 "an unbounded binder cannot adopt the literal: {printed}"
@@ -3825,29 +3702,11 @@ mod tests {
         }
     }
 
-    /// A binder declared on a standalone `sig` rather than inline is the same
-    /// binder, so its body's cast target is spelled the same way.
-    ///
-    /// Regression test: `collect_declared_type_binders` reads both carriers
-    /// because a `def` whose binders live on a `sig` lists none of its own,
-    /// which is the shape every `[05-OP-35]` stdlib wrapper uses.
     #[test]
     fn a_binder_declared_on_a_standalone_sig_is_still_a_binder() {
-        let decls = crate::parser::parse_str(
+        let printed = compact_desugared_source(
             "sig scale[p: Float]: p -> p\ndef scale(x) = mul(x, cast(0.1, p))\n",
-        )
-        .expect("fixture parses");
-        let printed = desugar_program(&decls)
-            .iter()
-            .map(print_expr)
-            .collect::<Vec<_>>()
-            .join("\n")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        // The `sig` itself spells `(t-var {} p)`, so asserting that substring
-        // alone would pass without the body ever seeing the binder. Assert on
-        // the CAST node instead, and on the absence of the malformed spelling.
+        );
         assert!(
             !printed.contains("(t-prim {} p)"),
             "no `t-prim` may name a binder anywhere: {printed}"
@@ -3858,27 +3717,10 @@ mod tests {
         );
     }
 
-    /// An `Int`-bounded binder does not adopt a FLOAT literal, mirroring the
-    /// concrete integer-target rule: a decimal cannot bind at an integer type,
-    /// so it keeps its float source and the checked cast applies [04-NUM-14].
-    ///
-    /// Disposition lock. The adoption rule must not become "a binder target
-    /// always adopts", which would make `cast(1.9, p)` under `[p: Int]` an
-    /// int-typed literal and turn the checked cast into a type error on its
-    /// own argument.
     #[test]
     fn an_int_bounded_binder_does_not_adopt_a_float_literal() {
-        let decls =
-            crate::parser::parse_str("def trunc_to[p: Int](x: p) -> p = add(x, cast(1.9, p))\n")
-                .expect("fixture parses");
-        let printed = desugar_program(&decls)
-            .iter()
-            .map(print_expr)
-            .collect::<Vec<_>>()
-            .join("\n")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let printed =
+            compact_desugared_source("def trunc_to[p: Int](x: p) -> p = add(x, cast(1.9, p))\n");
         assert!(
             printed.contains("type: (t-prim {} f32)} 1.9)"),
             "a float literal keeps its float source under an Int binder: {printed}"

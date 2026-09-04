@@ -208,4 +208,3 @@ fn ascription_is_not_a_literal_adoption_rule() {
     );
     assert_all_lanes_reject(&root, "[04-INF-6]");
 }
-

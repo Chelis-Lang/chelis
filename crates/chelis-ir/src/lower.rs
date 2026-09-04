@@ -1891,20 +1891,7 @@ fn extract_precision_var_name(expr: &Expr) -> Option<String> {
     }
 }
 
-/// chelis#1544: the binder name of a BARE SCALAR precision variable, the
-/// scalar twin of [`extract_precision_var_name`].
-///
-/// A declaration can be polymorphic in a scalar slot (`def f[p: Float](x: p)`)
-/// exactly as it can in a tensor's precision slot, and the literal inside a
-/// `cast(<literal>, p)` in its body carries a bare `(t-var {} p)` stamp in
-/// either case. Every precision-variable reader in this module was written for
-/// the tensor spelling, so that stamp was read by nothing and silently became
-/// f32.
-///
-/// A leading `(t-ref {} ...)` is stripped for the same reason the tensor twin
-/// strips it: the borrow is irrelevant to precision monomorphization. `_` is
-/// excluded because `spec/03-deep-syntax.md` §2.5.1 makes it an inference hole
-/// rather than a binder.
+/// Binder name from a bare scalar `(t-var {} p)` type (#1544).
 fn extract_scalar_precision_var_name(expr: &Expr) -> Option<String> {
     let stripped = if let Some((DeepTag::TRef, _, kids)) = stamped_parts(expr) {
         kids.first()?
@@ -2599,14 +2586,8 @@ fn type_is_never_lowerable(expr: &Expr, bounded_dtype_names: Option<&UnordSet<St
         // precision per spec/04-type-system.md §5.8.1); we just must
         // skip the standalone top-level emission.
         DeepTag::TFn => {
-            // chelis#1544: the rule below was written for a precision slot
-            // inside a `t-tensor`, but a declaration can be polymorphic in a
-            // BARE SCALAR slot too (`def abs_float[p: Float](x: p) -> p`).
-            // That signature has no standalone monomorphization for exactly
-            // the reason the tensor case does not, and lowering it standalone
-            // reaches the literal and cast readers with an unsubstituted
-            // binder. Reached through call-site inlining, like every other
-            // polymorphic slot.
+            // Bounded bare scalar binders, like tensor precision binders,
+            // monomorphize only through their call sites.
             kids.iter().any(|kid| {
                 extract_scalar_precision_var_name(kid).is_some_and(|name| {
                     bounded_dtype_names.is_some_and(|bounded| bounded.contains(&name))
@@ -3027,9 +3008,7 @@ fn collect_top_level_sigs(exprs: &[Expr]) -> BTreeMap<String, Expr> {
     sigs
 }
 
-/// The exact dtype-family-bounded binder names authored on each `defsig`.
-/// Bare type variables are not numeric capabilities: only this declaration
-/// metadata authorizes the scalar-template skip added for chelis#1544.
+/// Exact dtype-family-bounded binder names on each `defsig`.
 fn collect_top_level_dtype_bound_names(exprs: &[Expr]) -> BTreeMap<String, UnordSet<String>> {
     let mut bounds = BTreeMap::new();
     for expr in exprs {
@@ -5456,30 +5435,9 @@ impl LowerCtx {
         if let Some(inner) = Self::try_extract_ref_type(expr) {
             return Self::type_from_type_expr_with_subst(inner, prec_subst, rank_subst);
         }
-        // chelis#1544: a BARE SCALAR precision variable. `spec/02-surf-syntax.md`
-        // §P10b position 4 binds a `cast(literal, p)` literal at `p`, and the
-        // desugarer stamps the literal with the binder; this is where that
-        // stamp is read back. Without this arm the fall-through below answered
-        // `scalar_f32` and `finalize_scalar` rounded the value, so every
-        // non-f32 instantiation silently received an f32 constant widened to
-        // its own width.
-        //
-        // An UNBOUND binder keeps that fall-through, deliberately. Two routes
-        // reach this point with nothing to resolve against, and both are
-        // pre-existing and legitimate:
-        //
-        // - the `program_types` probe in `lower_program_to_library_inner`,
-        //   which walks the whole `type_env` before any call site exists;
-        // - `grad` sub-context lowering, whose own comment says a precision
-        //   var internal to a callee of the differentiated body "is NOT in
-        //   this map either; it is resolved when that callee is inlined into
-        //   the body". Measured: the substitution is empty there, so the name
-        //   is absent rather than renamed.
-        //
-        // Failing loudly on those routes turned working programs into errors
-        // (the `issue_1293_*` and `issue_369_grad_fulllike_callee` families).
-        // This arm is therefore purely additive: it resolves a binder when the
-        // call site bound one, and otherwise behaves exactly as `main` did.
+        // [02-SURF-P10b]: resolve a bare scalar binder stamp at the call site.
+        // Internal callees can remain unbound until inlining, so preserve the
+        // existing default when this substitution map has no entry.
         if let Some(var_name) = Self::scalar_precision_var_name(expr)
             && let Some(prim) = prec_subst.get(&var_name).copied()
         {
@@ -5494,8 +5452,6 @@ impl LowerCtx {
         Self::default_type()
     }
 
-    /// chelis#1544: the associated-function view of
-    /// [`extract_scalar_precision_var_name`], for the type-extraction path.
     fn scalar_precision_var_name(expr: &Expr) -> Option<String> {
         extract_scalar_precision_var_name(expr)
     }

@@ -610,26 +610,14 @@ impl<'a> EvalContext<'a> {
         // Honor that meta where present so a context-typed literal
         // (e.g. `(lit {type: (t-prim {} int64)} 42)`) carries the
         // surrounding-position dtype, not just the bare default.
-        // chelis#1544: a literal stamped with a type BINDER rather than a
-        // primitive, which is what `cast(<literal>, p)` produces under
-        // `spec/02-surf-syntax.md` §P10b position 4. Resolve it through this
-        // frame's precision bindings, the same map `eval_cast` already
-        // consults for a binder-named cast target. Without this the literal
-        // fell through to the §P10 f32 default and every non-f32
-        // instantiation silently received a rounded constant.
+        // [02-SURF-P10b]: a literal in `cast(<literal>, p)` binds at `p`.
+        // Resolve that stamp through the call frame's precision bindings.
         let meta = get_meta(list);
         let meta_dtype = match meta.and_then(lit_meta_prim) {
             Some(prim) => Some(prim),
             None => match meta.and_then(lit_meta_type_var_name) {
-                // An UNBOUND binder keeps the §P10 default, deliberately.
-                // The sibling arm in `chelis-ir`'s `lower.rs` was written to
-                // fail loudly here and that turned working `grad` programs
-                // into errors, because a precision var internal to a callee is
-                // legitimately unbound until that callee is inlined. Nothing
-                // proves the interpreter has no equivalent route, and the cost
-                // of being wrong is the same, so this arm is purely additive
-                // too: resolve when the frame bound one, otherwise behave
-                // exactly as `main` did.
+                // Internal callee binders may remain unbound until inlining;
+                // preserve the default when no call-site binding exists.
                 Some(binder) => self.precision_bindings.get(binder).copied(),
                 None => None,
             },
@@ -1287,69 +1275,10 @@ impl<'a> EvalContext<'a> {
         // f8e4m3 (spec/04-type-system.md §1.1.1) at this point so the
         // host eval lane just needs to pick the right re-pack.
         //
-        // chelis#1544: the name-keyed fallback covers BOTH cast-target
-        // spellings, `(t-prim {} p)` and `(t-var {} p)`, and it must. It is not
-        // a leniency: `runtime::tests::generic_cast_target_uses_*` pin that an
-        // UNBOUNDED binder target actualizes at each call site's own concrete
-        // precision, which is a capability this lane has always had. Narrowing
-        // it to the `t-var` spelling broke all three.
-        //
-        // chelis#1544 narrow enforcement: that fallback does NOT extend to a
-        // literal operand. `spec/04-type-system.md` [04-DTYPE-2] makes an
-        // unbounded binder an unconstrained type variable admitting every type,
-        // not a dtype, so an unsuffixed literal has no family to bind at and
-        // §P10b position 4's "the literals bind at `p`" says nothing here. What
-        // the fallback then produced was the §P10 f32 default cast to whatever
-        // the call site instantiated: a wrong value, silently, on this lane
-        // only, while the compiled lane rejected the same source. This is a
-        // PARTIAL enforcement of [04-DTYPE-1] (which constrains the target and
-        // not the source); the general one is chelis#1558 and the readings are
-        // recorded in chelis#1553.
-        // Narrower still, and the narrowness is the point: a FLOAT literal.
-        // An unsuffixed float defaults to f32 (§P10), and casting that to an
-        // f64 instantiation is not the same value as binding at f64, which is
-        // the wrong answer this enforces against. An unsuffixed INTEGER
-        // defaults to int32 and casting it to another integer width is either
-        // exact or a loud [04-NUM-14] checked trap, never a silent wrong
-        // value, and `runtime::tests::generic_cast_target_survives_every_higher_order_callback_edge`
-        // pins that working shape (`cast(0, p_int)` under an unbounded
-        // `[p_int]`). So the integer case is left exactly as it behaves today.
-        // And only for the UNBOUNDED spelling. A bounded binder's target is
-        // `(t-var {} p)` and its literal was adopted at the binder, so it has a
-        // dtype and resolves correctly; only the `t-prim` spelling names a
-        // binder with no family. Keying on the operand alone rejected the
-        // bounded rows this pull request exists to make work.
-        let target_is_unbounded_binder = kids
-            .get(1)
-            .and_then(as_list)
-            .is_some_and(|ty| tag(ty) == Some(DeepTag::TPrim));
-        let operand_is_float_literal = target_is_unbounded_binder
-            && kids
-                .first()
-                .and_then(as_list)
-                .filter(|operand| tag(operand) == Some(DeepTag::Lit))
-                .and_then(|operand| children(operand).first())
-                .is_some_and(|value| matches!(value, Expr::Atom(Atom::Float(_), _)));
+        // Binder targets actualize from the call site's concrete precision.
         let target_prim = prim_from_name(target)
-            .or_else(|| {
-                (!operand_is_float_literal)
-                    .then(|| self.precision_bindings.get(target).copied())
-                    .flatten()
-            })
-            .ok_or_else(|| {
-                if operand_is_float_literal {
-                    format!(
-                        "cast target `{target}` is not a recognized primitive type: an \
-                         unbounded type binder is an unconstrained type variable rather than \
-                         a dtype ([04-DTYPE-2]), so an unsuffixed float literal has no \
-                         dtype to bind at and would silently take the §P10 f32 default. \
-                         Give the binder a dtype-family bound (`[{target}: Float]`, \
-                         `[{target}: Numeric]`) or write a suffixed literal (chelis#1544)"
-                    )
-                } else {
-                    format!("cast target `{target}` is not a recognized primitive type")
-                }
-            })?;
+            .or_else(|| self.precision_bindings.get(target).copied())
+            .ok_or_else(|| format!("cast target `{target}` is not a recognized primitive type"))?;
         // [05-OP-6]: the truncating rung has its own sealed kernel and
         // its own trap brand. The checker has already pinned the pair to
         // float source / integer target.
