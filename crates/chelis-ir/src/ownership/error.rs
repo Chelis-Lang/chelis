@@ -43,6 +43,31 @@ pub enum OwnershipError {
     NonFunctionCallee { caller: String, unit: u32 },
     #[error("direct call in `{caller}` does not match ownership signature of u{unit}")]
     DirectCallSchema { caller: String, unit: u32 },
+    #[error(
+        "direct call argument {argument} in `{caller}` has class `{actual}`, callable u{unit} requires `{expected}`"
+    )]
+    DirectCallArgumentClass {
+        caller: String,
+        unit: u32,
+        argument: usize,
+        expected: String,
+        actual: String,
+    },
+    #[error("function `{unit}` b{block} returns with `{actual}`, expected `move`")]
+    FunctionReturnMode {
+        unit: String,
+        block: u32,
+        actual: &'static str,
+    },
+    #[error(
+        "function `{unit}` b{block} returns class `{actual}`, another reachable return has `{expected}`"
+    )]
+    FunctionReturnClass {
+        unit: String,
+        block: u32,
+        expected: String,
+        actual: String,
+    },
     #[error("unreachable block b{block} in `{unit}`")]
     UnreachableBlock { unit: String, block: u32 },
     #[error("owner %{owner} in `{unit}` has no {missing}")]

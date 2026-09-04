@@ -23,9 +23,9 @@ use crate::host_type_state::ConcreteHostType;
 use super::classify::{ClassifyError, Placement, ValueClass, classify, render_type};
 use super::error::OwnershipError;
 use super::ir::{
-    ApplyKind, Block, BlockId, BlockParam, Edge, HostSiteAction, HostSiteBuilder, HostSiteId,
-    HostSiteKind, Op, OpId, Operand, Operation, OperationSchema, OwnerId, OwnerInfo, OwnerOrigin,
-    OwnershipProgram, ParamMode, Terminator, Unit, UnitId, UnitKind,
+    ApplyKind, Block, BlockId, BlockParam, CallableBody, Edge, HostSiteAction, HostSiteBuilder,
+    HostSiteId, HostSiteKind, Op, OpId, Operand, Operation, OperationSchema, OwnerId, OwnerInfo,
+    OwnerOrigin, OwnershipProgram, ParamMode, Terminator, Unit, UnitId, UnitKind,
 };
 
 const ROOTS_UNIT: &str = "roots";
@@ -600,7 +600,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
     fn finish(
         self,
         kind: UnitKind,
-        function_schema: Option<OperationSchema>,
+        callable_body: Option<CallableBody>,
         entry: BlockId,
     ) -> Result<Unit, OwnershipError> {
         let mut blocks = Vec::with_capacity(self.blocks.len());
@@ -623,7 +623,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             id: UnitId(self.unit_index as u32),
             name: self.unit_name,
             kind,
-            function_schema,
+            callable_body,
             entry,
             blocks,
             owners: self.owners,
@@ -2265,13 +2265,5 @@ fn lower_function(
         lowerer.exit_scope()?;
         lowerer.set_terminator(Terminator::Return { result })
     })?;
-    let function_schema = OperationSchema::new(
-        signature
-            .params
-            .iter()
-            .map(|param| param.mode.use_())
-            .collect(),
-        Some(lowerer.classify_or_reject(&function.ret_ty, Placement::Value, None)?),
-    );
-    lowerer.finish(UnitKind::Function, Some(function_schema), entry)
+    lowerer.finish(UnitKind::Function, Some(CallableBody::new(body)), entry)
 }

@@ -8,13 +8,19 @@ use crate::host::{
     ConcreteHostProgram, HostDisplayRoot, HostFunctionOrigin, HostTensorHelper,
 };
 
-use super::classify::{classify, render_type};
+use super::classify::{Placement, ValueClass, classify, render_type};
 use super::error::OwnershipError;
 use super::ir::{
     ApplyKind, Block, BlockId, Edge, HostSiteAction, HostSiteMap, Op, OpId, Operand, OwnerId,
     OwnerOrigin, OwnershipProgram, OwnershipUse, ParamMode, Terminal, Terminator, Unit, UnitId,
     UnitKind,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CallableSchema {
+    operation: super::ir::OperationSchema,
+    parameter_classes: Vec<ValueClass>,
+}
 
 #[derive(Debug)]
 pub(super) struct HostVerification {
@@ -53,9 +59,16 @@ pub(super) fn verify(program: &OwnershipProgram) -> Result<HostVerification, Own
         }
         roots += usize::from(unit.kind == UnitKind::Roots);
     }
+    let mut callable_schemas = BTreeMap::new();
+    for unit in &program.units {
+        if let Some(schema) = derive_callable_schema(unit)? {
+            callable_schemas.insert(unit.id, schema);
+        }
+    }
     let mut max_live_heap_owners = 0;
     for unit in &program.units {
-        max_live_heap_owners = max_live_heap_owners.max(verify_unit(unit, &units)?);
+        max_live_heap_owners =
+            max_live_heap_owners.max(verify_unit(unit, &units, &callable_schemas)?);
     }
     if roots != 1 {
         return Err(OwnershipError::RootUnitCount { actual: roots });
@@ -833,14 +846,18 @@ fn independent_display_root(root: &RootEntry) -> HostDisplayRoot {
     }
 }
 
-fn verify_unit(unit: &Unit, units: &BTreeMap<UnitId, &Unit>) -> Result<usize, OwnershipError> {
+fn verify_unit(
+    unit: &Unit,
+    units: &BTreeMap<UnitId, &Unit>,
+    callable_schemas: &BTreeMap<UnitId, CallableSchema>,
+) -> Result<usize, OwnershipError> {
     if !matches!(
-        (unit.kind, &unit.function_schema),
+        (unit.kind, unit.callable_body),
         (UnitKind::Roots, None) | (UnitKind::Function, Some(_))
     ) {
         return Err(OwnershipError::LoweringInvariant {
             unit: unit.name.clone(),
-            detail: "ownership unit kind and function signature disagree".to_string(),
+            detail: "ownership unit kind and callable body disagree".to_string(),
         });
     }
     let blocks = blocks(unit)?;
@@ -898,7 +915,15 @@ fn verify_unit(unit: &Unit, units: &BTreeMap<UnitId, &Unit>) -> Result<usize, Ow
                 // before moved inputs receive their post-operation terminal.
                 max_live_heap_owners = max_live_heap_owners.max(live_heap_count(unit, &live) + 1);
             }
-            verify_op(unit, block, &operation.kind, &definitions, units, &mut live)?;
+            verify_op(
+                unit,
+                block,
+                &operation.kind,
+                &definitions,
+                units,
+                callable_schemas,
+                &mut live,
+            )?;
             max_live_heap_owners = max_live_heap_owners.max(live_heap_count(unit, &live));
         }
         verify_terminator(
@@ -912,6 +937,117 @@ fn verify_unit(unit: &Unit, units: &BTreeMap<UnitId, &Unit>) -> Result<usize, Ow
         )?;
     }
     Ok(max_live_heap_owners)
+}
+
+fn derive_callable_schema(unit: &Unit) -> Result<Option<CallableSchema>, OwnershipError> {
+    let body = match (unit.kind, unit.callable_body) {
+        (UnitKind::Roots, None) => return Ok(None),
+        (UnitKind::Function, Some(body)) => body,
+        _ => {
+            return Err(OwnershipError::LoweringInvariant {
+                unit: unit.name.clone(),
+                detail: "ownership unit kind and callable body disagree".to_string(),
+            });
+        }
+    };
+    let blocks = blocks(unit)?;
+    let reached = reachable_blocks(unit, &blocks)?;
+    if !reached.contains(&body.entry()) {
+        return Err(OwnershipError::UnreachableBlock {
+            unit: unit.name.clone(),
+            block: body.entry().0,
+        });
+    }
+    let callable = blocks
+        .get(&body.entry())
+        .ok_or_else(|| missing_block(unit, body.entry()))?;
+    let mut operands = Vec::with_capacity(callable.params.len());
+    let mut parameter_classes = Vec::with_capacity(callable.params.len());
+    let mut saw_capture = false;
+    for param in &callable.params {
+        if param.mode == ParamMode::EntryBorrow {
+            return Err(OwnershipError::LoweringInvariant {
+                unit: unit.name.clone(),
+                detail: format!(
+                    "callable body b{} carries artifact-only EntryBorrow parameter %{}",
+                    callable.id.0, param.owner.0
+                ),
+            });
+        }
+        let info = unit
+            .owners
+            .get(&param.owner)
+            .ok_or_else(|| incomplete(unit, param.owner, "metadata"))?;
+        match info.placement {
+            Placement::Parameter if saw_capture => {
+                return Err(OwnershipError::LoweringInvariant {
+                    unit: unit.name.clone(),
+                    detail: format!(
+                        "callable parameter %{} follows captured environment parameters",
+                        param.owner.0
+                    ),
+                });
+            }
+            Placement::Parameter => {
+                operands.push(param.mode.use_());
+                parameter_classes.push(info.class);
+            }
+            Placement::Value => {
+                saw_capture = true;
+                if param.mode != ParamMode::Borrowed || info.origin != OwnerOrigin::ExternalBorrow {
+                    return Err(OwnershipError::LoweringInvariant {
+                        unit: unit.name.clone(),
+                        detail: format!(
+                            "callable environment parameter %{} is not an external borrow",
+                            param.owner.0
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    let mut result: Option<ValueClass> = None;
+    for block in unit
+        .blocks
+        .iter()
+        .filter(|block| reached.contains(&block.id))
+    {
+        let Terminator::Return { result: returned } = &block.terminator else {
+            continue;
+        };
+        if returned.use_ != OwnershipUse::Move {
+            return Err(OwnershipError::FunctionReturnMode {
+                unit: unit.name.clone(),
+                block: block.id.0,
+                actual: returned.use_.name(),
+            });
+        }
+        let actual = unit
+            .owners
+            .get(&returned.owner)
+            .ok_or_else(|| incomplete(unit, returned.owner, "metadata"))?
+            .class;
+        if let Some(expected) = result
+            && expected != actual
+        {
+            return Err(OwnershipError::FunctionReturnClass {
+                unit: unit.name.clone(),
+                block: block.id.0,
+                expected: expected.to_string(),
+                actual: actual.to_string(),
+            });
+        }
+        result = Some(actual);
+    }
+    let result = result.ok_or_else(|| OwnershipError::LoweringInvariant {
+        unit: unit.name.clone(),
+        detail: "function has no reachable return".to_string(),
+    })?;
+    Ok(Some(CallableSchema {
+        operation: super::ir::OperationSchema::new(operands, Some(result)),
+        parameter_classes,
+    }))
 }
 
 fn check_operation_ids(unit: &Unit) -> Result<(), OwnershipError> {
@@ -1152,6 +1288,20 @@ fn check_params(unit: &Unit) -> Result<(), OwnershipError> {
 }
 
 fn check_reachable(unit: &Unit, blocks: &BTreeMap<BlockId, &Block>) -> Result<(), OwnershipError> {
+    let reached = reachable_blocks(unit, blocks)?;
+    if let Some(block) = unit.blocks.iter().find(|b| !reached.contains(&b.id)) {
+        return Err(OwnershipError::UnreachableBlock {
+            unit: unit.name.clone(),
+            block: block.id.0,
+        });
+    }
+    Ok(())
+}
+
+fn reachable_blocks(
+    unit: &Unit,
+    blocks: &BTreeMap<BlockId, &Block>,
+) -> Result<BTreeSet<BlockId>, OwnershipError> {
     let mut reached = BTreeSet::new();
     let mut queue = VecDeque::from([unit.entry]);
     while let Some(id) = queue.pop_front() {
@@ -1166,13 +1316,7 @@ fn check_reachable(unit: &Unit, blocks: &BTreeMap<BlockId, &Block>) -> Result<()
             queue.push_back(target);
         }
     }
-    if let Some(block) = unit.blocks.iter().find(|b| !reached.contains(&b.id)) {
-        return Err(OwnershipError::UnreachableBlock {
-            unit: unit.name.clone(),
-            block: block.id.0,
-        });
-    }
-    Ok(())
+    Ok(reached)
 }
 
 fn successors(terminator: &Terminator) -> Vec<BlockId> {
@@ -1199,6 +1343,7 @@ fn verify_op(
     op: &Op,
     definitions: &BTreeSet<OwnerId>,
     units: &BTreeMap<UnitId, &Unit>,
+    callable_schemas: &BTreeMap<UnitId, CallableSchema>,
     live: &mut BTreeSet<OwnerId>,
 ) -> Result<(), OwnershipError> {
     match op {
@@ -1210,7 +1355,7 @@ fn verify_op(
             schema,
             args,
         } => {
-            if let ApplyKind::DirectCall { callee } = kind {
+            let direct_schema = if let ApplyKind::DirectCall { callee } = kind {
                 match units.get(callee) {
                     None => {
                         return Err(OwnershipError::MissingUnit {
@@ -1224,15 +1369,20 @@ fn verify_op(
                             unit: callee.0,
                         });
                     }
-                    Some(target) if target.function_schema.as_ref() != Some(schema) => {
+                    Some(_)
+                        if callable_schemas.get(callee).map(|schema| &schema.operation)
+                            != Some(schema) =>
+                    {
                         return Err(OwnershipError::DirectCallSchema {
                             caller: unit.name.clone(),
                             unit: callee.0,
                         });
                     }
-                    Some(_) => {}
+                    Some(_) => callable_schemas.get(callee),
                 }
-            }
+            } else {
+                None
+            };
             if args.len() != schema.operands.len() {
                 return Err(OwnershipError::OperationArity {
                     unit: unit.name.clone(),
@@ -1241,6 +1391,31 @@ fn verify_op(
                     expected: schema.operands.len(),
                     actual: args.len(),
                 });
+            }
+            if let Some(direct_schema) = direct_schema {
+                for (argument, (arg, expected)) in args
+                    .iter()
+                    .zip(&direct_schema.parameter_classes)
+                    .enumerate()
+                {
+                    let actual = unit
+                        .owners
+                        .get(&arg.owner)
+                        .ok_or_else(|| incomplete(unit, arg.owner, "metadata"))?
+                        .class;
+                    if actual != *expected {
+                        let ApplyKind::DirectCall { callee } = kind else {
+                            unreachable!("derived direct-call schema requires a direct call")
+                        };
+                        return Err(OwnershipError::DirectCallArgumentClass {
+                            caller: unit.name.clone(),
+                            unit: callee.0,
+                            argument,
+                            expected: expected.to_string(),
+                            actual: actual.to_string(),
+                        });
+                    }
+                }
             }
             check_mixed_uses(unit, block.id, args)?;
             for (arg, expected) in args.iter().zip(&schema.operands) {

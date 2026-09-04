@@ -272,12 +272,30 @@ pub(crate) enum UnitKind {
     Function,
 }
 
+/// Structural identity of the callable body boundary. Authored functions may
+/// have a distinct `Unit::entry` adapter whose `EntryBorrow` parameters are
+/// copied before owned internal formals; direct calls target this body entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CallableBody {
+    entry: BlockId,
+}
+
+impl CallableBody {
+    pub(crate) fn new(entry: BlockId) -> Self {
+        Self { entry }
+    }
+
+    pub(crate) fn entry(self) -> BlockId {
+        self.entry
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Unit {
     pub(crate) id: UnitId,
     pub(crate) name: String,
     pub(crate) kind: UnitKind,
-    pub(crate) function_schema: Option<OperationSchema>,
+    pub(crate) callable_body: Option<CallableBody>,
     pub(crate) entry: BlockId,
     pub(crate) blocks: Vec<Block>,
     pub(crate) owners: BTreeMap<OwnerId, OwnerInfo>,
