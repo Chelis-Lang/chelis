@@ -2532,7 +2532,8 @@ enum a traversal must exhaust, not an `Option` it may drop.
   and the reader-path `to_list` removals. Roughly 320 lines if the collapse is
   mechanical, materially more if the `Option`-to-enum change ripples through
   callers; slice again on that evidence rather than growing one pull request.
-- **E5c, outside `chelis-types`.** `prune::deep_def_name` and
+- **E5c, outside `chelis-types`. Delivered by PR [#1546].** `prune::deep_def_name`
+  and
   `deep_named_decl_name`, `prune_to_entry`'s module descent,
   `tier_b_lower`'s `tag`/`children`/`lookup_producer`, and
   `count_invariant_opaque_deep`, whose raw-tag read also owes a decode-once
@@ -2540,7 +2541,12 @@ enum a traversal must exhaust, not an `Option` it may drop.
   already asserts the correct tier and nothing invokes it, so E5c's own fix
   would land unverified on the same terms. E5c therefore carries all three
   outside-the-checker rows, each in the crate that can reach it. Roughly 180
-  lines plus the CI step.
+  lines plus the CI step. Delivery found four more readers this list does not
+  name, all in `tier_b_lower.rs` and all required before the obligation would
+  lower: `lookup_producer`'s module descent and its `BareList` parameter read,
+  `rewrite_opaque_field_access`'s recursion, and `rebuild`'s tag copy. Making
+  `tag` and `children` carrier-complete was measured, not assumed, to be
+  insufficient on its own.
 - **E5d, the lint and its corpus.** Roughly 250 lines.
 - **E5e, the remaining sites.** The 59 unadjudicated guarded-arm sites and the
   19 never-adjudicated ones the audit inventories, swept behind E5b so the
@@ -3488,6 +3494,7 @@ silent exemption to be diagnosed rather than an empty subtree to be skipped.
 [#1362]: https://github.com/Chelis-Lang/chelis/issues/1362
 [#1537]: https://github.com/Chelis-Lang/chelis/issues/1537
 [#1543]: https://github.com/Chelis-Lang/chelis/pull/1543
+[#1546]: https://github.com/Chelis-Lang/chelis/pull/1546
 [#1134]: https://github.com/Chelis-Lang/chelis/issues/1134
 [#887]: https://github.com/Chelis-Lang/chelis/issues/887
 [#930]: https://github.com/Chelis-Lang/chelis/issues/930
