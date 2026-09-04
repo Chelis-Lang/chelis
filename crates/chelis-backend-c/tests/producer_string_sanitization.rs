@@ -217,12 +217,21 @@ fn c_fprintf_format_string_escapes_percent_in_symbolic_dim_name() {
     let result = codegen(&dag, "sym").unwrap();
     let src = &result.c_source;
 
-    // No `%` injection here (clean identifier `batch`); confirm the
-    // mismatch fprintf is structurally present and the `batch` name
-    // appears verbatim — the architectural pattern lock.
+    // No `%` injection here (clean identifier `batch`); confirm the guard's
+    // context line is structurally present and the `batch` name appears
+    // verbatim - the architectural pattern lock.
+    //
+    // chelis#1277: the guard's TRAP line is now [04-NUM-9]'s fixed rendering,
+    // which carries no name, so the name-bearing surface this test locks is
+    // the accompanying context line that `spec/04-type-system.md` section 4.7
+    // requires beside the trap.
     assert!(
-        src.contains("symbolic dim `batch` mismatch"),
-        "symbolic-dim mismatch fprintf must be emitted; source:\n{src}"
+        src.contains("extent `batch`"),
+        "the guard's name-bearing context line must be emitted; source:\n{src}"
+    );
+    assert!(
+        src.contains("numeric trap: domain in load at int64"),
+        "and the trap line is [04-NUM-9]'s exact rendering; source:\n{src}"
     );
 }
 
