@@ -909,6 +909,17 @@ naming here rather than leaving to the corpus file:
   are deliberately unchecked, so a receipt naming a not-yet-authored test is
   a plan rather than a defect.
 
+- The three unit-source rows (`expand.positional.replacement.non_unit_source_static`
+  and `...non_unit_source_traps.{c,eval}`) stay at baseline and belong to
+  **S2b**, the pull request that implements the single-meaning `expand`. Once
+  `expand` is the broadcast primitive and the rank-increasing form has its own
+  name, the removal of lowering's `fallback_expand_type` override, the
+  unit-extent claim these rows assert, and the static literal-non-unit
+  rejection are all one change to the checker's single `expand` rule; splitting
+  them across two pull requests would put the guard and the widening it guards
+  in different changes, which C2.7 forbids. The `Literal(1)` claim machinery
+  they need is already in the class derivation.
+
 **Frozen at exit:** the `RuntimeDimClass` shape, canonical class and member
 order, the guard placement realization per lane, the `AxisSource` variant
 set, the one derivation point for both, the removal of string searches for
