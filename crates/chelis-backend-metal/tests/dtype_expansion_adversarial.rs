@@ -15,7 +15,7 @@ use chelis_backend_metal::dtype as metal_dtype;
 use chelis_backend_metal::kernels;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
-use support::codegen_metal;
+use support::{codegen_metal, try_codegen_metal};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -548,27 +548,13 @@ fn mps_f16_wrapper_uses_uint16_t_for_row_bytes_not_msl_half() {
 // ===========================================================================
 
 #[test]
-fn integer_matmul_stub_carries_meaningful_abort_message() {
+fn integer_matmul_returns_a_typed_codegen_error() {
     let dag = build_matmul_dag(Prim::Int32);
-    let result = codegen_metal(&dag, "mm_i32");
-    let src = &result.mm_source;
-    // Either the stub is reached AND it carries the func name, OR the
-    // emit_dag is expected to surface a structured F1 error to the
-    // caller (which the CLI translates to a diagnostic). Today only the
-    // first lands. Without a meaningful error string in the stub, the
-    // user sees the bare "stub: codegen for `mm_i32` not yet implemented"
-    // and has to dig through spec/04-type-system.md to find why an int
-    // matmul didn't compile.
-    let in_stub = src.contains("M1 fallback stub");
-    let mentions_int_or_f1 = src.contains("int") || src.contains("§5.7.2") || src.contains("F1");
+    let error = try_codegen_metal(&dag, "mm_i32").unwrap_err();
+    let rendered = error.to_string();
     assert!(
-        in_stub,
-        "integer matmul must fall through to stub (defense in depth):\n{src}"
-    );
-    assert!(
-        mentions_int_or_f1,
-        "integer matmul stub gives no hint why; should reference spec \
-         §5.7.2 or the F1 guard so users see why the build is empty:\n{src}"
+        rendered.starts_with("unsupported:") && rendered.contains("codegen:metal"),
+        "integer matmul must fail through the typed Metal channel:\n{rendered}"
     );
 }
 

@@ -10,7 +10,7 @@
 mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
-use support::codegen_metal;
+use support::{codegen_metal, try_codegen_metal};
 
 fn vec_f32(n: usize) -> TensorType {
     TensorType {
@@ -69,7 +69,7 @@ fn m1_emits_extern_c_signature_and_runtime_import() {
 }
 
 #[test]
-fn m1_stub_carries_link_flags_for_metal_and_foundation() {
+fn codegen_result_carries_link_flags_for_metal_and_foundation() {
     let dag = build_simple_add_dag();
     let result = codegen_metal(&dag, "f");
 
@@ -89,7 +89,7 @@ fn m1_stub_carries_link_flags_for_metal_and_foundation() {
 }
 
 #[test]
-fn m1_stub_extracts_input_and_output_labels_from_loads_and_stores() {
+fn codegen_result_extracts_input_and_output_labels_from_loads_and_stores() {
     let dag = build_simple_add_dag();
     let result = codegen_metal(&dag, "f");
     assert_eq!(result.input_labels, vec!["a".to_string(), "b".to_string()]);
@@ -122,14 +122,6 @@ fn m2_simple_add_emits_msl_kernel_void_and_thread_position() {
     let dag = build_simple_add_dag();
     let result = codegen_metal(&dag, "f");
     let src = &result.mm_source;
-
-    // M2 emission MUST replace the M1 stub. abort() in the stub body is the
-    // signal the emitter fell through to the fallback; for a supported
-    // shape we should emit real kernels and dispatch sites.
-    assert!(
-        !src.contains("M1 fallback stub"),
-        "M2 should emit real code for a simple rank-1 add, but fell back to the stub:\n{src}"
-    );
 
     // MSL kernel signature shape.
     assert!(
@@ -217,11 +209,6 @@ fn m2_chained_elementwise_emits_one_kernel_per_compute_node() {
 
     let result = codegen_metal(&dag, "chain");
     let src = &result.mm_source;
-    assert!(
-        !src.contains("M1 fallback stub"),
-        "M2 should emit real code: {src}"
-    );
-
     let kernel_void_count = src.matches("kernel void").count();
     assert_eq!(
         kernel_void_count, 2,
@@ -294,11 +281,6 @@ fn m4_sum_reduction_emits_threadgroup_memory_and_barriers() {
     );
     let result = codegen_metal(&dag, "sumv");
     let src = &result.mm_source;
-    assert!(
-        !src.contains("M1 fallback stub"),
-        "M4 should emit a real reduction kernel for Sum: {src}"
-    );
-
     // Reduction kernel hallmarks.
     assert!(
         src.contains("threadgroup float shared[256]"),
@@ -338,10 +320,6 @@ fn m4_max_reduction_uses_neg_infinity_identity() {
     let result = codegen_metal(&dag, "maxv");
     let src = &result.mm_source;
     assert!(
-        !src.contains("M1 fallback stub"),
-        "M4 should emit a real reduction kernel for Max: {src}"
-    );
-    assert!(
         src.contains("float acc = -INFINITY;"),
         "expected max identity -INFINITY: {src}"
     );
@@ -368,10 +346,10 @@ fn m4_min_reduction_uses_positive_infinity_identity() {
 }
 
 #[test]
-fn m4_oversize_reduction_falls_through_to_stub_until_two_pass_lands() {
+fn m4_oversize_reduction_returns_typed_unsupported_until_two_pass_lands() {
     // n>4096 exceeds the single-threadgroup wrap-loop limit. Two-pass
-    // reduction lands in a follow-up phase; until then, fall through to
-    // the stub so we never silently emit a wrong reduction.
+    // reduction lands in a follow-up phase; until then, reject before
+    // artifact emission so we never silently emit a wrong reduction.
     let dag = build_reduce_dag(
         RiscOp::Sum {
             axis: 0,
@@ -379,12 +357,12 @@ fn m4_oversize_reduction_falls_through_to_stub_until_two_pass_lands() {
         },
         4097,
     );
-    let result = codegen_metal(&dag, "big");
-    let src = &result.mm_source;
-    assert!(
-        src.contains("M1 fallback stub"),
-        "M4 should fall through to stub for n>4096 until two-pass lands. Source:\n{src}"
+    let error = try_codegen_metal(&dag, "big").unwrap_err();
+    assert_eq!(
+        error.stage,
+        chelis_types::unsupported::Stage::Codegen("metal")
     );
+    assert!(error.to_string().contains("n=4097"), "{error}");
 }
 
 #[test]
@@ -657,7 +635,7 @@ fn build_matmul_dag_prec(m: usize, k: usize, n: usize, prec: Prim) -> Dag {
 #[test]
 fn m4_axis_nonzero_reduction_is_rejected_before_codegen() {
     // The M4 first cut handles full-axis reduce only (axis=0 on rank-1).
-    // axis-nonzero falls through to the stub.
+    // axis-nonzero is rejected before artifact emission.
     let mut dag = Dag::new();
     let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(64), None);
     // Construct an axis=1 sum even though our input is rank-1; this

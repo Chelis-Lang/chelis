@@ -81,7 +81,8 @@ metal = "0.29"
 objc = "0.2"
 ```
 
-On non-macOS platforms, the crate compiles as an empty module with a stub `emit_metal()` that returns an error. The CLI's `--target metal` flag is only accepted on macOS.
+The crate is platform-portable Rust string emission. It can produce Objective-C++/MSL
+artifacts on any host; only the later `clang++` compile and Metal execution require macOS.
 
 ### 3.2 MSL Kernel Emission (`emit.rs`)
 
@@ -441,7 +442,14 @@ extern "C" void compute_add(chelis_tensor **inputs, int n_in,
 }
 ```
 
-**Optimization: avoid alloc/free per kernel call.** The generated code should allocate buffers once for the program's lifetime and reuse them. The DAG already knows the buffer sizes — emit the allocations at program startup and frees at program exit. This mirrors what the HIP backend already does via the slot-reuse memory plan.
+**Ownership projection: distinct storage, never reuse.** The generated program allocates a
+distinct Metal buffer for every physically materialized DAG node. Before emission,
+`plan_metal` projects the verified DAG into an opaque `MetalNeverReuse` value with one
+unforgeable allocation identity per physical `chelis_metal_alloc` site. The emitter must
+claim each identity exactly once and must reject a plan/emission mismatch before returning
+an artifact. Virtual nodes folded into another kernel do not receive identities. Metal has
+no local reuse predicate or reusable-storage token; admitting reuse later requires the
+controlling change described by `compiled_value_ownership.md` C6.
 
 ### 3.5 CLI Integration
 
@@ -453,10 +461,16 @@ In `crates/chelis-cli/src/main.rs`, add `"metal"` to the existing `target: Strin
     reject_unsupported_metal_precisions(&dag)?;
     let dag = dead_code_eliminate(dag);
     let dag = fuse(dag);
-    let result = chelis_backend_metal::codegen_metal(&dag, &func_name);
+    let verified = verified_dag_codegen_program(dag)?;
+    let plan = chelis_backend_metal::plan_metal(&verified);
+    let result = chelis_backend_metal::codegen_metal(&plan, &func_name)?;
     cmd_build_metal(result, &func_name, output, &symbolic_dims)
 }
 ```
+
+Unsupported Metal lowering returns the shared typed `Unsupported` channel before output
+paths are created or files are written. An aborting Objective-C++ placeholder is not a
+successful build artifact.
 
 `cmd_build_metal` writes `<func_name>_metal.mm` plus the header, copies `chelis_metal_runtime.h` from `chelis_backend_metal::runtime_dir()` into the output, prints the symbolic dim list, the unified-memory-aware `peak_device_bytes` formula, and the recommended `clang++` recipe.
 
@@ -556,11 +570,10 @@ The only synchronization point is `waitUntilCompleted()` after kernel dispatch, 
 crates/chelis-backend-metal/
     Cargo.toml                  -- deps: chelis-ir, chelis-types. ZERO macOS-only deps.
     src/
-        lib.rs                  -- public API: codegen_metal(dag, func_name) -> MetalCodegenResult
-        emit.rs                 -- MetalEmitter, mirrors HipEmitter::emit_dag
+        lib.rs                  -- opaque MetalNeverReuse projection + fallible codegen_metal
+        emit.rs                 -- MetalEmitter, consumes one allocation identity per materialized node
         kernels.rs              -- MSL kernel templates (elementwise, reduction, matmul, fill)
         launch.rs               -- threadgroup/grid sizing (analog of HIP's launch.rs)
-        memory.rs               -- slot reuse plan (initial copy of HIP's; hoist later)
         blas.rs                 -- tiled matmul detection + emission
     runtime/
         chelis_metal_runtime.h  -- Objective-C++ helpers, peer of chelis_hip_runtime.h
@@ -661,7 +674,8 @@ M2: Elementwise emission + structural test surface (default-gate)
 ├── MetalEmitter mirrors HipEmitter (same passes, MSL kernel syntax)
 ├── kernels.rs templates: add/sub/mul/div/neg/exp/log/sqrt/sin/cast/clamp/where + fill
 ├── launch.rs emits chelis_metal_launch dispatch sites
-├── memory.rs initial copy of HIP's plan (track hoist as follow-up)
+├── MetalNeverReuse projection: one distinct identity per physical allocation,
+│   with no local reuse state or HIP-derived memory-plan copy
 └── Oracle: cargo test -p chelis-backend-metal --test codegen_structure
 
 M3: Compile-and-link smoke on macOS CI (default-gate, macOS only)
@@ -705,7 +719,9 @@ M7: Adversarial / red-team test surface (default-gate)
 After each phase lands, invoke `/red-team` (which routes to `redteam-exec`) — fresh local subagent in fresh context. Main-thread validation does not satisfy the red-team requirement.
 
 Deferred (not in M0–M7, tracked as follow-ups):
-- Hoist `memory.rs` from per-backend copy into a shared crate once both GPU backends are stable
+- Any future Metal reuse admission requires an explicit controlling-contract change and a
+  mutation proving removal of each reuse condition disables the optimization; it cannot be
+  introduced by copying a backend-local memory planner.
 - ~~Convert `smoke_macos_accelerate.sh` to Python ("Never shell" cleanup)~~ Done; the runner is now `.github/scripts/smoke_macos_accelerate.py`.
 - MPS integration for matmul, GPU sort/cumsum, RNG kernel, async dispatch (see §10)
 
