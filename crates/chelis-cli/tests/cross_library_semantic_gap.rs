@@ -134,8 +134,8 @@ fn semantic_gap_sources() -> (&'static str, &'static str, &'static str, &'static
                   -> tensor[8, 4, f32] = matmul(a, b)\n";
     let inline_manual = "def f(a: tensor[8, 16, f32], b: tensor[16, 4, f32]) \
                          -> tensor[8, 4, f32] = {\n  \
-                           ae = expand(a, 2, 4i64)\n  \
-                           be = expand(b, 0, 8i64)\n  \
+                           ae = insert(a, 2, 4i64)\n  \
+                           be = insert(b, 0, 8i64)\n  \
                            sum(mul(ae, be), 1)\n\
                          }\n";
     let user_def_builtin = "def my_mm(a: tensor[8, 16, f32], b: tensor[16, 4, f32]) \
@@ -144,8 +144,8 @@ fn semantic_gap_sources() -> (&'static str, &'static str, &'static str, &'static
                             -> tensor[8, 4, f32] = my_mm(a, b)\n";
     let user_def_manual = "def my_mm(a: tensor[8, 16, f32], b: tensor[16, 4, f32]) \
                            -> tensor[8, 4, f32] = {\n  \
-                             ae = expand(a, 2, 4i64)\n  \
-                             be = expand(b, 0, 8i64)\n  \
+                             ae = insert(a, 2, 4i64)\n  \
+                             be = insert(b, 0, 8i64)\n  \
                              sum(mul(ae, be), 1)\n\
                            }\n\
                            def f(a: tensor[8, 16, f32], b: tensor[16, 4, f32]) \

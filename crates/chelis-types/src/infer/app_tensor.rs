@@ -979,10 +979,11 @@ pub(super) fn check_expand_signature(
             errors,
             CheckError::new(
                 CheckErrorKind::DimensionMismatch,
-                "expand takes a fourth (anchor) argument only in the named-axis form \
-             `expand(x, new, size, anchor)`, where `new` names the inserted axis \
-             (spec/04-type-system.md \u{00a7}4.5.3)"
-                    .to_string(),
+                format!(
+                    "{builtin} takes a fourth (anchor) argument only in the named-axis \
+                     form `{builtin}(x, new, size, anchor)`, where `new` names the \
+                     inserted axis (spec/04-type-system.md \u{00a7}4.5.3)"
+                ),
                 vec![],
             ),
         );
@@ -995,12 +996,14 @@ pub(super) fn check_expand_signature(
             errors,
             CheckError::new(
                 CheckErrorKind::DimensionMismatch,
-                "expand: a positional integer axis is only valid on a concrete-rank \
-             operand; on a rank-spread operand, name the inserted axis (e.g. \
-             `expand(x, one, 1)` for a trailing insert, or `expand(x, c, n, seq)` \
-             to insert before the named `seq` anchor) so the insertion point stays \
-             name-anchored (spec/04-type-system.md \u{00a7}4.5.3)"
-                    .to_string(),
+                format!(
+                    "{builtin}: a positional integer axis is only valid on a \
+                     concrete-rank operand; on a rank-spread operand, name the \
+                     inserted axis (e.g. `{builtin}(x, one, 1)` for a trailing insert, \
+                     or `{builtin}(x, c, n, seq)` to insert before the named `seq` \
+                     anchor) so the insertion point stays name-anchored \
+                     (spec/04-type-system.md \u{00a7}4.5.3)"
+                ),
                 vec![],
             ),
         );
@@ -1040,12 +1043,11 @@ pub(super) fn check_expand_signature(
                      shape to be inferable, got {}",
                         describe_axis_arg(arg_exprs.get(1)),
                     ),
-                    vec![
-                        "Pass a literal axis (e.g. `expand(x, 0, n)`) or a `cast(N, int32)` \
-                     literal. The axis selects where the new dimension is inserted, so \
-                     it must be known at compile time."
-                            .to_string(),
-                    ],
+                    vec![format!(
+                        "Pass a literal axis (e.g. `{builtin}(x, 0, n)`) or a \
+                             `cast(N, int32)` literal. The axis selects where the new \
+                             dimension is inserted, so it must be known at compile time."
+                    )],
                 ),
             );
         }

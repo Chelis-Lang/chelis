@@ -800,7 +800,7 @@ def g(k: tensor[2, 4, f32]) -> tensor[4, 2, f32] = permute(&k, cast(99, int32), 
 #[test]
 fn red_team_214_r3_expand_cast_wrapped_axis_and_size_typechecks() {
     let src = r#"
-def f(x: tensor[2, f32]) -> tensor[3, 2, f32] = expand(&x, cast(0, int32), cast(3, int64))
+def f(x: tensor[2, f32]) -> tensor[3, 2, f32] = insert(&x, cast(0, int32), cast(3, int64))
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
@@ -820,7 +820,7 @@ def f(x: tensor[2, f32]) -> tensor[3, 2, f32] = expand(&x, cast(0, int32), cast(
 #[test]
 fn red_team_214_r3_expand_cast_wrapped_zero_size_typechecks() {
     let src = r#"
-def f(x: tensor[2, f32]) -> tensor[0, 2, f32] = expand(&x, cast(0, int32), cast(0, int64))
+def f(x: tensor[2, f32]) -> tensor[0, 2, f32] = insert(&x, cast(0, int32), cast(0, int64))
 "#;
     let deep = surf_to_deep(src);
     if let Err(rep) = check_ir_program(&deep) {

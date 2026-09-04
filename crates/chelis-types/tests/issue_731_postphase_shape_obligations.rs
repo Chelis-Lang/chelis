@@ -186,8 +186,8 @@ def manual_matmul(
   a: tensor[8, 16, f32],
   b: tensor[16, 4, f32]
 ) -> tensor[8, 4, f32] = {
-  ae = expand(a, 2, 4i64)
-  be = expand(b, 0, 8i64)
+  ae = insert(a, 2, 4i64)
+  be = insert(b, 0, 8i64)
   sum(mul(ae, be), 1)
 }
 "#,

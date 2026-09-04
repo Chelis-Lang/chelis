@@ -192,7 +192,7 @@ fn issue_288_grad_through_expand_scalar_constructs() {
         match grad_dag_checked(&dag, out, &[x]) {
             Ok(_) => {}
             Err(AdError::NotSupported { op, reason }) => panic!(
-                "grad through expand(scalar_to_tensor(c), 0, n) with source \
+                "grad through insert(scalar_to_tensor(c), 0, n) with source \
                  shape {shape:?} must succeed (issue #288); got rejection \
                  op={op}, reason={reason:?}",
             ),

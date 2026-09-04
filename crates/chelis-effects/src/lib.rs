@@ -1315,7 +1315,7 @@ mod tests {
         let mut lines = vec![
             format!("module FrontEndPerformance.{module}N{operations}"),
             "def bc(c: f32) -> tensor[8, f32] = \
-             reshape(expand(to_tensor([c]), 0, 8i64), [8i64])"
+             reshape(insert(to_tensor([c]), 0, 8i64), [8i64])"
                 .to_string(),
         ];
         if flat {

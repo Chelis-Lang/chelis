@@ -1414,7 +1414,7 @@ fn prelude_linear_layer() -> MacroDef {
             "add",
             vec![
                 app("matmul", vec![var("x"), var("w")]),
-                app("expand", vec![var("b"), int32_lit(0), var("batch")]),
+                app("insert", vec![var("b"), int32_lit(0), var("batch")]),
             ],
         ),
     }

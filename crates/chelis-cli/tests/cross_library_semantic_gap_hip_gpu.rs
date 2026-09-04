@@ -326,8 +326,8 @@ fn g15_user_def_manual_matmul_helper_hits_hipblas_numeric() {
     // the binary still hits hipBLAS numerically.
     let source = "def my_mm(a: tensor[8, 16, f32], b: tensor[16, 4, f32]) \
                   -> tensor[8, 4, f32] = {\n  \
-                    ae = expand(a, 2, 4i64)\n  \
-                    be = expand(b, 0, 8i64)\n  \
+                    ae = insert(a, 2, 4i64)\n  \
+                    be = insert(b, 0, 8i64)\n  \
                     sum(mul(ae, be), 1)\n\
                   }\n\
                   def hip_user_def_manual_mm(a: tensor[8, 16, f32], b: tensor[16, 4, f32]) \

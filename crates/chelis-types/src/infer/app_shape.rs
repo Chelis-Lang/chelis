@@ -161,7 +161,7 @@ pub(super) fn infer_expand_app(
                     with_macro_provenance(
                         &deep::Expr::List(list.clone(), zero_span()),
                         format!(
-                            "expand expects an int64 size (write Ni64 or cast(N, int64)), got {other}"
+                            "{callee} expects an int64 size (write Ni64 or cast(N, int64)), got {other}"
                         ),
                     ),
                     vec![],

@@ -4717,7 +4717,7 @@ def main(
   w: tensor[784, 10, f32],
   b: tensor[10, f32]
 ) -> tensor[32, 10, f32] = {
-  bias = expand(&b, 0, shape(&x, cast(0, int32)))
+  bias = insert(&b, 0, shape(&x, cast(0, int32)))
   wx = matmul(&x, &w)
   add(wx, bias)
 }
@@ -8574,7 +8574,7 @@ fn build_c_linreg_expand_singleton_bias_keeps_rank2_shape() {
     // (`expand(b, 0, 64i64)` where `b: tensor[1, f32]`).
     write_file(
         &path,
-        "def broadcast_bias(b: tensor[1, f32]) -> tensor[4, 1, f32] = expand(b, 0, 4i64)\n\
+        "def broadcast_bias(b: tensor[1, f32]) -> tensor[4, 1, f32] = insert(b, 0, 4i64)\n\
          result = broadcast_bias(to_tensor([cast(7.0, f32)]))\n",
     );
 

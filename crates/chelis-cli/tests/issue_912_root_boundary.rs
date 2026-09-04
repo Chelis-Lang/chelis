@@ -421,11 +421,11 @@ result = concat(a, b)
 #[test]
 fn precision_determinism_f64_root_is_retained_by_c_build() {
     let source_no_print = r#"
-x = expand(scalar_to_tensor(cast(0.1, f64)), 0, 4i64)
+x = insert(scalar_to_tensor(cast(0.1, f64)), 0, 4i64)
 y = mul(x, x)
 "#;
     let source_with_print = r#"
-x = expand(scalar_to_tensor(cast(0.1, f64)), 0, 4i64)
+x = insert(scalar_to_tensor(cast(0.1, f64)), 0, 4i64)
 y = mul(x, x)
 z = print("host")
 "#;
@@ -486,7 +486,7 @@ z = print("host")
     // `RootManifest::requires_main()` must therefore still be killed here,
     // where no host-backend condition can accidentally supply the driver.
     let tensor_only = build_c(
-        "x = expand(scalar_to_tensor(cast(0.1, f32)), 0, 4i64)\n\
+        "x = insert(scalar_to_tensor(cast(0.1, f32)), 0, 4i64)\n\
          y = mul(x, x)\n",
     );
     assert!(
@@ -701,7 +701,7 @@ fn host_manifest_order_preserves_lowering_dependencies() {
 #[test]
 fn hip_tensor_root_uses_the_manifest_to_emit_a_gpu_executable() {
     let source = r#"
-x = expand(scalar_to_tensor(cast(0.1, f64)), 0, 4i64)
+x = insert(scalar_to_tensor(cast(0.1, f64)), 0, 4i64)
 y = mul(x, x)
 "#;
     let (manifest, stderr, eval_ok) = eval_json_file(source, Some("hip"));
@@ -800,7 +800,7 @@ fn manifest_completeness_eval_lane() {
     let source = r#"
 type Pair = | Pair { left: int32, right: int32 }
 scalar_root = cast(7, int32)
-tensor_root = expand(scalar_to_tensor(cast(0.25, f32)), 0, 2i64)
+tensor_root = insert(scalar_to_tensor(cast(0.25, f32)), 0, 2i64)
 tuple_root = (cast(1, int32), (cast(2, int32), cast(3, int32)))
 record_root = Pair { left: cast(4, int32), right: cast(5, int32) }
 "#;
@@ -881,7 +881,7 @@ fn manifest_completeness_c_lane() {
     let source = r#"
 type Pair = | Pair { left: int32, right: int32 }
 scalar_root = cast(7, int32)
-tensor_root = expand(scalar_to_tensor(cast(0.25, f32)), 0, 2i64)
+tensor_root = insert(scalar_to_tensor(cast(0.25, f32)), 0, 2i64)
 tuple_root = (cast(1, int32), (cast(2, int32), cast(3, int32)))
 record_root = Pair { left: cast(4, int32), right: cast(5, int32) }
 "#;

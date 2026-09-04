@@ -55,7 +55,7 @@ const REPRO_CALLEE: &str = "module Repro.GradFullLikeCallee\n\
 def tensor_full_like[n](x: &tensor[n, f32], value: f32) -> tensor[n, f32] = {\n\
   len = shape(x, cast(0, int32))\n\
   scalar_t = scalar_to_tensor(value)\n\
-  expand(scalar_t, cast(0, int32), cast(len, int64))\n\
+  insert(scalar_t, cast(0, int32), cast(len, int64))\n\
 }\n\
 def loss_full_like(x: tensor[3, f32]) -> f32 = {\n\
   twos = tensor_full_like(&x, cast(2.0, f32))\n\
@@ -70,7 +70,7 @@ out = df(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))\n";
 const REPRO_INLINE_LET: &str = "module Repro.GradInlineLet\n\
 def loss_inline(x: tensor[3, f32]) -> f32 = {\n\
   len = shape(&x, cast(0, int32))\n\
-  twos = expand(scalar_to_tensor(cast(2.0, f32)), cast(0, int32), cast(len, int64))\n\
+  twos = insert(scalar_to_tensor(cast(2.0, f32)), cast(0, int32), cast(len, int64))\n\
   sum(mul(x, twos), cast(0, int32)) |> tensor_to_scalar\n\
 }\n\
 def df(x: tensor[3, f32]) -> tensor[3, f32] = grad(loss_inline)(x)\n\
@@ -81,7 +81,7 @@ out = df(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))\n";
 /// discriminator.
 const REPRO_INLINE_DIRECT: &str = "module Repro.GradInlineDirect\n\
 def loss_direct(x: tensor[3, f32]) -> f32 = {\n\
-  twos = expand(scalar_to_tensor(cast(2.0, f32)), cast(0, int32), cast(shape(&x, cast(0, int32)), int64))\n\
+  twos = insert(scalar_to_tensor(cast(2.0, f32)), cast(0, int32), cast(shape(&x, cast(0, int32)), int64))\n\
   sum(mul(x, twos), cast(0, int32)) |> tensor_to_scalar\n\
 }\n\
 def df(x: tensor[3, f32]) -> tensor[3, f32] = grad(loss_direct)(x)\n\
@@ -111,12 +111,12 @@ const REPRO_CROSS_DEF_SHADOW: &str = "module Repro.GradCrossDefShadow\n\
 def tensor_full_like[n](y: &tensor[n, f32], value: f32) -> tensor[n, f32] = {\n\
   len = shape(y, cast(0, int32))\n\
   scalar_t = scalar_to_tensor(value)\n\
-  expand(scalar_t, cast(0, int32), cast(len, int64))\n\
+  insert(scalar_t, cast(0, int32), cast(len, int64))\n\
 }\n\
 def loss_cross(x: tensor[5, f32]) -> f32 = {\n\
   guide = to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)])\n\
   len = shape(&guide, cast(0, int32))\n\
-  zeros3 = expand(scalar_to_tensor(cast(0.0, f32)), cast(0, int32), cast(len, int64))\n\
+  zeros3 = insert(scalar_to_tensor(cast(0.0, f32)), cast(0, int32), cast(len, int64))\n\
   caller_contrib = sum(zeros3, cast(0, int32)) |> tensor_to_scalar\n\
   twos = tensor_full_like(&x, cast(2.0, f32))\n\
   main = sum(mul(x, twos), cast(0, int32)) |> tensor_to_scalar\n\
@@ -141,7 +141,7 @@ out = df(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f3
 const REPRO_BARE_SCALAR_REJECTS: &str = "module Repro.BareScalarRejects\n\
 def bad(x: tensor[3, f32], k: int32) -> tensor[k, f32] = {\n\
   scalar_t = scalar_to_tensor(cast(2.0, f32))\n\
-  expand(scalar_t, cast(0, int32), k)\n\
+  insert(scalar_t, cast(0, int32), k)\n\
 }\n\
 out = bad(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]), cast(4, int32))\n";
 

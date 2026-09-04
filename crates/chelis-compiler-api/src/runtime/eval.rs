@@ -752,7 +752,7 @@ impl<'a> EvalContext<'a> {
         // the operand's named dims. The positional form (integer axis,
         // possibly with a symbolic size) keeps the host path.
         if let Some(expand_name) = self.active_builtin_name(func)
-            && expand_name == "expand"
+            && (expand_name == "expand" || expand_name == "insert")
             && kids.len() >= 4
             && var_name(&kids[2]).is_some()
         {
@@ -2720,7 +2720,7 @@ impl<'a> EvalContext<'a> {
                 }
                 tensor_permute_host(&tensor, &axes).map(RuntimeValue::Tensor)
             }
-            "expand" => {
+            "expand" | "insert" => {
                 let tensor = expect_tensor_arg(args, 0)?;
                 let axis = expect_int_arg(args, 1)?;
                 let count = expect_int_arg(args, 2)?;

@@ -2069,7 +2069,7 @@ mod tests {
     #[test]
     fn compute_root_manifest_records_tensor_lane_not_just_host_default() {
         let checked =
-            check_program_from_source("x = expand(scalar_to_tensor(cast(1.0, f32)), 0, 1i64)\n");
+            check_program_from_source("x = insert(scalar_to_tensor(cast(1.0, f32)), 0, 1i64)\n");
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
         let x = manifest

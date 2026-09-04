@@ -69,7 +69,7 @@ fn compile_and_run_c(build_dir: &Path, stem: &str) -> std::process::Output {
 
 #[test]
 fn zero_extent_is_check_clean_and_evaluates_to_empty_tensor() {
-    let source = "out = expand(scalar_to_tensor(1.0f32), 0, 0i64)\n";
+    let source = "out = insert(scalar_to_tensor(1.0f32), 0, 0i64)\n";
     let report = check(source);
     assert_eq!(report["score"].as_f64(), Some(1.0), "{report}");
     assert!(errors(&report).is_empty(), "{report}");
@@ -129,7 +129,7 @@ fn zero_extent_is_check_clean_and_evaluates_to_empty_tensor() {
 
 #[test]
 fn negative_extent_remains_a_static_type_error() {
-    let report = check("out = expand(scalar_to_tensor(1.0f32), 0, -1i64)\n");
+    let report = check("out = insert(scalar_to_tensor(1.0f32), 0, -1i64)\n");
     let joined = errors(&report).join("\n");
     assert!(
         joined.contains("expand") && joined.contains("-1"),
@@ -140,7 +140,7 @@ fn negative_extent_remains_a_static_type_error() {
 #[test]
 fn shape_sourced_expand_rejects_wrong_rank_ascription() {
     let source = "def bad(g: &tensor[c, f32], x: &tensor[a, c, h, w, f32]) -> tensor[c, h, w, f32] = {\n\
-        \x20 step1: tensor[c, h, w, f32] = expand(g, 1, shape(x, cast(2, int32)))\n\
+        \x20 step1: tensor[c, h, w, f32] = insert(g, 1, shape(x, cast(2, int32)))\n\
         \x20 step1\n\
         }\n";
     let report = check(source);
@@ -153,7 +153,7 @@ fn shape_sourced_expand_rejects_wrong_rank_ascription() {
 
 #[test]
 fn bare_dimension_binder_executes_and_builds_without_symbolic_dim_ice() {
-    let source = "def f(b: tensor[f32], c: tensor[k, f32]) -> tensor[k, f32] = expand(b, 0, k)\n\
+    let source = "def f(b: tensor[f32], c: tensor[k, f32]) -> tensor[k, f32] = insert(b, 0, k)\n\
         out = f(scalar_to_tensor(2.0f32), to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
     let report = check(source);
     assert!(errors(&report).is_empty(), "{report}");
@@ -221,14 +221,14 @@ fn bare_dimension_binder_executes_and_builds_without_symbolic_dim_ice() {
 
 #[test]
 fn stale_extent_guidance_is_removed_but_axis_guidance_stays_int32() {
-    let extent = check("def bad(b: tensor[f32], k: int64) -> tensor[k, f32] = expand(b, 0, k)\n");
+    let extent = check("def bad(b: tensor[f32], k: int64) -> tensor[k, f32] = insert(b, 0, k)\n");
     let extent_errors = errors(&extent).join("\n");
     assert!(!extent_errors.contains("Form-3"), "{extent_errors}");
     assert!(!extent_errors.contains("cast(N, int32)"), "{extent_errors}");
     assert!(extent_errors.contains("int64"), "{extent_errors}");
 
     let axis = check(
-        "def bad(x: tensor[2, f32], axis: int32) -> tensor[2, 2, f32] = expand(x, axis, 2i64)\n",
+        "def bad(x: tensor[2, f32], axis: int32) -> tensor[2, 2, f32] = insert(x, axis, 2i64)\n",
     );
     let axis_errors = errors(&axis).join("\n");
     assert!(axis_errors.contains("int32"), "{axis_errors}");

@@ -12,7 +12,7 @@ fn source(expand_size: &str, consume: bool) -> String {
     format!(
         "module Repro.ShrinkExpandRank\n\
          x = to_tensor([cast(11.0, f32), cast(22.0, f32)])\n\
-         e = expand(x, cast(0, int32), {expand_size})\n\
+         e = insert(x, cast(0, int32), {expand_size})\n\
          s = shrink(e, [[cast(0, int64), cast(1, int64)], [cast(0, int64), cast(2, int64)]])\n\
          out = {tail}\n"
     )
@@ -22,7 +22,7 @@ fn runtime_bound_source(start: &str, end: &str) -> String {
     format!(
         "module Repro.ShrinkExpandRuntimeBound\n\
          x = to_tensor([cast(11.0, f32), cast(22.0, f32)])\n\
-         e = expand(x, cast(0, int32), cast(2, int64))\n\
+         e = insert(x, cast(0, int32), cast(2, int64))\n\
          k = shape(x, cast(0, int32))\n\
          s = shrink(e, [[cast(0, int64), cast(1, int64)], [{start}, {end}]])\n\
          out = relu(s)\n"
@@ -33,7 +33,7 @@ fn runtime_bound_movement_consumer_source(consumer: &str) -> String {
     format!(
         "module Repro.ShrinkExpandMovementConsumer\n\
          x = to_tensor([cast(11.0, f32), cast(22.0, f32)])\n\
-         e = expand(x, cast(0, int32), cast(2, int64))\n\
+         e = insert(x, cast(0, int32), cast(2, int64))\n\
          k = shape(x, cast(0, int32))\n\
          s = shrink(e, [[cast(0, int64), cast(1, int64)], [cast(k - k, int64), k]])\n\
          out = {consumer}\n"

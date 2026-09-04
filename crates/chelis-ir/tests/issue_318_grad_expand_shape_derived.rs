@@ -230,7 +230,7 @@ fn issue_318_grad_through_shape_derived_expand_constructs() {
         match grad_dag_checked(&dag, out, &[x]) {
             Ok(_) => {}
             Err(AdError::NotSupported { op, reason }) => panic!(
-                "grad through shape-derived expand(scalar_to_tensor(c), 0, \
+                "grad through shape-derived insert(scalar_to_tensor(c), 0, \
                  shape(&x, 0)) with source shape {shape:?} must succeed \
                  (issue #318); got rejection op={op}, reason={reason:?}",
             ),

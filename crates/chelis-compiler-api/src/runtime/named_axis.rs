@@ -530,7 +530,9 @@ fn app_expands_named_axis(list: &List) -> bool {
     let Some(callee) = kids.first().and_then(var_name) else {
         return false;
     };
-    callee == "expand" && kids.len() >= 4 && kids.get(2).and_then(var_name).is_some()
+    (callee == "expand" || callee == "insert")
+        && kids.len() >= 4
+        && kids.get(2).and_then(var_name).is_some()
 }
 
 /// Walk a Deep expr looking for a named-axis reduction or expand app,
