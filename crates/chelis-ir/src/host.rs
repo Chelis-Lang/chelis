@@ -3190,6 +3190,364 @@ fn cached_def_effect_rows(
     rows
 }
 
+/// A form the kernel lowering cannot carry, found before lowering by walking
+/// the body and every inlined callee with lexical scoping (chelis#1277 B2h,
+/// ruling 1(a): each class is one the byte-identity corpus found the lowerer
+/// rejecting after a kernel decision, named with the lowerer's own reason).
+/// `Some(reason)` keeps the def in host code on both lanes; on C that is the
+/// lane the non-fatal fall-through (chelis#1515) already chose, so the emitted
+/// program is unchanged, which the corpus capture proves rather than assumes.
+fn body_form_the_dag_cannot_carry(
+    program: &CheckedProgram,
+    body: &Expr,
+    params: &[HostParam],
+) -> Option<String> {
+    let defs = cached_program_defs(program);
+    let mut walk = UncarriableWalk {
+        defs: &defs,
+        visited: UnordSet::new(),
+        scopes: vec![
+            params
+                .iter()
+                .map(|param| (param.name.clone(), false))
+                .collect(),
+        ],
+    };
+    walk.expr(body)
+}
+
+/// Lexical scopes carry whether a binder is a compile-time-known ADT
+/// constructor value, the only scrutinee `lower_match` selects an arm for
+/// (chelis#520 D1).
+struct UncarriableWalk<'a> {
+    defs: &'a BTreeMap<String, Expr>,
+    visited: UnordSet<String>,
+    scopes: Vec<UnordMap<String, bool>>,
+}
+
+impl UncarriableWalk<'_> {
+    fn bound(&self, name: &str) -> Option<bool> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).copied())
+    }
+
+    fn expr(&mut self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Atom(Atom::Str(_), _) => {
+                Some("a string literal, which has no numeric IR constant (chelis#856)".to_string())
+            }
+            Expr::Atom(_, _) | Expr::Map(_, _) => None,
+            Expr::MetaExpr(meta, _) => self.expr(&meta.expr),
+            Expr::Node(node, span) => self.expr(&Expr::List(node.to_list(*span), *span)),
+            Expr::BareList(elems, _) => elems.iter().find_map(|elem| self.expr(elem)),
+            Expr::UnknownForm(data) => data.children.iter().find_map(|child| self.expr(child)),
+            Expr::List(list, _) => self.list(expr, list),
+        }
+    }
+
+    fn list(&mut self, expr: &Expr, list: &List) -> Option<String> {
+        let kids = children(list);
+        match tag(list) {
+            Some(DeepTag::Var) => {
+                let name = kids.first().and_then(symbol_name)?;
+                if self.bound(name).is_some()
+                    || BUILTIN_NAMES.contains(&name)
+                    || name.chars().next().is_some_and(char::is_uppercase)
+                {
+                    return None;
+                }
+                match self.defs.get(name) {
+                    // A callee inlines into the kernel, so its body is walked
+                    // under its own parameters; a value binding becomes a
+                    // `Load` and carries nothing.
+                    Some(def_body) => self.def(name, def_body),
+                    None => Some(format!(
+                        "the name `{name}`, which is neither a parameter nor a definition \
+                         of this program (a library definition under a compiled context)"
+                    )),
+                }
+            }
+            Some(DeepTag::App) => {
+                if let Some(callee) = kids.first().and_then(as_list)
+                    && tag(callee) == Some(DeepTag::Var)
+                    && let Some(name) = children(callee).first().and_then(symbol_name)
+                    && self.bound(name).is_none()
+                    && !self.defs.contains_key(name)
+                {
+                    if HOST_ONLY_BUILTINS.contains(&name) {
+                        return Some(format!(
+                            "the builtin `{name}`, which has no tensor-DAG lowering"
+                        ));
+                    }
+                }
+                kids.iter().find_map(|kid| self.expr(kid))
+            }
+            Some(DeepTag::Fn) => {
+                let params = kids
+                    .first()
+                    .map(fn_param_names)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|name| (name, false))
+                    .collect();
+                self.scopes.push(params);
+                let found = kids.get(1).and_then(|body| self.expr(body));
+                self.scopes.pop();
+                found
+            }
+            Some(DeepTag::Let) => {
+                self.scopes.push(UnordMap::new());
+                let mut found = None;
+                if let Some(bindings) = kids.first().and_then(as_list)
+                    && tag(bindings) == Some(DeepTag::Bind)
+                {
+                    let binding_kids = children(bindings);
+                    let mut index = 0;
+                    while index + 1 < binding_kids.len() {
+                        found = found.or_else(|| self.expr(&binding_kids[index + 1]));
+                        let static_ctor = is_static_constructor(&binding_kids[index + 1], self);
+                        let mut bound = UnordSet::new();
+                        collect_binder_names(&binding_kids[index], &mut bound);
+                        if let Some(scope) = self.scopes.last_mut() {
+                            for name in bound.into_sorted() {
+                                scope.insert(name, static_ctor);
+                            }
+                        }
+                        index += 2;
+                    }
+                }
+                let found = found.or_else(|| kids.get(1).and_then(|body| self.expr(body)));
+                self.scopes.pop();
+                found
+            }
+            Some(DeepTag::Match) => {
+                let Some(scrutinee) = kids.first() else {
+                    return None;
+                };
+                if let Some(found) = self.expr(scrutinee) {
+                    return Some(found);
+                }
+                if !is_static_constructor(scrutinee, self) {
+                    return Some(
+                        "a `match` on a runtime scrutinee, which IR lowering resolves only \
+                         for a compile-time-known constructor value (chelis#520 D1)"
+                            .to_string(),
+                    );
+                }
+                for arm in kids.iter().skip(1) {
+                    let Some(arm_list) = as_list(arm) else {
+                        continue;
+                    };
+                    if tag(arm_list) != Some(DeepTag::Arm) {
+                        continue;
+                    }
+                    let arm_kids = children(arm_list);
+                    let mut bound = UnordSet::new();
+                    if let Some(pattern) = arm_kids.first() {
+                        collect_binder_names(pattern, &mut bound);
+                    }
+                    self.scopes.push(
+                        bound
+                            .into_sorted()
+                            .into_iter()
+                            .map(|n| (n, false))
+                            .collect(),
+                    );
+                    let found = arm_kids.iter().skip(1).find_map(|kid| self.expr(kid));
+                    self.scopes.pop();
+                    if found.is_some() {
+                        return found;
+                    }
+                }
+                None
+            }
+            Some(DeepTag::If) => {
+                if !crate::lower::if_expr_is_dag_lowerable(expr) {
+                    return Some(
+                        "an `if` whose branches are not a float tensor selected by a \
+                         matching-shape bool condition, which IR lowering does not \
+                         represent"
+                            .to_string(),
+                    );
+                }
+                kids.iter().find_map(|kid| self.expr(kid))
+            }
+            _ => kids.iter().find_map(|kid| self.expr(kid)),
+        }
+    }
+
+    fn def(&mut self, name: &str, body: &Expr) -> Option<String> {
+        let Some((DeepTag::Fn, _, fn_kids)) = stamped_parts(body) else {
+            return None;
+        };
+        if !self.visited.insert(name.to_string()) {
+            return None;
+        }
+        let params = fn_kids
+            .first()
+            .map(fn_param_names)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|param| (param, false))
+            .collect();
+        let saved = std::mem::replace(&mut self.scopes, vec![params]);
+        let found = fn_kids.get(1).and_then(|fn_body| self.expr(fn_body));
+        self.scopes = saved;
+        found
+    }
+}
+
+/// Builtins the kernel lowering has no arm for: the lowerer's own host-side
+/// list (`lower.rs`, `expr_requires_host_runtime_with_ctx`) minus the names
+/// its `lower_builtin_app` does handle (`count`, `shape`, `concat`, `fold`,
+/// a static `to_tensor`, which the preflight covers). Measured against the
+/// arms on `801f92c02`.
+const HOST_ONLY_BUILTINS: &[&str] = &[
+    "print",
+    "debug",
+    "string_len",
+    "string_concat",
+    "string_slice",
+    "string_contains",
+    "string_starts_with",
+    "string_ends_with",
+    "string_trim",
+    "to_string",
+    "to_int",
+    "to_float",
+    "mod",
+    "bitand",
+    "bitor",
+    "bitxor",
+    "shl",
+    "shr",
+    "rank",
+    "numel",
+    "len",
+    "index",
+    "append",
+    "take",
+    "chunk",
+    "range",
+    "map",
+    "filter",
+    "scan",
+    "tensor_scan",
+    "partition",
+    "flat_map",
+    "flatten",
+    "zip",
+    "enumerate",
+    "dict_of",
+    "dict_get",
+    "dict_contains",
+    "dict_remove",
+    "dict_insert",
+    "dict_merge",
+    "dict_keys",
+    "dict_values",
+    "dict_entries",
+    "read_file",
+    "write_file",
+    "read_lines",
+    "read_bytes",
+    "file_exists",
+    "list_dir",
+    "mmap_file",
+    "mmap_read",
+    "mmap_len",
+    "process_run",
+    "round_to",
+    "parse_csv",
+    "to_csv",
+    "csv_ints",
+    "csv_strs",
+    "csv_nrows",
+    "csv_cols",
+    "csv_int",
+    "csv_str",
+    "to_list",
+    "pad_sequences",
+    "pad_sequences_to",
+    "einsum",
+    "split",
+    "scatter",
+    "where",
+    "cumsum",
+    "sort",
+    "diagonal",
+    "trace",
+    "clamp",
+];
+
+fn fn_param_names(params: &Expr) -> Vec<String> {
+    let Some(list) = as_list(params) else {
+        return Vec::new();
+    };
+    if tag(list) != Some(DeepTag::Params) {
+        return Vec::new();
+    }
+    children(list).iter().filter_map(param_name).collect()
+}
+
+/// Every name a `let` binder or a match pattern introduces (`pat-var` leaves,
+/// plus the bare-name and tuple forms a `bind` uses).
+fn collect_binder_names(pattern: &Expr, out: &mut UnordSet<String>) {
+    match pattern {
+        Expr::Atom(Atom::Name(name), _) => {
+            out.insert(name.clone());
+        }
+        Expr::Atom(_, _) | Expr::Map(_, _) => {}
+        Expr::MetaExpr(meta, _) => collect_binder_names(&meta.expr, out),
+        Expr::List(_, _) | Expr::Node(_, _) => {
+            let Some((pattern_tag, _, kids)) = stamped_parts(pattern) else {
+                return;
+            };
+            if matches!(pattern_tag, DeepTag::PatVar | DeepTag::Var)
+                && let Some(name) = kids.first().and_then(symbol_name)
+            {
+                out.insert(name.to_string());
+                return;
+            }
+            for kid in kids {
+                collect_binder_names(kid, out);
+            }
+        }
+        Expr::BareList(elems, _) => {
+            for elem in elems {
+                collect_binder_names(elem, out);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            for kid in &data.children {
+                collect_binder_names(kid, out);
+            }
+        }
+    }
+}
+
+/// A compile-time-known constructor value: an uppercase variable, an
+/// application of one, or a binder holding one.
+fn is_static_constructor(expr: &Expr, walk: &UncarriableWalk<'_>) -> bool {
+    let Some((expr_tag, _, kids)) = stamped_parts(expr) else {
+        return false;
+    };
+    match expr_tag {
+        DeepTag::Var => kids.first().and_then(symbol_name).is_some_and(|name| {
+            name.chars().next().is_some_and(char::is_uppercase) || walk.bound(name) == Some(true)
+        }),
+        DeepTag::App => kids
+            .first()
+            .and_then(as_list)
+            .filter(|callee| tag(callee) == Some(DeepTag::Var))
+            .and_then(|callee| children(callee).first().and_then(symbol_name))
+            .is_some_and(|name| name.chars().next().is_some_and(char::is_uppercase)),
+        _ => false,
+    }
+}
+
 /// The predicate list `lower_host_function` has always applied, evaluated
 /// before lowering: declared tensor result, no callable parameter, no
 /// recursive, callable-parameter or summary-rejecting callee reached, root
@@ -3222,6 +3580,12 @@ fn def_body_decision(
     // `Random` (`UniformLike`) and `Accum` (gradient accumulation) are carried
     // by the DAG.
     if def_effect_row_forbids_kernel(program, &signature.name) {
+        return Ok(DefBodyDecision::Host);
+    }
+    // A form the kernel lowering cannot carry keeps the def in host code on
+    // both lanes, decided here rather than discovered by a failed lowering
+    // (chelis#1277 B2h; the classes the byte-identity corpus found).
+    if body_form_the_dag_cannot_carry(program, body_expr, &signature.params).is_some() {
         return Ok(DefBodyDecision::Host);
     }
     if any_callable_param

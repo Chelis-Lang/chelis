@@ -3515,7 +3515,7 @@ fn expr_type_metadata(expr: &Expr) -> Option<&Expr> {
         .map(|(_, value)| value)
 }
 
-fn if_expr_is_dag_lowerable(expr: &Expr) -> bool {
+pub(crate) fn if_expr_is_dag_lowerable(expr: &Expr) -> bool {
     let Some((DeepTag::If, meta, kids)) = stamped_parts(expr) else {
         return false;
     };
@@ -3865,7 +3865,7 @@ fn cons_chain_pair_list(expr: &Expr) -> Option<Vec<(usize, usize)>> {
 /// `(var {} Nil)` or contains a non-Cons app. Used by
 /// [`LowerCtx::extract_dim_list`] to recognize Surf-desugared list
 /// literals (issue Chelis-Lang/chelis#220).
-fn collect_cons_chain(expr: &Expr) -> Option<Vec<&Expr>> {
+pub(crate) fn collect_cons_chain(expr: &Expr) -> Option<Vec<&Expr>> {
     let mut out = Vec::new();
     let mut cursor = expr;
     loop {
@@ -4050,7 +4050,7 @@ fn rebuild_cons_chain(items: Vec<LoweredValue>) -> LoweredValue {
 /// Returns the numeric value as `i64` when extractable. Used by
 /// [`LowerCtx::extract_dim_list`] to interpret reshape shape-list
 /// entries (issue Chelis-Lang/chelis#220).
-fn extract_int_for_dim(expr: &Expr) -> Option<i64> {
+pub(crate) fn extract_int_for_dim(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Atom(Atom::Int(n), _) => Some(*n),
         Expr::List(_, _) | Expr::Node(_, _) => match stamped_parts(expr)?.0 {
