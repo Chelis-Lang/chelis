@@ -4583,9 +4583,24 @@ int main() {{
         out.contains("numeric trap: domain in load at int64"),
         "section 4.7 makes this an [04-NUM-9] guard naming the `load`: {out}"
     );
+    // NOT `out.contains('n')`. That was satisfied by "numeric", "domain in"
+    // and "int64" in the trap line itself, so it asserted nothing about the
+    // context line it was meant to check: round 1 replaced the whole context
+    // `fprintf` with a literal and both driven rows still passed. Section 4.7
+    // requires the disagreeing SOURCE NAMES, the AXIS and each OBSERVED
+    // VALUE, so assert that content, which cannot survive the line being
+    // replaced.
     assert!(
-        out.contains('n'),
-        "the disagreeing claim is conveyed: {out}"
+        out.contains("extent `n`"),
+        "the context line names the disagreeing claim: {out}"
+    );
+    assert!(
+        out.contains("x axis 0 = 2"),
+        "and the canonical witness with its observed extent: {out}"
+    );
+    assert!(
+        out.contains("p axis 0 = 3"),
+        "and the disagreeing witness with its observed extent: {out}"
     );
 }
 

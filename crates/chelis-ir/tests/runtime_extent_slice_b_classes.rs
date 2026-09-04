@@ -1076,3 +1076,92 @@ fn an_input_axis_naming_a_computed_tensor_is_a_local_guard() {
         "the read tensor is computed, so its axis is not an interface value",
     );
 }
+
+// ---------------------------------------------------------------------------
+// "A `cast` takes the placement of the value it casts" (`spec/04` §4.7).
+//
+// The rule is in the same paragraph as the interface list, and a cast is how a
+// scalar parameter of the wrong width reaches an extent: `reshape(x, [cast(m,
+// int64)])` for an `int32` parameter `m` lands its `RtDim::Node` at the Cast,
+// not at the `Load`. Classifying by the slot's immediate producer would make
+// that Local while the bare parameter is Entry, which is the same claim placed
+// two different ways depending on a width conversion.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_cast_of_a_scalar_parameter_takes_the_parameters_placement() {
+    let mut dag = Dag::new();
+    let base = f32_load(&mut dag, "b", vec![]);
+    let m = dag.add_node(
+        RiscOp::Load { name: "m".into() },
+        vec![],
+        ty(vec![], Prim::Int32),
+        None,
+    );
+    let widened = dag.add_node(
+        RiscOp::Cast {
+            new_precision: Prim::Int64,
+        },
+        vec![m],
+        ty(vec![], Prim::Int64),
+        None,
+    );
+    f32_load(&mut dag, "x", vec![named("k")]);
+    dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::Node(1),
+        },
+        vec![base, widened],
+        ty(vec![named("k")], Prim::F32),
+        None,
+    );
+    let classes = derive_runtime_dim_classes(&dag);
+    assert_eq!(
+        class_for(&classes, DimClaim::Name("k".into())).placement(&dag),
+        GuardPlacement::Entry,
+        "a cast takes the placement of the value it casts, and that value is a \
+         scalar parameter",
+    );
+}
+
+/// The discriminating twin: a cast of CHECKED ARITHMETIC takes the
+/// arithmetic's placement, which is local. Without it, looking through every
+/// `Cast` unconditionally would satisfy the row above and hoist a computed
+/// guard to entry, where its operand has not been produced.
+#[test]
+fn a_cast_of_computed_arithmetic_takes_the_arithmetics_placement() {
+    let mut dag = Dag::new();
+    let base = f32_load(&mut dag, "b", vec![]);
+    let m = dag.add_node(
+        RiscOp::Load { name: "m".into() },
+        vec![],
+        ty(vec![], Prim::Int32),
+        None,
+    );
+    let doubled = dag.add_node(RiscOp::Mul, vec![m, m], ty(vec![], Prim::Int32), None);
+    let widened = dag.add_node(
+        RiscOp::Cast {
+            new_precision: Prim::Int64,
+        },
+        vec![doubled],
+        ty(vec![], Prim::Int64),
+        None,
+    );
+    f32_load(&mut dag, "x", vec![named("k")]);
+    dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::Node(1),
+        },
+        vec![base, widened],
+        ty(vec![named("k")], Prim::F32),
+        None,
+    );
+    let classes = derive_runtime_dim_classes(&dag);
+    assert_eq!(
+        class_for(&classes, DimClaim::Name("k".into())).placement(&dag),
+        GuardPlacement::Local,
+        "the value cast is checked arithmetic, so the cast is local too",
+    );
+}

@@ -802,11 +802,37 @@ impl RuntimeDimClass {
         // computed scalar, does not exist until its producer runs, so its
         // guard cannot be evaluated at entry "before any other operation of
         // the function".
+        // "A `cast` takes the placement of the value it casts" (section 4.7,
+        // the same paragraph as the interface list). A cast is how a scalar
+        // parameter of the wrong width reaches an extent - an `int32`
+        // parameter `m` in `reshape(x, [cast(m, int64)])` lands its
+        // `RtDim::Node` at the Cast, not at the `Load` - so classifying by
+        // the slot's IMMEDIATE producer would place the same claim two
+        // different ways depending on a width conversion. Look through the
+        // cast to the value cast: a cast of a parameter is interface, a cast
+        // of arithmetic is local.
+        //
+        // The walk is bounded by the node count, so a malformed graph cannot
+        // spin here.
         let slot_is_input = |member: &ClassMember, slot: usize| {
-            dag.get(member.node)
-                .and_then(|node| node.inputs.get(slot))
-                .and_then(|id| dag.get(*id))
-                .is_some_and(|producer| matches!(producer.op, RiscOp::Load { .. }))
+            let mut current = match dag.get(member.node).and_then(|n| n.inputs.get(slot)) {
+                Some(id) => *id,
+                None => return false,
+            };
+            for _ in 0..dag.nodes().len() {
+                let Some(node) = dag.get(current) else {
+                    return false;
+                };
+                match node.op {
+                    RiscOp::Load { .. } => return true,
+                    RiscOp::Cast { .. } | RiscOp::CastTrunc { .. } => match node.inputs.first() {
+                        Some(inner) => current = *inner,
+                        None => return false,
+                    },
+                    _ => return false,
+                }
+            }
+            false
         };
         let interface = |member: &ClassMember| match member.source {
             AxisSource::ExternalAxis { .. } | AxisSource::Literal { .. } => true,
