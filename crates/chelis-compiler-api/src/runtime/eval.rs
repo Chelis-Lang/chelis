@@ -1295,20 +1295,31 @@ impl<'a> EvalContext<'a> {
         // it to the `t-var` spelling broke all three.
         //
         // chelis#1544 narrow enforcement: that fallback does NOT extend to a
-        // literal operand. `spec/04-type-system.md` [04-DTYPE-2] makes an
+        // float-literal operand. `spec/04-type-system.md` [04-DTYPE-2] makes an
         // unbounded binder an unconstrained type variable admitting every type,
-        // not a dtype, so an unsuffixed literal has no family to bind at and
-        // §P10b position 4's "the literals bind at `p`" says nothing here. What
-        // the fallback then produced was the §P10 f32 default cast to whatever
-        // the call site instantiated: a wrong value, silently, on this lane
-        // only, while the compiled lane rejected the same source. This is a
-        // PARTIAL enforcement of [04-DTYPE-1] (which constrains the target and
-        // not the source); the general one is chelis#1558 and the readings are
-        // recorded in chelis#1553.
-        // Narrower still, and the narrowness is the point: a FLOAT literal.
-        // An unsuffixed float defaults to f32 (§P10), and casting that to an
-        // f64 instantiation is not the same value as binding at f64, which is
-        // the wrong answer this enforces against. An unsuffixed INTEGER
+        // not a dtype, so no literal has a family to bind at under one and
+        // §P10b position 4's "the literals bind at `p`" says nothing here. For
+        // an UNSUFFIXED float the fallback produced the §P10 f32 default cast
+        // to whatever the call site instantiated: a wrong value, silently, on
+        // this lane only, while the compiled lane rejected the same source.
+        //
+        // EVERY float literal is rejected here, suffixed included, and that is
+        // deliberate rather than an oversight in the predicate. On this head
+        // the compiled lane rejects every cast to an unbounded target, so
+        // admitting `cast(0.1f64, p)` on this lane alone would reopen exactly
+        // the build-versus-eval divergence this work removed: a value on one
+        // lane, a rejection on the other. The suffix changes which value would
+        // have been produced, not whether the target names a dtype.
+        //
+        // This is a PARTIAL enforcement of [04-DTYPE-1] (which constrains the
+        // target and not the source); the general one is chelis#1558 and the
+        // readings are recorded in chelis#1553.
+        // Narrower still, and the narrowness is the point: a FLOAT literal,
+        // suffixed or not. An unsuffixed float defaults to f32 (§P10), and
+        // casting that to an f64 instantiation is not the same value as
+        // binding at f64, which is the wrong answer this enforces against; a
+        // suffixed one is rejected with it to keep the two lanes agreeing, per
+        // the note above. An unsuffixed INTEGER
         // defaults to int32 and casting it to another integer width is either
         // exact or a loud [04-NUM-14] checked trap, never a silent wrong
         // value, and `runtime::tests::generic_cast_target_survives_every_higher_order_callback_edge`
@@ -1340,11 +1351,13 @@ impl<'a> EvalContext<'a> {
                 if operand_is_float_literal {
                     format!(
                         "cast target `{target}` is not a recognized primitive type: an \
-                         unbounded type binder is an unconstrained type variable rather than \
-                         a dtype ([04-DTYPE-2]), so an unsuffixed float literal has no \
-                         dtype to bind at and would silently take the §P10 f32 default. \
-                         Give the binder a dtype-family bound (`[{target}: Float]`, \
-                         `[{target}: Numeric]`) or write a suffixed literal (chelis#1544)"
+                         unbounded type binder is an unconstrained type variable admitting \
+                         every type rather than a dtype ([04-DTYPE-2]), so a float literal \
+                         has no dtype to bind at under it. Declare a dtype-family bound on \
+                         the binder, `[{target}: Float]` or `[{target}: Numeric]`, so the \
+                         literal binds at the instantiated dtype. A literal suffix does not \
+                         help: the target still names no dtype, and the compiled lane \
+                         rejects it too (chelis#1544)"
                     )
                 } else {
                     format!("cast target `{target}` is not a recognized primitive type")

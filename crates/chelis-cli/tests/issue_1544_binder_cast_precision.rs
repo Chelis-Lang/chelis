@@ -254,6 +254,60 @@ fn an_unbounded_binder_float_literal_cast_is_rejected_on_both_lanes() {
     }
 }
 
+/// Round 1 N1, disposition lock. A SUFFIXED float literal under an unbounded
+/// binder is rejected on both lanes too, and was rejected on base.
+///
+/// The suffix decides which value the literal holds; it does not give the
+/// TARGET a dtype, which is what [04-DTYPE-2] denies an unbounded binder. The
+/// compiled lane rejects every cast to an unbounded target regardless of the
+/// source, so admitting this one on the interpreter lane alone would reopen the
+/// build-versus-eval divergence this work exists to remove: a value on one
+/// lane, a rejection on the other.
+///
+/// This row exists because the first version of the rejection message advised
+/// "or write a suffixed literal", a remedy that does not work. The message now
+/// says to declare a family bound; this pins the behaviour the message
+/// describes so the two cannot drift apart again.
+#[test]
+fn a_suffixed_float_literal_under_an_unbounded_binder_is_also_rejected() {
+    let (_dir, root) = make_package(
+        "unbounded-binder-suffixed",
+        "module Bind.Main\n\
+         export (main)\n\
+         def scale[p](x: p) -> p = mul(x, cast(0.1f64, p))\n\
+         def main() -> f64 = scale(3.0f64)\n",
+    );
+    let check = run(&root, &["check", "src/main.ch"]);
+    assert!(check.status.success(), "the program type-checks");
+    for command in [
+        vec!["eval", "--file", "src/main.ch"],
+        vec!["build", "src/main.ch", "--target", "c", "--output", "out"],
+    ] {
+        let label = command[0];
+        let output = run(&root, &command);
+        assert!(
+            !output.status.success(),
+            "{label} must reject a suffixed float literal under an unbounded binder; \
+             stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    // The remedy the message names must actually work.
+    let (_bounded_dir, bounded) = make_package(
+        "unbounded-binder-remedy",
+        "module Bind.Main\n\
+         export (main)\n\
+         def scale[p: Float](x: p) -> p = mul(x, cast(0.1, p))\n\
+         def main() -> f64 = scale(3.0f64)\n",
+    );
+    let stdout = check_then_eval(&bounded);
+    assert!(
+        stdout.contains(&format!("main = {EXACT_F64}")),
+        "declaring a family bound must be a working remedy: {stdout}"
+    );
+}
+
 /// The positive control that pins the narrowness, so it is deliberate rather
 /// than incidental. A VARIABLE source under an unbounded binder still
 /// actualizes at the call site, exactly as it does today: there is no literal
