@@ -238,7 +238,6 @@ pub(crate) enum HostSiteKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HostSiteAction {
-    Structural,
     Operation {
         unit: usize,
         block: BlockId,
@@ -253,7 +252,10 @@ pub(crate) enum HostSiteAction {
         source: BlockId,
         target: BlockId,
     },
-    Root(OwnerId),
+    Root {
+        manifest_index: usize,
+        owner: OwnerId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,7 +281,7 @@ impl HostSiteBuilder {
         self.records.push(HostSiteRecord {
             id,
             kind,
-            actions: vec![HostSiteAction::Structural],
+            actions: Vec::new(),
         });
         id
     }

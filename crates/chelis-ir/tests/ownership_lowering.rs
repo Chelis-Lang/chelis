@@ -454,13 +454,9 @@ fn authored_entries_are_borrow_adapters_but_internal_specializations_are_not() {
 }
 
 #[test]
-fn host_payload_owns_a_total_site_directive_map() {
+fn host_payload_crosses_the_independently_verified_site_boundary() {
     let verified = verified_fixture("issue_1352_if_fresh");
-    assert!(verified.host_site_count() > 0);
-    assert_eq!(
-        verified.host_site_count(),
-        verified.host_directive_site_count()
-    );
+    assert!(verified.render().contains("root "));
 }
 
 fn scalar_tensor() -> TensorType {
@@ -537,4 +533,87 @@ fn a_dag_owner_cannot_have_two_terminal_directives() {
         lower_dag_ownership(dag),
         Err(OwnershipError::DagDuplicateTerminal { owner: 1 })
     ));
+}
+
+#[test]
+fn a_borrowed_dag_load_cannot_be_consumed_by_drop() {
+    let mut dag = Dag::new();
+    let load = dag.add_node(
+        RiscOp::Load {
+            name: "entry".into(),
+        },
+        vec![],
+        scalar_tensor(),
+        None,
+    );
+    dag.add_node(RiscOp::Drop, vec![load], scalar_tensor(), None);
+    assert!(matches!(
+        lower_dag_ownership(dag),
+        Err(OwnershipError::DagBorrowConsumed {
+            owner: 0,
+            consumer: 1,
+        })
+    ));
+
+    let mut twin = Dag::new();
+    let load = twin.add_node(
+        RiscOp::Load {
+            name: "entry".into(),
+        },
+        vec![],
+        scalar_tensor(),
+        None,
+    );
+    let copied = twin.add_node(RiscOp::Copy, vec![load], scalar_tensor(), None);
+    twin.add_node(RiscOp::Drop, vec![copied], scalar_tensor(), None);
+    verify_ownership(lower_dag_ownership(twin).unwrap()).unwrap();
+}
+
+#[test]
+fn a_dag_copy_after_store_move_is_rejected() {
+    let mut dag = Dag::new();
+    let load = dag.add_node(
+        RiscOp::Load {
+            name: "entry".into(),
+        },
+        vec![],
+        scalar_tensor(),
+        None,
+    );
+    let produced = dag.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
+    dag.add_node(
+        RiscOp::Store { name: "out".into() },
+        vec![produced],
+        scalar_tensor(),
+        None,
+    );
+    let copied = dag.add_node(RiscOp::Copy, vec![produced], scalar_tensor(), None);
+    dag.add_root(copied);
+    assert!(matches!(
+        lower_dag_ownership(dag),
+        Err(OwnershipError::DagUseAfterTerminal {
+            owner: 1,
+            consumer: 3,
+        })
+    ));
+
+    let mut twin = Dag::new();
+    let load = twin.add_node(
+        RiscOp::Load {
+            name: "entry".into(),
+        },
+        vec![],
+        scalar_tensor(),
+        None,
+    );
+    let produced = twin.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
+    let copied = twin.add_node(RiscOp::Copy, vec![produced], scalar_tensor(), None);
+    twin.add_node(
+        RiscOp::Store { name: "out".into() },
+        vec![produced],
+        scalar_tensor(),
+        None,
+    );
+    twin.add_root(copied);
+    verify_ownership(lower_dag_ownership(twin).unwrap()).unwrap();
 }

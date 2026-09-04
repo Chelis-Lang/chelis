@@ -185,13 +185,14 @@ pub fn verify_ownership<P: EmissionPayload>(
 ```
 
 `EmissionPayload` is sealed inside `chelis-ir`; downstream crates cannot add a
-payload kind. Only `verify_ownership` constructs either verified
-specialization. A verified value owns the exact post-entry-selection,
-post-optimization payload together with its directives: a caller cannot retain
-a mutable sibling payload, extract the raw payload, or reorder it after
-lowering. Backends receive read-only verified views and every compiled backend
-entry point takes the specialization for its lane. `HostProgram` and `Dag`
-remain earlier logical forms and are not themselves emission contracts.
+payload kind: only `verify_ownership` constructs
+`VerifiedOwnershipProgram`. Its host and DAG specializations own the exact
+post-entry-selection, post-optimization payload together with its directives:
+a caller cannot retain a mutable sibling payload, extract the raw payload, or
+reorder it after lowering. Backends receive read-only verified views and every
+compiled backend entry point takes the specialization for its lane.
+`HostProgram` and `Dag` remain earlier logical forms and are not themselves
+emission contracts.
 
 The host payload assigns an opaque `HostSiteId` by structural traversal, never
 from an identifier's spelling. Every binding, expression, argument, branch or

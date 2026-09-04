@@ -1,6 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use chelis_types::types::Prim;
+use chelis_types::manifest::{RootEntry, RootManifest};
+use chelis_types::types::{Lane, Prim};
+
+use crate::host::{
+    ConcreteHostCallback, ConcreteHostCallbackKind, ConcreteHostExpr, ConcreteHostExprKind,
+    ConcreteHostProgram, HostDisplayRoot, HostFunctionOrigin, HostTensorHelper,
+};
 
 use super::classify::{classify, render_type};
 use super::error::OwnershipError;
@@ -35,30 +41,84 @@ pub(super) fn verify(program: &OwnershipProgram) -> Result<(), OwnershipError> {
 /// is owned by exactly one opaque host site; every structural payload site has
 /// one directive-list entry.
 pub(super) fn verify_host_sites(
+    host: &ConcreteHostProgram,
+    manifest: &RootManifest,
     program: &OwnershipProgram,
     sites: &HostSiteMap,
 ) -> Result<(), OwnershipError> {
-    let mut operations = BTreeSet::new();
-    let mut terminals = BTreeSet::new();
-    for (index, site) in sites.records.iter().enumerate() {
+    verify_host_payload_sites(host, manifest, sites)?;
+    verify_host_actions(program, manifest, sites)
+}
+
+pub(super) fn verify_host_payload_sites(
+    host: &ConcreteHostProgram,
+    manifest: &RootManifest,
+    sites: &HostSiteMap,
+) -> Result<(), OwnershipError> {
+    verify_materialized_roots(host, manifest)?;
+    let expected = census_host_payload(host, manifest)?;
+    if expected.len() != sites.records.len() {
+        return Err(OwnershipError::HostSiteMap {
+            detail: format!(
+                "payload has {} structural sites, directive map has {}",
+                expected.len(),
+                sites.records.len()
+            ),
+        });
+    }
+    for (index, (expected_kind, site)) in expected.iter().zip(&sites.records).enumerate() {
         if site.id.index() != index {
             return Err(OwnershipError::HostSiteMap {
                 detail: format!("site at position {index} has a different opaque identity"),
             });
         }
-        if site.actions.is_empty() {
+        if site.kind != *expected_kind {
             return Err(OwnershipError::HostSiteMap {
-                detail: format!("site {index} has no directive entry"),
+                detail: format!(
+                    "payload site {index} has kind {expected_kind:?}, directive map has {:?}",
+                    site.kind
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn verify_host_actions(
+    program: &OwnershipProgram,
+    manifest: &RootManifest,
+    sites: &HostSiteMap,
+) -> Result<(), OwnershipError> {
+    let mut operations = BTreeSet::new();
+    let mut terminals = BTreeSet::new();
+    let mut controls = BTreeMap::new();
+    let mut roots = BTreeMap::new();
+    for (index, site) in sites.records.iter().enumerate() {
+        if matches!(
+            site.kind,
+            super::ir::HostSiteKind::Binding | super::ir::HostSiteKind::Argument
+        ) && !site.actions.is_empty()
+        {
+            return Err(OwnershipError::HostSiteMap {
+                detail: format!("structural site {index} carries an ownership action"),
             });
         }
         for action in &site.actions {
             match *action {
-                HostSiteAction::Structural => {}
                 HostSiteAction::Operation {
                     unit,
                     block,
                     operation,
                 } => {
+                    if !matches!(
+                        site.kind,
+                        super::ir::HostSiteKind::Expression
+                            | super::ir::HostSiteKind::FunctionEntry
+                            | super::ir::HostSiteKind::FunctionReturn
+                            | super::ir::HostSiteKind::ManifestRoot
+                    ) {
+                        return Err(site_error(index, "operation has inappropriate site kind"));
+                    }
                     let Some(unit_ref) = program.units.get(unit) else {
                         return Err(site_error(index, "operation names missing unit"));
                     };
@@ -74,6 +134,14 @@ pub(super) fn verify_host_sites(
                     }
                 }
                 HostSiteAction::Terminator { unit, block } => {
+                    if !matches!(
+                        site.kind,
+                        super::ir::HostSiteKind::Expression
+                            | super::ir::HostSiteKind::FunctionEntry
+                            | super::ir::HostSiteKind::FunctionReturn
+                    ) {
+                        return Err(site_error(index, "terminator has inappropriate site kind"));
+                    }
                     if !terminals.insert((unit, block)) {
                         return Err(site_error(index, "terminator belongs to two sites"));
                     }
@@ -84,7 +152,19 @@ pub(super) fn verify_host_sites(
                         return Err(site_error(index, "terminator names missing block"));
                     }
                 }
-                HostSiteAction::Root(owner) => {
+                HostSiteAction::Root {
+                    manifest_index,
+                    owner,
+                } => {
+                    if site.kind != super::ir::HostSiteKind::ManifestRoot {
+                        return Err(site_error(index, "root has inappropriate site kind"));
+                    }
+                    let Some(entry) = manifest.entries.get(manifest_index) else {
+                        return Err(site_error(index, "root names missing manifest entry"));
+                    };
+                    if entry.lane != Lane::Host {
+                        return Err(site_error(index, "root names a non-host manifest entry"));
+                    }
                     if !program
                         .units
                         .iter()
@@ -92,12 +172,25 @@ pub(super) fn verify_host_sites(
                     {
                         return Err(site_error(index, "directive names missing owner"));
                     }
+                    if roots.insert(manifest_index, (index, owner)).is_some() {
+                        return Err(site_error(index, "manifest root belongs to two sites"));
+                    }
                 }
                 HostSiteAction::ControlEdge {
                     unit,
                     source,
                     target,
                 } => {
+                    let expected_kind = expected_control_kind(program, unit, source, target)
+                        .ok_or_else(|| {
+                            site_error(index, "edge is not a typed control successor")
+                        })?;
+                    if site.kind != expected_kind {
+                        return Err(site_error(
+                            index,
+                            "control edge has inappropriate site kind",
+                        ));
+                    }
                     let Some(unit_ref) = program.units.get(unit) else {
                         return Err(site_error(index, "edge names missing unit"));
                     };
@@ -108,8 +201,23 @@ pub(super) fn verify_host_sites(
                     if !successors(&block_ref.terminator).contains(&target) {
                         return Err(site_error(index, "edge target is not a successor"));
                     }
+                    if controls.insert((unit, source, target), site.kind).is_some() {
+                        return Err(site_error(index, "control edge belongs to two sites"));
+                    }
                 }
             }
+        }
+        if matches!(
+            site.kind,
+            super::ir::HostSiteKind::BranchEdge
+                | super::ir::HostSiteKind::MatchArm
+                | super::ir::HostSiteKind::LoopEdge
+        ) && site.actions.len() != 1
+        {
+            return Err(site_error(
+                index,
+                "control-edge site does not carry exactly one action",
+            ));
         }
     }
     let expected_operations = program
@@ -138,12 +246,406 @@ pub(super) fn verify_host_sites(
             detail: "ownership terminator/site correspondence is not bijective".to_string(),
         });
     }
+    let expected_controls = collect_expected_controls(program)?;
+    if controls != expected_controls {
+        return Err(OwnershipError::HostSiteMap {
+            detail: "ownership control-edge/site correspondence is not bijective".to_string(),
+        });
+    }
+    let expected_roots = manifest
+        .entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, root)| (root.lane == Lane::Host).then_some(index))
+        .collect::<Vec<_>>();
+    if roots.keys().copied().collect::<Vec<_>>() != expected_roots {
+        return Err(OwnershipError::HostSiteMap {
+            detail: "manifest root/site correspondence is not bijective".to_string(),
+        });
+    }
+    for (manifest_index, (site_index, owner)) in roots {
+        let entry = &manifest.entries[manifest_index];
+        let site = &sites.records[site_index];
+        let consumes = site
+            .actions
+            .iter()
+            .filter_map(|action| match *action {
+                HostSiteAction::Operation {
+                    unit,
+                    block,
+                    operation,
+                } => program
+                    .units
+                    .get(unit)
+                    .and_then(|unit| unit.blocks.iter().find(|candidate| candidate.id == block))
+                    .and_then(|block| block.ops.get(operation)),
+                _ => None,
+            })
+            .filter_map(|op| match op {
+                Op::RootConsume { root, owner } => Some((root, owner)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if consumes.len() != 1
+            || consumes[0].0 != &entry.name
+            || consumes[0].1.owner != owner
+            || consumes[0].1.use_ != OwnershipUse::Move
+        {
+            return Err(site_error(
+                site_index,
+                "root action does not match its exact root-consume operation",
+            ));
+        }
+    }
     Ok(())
+}
+
+fn collect_expected_controls(
+    program: &OwnershipProgram,
+) -> Result<BTreeMap<(usize, BlockId, BlockId), super::ir::HostSiteKind>, OwnershipError> {
+    let mut result = BTreeMap::new();
+    for (unit_index, unit) in program.units.iter().enumerate() {
+        for block in &unit.blocks {
+            let mut insert = |target: BlockId, kind: super::ir::HostSiteKind| {
+                if result
+                    .insert((unit_index, block.id, target), kind)
+                    .is_some()
+                {
+                    Err(OwnershipError::HostSiteMap {
+                        detail: format!(
+                            "unit {unit_index} block b{} repeats control target b{}",
+                            block.id.0, target.0
+                        ),
+                    })
+                } else {
+                    Ok(())
+                }
+            };
+            match &block.terminator {
+                Terminator::Branch {
+                    then_edge,
+                    else_edge,
+                    ..
+                } => {
+                    insert(then_edge.target, super::ir::HostSiteKind::BranchEdge)?;
+                    insert(else_edge.target, super::ir::HostSiteKind::BranchEdge)?;
+                }
+                Terminator::Match { arms, .. } => {
+                    for arm in arms {
+                        insert(arm.target, super::ir::HostSiteKind::MatchArm)?;
+                    }
+                }
+                Terminator::Loop {
+                    body_edge,
+                    exit_edge,
+                    ..
+                } => {
+                    insert(body_edge.target, super::ir::HostSiteKind::LoopEdge)?;
+                    insert(exit_edge.target, super::ir::HostSiteKind::LoopEdge)?;
+                }
+                Terminator::Jump(_) | Terminator::Return { .. } | Terminator::Exit => {}
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn expected_control_kind(
+    program: &OwnershipProgram,
+    unit: usize,
+    source: BlockId,
+    target: BlockId,
+) -> Option<super::ir::HostSiteKind> {
+    collect_expected_controls(program)
+        .ok()?
+        .get(&(unit, source, target))
+        .copied()
 }
 
 fn site_error(index: usize, detail: &'static str) -> OwnershipError {
     OwnershipError::HostSiteMap {
         detail: format!("site {index} {detail}"),
+    }
+}
+
+/// Reconstruct the exact payload-site sequence without consulting the
+/// ownership IR or the site builder. This is deliberately a second traversal
+/// over the retained emission payload: verification would be circular if it
+/// derived its expected sites from the lowering result it is checking.
+fn census_host_payload(
+    host: &ConcreteHostProgram,
+    manifest: &RootManifest,
+) -> Result<Vec<super::ir::HostSiteKind>, OwnershipError> {
+    let mut sites = Vec::new();
+    for binding in &host.globals {
+        sites.push(super::ir::HostSiteKind::Binding);
+        census_host_expr(&binding.value, &host.global_tensor_helpers, &mut sites)?;
+    }
+    sites.extend(
+        manifest
+            .entries
+            .iter()
+            .filter(|entry| entry.lane == Lane::Host)
+            .map(|_| super::ir::HostSiteKind::ManifestRoot),
+    );
+    sites.push(super::ir::HostSiteKind::FunctionReturn);
+
+    for function in &host.functions {
+        sites.extend(
+            function
+                .params
+                .iter()
+                .map(|_| super::ir::HostSiteKind::Binding),
+        );
+        sites.push(super::ir::HostSiteKind::FunctionEntry);
+        if function.origin == HostFunctionOrigin::Authored {
+            sites.extend(
+                function
+                    .params
+                    .iter()
+                    .map(|_| super::ir::HostSiteKind::Argument),
+            );
+        }
+        sites.push(super::ir::HostSiteKind::FunctionReturn);
+        census_host_expr(&function.body, &function.tensor_helpers, &mut sites)?;
+    }
+    Ok(sites)
+}
+
+fn census_host_expr(
+    expr: &ConcreteHostExpr,
+    helpers: &[HostTensorHelper],
+    sites: &mut Vec<super::ir::HostSiteKind>,
+) -> Result<(), OwnershipError> {
+    use super::ir::HostSiteKind;
+
+    sites.push(HostSiteKind::Expression);
+    match &expr.kind {
+        ConcreteHostExprKind::Int(_)
+        | ConcreteHostExprKind::Float(_)
+        | ConcreteHostExprKind::Bool(_)
+        | ConcreteHostExprKind::String(_)
+        | ConcreteHostExprKind::Var(_, _)
+        | ConcreteHostExprKind::Unit => {}
+        ConcreteHostExprKind::List(items, _)
+        | ConcreteHostExprKind::Tuple(items, _)
+        | ConcreteHostExprKind::AdtConstruct { fields: items, .. }
+        | ConcreteHostExprKind::Call { args: items, .. }
+        | ConcreteHostExprKind::Builtin { args: items, .. } => {
+            for item in items {
+                sites.push(HostSiteKind::Argument);
+                census_host_expr(item, helpers, sites)?;
+            }
+        }
+        ConcreteHostExprKind::AdtFieldAccess { base, .. } => {
+            census_host_expr(base, helpers, sites)?;
+        }
+        ConcreteHostExprKind::If {
+            cond,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            census_host_expr(cond, helpers, sites)?;
+            sites.push(HostSiteKind::BranchEdge);
+            sites.push(HostSiteKind::BranchEdge);
+            census_host_expr(then_expr, helpers, sites)?;
+            census_host_expr(else_expr, helpers, sites)?;
+        }
+        ConcreteHostExprKind::MatchOption {
+            scrutinee,
+            some_expr,
+            none_expr,
+            ..
+        } => {
+            census_host_expr(scrutinee, helpers, sites)?;
+            sites.push(HostSiteKind::MatchArm);
+            sites.push(HostSiteKind::MatchArm);
+            sites.push(HostSiteKind::Binding);
+            census_host_expr(some_expr, helpers, sites)?;
+            census_host_expr(none_expr, helpers, sites)?;
+        }
+        ConcreteHostExprKind::MatchAdt {
+            scrutinee,
+            arms,
+            default_expr,
+            ..
+        } => {
+            census_host_expr(scrutinee, helpers, sites)?;
+            sites.extend(
+                (0..arms.len() + usize::from(default_expr.is_some()))
+                    .map(|_| HostSiteKind::MatchArm),
+            );
+            for arm in arms {
+                sites.extend(arm.bindings.iter().map(|_| HostSiteKind::Binding));
+                census_host_expr(&arm.expr, helpers, sites)?;
+            }
+            if let Some(default_expr) = default_expr {
+                census_host_expr(default_expr, helpers, sites)?;
+            }
+        }
+        ConcreteHostExprKind::Let { bindings, body, .. } => {
+            for binding in bindings {
+                sites.push(HostSiteKind::Binding);
+                census_host_expr(&binding.value, helpers, sites)?;
+            }
+            census_host_expr(body, helpers, sites)?;
+        }
+        ConcreteHostExprKind::Map { callback, list, .. }
+        | ConcreteHostExprKind::Filter { callback, list, .. }
+        | ConcreteHostExprKind::Partition { callback, list, .. }
+        | ConcreteHostExprKind::FlatMap { callback, list, .. } => {
+            census_host_expr(list, helpers, sites)?;
+            sites.push(HostSiteKind::LoopEdge);
+            sites.push(HostSiteKind::LoopEdge);
+            sites.push(HostSiteKind::Binding);
+            census_host_callback(callback, helpers, sites)?;
+        }
+        ConcreteHostExprKind::Fold {
+            callback,
+            init,
+            list,
+            ..
+        } => {
+            census_host_expr(init, helpers, sites)?;
+            census_host_expr(list, helpers, sites)?;
+            sites.push(HostSiteKind::Binding);
+            sites.push(HostSiteKind::LoopEdge);
+            sites.push(HostSiteKind::LoopEdge);
+            sites.push(HostSiteKind::Binding);
+            census_host_callback(callback, helpers, sites)?;
+        }
+        ConcreteHostExprKind::Scan {
+            callback,
+            init,
+            list,
+            ..
+        } => {
+            census_host_expr(init, helpers, sites)?;
+            census_host_expr(list, helpers, sites)?;
+            sites.push(HostSiteKind::Binding);
+            sites.push(HostSiteKind::LoopEdge);
+            sites.push(HostSiteKind::LoopEdge);
+            sites.push(HostSiteKind::Binding);
+            census_host_callback(callback, helpers, sites)?;
+        }
+        ConcreteHostExprKind::WithSeed { seed, body, .. } => {
+            sites.push(HostSiteKind::Argument);
+            census_host_expr(seed, helpers, sites)?;
+            sites.push(HostSiteKind::Argument);
+            census_host_expr(body, helpers, sites)?;
+        }
+        ConcreteHostExprKind::TensorCall { helper, args, .. } => {
+            let Some(helper) = helpers.get(*helper) else {
+                return Err(OwnershipError::HostSiteMap {
+                    detail: format!("payload names missing tensor helper {helper}"),
+                });
+            };
+            if independent_identity_helper(helper) && args.len() == 1 {
+                census_host_expr(&args[0], helpers, sites)?;
+            } else {
+                for arg in args {
+                    sites.push(HostSiteKind::Argument);
+                    census_host_expr(arg, helpers, sites)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn census_host_callback(
+    callback: &ConcreteHostCallback,
+    helpers: &[HostTensorHelper],
+    sites: &mut Vec<super::ir::HostSiteKind>,
+) -> Result<(), OwnershipError> {
+    match &callback.kind {
+        ConcreteHostCallbackKind::Named { .. } => Ok(()),
+        ConcreteHostCallbackKind::Inline { body, .. } => census_host_expr(body, helpers, sites),
+    }
+}
+
+fn independent_identity_helper(helper: &HostTensorHelper) -> bool {
+    if helper.dag.roots().len() != 1 || helper.inputs.len() != 1 {
+        return false;
+    }
+    let Some(node) = helper.dag.get(helper.dag.roots()[0]) else {
+        return false;
+    };
+    matches!(
+        &node.op,
+        crate::dag::RiscOp::Load { name }
+            if node.output_type == helper.output && helper.inputs[0].name == *name
+    )
+}
+
+fn verify_materialized_roots(
+    host: &ConcreteHostProgram,
+    manifest: &RootManifest,
+) -> Result<(), OwnershipError> {
+    let host_roots = manifest
+        .entries
+        .iter()
+        .filter(|entry| entry.lane == Lane::Host)
+        .collect::<Vec<_>>();
+    let payload_root_count = host
+        .globals
+        .iter()
+        .map(|binding| binding.display_roots.len())
+        .sum::<usize>();
+    if payload_root_count != host_roots.len() {
+        return Err(OwnershipError::HostSiteMap {
+            detail: format!(
+                "payload has {payload_root_count} materialized roots, manifest selects {}",
+                host_roots.len()
+            ),
+        });
+    }
+
+    for entry in host_roots {
+        let expected = independent_display_root(entry);
+        let candidates = host
+            .globals
+            .iter()
+            .filter(|binding| {
+                let is_selected_binding = binding.name == entry.def_name
+                    || matches!(
+                        &binding.value.kind,
+                        ConcreteHostExprKind::Call { function, args, .. }
+                            if function == &entry.def_name && args.is_empty()
+                    );
+                is_selected_binding
+                    && binding
+                        .display_roots
+                        .iter()
+                        .filter(|root| **root == expected)
+                        .count()
+                        == 1
+            })
+            .count();
+        if candidates != 1 {
+            return Err(OwnershipError::HostSiteMap {
+                detail: format!(
+                    "manifest root `{}` has {candidates} exact materialized payload bindings",
+                    entry.name
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn independent_display_root(root: &RootEntry) -> HostDisplayRoot {
+    let short_def = root
+        .def_name
+        .rsplit_once("__")
+        .map(|(_, tail)| tail)
+        .or_else(|| root.def_name.rsplit_once('.').map(|(_, tail)| tail))
+        .unwrap_or(root.def_name.as_str());
+    let suffix = root.name.strip_prefix(root.def_name.as_str()).unwrap_or("");
+    HostDisplayRoot {
+        name: format!("{short_def}{suffix}"),
+        path: root.path.clone(),
     }
 }
 

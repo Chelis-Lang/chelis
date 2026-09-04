@@ -152,6 +152,14 @@ pub enum OwnershipError {
     },
     #[error("DAG owner n{owner} has more than one terminal ownership directive")]
     DagDuplicateTerminal { owner: usize },
+    #[error("borrowed DAG owner n{owner} is consumed by n{consumer}")]
+    DagBorrowConsumed { owner: usize, consumer: usize },
+    #[error("DAG owner n{owner} is used by n{consumer} after its terminal ownership directive")]
+    DagUseAfterTerminal { owner: usize, consumer: usize },
+    #[error("owned DAG producer n{owner} has no terminal ownership directive")]
+    DagMissingTerminal { owner: usize },
+    #[error("DAG ownership directive map is not total: {detail}")]
+    DagDirectiveMap { detail: String },
     #[error("DAG root n{root} does not name an owned producer")]
     DagInvalidRoot { root: usize },
 }

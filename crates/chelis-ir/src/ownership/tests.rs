@@ -1,5 +1,9 @@
 use std::collections::BTreeMap;
 
+use chelis_deep::ast::{Atom, Expr};
+use chelis_deep::span::Span;
+use chelis_types::manifest::{RootEntry, RootManifest};
+use chelis_types::types::Lane;
 use chelis_types::types::Prim;
 
 use super::OwnershipError;
@@ -9,7 +13,10 @@ use super::ir::{
     HostSiteRecord, Op, Operand, OperationSchema, OwnerId, OwnerInfo, OwnerOrigin,
     OwnershipProgram as RawProgram, OwnershipUse, ParamMode, Terminator, Unit, UnitKind,
 };
+use super::{DagDirective, DagOwnershipPlan};
+use crate::host::{ConcreteHostProgram, HostBinding, HostDisplayRoot, HostExpr, HostExprKind};
 use crate::host_type_state::ConcreteHostType;
+use crate::{Dag, DimInfo, RiscOp, TensorType};
 
 fn ty(prim: Prim) -> ConcreteHostType {
     ConcreteHostType::Scalar(prim)
@@ -400,32 +407,59 @@ fn unreachable_block_is_rejected() {
 
 #[test]
 fn host_payload_site_and_directive_universes_are_bijective() {
+    let host = ConcreteHostProgram {
+        globals: vec![HostBinding {
+            name: "result".into(),
+            display_name: None,
+            display_roots: vec![HostDisplayRoot {
+                name: "result".into(),
+                path: Vec::new(),
+            }],
+            ty: ConcreteHostType::String,
+            value: HostExpr::new(HostExprKind::String("value".into())),
+        }],
+        ..ConcreteHostProgram::default()
+    };
+    let manifest = RootManifest {
+        entries: vec![RootEntry {
+            name: "result".into(),
+            path: Vec::new(),
+            def_name: "result".into(),
+            ty: Expr::Atom(Atom::Name("string".into()), Span::new(0, 0)),
+            lane: Lane::Host,
+            required_inputs: Default::default(),
+            reasons: Vec::new(),
+        }],
+    };
     let program = roots(
         vec![block(0, vec![], vec![define(0), root(0)], Terminator::Exit)],
         BTreeMap::from([(OwnerId(0), info(Prim::String, OwnerOrigin::Owned))]),
     );
-    let record = |index, actions| HostSiteRecord {
+    let record = |index, kind, actions| HostSiteRecord {
         id: HostSiteId::from_index(index),
-        kind: HostSiteKind::Expression,
+        kind,
         actions,
     };
     let valid = HostSiteMap {
         records: vec![
-            record(
-                0,
-                vec![
-                    HostSiteAction::Structural,
-                    HostSiteAction::Operation {
-                        unit: 0,
-                        block: BlockId(0),
-                        operation: 0,
-                    },
-                ],
-            ),
+            record(0, HostSiteKind::Binding, vec![]),
             record(
                 1,
+                HostSiteKind::Expression,
+                vec![HostSiteAction::Operation {
+                    unit: 0,
+                    block: BlockId(0),
+                    operation: 0,
+                }],
+            ),
+            record(
+                2,
+                HostSiteKind::ManifestRoot,
                 vec![
-                    HostSiteAction::Structural,
+                    HostSiteAction::Root {
+                        manifest_index: 0,
+                        owner: OwnerId(0),
+                    },
                     HostSiteAction::Operation {
                         unit: 0,
                         block: BlockId(0),
@@ -434,43 +468,264 @@ fn host_payload_site_and_directive_universes_are_bijective() {
                 ],
             ),
             record(
-                2,
-                vec![
-                    HostSiteAction::Structural,
-                    HostSiteAction::Terminator {
-                        unit: 0,
-                        block: BlockId(0),
-                    },
-                ],
+                3,
+                HostSiteKind::FunctionReturn,
+                vec![HostSiteAction::Terminator {
+                    unit: 0,
+                    block: BlockId(0),
+                }],
             ),
         ],
     };
-    super::verify::verify_host_sites(&program, &valid).unwrap();
+    super::verify::verify_host_sites(&host, &manifest, &program, &valid).unwrap();
 
     let mut missing = valid.clone();
-    missing.records[1]
+    missing.records[2]
         .actions
         .retain(|action| !matches!(action, HostSiteAction::Operation { .. }));
     assert!(matches!(
-        super::verify::verify_host_sites(&program, &missing),
+        super::verify::verify_host_sites(&host, &manifest, &program, &missing),
+        Err(OwnershipError::HostSiteMap { .. })
+    ));
+
+    let mut missing_root = valid.clone();
+    missing_root.records[2]
+        .actions
+        .retain(|action| !matches!(action, HostSiteAction::Root { .. }));
+    assert!(matches!(
+        super::verify::verify_host_sites(&host, &manifest, &program, &missing_root),
+        Err(OwnershipError::HostSiteMap { .. })
+    ));
+
+    let mut duplicate_root = valid.clone();
+    duplicate_root.records[2]
+        .actions
+        .push(HostSiteAction::Root {
+            manifest_index: 0,
+            owner: OwnerId(0),
+        });
+    assert!(matches!(
+        super::verify::verify_host_sites(&host, &manifest, &program, &duplicate_root),
         Err(OwnershipError::HostSiteMap { .. })
     ));
 
     let mut extra = valid.clone();
-    extra.records[2].actions.push(HostSiteAction::Operation {
+    extra.records[3].actions.push(HostSiteAction::Operation {
         unit: 0,
         block: BlockId(0),
         operation: 1,
     });
     assert!(matches!(
-        super::verify::verify_host_sites(&program, &extra),
+        super::verify::verify_host_sites(&host, &manifest, &program, &extra),
         Err(OwnershipError::HostSiteMap { .. })
     ));
 
     let mut mismatched = valid;
     mismatched.records.swap(0, 1);
     assert!(matches!(
-        super::verify::verify_host_sites(&program, &mismatched),
+        super::verify::verify_host_sites(&host, &manifest, &program, &mismatched),
         Err(OwnershipError::HostSiteMap { .. })
+    ));
+}
+
+#[test]
+fn payload_census_rejects_a_missing_match_option_binding_and_wrong_kind() {
+    let int_ty = ConcreteHostType::Int64;
+    let host = ConcreteHostProgram {
+        globals: vec![HostBinding {
+            name: "out".into(),
+            display_name: None,
+            display_roots: Vec::new(),
+            ty: int_ty.clone(),
+            value: HostExpr::new(HostExprKind::MatchOption {
+                scrutinee: Box::new(HostExpr::new(HostExprKind::Var(
+                    "maybe".into(),
+                    ConcreteHostType::Option(Box::new(int_ty.clone())),
+                ))),
+                bind_name: "item".into(),
+                some_expr: Box::new(HostExpr::new(HostExprKind::Var(
+                    "item".into(),
+                    int_ty.clone(),
+                ))),
+                none_expr: Box::new(HostExpr::new(HostExprKind::Int(0))),
+                ty: int_ty,
+            }),
+        }],
+        ..ConcreteHostProgram::default()
+    };
+    let manifest = RootManifest { entries: vec![] };
+    let kinds = [
+        HostSiteKind::Binding,
+        HostSiteKind::Expression,
+        HostSiteKind::Expression,
+        HostSiteKind::MatchArm,
+        HostSiteKind::MatchArm,
+        HostSiteKind::Binding,
+        HostSiteKind::Expression,
+        HostSiteKind::Expression,
+        HostSiteKind::FunctionReturn,
+    ];
+    let records = kinds
+        .into_iter()
+        .enumerate()
+        .map(|(index, kind)| HostSiteRecord {
+            id: HostSiteId::from_index(index),
+            kind,
+            actions: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    let valid = HostSiteMap { records };
+    super::verify::verify_host_payload_sites(&host, &manifest, &valid).unwrap();
+
+    let mut missing_binding = valid.clone();
+    missing_binding.records.remove(5);
+    for (index, record) in missing_binding.records.iter_mut().enumerate() {
+        record.id = HostSiteId::from_index(index);
+    }
+    assert!(matches!(
+        super::verify::verify_host_payload_sites(&host, &manifest, &missing_binding),
+        Err(OwnershipError::HostSiteMap { .. })
+    ));
+
+    let mut wrong_kind = valid;
+    wrong_kind.records[5].kind = HostSiteKind::Argument;
+    assert!(matches!(
+        super::verify::verify_host_payload_sites(&host, &manifest, &wrong_kind),
+        Err(OwnershipError::HostSiteMap { .. })
+    ));
+}
+
+#[test]
+fn control_and_root_actions_are_complete_unique_and_kind_checked() {
+    let branch = roots(
+        vec![
+            block(
+                0,
+                vec![],
+                vec![],
+                Terminator::Branch {
+                    condition: Operand::borrow(OwnerId(0)),
+                    then_edge: Edge {
+                        target: BlockId(1),
+                        args: vec![],
+                    },
+                    else_edge: Edge {
+                        target: BlockId(2),
+                        args: vec![],
+                    },
+                },
+            ),
+            block(1, vec![], vec![], Terminator::Exit),
+            block(2, vec![], vec![], Terminator::Exit),
+        ],
+        BTreeMap::from([(OwnerId(0), info(Prim::Bool, OwnerOrigin::ExternalBorrow))]),
+    );
+    let record = |index, kind, actions| HostSiteRecord {
+        id: HostSiteId::from_index(index),
+        kind,
+        actions,
+    };
+    let controls = HostSiteMap {
+        records: vec![
+            record(
+                0,
+                HostSiteKind::Expression,
+                vec![HostSiteAction::Terminator {
+                    unit: 0,
+                    block: BlockId(0),
+                }],
+            ),
+            record(
+                1,
+                HostSiteKind::BranchEdge,
+                vec![HostSiteAction::ControlEdge {
+                    unit: 0,
+                    source: BlockId(0),
+                    target: BlockId(1),
+                }],
+            ),
+            record(
+                2,
+                HostSiteKind::BranchEdge,
+                vec![HostSiteAction::ControlEdge {
+                    unit: 0,
+                    source: BlockId(0),
+                    target: BlockId(2),
+                }],
+            ),
+            record(
+                3,
+                HostSiteKind::Expression,
+                vec![HostSiteAction::Terminator {
+                    unit: 0,
+                    block: BlockId(1),
+                }],
+            ),
+            record(
+                4,
+                HostSiteKind::Expression,
+                vec![HostSiteAction::Terminator {
+                    unit: 0,
+                    block: BlockId(2),
+                }],
+            ),
+        ],
+    };
+    super::verify::verify_host_actions(&branch, &RootManifest { entries: vec![] }, &controls)
+        .unwrap();
+
+    let mut missing = controls.clone();
+    missing.records[1].actions.clear();
+    assert!(
+        super::verify::verify_host_actions(&branch, &RootManifest { entries: vec![] }, &missing,)
+            .is_err()
+    );
+
+    let mut duplicate = controls.clone();
+    duplicate.records[2].actions = duplicate.records[1].actions.clone();
+    assert!(
+        super::verify::verify_host_actions(&branch, &RootManifest { entries: vec![] }, &duplicate,)
+            .is_err()
+    );
+
+    let mut wrong_kind = controls;
+    wrong_kind.records[1].kind = HostSiteKind::Expression;
+    assert!(super::verify::verify_host_actions(
+        &branch,
+        &RootManifest { entries: vec![] },
+        &wrong_kind,
+    )
+    .is_err());
+}
+
+#[test]
+fn dag_verification_checks_mutated_directives_and_terminal_completeness() {
+    let ty = TensorType {
+        dims: vec![DimInfo::Lit(2)],
+        precision: Prim::F32,
+    };
+    let mut dag = Dag::new();
+    let load = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+    let copied = dag.add_node(RiscOp::Copy, vec![load], ty.clone(), None);
+    let dropped = dag.add_node(RiscOp::Drop, vec![copied], ty.clone(), None);
+    let mut plan = DagOwnershipPlan::lower(&dag).unwrap();
+    plan.verify(&dag).unwrap();
+    plan.directives[2] = DagDirective::Drop {
+        node: dropped,
+        source: load,
+    };
+    assert!(matches!(
+        plan.verify(&dag),
+        Err(OwnershipError::DagDirectiveMap { .. })
+    ));
+
+    let mut unterminated = Dag::new();
+    let load = unterminated.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+    unterminated.add_node(RiscOp::Neg, vec![load], ty, None);
+    let mut plan = DagOwnershipPlan::lower(&unterminated).unwrap();
+    plan.directives.pop();
+    assert!(matches!(
+        plan.verify(&unterminated),
+        Err(OwnershipError::DagDirectiveMap { .. })
     ));
 }

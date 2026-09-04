@@ -1233,6 +1233,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             args: vec![init],
         }))?;
         self.push_scope();
+        self.sites.add(HostSiteKind::Binding);
         let acc = self.mint(
             ty,
             Placement::Value,
@@ -1895,12 +1896,14 @@ fn lower_roots(
         })?;
     }
     let mut sinks = Vec::new();
-    for (root, binding_name) in manifest.entries.iter().zip(root_bindings) {
+    for (manifest_index, (root, binding_name)) in
+        manifest.entries.iter().zip(root_bindings).enumerate()
+    {
         let Some(binding_name) = binding_name else {
             continue;
         };
         match lowerer.lookup(binding_name) {
-            Some(Place::Owner(owner)) => sinks.push((root, owner)),
+            Some(Place::Owner(owner)) => sinks.push((manifest_index, root, owner)),
             Some(Place::Callback(_)) | None => {
                 return Err(OwnershipError::ManifestRootWithoutBinding {
                     root: root.name.clone(),
@@ -1909,15 +1912,20 @@ fn lower_roots(
             }
         }
     }
-    for (index, (root, owner)) in sinks.iter().enumerate() {
+    for (index, (manifest_index, root, owner)) in sinks.iter().enumerate() {
         lowerer.with_site(HostSiteKind::ManifestRoot, |lowerer| {
             let owner = *owner;
-            let later = sinks[index + 1..].iter().any(|(_, other)| *other == owner);
+            let later = sinks[index + 1..]
+                .iter()
+                .any(|(_, _, other)| *other == owner);
             let owner = if later { lowerer.copy(owner)? } else { owner };
             lowerer.moved.insert(owner);
             lowerer.sites.record(
                 lowerer.active_site.expect("root site"),
-                HostSiteAction::Root(owner),
+                HostSiteAction::Root {
+                    manifest_index: *manifest_index,
+                    owner,
+                },
             );
             lowerer.emit(Op::RootConsume {
                 root: root.name.clone(),

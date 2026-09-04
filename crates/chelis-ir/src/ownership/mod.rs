@@ -78,7 +78,7 @@
 //! fn forge() -> HostSiteId { HostSiteId::from_index(7) }
 //! ```
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use chelis_types::manifest::{ManifestedProgram, RootManifest};
 
@@ -233,8 +233,9 @@ pub fn verify_ownership<P: EmissionPayload>(
             PayloadKind::Host,
         ) => {
             verify::verify(ir_program)?;
-            verify::verify_host_sites(ir_program, sites)?;
-            verify_manifest_sinks(host_payload(&program)?, ir_program)?;
+            let payload = host_payload(&program)?;
+            verify::verify_host_sites(&payload.program, &payload.manifest, ir_program, sites)?;
+            verify_manifest_sinks(payload, ir_program)?;
             verify_nested_dags(&program, nested_dags)?;
         }
         (OwnershipProof::Dag(plan), PayloadKind::Dag) => {
@@ -291,24 +292,6 @@ impl VerifiedHostProgram {
     pub fn render(&self) -> String {
         match &self.0.proof {
             OwnershipProof::Host { program, .. } => render::render(program),
-            OwnershipProof::Dag(_) => unreachable!("sealed host specialization"),
-        }
-    }
-
-    pub fn host_site_count(&self) -> usize {
-        match &self.0.proof {
-            OwnershipProof::Host { sites, .. } => sites.records.len(),
-            OwnershipProof::Dag(_) => unreachable!("sealed host specialization"),
-        }
-    }
-
-    pub fn host_directive_site_count(&self) -> usize {
-        match &self.0.proof {
-            OwnershipProof::Host { sites, .. } => sites
-                .records
-                .iter()
-                .filter(|site| !site.actions.is_empty())
-                .count(),
             OwnershipProof::Dag(_) => unreachable!("sealed host specialization"),
         }
     }
@@ -400,6 +383,13 @@ enum DagOwnerOrigin {
     OwnedProducer,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DagOwnerState {
+    BorrowedLive,
+    OwnedLive,
+    OwnedTerminal,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DagDirective {
     BorrowLoad { node: NodeId },
@@ -429,26 +419,22 @@ impl DagOwnershipPlan {
             });
         }
         let mut owners = BTreeMap::new();
+        let mut states = BTreeMap::new();
         let mut directives = Vec::new();
-        let mut terminals = BTreeSet::new();
         for node in dag.nodes() {
-            for input in &node.inputs {
-                if input.0 >= node.id.0 || dag.get(*input).is_none() {
-                    return Err(OwnershipError::DagInput {
-                        node: node.id.0,
-                        input: input.0,
-                    });
-                }
-            }
+            validate_dag_dependencies(dag, node)?;
             match &node.op {
                 RiscOp::Load { .. } => {
                     require_dag_arity(node.id, "load", 0, node.inputs.len())?;
                     owners.insert(node.id, DagOwnerOrigin::BorrowedLoad);
+                    states.insert(node.id, DagOwnerState::BorrowedLive);
                     directives.push(DagDirective::BorrowLoad { node: node.id });
                 }
                 RiscOp::Copy => {
                     require_dag_arity(node.id, "copy", 1, node.inputs.len())?;
+                    require_live_dag_owner(&states, node.inputs[0], node.id)?;
                     owners.insert(node.id, DagOwnerOrigin::OwnedProducer);
+                    states.insert(node.id, DagOwnerState::OwnedLive);
                     directives.push(DagDirective::Clone {
                         node: node.id,
                         source: node.inputs[0],
@@ -456,7 +442,7 @@ impl DagOwnershipPlan {
                 }
                 RiscOp::Drop => {
                     require_dag_arity(node.id, "drop", 1, node.inputs.len())?;
-                    record_dag_terminal(&mut terminals, node.inputs[0])?;
+                    consume_dag_owner(&mut states, node.inputs[0], node.id)?;
                     directives.push(DagDirective::Drop {
                         node: node.id,
                         source: node.inputs[0],
@@ -464,8 +450,9 @@ impl DagOwnershipPlan {
                 }
                 RiscOp::Realize => {
                     require_dag_arity(node.id, "realize", 1, node.inputs.len())?;
-                    record_dag_terminal(&mut terminals, node.inputs[0])?;
+                    consume_dag_owner(&mut states, node.inputs[0], node.id)?;
                     owners.insert(node.id, DagOwnerOrigin::OwnedProducer);
+                    states.insert(node.id, DagOwnerState::OwnedLive);
                     directives.push(DagDirective::MoveProduce {
                         node: node.id,
                         source: node.inputs[0],
@@ -473,20 +460,24 @@ impl DagOwnershipPlan {
                 }
                 RiscOp::Store { .. } => {
                     require_dag_arity(node.id, "store", 1, node.inputs.len())?;
-                    record_dag_terminal(&mut terminals, node.inputs[0])?;
+                    consume_dag_owner(&mut states, node.inputs[0], node.id)?;
                     directives.push(DagDirective::Store {
                         node: node.id,
                         source: node.inputs[0],
                     });
                 }
                 _ => {
-                    owners.insert(node.id, DagOwnerOrigin::OwnedProducer);
                     let mut borrows = node.inputs.clone();
                     for dependency in &node.shape_deps {
                         if !borrows.contains(dependency) {
                             borrows.push(*dependency);
                         }
                     }
+                    for source in &borrows {
+                        require_live_dag_owner(&states, *source, node.id)?;
+                    }
+                    owners.insert(node.id, DagOwnerOrigin::OwnedProducer);
+                    states.insert(node.id, DagOwnerState::OwnedLive);
                     directives.push(DagDirective::Produce {
                         node: node.id,
                         borrows,
@@ -494,34 +485,211 @@ impl DagOwnershipPlan {
                 }
             }
         }
-        for root in dag.roots() {
-            match owners.get(root) {
-                Some(DagOwnerOrigin::OwnedProducer) => {
-                    record_dag_terminal(&mut terminals, *root)?;
+        for (root_index, root) in dag.roots().iter().enumerate() {
+            let consumer = NodeId(dag.nodes().len() + root_index);
+            match states.get(root).copied() {
+                Some(DagOwnerState::OwnedLive) => {
+                    consume_dag_owner(&mut states, *root, consumer)?;
                     directives.push(DagDirective::Root { source: *root });
                 }
-                Some(DagOwnerOrigin::BorrowedLoad) => {
+                Some(DagOwnerState::BorrowedLive) => {
                     directives.push(DagDirective::RootClone { source: *root });
+                }
+                Some(DagOwnerState::OwnedTerminal) => {
+                    return Err(OwnershipError::DagDuplicateTerminal { owner: root.0 });
                 }
                 None => return Err(OwnershipError::DagInvalidRoot { root: root.0 }),
             }
         }
+        let live_owned = states
+            .iter()
+            .filter_map(|(owner, state)| (*state == DagOwnerState::OwnedLive).then_some(*owner))
+            .collect::<Vec<_>>();
+        for owner in live_owned {
+            consume_dag_owner(
+                &mut states,
+                owner,
+                NodeId(dag.nodes().len() + dag.roots().len()),
+            )?;
+            directives.push(DagDirective::ScopeDrop { source: owner });
+        }
         for (&owner, origin) in &owners {
-            if *origin == DagOwnerOrigin::OwnedProducer && !terminals.contains(&owner) {
-                terminals.insert(owner);
-                directives.push(DagDirective::ScopeDrop { source: owner });
+            if *origin == DagOwnerOrigin::OwnedProducer
+                && states.get(&owner) != Some(&DagOwnerState::OwnedTerminal)
+            {
+                return Err(OwnershipError::DagMissingTerminal { owner: owner.0 });
             }
         }
         Ok(Self { owners, directives })
     }
 
     fn verify(&self, dag: &Dag) -> Result<(), OwnershipError> {
-        let rebuilt = Self::lower(dag)?;
-        if self.owners != rebuilt.owners || self.directives != rebuilt.directives {
+        let structural_errors = crate::verify::verify(dag);
+        if !structural_errors.is_empty() {
             return Err(OwnershipError::LoweringInvariant {
                 unit: "dag".to_string(),
-                detail: "DAG payload and ownership directive map diverged".to_string(),
+                detail: structural_errors.join("; "),
             });
+        }
+
+        let mut owners = BTreeMap::new();
+        let mut states = BTreeMap::new();
+        let mut cursor = 0;
+        for node in dag.nodes() {
+            validate_dag_dependencies(dag, node)?;
+            let directive = self.directives.get(cursor).ok_or_else(|| {
+                dag_directive_error(format!("node n{} has no directive", node.id.0))
+            })?;
+            cursor += 1;
+            match &node.op {
+                RiscOp::Load { .. } => {
+                    require_dag_arity(node.id, "load", 0, node.inputs.len())?;
+                    require_exact_dag_directive(
+                        directive,
+                        &DagDirective::BorrowLoad { node: node.id },
+                        node.id,
+                    )?;
+                    owners.insert(node.id, DagOwnerOrigin::BorrowedLoad);
+                    states.insert(node.id, DagOwnerState::BorrowedLive);
+                }
+                RiscOp::Copy => {
+                    require_dag_arity(node.id, "copy", 1, node.inputs.len())?;
+                    require_live_dag_owner(&states, node.inputs[0], node.id)?;
+                    require_exact_dag_directive(
+                        directive,
+                        &DagDirective::Clone {
+                            node: node.id,
+                            source: node.inputs[0],
+                        },
+                        node.id,
+                    )?;
+                    owners.insert(node.id, DagOwnerOrigin::OwnedProducer);
+                    states.insert(node.id, DagOwnerState::OwnedLive);
+                }
+                RiscOp::Drop => {
+                    require_dag_arity(node.id, "drop", 1, node.inputs.len())?;
+                    consume_dag_owner(&mut states, node.inputs[0], node.id)?;
+                    require_exact_dag_directive(
+                        directive,
+                        &DagDirective::Drop {
+                            node: node.id,
+                            source: node.inputs[0],
+                        },
+                        node.id,
+                    )?;
+                }
+                RiscOp::Realize => {
+                    require_dag_arity(node.id, "realize", 1, node.inputs.len())?;
+                    consume_dag_owner(&mut states, node.inputs[0], node.id)?;
+                    require_exact_dag_directive(
+                        directive,
+                        &DagDirective::MoveProduce {
+                            node: node.id,
+                            source: node.inputs[0],
+                        },
+                        node.id,
+                    )?;
+                    owners.insert(node.id, DagOwnerOrigin::OwnedProducer);
+                    states.insert(node.id, DagOwnerState::OwnedLive);
+                }
+                RiscOp::Store { .. } => {
+                    require_dag_arity(node.id, "store", 1, node.inputs.len())?;
+                    consume_dag_owner(&mut states, node.inputs[0], node.id)?;
+                    require_exact_dag_directive(
+                        directive,
+                        &DagDirective::Store {
+                            node: node.id,
+                            source: node.inputs[0],
+                        },
+                        node.id,
+                    )?;
+                }
+                _ => {
+                    let mut borrows = node.inputs.clone();
+                    for dependency in &node.shape_deps {
+                        if !borrows.contains(dependency) {
+                            borrows.push(*dependency);
+                        }
+                    }
+                    for source in &borrows {
+                        require_live_dag_owner(&states, *source, node.id)?;
+                    }
+                    require_exact_dag_directive(
+                        directive,
+                        &DagDirective::Produce {
+                            node: node.id,
+                            borrows,
+                        },
+                        node.id,
+                    )?;
+                    owners.insert(node.id, DagOwnerOrigin::OwnedProducer);
+                    states.insert(node.id, DagOwnerState::OwnedLive);
+                }
+            }
+        }
+        if self.owners != owners {
+            return Err(dag_directive_error(
+                "owner origins diverge from the retained DAG payload".to_string(),
+            ));
+        }
+
+        for (root_index, root) in dag.roots().iter().enumerate() {
+            let directive = self
+                .directives
+                .get(cursor)
+                .ok_or_else(|| dag_directive_error(format!("root n{} has no directive", root.0)))?;
+            cursor += 1;
+            let consumer = NodeId(dag.nodes().len() + root_index);
+            match states.get(root).copied() {
+                Some(DagOwnerState::OwnedLive) => {
+                    consume_dag_owner(&mut states, *root, consumer)?;
+                    require_exact_dag_directive(
+                        directive,
+                        &DagDirective::Root { source: *root },
+                        consumer,
+                    )?;
+                }
+                Some(DagOwnerState::BorrowedLive) => require_exact_dag_directive(
+                    directive,
+                    &DagDirective::RootClone { source: *root },
+                    consumer,
+                )?,
+                Some(DagOwnerState::OwnedTerminal) => {
+                    return Err(OwnershipError::DagDuplicateTerminal { owner: root.0 });
+                }
+                None => return Err(OwnershipError::DagInvalidRoot { root: root.0 }),
+            }
+        }
+
+        let live_owned = states
+            .iter()
+            .filter_map(|(owner, state)| (*state == DagOwnerState::OwnedLive).then_some(*owner))
+            .collect::<Vec<_>>();
+        for owner in live_owned {
+            let directive = self.directives.get(cursor).ok_or_else(|| {
+                dag_directive_error(format!("owned producer n{} has no terminal", owner.0))
+            })?;
+            cursor += 1;
+            let consumer = NodeId(dag.nodes().len() + dag.roots().len());
+            consume_dag_owner(&mut states, owner, consumer)?;
+            require_exact_dag_directive(
+                directive,
+                &DagDirective::ScopeDrop { source: owner },
+                consumer,
+            )?;
+        }
+        if cursor != self.directives.len() {
+            return Err(dag_directive_error(format!(
+                "{} directives remain after the payload is exhausted",
+                self.directives.len() - cursor
+            )));
+        }
+        for (&owner, origin) in &owners {
+            if *origin == DagOwnerOrigin::OwnedProducer
+                && states.get(&owner) != Some(&DagOwnerState::OwnedTerminal)
+            {
+                return Err(OwnershipError::DagMissingTerminal { owner: owner.0 });
+            }
         }
         Ok(())
     }
@@ -587,15 +755,78 @@ fn require_dag_arity(
     }
 }
 
-fn record_dag_terminal(
-    terminals: &mut BTreeSet<NodeId>,
+fn validate_dag_dependencies(dag: &Dag, node: &crate::dag::DagNode) -> Result<(), OwnershipError> {
+    for input in node.inputs.iter().chain(&node.shape_deps) {
+        if input.0 >= node.id.0 || dag.get(*input).is_none() {
+            return Err(OwnershipError::DagInput {
+                node: node.id.0,
+                input: input.0,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn require_live_dag_owner(
+    states: &BTreeMap<NodeId, DagOwnerState>,
     owner: NodeId,
+    consumer: NodeId,
+) -> Result<DagOwnerState, OwnershipError> {
+    match states.get(&owner).copied() {
+        Some(DagOwnerState::BorrowedLive) => Ok(DagOwnerState::BorrowedLive),
+        Some(DagOwnerState::OwnedLive) => Ok(DagOwnerState::OwnedLive),
+        Some(DagOwnerState::OwnedTerminal) => Err(OwnershipError::DagUseAfterTerminal {
+            owner: owner.0,
+            consumer: consumer.0,
+        }),
+        None => Err(OwnershipError::DagInput {
+            node: consumer.0,
+            input: owner.0,
+        }),
+    }
+}
+
+fn consume_dag_owner(
+    states: &mut BTreeMap<NodeId, DagOwnerState>,
+    owner: NodeId,
+    consumer: NodeId,
 ) -> Result<(), OwnershipError> {
-    if terminals.insert(owner) {
+    match states.get(&owner).copied() {
+        Some(DagOwnerState::BorrowedLive) => Err(OwnershipError::DagBorrowConsumed {
+            owner: owner.0,
+            consumer: consumer.0,
+        }),
+        Some(DagOwnerState::OwnedLive) => {
+            states.insert(owner, DagOwnerState::OwnedTerminal);
+            Ok(())
+        }
+        Some(DagOwnerState::OwnedTerminal) => {
+            Err(OwnershipError::DagDuplicateTerminal { owner: owner.0 })
+        }
+        None => Err(OwnershipError::DagInput {
+            node: consumer.0,
+            input: owner.0,
+        }),
+    }
+}
+
+fn require_exact_dag_directive(
+    actual: &DagDirective,
+    expected: &DagDirective,
+    consumer: NodeId,
+) -> Result<(), OwnershipError> {
+    if actual == expected {
         Ok(())
     } else {
-        Err(OwnershipError::DagDuplicateTerminal { owner: owner.0 })
+        Err(dag_directive_error(format!(
+            "directive for ownership consumer n{} does not match its payload operation",
+            consumer.0
+        )))
     }
+}
+
+fn dag_directive_error(detail: String) -> OwnershipError {
+    OwnershipError::DagDirectiveMap { detail }
 }
 
 #[cfg(test)]
