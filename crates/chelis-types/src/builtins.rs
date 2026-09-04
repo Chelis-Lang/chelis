@@ -3002,6 +3002,7 @@ mod tests {
             "argmax_reduce",
             "argmin_reduce",
             "expand",
+            "insert",
         ];
         for name in BUILTIN_NAMES {
             let expected = if identity.contains(name) {
@@ -3034,6 +3035,7 @@ mod tests {
         assert_eq!(shape_class("count"), ShapeClass::NameTracked);
         assert_eq!(shape_class("mean"), ShapeClass::NameTracked);
         assert_eq!(shape_class("expand"), ShapeClass::NameTracked);
+        assert_eq!(shape_class("insert"), ShapeClass::NameTracked);
         // chelis#340: the rest of the reduction family is name-tracked too.
         assert_eq!(shape_class("max_reduce"), ShapeClass::NameTracked);
         assert_eq!(shape_class("min_reduce"), ShapeClass::NameTracked);

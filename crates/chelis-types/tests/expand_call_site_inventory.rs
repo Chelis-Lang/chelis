@@ -22,6 +22,14 @@ use std::process::Command;
 /// Files that may still contain `expand` program text, with the exact count and
 /// the reason the sites are there.
 const ALLOWED: &[(&str, usize, &str)] = &[
+    // A deliberate mutant: the oracle's anchor test replaces the real spec
+    // line with a wrong one to prove the anchor catches it. Renaming a mutant
+    // is churn that can only weaken it.
+    (
+        "scripts/test_dtype_phase4b_oracle.py",
+        1,
+        "the wrong-line mutant in the mean-adjoint anchor test",
+    ),
     // Genuine same-rank broadcasts: the declared result has the operand's rank.
     // These are what `expand` means after the split, so they are not renamed.
     (
@@ -96,6 +104,13 @@ fn repo_root() -> PathBuf {
 /// literals cannot see a `'"'` char literal and one stray quote then swallows
 /// the rest of the file.
 fn program_sites(text: &str, suffix: &str) -> usize {
+    // A Python fixture generator emits Chelis program text from its own string
+    // literals, so it is a program source too. `scripts/` was the blind spot
+    // that let a rank-raising call survive the migration while its in-tree twin
+    // was renamed; counting the whole line is coarse but cannot miss one.
+    if suffix == "py" {
+        return text.matches("expand(").count();
+    }
     if suffix == "ch" {
         return text.matches("expand(").count();
     }
@@ -185,8 +200,13 @@ fn every_surviving_expand_program_site_is_inventoried() {
         if rel.starts_with("spec/") {
             continue;
         }
+        // This file holds the needle it searches for, in the literals that do
+        // the searching. Counting itself would pin its own implementation.
+        if rel == "crates/chelis-types/tests/expand_call_site_inventory.rs" {
+            continue;
+        }
         let suffix = match rel.rsplit_once('.') {
-            Some((_, s)) if matches!(s, "ch" | "dp" | "rs") => s,
+            Some((_, s)) if matches!(s, "ch" | "dp" | "rs" | "py") => s,
             _ => continue,
         };
         let Ok(text) = std::fs::read_to_string(root.join(rel)) else {

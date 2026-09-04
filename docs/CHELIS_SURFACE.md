@@ -158,6 +158,7 @@ explicitly first. Windowed extents must be statically known on the build path.
 | `reshape` | `(&tensor[D_old,p], shape) -> tensor[D_new,p]` | `reshape(g, old_shape)` |
 | `permute` | `(&tensor[..,p], axes: int32...) -> tensor[..,p]` | `permute(g, inverse_axes)` |
 | `expand` | `(&tensor[D_small,p], axis: int32, size: int64) -> tensor[D_large,p]` | `sum(g, expanded_axes)` |
+| `insert` | `(&tensor[D,p], axis: int32, size: int64) -> tensor[D_plus,p]` | `sum(g, axis)` |
 | `pad` | `(&tensor[D,p], padding, fill) -> tensor[D',p]` | `shrink(g, inverse_padding)` |
 | `shrink` | `(&tensor[D,p], bounds) -> tensor[D',p]` | `pad(g, inverse_bounds)` |
 | `stride` | `(&tensor[D,p], strides) -> tensor[D',p]` | expand/scatter |
@@ -368,7 +369,7 @@ undefined).
 Tier-1 DAG:   add sub mul div floor_div trunc_div max_elem min_elem cmplt neg recip exp log sin cos tan atan sqrt
               abs floor ceil round sum count max_reduce min_reduce prod_reduce argmax_reduce
               argmin_reduce reduce_window_max reduce_window_min reduce_window_sum
-              reduce_window_mean reshape permute expand pad shrink stride
+              reduce_window_mean reshape permute expand insert pad shrink stride
               uniform_like gather scatter_replace scatter_elements
 Tier-2 DAG:   eq neq lt gt lte gte and or not relu sigmoid tanh silu gelu
               softmax normalize mean matmul layer_norm conv2d

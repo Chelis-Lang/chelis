@@ -375,6 +375,7 @@ fn every_axis_builtin_has_one_axis_layout() {
         "diagonal",
         "expand",
         "gather",
+        "insert",
         "max_reduce",
         "mean",
         "min_reduce",
