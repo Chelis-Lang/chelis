@@ -1019,6 +1019,93 @@ fn is_member(op: &RiscOp, axis: usize, claim: &DimClaim, source: &AxisSource) ->
 /// already statically bound, since the legacy occurrence pass distinguishes
 /// `Named(n, None)` from `Named(n, Some(k))` and the C prologue declares only
 /// the former.
+/// Which scope each node belongs to, as one bit-set per node.
+///
+/// C2.4: a claim's identity is the name TOGETHER WITH the scope that
+/// introduced it. A binder is scoped to the signature that declares it, and
+/// the DAG carries that scope only sometimes.
+///
+/// A kernel lowered from ONE signature has exactly one scope, and every
+/// interface witness belongs to it regardless of data use, because there is
+/// nothing else it could belong to. `spec/04-type-system.md` section 4.7's
+/// guard checks that a declared extent agrees with the value observed, and a
+/// signature declaring `f(x: tensor[n, f32], p: tensor[n, f32])` is violated
+/// by a caller whose `p` disagrees whether or not the body reads `p`.
+///
+/// A MERGED kernel - the `__global__` top-level kind, where independent
+/// top-level results are lowered into one function - does not carry that
+/// scope: two signatures' binders coexist in it, and grouping by name alone
+/// identifies extents from different signatures. Root reachability
+/// approximates the scope there. It is exact across independent results,
+/// approximate under inlining, since a callee inlined into one result brings
+/// its binders with it, and blind to an interface witness no result reaches,
+/// which forms no class; that last case is a recorded residual.
+///
+/// **The two are NOT told apart, and that is the shipped limit.** Measured:
+/// the merged kernel `named_axis__global__tensor_2` reports one explicit
+/// root, eight `Load`s and twelve nodes, so by result count it is identical
+/// to a single-signature kernel. Every discriminator the graph offers puts it
+/// on the single-signature side, and the mechanism that does separate its two
+/// `seq` claims - reachability leaving an unreached witness with an empty
+/// scope - is the same mechanism that drops an interface witness no operation
+/// reads. They are one rule seen from two sides, so this derivation cannot
+/// honour section 4.7's "regardless of data use" for an unread witness and
+/// separate two signatures at the same time.
+///
+/// Reachability is therefore applied everywhere. `Name` claims group among
+/// root-reachable witnesses only, and a claim whose witness no result reaches
+/// forms no class. That gap is a recorded residual, owned by B2b, whose fix
+/// is scope carried on the dimension; the alternative traps correct programs,
+/// which is the one thing this slice must not ship.
+fn root_reach(dag: &Dag) -> Vec<u128> {
+    let sinks: Vec<NodeId>;
+    let results = if dag.roots().is_empty() {
+        let mut consumed = vec![false; dag.len()];
+        for node in dag.nodes() {
+            for input in node.inputs.iter().chain(node.shape_deps.iter()) {
+                if let Some(slot) = consumed.get_mut(input.0) {
+                    *slot = true;
+                }
+            }
+        }
+        sinks = dag
+            .nodes()
+            .iter()
+            .filter(|node| !consumed[node.id.0] && !matches!(node.op, RiscOp::Load { .. }))
+            .map(|node| node.id)
+            .collect();
+        &sinks[..]
+    } else {
+        dag.roots()
+    };
+    // No result to scope by, or more results than the bit-set holds: one
+    // scope, which is the behavior every caller had before scoping existed.
+    // Widening a class rather than splitting it keeps the derivation
+    // conservative - it can then only guard more, never silently guard less.
+    if results.is_empty() || results.len() > 128 {
+        return vec![u128::MAX; dag.len()];
+    }
+    let mut reach = vec![0u128; dag.len()];
+    for (index, result) in results.iter().enumerate() {
+        let bit = 1u128 << index;
+        let mut stack = vec![*result];
+        while let Some(id) = stack.pop() {
+            let Some(slot) = reach.get_mut(id.0) else {
+                continue;
+            };
+            if *slot & bit != 0 {
+                continue;
+            }
+            *slot |= bit;
+            if let Some(node) = dag.get(id) {
+                stack.extend(node.inputs.iter().copied());
+                stack.extend(node.shape_deps.iter().copied());
+            }
+        }
+    }
+    reach
+}
+
 pub fn derive_dim_witnesses(dag: &Dag) -> Vec<RuntimeDimClass> {
     let mut grouped: Vec<(DimClaim, Vec<OrderedMember>)> = Vec::new();
     for node in dag.nodes() {
@@ -1066,7 +1153,44 @@ pub fn derive_dim_witnesses(dag: &Dag) -> Vec<RuntimeDimClass> {
             }
         }
     }
-    let mut out: Vec<(OrderKey, RuntimeDimClass)> = grouped
+    // C2.4: split each name by SCOPE before it becomes a class. Two members
+    // belong to one scope when their root reach overlaps, transitively; two
+    // independent roots that happen to spell a binder the same way do not.
+    //
+    // Measured on `rank_poly_tier3::named_axis_eval_parity_corners`, where
+    // `total(x: &tensor[seq, f32])` and `use2(x: &tensor[batch, seq, f32])`
+    // are merged into one global kernel: grouping by name alone identified a
+    // 3-element axis with a 2-element one and made a correct program trap.
+    // That is the defect this slice exists to remove, reappearing one level
+    // up, in the grouping rather than in the backend's walk.
+    let reach = root_reach(dag);
+    let scoped: Vec<(DimClaim, Vec<OrderedMember>)> = grouped
+        .into_iter()
+        .flat_map(|(claim, members)| {
+            let mut buckets: Vec<(u128, Vec<OrderedMember>)> = Vec::new();
+            for entry in members {
+                let mask = reach.get(entry.node).copied().unwrap_or(u128::MAX);
+                // Merge every bucket this member touches, so overlap is
+                // transitive and A-B-C chains stay one scope.
+                let mut merged: Vec<OrderedMember> = vec![entry];
+                let mut merged_mask = mask;
+                buckets.retain_mut(|(bucket_mask, bucket)| {
+                    if *bucket_mask & merged_mask != 0 {
+                        merged_mask |= *bucket_mask;
+                        merged.append(bucket);
+                        false
+                    } else {
+                        true
+                    }
+                });
+                buckets.push((merged_mask, merged));
+            }
+            buckets
+                .into_iter()
+                .map(move |(_, members)| (claim.clone(), members))
+        })
+        .collect();
+    let mut out: Vec<(OrderKey, RuntimeDimClass)> = scoped
         .into_iter()
         .map(|(claim, mut members)| {
             members.sort_by_key(OrderedMember::key);

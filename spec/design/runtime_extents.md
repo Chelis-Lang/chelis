@@ -323,7 +323,36 @@ the defect class this slice removes.
   claim, a binder name or a literal, that the checker attached to more than
   one witness is one `RuntimeDimClass`, computed by
   `derive_runtime_dim_classes` from the DAG a lane consumes, after the last
-  rewrite, at the same point as `output_axis_sources` (C4.5). Grouping is by
+  rewrite, at the same point as `output_axis_sources` (C4.5). A claim's identity is the stamped name TOGETHER WITH THE SCOPE THAT
+  INTRODUCED IT. A binder is scoped to the signature that declares it, and
+  grouping by name alone identifies two extents that merely share a spelling
+  - the defect this slice removes from the backend walk, reappearing one
+  level up in the grouping. Measured: `rank_poly_tier3`'s
+  `named_axis_eval_parity_corners` declares `total(x: &tensor[seq, f32])` and
+  `use2(x: &tensor[batch, seq, f32])`, both lowered into one `__global__`
+  kernel, and grouping by name alone identified a 3-element axis with a
+  2-element one and trapped a correct program at run time.
+
+  The DAG does not carry signature scope, and `root_reach` approximates it by
+  reachability from the graph's results. The approximation is exact across
+  independent results and approximate under inlining, since a callee inlined
+  into one result brings its binders with it. **It is also blind to an
+  interface witness no result reaches, whose claim forms no class and gets no
+  guard.** That contradicts `spec/04` §4.7, which exempts no parameter:
+  `f(x: tensor[n, f32], p: tensor[n, f32])` declares that `p`'s axis is `n`
+  whether or not the body reads `p`, and a caller passing a disagreeing `p`
+  has violated the signature. The requirement stands and this derivation
+  cannot honour it, because the only mechanism that separates same-named
+  claims across signatures - an unreached witness falling out of its class -
+  is the same mechanism that drops an unread one. A merged kernel is not
+  distinguishable from a single-signature one where scoping runs: the
+  measured parity kernel carries one explicit root, eight `Load`s and twelve
+  nodes. The gap is a residual owned by B2b, whose fix is scope carried on
+  the dimension itself; its instances are the two driven rows in
+  `crates/chelis-backend-c/tests/exec_compile.rs`, which now lock the weaker
+  consumed-witness property and say so.
+
+  Within one scope, grouping is by
   the stamped claim, which is the output of the typed identity proof (C1.2)
   and is what `symbolic_bindings` (`dag.rs:2283`) groups by today for names;
   a member is an output axis `(node, axis)` carrying the claim, and what

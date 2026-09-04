@@ -5098,7 +5098,18 @@ fn build_symbolic_matmul_succeeds_on_c_and_hip_targets() {
     let c_source = fs::read_to_string(c_out.join("symbolic_matmul.c")).expect("generated c");
     assert!(c_source.contains("int64_t batch = chelis_tensor_shape(inputs[0], 0);"));
     assert!(c_source.contains("int64_t in_dim = chelis_tensor_shape(inputs[0], 1);"));
-    assert!(c_source.contains("chelis_tensor_shape(inputs[1], 0) != in_dim"));
+    // chelis#1277: the C guard reads BOTH operands from the class's own
+    // witnesses instead of comparing against the declared variable, so that a
+    // member scoped to one signature is never compared with a variable the
+    // occurrence walk declared for another. The property this row names -
+    // `in_dim`'s second occurrence is guarded against the axis it was
+    // declared from - is unchanged, and the declaration two lines above
+    // pins which axis that is. HIP still compares against the variable and
+    // its assertion below is unchanged, which is the cross-lane difference
+    // this slice records rather than hides.
+    assert!(
+        c_source.contains("chelis_tensor_shape(inputs[1], 0) != chelis_tensor_shape(inputs[0], 1)")
+    );
 
     let hip_source =
         fs::read_to_string(hip_out.join("symbolic_matmul_hip.cpp")).expect("generated hip");

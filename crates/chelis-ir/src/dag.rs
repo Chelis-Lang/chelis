@@ -2414,10 +2414,17 @@ pub fn symbolic_bindings(dag: &Dag) -> Vec<SymbolicDimBinding> {
 /// shape metadata. chelis#616: op-declared dims are computed at run time by
 /// their owning op and are deliberately excluded; they are not parameters.
 pub fn symbolic_params(dag: &Dag) -> Vec<String> {
+    // Deduplicated by NAME, because C2.4's scope split is about which axes are
+    // guarded together and not about how many parameters a caller supplies.
+    // One binder spelled once in a signature is one parameter however many
+    // scopes the derivation finds it in; without this a merged kernel
+    // published `["batch", "batch"]`.
+    let mut seen = std::collections::BTreeSet::new();
     symbolic_bindings_interface(dag)
         .into_iter()
         .filter(|binding| matches!(binding.canonical.source, SymbolicDimSource::Load { .. }))
         .map(|binding| binding.name)
+        .filter(|name| seen.insert(name.clone()))
         .collect()
 }
 

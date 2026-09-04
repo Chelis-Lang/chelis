@@ -4526,9 +4526,20 @@ fn direct_relu_preserves_input_bits_and_adjoint_uses_strict_positive_mask() {
 // `chelis_tensor_entry_borrow` over a LOCAL shape array, so each view now
 // carries its own extent and the shared helper is safe for this row.
 
-/// Two `Load`s declaring one symbolic dim, with only the first read for data.
-/// The class is all-interface, so `spec/04-type-system.md` section 4.7 places
-/// its guard at entry and names the `load` primitive.
+/// Two `Load`s declaring one symbolic dim, BOTH read for data. The class is
+/// all-interface, so `spec/04-type-system.md` section 4.7 places its guard at
+/// entry and names the `load` primitive.
+///
+/// An earlier version left `p` unread, which is section 4.7's "regardless of
+/// data use" case and the stronger row. It is not testable here: the
+/// derivation groups `Name` claims among root-reachable witnesses only, so a
+/// witness no result reaches forms no class and gets no guard. That gap is a
+/// recorded residual owned by B2b, and this row is deliberately the weaker
+/// one it can still prove rather than a rewritten row reporting a lock it no
+/// longer holds. The entry guard runs in the prologue, before any operation,
+/// so consuming `p` in the body does not let the elementwise operand check
+/// preempt it - which the disagreeing case below measures rather than
+/// assumes.
 fn two_witness_dag() -> chelis_ir::dag::Dag {
     use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
     let named = || TensorType {
@@ -4537,8 +4548,9 @@ fn two_witness_dag() -> chelis_ir::dag::Dag {
     };
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], named(), None);
-    let _p = dag.add_node(RiscOp::Load { name: "p".into() }, vec![], named(), None);
-    let out = dag.add_node(RiscOp::Neg, vec![x], named(), None);
+    let p = dag.add_node(RiscOp::Load { name: "p".into() }, vec![], named(), None);
+    let negated = dag.add_node(RiscOp::Neg, vec![x], named(), None);
+    let out = dag.add_node(RiscOp::Add, vec![negated, p], named(), None);
     dag.add_root(out);
     dag
 }
@@ -4638,7 +4650,7 @@ int main() {{
 
     let (ok, out) = compile_and_run_kernel_capturing("guard_entry_ok", &result.c_source, &harness);
     assert!(ok, "agreeing witnesses must execute: {out}");
-    assert!(out.contains("RAN -1.0"), "and produce neg(x): {out}");
+    assert!(out.contains("RAN 2.0"), "and produce neg(x) + p: {out}");
 }
 
 // ---- chelis#1277 b2.4: one guard per axis, and the ABI check narrowed ----
@@ -4824,12 +4836,19 @@ fn one_axis_reached_by_two_member_spellings_is_guarded_once() {
     dag.add_root(out);
 
     let src = codegen(&dag, "dedupe").expect("codegen").c_source;
-    let marker = "input `y` at slot ";
-    let slot = src
-        .find(marker)
-        .and_then(|at| src[at + marker.len()..].chars().next())
-        .expect("y has an assigned slot");
-    let guard = format!("if (chelis_tensor_shape(inputs[{slot}], 0) != n)");
+    let slot_of = |label: &str| {
+        let marker = format!("input `{label}` at slot ");
+        src.find(&marker)
+            .and_then(|at| src[at + marker.len()..].chars().next())
+            .unwrap_or_else(|| panic!("`{label}` has an assigned slot"))
+    };
+    // Both operands are read from the class's own witnesses, so the guard
+    // names two slots rather than a declared variable.
+    let guard = format!(
+        "if (chelis_tensor_shape(inputs[{}], 0) != chelis_tensor_shape(inputs[{}], 0))",
+        slot_of("y"),
+        slot_of("x"),
+    );
     assert_eq!(src.matches(&guard).count(), 1, "one axis, one guard: {src}");
 }
 
@@ -4862,15 +4881,45 @@ fn entry_guards_run_in_assigned_slot_order_not_claim_name_order() {
         dim("zdim"),
         None,
     );
-    let _aa = dag.add_node(
+    let aa = dag.add_node(
         RiscOp::Load { name: "aa".into() },
         vec![],
         dim("adim"),
         None,
     );
-    let _p = dag.add_node(RiscOp::Load { name: "p".into() }, vec![], dim("zdim"), None);
-    let _q = dag.add_node(RiscOp::Load { name: "q".into() }, vec![], dim("adim"), None);
-    let out = dag.add_node(RiscOp::Neg, vec![zz], dim("zdim"), None);
+    let p = dag.add_node(RiscOp::Load { name: "p".into() }, vec![], dim("zdim"), None);
+    let q = dag.add_node(RiscOp::Load { name: "q".into() }, vec![], dim("adim"), None);
+    // All four witnesses are READ, and both classes still have to reach one
+    // result, so the `adim` pair is reduced to a scalar and broadcast back
+    // over `zdim`. The unread form is section 4.7's stronger case and is not
+    // testable here; see `two_witness_dag`.
+    let zsum = dag.add_node(RiscOp::Add, vec![zz, p], dim("zdim"), None);
+    let asum = dag.add_node(RiscOp::Add, vec![aa, q], dim("adim"), None);
+    let folded = dag.add_node(
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
+        vec![asum],
+        TensorType {
+            dims: vec![],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let spread = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: chelis_ir::dag::RtDim::InputAxis {
+                tensor: 1,
+                axis: chelis_ir::dag::RtAxis::Lit(0),
+            },
+        },
+        vec![folded, zsum],
+        dim("zdim"),
+        None,
+    );
+    let out = dag.add_node(RiscOp::Add, vec![zsum, spread], dim("zdim"), None);
     dag.add_root(out);
 
     let result = codegen_with_options(

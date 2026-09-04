@@ -1520,11 +1520,32 @@ impl CEmitter {
             // chelis#616: an op-declared dim is declared inline at its
             // owning op (the bound scalars are computed tensors that do not
             // exist here at prologue time); see `runtime_dim_sites`.
-            let Some((canonical_slot, canonical_axis)) = declared_from.get(&binding.name).copied()
+            // The canonical is this CLASS's own first witness, never the
+            // variable the walk declared for the same spelling. The two are
+            // scoped differently now: the derivation splits a name by root
+            // scope (C2.4) and the walk does not, so comparing a scoped
+            // member against a globally declared variable pairs witnesses
+            // from two signatures. Measured on
+            // `rank_poly_tier3::named_axis_eval_parity_corners`, where that
+            // pairing survived the regrouping and kept trapping a correct
+            // program: `seq` is a 3-element axis in `total`'s signature and a
+            // 2-element one in `use2`'s, and the walk declares one of them.
+            //
+            // Reading both operands directly also makes the guard independent
+            // of which name the emitter happened to allocate under, which is
+            // the coupling that hid this.
+            let SymbolicDimSource::Load {
+                input_label: canonical_label,
+                axis: canonical_axis,
+            } = binding.canonical.source.clone()
             else {
                 continue;
             };
-            let canonical_label = &input_labels[canonical_slot];
+            let canonical_slot = input_slots[canonical_label.as_str()];
+            let canonical_label = canonical_label.as_str();
+            let canonical_read =
+                format!("chelis_tensor_shape(inputs[{canonical_slot}], {canonical_axis})");
+            guarded.insert((binding.name.clone(), canonical_slot, canonical_axis as i32));
             // `binding.name` flows into BOTH an identifier context (the
             // emitted `int {name} = ...;` declarator) and a format-string
             // context (the fprintf below). The identifier emission is
@@ -1565,13 +1586,11 @@ impl CEmitter {
                 let canonical_label_fmt =
                     chelis_ir::span_sanitize::sanitize_for_format_string(canonical_label);
                 self.line(&format!(
-                    "if (chelis_tensor_shape(inputs[{slot}], {axis}) != {}) {{",
-                    binding.name
+                    "if (chelis_tensor_shape(inputs[{slot}], {axis}) != {canonical_read}) {{"
                 ));
                 self.indent += 1;
                 self.line(&format!(
-                    "fprintf(stderr, \"extent `{binding_name_fmt}`: {canonical_label_fmt} axis {canonical_axis} = %lld, {occ_label_fmt} axis {axis} = %lld\\n\", (long long){}, (long long)chelis_tensor_shape(inputs[{slot}], {axis}));",
-                    binding.name
+                    "fprintf(stderr, \"extent `{binding_name_fmt}`: {canonical_label_fmt} axis {canonical_axis} = %lld, {occ_label_fmt} axis {axis} = %lld\\n\", (long long)({canonical_read}), (long long)chelis_tensor_shape(inputs[{slot}], {axis}));"
                 ));
                 self.line("chelis_numeric_trap(\"numeric trap: domain in load at int64\");");
                 self.indent -= 1;
