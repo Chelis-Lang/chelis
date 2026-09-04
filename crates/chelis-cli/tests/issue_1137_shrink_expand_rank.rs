@@ -193,7 +193,8 @@ fn assert_typed_refusal(source: &str, stem: &str) {
         .expect("build C");
     assert!(
         !output.status.success(),
-        "chelis#1482 still refuses this shape; a success here means it was          fixed, so restore the C-parity assertion: stdout={} stderr={}",
+        "chelis#1482 still refuses this shape; a success here means it was fixed, \
+         so restore the C-parity assertion: stdout={} stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
