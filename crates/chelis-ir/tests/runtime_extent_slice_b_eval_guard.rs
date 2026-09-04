@@ -108,8 +108,16 @@ fn a_disagreeing_class_traps_with_the_numeric_trap_line() {
         _ => None,
     });
     let err = result.expect_err("n = 2 claimed over a read of m = 3 must not evaluate");
+    // `load`, not `expand`. Section 4.7 fixes the slot for this shape:
+    // "for a guard whose operands are all interface values, the `load`
+    // primitive of the later witness in signature order". Both witnesses here
+    // are input tensor axes - `x`'s own, and the `expand` size's folded read
+    // of `y` - so the class is all-interface and its guard runs at entry. The
+    // b2.1 stub wrote `expand` under the pre-refinement belief that an
+    // `InputAxis` member makes a class local; the spec text is the oracle and
+    // it says otherwise.
     assert!(
-        err.contains(&domain_trap_line("expand")),
+        err.contains(&domain_trap_line("load")),
         "section 4.7 makes this an [04-NUM-9] typed precondition guard, got: {err}",
     );
 }
@@ -174,7 +182,7 @@ fn the_guard_precedes_the_allocation_it_protects() {
     });
     match result {
         Err(err) => assert!(
-            err.contains(&domain_trap_line("expand")),
+            err.contains(&domain_trap_line("load")),
             "the guard, not a later shape error, must be what fails: {err}",
         ),
         Ok(values) => panic!(
