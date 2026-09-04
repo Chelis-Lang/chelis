@@ -199,14 +199,18 @@ caches. A failed open-PR lookup fail-safes to no PR pruning (never mass-delete
 on error); manual dispatch is dry-run unless `apply` is set.
 `scripts/test_ci_cache_prune.py` covers the deletion policy.
 
-Two companion prove-in-CI lanes, `smt-build-glibc231` (a `debian:11`
-container) and `smt-build-darwin-arm64` (`macos-latest`), build
+Two companion prove-in-CI lanes, `smt-build-glibc231` (a digest-pinned
+Python 3.11 Bullseye container) and `smt-build-darwin-arm64` (`macos-latest`), build
 `chelis-cli --features smt` on the other two release targets and run
 the post-build verifier. They prove cvc5 builds on those toolchains
 before `release.yml` ships the feature there (chelis#422). The
-`debian:11` lane additionally installs `python3-pip` and `pip install
-tomli`, because cvc5's build-time TOML codegen imports `tomli` on
-Python < 3.11 and `python3-tomli` is not in the main bullseye suite.
+Bullseye lane uses the same pinned container digest in `ci.yml`,
+`build-cvc5.yml`, and `release.yml`; the image supplies Python, git, curl,
+and CA certificates before checkout. After checkout, `ci_apt_get.py
+--debian-bullseye-snapshot` replaces every moving apt source with the
+immutable `20260901T000000Z` Debian and Debian Security snapshots before
+installing build dependencies. Python 3.11 also lets cvc5 use `tomllib`
+without a separate moving PyPI bootstrap.
 
 ## Release builds (chelis#422)
 
