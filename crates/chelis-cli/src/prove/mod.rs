@@ -2026,9 +2026,7 @@ fn count_invariant_opaque_deep(exprs: &[DeepExpr]) -> usize {
         match expr {
             DeepExpr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
             DeepExpr::List(list, _) => match (list.tag(), list.elements.get(1)) {
-                (Some(tag), Some(DeepExpr::Map(meta, _))) => {
-                    Some((tag, meta, &list.elements[2..]))
-                }
+                (Some(tag), Some(DeepExpr::Map(meta, _))) => Some((tag, meta, &list.elements[2..])),
                 _ => None,
             },
             _ => None,

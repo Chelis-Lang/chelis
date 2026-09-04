@@ -399,6 +399,18 @@ jobs:
       - name: Run cvc5 engine smoke tests
         run: cargo test -p chelis-prove --features smt --lib cvc5_engine_
 
+      # chelis#1125 PP7: `crates/chelis-cli/tests/prove_deep_obligations.rs` is
+      # `#![cfg(feature = "smt")]` and had NO invocation anywhere. The gate
+      # never passes `--features smt`, this job tested only `chelis-prove`, and
+      # smt-full-prove.yml never names `chelis-cli`, so a merged test asserting
+      # the correct proof tier for the `.dp` surface could not fail and the
+      # regression it was written to catch landed green. This is the smallest
+      # step that runs it, in the job that already provisions cvc5. Pinned by
+      # scripts/test_gate.py's SmtCiSplitTests so it cannot silently disappear
+      # again.
+      - name: Run the Deep-surface obligation tier tests
+        run: cargo test -p chelis-cli --features smt --test prove_deep_obligations
+
       # Clippy's `disallowed_types` ban on raw hash collections
       # (spec/design/hash_order_determinism.md C2.3) only sees the
       # configuration it compiles. This job already provisions cvc5, so it is

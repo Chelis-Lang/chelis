@@ -185,8 +185,9 @@ fn unknown_entry_leaves_the_program_unchanged() {
 /// "the same program in two admitted representations" true by construction.
 fn stamp(exprs: &[DeepExpr]) -> Vec<DeepExpr> {
     let text = chelis_deep::printer::print_canonical(exprs);
-    chelis_deep::parse_and_stamp_file(&text)
-        .unwrap_or_else(|e| panic!("canonical Deep must re-parse through the stamping ingress: {e}"))
+    chelis_deep::parse_and_stamp_file(&text).unwrap_or_else(|e| {
+        panic!("canonical Deep must re-parse through the stamping ingress: {e}")
+    })
 }
 
 /// Carrier-neutral `(tag, first-child-name)` for a declaration node. Written
@@ -278,7 +279,7 @@ fn stamped_module_head_and_import_survive_pruning() {
     let pruned = prune_to_entry(stamped, "priced");
     assert_eq!(pruned.len(), 1, "the module wrapper is preserved");
     let DeepExpr::Node(node, _) = &pruned[0] else {
-        panic!("expected the stamped module node, got {:?}", &pruned[0]);
+        panic!("expected the stamped module node, got {:?}", pruned[0]);
     };
     assert_eq!(node.tag(), DeepTag::Module);
     assert!(
