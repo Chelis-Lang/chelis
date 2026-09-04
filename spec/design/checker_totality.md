@@ -2134,30 +2134,36 @@ it is honest**, where a complete or authored-binder header is honest by
    removes. The `defsig`-less floor bound (a value below the floor reading a
    `defsig`-less later function is unbound) is function visibility, owned
    by [04-INF-2]/[04-INF-3], and PP6 does not move it.
-3. *Eager references.* `collect_eager_refs` descends into `fn` bodies with
-   the lambda's parameters bound, in the initializer walk and in the
-   function-body walk that `detect_top_level_binding_cycles` chains through
-   `fn_body_refs`. In the DFS, a `call_edges` step onto a member of the
-   value stack reports the cycle exactly as a `value_edges` step does. The
-   external-input exemption and the function-application chaining are
-   unchanged, and so is the value/function line: [04-INF-7] now states
-   what `is_value` in `detect_top_level_binding_cycles` already decides, a
-   `def` whose initializer is a lambda is a function.
-4. *Mixed groups.* `primary_inference_schedule` contracts every strongly
-   connected component of the full reference graph (call, read, mirror, and
-   hole edges), not only the planner's recursive function components, and
-   `primary_inference_groups_for_schedule` emits each component as one
-   group. `prebind_recursive_function_schemes` additionally prebinds a
-   value member with a monomorphic fresh variable when the value has no
-   declared signature and no metadata prebind; `infer_top_level`'s
-   provisional path already unifies a member's body with its provisional
-   type and defers generalization to the group, and needs no change for a
-   value. The stall release (`or_else(|| pending.first())`) is deleted: a
-   DAG of components never stalls, and the schedule is total by
-   construction. Under [04-INF-7] a mixed group is always part of a
-   rejected program; the group exists so that inference on that program is
-   total and reports the same diagnostics at both ingresses, and so that a
-   future refinement of [04-INF-7] would not reopen the stall.
+3. *Canonical eager-reference graph.* `TopLevelReferenceGraph::build`
+   indexes the unit's top-level definitions and runs
+   `collect_top_level_references` once for each flattened item. That one
+   lexical collector records read and direct-application edges, descends into
+   lambda bodies with their parameters bound, and preserves sequential local
+   and match-arm scope. It removes only [04-INF-4]'s explicitly typed literal
+   external-input self edge. A lambda initializer classifies its top-level
+   `def` as a function while the references in its body remain graph edges,
+   which is [04-INF-7]'s stored-closure rule. The resulting graph supplies the
+   function plan, mixed-component schedule, and `report_eager_cycle_errors`;
+   both production drivers retain that same instance through validation, so
+   cycle reporting performs no second reference walk.
+4. *Mixed groups.* `TopLevelReferenceGraph::inference_components` projects
+   strongly connected components of the complete reference graph in
+   dependency-first order with each component's members in source order.
+   `primary_inference_schedule_with_reference_graph` contracts those
+   components before adding the backward-value, `defsig`-less mirror, and
+   hole-header precedence edges, so Kahn's algorithm operates on a DAG and
+   has no stall-release path. `primary_inference_groups_for_schedule` emits
+   each component once and separately records its recursive-function members;
+   a mixed cycle alone therefore does not activate recursive-instantiation
+   validation. In both production drivers a cyclic group enters the scoped
+   component level, and `prebind_cyclic_component_schemes` installs
+   monomorphic provisional types for members without a declared or metadata
+   prebind: arity-shaped types for functions and one fresh type for eager
+   values. Each body unifies with its provisional type before the component
+   is generalized as a unit, and scoped restoration handles cancellation and
+   failure. The graph then appends the ingress-independent `CycleDetected`
+   diagnostic for a cyclic component containing an eager value; no earlier
+   `UnboundVariable` is erased.
 
 **You deliver:**
 

@@ -52,6 +52,7 @@ fn infer() -> &'static str {
 
 const ERRORS: &str = include_str!("../src/errors.rs");
 const DEEP_TYPE: &str = include_str!("../src/deep_type.rs");
+const INFER_PROGRAM: &str = include_str!("../src/infer/program.rs");
 const OPACITY: &str = include_str!("../src/opacity.rs");
 const SESSION: &str = include_str!("../src/session.rs");
 const DEEP_VALIDATE: &str = include_str!("../../chelis-deep/src/validate.rs");
@@ -241,6 +242,24 @@ fn checked_result_reconstruction_is_effect_only_fallible_and_session_owned() {
 
 #[test]
 fn diagnostic_sink_is_append_only_and_cycle_errors_are_never_erased() {
+    use syn::visit::Visit;
+    use syn::{Expr, Item};
+
+    #[derive(Default)]
+    struct CyclicPrebindCalls(usize);
+
+    impl<'ast> Visit<'ast> for CyclicPrebindCalls {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let Expr::Path(path) = call.func.as_ref()
+                && path.qself.is_none()
+                && path.path.is_ident("prebind_cyclic_component_schemes")
+            {
+                self.0 += 1;
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+
     for forbidden in [
         "pub(crate) fn retain(",
         "pub(crate) fn clear(",
@@ -255,9 +274,29 @@ fn diagnostic_sink_is_append_only_and_cycle_errors_are_never_erased() {
             "the witness-owning diagnostic session must be monotonic: `{forbidden}`"
         );
     }
+    let file = syn::parse_file(INFER_PROGRAM).expect("infer/program.rs must remain valid Rust");
+    for driver in [
+        "infer_program_with_product_in_session",
+        "infer_ir_program_with_state",
+    ] {
+        let function = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Fn(function) if function.sig.ident == driver => Some(function),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing production inference driver `{driver}`"));
+        let mut calls = CyclicPrebindCalls::default();
+        calls.visit_block(&function.block);
+        assert_eq!(
+            calls.0, 1,
+            "production driver `{driver}` must call the cyclic-component prebind exactly once"
+        );
+    }
     assert!(
-        infer().contains("prebind_recursive_function_schemes("),
-        "known recursive callables must be bound before body inference"
+        !INFER_PROGRAM.contains("prebind_recursive_function_schemes"),
+        "the source contract must not preserve the removed recursive-only prebind seam"
     );
 }
 
