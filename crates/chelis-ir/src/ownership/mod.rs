@@ -174,6 +174,22 @@ impl<'a> VerifiedDagView<'a> {
         crate::dag::symbolic_bindings_interface(self.dag)
     }
 
+    /// The runtime-dimension equality classes whose guards `spec/04` section
+    /// 4.7 places at function ENTRY, because every operand they compare is an
+    /// interface value.
+    ///
+    /// The view answers the placement question rather than handing out the
+    /// graph. Placement has to resolve a slot's producer to decide whether an
+    /// operand is an input tensor's axis, a scalar parameter, or a computed
+    /// value, and an emitter doing that itself would be reaching behind this
+    /// façade to re-derive what the view already knows.
+    pub fn entry_dim_classes(self) -> Vec<crate::axis_sources::RuntimeDimClass> {
+        crate::axis_sources::derive_runtime_dim_classes(self.dag)
+            .into_iter()
+            .filter(|class| class.placement(self.dag) == crate::axis_sources::GuardPlacement::Entry)
+            .collect()
+    }
+
     pub fn symbolic_occurrences(self) -> Vec<SymbolicDimOccurrence> {
         crate::dag::symbolic_occurrences(self.dag)
     }

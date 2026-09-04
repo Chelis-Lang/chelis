@@ -1438,10 +1438,7 @@ impl CEmitter {
         // that yields 5. And an `InputAxis`-sourced member reads an input
         // tensor's axis directly, which section 4.7 lists as an interface
         // value, so its guard belongs at entry too; that is chelis#1376.
-        for class in chelis_ir::axis_sources::derive_runtime_dim_classes(dag) {
-            if class.placement(dag) != chelis_ir::axis_sources::GuardPlacement::Entry {
-                continue;
-            }
+        for class in dag.entry_dim_classes() {
             let (canonical_expr, claim_text) = match &class.claim {
                 chelis_ir::axis_sources::DimClaim::Literal(value) => {
                     (value.to_string(), value.to_string())
