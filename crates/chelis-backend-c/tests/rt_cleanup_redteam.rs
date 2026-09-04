@@ -22,13 +22,14 @@
 //! gate stays green for orchestrator merging and WS-Cleanup-Fixups can
 //! re-enable them when fixed.
 
-use chelis_backend_c::codegen;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_types::types::Prim;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+use support::codegen;
 
 const BF16_TOL: f64 = 1e-2;
 #[allow(dead_code)]

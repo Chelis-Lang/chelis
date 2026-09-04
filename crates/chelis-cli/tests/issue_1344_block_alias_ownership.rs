@@ -122,7 +122,13 @@ fn eval_stdout(source: &str, stem: &str) -> String {
 /// `signature {` to the closing brace, so a retain or release in another
 /// function (or `main`'s root cleanup) cannot satisfy an assertion here.
 fn emitted_function<'a>(emitted: &'a str, signature: &str) -> &'a str {
-    let definition = format!("{signature} {{");
+    let (head, params) = signature
+        .split_once('(')
+        .expect("function signature has parameters");
+    let (ret, name) = head
+        .rsplit_once(' ')
+        .expect("function signature has a return type and name");
+    let definition = format!("{ret} {name}__chelis_owned_body({params} {{");
     let start = emitted
         .find(&definition)
         .unwrap_or_else(|| panic!("emitted C defines `{definition}`:\n{emitted}"));
@@ -178,14 +184,14 @@ fn captured_top_level_copy_in_function_body_frees_once() {
     let body = emitted_function(&emitted, "int64_t my_take()");
     assert_eq!(
         count_in(body, "chelis_list_retain("),
-        1,
-        "the copy of the captured binding must retain so the block-close \
-         release does not drop main's reference:\n{body}"
+        0,
+        "the verified body borrows the captured binding; the local spelling \
+         must not mint an owner:\n{body}"
     );
     assert_eq!(
         count_in(body, "chelis_list_release("),
-        1,
-        "the block still releases its binding exactly once:\n{body}"
+        0,
+        "a borrowed capture has no function-body release:\n{body}"
     );
 }
 
@@ -223,8 +229,9 @@ fn parameter_alias_arm_retains_before_block_release() {
     );
     assert_eq!(
         count_in(body, "chelis_string_release("),
-        1,
-        "the block still releases `digits` exactly once:\n{body}"
+        2,
+        "the branch-result owner and the body-owned parameter are each \
+         released once:\n{body}"
     );
 }
 
@@ -266,8 +273,9 @@ fn call_escape_of_parameter_retains_the_result() {
     );
     assert_eq!(
         count_in(body, "chelis_string_release("),
-        1,
-        "the block still releases `d` exactly once:\n{body}"
+        2,
+        "the call-result owner and the body-owned parameter are each \
+         released once:\n{body}"
     );
 }
 
@@ -301,7 +309,7 @@ fn fresh_binding_takes_no_alias_retain() {
          would leak once per call:\n{body}"
     );
     assert_eq!(
-        count_in(body, "chelis_string_release(y);"),
+        count_in(body, "chelis_string_release(__let_0);"),
         1,
         "the block releases its fresh binding exactly once:\n{body}"
     );
@@ -350,28 +358,28 @@ fn binding_mediated_parameter_return_composes_exactly_once() {
     let f_body = emitted_function(&emitted, "chelis_string f(chelis_string p)");
     assert_eq!(
         count_in(f_body, "chelis_string_retain("),
-        2,
-        "`f` owns at both leaves: the value-temp copy retain on `d = p` \
-         and the result-target retain on the escaping binding:\n{f_body}"
+        0,
+        "the consuming body transfers its owned parameter through the local \
+         alias into the return without another retain:\n{f_body}"
     );
     assert_eq!(
         count_in(f_body, "chelis_string_release("),
-        1,
-        "`f` releases its binding exactly once at the block close:\n{f_body}"
+        0,
+        "the transferred parameter is returned, not released in `f`:\n{f_body}"
     );
     let g2_body = emitted_function(&emitted, "int64_t g2()");
     assert_eq!(
         count_in(g2_body, "chelis_string_retain("),
-        0,
-        "`f`'s binding-mediated return is owned, so the caller claims it \
-         and must NOT add a call-escape compensation - that third retain \
-         was the round-2 per-call leak:\n{g2_body}"
+        1,
+        "the internal consuming call receives exactly one clone of `raw`; \
+         its returned owner is then claimed without a second retain:\n{g2_body}"
     );
-    for owner in ["out", "raw"] {
+    for (owner, label) in [("__let_3", "out"), ("__let_0", "raw")] {
         assert_eq!(
             count_in(g2_body, &format!("chelis_string_release({owner});")),
             1,
-            "the caller releases `{owner}` exactly once:\n{g2_body}"
+            "the caller releases `{label}` exactly once through its verified \
+             expression owner `{owner}`:\n{g2_body}"
         );
     }
     assert_eq!(
@@ -415,15 +423,13 @@ fn outer_returning_call_into_a_value_temp_is_retained_and_claimed() {
     let f_body = emitted_function(&emitted, "chelis_string f()");
     assert_eq!(
         count_in(f_body, "chelis_string_retain("),
-        2,
-        "`f` owns at both leaves: the outer-return escape retain on \
-         `d = retg()` and the result-target retain on the escaping \
-         binding; without the first, `main` claiming the owned-summarized \
-         result over-releases the captured allocation:\n{f_body}"
+        0,
+        "`retg` returns an already-owned result and `f` transfers it through \
+         the local alias without another retain:\n{f_body}"
     );
     assert_eq!(
         count_in(f_body, "chelis_string_release("),
-        1,
-        "`f` releases its binding exactly once at the block close:\n{f_body}"
+        0,
+        "the result owner leaves through `f`'s return:\n{f_body}"
     );
 }

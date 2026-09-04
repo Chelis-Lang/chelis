@@ -11,6 +11,19 @@ use chelis_types::types::Prim;
 // inside an otherwise-empty arm body is the clearer expression of intent.
 #[allow(clippy::collapsible_match)]
 pub fn verify(dag: &Dag) -> Vec<String> {
+    verify_with_dangling_policy(dag, true)
+}
+
+/// Structural verifier used immediately before ownership lowering. Dangling
+/// producers are intentionally admitted here because the ownership plan
+/// attaches their required `ScopeDrop`; every other DAG invariant remains
+/// identical to [`verify`].
+pub(crate) fn verify_ownership_input(dag: &Dag) -> Vec<String> {
+    verify_with_dangling_policy(dag, false)
+}
+
+#[allow(clippy::collapsible_match)]
+fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> {
     let mut errors = Vec::new();
     let mut consumers = vec![0usize; dag.len()];
     let mut load_types = chelis_unord::UnordMap::<String, crate::dag::TensorType>::new();
@@ -1359,7 +1372,8 @@ pub fn verify(dag: &Dag) -> Vec<String> {
         }
 
         let is_implicit_root = dag.roots().is_empty() && node.id.0 + 1 == dag.len();
-        if !dag.is_root(node.id)
+        if reject_dangling
+            && !dag.is_root(node.id)
             && !is_implicit_root
             && consumers[node.id.0] == 0
             && !matches!(node.op, RiscOp::Store { .. } | RiscOp::Drop)

@@ -26,10 +26,12 @@
 //! deferrals" rule. The emit-side sanitizer is the second layer of
 //! defense in depth and is what these tests verify.
 
-use chelis_backend_c::{CodegenOptions, codegen, codegen_with_options};
+use chelis_backend_c::CodegenOptions;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::load_store_name::LoadStoreName;
 use chelis_types::types::Prim;
+use support::{codegen, codegen_with_options};
 
 fn vec_f32(n: usize) -> TensorType {
     TensorType {

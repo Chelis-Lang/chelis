@@ -1,6 +1,6 @@
 use chelis_ir::host::{
-    ConcreteHostProgram, HostBlasMatmulSummary, HostFunctionSpecialization, HostSparseOpSummary,
-    HostTensorHelper, HostTensorSpecialization,
+    HostBlasMatmulSummary, HostFunctionSpecialization, HostSparseOpSummary, HostTensorHelper,
+    HostTensorSpecialization,
 };
 
 /// Sparse-op kind discriminator for the C summary-derived emission path.
@@ -173,398 +173,25 @@ use crate::host_abi::{
     HostAbiCallback as HostCallback, HostAbiCallbackKind as HostCallbackKind,
     HostAbiExpr as HostExpr, HostAbiExprKind as HostExprKind, HostAbiFunction as HostFunction,
     HostAbiMatchArm as HostMatchArm, HostAbiParam as HostParam, HostAbiProgram as HostProgram,
-    HostAbiType, HostAbiType as HostType, project_program,
+    HostAbiType, HostAbiType as HostType, ProjectedHostProgram, ProjectedHostSite,
 };
 use chelis_ir::dag::{DimExpr, DimInfo, RiscOp, TensorType};
-use chelis_types::manifest::RootPathStep;
-use chelis_types::types::Prim;
+use chelis_ir::ownership::{
+    HostSiteId, VerifiedBlockId, VerifiedDagView, VerifiedHostAction, VerifiedHostOperation,
+    VerifiedHostTensorHelperView, VerifiedHostTerminator, VerifiedOwnerId, VerifiedOwnershipUse,
+};
+use chelis_types::manifest::{RootManifest, RootPathStep};
+use chelis_types::types::{Lane, Prim};
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_types::{CheckedCastKind, CheckedCastPlan, NumericTrap};
 use chelis_unord::{UnordMap, UnordSet};
 
-/// The set of parameter indices a user function's result may alias
-/// (issue #406 call-escape interprocedural summary). `Indices(s)` means
-/// the result may *be* the allocation of one of the parameters in `s`
-/// (and only those); an empty set means the result is always a fresh
-/// allocation that does not escape any argument. `Any` is the
-/// conservative top element: the result may alias *any* refcounted
-/// pointer-typed argument. `Any` is used whenever the body contains a
-/// shape the analysis does not precisely model (e.g. a call to a
-/// function not yet in the summary, an unmodeled `HostExprKind`), so the
-/// emit site over-retains rather than risking a use-after-free.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ParamAlias {
-    Indices(UnordSet<usize>),
-    Any,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ReturnsArg {
-    params: ParamAlias,
-    /// chelis#1222: the result may be a value the caller never handed in --
-    /// a top-level binding read as a free variable somewhere in the body
-    /// (issue #352 hoists such a binding to file scope, so the body reads
-    /// it by name). `main` already owns that allocation through the
-    /// binding itself, so a caller that also claimed the call result would
-    /// release one allocation twice. Widened exactly like `params`: any
-    /// arm, any `let` body, or any callee that can hand back an enclosing
-    /// scope's value sets it.
-    outer: bool,
-}
-
-impl ReturnsArg {
-    fn empty() -> Self {
-        ReturnsArg {
-            params: ParamAlias::Indices(UnordSet::new()),
-            outer: false,
-        }
-    }
-
-    /// A result that is an enclosing scope's value rather than a fresh
-    /// allocation or one of this function's own parameters (chelis#1222).
-    fn outer() -> Self {
-        ReturnsArg {
-            params: ParamAlias::Indices(UnordSet::new()),
-            outer: true,
-        }
-    }
-
-    /// Join two result-alias summaries (the `if`/`match`-arm union or the
-    /// fixpoint widening). `Any` absorbs everything; otherwise the index
-    /// sets are unioned and the outer-alias flags are or-ed.
-    fn join(self, other: ReturnsArg) -> ReturnsArg {
-        let params = match (self.params, other.params) {
-            (ParamAlias::Any, _) | (_, ParamAlias::Any) => ParamAlias::Any,
-            (ParamAlias::Indices(mut a), ParamAlias::Indices(b)) => {
-                a.merge(b);
-                ParamAlias::Indices(a)
-            }
-        };
-        ReturnsArg {
-            params,
-            outer: self.outer || other.outer,
-        }
-    }
-
-    /// Does the result possibly alias parameter index `i`?
-    fn may_return(&self, i: usize) -> bool {
-        match &self.params {
-            ParamAlias::Any => true,
-            ParamAlias::Indices(s) => s.contains(&i),
-        }
-    }
-
-    /// Does the result possibly alias a value owned by an enclosing scope
-    /// (chelis#1222)? A caller must not claim ownership of such a result.
-    fn may_return_outer(&self) -> bool {
-        self.outer
-    }
-}
-
-/// Compute, for every user function in the program, the set of parameter
-/// indices its result may alias (issue #406 call-escape). Reaches a
-/// least-fixpoint over the call graph so mutual recursion is handled: a
-/// function that returns the result of calling another (or itself)
-/// propagates that callee's parameter-alias set back through the matching
-/// argument positions.
-///
-/// Soundness contract: the result for a function is only ever *widened*
-/// across iterations, and any expression shape the walker does not
-/// precisely model yields [`ReturnsArg::Any`] (top), so the summary is a
-/// sound over-approximation of "may the result be this parameter's
-/// allocation". The emit site uses it to decide which block-frame heap
-/// bindings escape through a call and must be retained; an over-estimate
-/// retains a binding that did not actually escape (a documented residual
-/// leak), never frees one that did (which would be a use-after-free).
-fn analyze_returns_arg(program: &HostProgram) -> UnordMap<String, ReturnsArg> {
-    let mut summary: UnordMap<String, ReturnsArg> = program
-        .functions
-        .iter()
-        .map(|f| (f.name.clone(), ReturnsArg::empty()))
-        .collect();
-
-    // Monotone fixpoint: re-evaluate each body until no summary widens.
-    // Bounded by (function count x parameter count) widenings.
-    loop {
-        let mut changed = false;
-        for function in &program.functions {
-            let param_index: UnordMap<&str, usize> = function
-                .params
-                .iter()
-                .enumerate()
-                .map(|(i, p)| (p.name.as_str(), i))
-                .collect();
-            let mut env: UnordMap<String, ReturnsArg> = UnordMap::new();
-            let computed = result_alias_set(
-                &function.body,
-                &param_index,
-                &summary,
-                &mut env,
-                &function.tensor_helpers,
-            );
-            let entry = summary
-                .entry(function.name.clone())
-                .or_insert_with(ReturnsArg::empty);
-            let joined = entry.clone().join(computed);
-            if &joined != entry {
-                *entry = joined;
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    summary
-}
-
-/// Evaluate the parameter-alias set of `expr`'s *result value* under the
-/// current call-graph `summary` and the local `env` mapping in-scope
-/// `let`-binding names to their own alias sets. `param_index` maps the
-/// enclosing function's parameter names to their positions.
-///
-/// The result is the set of enclosing-function parameter indices the
-/// value may alias, or [`ReturnsArg::Any`] when the value may alias an
-/// argument the analysis cannot pin to a specific parameter (a call to a
-/// not-yet-summarized or opaque function whose returned argument is
-/// itself parameter-derived, etc.). Constructors, literals, builtins, and
-/// tensor lanes produce fresh allocations and contribute the empty set.
-fn result_alias_set(
-    expr: &HostExpr,
-    param_index: &UnordMap<&str, usize>,
-    summary: &UnordMap<String, ReturnsArg>,
-    env: &mut UnordMap<String, ReturnsArg>,
-    helpers: &[HostTensorHelper],
-) -> ReturnsArg {
-    match &expr.kind {
-        HostExprKind::Var(name, _) => {
-            // chelis#1222: `env` first, `param_index` second. Parameters are
-            // the function's outermost scope, so any binder currently in
-            // `env` shadows one that reuses its name. Asking `param_index`
-            // first made a `let` binder invisible to the analysis: for
-            // `def f(p) = { p = g  p }` the body reported "returns parameter
-            // 0" instead of `outer`, and the caller then claimed the
-            // captured global `g` and released it a second time. The three
-            // binder arms below already save and restore what they shadow,
-            // so `env` is the authority on what a name means here.
-            if let Some(set) = env.get(name) {
-                set.clone()
-            } else if let Some(&i) = param_index.get(name.as_str()) {
-                ReturnsArg {
-                    params: ParamAlias::Indices(UnordSet::from([i])),
-                    outer: false,
-                }
-            } else if name == "Nil" || name == "None" {
-                // Emitted as a fresh empty list / `None` payload, not as a
-                // read of an enclosing binding.
-                ReturnsArg::empty()
-            } else {
-                // A free variable: a top-level binding this function
-                // captured. The allocation is owned elsewhere (chelis#1222),
-                // so the result is borrowed rather than fresh, and a caller
-                // that released it would release it a second time.
-                ReturnsArg::outer()
-            }
-        }
-        HostExprKind::Let { bindings, body, .. } => {
-            // chelis#1222: save what each binder shadows and put it back at
-            // the end, the way the `MatchOption` and `MatchAdt` arms below
-            // already do. Without this a `let` binder's meaning outlives its
-            // block: a sibling branch reading the same NAME finds the inner
-            // (fresh) set instead of falling through to `outer()`, the
-            // summary reports `may_return_outer() == false` for a function
-            // that does return an outer value, and the caller then claims a
-            // borrowed result and releases it twice.
-            //
-            // The insert stays AFTER the value walk: the initializer is
-            // evaluated in the enclosing scope and may read the outer
-            // meaning of the very name being bound.
-            let mut saved: Vec<(String, Option<ReturnsArg>)> = Vec::new();
-            for binding in bindings {
-                // A refcount-tracked binding OWNS its allocation: the
-                // emitter retains at the value temp on a bare copy
-                // (whatever the source's provenance) and retains again at
-                // a result leaf naming the binding, so a return THROUGH
-                // such a binding hands the caller an owned reference, not
-                // a borrow of the parameter or captured value it started
-                // from. Its result-alias meaning is therefore `empty`.
-                // Propagating the value's alias set here instead made the
-                // caller's call-escape retain compensate an already-owned
-                // return: for `def f(p) = { d = p  d }`, three retains
-                // against two releases, one leaked allocation per call
-                // (PR #1302 round-2 red-team finding). Non-refcounted
-                // carriers (tensors above all) have no retain machinery
-                // and still return true borrows, so they keep the
-                // propagated set -- blanking those would let a caller
-                // claim a borrowed tensor and restore the chelis#1222
-                // double free.
-                let set = if retain_call(&binding.name, &binding.ty).is_some() {
-                    ReturnsArg::empty()
-                } else {
-                    result_alias_set(&binding.value, param_index, summary, env, helpers)
-                };
-                saved.push((binding.name.clone(), env.insert(binding.name.clone(), set)));
-            }
-            let result = result_alias_set(body, param_index, summary, env, helpers);
-            for (name, prev) in saved.into_iter().rev() {
-                match prev {
-                    Some(set) => {
-                        env.insert(name, set);
-                    }
-                    None => {
-                        env.remove(&name);
-                    }
-                }
-            }
-            result
-        }
-        HostExprKind::If {
-            then_expr,
-            else_expr,
-            ..
-        } => {
-            let t = result_alias_set(then_expr, param_index, summary, env, helpers);
-            let e = result_alias_set(else_expr, param_index, summary, env, helpers);
-            t.join(e)
-        }
-        HostExprKind::MatchOption {
-            bind_name,
-            some_expr,
-            none_expr,
-            ..
-        } => {
-            // `bind_name` names the Option's unwrapped inner value (a
-            // fresh scalar/boxed extraction), not a parameter; shadow any
-            // outer entry with the empty set for the `some` arm.
-            let prev = env.insert(bind_name.clone(), ReturnsArg::empty());
-            let s = result_alias_set(some_expr, param_index, summary, env, helpers);
-            match prev {
-                Some(set) => {
-                    env.insert(bind_name.clone(), set);
-                }
-                None => {
-                    env.remove(bind_name);
-                }
-            }
-            let n = result_alias_set(none_expr, param_index, summary, env, helpers);
-            s.join(n)
-        }
-        HostExprKind::MatchAdt {
-            arms, default_expr, ..
-        } => {
-            let mut acc = ReturnsArg::empty();
-            for arm in arms {
-                // The arm's pattern bindings name freshly-accessed ADT
-                // fields (a `chelis_adt_field` read returns an independent
-                // retained handle), not the enclosing function's
-                // parameters. Shadow any outer `env` entry of the same
-                // name with the empty set for the arm body so a coincidental
-                // name reuse cannot spuriously propagate a parameter alias.
-                let saved: Vec<(String, Option<ReturnsArg>)> = arm
-                    .bindings
-                    .iter()
-                    .map(|b| {
-                        (
-                            b.name.clone(),
-                            env.insert(b.name.clone(), ReturnsArg::empty()),
-                        )
-                    })
-                    .collect();
-                acc = acc.join(result_alias_set(
-                    &arm.expr,
-                    param_index,
-                    summary,
-                    env,
-                    helpers,
-                ));
-                for (name, prev) in saved {
-                    match prev {
-                        Some(set) => {
-                            env.insert(name, set);
-                        }
-                        None => {
-                            env.remove(&name);
-                        }
-                    }
-                }
-            }
-            if let Some(default) = default_expr {
-                acc = acc.join(result_alias_set(
-                    default,
-                    param_index,
-                    summary,
-                    env,
-                    helpers,
-                ));
-            }
-            acc
-        }
-        HostExprKind::Call { function, args, .. } => {
-            // The call's result aliases this function's parameters only
-            // through whichever arguments the callee returns. If the
-            // callee is not yet summarized, treat it as may-return-any of
-            // its arguments (conservative top): any argument that itself
-            // aliases a parameter then propagates.
-            let callee = summary.get(function);
-            // chelis#1222: an outer-scope value the callee hands back is
-            // still an outer-scope value here. An unsummarized callee is
-            // conservatively assumed to do so.
-            let mut acc = match callee {
-                Some(s) if !s.may_return_outer() => ReturnsArg::empty(),
-                _ => ReturnsArg::outer(),
-            };
-            for (i, arg) in args.iter().enumerate() {
-                let returns_this = match callee {
-                    Some(s) => s.may_return(i),
-                    None => true,
-                };
-                if returns_this {
-                    acc = acc.join(result_alias_set(arg, param_index, summary, env, helpers));
-                }
-            }
-            acc
-        }
-        HostExprKind::WithSeed { body, .. } => {
-            result_alias_set(body, param_index, summary, env, helpers)
-        }
-        // chelis#1222: an identity tensor helper's whole body is
-        // `outputs[0] = inputs[0];` (see `identity_helper_input`), so the
-        // call hands back its argument's pointer rather than allocating.
-        // Its provenance is the argument's. Every other helper writes a
-        // freshly allocated `chelis_contiguous` output, which is why the
-        // catch-all below reports a fresh result for the rest.
-        HostExprKind::TensorCall { helper, args, .. } => {
-            match (
-                helpers.get(*helper).and_then(identity_helper_input),
-                args.first(),
-            ) {
-                (Some(_), Some(arg)) => result_alias_set(arg, param_index, summary, env, helpers),
-                _ => ReturnsArg::empty(),
-            }
-        }
-        // Constructors, literals, builtins, field access, and the iterator
-        // lanes all build fresh allocations whose result does not alias an
-        // incoming parameter pointer. (A builtin
-        // like `id` is not a user function call; the few identity-shaped
-        // builtins still hand back a retained/independent reference, so
-        // treating them as fresh here is sound for the block-release
-        // balance.)
-        _ => ReturnsArg::empty(),
-    }
-}
-
-pub fn emit_host_program(
-    program: &ConcreteHostProgram,
-    program_name: &str,
-) -> Result<String, Unsupported> {
-    let abi_program = project_program(program)?;
-    emit_host_abi_program(&abi_program, program_name)
-}
-
 pub(crate) fn emit_host_abi_program(
-    program: &HostProgram,
+    projected: &ProjectedHostProgram<'_>,
     program_name: &str,
 ) -> Result<String, Unsupported> {
+    let program = projected.program();
+    let _site_identity_count = projected.sites().len();
     // Emit helpers and functions into a body buffer first so we can detect which
     // runtime headers they transitively require (e.g. `chelis_math.h` on macOS
     // when a helper uses the vForce vvexpf/vvlogf path).  The preamble is then
@@ -594,11 +221,47 @@ pub(crate) fn emit_host_abi_program(
     let internal_linkage = false;
     let emitted_names = emitted_function_names(program, program_name);
     reject_duplicate_emitted_function_names(&emitted_names)?;
+    let internal_names = internal_function_names(program, &emitted_names);
+    let mut all_names = emitted_names.clone();
+    for (original, internal) in internal_names.to_sorted() {
+        if emitted_names
+            .get(original)
+            .is_some_and(|public| public != internal)
+        {
+            all_names.insert(format!("{original} (owned body)"), internal.clone());
+        }
+    }
+    reject_duplicate_emitted_function_names(&all_names)?;
     let function_specializations = function_specializations(program);
-    let returns_arg = analyze_returns_arg(program);
     let header = emit_host_header_with_linkage(program, program_name, internal_linkage)?;
     if !header.is_empty() {
         body.push(header);
+        body.push(String::new());
+    }
+    for function in &program.functions {
+        if function.origin != chelis_ir::host::HostFunctionOrigin::Authored {
+            continue;
+        }
+        let params = function
+            .params
+            .iter()
+            .map(|param| c_decl(&param.ty, &param.name))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(", ");
+        body.push(format!(
+            "static inline {} {}({});",
+            c_type(&function.ret_ty)?,
+            internal_names
+                .get(&function.name)
+                .expect("authored function has owned-body name"),
+            params
+        ));
+    }
+    if program
+        .functions
+        .iter()
+        .any(|function| function.origin == chelis_ir::host::HostFunctionOrigin::Authored)
+    {
         body.push(String::new());
     }
 
@@ -635,6 +298,9 @@ pub(crate) fn emit_host_abi_program(
         helper_requirements.merge(append_helper(
             &mut body,
             helper,
+            projected
+                .global_tensor_helper(index)
+                .expect("projected global helper retains verified child"),
             &format!("{program_name}__global__tensor_{index}"),
         )?);
     }
@@ -659,19 +325,33 @@ pub(crate) fn emit_host_abi_program(
 
     let mut stubbed_functions: UnordSet<String> = UnordSet::new();
     let mut function_bodies: Vec<String> = Vec::new();
-    for function in &program.functions {
+    for (function_index, function) in program.functions.iter().enumerate() {
         let emitted_name = emitted_names
             .get(&function.name)
             .expect("host function emitted name");
         let mut fn_buf: Vec<String> = Vec::new();
+        let helper_output_counts = (0..function.tensor_helpers.len())
+            .map(|helper| {
+                let verified = projected
+                    .function_tensor_helper(function_index, helper)
+                    .expect("projected function helper retains verified child");
+                CEmitter::output_labels(verified.dag()).len().max(1)
+            })
+            .collect::<Vec<_>>();
         match emit_function(
             &mut fn_buf,
             function,
             emitted_name,
-            &emitted_names,
+            &internal_names,
             &function_specializations,
-            &returns_arg,
             internal_linkage || function.is_monomorphized_specialization(),
+            projected
+                .function_sites(function_index)
+                .expect("projected function retains verified sites"),
+            projected
+                .function_owner_bindings(function_index)
+                .expect("projected function retains verified body-owner bindings"),
+            &helper_output_counts,
         ) {
             Ok(()) => {
                 function_bodies.extend(fn_buf);
@@ -692,7 +372,7 @@ pub(crate) fn emit_host_abi_program(
         }
     }
 
-    for function in &program.functions {
+    for (function_index, function) in program.functions.iter().enumerate() {
         if stubbed_functions.contains(&function.name) {
             // A stubbed wrapper aborts before any helper call; skip its
             // (possibly unemittable) tensor helpers entirely.
@@ -705,6 +385,9 @@ pub(crate) fn emit_host_abi_program(
             helper_requirements.merge(append_helper(
                 &mut body,
                 helper,
+                projected
+                    .function_tensor_helper(function_index, index)
+                    .expect("projected function helper retains verified child"),
                 &format!("{function_name}__tensor_{index}"),
             )?);
         }
@@ -714,7 +397,24 @@ pub(crate) fn emit_host_abi_program(
 
     if !program.globals.is_empty() {
         let hoisted: UnordSet<&str> = captured_globals.iter().map(String::as_str).collect();
-        emit_main(&mut body, program_name, program, &returns_arg, &hoisted)?;
+        let helper_output_counts = (0..program.global_tensor_helpers.len())
+            .map(|helper| {
+                let verified = projected
+                    .global_tensor_helper(helper)
+                    .expect("projected global helper retains verified child");
+                CEmitter::output_labels(verified.dag()).len().max(1)
+            })
+            .collect::<Vec<_>>();
+        emit_main(
+            &mut body,
+            program_name,
+            program,
+            projected.manifest(),
+            &hoisted,
+            projected.root_sites(),
+            &internal_names,
+            &helper_output_counts,
+        )?;
     }
 
     // Keep the JSON-only sorting machinery out of unrelated generated
@@ -824,6 +524,31 @@ fn emitted_function_names(program: &HostProgram, program_name: &str) -> UnordMap
                 function.name.clone(),
                 emitted_function_name(program_name, &function.name),
             )
+        })
+        .collect()
+}
+
+fn owned_body_name(emitted_name: &str) -> String {
+    format!("{emitted_name}__chelis_owned_body")
+}
+
+fn internal_function_names(
+    program: &HostProgram,
+    emitted_names: &UnordMap<String, String>,
+) -> UnordMap<String, String> {
+    program
+        .functions
+        .iter()
+        .map(|function| {
+            let public = emitted_names
+                .get(&function.name)
+                .expect("every host function has an emitted name");
+            let internal = if function.origin == chelis_ir::host::HostFunctionOrigin::Authored {
+                owned_body_name(public)
+            } else {
+                public.clone()
+            };
+            (function.name.clone(), internal)
         })
         .collect()
 }
@@ -1639,6 +1364,15 @@ fn append_tensor_abi_helpers(out: &mut Vec<String>) {
 /// Render a tensor element by first recovering the exact tagged scalar.
 /// The runtime owns the exhaustive dtype dispatch and public text contract.
 fn append_tensor_print_helper(out: &mut Vec<String>) {
+    out.push(
+        "static bool chelis_host_string_eq_cstr(chelis_string lhs, const char *rhs) {".to_string(),
+    );
+    out.push("    chelis_string owned_rhs = chelis_string_from_cstr(rhs);".to_string());
+    out.push("    bool equal = chelis_string_eq(lhs, owned_rhs);".to_string());
+    out.push("    chelis_string_release(owned_rhs);".to_string());
+    out.push("    return equal;".to_string());
+    out.push("}".to_string());
+    out.push(String::new());
     out.push("static chelis_string chelis_host_string_from_f16(uint16_t value) {".to_string());
     out.push(
         "    return chelis_string_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_F16, (uint64_t)value));"
@@ -1774,19 +1508,11 @@ fn append_tensor_reshape_helper(out: &mut Vec<String>) {
     out.push("}".to_string());
 }
 
-pub fn emit_host_header(
-    program: &ConcreteHostProgram,
-    program_name: &str,
-) -> Result<String, Unsupported> {
-    let abi_program = project_program(program)?;
-    emit_host_declarations(&abi_program, program_name, false, false)
-}
-
 pub(crate) fn emit_host_abi_header(
-    program: &HostProgram,
+    projected: &ProjectedHostProgram<'_>,
     program_name: &str,
 ) -> Result<String, Unsupported> {
-    emit_host_declarations(program, program_name, false, false)
+    emit_host_declarations(projected.program(), program_name, false, false)
 }
 
 fn emit_host_header_with_linkage(
@@ -1857,9 +1583,10 @@ impl HelperRequirements {
 fn append_helper(
     out: &mut Vec<String>,
     helper: &HostTensorHelper,
+    verified: VerifiedHostTensorHelperView<'_>,
     helper_name: &str,
 ) -> Result<HelperRequirements, Unsupported> {
-    if let Some((_input_name, _input_ty)) = identity_helper_input(helper) {
+    if let Some((_input_name, _input_ty)) = verified_identity_helper_input(helper, verified.dag()) {
         out.push(format!(
             "static void {}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out) {{",
             helper_name,
@@ -1876,13 +1603,13 @@ fn append_helper(
     // generated `.c` file and must never be exported symbols.  `static_entry`
     // ensures the kernel function itself gets `static` linkage so that when
     // compiled with `-shared -fPIC` the symbol is not exported via PLT.
-    let specialized = chelis_ir::specialize::specialize_for_blas(&helper.dag);
-    let uses_blas = specialized
+    let dag = verified.dag();
+    let uses_blas = dag
         .nodes()
         .iter()
         .any(|node| matches!(node.op, RiscOp::BlasMatmul { .. }));
-    let helper_src = CEmitter::emit_dag_with_options(
-        &specialized,
+    let helper_src = CEmitter::emit_verified_dag_with_options(
+        dag,
         helper_name,
         crate::CodegenOptions {
             use_blas: uses_blas,
@@ -1927,14 +1654,15 @@ fn append_helper(
     Ok(requirements)
 }
 
-fn identity_helper_input(
+fn verified_identity_helper_input(
     helper: &HostTensorHelper,
+    dag: VerifiedDagView<'_>,
 ) -> Option<(String, chelis_ir::dag::TensorType)> {
-    if helper.dag.roots().len() != 1 || helper.inputs.len() != 1 {
+    if dag.roots().len() != 1 || helper.inputs.len() != 1 {
         return None;
     }
-    let root = helper.dag.roots()[0];
-    let node = helper.dag.get(root)?;
+    let root = dag.roots()[0];
+    let node = dag.get(root)?;
     match &node.op {
         RiscOp::Load { name } if node.output_type == helper.output => helper
             .inputs
@@ -1983,14 +1711,17 @@ fn append_unreachable_fn_abort_stub(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_function(
     out: &mut Vec<String>,
     function: &HostFunction,
     emitted_name: &str,
-    emitted_names: &UnordMap<String, String>,
+    internal_names: &UnordMap<String, String>,
     function_specializations: &UnordMap<String, HostFunctionSpecialization>,
-    returns_arg: &UnordMap<String, ReturnsArg>,
     internal_linkage: bool,
+    ownership_sites: &[ProjectedHostSite<'_>],
+    owner_bindings: &[(VerifiedOwnerId, String)],
+    helper_output_counts: &[usize],
 ) -> Result<(), Unsupported> {
     let params = function
         .params
@@ -1998,7 +1729,11 @@ fn emit_function(
         .map(|param| c_decl(&param.ty, &param.name))
         .collect::<Result<Vec<_>, _>>()?
         .join(", ");
-    let prefix = if internal_linkage {
+    let authored = function.origin == chelis_ir::host::HostFunctionOrigin::Authored;
+    let body_name = internal_names
+        .get(&function.name)
+        .expect("verified function has an internal emitted name");
+    let prefix = if internal_linkage || authored {
         "static inline "
     } else {
         ""
@@ -2006,36 +1741,155 @@ fn emit_function(
     out.push(format!(
         "{prefix}{} {}({}) {{",
         c_type(&function.ret_ty)?,
-        emitted_name,
+        body_name,
         params
     ));
     let mut emitter = HostEmitter::new(
         "    ".to_string(),
         emitted_name,
-        emitted_names.clone(),
+        internal_names.clone(),
         function_specializations.clone(),
-        returns_arg.clone(),
         &function.tensor_helpers,
+        helper_output_counts,
+        ownership_sites,
     );
+    if owner_bindings.len() < function.params.len()
+        || function
+            .params
+            .iter()
+            .zip(owner_bindings)
+            .any(|(param, (_, name))| param.name != *name)
+    {
+        return Err(invalid_abi_shape(
+            format!(
+                "verified function's {} payload parameters disagree with {} body-owner bindings",
+                function.params.len(),
+                owner_bindings.len()
+            ),
+            "verified C host ownership emission",
+        ));
+    }
+    for (owner, name) in owner_bindings {
+        if emitter
+            .owner_vars
+            .insert(*owner, c_ident(name).into_owned())
+            .is_some()
+        {
+            return Err(invalid_abi_shape(
+                format!("verified function repeats parameter owner {owner:?}"),
+                "verified C host ownership emission",
+            ));
+        }
+    }
     emitter.emit_expr_to_var(&function.body, "__result", &function.ret_ty)?;
+    let terminal = ownership_sites
+        .iter()
+        .find(|site| site.kind == chelis_ir::ownership::HostSiteKind::FunctionReturn)
+        .ok_or_else(|| {
+            invalid_abi_shape(
+                "verified host function has no FunctionReturn site".to_string(),
+                "verified C host ownership emission",
+            )
+        })?;
+    emitter.emit_terminal_site(terminal, Some("__result"))?;
+    emitter.finish_expression_sites()?;
     out.extend(emitter.lines);
     out.push("    return __result;".to_string());
     out.push("}".to_string());
+
+    if authored {
+        let entry_uses = authored_entry_uses(ownership_sites, function.params.len())?;
+        let wrapper_params = function
+            .params
+            .iter()
+            .map(|param| c_decl(&param.ty, &param.name))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(", ");
+        out.push(format!(
+            "{} {}({}) {{",
+            c_type(&function.ret_ty)?,
+            emitted_name,
+            wrapper_params
+        ));
+        let mut args = Vec::with_capacity(function.params.len());
+        for (index, (param, use_)) in function.params.iter().zip(entry_uses).enumerate() {
+            if use_ == VerifiedOwnershipUse::Move && retain_call(&param.name, &param.ty).is_some() {
+                let owned = format!("__chelis_owned_arg_{index}");
+                out.push(format!(
+                    "    {} = {};",
+                    c_decl(&param.ty, &owned)?,
+                    c_ident(&param.name)
+                ));
+                out.push(format!(
+                    "    {}",
+                    retain_call(&owned, &param.ty).expect("heap retain")
+                ));
+                args.push(owned);
+            } else {
+                args.push(c_ident(&param.name).into_owned());
+            }
+        }
+        out.push(format!(
+            "    {} __result = {}({});",
+            c_type(&function.ret_ty)?,
+            body_name,
+            args.join(", ")
+        ));
+        out.push("    return __result;".to_string());
+        out.push("}".to_string());
+    }
     Ok(())
 }
 
-/// The base C indent inside the generated `main` body. Top-level `main`
-/// locals are emitted at this indent; `track_owned_alloc` releases only
-/// allocations at this depth (issue #406) so block-scoped temporaries in
-/// nested loop/conditional bodies are not freed out of scope.
+fn authored_entry_uses(
+    sites: &[ProjectedHostSite<'_>],
+    param_count: usize,
+) -> Result<Vec<VerifiedOwnershipUse>, Unsupported> {
+    let entry = sites
+        .iter()
+        .find(|site| site.kind == chelis_ir::ownership::HostSiteKind::FunctionEntry)
+        .ok_or_else(|| {
+            invalid_abi_shape(
+                "verified authored function has no FunctionEntry site".to_string(),
+                "verified C host ownership emission",
+            )
+        })?;
+    let args = entry.directives.iter().find_map(|action| match action {
+        VerifiedHostAction::Terminator(VerifiedHostTerminator::Jump { edge, .. }) => {
+            Some(edge.args())
+        }
+        _ => None,
+    });
+    let Some(args) = args else {
+        return Err(invalid_abi_shape(
+            "verified authored FunctionEntry has no consuming body edge".to_string(),
+            "verified C host ownership emission",
+        ));
+    };
+    if args.len() < param_count {
+        return Err(invalid_abi_shape(
+            format!(
+                "verified authored FunctionEntry carries {} arguments for {param_count} parameters",
+                args.len()
+            ),
+            "verified C host ownership emission",
+        ));
+    }
+    Ok(args[..param_count].iter().map(|arg| arg.use_()).collect())
+}
+
 const BASE_MAIN_INDENT: &str = "    ";
 
+#[allow(clippy::too_many_arguments)]
 fn emit_main(
     out: &mut Vec<String>,
     program_name: &str,
     program: &HostProgram,
-    returns_arg: &UnordMap<String, ReturnsArg>,
+    manifest: &RootManifest,
     hoisted: &UnordSet<&str>,
+    ownership_sites: &[ProjectedHostSite<'_>],
+    internal_names: &UnordMap<String, String>,
+    helper_output_counts: &[usize],
 ) -> Result<(), Unsupported> {
     out.push("int main(void) {".to_string());
     // chelis#840: the globals emitter needs the same original-to-emitted
@@ -2045,40 +1899,15 @@ fn emit_main(
     let mut emitter = HostEmitter::new(
         BASE_MAIN_INDENT.to_string(),
         &format!("{program_name}__global"),
-        emitted_function_names(program, program_name),
+        internal_names.clone(),
         function_specializations(program),
-        returns_arg.clone(),
         &program.global_tensor_helpers,
+        helper_output_counts,
+        ownership_sites,
     );
-    // issue #406: `main` is the program root — it owns every heap value
-    // it creates (globals plus the list/tuple/dict temporaries built to
-    // construct them) and returns none, so enable scope-release tracking
-    // and free each owned allocation before `return 0`. Without this the
-    // generated binary leaks them for the whole process lifetime, which
-    // a `valgrind --leak-check=full --error-exitcode=1` gate flags as
-    // "definitely lost".
-    emitter.scope_releases = Some(Vec::new());
     for (index, binding) in program.globals.iter().enumerate() {
         let binding_var = format!("__binding_{index}_value");
         emitter.emit_expr_to_var(&binding.value, &binding_var, &binding.ty)?;
-        // The binding-value local owns its allocation when the binding
-        // built one (tensor kernel output, list/dict builtin, literal).
-        // Track it here; the alias name (`theta`) is never tracked, and
-        // dedup in `emit_scope_releases` collapses the case where the
-        // binding value *is* a literal already tracked above.
-        //
-        // chelis#1222: a binding can instead be a second *name* for an
-        // allocation an earlier binding already owns -- `rho = rho_base`,
-        // an `if`/`match` whose arms are existing bindings, a call to a
-        // function that returns one of its arguments or a captured
-        // top-level binding, or an identity tensor helper. `main` frees
-        // one pointer per tracked variable, so claiming such a binding
-        // releases one allocation twice: a tensor double-release for a
-        // tensor, an unearned release for a refcounted container. Leave it
-        // untracked; the owning binding's release reclaims it exactly once.
-        if !emitter.scope_already_owns(&binding_var) {
-            emitter.track_owned_alloc(&binding_var, &binding.ty);
-        }
         if hoisted.contains(binding.name.as_str()) {
             // Declared at file scope (issue #352); assign, don't shadow.
             // #379: reference the same mangled name the file-scope `static`
@@ -2093,35 +1922,151 @@ fn emit_main(
                 c_decl(&binding.ty, &binding.name)?
             ));
         }
-        // chelis#1222: the user-facing name is a second slot holding the
-        // same pointer as the value temp. Record it so a later binding
-        // that reads the name resolves back to the temp `main` tracks.
-        if release_call(&binding.name, &binding.ty).is_some() {
-            let name = c_ident(&binding.name).into_owned();
-            emitter.record_alias(&name, &binding_var);
-        }
     }
+    let root_sites = ownership_sites
+        .iter()
+        .filter(|site| site.kind == chelis_ir::ownership::HostSiteKind::ManifestRoot)
+        .collect::<Vec<_>>();
+    let mut consumed_root_sites = UnordSet::new();
     for binding in &program.globals {
-        if !binding.display_roots.is_empty() {
-            for root in &binding.display_roots {
-                emitter.emit_manifest_root(
-                    &root.name,
-                    &c_ident(&binding.name),
-                    &binding.ty,
-                    &root.path,
-                )?;
+        for display in &binding.display_roots {
+            let mut entries = manifest.entries.iter().enumerate().filter(|(_, root)| {
+                let short_def = root
+                    .def_name
+                    .rsplit_once("__")
+                    .map(|(_, tail)| tail)
+                    .or_else(|| root.def_name.rsplit_once('.').map(|(_, tail)| tail))
+                    .unwrap_or(root.def_name.as_str());
+                let suffix = root.name.strip_prefix(root.def_name.as_str()).unwrap_or("");
+                let selected = binding.name == root.def_name
+                    || matches!(
+                        &binding.value.kind,
+                        HostExprKind::Call { function, args, .. }
+                            if function == &root.def_name && args.is_empty()
+                    );
+                root.lane == Lane::Host
+                    && selected
+                    && display.name == format!("{short_def}{suffix}")
+                    && display.path == root.path
+            });
+            let manifest_index = entries.next().map(|(index, _)| index);
+            if entries.next().is_some() {
+                return Err(invalid_abi_shape(
+                    format!(
+                        "materialized root `{}` has duplicate manifest entries",
+                        display.name
+                    ),
+                    "verified C host ownership emission",
+                ));
             }
-        } else if let Some(display_name) = binding.display_name.as_deref() {
-            // #379: the display label stays raw (it is a printed string);
-            // the C value identifier routes through `c_ident` so it matches
-            // the (possibly mangled) declaration above.
+            let mut sites = root_sites.iter().copied().filter(|site| {
+                let identity = site.directives.iter().any(|action| {
+                    matches!(
+                        action,
+                        VerifiedHostAction::ManifestRoot {
+                            manifest_index: candidate,
+                            ..
+                        } if *candidate == manifest_index
+                    )
+                });
+                let label = manifest_index.is_some()
+                    || site.directives.iter().any(|action| {
+                        matches!(
+                            action,
+                            VerifiedHostAction::Operation(VerifiedHostOperation::RootConsume {
+                                root,
+                                ..
+                            }) if *root == display.name
+                        )
+                    });
+                identity && label
+            });
+            let site = sites.next().ok_or_else(|| {
+                invalid_abi_shape(
+                    format!("display root `{}` has no verified root site", display.name),
+                    "verified C host ownership emission",
+                )
+            })?;
+            if sites.next().is_some() || !consumed_root_sites.insert(site.id) {
+                return Err(invalid_abi_shape(
+                    format!(
+                        "display root `{}` has duplicate verified root sites",
+                        display.name
+                    ),
+                    "verified C host ownership emission",
+                ));
+            }
+            emitter.prepare_manifest_root(site)?;
+            emitter.emit_manifest_root(
+                &display.name,
+                &c_ident(&binding.name),
+                &binding.ty,
+                &display.path,
+            )?;
+            emitter.finish_manifest_root(site)?;
+        }
+        if binding.display_roots.is_empty()
+            && let Some(display_name) = binding.display_name.as_deref()
+        {
+            let mut sites = root_sites.iter().copied().filter(|site| {
+                let display = site.directives.iter().any(|action| {
+                    matches!(
+                        action,
+                        VerifiedHostAction::ManifestRoot {
+                            manifest_index: None,
+                            ..
+                        }
+                    )
+                });
+                let consume = site.directives.iter().any(|action| {
+                    matches!(
+                        action,
+                        VerifiedHostAction::Operation(VerifiedHostOperation::RootConsume {
+                            root,
+                            ..
+                        }) if *root == display_name
+                    )
+                });
+                display && consume
+            });
+            let site = sites.next().ok_or_else(|| {
+                invalid_abi_shape(
+                    format!("displayed root `{display_name}` has no verified root site"),
+                    "verified C host ownership emission",
+                )
+            })?;
+            if sites.next().is_some() || !consumed_root_sites.insert(site.id) {
+                return Err(invalid_abi_shape(
+                    format!("displayed root `{display_name}` has duplicate verified root sites"),
+                    "verified C host ownership emission",
+                ));
+            }
+            emitter.prepare_manifest_root(site)?;
             emitter.emit_labeled_root(display_name, &c_ident(&binding.name), &binding.ty)?;
+            emitter.finish_manifest_root(site)?;
         }
     }
-    // issue #406: free everything `main` owns before returning. Emitted
-    // after the labeled-root prints so the values are still live when
-    // printed and reclaimed immediately after.
-    emitter.emit_scope_releases();
+    if consumed_root_sites.len() != root_sites.len() {
+        return Err(invalid_abi_shape(
+            format!(
+                "verified ownership root-site cursor consumed {} of {} roots",
+                consumed_root_sites.len(),
+                root_sites.len()
+            ),
+            "verified C host ownership emission",
+        ));
+    }
+    let terminal = ownership_sites
+        .iter()
+        .find(|site| site.kind == chelis_ir::ownership::HostSiteKind::FunctionReturn)
+        .ok_or_else(|| {
+            invalid_abi_shape(
+                "verified roots unit has no terminal site".to_string(),
+                "verified C host ownership emission",
+            )
+        })?;
+    emitter.emit_terminal_site(terminal, None)?;
+    emitter.finish_expression_sites()?;
     out.extend(emitter.lines);
     out.push("    return 0;".to_string());
     out.push("}".to_string());
@@ -2417,151 +2362,19 @@ fn host_functions_reachable_from_main(program: &HostProgram) -> UnordSet<String>
     reachable
 }
 
-/// chelis#1222: the spelling of a binder's alias-graph key.
-///
-/// A binder key shares one namespace with every other string
-/// [`HostEmitter::alias_source`] is keyed on, and the other inhabitants of
-/// that namespace are C identifiers: emitter temps, and -- through
-/// [`HostEmitter::resolve_alias_key`]'s fallback -- the `c_ident` spelling
-/// of any name no binder scope introduced (a hoisted top-level binding, a
-/// compiled function's parameter).
-///
-/// The key must therefore be a string no source identifier can produce.
-/// `#` is the discriminator: it is not a Chelis identifier character, so
-/// `c_ident` can never return a name containing one, while the key itself
-/// is only ever a `UnordMap` key and never reaches emitted C.
-///
-/// The first cut spelled keys `__bind_N`, on `c_ident`'s premise that
-/// "Surf/Deep identifiers cannot start with `__`". The lexer and checker
-/// accept such identifiers, so `__bind_0 = to_tensor([1.0f32, 2.0f32])`
-/// beside any `let` block overwrote the top-level binding's alias edge and
-/// re-armed the chelis#1222 double free -- reachable only by spelling the
-/// binding a particular way, which is exactly the alpha-dependence this
-/// mechanism exists to remove.
-const BINDER_KEY_PREFIX: &str = "#bind#";
-
 struct HostEmitter<'a> {
     lines: Vec<String>,
     indent: String,
     helper_prefix: String,
     emitted_names: UnordMap<String, String>,
     function_specializations: UnordMap<String, HostFunctionSpecialization>,
-    /// Interprocedural "result aliases parameter" summary (issue #406
-    /// call-escape): maps a user function's name to the set of parameter
-    /// indices whose allocation its result may *be* (rather than a fresh
-    /// allocation). Computed once per program by [`analyze_returns_arg`].
-    /// When a block result is `f(p, ...)` and `f` may return its first
-    /// parameter, the block-frame heap binding `p` escapes through the
-    /// call and must be retained so the block's release does not drop the
-    /// reference the caller now holds. A callee absent from this map
-    /// (recursion not yet at fixpoint, an unanalyzable builtin path, or a
-    /// genuinely opaque call) is treated conservatively as may-return-any
-    /// by the emit-site logic, which is use-after-free-safe (it may
-    /// over-retain, never under-retain).
-    returns_arg: UnordMap<String, ReturnsArg>,
     tensor_helpers: &'a [HostTensorHelper],
+    tensor_helper_output_counts: &'a [usize],
+    expression_sites: Vec<ProjectedHostSite<'a>>,
+    expression_site_index: usize,
+    pre_emitted_clone_sites: UnordSet<HostSiteId>,
+    owner_vars: UnordMap<VerifiedOwnerId, String>,
     temp_counter: usize,
-    /// When `Some`, every heap-owning allocation created in this emit
-    /// scope is recorded as `(var, type)` so the scope can release it
-    /// before returning. Set only for `emit_main` (issue #406): the
-    /// generated `main` is the program root, owns every heap value it
-    /// creates, and transfers none out, so each owned allocation must be
-    /// freed at scope exit or it leaks for the process lifetime. `None`
-    /// inside compiled functions, which already emit their own
-    /// per-local tensor-release cleanup.
-    scope_releases: Option<Vec<(String, HostType)>>,
-    /// Stack of open release-tracking `let` blocks (issue #406, the
-    /// function-body sibling of the `emit_main` leak). One entry per block;
-    /// each records the slots the block transfers an owned reference into
-    /// (`owned_destinations`: its result target plus each binding's value
-    /// temp) and the heap bindings it frees at its close (`bindings`).
-    ///
-    /// A bare pointer-copy that aliases one of a block's `bindings` into an
-    /// `owned_destinations` slot (emitted directly for a `Var` body or
-    /// inside an `if`/`match` arm) is retained: that destination owns an
-    /// independent reference and the retain cancels the eventual release so
-    /// the caller keeps one reference. A transient read of a binding into an
-    /// internal arg temp (e.g. `__arg0 = p` feeding `chelis_tuple_get`) is
-    /// not an owned destination, so it is left untouched. Empty outside a
-    /// tracked block (e.g. `emit_main`, whose alias handling is the distinct
-    /// global-binding path above).
-    let_scopes: Vec<LetReleaseScope>,
-    /// chelis#1222: C variables whose value is a bare pointer copy of
-    /// another C variable's allocation, mapped to that source variable.
-    ///
-    /// A scope may only release what it allocated. Every emitted
-    /// `target = source;` that hands one allocation to a second slot is
-    /// recorded here, so a slot can be traced back to the variable that
-    /// actually owns its pointer before the scope claims it. Chains are
-    /// resolved by [`HostEmitter::alias_root`].
-    ///
-    /// Only heap-owning types are recorded: a scalar copy owns nothing, so
-    /// tracking it would be noise. `let`-binding *names* are deliberately
-    /// not recorded either -- the block-release ledger tracks the name, not
-    /// its `__let_N` value temp, so a chain through the name would report a
-    /// binding this block genuinely owns as borrowed.
-    alias_source: UnordMap<String, String>,
-    /// chelis#1222: C variables holding a pointer this scope did not
-    /// allocate and whose owner it cannot name -- the result of a call
-    /// whose callee may hand back a value it read out of an enclosing
-    /// scope (`may_return_outer`). There is no source variable to record,
-    /// only the fact that claiming ownership would be wrong.
-    foreign: UnordSet<String>,
-    /// chelis#1222: a stack of binder scopes, mapping a **raw source name**
-    /// to the alias-graph key that currently means it.
-    ///
-    /// A source name is not a usable key on its own. C identifiers are
-    /// scoped and reusable, so one name can have two live meanings, and a
-    /// name-keyed graph silently conflates them: the outer meaning is the
-    /// one a later reference needs, while the inner one is what the map
-    /// holds. Every binder therefore gets its own [`BINDER_KEY_PREFIX`] key,
-    /// and references resolve through this stack before touching the graph,
-    /// so a bound name's *spelling* never reaches `alias_source` at all.
-    ///
-    /// That is what makes the ownership decision alpha-invariant: renaming
-    /// a bound variable cannot change which allocations get released. The
-    /// key spelling is part of that guarantee, not decoration -- a key a
-    /// source identifier could also spell puts the two back in one slot.
-    ///
-    /// `result_alias_set`'s `env` is the analysis-side counterpart and now
-    /// saves and restores shadowed names in all three of its binder arms.
-    /// The `Let` arm did not until chelis#1222, so an earlier version of
-    /// this comment cited a precedent that did not exist.
-    binder_keys: Vec<UnordMap<String, String>>,
-    /// chelis#1222: counter for [`HostEmitter::bind_alias_key`].
-    ///
-    /// Deliberately NOT `temp_counter`. A binder key is a key in
-    /// `alias_source` and never appears in emitted C, so drawing from the
-    /// emitted-temp counter would renumber every later temp in the
-    /// translation unit -- a corpus-wide textual diff that says nothing
-    /// about behaviour and hides the diff that would. Measured: sharing
-    /// the counter changed the emitted C of 21 of 76 corpus files with
-    /// identical release counts in all 21.
-    binder_key_counter: usize,
-}
-
-/// One open release-tracking `let` block; see `HostEmitter::let_scopes`.
-struct LetReleaseScope {
-    /// C variables this block transfers an owned reference into: the block's
-    /// result target (the enclosing-scope variable it writes its result to)
-    /// plus each binding's `__let_N` value temp. A bare pointer-copy that
-    /// aliases one of this block's `bindings` into one of these destinations
-    /// must be retained so the destination owns an independent reference —
-    /// that destination is itself released later (a binding at this block's
-    /// close, or by whatever owns the result target). A copy into any other
-    /// temp (a transient arg fed to `chelis_tuple_get`, say) is a borrow and
-    /// is not retained.
-    owned_destinations: UnordSet<String>,
-    /// The subset of `owned_destinations` that are binding value temps.
-    /// Their reference is transferred to the binding name and released at
-    /// this block's close unconditionally, so a bare copy into one must
-    /// retain whatever the source's provenance. The block's result target
-    /// is deliberately NOT in this set: its release path is the caller's
-    /// alias-aware machinery, so it keeps the tracked-binding-source rule
-    /// (see `retain_transferred_result`).
-    value_temps: UnordSet<String>,
-    /// Heap binding names this block releases at its close.
-    bindings: UnordSet<String>,
 }
 
 impl<'a> HostEmitter<'a> {
@@ -2570,8 +2383,9 @@ impl<'a> HostEmitter<'a> {
         helper_prefix: &str,
         emitted_names: UnordMap<String, String>,
         function_specializations: UnordMap<String, HostFunctionSpecialization>,
-        returns_arg: UnordMap<String, ReturnsArg>,
         tensor_helpers: &'a [HostTensorHelper],
+        tensor_helper_output_counts: &'a [usize],
+        ownership_sites: &[ProjectedHostSite<'a>],
     ) -> Self {
         Self {
             lines: Vec::new(),
@@ -2579,15 +2393,17 @@ impl<'a> HostEmitter<'a> {
             helper_prefix: helper_prefix.to_string(),
             emitted_names,
             function_specializations,
-            returns_arg,
             tensor_helpers,
+            tensor_helper_output_counts,
+            expression_sites: ownership_sites
+                .iter()
+                .filter(|site| site.kind == chelis_ir::ownership::HostSiteKind::Expression)
+                .cloned()
+                .collect(),
+            expression_site_index: 0,
+            pre_emitted_clone_sites: UnordSet::new(),
+            owner_vars: UnordMap::new(),
             temp_counter: 0,
-            scope_releases: None,
-            let_scopes: Vec::new(),
-            alias_source: UnordMap::new(),
-            foreign: UnordSet::new(),
-            binder_keys: Vec::new(),
-            binder_key_counter: 0,
         }
     }
 
@@ -2610,277 +2426,6 @@ impl<'a> HostEmitter<'a> {
             .push(format!("{}chelis_tensor_end_write({guard});", self.indent));
     }
 
-    /// chelis#1222: record that `target` now holds `source`'s pointer.
-    /// Self-aliases are dropped so [`HostEmitter::alias_root`] cannot spin.
-    fn record_alias(&mut self, target: &str, source: &str) {
-        if target == source {
-            return;
-        }
-        self.alias_source
-            .insert(target.to_string(), source.to_string());
-    }
-
-    /// chelis#1222: a builtin whose emitted form is `target = <arg temp>;`
-    /// hands the argument's pointer straight through, so `target` owns
-    /// nothing of its own and the receiving scope must trace it back before
-    /// claiming it.
-    ///
-    /// `source` is an emitter temp, never a source name, so it needs no
-    /// [`HostEmitter::resolve_alias_key`] pass. Only heap-owning types are
-    /// recorded, matching the `Var` arm: a scalar copy owns nothing.
-    ///
-    /// An unretained copy records provenance whether or not the argument was
-    /// itself borrowed. A fresh argument's temp has no outgoing edge, so the
-    /// chain ends at a variable this scope allocated and never tracked and
-    /// `target` is still claimed; a borrowed one reaches its owner and is not.
-    /// A retained destination instead owns its reference and must not also be
-    /// marked borrowed. Without this distinction,
-    /// `b = debug(a)` freed `a`'s tensor twice -- the reported chelis#1222
-    /// shape, through a builtin instead of a bare name.
-    ///
-    /// `arg` is the unlowered argument expression. When it is a bare `Var`,
-    /// this is the same transfer the `Var` arm of [`HostEmitter::assign_expr`]
-    /// performs, so it takes the same issue #406 escape retain: a block
-    /// binding that reaches an owned destination through such a builtin is
-    /// released at the block close like any other, and without the retain
-    /// `b = { c = [1i64]  debug(c) }` released one allocation twice.
-    fn record_pointer_copy(&mut self, target: &str, source: &str, arg: &HostExpr, ty: &HostType) {
-        let retained = if let HostExprKind::Var(name, _) = &arg.kind {
-            self.retain_transferred_result(target, name, ty)
-        } else {
-            false
-        };
-        // A retained pointer is an independently owned reference. Recording
-        // borrowed provenance as well would suppress its eventual release and
-        // strand the retain, the same split judgement assign_call avoids.
-        if !retained && release_call(target, ty).is_some() {
-            self.record_alias(target, source);
-        }
-    }
-
-    /// chelis#1222: record that `target` holds a pointer from an enclosing
-    /// scope that this emitter cannot attribute to a local variable.
-    fn mark_foreign(&mut self, target: &str) {
-        self.foreign.insert(target.to_string());
-    }
-
-    /// chelis#1222: the alias-graph key that currently means `name`.
-    ///
-    /// Walks the binder stack innermost-first, exactly as C name lookup
-    /// does, and falls back to the `c_ident`-mapped name for anything no
-    /// binder scope introduced -- a compiled function's parameter, a
-    /// hoisted top-level binding, or a temp. Those are already unique
-    /// within one emitted C function body, so the fallback needs no key of
-    /// its own.
-    fn resolve_alias_key(&self, name: &str) -> String {
-        self.binder_keys
-            .iter()
-            .rev()
-            .find_map(|frame| frame.get(name).cloned())
-            .unwrap_or_else(|| c_ident(name).into_owned())
-    }
-
-    /// chelis#1222: give `name` its own alias-graph key inside the innermost
-    /// binder scope.
-    ///
-    /// Call this only AFTER the binder's initializer has been emitted. The
-    /// initializer is evaluated in the *enclosing* scope and may read the
-    /// outer meaning of this very name (`a = a`); binding the name first
-    /// would make that read resolve to the binder being defined. The
-    /// analysis side already sequences it this way -- `result_alias_set`
-    /// computes a binding's set before inserting the name -- and getting it
-    /// backwards here is precisely the defect that produced a double free
-    /// for `b = { a = a  a }` while `b = { z = a  z }` was correct.
-    ///
-    /// The key is spelled with [`BINDER_KEY_PREFIX`] so no source identifier
-    /// can name one; see that constant for why a `__`-prefixed key was a
-    /// double free waiting to be spelled.
-    fn bind_alias_key(&mut self, name: &str) -> String {
-        let key = format!("{BINDER_KEY_PREFIX}{}", self.binder_key_counter);
-        self.binder_key_counter += 1;
-        if let Some(frame) = self.binder_keys.last_mut() {
-            frame.insert(name.to_string(), key.clone());
-        }
-        key
-    }
-
-    /// chelis#1222: follow `var` back through the recorded pointer copies,
-    /// returning every variable that holds the same allocation, `var`
-    /// first and the owner last. A single-element chain means nothing
-    /// aliased into `var`, so its value is freshly allocated. The `seen`
-    /// set makes the walk total even if a future emit path records a
-    /// cycle.
-    ///
-    /// The whole chain matters, not just its end: a `let` block's result
-    /// reaches an outer binding through the block's own binding name and
-    /// value temp, and which of those links is a slot somebody already
-    /// releases is exactly the ownership question.
-    fn alias_chain(&self, var: &str) -> Vec<String> {
-        let mut chain = vec![var.to_string()];
-        let mut seen: UnordSet<String> = UnordSet::from([var.to_string()]);
-        while let Some(next) = self.alias_source.get(chain.last().expect("non-empty")) {
-            if !seen.insert(next.clone()) {
-                break;
-            }
-            chain.push(next.clone());
-        }
-        chain
-    }
-
-    /// chelis#1222: the variable at the end of `var`'s alias chain.
-    fn alias_root(&self, var: &str) -> String {
-        self.alias_chain(var)
-            .pop()
-            .expect("alias chain is never empty")
-    }
-
-    /// chelis#1222: is `var`'s allocation already owned by another slot
-    /// this scope releases, or by a scope outside this one?
-    ///
-    /// `main` frees one allocation per tracked variable, so tracking a
-    /// second variable that holds the same pointer frees it twice -- for a
-    /// tensor that is a hard tensor double-release, and for a
-    /// refcounted container a release the ledger never earned. Both are
-    /// heap corruption; the answer here decides whether the value is
-    /// claimed at all.
-    fn scope_already_owns(&self, var: &str) -> bool {
-        let chain = self.alias_chain(var);
-        if chain.iter().any(|link| self.foreign.contains(link)) {
-            return true;
-        }
-        self.scope_releases.as_ref().is_some_and(|tracked| {
-            chain
-                .iter()
-                .any(|link| tracked.iter().any(|(name, _)| name == link))
-        })
-    }
-
-    /// Record `var` (of `ty`) as a heap-owning allocation this scope must
-    /// release before returning. No-op unless scope-release tracking is
-    /// enabled (i.e. this is the `main` emitter, issue #406). Only the
-    /// pointer-typed, heap-owning `HostType`s are tracked; scalars and
-    /// borrowed views carry no ownership.
-    fn track_owned_alloc(&mut self, var: &str, ty: &HostType) {
-        // Only track allocations declared at the scope's own (base) indent
-        // level. Temporaries created inside a nested C block -- a
-        // `map` / `flat_map` / `filter` / `fold` loop body, or an `if` /
-        // `match` arm -- are emitted at a deeper indent and are block-
-        // scoped, so they are not visible at the function-level cleanup
-        // and must not be released there (that would emit C referencing
-        // an out-of-scope identifier). The combinator loops accumulate
-        // in place (`chelis_list_push`/`chelis_list_extend`, chelis#943)
-        // so they create no per-iteration list generations; the `append`
-        // builtin's per-call result inside a nested block is still
-        // unreleased -- that remaining half of chelis#943 needs
-        // consumption facts this emitter does not have yet.
-        if self.indent.len() != BASE_MAIN_INDENT.len() {
-            return;
-        }
-        if let Some(releases) = self.scope_releases.as_mut()
-            && release_call(var, ty).is_some()
-        {
-            releases.push((var.to_string(), ty.clone()));
-        }
-    }
-
-    /// Remove a temporary whose owned reference was consumed locally from
-    /// the enclosing main-scope cleanup ledger. Without this transfer step,
-    /// a nested aggregate literal is released once through its parent and a
-    /// second time by `emit_scope_releases`.
-    fn forget_owned_alloc(&mut self, var: &str) {
-        if let Some(releases) = self.scope_releases.as_mut() {
-            releases.retain(|(name, _)| name != var);
-        }
-    }
-
-    /// Drain the recorded scope-owned allocations, emitting one release
-    /// call per distinct variable (deduped: an alias such as `theta =
-    /// __binding_0_value` is never recorded, only the underlying
-    /// `__binding_N_value`, so each heap pointer is freed exactly once).
-    /// Released in reverse creation order so a container is freed after
-    /// any later-created value, mirroring C scope-exit destruction order.
-    fn emit_scope_releases(&mut self) {
-        let Some(releases) = self.scope_releases.take() else {
-            return;
-        };
-        let mut seen: UnordSet<String> = UnordSet::new();
-        for (var, ty) in releases.into_iter().rev() {
-            if !seen.insert(var.clone()) {
-                continue;
-            }
-            if let Some(call) = release_call(&var, &ty) {
-                self.lines.push(format!("{}{call}", self.indent));
-            }
-        }
-    }
-
-    /// Retain `target` when a bare pointer-copy `target = source` lands in
-    /// a slot whose own release path demands an independent reference
-    /// (issue #406, chelis#1286 invariant 2). The two destination classes
-    /// carry different rules, and the difference is the caller's
-    /// compensation, not the emitter's convenience:
-    ///
-    /// * A binding's VALUE TEMP is released (through its binding name) at
-    ///   this block's close, unconditionally. The copy retains whatever
-    ///   the source's provenance: a block binding is released at its own
-    ///   close, a parameter or captured value by its caller or owning
-    ///   scope, and skipping the retain hands two release paths one
-    ///   reference. The earlier tracked-binding-only guard let the
-    ///   stdlib's `digits = if negative then string_slice(text, ..) else
-    ///   text` (`canonical_bigint_text`) free the caller's string through
-    ///   the parameter-aliasing arm, corrupting the heap on every
-    ///   compiled out-of-int64 JSON token (PR #1302 red-team finding
-    ///   P0-1).
-    ///
-    /// * A block's RESULT TARGET is released by the CALLER's machinery,
-    ///   which is alias-aware: `main`'s root ledger (chelis#1222) frees a
-    ///   returned alias once, and a `let`-block caller compensates through
-    ///   the call-escape retain. The result therefore retains only when
-    ///   the source is a binding this block is about to release (the
-    ///   classic escaping-result case). Retaining a returned parameter
-    ///   here would double-count against the caller's compensation and
-    ///   leak once per call
-    ///   (`a_parameter_spelled_like_a_binder_key_takes_no_retain` pins
-    ///   this side).
-    ///
-    /// A transient read of a binding into an internal arg temp (e.g.
-    /// `__arg0 = p` feeding `chelis_tuple_get`) is neither class and is
-    /// left alone: `chelis_tuple_get` does its own element retain and the
-    /// binding's single release still balances its construction.
-    /// Returns whether it emitted a retain. A retained destination is an
-    /// independent owner, so callers must not also attach borrow provenance.
-    fn retain_transferred_result(&mut self, target: &str, source: &str, ty: &HostType) -> bool {
-        let target_is_value_temp = self
-            .let_scopes
-            .iter()
-            .any(|scope| scope.value_temps.contains(target));
-        let retains = if target_is_value_temp {
-            true
-        } else {
-            let target_is_owned = self
-                .let_scopes
-                .iter()
-                .any(|scope| scope.owned_destinations.contains(target));
-            // chelis#1222: `bindings` holds alias keys, not spellings, so
-            // the incoming source name resolves the same way a reference
-            // does.
-            let source_key = self.resolve_alias_key(source);
-            let source_is_binding = self
-                .let_scopes
-                .iter()
-                .any(|scope| scope.bindings.contains(&source_key));
-            target_is_owned && source_is_binding
-        };
-        if !retains {
-            return false;
-        }
-        if let Some(call) = retain_call(target, ty) {
-            self.lines.push(format!("{}{call}", self.indent));
-            return true;
-        }
-        false
-    }
-
     fn emit_expr_to_var(
         &mut self,
         expr: &HostExpr,
@@ -2890,6 +2435,593 @@ impl<'a> HostEmitter<'a> {
         self.lines
             .push(format!("{}{};", self.indent, c_decl(ty, target)?));
         self.assign_expr(target, expr, ty)?;
+        Ok(())
+    }
+
+    fn next_expression_site(&mut self) -> Result<ProjectedHostSite<'a>, Unsupported> {
+        let Some(site) = self
+            .expression_sites
+            .get(self.expression_site_index)
+            .cloned()
+        else {
+            return Err(invalid_abi_shape(
+                "verified ownership expression-site cursor exhausted before host payload"
+                    .to_string(),
+                "verified C host ownership emission",
+            ));
+        };
+        self.expression_site_index += 1;
+        Ok(site)
+    }
+
+    fn emit_expression_site(
+        &mut self,
+        site: &ProjectedHostSite<'a>,
+        target: &str,
+    ) -> Result<(), Unsupported> {
+        self.emit_expression_site_excluding_block(site, target, None)
+    }
+
+    fn emit_expression_site_excluding_block(
+        &mut self,
+        site: &ProjectedHostSite<'a>,
+        target: &str,
+        excluded: Option<VerifiedBlockId>,
+    ) -> Result<(), Unsupported> {
+        let excluded = excluded.map_or_else(Vec::new, |block| vec![block]);
+        self.emit_expression_site_excluding_blocks(site, target, &excluded)
+    }
+
+    fn emit_expression_site_excluding_blocks(
+        &mut self,
+        site: &ProjectedHostSite<'a>,
+        target: &str,
+        excluded: &[VerifiedBlockId],
+    ) -> Result<(), Unsupported> {
+        if site.actions.len() != site.directives.len() {
+            return Err(invalid_abi_shape(
+                format!(
+                    "verified expression site carries {} classifications for {} directives",
+                    site.actions.len(),
+                    site.directives.len()
+                ),
+                "verified C host ownership emission",
+            ));
+        }
+        for action in &site.directives {
+            if excluded
+                .iter()
+                .any(|block| Self::action_is_in_block(action, *block))
+            {
+                continue;
+            }
+            match action {
+                VerifiedHostAction::Operation(VerifiedHostOperation::Define { dest, .. }) => {
+                    self.owner_vars.insert(dest.id(), target.to_string());
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                    dest: Some(dest),
+                    binding_name,
+                    label,
+                    ..
+                }) => {
+                    let value = binding_name
+                        .as_ref()
+                        .filter(|_| {
+                            label.starts_with("option_payload")
+                                || label.starts_with("adt_payload")
+                                || *label == "loop_item"
+                        })
+                        .map_or_else(
+                            || target.to_string(),
+                            |name| c_ident(name.as_str()).into_owned(),
+                        );
+                    self.owner_vars.insert(dest.id(), value);
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                    dest: None,
+                    label,
+                    args,
+                    ..
+                }) if args.len() == 1
+                    && label.starts_with("discard")
+                    && args[0].use_() == VerifiedOwnershipUse::Move
+                    && !args[0].owner().is_heap() => {}
+                VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                    dest: None,
+                    label: "builtin:copy" | "builtin:debug",
+                    ..
+                }) => {}
+                VerifiedHostAction::Operation(VerifiedHostOperation::Clone {
+                    dest,
+                    source,
+                    ..
+                }) if !self.pre_emitted_clone_sites.contains(&site.id) => {
+                    self.emit_clone_to(*dest, *source, None)?;
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::Clone { .. }) => {}
+                VerifiedHostAction::Operation(VerifiedHostOperation::Project {
+                    source, ..
+                }) => {
+                    self.owner_vars
+                        .insert(source.owner().id(), target.to_string());
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::LoopItem { .. }) => {}
+                VerifiedHostAction::Operation(VerifiedHostOperation::Drop { owner, .. }) => {
+                    let var = self.owner_var(owner.owner())?;
+                    let ty = Self::owner_abi_type(owner.owner())?;
+                    if let Some(release) = release_call(&var, &ty) {
+                        self.lines.push(format!("{}{release}", self.indent));
+                    }
+                }
+                VerifiedHostAction::Terminator(VerifiedHostTerminator::Jump { edge, .. }) => {
+                    if edge.params().len() == 1 {
+                        self.owner_vars
+                            .insert(edge.params()[0].id(), target.to_string());
+                    }
+                }
+                VerifiedHostAction::Terminator(VerifiedHostTerminator::Loop {
+                    body_edge,
+                    exit_edge,
+                    ..
+                }) => {
+                    if body_edge.params().len() == 2 && exit_edge.params().len() == 2 {
+                        // Scan carries `(state, output)` and binds those two
+                        // payloads to distinct C variables in `assign_scan`.
+                        continue;
+                    }
+                    for (edge, name) in [(body_edge, "body"), (exit_edge, "exit")] {
+                        let [param] = edge.params() else {
+                            return Err(invalid_abi_shape(
+                                format!(
+                                    "verified loop {name} edge carries {} parameters, expected one owned payload",
+                                    edge.params().len()
+                                ),
+                                "verified C host ownership emission",
+                            ));
+                        };
+                        self.owner_vars.insert(param.id(), target.to_string());
+                    }
+                }
+                VerifiedHostAction::Terminator(VerifiedHostTerminator::Branch { .. })
+                | VerifiedHostAction::Terminator(VerifiedHostTerminator::Match { .. }) => {}
+                other => {
+                    return Err(invalid_abi_shape(
+                        format!("unexpected verified expression-site action {other:?}"),
+                        "verified C host ownership emission",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Emit argument-owner clones before the consuming call they feed.
+    ///
+    /// Ownership lowering records a call site's operand `Clone` operations
+    /// before its result-producing `Apply`. Formatting necessarily visits the
+    /// argument payloads first; this hook preserves that verified ordering
+    /// instead of retaining an argument after the owned callee has consumed it.
+    fn emit_pre_call_clones(&mut self, site: &ProjectedHostSite<'a>) -> Result<(), Unsupported> {
+        if !self.pre_emitted_clone_sites.insert(site.id) {
+            return Err(invalid_abi_shape(
+                "verified call site emitted its operand clones twice".to_string(),
+                "verified C host ownership emission",
+            ));
+        }
+        for action in &site.directives {
+            if let VerifiedHostAction::Operation(VerifiedHostOperation::Clone {
+                dest,
+                source,
+                ..
+            }) = action
+            {
+                self.emit_clone_to(*dest, *source, None)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn action_is_in_block(action: &VerifiedHostAction<'_>, expected: VerifiedBlockId) -> bool {
+        let block = match action {
+            VerifiedHostAction::Operation(VerifiedHostOperation::Define { block, .. })
+            | VerifiedHostAction::Operation(VerifiedHostOperation::Apply { block, .. })
+            | VerifiedHostAction::Operation(VerifiedHostOperation::Clone { block, .. })
+            | VerifiedHostAction::Operation(VerifiedHostOperation::Project { block, .. })
+            | VerifiedHostAction::Operation(VerifiedHostOperation::LoopItem { block, .. })
+            | VerifiedHostAction::Operation(VerifiedHostOperation::Drop { block, .. })
+            | VerifiedHostAction::Operation(VerifiedHostOperation::RootConsume { block, .. })
+            | VerifiedHostAction::Terminator(VerifiedHostTerminator::Return { block, .. })
+            | VerifiedHostAction::Terminator(VerifiedHostTerminator::Jump { block, .. })
+            | VerifiedHostAction::Terminator(VerifiedHostTerminator::Branch { block, .. })
+            | VerifiedHostAction::Terminator(VerifiedHostTerminator::Match { block, .. })
+            | VerifiedHostAction::Terminator(VerifiedHostTerminator::Loop { block, .. })
+            | VerifiedHostAction::Terminator(VerifiedHostTerminator::Exit { block }) => *block,
+            VerifiedHostAction::ControlEdge { source, .. } => *source,
+            VerifiedHostAction::ManifestRoot { .. } => return false,
+        };
+        block == expected
+    }
+
+    fn join_completion_blocks(
+        site: &ProjectedHostSite<'a>,
+        expected: usize,
+        context: &str,
+    ) -> Result<Vec<VerifiedBlockId>, Unsupported> {
+        let blocks = site
+            .directives
+            .iter()
+            .filter_map(|action| match action {
+                VerifiedHostAction::Terminator(VerifiedHostTerminator::Jump { block, .. }) => {
+                    Some(*block)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if blocks.len() != expected {
+            return Err(invalid_abi_shape(
+                format!(
+                    "verified {context} site has {} arm completions, expected {expected}",
+                    blocks.len()
+                ),
+                "verified C host ownership emission",
+            ));
+        }
+        Ok(blocks)
+    }
+
+    fn emit_expression_block_actions(
+        &mut self,
+        site: &ProjectedHostSite<'a>,
+        block: VerifiedBlockId,
+        target: &str,
+    ) -> Result<(), Unsupported> {
+        for action in &site.directives {
+            match action {
+                VerifiedHostAction::Operation(VerifiedHostOperation::Define {
+                    block: owner_block,
+                    dest,
+                    ..
+                }) if *owner_block == block => {
+                    self.owner_vars.insert(dest.id(), target.to_string());
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                    block: owner_block,
+                    dest: Some(dest),
+                    binding_name,
+                    label,
+                    ..
+                }) if *owner_block == block => {
+                    let value = binding_name
+                        .as_ref()
+                        .filter(|_| {
+                            label.starts_with("option_payload")
+                                || label.starts_with("adt_payload")
+                                || *label == "loop_item"
+                        })
+                        .map_or_else(
+                            || target.to_string(),
+                            |name| c_ident(name.as_str()).into_owned(),
+                        );
+                    self.owner_vars.insert(dest.id(), value);
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                    block: owner_block,
+                    dest: None,
+                    label,
+                    args,
+                    ..
+                }) if *owner_block == block
+                    && label.starts_with("discard")
+                    && args.len() == 1
+                    && args[0].use_() == VerifiedOwnershipUse::Move
+                    && !args[0].owner().is_heap() => {}
+                VerifiedHostAction::Operation(VerifiedHostOperation::Clone {
+                    block: owner_block,
+                    dest,
+                    source,
+                }) if *owner_block == block => self.emit_clone_to(*dest, *source, None)?,
+                VerifiedHostAction::Operation(VerifiedHostOperation::Project {
+                    block: owner_block,
+                    source,
+                }) if *owner_block == block => {
+                    self.owner_vars
+                        .insert(source.owner().id(), target.to_string());
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::LoopItem { .. }) => {}
+                VerifiedHostAction::Operation(VerifiedHostOperation::Drop {
+                    block: owner_block,
+                    owner,
+                }) if *owner_block == block => {
+                    let var = self.owner_var(owner.owner())?;
+                    let ty = Self::owner_abi_type(owner.owner())?;
+                    if let Some(release) = release_call(&var, &ty) {
+                        self.lines.push(format!("{}{release}", self.indent));
+                    }
+                }
+                VerifiedHostAction::Terminator(VerifiedHostTerminator::Jump {
+                    block: owner_block,
+                    edge,
+                }) if *owner_block == block && edge.params().len() == 1 => {
+                    self.owner_vars
+                        .insert(edge.params()[0].id(), target.to_string());
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn bind_loop_item(
+        &mut self,
+        site: &ProjectedHostSite<'a>,
+        emitted_var: &str,
+    ) -> Result<(), Unsupported> {
+        let mut items = site.directives.iter().filter_map(|action| match action {
+            VerifiedHostAction::Operation(VerifiedHostOperation::LoopItem { dest, .. }) => {
+                Some(*dest)
+            }
+            _ => None,
+        });
+        let Some(owner) = items.next() else {
+            return Err(invalid_abi_shape(
+                "verified list-loop site has no typed loop-item action".to_string(),
+                "verified C host ownership emission",
+            ));
+        };
+        if items.next().is_some() {
+            return Err(invalid_abi_shape(
+                "verified list-loop site has more than one typed loop-item action".to_string(),
+                "verified C host ownership emission",
+            ));
+        }
+        self.owner_vars.insert(owner.id(), emitted_var.to_string());
+        Ok(())
+    }
+
+    /// Bind a verified pattern-payload owner to the C variable that holds the
+    /// independently retained value extracted for that pattern.
+    ///
+    /// Payload owners can acquire further logical names while lowering nested
+    /// lets.  Falling back to the last such name can point a later arm-terminal
+    /// release at a C temporary whose lexical scope has already closed, so the
+    /// match formatter consumes the exact entry-block payload action instead.
+    fn bind_match_payload(
+        &mut self,
+        site: &ProjectedHostSite<'a>,
+        block: VerifiedBlockId,
+        label_prefix: &str,
+        binding_name: &str,
+    ) -> Result<(), Unsupported> {
+        let mut owners = site.directives.iter().filter_map(|action| match action {
+            VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                block: owner_block,
+                dest: Some(dest),
+                binding_name: projected_name,
+                label,
+                ..
+            }) if *owner_block == block
+                && label.starts_with(label_prefix)
+                && projected_name
+                    .as_ref()
+                    .is_some_and(|name| name.as_str() == binding_name) =>
+            {
+                Some(*dest)
+            }
+            _ => None,
+        });
+        let Some(owner) = owners.next() else {
+            return Err(invalid_abi_shape(
+                format!(
+                    "verified match block {:?} has no `{label_prefix}` payload owner for `{binding_name}`",
+                    block
+                ),
+                "verified C host ownership emission",
+            ));
+        };
+        if owners.next().is_some() {
+            return Err(invalid_abi_shape(
+                format!(
+                    "verified match block {:?} has duplicate `{label_prefix}` payload owners for `{binding_name}`",
+                    block
+                ),
+                "verified C host ownership emission",
+            ));
+        }
+        self.owner_vars
+            .insert(owner.id(), c_ident(binding_name).into_owned());
+        Ok(())
+    }
+
+    /// Return the loop preheader and the block that completes one body
+    /// iteration.
+    ///
+    /// The body entry is not necessarily its completion block: an inline
+    /// callback may introduce branch/match blocks before the back-edge. Scope
+    /// terminals recorded on the enclosing loop site belong immediately
+    /// before that back-edge, while the callback locals are still in C scope.
+    fn loop_blocks(
+        site: &ProjectedHostSite<'a>,
+    ) -> Result<(VerifiedBlockId, VerifiedBlockId), Unsupported> {
+        let mut headers = site.directives.iter().filter_map(|action| match action {
+            VerifiedHostAction::Terminator(VerifiedHostTerminator::Loop { block, .. }) => {
+                Some(*block)
+            }
+            _ => None,
+        });
+        let Some(header) = headers.next() else {
+            return Err(invalid_abi_shape(
+                "verified list-loop site has no loop terminator".to_string(),
+                "verified C host ownership emission",
+            ));
+        };
+        if headers.next().is_some() {
+            return Err(invalid_abi_shape(
+                "verified list-loop site has more than one loop terminator".to_string(),
+                "verified C host ownership emission",
+            ));
+        }
+
+        let jumps =
+            site.directives
+                .iter()
+                .filter_map(|action| match action {
+                    VerifiedHostAction::Terminator(VerifiedHostTerminator::Jump {
+                        block,
+                        edge,
+                    }) if edge.target() == header => Some(*block),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+        let [preheader, completion] = jumps.as_slice() else {
+            return Err(invalid_abi_shape(
+                format!(
+                    "verified list-loop site has {} jumps to its header, expected preheader and back-edge",
+                    jumps.len()
+                ),
+                "verified C host ownership emission",
+            ));
+        };
+        Ok((*preheader, *completion))
+    }
+
+    fn finish_expression_sites(&self) -> Result<(), Unsupported> {
+        if self.expression_site_index == self.expression_sites.len() {
+            Ok(())
+        } else {
+            Err(invalid_abi_shape(
+                format!(
+                    "verified ownership expression-site cursor left {} of {} sites unconsumed",
+                    self.expression_sites.len() - self.expression_site_index,
+                    self.expression_sites.len()
+                ),
+                "verified C host ownership emission",
+            ))
+        }
+    }
+
+    fn owner_var(
+        &self,
+        owner: chelis_ir::ownership::VerifiedOwnerView<'_>,
+    ) -> Result<String, Unsupported> {
+        self.owner_vars.get(&owner.id()).cloned().ok_or_else(|| {
+            invalid_abi_shape(
+                format!(
+                    "verified ownership action names emitted owner {:?} with no value binding",
+                    owner.id()
+                ),
+                "verified C host ownership emission",
+            )
+        })
+    }
+
+    fn owner_abi_type(
+        owner: chelis_ir::ownership::VerifiedOwnerView<'_>,
+    ) -> Result<HostType, Unsupported> {
+        HostAbiType::try_from_concrete(owner.ty())
+    }
+
+    fn emit_clone_to(
+        &mut self,
+        dest: chelis_ir::ownership::VerifiedOwnerView<'_>,
+        source: chelis_ir::ownership::VerifiedOperandView<'_>,
+        target: Option<&str>,
+    ) -> Result<(), Unsupported> {
+        let source_var = self.owner_var(source.owner())?;
+        let dest_var = target.map_or_else(|| source_var.clone(), str::to_string);
+        let ty = Self::owner_abi_type(dest)?;
+        if let Some(retain) = retain_call(&dest_var, &ty) {
+            self.lines.push(format!("{}{retain}", self.indent));
+        }
+        self.owner_vars.insert(dest.id(), dest_var);
+        Ok(())
+    }
+
+    fn emit_terminal_site(
+        &mut self,
+        site: &ProjectedHostSite<'a>,
+        result_target: Option<&str>,
+    ) -> Result<(), Unsupported> {
+        for action in &site.directives {
+            match action {
+                VerifiedHostAction::Operation(VerifiedHostOperation::Clone {
+                    dest,
+                    source,
+                    ..
+                }) => self.emit_clone_to(*dest, *source, result_target)?,
+                VerifiedHostAction::Operation(VerifiedHostOperation::Drop { owner, .. }) => {
+                    let var = self.owner_var(owner.owner())?;
+                    let ty = Self::owner_abi_type(owner.owner())?;
+                    if let Some(release) = release_call(&var, &ty) {
+                        self.lines.push(format!("{}{release}", self.indent));
+                    }
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                    dest: None,
+                    label,
+                    args,
+                    ..
+                }) if args.len() == 1
+                    && label.starts_with("discard")
+                    && args[0].use_() == VerifiedOwnershipUse::Move
+                    && !args[0].owner().is_heap() => {}
+                VerifiedHostAction::Terminator(VerifiedHostTerminator::Return { .. })
+                | VerifiedHostAction::Terminator(VerifiedHostTerminator::Exit { .. }) => {}
+                other => {
+                    return Err(invalid_abi_shape(
+                        format!("unexpected verified terminal-site action {other:?}"),
+                        "verified C host ownership emission",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn prepare_manifest_root(&mut self, site: &ProjectedHostSite<'a>) -> Result<(), Unsupported> {
+        for action in &site.directives {
+            if let VerifiedHostAction::Operation(VerifiedHostOperation::Clone {
+                dest,
+                source,
+                ..
+            }) = action
+            {
+                self.emit_clone_to(*dest, *source, None)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn finish_manifest_root(&mut self, site: &ProjectedHostSite<'a>) -> Result<(), Unsupported> {
+        let mut consumed = 0usize;
+        for action in &site.directives {
+            match action {
+                VerifiedHostAction::Operation(VerifiedHostOperation::Clone { .. })
+                | VerifiedHostAction::ManifestRoot { .. } => {}
+                VerifiedHostAction::Operation(VerifiedHostOperation::RootConsume {
+                    owner, ..
+                }) => {
+                    consumed += 1;
+                    let var = self.owner_var(owner.owner())?;
+                    let ty = Self::owner_abi_type(owner.owner())?;
+                    if let Some(release) = release_call(&var, &ty) {
+                        self.lines.push(format!("{}{release}", self.indent));
+                    }
+                }
+                other => {
+                    return Err(invalid_abi_shape(
+                        format!("unexpected verified manifest-root action {other:?}"),
+                        "verified C host ownership emission",
+                    ));
+                }
+            }
+        }
+        if consumed != 1 {
+            return Err(invalid_abi_shape(
+                format!("verified manifest-root site has {consumed} consuming actions"),
+                "verified C host ownership emission",
+            ));
+        }
         Ok(())
     }
 
@@ -2937,6 +3069,18 @@ impl<'a> HostEmitter<'a> {
         expr: &HostExpr,
         ty: &HostType,
     ) -> Result<(), Unsupported> {
+        let site = self.next_expression_site()?;
+        self.assign_expr_at_site(target, expr, ty, &site)?;
+        Ok(())
+    }
+
+    fn assign_expr_at_site(
+        &mut self,
+        target: &str,
+        expr: &HostExpr,
+        ty: &HostType,
+        site: &ProjectedHostSite<'a>,
+    ) -> Result<(), Unsupported> {
         self.emit_span_comments(expr);
         match &expr.kind {
             HostExprKind::Int(value) => self
@@ -2974,32 +3118,11 @@ impl<'a> HostEmitter<'a> {
                     self.lines
                         .push(format!("{}{target} = chelis_list_empty();", self.indent));
                 } else {
-                    // `target = name` is a bare pointer copy that does not
-                    // bump the refcount. A binding value temp retains
-                    // whatever `name`'s provenance; a block result target
-                    // retains only a tracked block binding (issue #406,
-                    // chelis#1286 invariant 2 - see
-                    // `retain_transferred_result` for why the classes
-                    // differ).
-                    //
                     // #379: route the referenced name through `c_ident` so a
                     // binding/param/let spelled like a C keyword resolves to
                     // the same mangled identifier its declaration used.
                     self.lines
                         .push(format!("{}{target} = {};", self.indent, c_ident(name)));
-                    let retained = self.retain_transferred_result(target, name, ty);
-                    // chelis#1222: `target` now holds `name`'s pointer. Only
-                    // a heap-owning type can be released twice, so only
-                    // those are recorded -- and the link is to the key that
-                    // currently means `name`, never to the spelling.
-                    // Retaining gives `target` an independent owner whose
-                    // enclosing scope must release it. Preserve an alias edge
-                    // only for an unretained pointer copy; otherwise the
-                    // alias-aware cleanup would suppress that matching release.
-                    if !retained && release_call(target, ty).is_some() {
-                        let source = self.resolve_alias_key(name);
-                        self.record_alias(target, &source);
-                    }
                 }
             }
             HostExprKind::Call {
@@ -3009,7 +3132,7 @@ impl<'a> HostEmitter<'a> {
                 ty: call_ty,
             } => {
                 require_same_abi_type(ty, call_ty, "call expression")?;
-                self.assign_call(target, function, args, arg_tys, call_ty)?;
+                self.assign_call(target, function, args, arg_tys, call_ty, site)?;
             }
             HostExprKind::Builtin {
                 name,
@@ -3042,6 +3165,24 @@ impl<'a> HostEmitter<'a> {
                 ty: expr_ty,
             } => {
                 require_same_abi_type(ty, expr_ty, "if expression")?;
+                site.directives
+                    .iter()
+                    .find_map(|action| match action {
+                        VerifiedHostAction::Terminator(VerifiedHostTerminator::Branch {
+                            then_edge,
+                            else_edge,
+                            ..
+                        }) => Some((then_edge.target(), else_edge.target())),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        invalid_abi_shape(
+                            "verified if site has no branch terminator".to_string(),
+                            "verified C host ownership emission",
+                        )
+                    })?;
+                let completion = Self::join_completion_blocks(site, 2, "if")?;
+                let (then_block, else_block) = (completion[0], completion[1]);
                 let cond_var = self.next_temp("cond");
                 self.emit_expr_to_var(cond, &cond_var, &HostType::Bool)?;
                 self.lines
@@ -3049,13 +3190,16 @@ impl<'a> HostEmitter<'a> {
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
                 self.assign_expr(target, then_expr, ty)?;
+                self.emit_expression_block_actions(site, then_block, target)?;
                 self.indent = previous.clone();
                 self.lines.push(format!("{}}} else {{", self.indent));
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
                 self.assign_expr(target, else_expr, ty)?;
+                self.emit_expression_block_actions(site, else_block, target)?;
                 self.indent = previous;
                 self.lines.push(format!("{}}}", self.indent));
+                return Ok(());
             }
             HostExprKind::MatchOption {
                 scrutinee,
@@ -3065,6 +3209,24 @@ impl<'a> HostEmitter<'a> {
                 ty: expr_ty,
             } => {
                 require_same_abi_type(ty, expr_ty, "option match")?;
+                let (some_entry, _none_entry) = site
+                    .directives
+                    .iter()
+                    .find_map(|action| match action {
+                        VerifiedHostAction::Terminator(VerifiedHostTerminator::Match {
+                            arms,
+                            ..
+                        }) if arms.len() == 2 => Some((arms[0].target(), arms[1].target())),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        invalid_abi_shape(
+                            "verified option-match site has no two-arm terminator".to_string(),
+                            "verified C host ownership emission",
+                        )
+                    })?;
+                let completion = Self::join_completion_blocks(site, 2, "option-match")?;
+                let arm_blocks = (completion[0], completion[1]);
                 let option_var = self.next_temp("option");
                 let option_ty = host_type(scrutinee);
                 self.emit_expr_to_var(scrutinee, &option_var, &option_ty)?;
@@ -3109,6 +3271,7 @@ impl<'a> HostEmitter<'a> {
                         ));
                     }
                 }
+                self.bind_match_payload(site, some_entry, "option_payload", bind_name)?;
                 // chelis#1222: the binder shadows any enclosing name it
                 // reuses. Its key carries no outgoing edge, because the
                 // value is freshly extracted here rather than copied from
@@ -3116,21 +3279,17 @@ impl<'a> HostEmitter<'a> {
                 // keeps emitted C unchanged for every program that does not
                 // shadow: a reference to it dead-ends exactly as it does
                 // today.
-                self.binder_keys.push(UnordMap::new());
-                self.bind_alias_key(bind_name);
                 self.assign_expr(target, some_expr, ty)?;
-                self.binder_keys.pop();
-                self.lines.push(format!(
-                    "{}chelis_value_release({boxed_inner});",
-                    self.indent
-                ));
+                self.emit_expression_block_actions(site, arm_blocks.0, target)?;
                 self.indent = previous.clone();
                 self.lines.push(format!("{}}} else {{", self.indent));
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
                 self.assign_expr(target, none_expr, ty)?;
+                self.emit_expression_block_actions(site, arm_blocks.1, target)?;
                 self.indent = previous;
                 self.lines.push(format!("{}}}", self.indent));
+                return Ok(());
             }
             HostExprKind::MatchAdt {
                 scrutinee,
@@ -3139,7 +3298,8 @@ impl<'a> HostEmitter<'a> {
                 ty: expr_ty,
             } => {
                 require_same_abi_type(ty, expr_ty, "ADT match")?;
-                self.assign_match_adt(target, scrutinee, arms, default_expr.as_deref(), ty)?;
+                self.assign_match_adt(target, scrutinee, arms, default_expr.as_deref(), ty, site)?;
+                return Ok(());
             }
             HostExprKind::Let {
                 bindings,
@@ -3150,28 +3310,6 @@ impl<'a> HostEmitter<'a> {
                 self.lines.push(format!("{}{{", self.indent));
                 let nested_indent = format!("{}    ", self.indent);
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
-                // issue #406: this `let` introduces a nested C scope that
-                // owns every heap binding it declares. The block body's
-                // result is written to `target` in the *outer* scope, so
-                // each heap binding must be released at block close or it
-                // leaks (the function-body sibling of the `emit_main`
-                // leak). Track this block's owned destinations + heap
-                // bindings; a bare pointer-copy of a binding into an owned
-                // destination (the escaping result, or another binding's
-                // value temp that aliases an earlier binding) is retained so
-                // each owned slot keeps exactly one reference.
-                self.let_scopes.push(LetReleaseScope {
-                    owned_destinations: UnordSet::from([target.to_string()]),
-                    value_temps: UnordSet::new(),
-                    bindings: UnordSet::new(),
-                });
-                // chelis#1222: open a binder scope. It starts EMPTY on
-                // purpose -- each name enters only after its own initializer
-                // has been emitted, because that initializer runs in the
-                // enclosing scope and may read the outer meaning of the very
-                // name being bound.
-                self.binder_keys.push(UnordMap::new());
-                let mut heap_bindings: Vec<(String, HostType)> = Vec::new();
                 for binding in bindings {
                     // Compute the value into a temp before declaring the binding name.
                     // If the compiler inlines a recursive call that reuses a binding
@@ -3179,18 +3317,6 @@ impl<'a> HostEmitter<'a> {
                     // declaring the inner name first would shadow the outer variable
                     // before its value is read, yielding a NULL pointer at runtime.
                     let temp = self.next_temp("let");
-                    // The value temp is an owned slot of this block: if the
-                    // binding's value is a bare alias of an earlier binding
-                    // (`b = a`), the copy into the temp must retain so `b`
-                    // owns an independent reference and the two distinct
-                    // block releases do not double-free the shared
-                    // allocation. Register it before emitting the value.
-                    if binding_release(&temp, &binding.ty).is_some()
-                        && let Some(scope) = self.let_scopes.last_mut()
-                    {
-                        scope.owned_destinations.insert(temp.clone());
-                        scope.value_temps.insert(temp.clone());
-                    }
                     self.emit_expr_to_var(&binding.value, &temp, &binding.ty)?;
                     self.lines.push(format!(
                         "{}{};",
@@ -3205,71 +3331,24 @@ impl<'a> HostEmitter<'a> {
                         c_ident(&binding.name),
                         temp
                     ));
-                    // chelis#1222: the binding is a second slot on the same
-                    // pointer, and a block whose body is that name hands the
-                    // allocation to the outer scope through it, so the chain
-                    // has to cross it. Give it a key of its own now that the
-                    // initializer has been emitted -- see `bind_alias_key`
-                    // for why the ordering is the whole fix.
-                    let binder_key = self.bind_alias_key(&binding.name);
-                    if release_call(&binding.name, &binding.ty).is_some() {
-                        self.record_alias(&binder_key, &temp);
-                    }
-                    // Track the binding name (not its `__let_N` temp: the
-                    // two alias the same allocation, so releasing only the
-                    // name frees it exactly once). Add it to the scope's
-                    // binding set after its value is computed so a binding
-                    // whose value reads an *earlier* binding still retains
-                    // on that transfer.
-                    //
-                    // chelis#1222 deliberately does NOT gate this on whether
-                    // the value looks borrowed. `emit_main`'s sibling rule
-                    // ("cannot prove ownership, so do not claim") runs once
-                    // per PROGRAM and its residual is bounded by the number
-                    // of top-level bindings. The same rule here would run
-                    // once per CALL, turning every unprovable case into a
-                    // leak that grows with the call count -- measurably, in
-                    // `Std.Io.Json` and `Std.Decimal`. Releasing a reference
-                    // this block never acquired is still wrong, but the fix
-                    // has to establish ownership positively rather than
-                    // infer a borrow from missing evidence. Tracked as the
-                    // block-scope follow-up in the PR.
-                    if binding_release(&binding.name, &binding.ty).is_some() {
-                        heap_bindings.push((binding.name.clone(), binding.ty.clone()));
-                        if let Some(scope) = self.let_scopes.last_mut() {
-                            // Keyed, not spelled: `retain_transferred_result`
-                            // and `retain_call_escaped_args` resolve a
-                            // reference before testing membership, so a
-                            // shadowing binder elsewhere cannot match this
-                            // block's binding by name alone (chelis#1222).
-                            scope.bindings.insert(binder_key.clone());
-                        }
-                    }
                 }
                 self.assign_expr(target, body, ty)?;
-                // Release the block's heap bindings in reverse declaration
-                // order, before closing the C block while they are still in
-                // scope. Last-declared shadows of a reused name win the C
-                // lookup, mirroring C scope-exit destruction order.
-                for (name, binding_ty) in heap_bindings.iter().rev() {
-                    if let Some(call) = binding_release(name, binding_ty) {
-                        self.lines.push(format!("{}{call}", self.indent));
-                    }
-                }
-                self.let_scopes.pop();
-                // The frame goes; the edges it recorded stay. A value that
-                // escaped this block still reaches its owner through the
-                // popped binder's key, which is why nothing has to be
-                // collapsed or rewritten on the way out (chelis#1222).
-                self.binder_keys.pop();
+                self.emit_expression_site(site, target)?;
                 self.indent = previous;
                 self.lines.push(format!("{}}}", self.indent));
+                return Ok(());
             }
             HostExprKind::Map { callback, list, ty } => {
-                self.assign_map(target, callback, list, ty)?;
+                let (_, body_block) = Self::loop_blocks(site)?;
+                self.assign_map(target, callback, list, ty, site, body_block)?;
+                self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
+                return Ok(());
             }
             HostExprKind::Filter { callback, list, ty } => {
-                self.assign_filter(target, callback, list, ty)?;
+                let (_, body_block) = Self::loop_blocks(site)?;
+                self.assign_filter(target, callback, list, ty, site, body_block)?;
+                self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
+                return Ok(());
             }
             HostExprKind::Fold {
                 callback,
@@ -3277,7 +3356,23 @@ impl<'a> HostEmitter<'a> {
                 list,
                 ty,
             } => {
-                self.assign_fold(target, callback, init, list, ty)?;
+                let (preheader_block, body_block) = Self::loop_blocks(site)?;
+                self.assign_fold(
+                    target,
+                    callback,
+                    init,
+                    list,
+                    ty,
+                    site,
+                    preheader_block,
+                    body_block,
+                )?;
+                self.emit_expression_site_excluding_blocks(
+                    site,
+                    target,
+                    &[preheader_block, body_block],
+                )?;
+                return Ok(());
             }
             HostExprKind::Scan {
                 callback,
@@ -3285,13 +3380,22 @@ impl<'a> HostEmitter<'a> {
                 list,
                 ty,
             } => {
-                self.assign_scan(target, callback, init, list, ty)?;
+                let (_, body_block) = Self::loop_blocks(site)?;
+                self.assign_scan(target, callback, init, list, ty, site, body_block)?;
+                self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
+                return Ok(());
             }
             HostExprKind::Partition { callback, list, ty } => {
-                self.assign_partition(target, callback, list, ty)?;
+                let (_, body_block) = Self::loop_blocks(site)?;
+                self.assign_partition(target, callback, list, ty, site, body_block)?;
+                self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
+                return Ok(());
             }
             HostExprKind::FlatMap { callback, list, ty } => {
-                self.assign_flat_map(target, callback, list, ty)?;
+                let (_, body_block) = Self::loop_blocks(site)?;
+                self.assign_flat_map(target, callback, list, ty, site, body_block)?;
+                self.emit_expression_site_excluding_block(site, target, Some(body_block))?;
+                return Ok(());
             }
             HostExprKind::WithSeed { seed, body, ty } => {
                 let seed_var = self.next_temp("seed");
@@ -3321,7 +3425,7 @@ impl<'a> HostEmitter<'a> {
                 self.lines.push(format!("{}{target} = 0;", self.indent));
             }
         }
-        Ok(())
+        self.emit_expression_site(site, target)
     }
 
     fn assign_builtin(
@@ -3362,6 +3466,11 @@ impl<'a> HostEmitter<'a> {
                 _ => None,
             };
             if let Some(assignment) = assignment {
+                // The scalar literal is folded into its checked cast without
+                // a temporary, but it remains an exact verified expression
+                // site and must advance the ownership cursor.
+                let literal_site = self.next_expression_site()?;
+                self.emit_expression_site(&literal_site, target)?;
                 let target_prim = checked_cast_abi_scalar_prim(ty)?;
                 let plan = CheckedCastPlan::new(Prim::F64, target_prim)
                     .map_err(|error| checked_cast_plan_error(error.to_string()))?;
@@ -3648,7 +3757,6 @@ impl<'a> HostEmitter<'a> {
             "copy" => {
                 self.lines
                     .push(format!("{}{target} = {};", self.indent, arg_vars[0].0));
-                self.record_pointer_copy(target, &arg_vars[0].0, &args[0], ty);
                 return Ok(());
             }
             "tuple-get" => {
@@ -3957,20 +4065,6 @@ impl<'a> HostEmitter<'a> {
                     arg_vars[0].0,
                     dtype.c_macro()
                 ));
-                // `chelis_tensor_from_values` borrows its `const chelis_list *`
-                // argument. A list literal evaluated solely for this call is
-                // therefore still owned by the generated temporary and must be
-                // released after the borrow ends. A variable argument is only
-                // an EntryBorrow in this temporary slot and must not be released
-                // here; its declaring scope remains the owner. Phase 2 replaces
-                // this syntax-bound distinction with verified ownership IR.
-                if matches!(&args[0].kind, HostExprKind::List(_, _)) {
-                    self.lines.push(format!(
-                        "{}chelis_list_release({});",
-                        self.indent, arg_vars[0].0
-                    ));
-                    self.forget_owned_alloc(&arg_vars[0].0);
-                }
                 return Ok(());
             }
             "to_list" => {
@@ -4154,7 +4248,6 @@ impl<'a> HostEmitter<'a> {
                 self.emit_print_value(&arg_vars[0].0, &arg_vars[0].1)?;
                 self.lines
                     .push(format!("{}{target} = {};", self.indent, arg_vars[0].0));
-                self.record_pointer_copy(target, &arg_vars[0].0, &args[0], ty);
                 return Ok(());
             }
             _ => {}
@@ -4822,25 +4915,6 @@ impl<'a> HostEmitter<'a> {
         let expr = build_expression()?;
         self.lines
             .push(format!("{}{target} = {};", self.indent, expr.as_c()));
-        // The generic expression has finished borrowing its argument
-        // temporaries. Consume only values whose syntax proves they were
-        // freshly allocated for this expression. `to_string(String)` is the
-        // one generic identity result and therefore transfers its argument
-        // owner to `target` instead of releasing it here.
-        let transfers_first_argument = name == "to_string"
-            && matches!(ty, HostType::String)
-            && matches!(arg_vars.first(), Some((_, HostType::String)));
-        for (index, ((arg_var, arg_ty), arg)) in arg_vars.iter().zip(args).enumerate() {
-            if transfers_first_argument && index == 0 {
-                continue;
-            }
-            if is_definitely_fresh_heap_expr(arg)
-                && let Some(call) = release_call(arg_var, arg_ty)
-            {
-                self.lines.push(format!("{}{call}", self.indent));
-                self.forget_owned_alloc(arg_var);
-            }
-        }
         if matches!(ty, HostType::Unit) {
             self.lines.push(format!("{}{target} = 0;", self.indent));
         }
@@ -5397,14 +5471,6 @@ impl<'a> HostEmitter<'a> {
             };
             tensor_args.push(entry);
         }
-        // chelis#1222: an identity helper's whole body is
-        // `outputs[0] = inputs[0];` (see `identity_helper_input`), so its
-        // result is its argument's pointer, not a fresh allocation.
-        let identity_source = self
-            .tensor_helpers
-            .get(helper)
-            .and_then(identity_helper_input)
-            .and(tensor_args.first().map(|(name, _)| name.clone()));
         let outputs_name = self.next_temp("outputs");
         // A constant-only tensor helper (e.g. `expand(scalar_to_tensor(c),
         // 0, n)`) has zero inputs. ISO C forbids a zero-length array
@@ -5441,9 +5507,9 @@ impl<'a> HostEmitter<'a> {
         // tensor and assemble a real `chelis_tuple` so the subsequent
         // `chelis_tuple_get` projection has a correctly-typed receiver.
         let root_count = self
-            .tensor_helpers
+            .tensor_helper_output_counts
             .get(helper)
-            .map(|host_helper| host_helper.dag.roots().len().max(1))
+            .copied()
             .unwrap_or(1);
         self.lines.push(format!(
             "{}chelis_tensor *{}[{}] = {{ NULL }};",
@@ -5493,9 +5559,6 @@ impl<'a> HostEmitter<'a> {
         } else {
             self.lines
                 .push(format!("{}{target} = {}[0];", self.indent, outputs_name));
-            if let Some(source) = identity_source {
-                self.record_alias(target, &source);
-            }
         }
         for (_, boxed) in tensor_args {
             if let Some(boxed) = boxed {
@@ -6213,6 +6276,7 @@ impl<'a> HostEmitter<'a> {
         args: &[HostExpr],
         arg_tys: &[HostType],
         ty: &HostType,
+        site: &ProjectedHostSite<'a>,
     ) -> Result<(), Unsupported> {
         if let Some(spec) = self.function_specializations.get(function).cloned() {
             match spec {
@@ -6279,6 +6343,7 @@ impl<'a> HostEmitter<'a> {
                 "user-function call",
             ));
         }
+        self.emit_pre_call_clones(site)?;
         self.lines.push(format!(
             "{}{target} = {}({});",
             self.indent,
@@ -6293,224 +6358,7 @@ impl<'a> HostEmitter<'a> {
                 .unwrap_or_else(|| c_ident(function)),
             arg_vars.join(", ")
         ));
-        // A non-owning result cannot alias a heap argument. Release a
-        // definitely fresh literal argument after the callee's entry borrow
-        // ends; variables remain owned by their declaring scope. Heap-return
-        // calls keep the existing ReturnsArg path until verified ownership IR
-        // replaces it in Phase 2.
-        if release_call(target, ty).is_none() {
-            for ((arg_var, arg_ty), arg) in arg_vars.iter().zip(arg_tys).zip(args) {
-                if is_definitely_fresh_heap_expr(arg)
-                    && let Some(call) = release_call(arg_var, arg_ty)
-                {
-                    self.lines.push(format!("{}{call}", self.indent));
-                    self.forget_owned_alloc(arg_var);
-                }
-            }
-        }
-        // chelis#1222: these two are halves of ONE judgement about the call
-        // result and must not be decided independently. When the escape
-        // retain fires, `target` owns a reference of its own and its scope
-        // owes the matching release; recording a borrow provenance on top of
-        // that would suppress the release and strand the retain, leaking one
-        // reference per call. Only an un-retained result needs its
-        // provenance traced.
-        if !self.retain_call_escaped_args(target, function, args, ty) {
-            self.record_call_result_provenance(target, function, &arg_vars, ty);
-        }
         Ok(())
-    }
-
-    /// chelis#1222: record where a call's result pointer came from, so the
-    /// receiving scope can tell an allocation the callee made from one it
-    /// merely handed back.
-    ///
-    /// Two provenances are unsafe to claim. The callee may return one of
-    /// its arguments, in which case the result is whatever that argument
-    /// already aliased; or it may return a value read out of an enclosing
-    /// scope (a captured top-level binding), in which case there is no
-    /// local variable to name and the result is marked foreign outright.
-    ///
-    /// Precision comes from the same [`analyze_returns_arg`] summary the
-    /// call-escape retain uses: a callee that demonstrably builds a fresh
-    /// result records nothing and the caller claims it as usual. When more
-    /// than one argument may be returned and more than one of them is
-    /// itself an alias, the result is marked foreign rather than pinned to
-    /// an arbitrary one of them: over-conservatism leaks at process exit,
-    /// under-conservatism corrupts the heap.
-    fn record_call_result_provenance(
-        &mut self,
-        target: &str,
-        function: &str,
-        arg_vars: &[String],
-        ty: &HostType,
-    ) {
-        if release_call(target, ty).is_none() {
-            return;
-        }
-        let callee = self.returns_arg.get(function).cloned();
-        // An unsummarized callee (not a user function, or not yet in the
-        // fixpoint) is treated as may-return-anything.
-        if callee.as_ref().is_none_or(ReturnsArg::may_return_outer) {
-            self.mark_foreign(target);
-            return;
-        }
-        let mut aliased_roots: Vec<(String, String)> = Vec::new();
-        for (index, arg_var) in arg_vars.iter().enumerate() {
-            let may_return = callee.as_ref().is_none_or(|s| s.may_return(index));
-            if !may_return {
-                continue;
-            }
-            let root = self.alias_root(arg_var);
-            // An argument temp that aliases nothing is left unrecorded, so
-            // a result that is that same pointer is claimed here.
-            //
-            // That is right when the temp is genuinely untracked, and WRONG
-            // when it is not: a fresh list literal built as an argument at
-            // `main` scope IS tracked and does get its own release, so a
-            // callee returning it leaves one allocation with two releases.
-            // Reported as chelis#1356 with a repro; unchanged from the
-            // parent commit, so it is not this change's regression, but do
-            // not read the line above as a proof of anything.
-            if root != *arg_var {
-                // Keyed by root so two arguments that alias the SAME
-                // allocation count once, but recorded as the argument
-                // variable: `record_alias` must add a link to the chain,
-                // never collapse it. The intermediate links are what a
-                // chain walk reads ownership off, and jumping straight to
-                // the root steps over them (chelis#1222).
-                aliased_roots.push((root, arg_var.clone()));
-            }
-        }
-        aliased_roots.sort();
-        aliased_roots.dedup_by(|a, b| a.0 == b.0);
-        match aliased_roots.as_slice() {
-            [] => {}
-            [(_, only)] => {
-                let only = only.clone();
-                self.record_alias(target, &only);
-            }
-            _ => self.mark_foreign(target),
-        }
-    }
-
-    /// Issue #406 (call-escape): when a block result is produced by a call
-    /// whose return may alias one of its bare-`Var` arguments, the call's
-    /// result `target` shares that variable's allocation, and the target's
-    /// own release would drop a reference someone else still owns. Retain
-    /// `target` once so the two release paths hold two references (the
-    /// same retain-cancels-release balance the bare-`Var` transfer arm
-    /// uses).
-    ///
-    /// As in [`HostEmitter::retain_transferred_result`], the destination's
-    /// class decides how much the argument's provenance matters
-    /// (chelis#1286 invariant 2). A binding VALUE TEMP is released at the
-    /// block close unconditionally, so any bare-`Var` argument the callee
-    /// may hand back forces the retain whatever owns that argument - the
-    /// earlier tracked-binding-only guard let `d = pass_through(text)`
-    /// release the caller's `text` through `d`'s block close and
-    /// underflow the string refcount (PR #1302 red-team follow-up to
-    /// P0-1). Any other destination keeps the tracked-binding
-    /// requirement: its release path is the caller's alias-aware
-    /// machinery, and retaining a borrowed return there would leak once
-    /// per call.
-    ///
-    /// Precision: the per-function `returns_arg` summary
-    /// ([`analyze_returns_arg`]) determines which argument positions the
-    /// callee may return, so a call that demonstrably builds a fresh
-    /// result (does not return the argument) retains nothing and does not
-    /// over-retain. A callee absent from the summary (an opaque /
-    /// not-user-defined call) is treated as may-return-any: the retain
-    /// then fires, which is use-after-free-safe and at worst leaks one
-    /// reference. Tensors and other non-refcounted types have no
-    /// `retain_call` and are skipped, keeping them excluded as before.
-    ///
-    /// Returns whether a retain was emitted, so the caller can keep the
-    /// tracking decision consistent with it (chelis#1222).
-    fn retain_call_escaped_args(
-        &mut self,
-        target: &str,
-        function: &str,
-        args: &[HostExpr],
-        ty: &HostType,
-    ) -> bool {
-        // Only meaningful for a refcounted result with a retain primitive
-        // and at least one open release-tracking `let` block.
-        if retain_call(target, ty).is_none() || self.let_scopes.is_empty() {
-            return false;
-        }
-        let callee = self.returns_arg.get(function).cloned();
-        let target_is_value_temp = self
-            .let_scopes
-            .iter()
-            .any(|scope| scope.value_temps.contains(target));
-        let mut retained = false;
-        for (index, arg) in args.iter().enumerate() {
-            // Only a bare `Var` directly aliases a binding's allocation.
-            // A more complex argument expression is materialized into a
-            // fresh temp (and, if it transferred a binding, already
-            // retained by the bare-`Var` arm or another call-escape
-            // retain when it was built), so it does not need a retain
-            // here.
-            let HostExprKind::Var(name, _) = &arg.kind else {
-                continue;
-            };
-            if !target_is_value_temp {
-                // chelis#1222: resolve the reference before testing
-                // membership; `bindings` holds alias keys, not spellings.
-                let source_key = self.resolve_alias_key(name);
-                let source_is_binding = self
-                    .let_scopes
-                    .iter()
-                    .any(|scope| scope.bindings.contains(&source_key));
-                if !source_is_binding {
-                    continue;
-                }
-            }
-            let may_return = match &callee {
-                Some(summary) => summary.may_return(index),
-                // Opaque callee: conservatively assume the argument may
-                // escape through the return (UAF-safe over-retain).
-                None => true,
-            };
-            if may_return {
-                retained = true;
-            }
-        }
-        // A callee that may hand back a CAPTURED top-level binding
-        // returns a borrowed reference through no argument at all
-        // (`def retg() -> string = gcap`). A value temp claiming that
-        // result unretained falsified the owned-binding precondition the
-        // `returns_arg` Let-arm refinement rests on: PR #1302's round-3
-        // red team showed `d = retg()  d` aborting once the owned-return
-        // summary let `main` claim the result of a function whose binding
-        // never owned it. Retain exactly as for an escaping argument; the
-        // block release pairs it. The known cost is chelis#1344's
-        // door-(a) imprecision in retain form: a branch-insensitive outer
-        // verdict over-retains a fresh-branch result into a bounded
-        // per-call leak instead of the borrowed-branch use-after-free.
-        // Non-value-temp targets keep the provenance path: `main` and the
-        // binder ledger abstain from claiming an outer-borrowed result,
-        // so a retain there would strand.
-        if target_is_value_temp {
-            let callee_may_return_outer = match &callee {
-                Some(summary) => summary.may_return_outer(),
-                None => true,
-            };
-            if callee_may_return_outer {
-                retained = true;
-            }
-        }
-        // Retain at most once: the result is a single pointer, and one
-        // extra reference cancels the one block release that would
-        // otherwise drop the escaping allocation. (Even if several
-        // arguments alias the *same* binding, the block releases that
-        // binding exactly once, so a single retain restores the balance.)
-        if retained && let Some(call) = retain_call(target, ty) {
-            self.lines.push(format!("{}{call}", self.indent));
-            return true;
-        }
-        false
     }
 
     fn assign_adt_construct(
@@ -6544,9 +6392,6 @@ impl<'a> HostEmitter<'a> {
                     values_name,
                     self.box_aggregate_value_expr(&field_var, &field_ty, field)?
                 ));
-                if is_definitely_fresh_heap_expr(field) {
-                    self.forget_owned_alloc(&field_var);
-                }
             }
             (values_name.clone(), Some(values_name))
         };
@@ -6601,7 +6446,34 @@ impl<'a> HostEmitter<'a> {
         arms: &[HostMatchArm],
         default_expr: Option<&HostExpr>,
         expr_ty: &HostType,
+        site: &ProjectedHostSite<'a>,
     ) -> Result<(), Unsupported> {
+        let arm_entries = site
+            .directives
+            .iter()
+            .find_map(|action| match action {
+                VerifiedHostAction::Terminator(VerifiedHostTerminator::Match { arms, .. }) => {
+                    Some(arms.iter().map(|edge| edge.target()).collect::<Vec<_>>())
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                invalid_abi_shape(
+                    "verified ADT-match site has no match terminator".to_string(),
+                    "verified C host ownership emission",
+                )
+            })?;
+        let expected_arms = arms.len() + usize::from(default_expr.is_some());
+        if arm_entries.len() != expected_arms {
+            return Err(invalid_abi_shape(
+                format!(
+                    "verified ADT match has {} blocks for {expected_arms} emitted arms",
+                    arm_entries.len()
+                ),
+                "verified C host ownership emission",
+            ));
+        }
+        let arm_blocks = Self::join_completion_blocks(site, expected_arms, "ADT-match")?;
         let scrutinee_var = self.next_temp("adt");
         self.emit_expr_to_var(scrutinee, &scrutinee_var, &host_type(scrutinee))?;
         let tag_var = self.next_temp("adt_tag");
@@ -6612,7 +6484,7 @@ impl<'a> HostEmitter<'a> {
         for (index, arm) in arms.iter().enumerate() {
             let prefix = if index == 0 { "if" } else { "else if" };
             self.lines.push(format!(
-                "{}{prefix} (chelis_string_eq({}, chelis_string_from_cstr({:?}))) {{",
+                "{}{prefix} (chelis_host_string_eq_cstr({}, {:?})) {{",
                 self.indent, tag_var, arm.ctor
             ));
             let nested_indent = format!("{}    ", self.indent);
@@ -6622,7 +6494,6 @@ impl<'a> HostEmitter<'a> {
             // carry no outgoing edge -- `chelis_adt_field` hands back an
             // independently retained handle, so the arm binding is not a
             // copy of anything this scope already owns.
-            self.binder_keys.push(UnordMap::new());
             for binding in &arm.bindings {
                 let field_var = self.next_temp(&format!("{}_field", binding.name));
                 self.lines.push(format!(
@@ -6636,10 +6507,10 @@ impl<'a> HostEmitter<'a> {
                     binding.name
                 ));
                 self.assign_unboxed_value(&binding.name, &binding.ty, &field_var)?;
-                self.bind_alias_key(&binding.name);
+                self.bind_match_payload(site, arm_entries[index], "adt_payload:", &binding.name)?;
             }
             self.assign_expr(target, &arm.expr, expr_ty)?;
-            self.binder_keys.pop();
+            self.emit_expression_block_actions(site, arm_blocks[index], target)?;
             self.indent = previous;
             self.lines.push(format!("{}}}", self.indent));
         }
@@ -6648,6 +6519,7 @@ impl<'a> HostEmitter<'a> {
         let previous = std::mem::replace(&mut self.indent, nested_indent);
         if let Some(default_expr) = default_expr {
             self.assign_expr(target, default_expr, expr_ty)?;
+            self.emit_expression_block_actions(site, arm_blocks[arms.len()], target)?;
         } else {
             self.lines.push(format!(
                 "{}fprintf(stderr, \"non-exhaustive ADT match\\n\");",
@@ -6657,6 +6529,8 @@ impl<'a> HostEmitter<'a> {
         }
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
+        self.lines
+            .push(format!("{}chelis_string_release({tag_var});", self.indent));
         Ok(())
     }
 
@@ -6693,9 +6567,6 @@ impl<'a> HostEmitter<'a> {
                 values_name,
                 self.box_aggregate_value_expr(&item_var, item_ty, item)?
             ));
-            if is_definitely_fresh_heap_expr(item) {
-                self.forget_owned_alloc(&item_var);
-            }
         }
         self.lines.push(format!(
             "{}{target} = chelis_list_from_values({}, {});",
@@ -6709,9 +6580,6 @@ impl<'a> HostEmitter<'a> {
                 self.indent
             ));
         }
-        // issue #406: a freshly-built list temporary in the program root
-        // scope is owned by `main` and must be released at scope exit.
-        self.track_owned_alloc(target, ty);
         Ok(())
     }
 
@@ -6761,9 +6629,6 @@ impl<'a> HostEmitter<'a> {
                     values_name,
                     self.box_aggregate_value_expr(&item_var, item_ty, item)?
                 ));
-                if is_definitely_fresh_heap_expr(item) {
-                    self.forget_owned_alloc(&item_var);
-                }
             }
             values_name
         };
@@ -6781,9 +6646,6 @@ impl<'a> HostEmitter<'a> {
                 ));
             }
         }
-        // issue #406: a freshly-built tuple temporary in the program root
-        // scope is owned by `main` and must be released at scope exit.
-        self.track_owned_alloc(target, ty);
         Ok(())
     }
 
@@ -6793,6 +6655,8 @@ impl<'a> HostEmitter<'a> {
         callback: &HostCallback,
         list: &HostExpr,
         _ty: &HostType,
+        site: &ProjectedHostSite<'a>,
+        body_block: VerifiedBlockId,
     ) -> Result<(), Unsupported> {
         let list_var = self.next_temp("map_list");
         self.emit_expr_to_var(list, &list_var, &host_type(list))?;
@@ -6832,12 +6696,14 @@ impl<'a> HostEmitter<'a> {
             arg_var
         ));
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
+        self.bind_loop_item(site, &arg_var)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var)?;
         self.lines.push(format!(
             "{}chelis_list_push({target}, {});",
             self.indent,
             self.box_value_expr(&result_var, &callback.ret_ty)?
         ));
+        self.emit_expression_block_actions(site, body_block, target)?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         Ok(())
@@ -6849,6 +6715,8 @@ impl<'a> HostEmitter<'a> {
         callback: &HostCallback,
         list: &HostExpr,
         _ty: &HostType,
+        site: &ProjectedHostSite<'a>,
+        body_block: VerifiedBlockId,
     ) -> Result<(), Unsupported> {
         let list_var = self.next_temp("filter_list");
         self.emit_expr_to_var(list, &list_var, &host_type(list))?;
@@ -6884,6 +6752,7 @@ impl<'a> HostEmitter<'a> {
             arg_var
         ));
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
+        self.bind_loop_item(site, &arg_var)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &keep_var)?;
         self.lines
             .push(format!("{}if ({}) {{", self.indent, keep_var));
@@ -6895,11 +6764,13 @@ impl<'a> HostEmitter<'a> {
         ));
         self.indent = nested_previous;
         self.lines.push(format!("{}}}", self.indent));
+        self.emit_expression_block_actions(site, body_block, target)?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn assign_fold(
         &mut self,
         target: &str,
@@ -6907,8 +6778,12 @@ impl<'a> HostEmitter<'a> {
         init: &HostExpr,
         list: &HostExpr,
         ty: &HostType,
+        site: &ProjectedHostSite<'a>,
+        preheader_block: VerifiedBlockId,
+        body_block: VerifiedBlockId,
     ) -> Result<(), Unsupported> {
         self.assign_expr(target, init, ty)?;
+        self.emit_expression_block_actions(site, preheader_block, target)?;
         let list_var = self.next_temp("fold_list");
         self.emit_expr_to_var(list, &list_var, &host_type(list))?;
         let len_var = self.next_temp("fold_len");
@@ -6935,6 +6810,47 @@ impl<'a> HostEmitter<'a> {
             c_type(&params[0].ty)?,
             acc_arg
         ));
+        let (body_edge, exit_edge) = site
+            .directives
+            .iter()
+            .find_map(|action| match action {
+                VerifiedHostAction::Terminator(VerifiedHostTerminator::Loop {
+                    body_edge,
+                    exit_edge,
+                    ..
+                }) => Some((body_edge, exit_edge)),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                invalid_abi_shape(
+                    "verified fold site has no loop terminator".to_string(),
+                    "verified C host ownership emission",
+                )
+            })?;
+        let [body_acc] = body_edge.params() else {
+            return Err(invalid_abi_shape(
+                format!(
+                    "verified fold body edge carries {} parameters, expected one accumulator",
+                    body_edge.params().len()
+                ),
+                "verified C host ownership emission",
+            ));
+        };
+        let [exit_acc] = exit_edge.params() else {
+            return Err(invalid_abi_shape(
+                format!(
+                    "verified fold exit edge carries {} parameters, expected one accumulator",
+                    exit_edge.params().len()
+                ),
+                "verified C host ownership emission",
+            ));
+        };
+        // The body consumes the per-iteration accumulator copy, while the exit
+        // owner remains represented by the expression result.  Bind both from
+        // the verified loop edges before the callback's ownership actions run;
+        // a later name-derived recovery would reintroduce backend inference.
+        self.owner_vars.insert(body_acc.id(), acc_arg.clone());
+        self.owner_vars.insert(exit_acc.id(), target.to_string());
         let item_arg = self.next_temp("fold_item");
         self.lines.push(format!(
             "{}{} {};",
@@ -6943,12 +6859,15 @@ impl<'a> HostEmitter<'a> {
             item_arg
         ));
         self.assign_unboxed_value(&item_arg, &params[1].ty, &item_value)?;
+        self.bind_loop_item(site, &item_arg)?;
         self.emit_callback_assign(callback, &[acc_arg, item_arg], target)?;
+        self.emit_expression_block_actions(site, body_block, target)?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn assign_scan(
         &mut self,
         target: &str,
@@ -6956,6 +6875,8 @@ impl<'a> HostEmitter<'a> {
         init: &HostExpr,
         list: &HostExpr,
         ty: &HostType,
+        site: &ProjectedHostSite<'a>,
+        body_block: VerifiedBlockId,
     ) -> Result<(), Unsupported> {
         let HostType::List(inner_ty) = ty else {
             self.lines
@@ -6965,6 +6886,36 @@ impl<'a> HostEmitter<'a> {
         let acc_ty = inner_ty.as_ref().clone();
         let acc_var = self.next_temp("scan_acc");
         self.emit_expr_to_var(init, &acc_var, &acc_ty)?;
+        let (body_edge, exit_edge) = site
+            .directives
+            .iter()
+            .find_map(|action| match action {
+                VerifiedHostAction::Terminator(VerifiedHostTerminator::Loop {
+                    body_edge,
+                    exit_edge,
+                    ..
+                }) => Some((body_edge.clone(), exit_edge.clone())),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                invalid_abi_shape(
+                    "verified scan site has no loop terminator".to_string(),
+                    "verified C host ownership emission",
+                )
+            })?;
+        for (edge, name) in [(body_edge, "body"), (exit_edge, "exit")] {
+            let [state, output] = edge.params() else {
+                return Err(invalid_abi_shape(
+                    format!(
+                        "verified scan {name} edge carries {} parameters, expected state and output",
+                        edge.params().len()
+                    ),
+                    "verified C host ownership emission",
+                ));
+            };
+            self.owner_vars.insert(state.id(), acc_var.clone());
+            self.owner_vars.insert(output.id(), target.to_string());
+        }
         let list_var = self.next_temp("scan_list");
         self.emit_expr_to_var(list, &list_var, &host_type(list))?;
         let len_var = self.next_temp("scan_len");
@@ -7004,12 +6955,14 @@ impl<'a> HostEmitter<'a> {
             item_arg
         ));
         self.assign_unboxed_value(&item_arg, &params[1].ty, &item_value)?;
+        self.bind_loop_item(site, &item_arg)?;
         self.emit_callback_assign(callback, &[acc_arg, item_arg], &acc_var)?;
         self.lines.push(format!(
             "{}chelis_list_push({target}, {});",
             self.indent,
             self.box_value_expr(&acc_var, &acc_ty)?
         ));
+        self.emit_expression_block_actions(site, body_block, target)?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         Ok(())
@@ -7021,6 +6974,8 @@ impl<'a> HostEmitter<'a> {
         callback: &HostCallback,
         list: &HostExpr,
         ty: &HostType,
+        site: &ProjectedHostSite<'a>,
+        body_block: VerifiedBlockId,
     ) -> Result<(), Unsupported> {
         let HostType::Tuple(parts) = ty else {
             // chelis#730 Phase 1 (census row 15, section C1.4
@@ -7097,6 +7052,7 @@ impl<'a> HostEmitter<'a> {
             arg_var
         ));
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
+        self.bind_loop_item(site, &arg_var)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &keep_var)?;
         self.lines
             .push(format!("{}if ({}) {{", self.indent, keep_var));
@@ -7116,6 +7072,7 @@ impl<'a> HostEmitter<'a> {
         ));
         self.indent = else_previous;
         self.lines.push(format!("{}}}", self.indent));
+        self.emit_expression_block_actions(site, body_block, target)?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         let tuple_values = self.next_temp("partition_values");
@@ -7142,6 +7099,8 @@ impl<'a> HostEmitter<'a> {
         callback: &HostCallback,
         list: &HostExpr,
         _ty: &HostType,
+        site: &ProjectedHostSite<'a>,
+        body_block: VerifiedBlockId,
     ) -> Result<(), Unsupported> {
         let list_var = self.next_temp("flat_map_list");
         self.emit_expr_to_var(list, &list_var, &host_type(list))?;
@@ -7181,11 +7140,13 @@ impl<'a> HostEmitter<'a> {
             arg_var
         ));
         self.assign_unboxed_value(&arg_var, &param.ty, &item_value)?;
+        self.bind_loop_item(site, &arg_var)?;
         self.emit_callback_assign(callback, std::slice::from_ref(&arg_var), &result_var)?;
         self.lines.push(format!(
             "{}chelis_list_extend({target}, {});",
             self.indent, result_var
         ));
+        self.emit_expression_block_actions(site, body_block, target)?;
         self.indent = previous;
         self.lines.push(format!("{}}}", self.indent));
         Ok(())
@@ -7214,14 +7175,6 @@ impl<'a> HostEmitter<'a> {
                 ));
             }
             HostCallbackKind::Inline { params, body } => {
-                // chelis#1222: a lambda parameter shadows any enclosing name
-                // it reuses. Without a scope here, a parameter that happens
-                // to reuse an outer binding's name made the emitter read the
-                // OUTER binding's ownership facts for it -- which decided
-                // whether a retain was emitted inside the loop, so the same
-                // program leaked or did not depending on the parameter's
-                // spelling. Edge-less, like the other extraction binders.
-                self.binder_keys.push(UnordMap::new());
                 for (param, arg_var) in params.iter().zip(arg_vars.iter()) {
                     self.lines.push(format!(
                         "{}{} {} = {};",
@@ -7231,11 +7184,7 @@ impl<'a> HostEmitter<'a> {
                         arg_var
                     ));
                 }
-                for param in params {
-                    self.bind_alias_key(&param.name);
-                }
                 self.assign_expr(target, body, &callback.ret_ty)?;
-                self.binder_keys.pop();
             }
         }
         Ok(())
@@ -7295,14 +7244,9 @@ impl<'a> HostEmitter<'a> {
         &self,
         value: &str,
         ty: &HostType,
-        source: &HostExpr,
+        _source: &HostExpr,
     ) -> Result<String, Unsupported> {
-        let boxed = self.box_value_expr(value, ty)?;
-        if is_borrowed_heap_expr(source) && release_call(value, ty).is_some() {
-            Ok(format!("chelis_value_clone({boxed})"))
-        } else {
-            Ok(boxed)
-        }
+        self.box_value_expr(value, ty)
     }
 
     fn assign_unboxed_value(
@@ -7685,9 +7629,6 @@ impl<'a> HostEmitter<'a> {
         ));
         self.lines
             .push(format!("{}chelis_value_release({boxed});", self.indent));
-        if is_definitely_fresh_heap_expr(source) {
-            self.forget_owned_alloc(value_var);
-        }
         Ok(())
     }
 
@@ -7704,70 +7645,9 @@ impl<'a> HostEmitter<'a> {
     }
 }
 
-/// Expressions in this closed set create one fresh heap owner in their
-/// destination. The Phase 1 emitter uses that fact only to balance the
-/// short-lived value carrier handed to a cloning aggregate constructor.
-/// Anything not listed is treated as borrowed and cloned before boxing;
-/// Phase 2 replaces this conservative syntax boundary with verified
-/// Borrow/Move/Clone operands.
-fn is_definitely_fresh_heap_expr(expr: &HostExpr) -> bool {
-    match &expr.kind {
-        HostExprKind::String(_)
-        | HostExprKind::List(_, _)
-        | HostExprKind::Tuple(_, _)
-        | HostExprKind::AdtConstruct { .. } => true,
-        HostExprKind::Var(name, _) => name == "Nil" || name == "None",
-        HostExprKind::Builtin { name, .. } => matches!(
-            name.as_str(),
-            "Some"
-                | "None"
-                | "string_concat"
-                | "string_trim"
-                | "string_slice"
-                | "to_string"
-                | "scalar_to_tensor"
-                | "to_tensor"
-                | "to_list"
-                | "append"
-                | "prepend"
-                | "concat"
-                | "take"
-                | "drop"
-                | "chunk"
-                | "flatten"
-                | "zip"
-                | "enumerate"
-                | "dict_of"
-                | "dict_insert"
-                | "dict_remove"
-                | "dict_merge"
-                | "dict_keys"
-                | "dict_values"
-                | "dict_entries"
-                | "read_file"
-                | "read_lines"
-                | "read_bytes"
-                | "list_dir"
-                | "mmap_file"
-                | "mmap_read"
-                | "range"
-        ),
-        _ => false,
-    }
-}
-
-fn is_borrowed_heap_expr(expr: &HostExpr) -> bool {
-    !is_definitely_fresh_heap_expr(expr)
-}
-
 /// The runtime release call that frees the heap allocation a value of
-/// `ty` held in `var` owns, or `None` for non-owning types (scalars,
-/// borrowed views, function pointers). Used by `emit_main`'s scope-exit
-/// cleanup (issue #406) so a `chelis build --target c` program frees the
-/// list / tensor / tuple / dict / adt / string temporaries it allocates
-/// instead of leaking them for the process lifetime. The runtime release
-/// functions are refcounted, so releasing a container correctly
-/// decrements any retained element without double-freeing it.
+/// `ty` held in `var` owns, or `None` for non-owning types. Called only
+/// while formatting a verified `Drop` or `RootConsume` action.
 fn release_call(var: &str, ty: &HostType) -> Option<String> {
     // #379: the var may be a user binding/let name spelled like a C keyword;
     // route through `c_ident` so the free call names the same (possibly
@@ -7789,18 +7669,7 @@ fn release_call(var: &str, ty: &HostType) -> Option<String> {
     }
 }
 
-/// The runtime retain call that adds one reference to the heap allocation
-/// a value of `ty` held in `var` owns, or `None` for non-refcounted types.
-/// Used by the `let`-block scope release (issue #406): when a block result
-/// is transferred to a `target` in the outer scope via a bare pointer copy
-/// (`target = <heap var>` for a `Var` body or an `if`/`match` arm), the
-/// target shares the source allocation's reference. Retaining at the
-/// transfer leaf lets the block uniformly release every heap binding it
-/// declared without freeing the value the caller now holds.
-///
-/// Every heap-backed host value has a matching retain/release pair. Phase 2
-/// replaces the syntax-directed transfer inference around these calls with
-/// verified Borrow/Move/Clone operands.
+/// The runtime retain call that formats one verified `Clone` action.
 fn retain_call(var: &str, ty: &HostType) -> Option<String> {
     // #379: mirror `release_call` — a user name spelled like a C keyword
     // routes through `c_ident`; compiler temps pass through unchanged.
@@ -7816,16 +7685,6 @@ fn retain_call(var: &str, ty: &HostType) -> Option<String> {
         HostType::MappedFile => Some(format!("chelis_mapped_file_retain({var});")),
         _ => None,
     }
-}
-
-/// The release call for a `let` binding tracked by the block-scope cleanup
-/// (issue #406), or `None` if the binding's type is not a refcounted
-/// host-value (so it owns no heap allocation the block must reclaim).
-/// Restricting the tracked set to exactly the `retain_call` types keeps every
-/// retain/release balanced regardless of how the block result is produced.
-fn binding_release(var: &str, ty: &HostType) -> Option<String> {
-    retain_call(var, ty)?;
-    release_call(var, ty)
 }
 
 fn c_type(ty: &HostAbiType) -> Result<&'static str, Unsupported> {
@@ -8658,6 +8517,58 @@ mod expression_dispatch_tests {
     use super::*;
 
     #[test]
+    fn verified_clone_and_drop_formatters_cover_all_eight_public_heap_payloads() {
+        let scalar = HostType::Int64;
+        let heap = [
+            (HostType::String, "chelis_string"),
+            (
+                HostType::Tensor(TensorType {
+                    dims: Vec::new(),
+                    precision: Prim::F32,
+                }),
+                "chelis_tensor",
+            ),
+            (HostType::List(Box::new(scalar.clone())), "chelis_list"),
+            (HostType::Tuple(vec![scalar.clone()]), "chelis_tuple"),
+            (
+                HostType::Dict(Box::new(scalar.clone()), Box::new(scalar.clone())),
+                "chelis_dict",
+            ),
+            (HostType::Adt("Probe".into(), Vec::new()), "chelis_adt"),
+            (HostType::Option(Box::new(scalar.clone())), "chelis_option"),
+            (HostType::MappedFile, "chelis_mapped_file"),
+        ];
+        for (ty, prefix) in heap {
+            assert_eq!(
+                retain_call("owner", &ty),
+                Some(format!("{prefix}_retain(owner);")),
+                "verified Clone lost its {ty:?} runtime effect"
+            );
+            assert_eq!(
+                release_call("owner", &ty),
+                Some(format!("{prefix}_release(owner);")),
+                "verified Drop lost its {ty:?} runtime effect"
+            );
+        }
+
+        for ty in [
+            HostType::Int64,
+            HostType::Float32,
+            HostType::Bool,
+            HostType::Unit,
+        ] {
+            assert_eq!(retain_call("owner", &ty), None, "{ty:?}");
+            assert_eq!(release_call("owner", &ty), None, "{ty:?}");
+        }
+
+        let source = include_str!("host_emit.rs");
+        assert!(source.contains("VerifiedHostOperation::Clone"));
+        assert!(source.contains("VerifiedHostOperation::Drop"));
+        assert!(source.contains("self.emit_clone_to"));
+        assert!(source.contains("release_call(&var, &ty)"));
+    }
+
+    #[test]
     fn exact_scalar_argument_projection_never_boxes_through_chelis_value() {
         for (ty, dtype) in [
             (HostType::Int8, "CHELIS_DTYPE_I8"),
@@ -8721,7 +8632,8 @@ mod expression_dispatch_tests {
             "manifest",
             UnordMap::new(),
             UnordMap::new(),
-            UnordMap::new(),
+            &[],
+            &[],
             &[],
         );
         emitter.emit_labeled_boxed_root("root", "boxed");

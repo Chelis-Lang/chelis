@@ -1,10 +1,10 @@
 //! C code generation backend for the Chelis language.
 
 pub mod blas;
-pub mod emit;
+mod emit;
 mod emitted_expr;
 mod host_abi;
-pub mod host_emit;
+mod host_emit;
 pub mod memory;
 pub mod toolchain;
 
@@ -102,21 +102,36 @@ pub struct CodegenOptions {
 /// Repeated `Load(name)` nodes share one input slot, surfaced via `input_labels`.
 /// `Store(name)` nodes are exported as named outputs in `output_labels`; any
 /// remaining DAG roots are appended afterward as `root{index}`.
+///
+/// ```compile_fail
+/// # use chelis_ir::dag::Dag;
+/// fn bypass(raw: &Dag) {
+///     let _ = chelis_backend_c::codegen(raw, "unchecked");
+/// }
+/// ```
 pub fn codegen(
-    dag: &chelis_ir::dag::Dag,
+    dag: &chelis_ir::ownership::VerifiedDagProgram,
     func_name: &str,
 ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
     codegen_with_options(dag, func_name, CodegenOptions::default())
 }
 
+/// Compile a sealed, verified host payload.
+///
+/// ```compile_fail
+/// # use chelis_ir::host::ConcreteHostProgram;
+/// fn bypass(raw: &ConcreteHostProgram) {
+///     let _ = chelis_backend_c::codegen_host_program(raw, "unchecked");
+/// }
+/// ```
 pub fn codegen_host_program(
-    program: &chelis_ir::host::ConcreteHostProgram,
+    program: &chelis_ir::ownership::VerifiedHostProgram,
     func_name: &str,
 ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
     // Resolve the backend capability boundary once.  All emission below is
     // over the private, fully-resolved ABI vocabulary; neither source nor
     // header generation can re-interpret logical types independently.
-    let abi_program = host_abi::project_program(program)?;
+    let abi_program = host_abi::project_program(program.emission())?;
     let c_source = host_emit::emit_host_abi_program(&abi_program, func_name)?;
     let h_header = host_emit::emit_host_abi_header(&abi_program, func_name)?;
     let needs_blas = c_source.contains("#include \"chelis_blas.h\"")
@@ -138,18 +153,12 @@ pub fn codegen_host_program(
 
 /// Generate C source code from a RISC DAG with explicit backend options.
 pub fn codegen_with_options(
-    dag: &chelis_ir::dag::Dag,
+    dag: &chelis_ir::ownership::VerifiedDagProgram,
     func_name: &str,
     options: CodegenOptions,
 ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
-    let specialized;
-    let dag = if options.use_blas {
-        specialized = chelis_ir::specialize::specialize_for_blas(dag);
-        &specialized
-    } else {
-        dag
-    };
     let c_source = emit::CEmitter::emit_dag_with_options(dag, func_name, options)?;
+    let dag = dag.emission();
     let h_header = format!(
         "void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
     );
@@ -160,7 +169,7 @@ pub fn codegen_with_options(
             .any(|node| matches!(node.op, chelis_ir::dag::RiscOp::BlasMatmul { .. }));
     let input_labels = emit::CEmitter::input_labels(dag);
     let output_labels = emit::CEmitter::output_labels(dag);
-    let symbolic_dims = chelis_ir::dag::symbolic_params(dag);
+    let symbolic_dims = dag.symbolic_params();
     Ok(CodegenResult {
         c_source,
         h_header,
@@ -174,6 +183,58 @@ pub fn codegen_with_options(
     })
 }
 
+/// Apply the C backend's payload-selection rewrites before ownership lowering.
+pub fn prepare_dag_for_codegen(
+    dag: chelis_ir::dag::Dag,
+    options: CodegenOptions,
+) -> chelis_ir::dag::Dag {
+    let dag = if options.use_blas {
+        chelis_ir::specialize::specialize_for_blas(&dag)
+    } else {
+        dag
+    };
+    emit::CEmitter::rename_anonymous_dims(dag)
+}
+
+/// Select the exact nested C helper DAGs before host ownership lowering.
+pub fn prepare_host_program_for_codegen(
+    mut program: chelis_ir::host::ConcreteHostProgram,
+) -> Result<chelis_ir::host::ConcreteHostProgram, chelis_types::unsupported::Unsupported> {
+    fn prepare(
+        helper: &mut chelis_ir::host::HostTensorHelper,
+    ) -> Result<(), chelis_types::unsupported::Unsupported> {
+        let specialized = chelis_ir::specialize::specialize_for_blas(&helper.dag);
+        chelis_ir::check_axis_sources(
+            &specialized,
+            chelis_types::unsupported::Stage::Codegen("c"),
+        )?;
+        helper.dag = emit::CEmitter::rename_anonymous_dims(specialized);
+        Ok(())
+    }
+    for helper in &mut program.global_tensor_helpers {
+        prepare(helper)?;
+    }
+    for function in &mut program.functions {
+        for helper in &mut function.tensor_helpers {
+            prepare(helper)?;
+        }
+    }
+    Ok(program)
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use chelis_ir::ownership::{OwnershipError, VerifiedDagProgram};
+
+    pub(crate) fn verified_dag(
+        dag: &chelis_ir::dag::Dag,
+        options: crate::CodegenOptions,
+    ) -> Result<VerifiedDagProgram, OwnershipError> {
+        let selected = crate::prepare_dag_for_codegen(dag.clone(), options);
+        chelis_ir::ownership::verify_ownership(chelis_ir::ownership::lower_dag_ownership(selected)?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +245,71 @@ mod tests {
     use std::path::PathBuf;
     use std::process::Command;
     use std::{env, fs};
+
+    fn codegen(
+        dag: &Dag,
+        name: &str,
+    ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
+        codegen_with_options(dag, name, CodegenOptions::default())
+    }
+
+    fn codegen_with_options(
+        dag: &Dag,
+        name: &str,
+        options: CodegenOptions,
+    ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
+        let verified = crate::testing::verified_dag(dag, options)
+            .expect("C backend unit-test DAG must verify ownership");
+        super::codegen_with_options(&verified, name, options)
+    }
+
+    fn codegen_host_program(
+        program: &chelis_ir::host::ConcreteHostProgram,
+        name: &str,
+    ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
+        let source = program
+            .functions
+            .iter()
+            .map(|function| {
+                let params = function
+                    .params
+                    .iter()
+                    .enumerate()
+                    .map(|(index, _)| format!("p{index}: f64"))
+                    .collect::<Vec<_>>();
+                let body = if params.is_empty() { "0.0f64" } else { "p0" };
+                format!(
+                    "def {}({}) -> f64 = {body}",
+                    function.name,
+                    params.join(", ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let declarations = chelis_surf::parser::parse_str(&source)
+            .unwrap_or_else(|error| panic!("parse synthetic host signatures: {error:?}"));
+        let deep = chelis_surf::desugar::desugar_program(&declarations);
+        let checked = chelis_types::check_typed_program(&deep).unwrap_or_else(|errors| {
+            panic!("check synthetic host signatures: {:?}", errors.errors)
+        });
+        let checked = chelis_effects::check_program(&checked)
+            .unwrap_or_else(|error| panic!("effects synthetic host signatures: {error:?}"));
+        let checked = chelis_types::check_linearity(&checked)
+            .unwrap_or_else(|error| panic!("linearity synthetic host signatures: {error:?}"));
+        let manifested = chelis_types::manifest::ManifestedProgram::new(
+            checked,
+            chelis_types::manifest::RootManifest {
+                entries: Vec::new(),
+            },
+            chelis_types::types::Target::C,
+        );
+        let selected = prepare_host_program_for_codegen(program.clone())?;
+        let lowered = chelis_ir::ownership::lower_host_ownership(&manifested, selected)
+            .expect("C backend unit-test host must lower ownership");
+        let verified = chelis_ir::ownership::verify_ownership(lowered)
+            .expect("C backend unit-test host must verify ownership");
+        super::codegen_host_program(&verified, name)
+    }
 
     fn scalar_f32() -> TensorType {
         TensorType::scalar_f32()
@@ -357,7 +483,6 @@ mod tests {
     /// after` (the symbolic entry-wrapper concat mis-sizing) must be rejected
     /// loud at codegen, never emit the heap-corrupting copy loop.
     #[test]
-    #[should_panic(expected = "chelis#593")]
     fn codegen_rejects_mis_sized_leading_axis_pad() {
         let mut dag = Dag::new();
         let sym = TensorType {
@@ -379,7 +504,11 @@ mod tests {
             sym,
             None,
         );
-        let _ = codegen(&dag, "mis_sized").unwrap();
+        let error = match chelis_ir::ownership::lower_dag_ownership(dag) {
+            Err(error) => error,
+            Ok(_) => panic!("a mis-sized pad must not become verified backend input"),
+        };
+        assert!(error.to_string().contains("expected 4"));
     }
 
     /// Positive parity: a CORRECTLY sized leading-axis Pad over a symbolic
@@ -456,15 +585,14 @@ mod tests {
             scalar_f32(),
             None,
         );
-        let result = emit::CEmitter::emit_dag_with_options(
-            &dag,
-            "internal_helper",
-            CodegenOptions {
-                static_entry: true,
-                ..CodegenOptions::default()
-            },
-        )
-        .unwrap();
+        let options = CodegenOptions {
+            static_entry: true,
+            ..CodegenOptions::default()
+        };
+        let verified = crate::testing::verified_dag(&dag, options)
+            .expect("static-entry test DAG must verify ownership");
+        let result =
+            emit::CEmitter::emit_dag_with_options(&verified, "internal_helper", options).unwrap();
         assert!(
             result.contains("static void internal_helper("),
             "internal helper must be static; got source starting:\n{}",

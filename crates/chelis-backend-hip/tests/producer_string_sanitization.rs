@@ -10,10 +10,11 @@
 //! Each has its own input-shape preamble with fprintf reports. Both
 //! must apply the format-string sanitizer.
 
-use chelis_backend_hip::codegen_hip;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::load_store_name::LoadStoreName;
 use chelis_types::types::Prim;
+use support::codegen_hip;
 
 fn vec_f32(n: usize) -> TensorType {
     TensorType {

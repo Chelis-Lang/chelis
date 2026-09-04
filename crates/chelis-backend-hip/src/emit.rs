@@ -4,12 +4,24 @@
 //! and walks the DAG in topological order launching kernels on GPU.
 
 use chelis_ir::dag::{
-    Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, NodeId, RiscOp, RtDim, TensorType,
-    symbolic_bindings,
+    DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, NodeId, RiscOp, RtDim, TensorType,
 };
+use chelis_ir::ownership::{VerifiedDagAction, VerifiedDagView};
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_types::{ElementRef, ScalarValue};
+
+fn unsupported_verified_dag_action(node: NodeId, detail: &str) -> Unsupported {
+    Unsupported::new(
+        UnsupportedKind::Op("Drop".to_string()),
+        format!("verified DAG ownership action at node {}: {detail}", node.0),
+        Stage::Codegen("hip"),
+        chelis_types::deliberate_rejection!(
+            "[04-TOT-2]",
+            "verified ownership and the retained DAG payload must agree exactly; no backend-local ownership fallback is permitted"
+        ),
+    )
+}
 
 /// chelis#616: the HIP device-kernel lane does not support runtime (node-valued)
 /// movement bounds; `reject_unsupported_hip_ops` (compiler-api + CLI) rejects
@@ -184,8 +196,8 @@ impl HipEmitter {
     /// The current HIP unary kernel spells `fabsf` for every dtype. Keep
     /// integer `abs` out of that float-only template until Phase 3 supplies
     /// the typed, trapping backend kernel (chelis#699).
-    fn reject_integer_abs(dag: &Dag) -> Result<(), Unsupported> {
-        if let Some(node) = chelis_ir::analysis::first_integer_abs_node(dag) {
+    fn reject_integer_abs(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
+        if let Some(node) = dag.first_integer_abs_node() {
             return Err(Unsupported::new(
                 UnsupportedKind::Op("Abs".to_string()),
                 format!("an integer tensor at HIP DAG node {}", node.0),
@@ -200,7 +212,7 @@ impl HipEmitter {
         Ok(())
     }
 
-    fn reject_count(dag: &Dag) -> Result<(), Unsupported> {
+    fn reject_count(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
         if let Some(node) = dag
             .nodes()
             .iter()
@@ -222,7 +234,7 @@ impl HipEmitter {
 
     /// Emit complete C/HIP source for a DAG as a function.
     pub(crate) fn emit_dag(
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
         func_name: &str,
     ) -> Result<(String, PeakDeviceBytesBreakdown), Unsupported> {
         Self::reject_integer_abs(dag)?;
@@ -272,7 +284,7 @@ impl HipEmitter {
             }
         }
 
-        let reduction_inlined = chelis_ir::fuse::reduction_inlined_fused_elems(dag);
+        let reduction_inlined = dag.reduction_inlined_fused_elems();
         let output_specs = Self::output_specs(dag);
         let output_ids: Vec<NodeId> = output_specs.iter().map(|o| o.id).collect();
         let plan = MemoryPlan::build(dag, &output_ids, &reduction_inlined);
@@ -417,7 +429,14 @@ impl HipEmitter {
         e.line("");
 
         // Cleanup: free GPU tensors (skip reduction-inlined FusedElems — never allocated)
-        let cleanup = e.plan.emit_cleanup();
+        let dropped_sources = dag
+            .actions()
+            .filter_map(|action| match action {
+                VerifiedDagAction::OwnedDrop { source, .. } => Some(source),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let cleanup = e.plan.emit_cleanup_with_drops(&dropped_sources);
         for line in cleanup {
             e.lines.push(line);
         }
@@ -449,7 +468,7 @@ impl HipEmitter {
 
     fn emit_device_entrypoint(
         &mut self,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
         func_name: &str,
         output_specs: &[OutputSpec],
         input_slots: &chelis_unord::UnordMap<String, usize>,
@@ -537,7 +556,14 @@ impl HipEmitter {
         }
 
         self.line("");
-        let cleanup = self.plan.emit_cleanup();
+        let dropped_sources = dag
+            .actions()
+            .filter_map(|action| match action {
+                VerifiedDagAction::OwnedDrop { source, .. } => Some(source),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let cleanup = self.plan.emit_cleanup_with_drops(&dropped_sources);
         for line in cleanup {
             self.lines.push(line);
         }
@@ -551,7 +577,7 @@ impl HipEmitter {
     // Kernel collection (first pass)
     // ------------------------------------------------------------------
 
-    fn collect_kernels(&mut self, dag: &Dag) -> Result<(), Unsupported> {
+    fn collect_kernels(&mut self, dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
         let mut seen = chelis_unord::UnordSet::new();
         for node in dag.nodes() {
             // Skip reduction-inlined FusedElem nodes (they become part of the
@@ -637,7 +663,7 @@ impl HipEmitter {
         name.starts_with("kernel_fused_")
     }
 
-    fn input_types(dag: &Dag) -> chelis_unord::UnordMap<String, TensorType> {
+    fn input_types(dag: VerifiedDagView<'_>) -> chelis_unord::UnordMap<String, TensorType> {
         let mut seen = chelis_unord::UnordMap::<String, TensorType>::new();
         for node in dag.nodes() {
             if let RiscOp::Load { name } = &node.op {
@@ -650,7 +676,7 @@ impl HipEmitter {
 
     fn emit_input_shape_preamble(
         &mut self,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
         input_slots: &chelis_unord::UnordMap<String, usize>,
         func_name: &str,
     ) {
@@ -707,7 +733,7 @@ impl HipEmitter {
             }
         }
 
-        for binding in symbolic_bindings(dag) {
+        for binding in dag.symbolic_bindings() {
             let (canonical_label, canonical_axis) = require_load_source(&binding.canonical);
             let canonical_slot = input_slots[canonical_label];
             // `binding.name` flows into format-string context; sanitize.
@@ -739,7 +765,7 @@ impl HipEmitter {
 
     fn emit_input_shape_preamble_device(
         &mut self,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
         input_slots: &chelis_unord::UnordMap<String, usize>,
         func_name: &str,
     ) {
@@ -793,7 +819,7 @@ impl HipEmitter {
             }
         }
 
-        for binding in symbolic_bindings(dag) {
+        for binding in dag.symbolic_bindings() {
             let (canonical_label, canonical_axis) = require_load_source(&binding.canonical);
             let canonical_slot = input_slots[canonical_label];
             let binding_name_fmt =
@@ -825,7 +851,7 @@ impl HipEmitter {
     fn reduction_kernel_sources(
         &self,
         node: &DagNode,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
         axis: usize,
     ) -> Result<Vec<(String, String)>, Unsupported> {
         // WS-A4: bind `accumulator` instead of `..`. The kernel-name and
@@ -903,7 +929,7 @@ impl HipEmitter {
     fn extra_reduction_kernel_sources(
         &self,
         node: &DagNode,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) -> Result<Vec<(String, String)>, Unsupported> {
         // Kernel sources for the four reductions previously deferred to
         // the C backend: Min / Prod / Argmax / Argmin. Argmax/Argmin emit
@@ -943,7 +969,7 @@ impl HipEmitter {
         &self,
         op: &RiscOp,
         node: &DagNode,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) -> Result<Option<String>, Unsupported> {
         // WS-A2 + WS-A4: kernel-name dispatch must agree with the
         // kernel-source emission in `kernel_source_for_op`. For binary
@@ -1206,7 +1232,7 @@ impl HipEmitter {
     /// Build the cast kernel name. When src/dst precision agree, this is
     /// the in-precision identity kernel; when they differ, it's the
     /// cross-precision conversion kernel.
-    fn cast_kernel_name(node: &DagNode, dag: &Dag) -> Result<String, Unsupported> {
+    fn cast_kernel_name(node: &DagNode, dag: VerifiedDagView<'_>) -> Result<String, Unsupported> {
         let (src_kind, dst_kind) = Self::cast_elem_kinds(node, dag)?;
         Ok(if src_kind == dst_kind {
             format!("kernel_cast_{}", dst_kind.suffix())
@@ -1220,7 +1246,7 @@ impl HipEmitter {
         name: &str,
         op: &RiscOp,
         node: &DagNode,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) -> Result<String, Unsupported> {
         // CmpLt's output type is `bool` (semantically) but the kernel
         // writes 1.0/0.0 of operand precision to the GPU buffer. Use the
@@ -1506,7 +1532,11 @@ impl HipEmitter {
 
     /// Cast / Realize / Copy kernel source: in-precision identity when
     /// src and dst kinds agree, cross-precision conversion otherwise.
-    fn cast_kernel_source(name: &str, node: &DagNode, dag: &Dag) -> Result<String, Unsupported> {
+    fn cast_kernel_source(
+        name: &str,
+        node: &DagNode,
+        dag: VerifiedDagView<'_>,
+    ) -> Result<String, Unsupported> {
         let (src_kind, dst_kind) = Self::cast_elem_kinds(node, dag)?;
         Ok(if src_kind == dst_kind {
             kernels::cast(name, dst_kind)
@@ -1557,7 +1587,7 @@ impl HipEmitter {
     // Node emission
     // ------------------------------------------------------------------
 
-    fn emit_node(&mut self, node: &DagNode, dag: &Dag) -> Result<(), Unsupported> {
+    fn emit_node(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
         let id = node.id.0;
         // Resolve the precision-suffixed kernel name once, so the launch
         // shims agree with the kernel-source emitter on the symbol the
@@ -1715,7 +1745,27 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
-            RiscOp::Drop => {}
+            RiscOp::Drop => {
+                let action = dag.action_for_node(node.id).ok_or_else(|| {
+                    unsupported_verified_dag_action(node.id, "missing Drop action")
+                })?;
+                match action {
+                    VerifiedDagAction::BorrowedDrop { node: drop, source }
+                    | VerifiedDagAction::OwnedDrop { node: drop, source }
+                        if drop == node.id && node.inputs.first() == Some(&source) =>
+                    {
+                        if matches!(action, VerifiedDagAction::OwnedDrop { .. }) {
+                            self.line(&format!("chelis_gpu_free_view(d_t{});", source.0));
+                        }
+                    }
+                    _ => {
+                        return Err(unsupported_verified_dag_action(
+                            node.id,
+                            "Drop action does not name the exact typed payload source",
+                        ));
+                    }
+                }
+            }
             // WS-A4: bind `accumulator` instead of `..` and thread it
             // through to `emit_reduce_launch` so the launch-side kernel
             // name agrees with the kernel-source-side name (otherwise
@@ -1975,7 +2025,7 @@ impl HipEmitter {
         ));
     }
 
-    fn emit_device_slot_allocations(&mut self, dag: &Dag) {
+    fn emit_device_slot_allocations(&mut self, dag: VerifiedDagView<'_>) {
         let declarations = self
             .plan
             .slots()
@@ -2361,7 +2411,7 @@ impl HipEmitter {
         axis: usize,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) -> Result<(), Unsupported> {
         let values = inputs[0].0;
         let indices = inputs[1].0;
@@ -2422,7 +2472,7 @@ impl HipEmitter {
         axis: usize,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) -> Result<(), Unsupported> {
         let target = inputs[0].0;
         let indices = inputs[1].0;
@@ -2502,7 +2552,7 @@ impl HipEmitter {
         axis: usize,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         let target = inputs[0].0;
         let indices = inputs[1].0;
@@ -2562,7 +2612,7 @@ impl HipEmitter {
         axis: usize,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         let data = inputs[0].0;
         let indices = inputs[1].0;
@@ -2744,7 +2794,7 @@ impl HipEmitter {
         axis: usize,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
         kind: kernels::ReduceKind,
         // WS-A4: accumulator dtype for Sum reductions (None for Max
         // and other non-accumulator-carrying kinds). Used to compute
@@ -2841,7 +2891,7 @@ impl HipEmitter {
         axis: usize,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) -> Result<(), Unsupported> {
         let a = inputs[0].0;
         let input_ty = &dag.get(inputs[0]).unwrap().output_type;
@@ -2900,7 +2950,7 @@ impl HipEmitter {
         axis: usize,
         reduction_inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         let fused_node = dag.get(reduction_inputs[0]).unwrap();
         let ext_inputs = &fused_node.inputs;
@@ -2968,7 +3018,13 @@ impl HipEmitter {
     }
 
     #[allow(dead_code)]
-    fn emit_blas_matmul(&mut self, id: usize, spec: &MatmulEmitSpec, ty: &TensorType, dag: &Dag) {
+    fn emit_blas_matmul(
+        &mut self,
+        id: usize,
+        spec: &MatmulEmitSpec,
+        ty: &TensorType,
+        dag: VerifiedDagView<'_>,
+    ) {
         // WS-A2 / WS-A3: dispatch by `(operand, accumulator)` pair (see
         // the match below). The historical F32-only assertion that lived
         // here was lifted by WS-A2 (admits f64) and WS-A3 (admits
@@ -3206,7 +3262,7 @@ impl HipEmitter {
         kernel_name: &str,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
         let prec = ty.precision;
@@ -3261,7 +3317,7 @@ impl HipEmitter {
         kernel_name: &str,
         inputs: &[NodeId],
         ty: &TensorType,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
         debug_assert_eq!(
@@ -3473,7 +3529,11 @@ impl HipEmitter {
     /// are admitted (WS-A2). Operands and result must share precision —
     /// the WS-A0 accumulator parameter is checked at the call site.
     #[allow(dead_code)]
-    fn supports_static_hipblas_matmul(dag: &Dag, info: &blas::MatmulInfo, ty: &TensorType) -> bool {
+    fn supports_static_hipblas_matmul(
+        dag: VerifiedDagView<'_>,
+        info: &blas::MatmulInfo,
+        ty: &TensorType,
+    ) -> bool {
         // WS-A2 + WS-A3: f32 / f64 (Sgemm/Dgemm) and bf16 / f16
         // (`hipblasGemmEx` with `HIPBLAS_COMPUTE_32F` per
         // spec/04-type-system.md §5.7.1) all admitted by the static
@@ -3492,7 +3552,7 @@ impl HipEmitter {
     }
 
     fn strided_batched_hipblas_plan(
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
         spec: &MatmulEmitSpec,
         ty: &TensorType,
     ) -> Option<StridedBatchedMatmulPlan> {
@@ -3591,7 +3651,7 @@ impl HipEmitter {
         node: &DagNode,
         input_node: &DagNode,
         axis: usize,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) -> bool {
         Self::total_size(&node.output_type) == 1
             && input_node.output_type.dims.len() <= 1
@@ -3619,7 +3679,7 @@ impl HipEmitter {
     }
 
     #[allow(dead_code)]
-    fn node_is_statically_contiguous(dag: &Dag, id: NodeId) -> bool {
+    fn node_is_statically_contiguous(dag: VerifiedDagView<'_>, id: NodeId) -> bool {
         match &dag.get(id).unwrap().op {
             RiscOp::Load { .. }
             | RiscOp::Const { .. }
@@ -3916,7 +3976,7 @@ impl HipEmitter {
     /// generic no-typed-kernel rejection from [`Self::elem_kind`].
     fn cast_elem_kinds(
         node: &DagNode,
-        dag: &Dag,
+        dag: VerifiedDagView<'_>,
     ) -> Result<(kernels::ElemKind, kernels::ElemKind), Unsupported> {
         let src_ty = &dag.get(node.inputs[0]).unwrap().output_type;
         let operation = match &node.op {
@@ -4030,7 +4090,7 @@ impl HipEmitter {
     // Input/output label logic (identical to C backend)
     // ------------------------------------------------------------------
 
-    pub fn input_labels(dag: &Dag) -> Vec<String> {
+    pub fn input_labels(dag: VerifiedDagView<'_>) -> Vec<String> {
         let mut labels = Vec::new();
         let mut seen = chelis_unord::UnordSet::new();
         for node in dag.nodes() {
@@ -4043,14 +4103,14 @@ impl HipEmitter {
         labels
     }
 
-    pub fn output_labels(dag: &Dag) -> Vec<String> {
+    pub fn output_labels(dag: VerifiedDagView<'_>) -> Vec<String> {
         Self::output_specs(dag)
             .into_iter()
             .map(|o| o.label)
             .collect()
     }
 
-    fn output_specs(dag: &Dag) -> Vec<OutputSpec> {
+    fn output_specs(dag: VerifiedDagView<'_>) -> Vec<OutputSpec> {
         let mut specs = Vec::new();
         let mut seen = chelis_unord::UnordSet::new();
 
@@ -4097,6 +4157,55 @@ impl HipEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn emit_test_dag(
+        dag: &Dag,
+        name: &str,
+    ) -> Result<(String, PeakDeviceBytesBreakdown), Unsupported> {
+        let verified = crate::testing::verified_dag(dag)
+            .expect("HIP emitter unit-test DAG must verify ownership");
+        HipEmitter::emit_dag(verified.emission(), name)
+    }
+
+    #[test]
+    fn drop_releases_exact_device_descriptor_once() {
+        let mut dag = Dag::new();
+        let source = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            TensorType::scalar_f32(),
+            None,
+        );
+        dag.add_node(RiscOp::Drop, vec![source], TensorType::scalar_f32(), None);
+
+        let (source, _) = emit_test_dag(&dag, "verified_drop").unwrap();
+        assert_eq!(
+            source.matches("chelis_gpu_free_view(d_t0);").count(),
+            2,
+            "host and device entrypoints each consume the exact verified descriptor once:\n{source}"
+        );
+    }
+
+    #[test]
+    fn borrowed_drop_is_a_logical_discard_without_a_device_release() {
+        let mut dag = Dag::new();
+        let borrowed = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType::scalar_f32(),
+            None,
+        );
+        dag.add_node(RiscOp::Drop, vec![borrowed], TensorType::scalar_f32(), None);
+        let output = dag.add_node(RiscOp::Copy, vec![borrowed], TensorType::scalar_f32(), None);
+        dag.add_root(output);
+
+        let (source, _) = emit_test_dag(&dag, "borrowed_drop").unwrap();
+        assert_eq!(
+            source.matches("chelis_gpu_free_view(d_t0);").count(),
+            2,
+            "the borrowed descriptor may be cleaned up once per host/device entrypoint, but the logical Drop must not add a third release:\n{source}"
+        );
+    }
 
     /// Width of a C type spelling this backend is allowed to emit.
     ///
@@ -4217,7 +4326,7 @@ mod tests {
             "-INT64_C(9007199254740993)"
         );
     }
-    use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
+    use chelis_ir::dag::{Dag, FusedInput, FusedStep, FusedStepOp};
 
     fn vec_f32(n: usize) -> TensorType {
         TensorType {
@@ -4248,7 +4357,7 @@ mod tests {
         let x = direct.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
         let out = direct.add_node(RiscOp::Abs, vec![x], ty.clone(), None);
         direct.set_roots(vec![out]);
-        let err = match HipEmitter::emit_dag(&direct, "integer_abs") {
+        let err = match emit_test_dag(&direct, "integer_abs") {
             Err(error) => error,
             Ok(_) => panic!("integer abs must not enter the HIP fabsf template"),
         };
@@ -4268,7 +4377,7 @@ mod tests {
             None,
         );
         fused.set_roots(vec![out]);
-        let err = match HipEmitter::emit_dag(&fused, "fused_integer_abs") {
+        let err = match emit_test_dag(&fused, "fused_integer_abs") {
             Err(error) => error,
             Ok(_) => panic!("fused integer abs must not bypass the HIP guard"),
         };
@@ -4335,7 +4444,7 @@ mod tests {
         );
         dag.add_root(out);
 
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_sparse").unwrap();
+        let (hip, _) = emit_test_dag(&dag, "test_sparse").unwrap();
 
         assert!(hip.contains("kernel_scatter_add_i64"));
         assert!(hip.contains("const long long *indices"));
@@ -4350,7 +4459,7 @@ mod tests {
     #[test]
     fn fused_reusable_input_emits_hip_in_place_restrict_shape() {
         let dag = fused_mul_reusable_input_dag();
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(hip.contains("extern \\\"C\\\" __global__ void kernel_fused_2("));
         // Aliased external (ext0 ↔ x) must NOT carry __restrict__.
@@ -4368,7 +4477,7 @@ mod tests {
     #[ignore = "chelis#1214: HIP does not yet reject caller-owned reuse"]
     fn fused_in_place_does_not_alias_a_caller_owned_input() {
         let dag = fused_mul_reusable_input_dag();
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(
             !hip.contains("d_t0->data, d_t0->storage_size"),
@@ -4414,7 +4523,7 @@ mod tests {
             None,
         );
         dag.set_reusable_input(fused, flat);
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(
             !hip.contains("d_t1->data, d_t1->storage_size"),
@@ -4444,7 +4553,7 @@ mod tests {
         // No set_reusable_input call — the in-place gate must reject.
         dag.add_root(fused);
 
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(hip.contains("extern \\\"C\\\" __global__ void kernel_fused_2("));
         assert!(hip.contains("const float *ext0"));
@@ -4474,7 +4583,7 @@ mod tests {
             None,
         );
         dag.add_root(c);
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
         let want_bits = (value as f32).to_bits();
         assert_ne!(
@@ -4508,7 +4617,7 @@ mod tests {
             None,
         );
         dag.add_root(c);
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
         let want_bits = value.to_bits();
         let needle = format!("chelis_f64_from_bits(0x{want_bits:016x}uLL)");
@@ -4527,14 +4636,22 @@ mod tests {
         let low = 1e-40_f64; // denormal f32: lost by `%.8`
         let high = 1.0_f64 / 3.0_f64; // off-by-ULP under `%.8`
         let mut dag = Dag::new();
-        let u = dag.add_node(
-            RiscOp::UniformLike { low, high, seed: 7 },
+        let like = dag.add_node(
+            RiscOp::Load {
+                name: "like".into(),
+            },
             vec![],
             vec_f32(8),
             None,
         );
+        let u = dag.add_node(
+            RiscOp::UniformLike { low, high, seed: 7 },
+            vec![like],
+            vec_f32(8),
+            None,
+        );
         dag.add_root(u);
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
         let low_bits = (low as f32).to_bits();
         let high_bits = (high as f32).to_bits();
@@ -4557,7 +4674,7 @@ mod tests {
         // Negative parity: no lossy decimal literal for the collapsed
         // denormal `low`.
         assert!(
-            !hip.contains("float t0_low = 0.00000000f;"),
+            !hip.contains("float t1_low = 0.00000000f;"),
             "uniform_like must not emit a lossy `{{:.8}}f` literal:\n{hip}"
         );
     }
@@ -4567,22 +4684,30 @@ mod tests {
         let low = 0.1_f64;
         let high = 0.9_f64;
         let mut dag = Dag::new();
+        let like = dag.add_node(
+            RiscOp::Load {
+                name: "like".into(),
+            },
+            vec![],
+            vec_f64(8),
+            None,
+        );
         let u = dag.add_node(
             RiscOp::UniformLike {
                 low,
                 high,
                 seed: 17,
             },
-            vec![],
+            vec![like],
             vec_f64(8),
             None,
         );
         dag.add_root(u);
-        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(hip.contains("__device__ double chelis_uniform_sample_f64("));
-        assert!(hip.contains("double t0_low = chelis_f64_from_bits("));
-        assert!(hip.contains("double t0_high = chelis_f64_from_bits("));
+        assert!(hip.contains("double t1_low = chelis_f64_from_bits("));
+        assert!(hip.contains("double t1_high = chelis_f64_from_bits("));
         assert!(hip.contains("double low, double high"));
         assert!(hip.contains("out[i] = chelis_uniform_sample_f64("));
         assert!(

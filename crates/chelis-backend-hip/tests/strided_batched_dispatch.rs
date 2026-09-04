@@ -39,9 +39,10 @@
 //! broadcasts) do not subsume the rank-3 literal-stride case, so the
 //! Perf-F1 cases live here as part of the keep-by-default lock.
 
-use chelis_backend_hip::codegen_hip;
+mod support;
 use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
+use support::codegen_hip;
 
 fn t(prim: Prim, dims: Vec<usize>) -> TensorType {
     TensorType {
@@ -124,13 +125,10 @@ fn rank4_uniform_batched_matmul_dispatches_strided_batched_with_product_batch_co
 }
 
 /// ADV-HIP-2: Rank-3 F64 uniform layout. The HIP backend fail-closes at
-/// codegen time when the operand and accumulator precision pair has no
-/// hipBLAS dispatch entry. WS-A2 lifted f64 support for the (f64, f64)
-/// pair (cblas_dgemm equivalent); the (f64, f32) combination this test
-/// constructs is still rejected because the IR-pinned accumulator and
-/// operand are inconsistent (spec §5.7.1).
+/// ownership lowering when the operand and accumulator precision pair is
+/// inconsistent. WS-A2 lifted f64 support for the (f64, f64) pair; the
+/// (f64, f32) combination never reaches a backend (spec §5.7.1).
 #[test]
-#[should_panic(expected = "is not yet supported by the HIP backend")]
 fn rank3_f64_uniform_batched_does_not_dispatch_strided_batched() {
     let mut dag = Dag::new();
     let a = dag.add_node(
@@ -159,11 +157,9 @@ fn rank3_f64_uniform_batched_does_not_dispatch_strided_batched() {
     );
     dag.add_root(out);
 
-    let result = codegen_hip(&dag, "red_team_rank3_f64").unwrap();
-    assert_no_substring(
-        &result.c_source,
-        "chelis_hipblas_sgemm_strided_batched_row_major(",
-    );
+    let error = chelis_ir::ownership::lower_dag_ownership(dag)
+        .expect_err("f64 operands with an f32 accumulator must not be verified");
+    assert!(error.to_string().contains("accumulator `f32` narrower"));
 }
 
 /// ADV-HIP-3: Symbolic batch dim with concrete m/n/k. `as_concrete()` on

@@ -10,11 +10,12 @@
 //! `clang++` accepting it. The real `clang++` compile gate is the
 //! `gpu_correctness.rs` manual oracle.
 
-use chelis_backend_metal::codegen_metal;
+mod support;
 use chelis_backend_metal::dtype as metal_dtype;
 use chelis_backend_metal::kernels;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
+use support::codegen_metal;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -109,10 +110,20 @@ fn build_matmul_dag(p: Prim) -> Dag {
             accumulator: acc,
         },
         vec![mul],
-        mat_prec(m, n, p),
+        mat_prec(m, n, acc),
         None,
     );
-    dag.add_root(sum);
+    let root = if acc == p {
+        sum
+    } else {
+        dag.add_node(
+            RiscOp::Cast { new_precision: p },
+            vec![sum],
+            mat_prec(m, n, p),
+            None,
+        )
+    };
+    dag.add_root(root);
     dag
 }
 

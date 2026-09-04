@@ -21,9 +21,11 @@
 //! NOT contain `cblas_sgemm`. A regression that drops the precision
 //! filter would fail these assertions.
 
-use chelis_backend_c::{CodegenOptions, codegen_with_options};
+use chelis_backend_c::CodegenOptions;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
+use support::codegen_with_options;
 
 fn t(prim: Prim, dims: Vec<usize>) -> TensorType {
     TensorType {

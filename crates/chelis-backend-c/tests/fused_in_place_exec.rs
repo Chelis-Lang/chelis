@@ -1,9 +1,11 @@
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, FusedInput, FusedStep, FusedStepOp, RiscOp, TensorType};
 use chelis_types::types::Prim;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+use support::codegen;
 
 fn vec_f32(n: usize) -> TensorType {
     TensorType {
@@ -201,7 +203,7 @@ fn fused_in_place_compile_run_preserves_canonical_caller_input() {
     dag.set_reusable_input(fused, x);
     dag.add_root(fused);
 
-    let result = chelis_backend_c::codegen(&dag, "fused_in_place_probe").unwrap();
+    let result = codegen(&dag, "fused_in_place_probe").unwrap();
     let stdout = compile_and_run(
         "fused_in_place_probe",
         &result.c_source,

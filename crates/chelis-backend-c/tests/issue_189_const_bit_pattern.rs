@@ -16,9 +16,10 @@
 //! these tests because its format strings discard information; these
 //! fixtures are written before the fix lands to lock the contract.
 
-use chelis_backend_c::emit::CEmitter;
+mod support;
 use chelis_ir::dag::{Dag, RiscOp, TensorType};
 use chelis_types::types::Prim;
+use support::emit_dag;
 
 fn scalar(p: Prim) -> TensorType {
     TensorType {
@@ -42,7 +43,7 @@ fn issue_189_f32_const_emits_exact_bit_pattern() {
         scalar(Prim::F32),
         None,
     );
-    let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+    let src = emit_dag(&dag, "test_fn").unwrap();
     let want_bits = (0.000000123456789_f64 as f32).to_bits();
     let needle = format!("0x{want_bits:08x}");
     assert!(
@@ -73,7 +74,7 @@ fn issue_189_f64_const_emits_exact_bit_pattern() {
         scalar(Prim::F64),
         None,
     );
-    let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+    let src = emit_dag(&dag, "test_fn").unwrap();
     let want_bits = v.to_bits();
     let needle = format!("0x{want_bits:016x}");
     assert!(
@@ -110,7 +111,7 @@ fn issue_189_f32_const_does_not_use_lossy_format() {
             scalar(Prim::F32),
             None,
         );
-        let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let src = emit_dag(&dag, "test_fn").unwrap();
         let v32 = v as f32;
         let want_bits = v32.to_bits();
         // The bit pattern must be present.
@@ -136,7 +137,7 @@ fn issue_189_f32_const_smallest_denormal_round_trips() {
         scalar(Prim::F32),
         None,
     );
-    let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+    let src = emit_dag(&dag, "test_fn").unwrap();
     assert!(
         src.contains("0x00000001"),
         "f32 denormal must round-trip via bit pattern `0x00000001`; emitted source:\n{src}"
@@ -159,7 +160,7 @@ fn issue_189_f64_const_one_ulp_pair_round_trips() {
             scalar(Prim::F64),
             None,
         );
-        let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let src = emit_dag(&dag, "test_fn").unwrap();
         let bits = v.to_bits();
         assert!(
             src.contains(&format!("0x{bits:016x}")),
@@ -178,11 +179,11 @@ fn issue_189_f64_const_one_ulp_pair_round_trips() {
 // bit pattern exactly.
 // ---------------------------------------------------------------
 
-use chelis_backend_c::codegen;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+use support::codegen;
 
 fn runtime_include_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")

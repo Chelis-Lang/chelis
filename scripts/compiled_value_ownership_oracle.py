@@ -111,6 +111,7 @@ FROZEN_SELF_TEST_CENSUS = tuple(
     ManifestContractTests.test_option_and_recursive_function_projection_universe_is_frozen
     ManifestContractTests.test_option_scalars_freeze_every_emitted_root
     ManifestContractTests.test_phase_one_mutation_canaries_bind_exact_runtime_receipts
+    ManifestContractTests.test_phase_two_mutation_canaries_bind_exact_execution_receipts
     ManifestContractTests.test_phase_zero_is_hardware_independent_but_hardware_row_exists
     ManifestContractTests.test_recursive_function_fixtures_reach_named_value_projection
     ManifestContractTests.test_recursive_function_rows_are_typed_must_passes
@@ -733,11 +734,11 @@ def fixture_manifest() -> tuple[Fixture, ...]:
             1206,
             Polarity.POSITIVE,
             Detector.LEDGER_LEAK,
-            xfail(1206, Detector.LEDGER_LEAK),
+            MustPass(),
             Action.LEDGER_BUILD_RUN,
             "issue_1206_depth_1.ch",
             peak_bound=512,
-            green_by=3,
+            green_by=2,
         )
     )
     rows.append(
@@ -969,7 +970,7 @@ def fixture_manifest() -> tuple[Fixture, ...]:
                 1346,
                 Polarity.POSITIVE,
                 Detector.INVALID_RELEASE,
-                xfail(1346, Detector.INVALID_RELEASE),
+                MustPass(),
                 Action.LEDGER_BUILD_RUN,
                 "issue_1346_fold_alias.ch",
                 green_by=2,
@@ -997,7 +998,7 @@ def fixture_manifest() -> tuple[Fixture, ...]:
                 1352,
                 Polarity.POSITIVE,
                 Detector.LEDGER_LEAK,
-                xfail(1352, Detector.LEDGER_LEAK),
+                MustPass(),
                 Action.LEDGER_BUILD_RUN,
                 source,
                 green_by=2,
@@ -1033,7 +1034,7 @@ def fixture_manifest() -> tuple[Fixture, ...]:
                 1356,
                 Polarity.POSITIVE,
                 Detector.INVALID_RELEASE,
-                xfail(1356, Detector.INVALID_RELEASE),
+                MustPass(),
                 Action.LEDGER_BUILD_RUN,
                 "issue_1356_fresh_argument.ch",
                 green_by=2,
@@ -1044,7 +1045,7 @@ def fixture_manifest() -> tuple[Fixture, ...]:
                 1356,
                 Polarity.POSITIVE,
                 Detector.INVALID_RELEASE,
-                xfail(1356, Detector.INVALID_RELEASE),
+                MustPass(),
                 Action.LEDGER_BUILD_RUN,
                 "issue_1356_nested_fresh_argument.ch",
                 green_by=2,
@@ -1191,29 +1192,9 @@ def fixture_manifest() -> tuple[Fixture, ...]:
         )
 
     receipts = {
-        "recursive-depth-1-control": ledger_receipt(
-            live_owners=2,
-            live_bytes=16,
-            live_kinds={"Tensor": 1, "TensorStorage": 1},
-        ),
-        "recursive-depth-32": ledger_receipt(peak_live_bytes=1616),
-        "recursive-depth-128": ledger_receipt(peak_live_bytes=6224),
-        "recursive-depth-288": ledger_receipt(peak_live_bytes=13904),
-        "fold-alias-single-owner": ledger_receipt(
-            invalid_operations=1, invalid_event="invalid_release"
-        ),
-        "if-mixed-fresh-arm": ledger_receipt(
-            live_owners=1, live_bytes=48, live_kinds={"List": 1}
-        ),
-        "match-adt-mixed-fresh-arm": ledger_receipt(
-            live_owners=3, live_bytes=21, live_kinds={"String": 3}
-        ),
-        "fresh-call-argument": ledger_receipt(
-            invalid_operations=1, invalid_event="invalid_release"
-        ),
-        "nested-fresh-call-argument": ledger_receipt(
-            invalid_operations=1, invalid_event="invalid_release"
-        ),
+        "recursive-depth-32": ledger_receipt(peak_live_bytes=4720),
+        "recursive-depth-128": ledger_receipt(peak_live_bytes=18544),
+        "recursive-depth-288": ledger_receipt(peak_live_bytes=41584),
     }
     outputs = {
         "aggregate-tensor-list": "make = [tensor(shape=[2], data=[1.0, 2.0]), tensor(shape=[2], data=[3.0, 4.0])]\nout = [tensor(shape=[2], data=[1.0, 2.0]), tensor(shape=[2], data=[3.0, 4.0])]",
@@ -1254,30 +1235,13 @@ def fixture_manifest() -> tuple[Fixture, ...]:
         "option-mapped-file": "out = 18",
         "option-nested-mapped-file": "out = 18",
     }
-    invalid_process_receipts = {
-        "fold-alias-single-owner": (
-            1,
-            ("compiled ownership ledger detected invalid tuple release",),
-        ),
-        "fresh-call-argument": (
-            1,
-            ("compiled ownership ledger detected invalid list release",),
-        ),
-        "nested-fresh-call-argument": (
-            1,
-            ("compiled ownership ledger detected invalid list release",),
-        ),
-    }
     frozen_rows = []
     for row in rows:
-        expected_exit, diagnostics = invalid_process_receipts.get(row.id, (row.expected_exit, row.diagnostic_fragments))
         frozen_rows.append(
             replace(
                 row,
                 ledger_receipt=receipts.get(row.id),
                 expected_output=outputs.get(row.id, row.expected_output),
-                expected_exit=expected_exit,
-                diagnostic_fragments=diagnostics,
             )
         )
     return tuple(frozen_rows)
@@ -1300,6 +1264,50 @@ def mutation_manifest() -> tuple[Mutation, ...]:
         Mutation("ledger-event-stream-emptied", 0, Detector.ZERO_VACUITY, "empty-ledger parser test"),
         Mutation("manifest-receipt-omitted", 0, Detector.MANIFEST, "receipt bijection"),
     )
+
+
+def validate_active_mutation_contracts(phase: str) -> None:
+    """Fail closed when an active structural ownership mutation is present."""
+
+    if phase in {"0", "1"}:
+        return
+    host_source = (REPO_ROOT / "crates/chelis-backend-c/src/host_emit.rs").read_text()
+    ownership_source = (REPO_ROOT / "crates/chelis-ir/src/ownership/mod.rs").read_text()
+    owner_view = re.search(
+        r"impl<'a> VerifiedOwnerView<'a> \{(?P<body>.*?)\n\}\n\n/// A binder spelling",
+        ownership_source,
+        flags=re.DOTALL,
+    )
+    if owner_view is None:
+        raise OracleFailure(
+            "backend-local-ownership-predicate-restored: "
+            "the sealed VerifiedOwnerView capability boundary is missing"
+        )
+    owner_capabilities = tuple(
+        re.findall(r"pub fn ([a-zA-Z0-9_]+)\(", owner_view.group("body"))
+    )
+    if owner_capabilities != ("id", "ty", "is_heap"):
+        raise OracleFailure(
+            "backend-local-ownership-predicate-restored: generic verified owner "
+            f"capabilities drifted from (id, ty, is_heap): {owner_capabilities!r}"
+        )
+    if ".names()" in host_source:
+        raise OracleFailure(
+            "backend-local-ownership-predicate-restored: C host emission reads a "
+            "generic owner binder spelling outside a certified binding projection"
+        )
+    required = (
+        "VerifiedHostAction::Operation",
+        "VerifiedHostTerminator::Return",
+        "emit_expression_site",
+        "binding_name",
+    )
+    missing = tuple(name for name in required if name not in host_source)
+    if missing:
+        raise OracleFailure(
+            "backend-local-ownership-predicate-restored: "
+            f"verified C host ownership action path is incomplete {missing!r}"
+        )
 
 
 def validate_manifest(
@@ -2592,6 +2600,7 @@ def run_phase(phase: str, *, require_hip: bool) -> None:
     fixtures = fixture_manifest()
     mutations = mutation_manifest()
     validate_manifest(fixtures, mutations)
+    validate_active_mutation_contracts(phase)
     if phase in {"3", "4", "complete"} and not require_hip:
         raise OracleFailure(f"phase {phase} requires --require-hip")
     if require_hip:

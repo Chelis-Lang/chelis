@@ -200,9 +200,9 @@ fn assert_activation_width_matrix(op: &str) {
             "{name}: emitted the historical unsupported-builtin stub"
         );
         let run_body = emitted
-            .rfind(" run() {")
+            .rfind(" run__chelis_owned_body() {")
             .and_then(|start| emitted.get(start..))
-            .unwrap_or_else(|| panic!("{name}: emitted C has no `run` definition:\n{emitted}"));
+            .unwrap_or_else(|| panic!("{name}: emitted C has no consuming `run` body:\n{emitted}"));
         let helper_call = format!("chelis_host_{op}_{dtype}(");
         assert!(
             run_body.contains(&helper_call),

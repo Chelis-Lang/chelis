@@ -33,6 +33,7 @@ pub mod host_type_state;
 pub mod load_store_name;
 pub mod lower;
 pub mod optimize;
+pub mod ownership;
 pub mod pipeline;
 pub mod span_merge;
 pub mod span_sanitize;

@@ -19,10 +19,19 @@
 //!    cleanup first. The user-facing contract is that identity `Cast(f32)`
 //!    no longer hides a matmul from BLAS specialization.
 
-use chelis_backend_c::blas::detect_matmul_pattern;
+use chelis_backend_c::blas::detect_matmul_pattern as detect_verified_matmul_pattern;
 use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
 use chelis_ir::specialize::specialize_for_blas;
 use chelis_types::types::Prim;
+mod support;
+
+fn detect_matmul_pattern(
+    dag: &Dag,
+    sum: chelis_ir::dag::NodeId,
+) -> Option<chelis_backend_c::blas::MatmulInfo> {
+    let verified = support::verified_dag(dag, chelis_backend_c::CodegenOptions::default());
+    detect_verified_matmul_pattern(verified.emission(), sum)
+}
 
 fn mat(r: usize, c: usize) -> TensorType {
     TensorType {

@@ -299,7 +299,17 @@ class ManifestContractTests(unittest.TestCase):
 
     def test_open_children_use_typed_expected_failures(self) -> None:
         fixtures = oracle.fixture_manifest()
-        open_children = EXPECTED_CHILD_ISSUES - {1222, 1344, 543, 544, 879, 1286}
+        open_children = EXPECTED_CHILD_ISSUES - {
+            543,
+            544,
+            879,
+            1222,
+            1286,
+            1344,
+            1346,
+            1352,
+            1356,
+        }
         for issue in open_children:
             rows = [fixture for fixture in fixtures if fixture.issue == issue]
             with self.subTest(issue=issue):
@@ -589,6 +599,74 @@ class ManifestContractTests(unittest.TestCase):
                 self.assertIn("ownership-ledger", fixture.command)
                 self.assertIn(canary, fixture.test_census)
                 self.assertIn(negative_twin, fixture.test_census)
+
+    def test_phase_two_mutation_canaries_bind_exact_execution_receipts(self) -> None:
+        rows = {row.id: row for row in oracle.fixture_manifest()}
+        active = {
+            mutation.id
+            for mutation in oracle.mutation_manifest()
+            if mutation.activation_phase == 2
+        }
+        self.assertEqual(
+            active,
+            {"branch-clone-borrowed", "backend-local-ownership-predicate-restored"},
+        )
+
+        for fixture_id in (
+            "if-mixed-fresh-arm",
+            "if-alias-control",
+            "match-adt-mixed-fresh-arm",
+            "match-option-mixed-fresh-control",
+        ):
+            with self.subTest(mutation="branch-clone-borrowed", fixture=fixture_id):
+                fixture = rows[fixture_id]
+                self.assertIsInstance(fixture.expected, oracle.MustPass)
+                self.assertIs(fixture.action, oracle.Action.LEDGER_BUILD_RUN)
+                self.assertIsNotNone(fixture.expected_output)
+
+        depth_one = rows["recursive-depth-1-control"]
+        self.assertIsInstance(depth_one.expected, oracle.MustPass)
+        self.assertEqual(depth_one.green_by, 2)
+        self.assertIs(depth_one.action, oracle.Action.LEDGER_BUILD_RUN)
+        self.assertEqual(depth_one.peak_bound, 512)
+        self.assertIsNone(depth_one.ledger_receipt)
+
+        oracle.validate_active_mutation_contracts("2")
+        source_path = oracle.REPO_ROOT / "crates/chelis-backend-c/src/host_emit.rs"
+        source = source_path.read_text()
+        exact_clone_entry = (
+            "        let source_var = self.owner_var(source.owner())?;"
+        )
+        self.assertIn(exact_clone_entry, source)
+        renamed_inference = """        enum RecoveredLifetime {
+            Named,
+            Temporary,
+        }
+        let recovered = if source.owner().names().is_empty() {
+            RecoveredLifetime::Temporary
+        } else {
+            RecoveredLifetime::Named
+        };
+        let source_var = match recovered {
+            RecoveredLifetime::Named | RecoveredLifetime::Temporary => {
+                self.owner_var(source.owner())?
+            }
+        };"""
+        mutated = source.replace(exact_clone_entry, renamed_inference, 1)
+        self.assertNotEqual(mutated, source)
+        original_read_text = Path.read_text
+
+        def read_mutated_host(path: Path, *args: object, **kwargs: object) -> str:
+            if path == source_path:
+                return mutated
+            return original_read_text(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", new=read_mutated_host):
+            with self.assertRaisesRegex(
+                oracle.OracleFailure,
+                "backend-local-ownership-predicate-restored: C host emission reads a generic owner binder spelling",
+            ):
+                oracle.validate_active_mutation_contracts("2")
 
 
 class LedgerContractTests(unittest.TestCase):
@@ -1310,15 +1388,13 @@ if __name__ == "__main__":
         fixture = next(
             row
             for row in oracle.fixture_manifest()
-            if row.id == "recursive-depth-1-control"
+            if row.id == "recursive-depth-32"
         )
         ledger = oracle.Ledger(
             records=(),
-            summary=oracle.LedgerSummary(14, 12, 3, 16, 128, 0),
+            summary=oracle.LedgerSummary(14, 14, 0, 0, 4719, 0),
             kind_allocations=oracle.Counter(),
-            live_kind_counts=oracle.Counter(
-                {"Tensor": 1, "TensorStorage": 1}
-            ),
+            live_kind_counts=oracle.Counter(),
             invalid_events=oracle.Counter(),
         )
         with self.assertRaisesRegex(oracle.OracleFailure, "frozen ledger receipt drift"):
@@ -1386,6 +1462,13 @@ if __name__ == "__main__":
             row
             for row in oracle.fixture_manifest()
             if row.id == "fold-alias-single-owner"
+        )
+        fixture = replace(
+            fixture,
+            expected_exit=1,
+            diagnostic_fragments=(
+                "compiled ownership ledger detected invalid list release",
+            ),
         )
         ledger = oracle.Ledger(
             records=(),

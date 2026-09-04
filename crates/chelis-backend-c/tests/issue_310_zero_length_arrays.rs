@@ -16,7 +16,7 @@
 //! `host_span_comments.rs`. The non-empty cases provide negative parity: the
 //! `[N]` array form must still be emitted when there *are* elements.
 
-use chelis_backend_c::host_emit::emit_host_program;
+mod support;
 use chelis_ir::ConcreteHostType as HostType;
 use chelis_ir::host::{
     ConcreteHostExpr as HostExpr, ConcreteHostExprKind as HostExprKind,
@@ -25,6 +25,7 @@ use chelis_ir::host::{
 };
 use std::path::PathBuf;
 use std::process::Command;
+use support::emit_host_program;
 
 /// Wrap a single-expression body into a minimal `HostProgram`. The function
 /// takes one scalar param so the emitted signature is well-formed; the body

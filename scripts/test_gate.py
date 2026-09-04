@@ -817,6 +817,7 @@ class ListOutputTests(unittest.TestCase):
         # too (chelis#875 and chelis#959).
         rendered = [gate.render(c) for c in gate.LOCAL_STATIC_COMMANDS]
         self.assertIn("cargo test -p chelis-types --doc", rendered)
+        self.assertIn("cargo test -p chelis-ir --doc", rendered)
         self.assertIn("cargo test -p chelis-compiler-api --doc", rendered)
 
     def test_pipeline_compile_fail_contracts_are_in_the_lint_and_unit_stage(self):
@@ -824,6 +825,7 @@ class ListOutputTests(unittest.TestCase):
             gate.render(command) for command in gate.STAGES["lint-and-unit"]
         ]
         for command in (
+            "cargo test -p chelis-ir --doc",
             "cargo test -p chelis-compiler-api --doc",
             "cargo test -p chelis-pipeline-core --doc",
             "<managed-python> scripts/check_checkpoint_compile_fail.py",
@@ -833,6 +835,7 @@ class ListOutputTests(unittest.TestCase):
     def test_pipeline_compile_fail_contracts_are_in_the_local_subset(self):
         rendered = [gate.render(command) for command in gate.LOCAL_STATIC_COMMANDS]
         for command in (
+            "cargo test -p chelis-ir --doc",
             "cargo test -p chelis-compiler-api --doc",
             "cargo test -p chelis-pipeline-core --doc",
             "<managed-python> scripts/check_checkpoint_compile_fail.py",
@@ -2021,18 +2024,19 @@ class CiParityTests(unittest.TestCase):
             aggregate_block,
         )
 
-    def test_compiled_value_ownership_stable_job_invokes_phase1_oracle(self):
+    def test_compiled_value_ownership_stable_job_invokes_phase2_and_launch_oracles(self):
         workspace_block = _ci_job_block("workspace-tests")
         dtype_block = _ci_job_block("dtype-phase3-oracle")
         faithful_block = _ci_job_block("faithful-observation-phase2-oracle")
         oracle_block = _ci_job_block("compiled-value-ownership-phase0-oracle")
         aggregate_block = _ci_job_block("integration")
-        command = (
-            ".venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 1"
+        commands = (
+            ".venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 2",
+            ".venv/bin/python scripts/compiled_value_ownership_oracle.py --phase launch",
         )
 
         self.assertIn(
-            "name: Compiled Value Ownership Phase 1 Oracle",
+            "name: Compiled Value Ownership Phase 2 Oracle",
             oracle_block,
         )
         self.assertIn("needs: [changes]", oracle_block)
@@ -2043,10 +2047,11 @@ class CiParityTests(unittest.TestCase):
         self.assertEqual(cache_inputs.get("shared-key"), "linux-workspace")
         self.assertEqual(cache_inputs.get("save-if"), "false")
         self.assertNotIn("CARGO_TARGET_DIR:", oracle_block)
-        _assert_executable_run_once(oracle_block, command)
-        self.assertNotIn(command, workspace_block)
-        self.assertNotIn(command, dtype_block)
-        self.assertNotIn(command, faithful_block)
+        for command in commands:
+            _assert_executable_run_once(oracle_block, command)
+            self.assertNotIn(command, workspace_block)
+            self.assertNotIn(command, dtype_block)
+            self.assertNotIn(command, faithful_block)
         self.assertIn(
             "compiled-value-ownership-phase0-oracle=${{ "
             "needs.compiled-value-ownership-phase0-oracle.result }}",

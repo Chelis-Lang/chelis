@@ -109,12 +109,13 @@ streamed live; a failed command's complete transcript and a 200-line replay
 are written under `target/gate-failures/`. Cargo output is pinned to this
 worktree, and nextest continues after failures to expose the complete set.
 
-Why three explicit rustdoc stages
+Why four explicit rustdoc stages
 ---------------------------------
 `cargo nextest` does not execute doctests, so a crate with a doctest
 contract needs an explicit `cargo test -p <crate> --doc` command or that
 contract runs nowhere. The `chelis-types` command runs the chelis#731
-`ErrorWitness` contracts; the `chelis-compiler-api` and
+`ErrorWitness` contracts; `chelis-ir` runs the chelis#1286 verified-ownership
+privacy contracts; the `chelis-compiler-api` and
 `chelis-pipeline-core` commands run the compiler pipeline artifact
 contracts. The `backend-sanitizers` CI job separately runs an unfiltered
 `cargo test -p chelis-backend-c`, which picks up that crate's doctests.
@@ -334,6 +335,7 @@ NEXTEST_WORKSPACE_CI: list[str] = [
 # makes every workspace doc example part of the gate without a reviewed
 # scope change.
 DOCTEST_TYPES: list[str] = ["cargo", "test", "-p", "chelis-types", "--doc"]
+DOCTEST_IR: list[str] = ["cargo", "test", "-p", "chelis-ir", "--doc"]
 DOCTEST_COMPILER_API: list[str] = [
     "cargo",
     "test",
@@ -476,6 +478,7 @@ STAGES: dict[str, list[list[str]]] = {
         CHELIS_LINT_CHECK,
         CHELIS_STD_BUNDLE_CHECK,
         DOCTEST_TYPES,
+        DOCTEST_IR,
         DOCTEST_COMPILER_API,
         DOCTEST_PIPELINE_CORE,
         CHECKPOINT_COMPILE_FAIL,
@@ -532,6 +535,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     CHELIS_LINT_CHECK,
     CHELIS_STD_BUNDLE_CHECK,
     DOCTEST_TYPES,
+    DOCTEST_IR,
     DOCTEST_COMPILER_API,
     DOCTEST_PIPELINE_CORE,
     CHECKPOINT_COMPILE_FAIL,

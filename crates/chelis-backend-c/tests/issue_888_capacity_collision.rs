@@ -32,6 +32,7 @@ use chelis_unord::UnordSet;
 use chelis_backend_c::memory::{MemoryPlan, NodeMemoryKind};
 use chelis_ir::dag::{Dag, DimExpr, DimExprKey, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_types::types::Prim;
+mod support;
 
 /// A tail extent chosen so the *concrete* part of the shape product,
 /// `2^40 * TAIL`, exceeds `usize::MAX` and therefore saturates.
@@ -112,7 +113,8 @@ fn chain_plan(
     let b = dag.add_node(RiscOp::Neg, vec![a], b_type, None);
     let c = dag.add_node(RiscOp::Neg, vec![b], c_type, None);
     dag.add_root(c);
-    let plan = MemoryPlan::build(&dag, &[c], &UnordSet::new());
+    let verified = support::verified_dag(&dag, chelis_backend_c::CodegenOptions::default());
+    let plan = MemoryPlan::build(verified.emission(), &[c], &UnordSet::new());
     (plan, a, b, c)
 }
 
