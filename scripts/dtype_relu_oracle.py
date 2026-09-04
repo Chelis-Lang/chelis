@@ -88,12 +88,13 @@ def source_contracts() -> tuple[SourceContract, ...]:
             "crates/chelis-backend-c/src/host_emit.rs",
             (
                 "chelis_host_relu_{suffix}",
-                '"static inline uint16_t chelis_host_relu_{suffix}(uint16_t x) {{"',
-                '"    return {decoder}(x) < 0.0f ? UINT16_C(0) : x;"',
-                "HostType::Float16 | HostType::BFloat16 => {",
+                "HostType::Float16 | HostType::BFloat16 => EmittedExpr::conditional(",
+                "BinaryOperator::Less,\n                                numeric_arg(0),\n                                EmittedExpr::integer(0),",
+                "EmittedExpr::integer(0),\n                            arg(0),",
                 '"    return x < {} ? {} : x;"',
                 'assert!(!body.contains("fmax")',
             ),
+            ("stored_relu_decoder",),
         ),
         SourceContract(
             "HIP all-width selection",

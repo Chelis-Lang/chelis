@@ -96,13 +96,24 @@ class SourceContractMutationTests(unittest.TestCase):
         with self.assertRaisesRegex(oracle.OracleFailure, "scalar stored-value"):
             oracle.validate_source_contracts(self.repo)
 
-    def test_reduced_scalar_decode_reencode_mutation_fails(self) -> None:
+    def test_reduced_scalar_raw_selection_fallback_mutation_fails(self) -> None:
         path = self.repo / "crates/chelis-backend-c/src/host_emit.rs"
         source = path.read_text()
         path.write_text(
             source.replace(
-                '"    return {decoder}(x) < 0.0f ? UINT16_C(0) : x;"',
-                '"    return chelis_f32_to_f16({decoder}(x));"',
+                """HostType::Float16 | HostType::BFloat16 => EmittedExpr::conditional(
+                            binary(
+                                BinaryOperator::Less,
+                                numeric_arg(0),
+                                EmittedExpr::integer(0),
+                            ),
+                            EmittedExpr::integer(0),
+                            arg(0),
+                        ),""",
+                """HostType::Float16 | HostType::BFloat16 => finalize_scalar_expr(
+                            EmittedExpr::call(helper, [numeric_arg(0)]),
+                            ty,
+                        ),""",
                 1,
             )
         )
