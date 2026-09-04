@@ -610,7 +610,34 @@ impl<'a> EvalContext<'a> {
         // Honor that meta where present so a context-typed literal
         // (e.g. `(lit {type: (t-prim {} int64)} 42)`) carries the
         // surrounding-position dtype, not just the bare default.
-        let meta_dtype = get_meta(list).and_then(lit_meta_prim);
+        // chelis#1544: a literal stamped with a type BINDER rather than a
+        // primitive, which is what `cast(<literal>, p)` produces under
+        // `spec/02-surf-syntax.md` §P10b position 4. Resolve it through this
+        // frame's precision bindings, the same map `eval_cast` already
+        // consults for a binder-named cast target. Without this the literal
+        // fell through to the §P10 f32 default and every non-f32
+        // instantiation silently received a rounded constant.
+        let meta = get_meta(list);
+        let meta_dtype = match meta.and_then(lit_meta_prim) {
+            Some(prim) => Some(prim),
+            None => match meta.and_then(lit_meta_type_var_name) {
+                Some(binder) => match self.precision_bindings.get(binder).copied() {
+                    Some(prim) => Some(prim),
+                    // Deliberately not the f32 default. A binder the frame
+                    // cannot resolve means this literal is being evaluated
+                    // outside any instantiation, and answering f32 is the
+                    // silent-wrong-answer shape chelis#744 exists to prevent.
+                    None => {
+                        return Err(format!(
+                            "literal is typed at the unresolved type binder `{binder}`; \
+                             it has no dtype outside a call that instantiates it \
+                             (chelis#1544)"
+                        ));
+                    }
+                },
+                None => None,
+            },
+        };
         match value {
             Expr::Atom(Atom::Int(value), _) => match meta_dtype {
                 Some(dtype) if dtype.is_integer() || dtype.is_float() => {

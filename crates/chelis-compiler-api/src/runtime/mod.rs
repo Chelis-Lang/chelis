@@ -999,6 +999,39 @@ fn lit_meta_prim(meta: &MetaMap) -> Option<Prim> {
     extract_prim_from_type_expr(ty_expr)
 }
 
+/// chelis#1544: the binder name of a literal stamped with a type VARIABLE
+/// rather than a primitive, as `(lit {type: (t-var {} p)} 0.1)`.
+///
+/// `spec/02-surf-syntax.md` §P10b position 4 binds the literal in
+/// `cast(<literal>, p)` at `p`, so the desugarer stamps the binder rather than
+/// a primitive. [`lit_meta_prim`] reads only the primitive spelling and answers
+/// `None` here, which sent the literal to the §P10 f32 default and rounded it
+/// before any instantiation could be applied. The caller resolves this name
+/// through the frame's precision bindings, which `eval_cast` has consulted for
+/// its own target all along.
+///
+/// `_` is excluded: `spec/03-deep-syntax.md` §2.5.1 makes it an inference hole
+/// rather than a binder, and the checker resolves a hole before the
+/// interpreter sees it.
+fn lit_meta_type_var_name(meta: &MetaMap) -> Option<&str> {
+    let (_, ty_expr) = meta.entries.iter().find(|(k, _)| k == "type")?;
+    // Both carriers, matching `extract_prim_from_type_expr`'s reach: a
+    // `t-var` arrives as a `List` from the parser and as a `Node` from the
+    // stamped ingress, and reading only one is how a carrier-shaped defect
+    // gets in (chelis#1107).
+    let (node_tag, kids) = match ty_expr {
+        Expr::List(list, _) => (tag(list)?, children(list)),
+        Expr::Node(node, _) => (node.tag(), node.children_slice()),
+        _ => return None,
+    };
+    if node_tag != DeepTag::TVar {
+        return None;
+    }
+    kids.first()
+        .and_then(symbol_name)
+        .filter(|name| *name != "_")
+}
+
 fn children(list: &List) -> &[Expr] {
     if list.elements.len() > 2 {
         &list.elements[2..]
