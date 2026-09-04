@@ -607,6 +607,64 @@ fn malformed_real_host_programs_fail_at_typed_boundaries() {
 }
 
 #[test]
+fn checked_scalar_call_slots_restore_the_exact_literal_type() {
+    let verified = verified_source(
+        "def keep_i32(x: int32) -> int32 = x\n\
+         def keep_i64(x: int64) -> int64 = x\n\
+         def keep_f32(x: f32) -> f32 = x\n\
+         def keep_f64(x: f64) -> f64 = x\n\
+         a = keep_i32(7)\n\
+         b = keep_i64(7i64)\n\
+         c = keep_f32(1.5)\n\
+         d = keep_f64(1.5f64)\n\
+         e = keep_f32(cast(42, f32))\n",
+    );
+    let roots = unit_text(&verified, "roots");
+    for callee in ["keep_i32", "keep_i64", "keep_f32", "keep_f64"] {
+        assert!(roots.contains(&format!("call:{callee}")), "{roots}");
+    }
+}
+
+#[test]
+fn forged_call_argument_types_cannot_retag_an_actual_expression() {
+    let front = front("def keep(x: int32) -> int32 = x\nout = keep(1)\n");
+
+    let mut forged_slot = front.host.clone();
+    let HostExprKind::Call { arg_tys, .. } = &mut forged_slot
+        .globals
+        .iter_mut()
+        .find(|binding| binding.name == "out")
+        .expect("out binding")
+        .value
+        .kind
+    else {
+        panic!("out must remain a direct call")
+    };
+    arg_tys[0] = ConcreteHostType::Int64;
+    assert!(matches!(
+        lower_host_ownership(&front.manifested, forged_slot),
+        Err(OwnershipError::CallArgumentType { argument: 0, .. })
+    ));
+
+    let mut forged_value = front.host;
+    let HostExprKind::Call { args, .. } = &mut forged_value
+        .globals
+        .iter_mut()
+        .find(|binding| binding.name == "out")
+        .expect("out binding")
+        .value
+        .kind
+    else {
+        panic!("out must remain a direct call")
+    };
+    args[0] = HostExpr::new(HostExprKind::Bool(true));
+    assert!(matches!(
+        lower_host_ownership(&front.manifested, forged_value),
+        Err(OwnershipError::CallArgumentType { argument: 0, .. })
+    ));
+}
+
+#[test]
 fn every_current_concrete_host_expr_kind_has_a_closed_disposition() {
     // The lowering match is wildcard-free, so a new enum variant also fails
     // compilation until this executable census and the lowering both change.

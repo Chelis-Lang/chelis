@@ -10,7 +10,7 @@ use chelis_deep::DeepTag;
 use chelis_deep::ast::Expr;
 use chelis_types::CheckedProgram;
 use chelis_types::manifest::RootManifest;
-use chelis_types::types::Lane;
+use chelis_types::types::{Lane, Prim};
 
 use crate::dag::RiscOp;
 use crate::host::{
@@ -666,16 +666,64 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             }
             ConcreteHostExprKind::Var(name, ty) => self.lower_var(name, ty),
             ConcreteHostExprKind::Call {
-                function, args, ty, ..
+                function,
+                args,
+                arg_tys,
+                ty,
             } => {
-                let values = args
-                    .iter()
-                    .map(|arg| {
-                        self.with_site(HostSiteKind::Argument, |lowerer| {
-                            lowerer.lower_expr(arg, None)
+                let direct_specs = if crate::host::is_host_unresolved_marker(function)
+                    || matches!(self.lookup(function), Some(Place::Callback(_)))
+                {
+                    None
+                } else {
+                    self.ctx
+                        .signatures
+                        .get(function)
+                        .map(|signature| signature.params.clone())
+                };
+                let values = if let Some(specs) = direct_specs {
+                    if args.len() != specs.len() {
+                        return Err(OwnershipError::CallArityMismatch {
+                            unit: self.unit_name.clone(),
+                            callee: function.clone(),
+                            supplied: args.len(),
+                            declared: specs.len(),
+                        });
+                    }
+                    if arg_tys.len() != specs.len() {
+                        return Err(OwnershipError::CallArityMismatch {
+                            unit: self.unit_name.clone(),
+                            callee: function.clone(),
+                            supplied: arg_tys.len(),
+                            declared: specs.len(),
+                        });
+                    }
+                    let mut values = Vec::with_capacity(args.len());
+                    for (index, ((arg, arg_ty), spec)) in
+                        args.iter().zip(arg_tys).zip(&specs).enumerate()
+                    {
+                        if arg_ty != &spec.ty {
+                            return Err(OwnershipError::CallArgumentType {
+                                unit: self.unit_name.clone(),
+                                callee: function.clone(),
+                                argument: index,
+                                expected: render_type(&spec.ty),
+                                actual: render_type(arg_ty),
+                            });
+                        }
+                        values
+                            .push(self.lower_direct_call_argument(function, index, arg, &spec.ty)?);
+                    }
+                    values
+                } else {
+                    args.iter()
+                        .map(|arg| {
+                            self.with_site(HostSiteKind::Argument, |lowerer| {
+                                lowerer.lower_expr(arg, None)
+                            })
                         })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
+                        .collect::<Result<Vec<_>, _>>()?
+                };
                 self.lower_call(function, values, ty, tail)
             }
             ConcreteHostExprKind::Builtin { name, args, ty } => {
@@ -966,6 +1014,57 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             .insert(name.to_string(), Place::Owner(body_owner));
         self.captures.insert(name.to_string(), body_owner);
         Ok(Value::Named(body_owner))
+    }
+
+    /// Restore the checker-owned type that the concrete host IR's raw
+    /// `Int`/`Float` lexical carriers do not retain. The expected type has
+    /// already been checked against both `Call.arg_tys` and the resolved
+    /// callee formal. Every other expression carries its own concrete type and
+    /// must agree exactly instead of being retagged at the call boundary.
+    fn lower_direct_call_argument(
+        &mut self,
+        function: &str,
+        argument: usize,
+        expr: &ConcreteHostExpr,
+        expected: &ConcreteHostType,
+    ) -> Result<Value, OwnershipError> {
+        self.with_site(HostSiteKind::Argument, |lowerer| {
+            lowerer.with_site(HostSiteKind::Expression, |lowerer| {
+                let raw_literal_allowed = match (&expr.kind, expected) {
+                    (ConcreteHostExprKind::Int(_), ConcreteHostType::Scalar(prim)) => {
+                        prim.is_integer() || prim.is_float()
+                    }
+                    (ConcreteHostExprKind::Float(_), ConcreteHostType::Scalar(prim)) => {
+                        prim.is_float()
+                    }
+                    _ => false,
+                };
+                if raw_literal_allowed {
+                    let label = match &expr.kind {
+                        ConcreteHostExprKind::Int(value) => format!("literal {value}"),
+                        ConcreteHostExprKind::Float(value) => format!("literal {value}"),
+                        _ => unreachable!("raw literal admission is exhaustive"),
+                    };
+                    return lowerer.define(expected, label);
+                }
+
+                let actual = match &expr.kind {
+                    ConcreteHostExprKind::Int(_) => ConcreteHostType::Scalar(Prim::Int32),
+                    ConcreteHostExprKind::Float(_) => ConcreteHostType::Scalar(Prim::F32),
+                    _ => expr_type(expr),
+                };
+                if actual != *expected {
+                    return Err(OwnershipError::CallArgumentType {
+                        unit: lowerer.unit_name.clone(),
+                        callee: function.to_string(),
+                        argument,
+                        expected: render_type(expected),
+                        actual: render_type(&actual),
+                    });
+                }
+                lowerer.lower_expr_at_site(expr, None)
+            })
+        })
     }
 
     fn lower_call(

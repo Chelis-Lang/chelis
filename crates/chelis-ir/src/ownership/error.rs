@@ -11,6 +11,16 @@ pub enum OwnershipError {
         supplied: usize,
         declared: usize,
     },
+    #[error(
+        "call argument {argument} to `{callee}` in `{unit}` has checked type `{actual}`, expected `{expected}`"
+    )]
+    CallArgumentType {
+        unit: String,
+        callee: String,
+        argument: usize,
+        expected: String,
+        actual: String,
+    },
     #[error("ownership lowering in `{unit}` names unknown callee `{callee}`")]
     UnknownCallee { unit: String, callee: String },
     #[error("ownership lowering in `{unit}` references unbound name `{name}`")]

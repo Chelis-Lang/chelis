@@ -748,6 +748,18 @@ fn direct_call_argument_class_matches_the_callable_body_parameter() {
     );
     super::verify::verify(&program).unwrap();
 
+    for prim in [Prim::Int32, Prim::F32, Prim::F64] {
+        let mut exact = program.clone();
+        exact.units[1]
+            .owners
+            .insert(OwnerId(2), info(prim, OwnerOrigin::Owned));
+        exact.units[2].owners.insert(
+            OwnerId(1),
+            parameter_info(prim, OwnerOrigin::ExternalBorrow),
+        );
+        super::verify::verify(&exact).unwrap();
+    }
+
     let mut wrong_mode = program.clone();
     let Op::Apply { schema, args, .. } = &mut wrong_mode.units[1].blocks[0].ops[1].kind else {
         unreachable!()
@@ -759,11 +771,75 @@ fn direct_call_argument_class_matches_the_callable_body_parameter() {
         Err(OwnershipError::DirectCallSchema { unit: 2, .. })
     ));
 
-    program.units[1]
+    let mut wrong_bool_family = program.clone();
+    wrong_bool_family.units[1]
         .owners
         .insert(OwnerId(2), info(Prim::Bool, OwnerOrigin::Owned));
     assert!(matches!(
-        super::verify::verify(&program),
+        super::verify::verify(&wrong_bool_family),
+        Err(OwnershipError::DirectCallArgumentClass {
+            unit: 2,
+            argument: 0,
+            ..
+        })
+    ));
+
+    let mut wrong_integer_width = program.clone();
+    wrong_integer_width.units[1]
+        .owners
+        .insert(OwnerId(2), info(Prim::Int32, OwnerOrigin::Owned));
+    assert!(matches!(
+        super::verify::verify(&wrong_integer_width),
+        Err(OwnershipError::DirectCallArgumentClass {
+            unit: 2,
+            argument: 0,
+            ..
+        })
+    ));
+
+    let mut wrong_float_width = program.clone();
+    wrong_float_width.units[1]
+        .owners
+        .insert(OwnerId(2), info(Prim::F32, OwnerOrigin::Owned));
+    wrong_float_width.units[2].owners.insert(
+        OwnerId(1),
+        parameter_info(Prim::F64, OwnerOrigin::ExternalBorrow),
+    );
+    assert!(matches!(
+        super::verify::verify(&wrong_float_width),
+        Err(OwnershipError::DirectCallArgumentClass {
+            unit: 2,
+            argument: 0,
+            ..
+        })
+    ));
+
+    let mut wrong_unit = program.clone();
+    wrong_unit.units[1].owners.insert(
+        OwnerId(2),
+        OwnerInfo {
+            ty: ConcreteHostType::Unit,
+            class: ValueClass::NonHeap(NonHeapKind::Unit),
+            placement: Placement::Value,
+            origin: OwnerOrigin::Owned,
+            names: Vec::new(),
+        },
+    );
+    assert!(matches!(
+        super::verify::verify(&wrong_unit),
+        Err(OwnershipError::DirectCallArgumentClass {
+            unit: 2,
+            argument: 0,
+            ..
+        })
+    ));
+
+    let mut wrong_heap = program;
+    wrong_heap.units[1]
+        .owners
+        .insert(OwnerId(2), info(Prim::String, OwnerOrigin::Owned));
+    assert!(matches!(
+        super::verify::verify(&wrong_heap),
         Err(OwnershipError::DirectCallArgumentClass {
             unit: 2,
             argument: 0,
