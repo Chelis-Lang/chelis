@@ -220,9 +220,10 @@ chelis-cli --features smt`, so the shipped `chelis` binary discharges
 property obligations through cvc5 instead of degrading to the
 solver-free fuzz path. Each release job:
 
-- installs the cvc5 build prerequisites for its platform (the
-  `debian:11` job adds `tomli` as above; macOS relies on the image's
-  CMake/Python/Xcode CLT plus an idempotent `brew install cmake`), and
+- installs the cvc5 build prerequisites for its platform (the glibc 2.31 job
+  uses the pinned Python 3.11 Bullseye container and immutable Debian snapshot
+  described above, with no separate PyPI bootstrap; macOS relies on the
+  image's CMake/Python/Xcode CLT plus an idempotent `brew install cmake`), and
 - runs `.github/scripts/verify_release_smt.py` against the freshly
   built binary, which proves a known producer obligation discharges
   via cvc5 (`proof_tier=smt`, `discharge_tier.engine=cvc5`). A binary
