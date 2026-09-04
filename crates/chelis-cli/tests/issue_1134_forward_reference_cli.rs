@@ -288,30 +288,60 @@ fn check_accepts_a_backward_value_read_across_a_hoisted_module_function() {
     );
 }
 
-/// chelis#1485, recorded rather than repaired: a header-less value naming a
-/// function that reads the value back. Legal under [04-INF-4], but the
-/// schedule's mirror and read edges point both ways and the stall releases the
-/// function first, so its backward read reports unbound. A ratchet, not a
-/// mute: this must still FAIL at the public surface, and reddens when #1485
-/// closes.
+/// chelis#1485 at the public surface, restated for the narrowed mirror edge.
+///
+/// A value naming a function that reads the value back. With `f` SIGNED the
+/// mirror edge is gone (chelis#1486), the schedule no longer stalls, and the
+/// program checks clean; with `g` `defsig`-less the mirror edge remains and
+/// the backward read still reports unbound.
+///
+/// The clean row is an intermediate state, not the disposition. [04-INF-7]
+/// makes this program an eager value cycle and chelis#1487 gives the detector
+/// the lambda and value-stack edges it needs to say so, at which point this
+/// row becomes `CycleDetected`.
+///
+/// Disposition lock: the signed row moved with this change, the `defsig`-less
+/// row did not, and either moving again reddens the test.
 #[test]
 fn a_value_that_names_a_function_reading_it_back_is_a_recorded_stall() {
-    assert_failed_report(
-        "mirror_escape",
+    assert_clean_report(
+        "mirror_escape_signed",
         "ch",
         "module MirrorEscape\n\n\
          def anchor() -> int32 = 1\n\n\
          carried = wrap(f)\n\n\
          def wrap(g) = g\n\n\
          def f(n: int32) -> int32 = if (n <= 0) then 0 else carried((n - 1))\n",
+    );
+    assert_failed_report(
+        "mirror_escape_defsig_less",
+        "ch",
+        "module WrapEscape\n\n\
+         def anchor() -> int32 = 1\n\n\
+         carried = wrap(g)\n\n\
+         def wrap(h) = h\n\n\
+         def g(n) = if (n <= 0) then 0 else carried((n - 1))\n",
         "UnboundVariable",
     );
 }
 
+/// The reader-first layout of the partial-header program: `r` sits BELOW the
+/// hoist floor, where the mirror edge never reached it.
+const READER_FIRST_PARTIAL_HEADER: &str = "module PartialHeaderReaderFirst\n\n\
+     r: f32 = f(2)\n\n\
+     v: int32 = 1\n\n\
+     def anchor() -> int32 = 1\n\n\
+     def f(n: int32) = add(v, n)\n";
+
 /// A partial header must not be instantiated before its body narrows it
-/// (chelis#1486): the reader's mismatched ascription must still reject at the
-/// public surface even though the function is deferred past the value it
-/// reads.
+/// (chelis#1486 / [04-INF-5]): the reader's mismatched ascription must reject
+/// at the public surface in both layouts. The first was already deferred by
+/// the mirror edge; the second sits below the hoist floor, where no mirror
+/// edge applies and only the hole edge defers it.
+///
+/// The first row is a disposition lock and was green before this change. The
+/// second is a regression test: the reader-first layout scored 1.0 and
+/// compiled a `f32` binding out of an `int32` body.
 #[test]
 fn check_rejects_a_mismatched_read_of_a_partial_header_deferred_by_a_barrier() {
     assert_failed_report(
@@ -324,6 +354,46 @@ fn check_rejects_a_mismatched_read_of_a_partial_header_deferred_by_a_barrier() {
          def f(n: int32) = add(v, n)\n",
         "TypeMismatch",
     );
+    assert_failed_report(
+        "partial_header_reader_first",
+        "ch",
+        READER_FIRST_PARTIAL_HEADER,
+        "TypeMismatch",
+    );
+}
+
+/// The same reader-first program at the two lanes that run code. `chelis
+/// check` reports a score; `eval` and `build` must refuse to execute or lower
+/// it, which is the half that makes chelis#1486 a compiled wrong answer rather
+/// than a fitness inaccuracy.
+///
+/// Regression test: before this change both commands succeeded, `eval` printed
+/// `r = 3` and the emitted C printed `3.0` for a binding declared `f32`.
+#[test]
+fn eval_and_build_reject_a_reader_first_partial_header() {
+    let directory = tempdir().expect("tempdir");
+    let path = directory.path().join("partial_header_reader_first.ch");
+    write_file(&path, READER_FIRST_PARTIAL_HEADER);
+    let fixture = path.to_str().expect("UTF-8 fixture path");
+    for command in [
+        vec!["eval", "--file", fixture],
+        vec!["build", fixture, "--target", "c"],
+    ] {
+        let label = command[0];
+        let output = Command::cargo_bin("chelis")
+            .expect("chelis binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(&command)
+            .output()
+            .expect("chelis command must run");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success()
+                && stderr.contains("def 'r' body doesn't match declared signature"),
+            "{label} must reject the reader-first partial header; stdout={} stderr={stderr}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
 }
 
 /// The public-surface half of the recursive-component ordering matrix.

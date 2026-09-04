@@ -145,6 +145,12 @@ pub struct Env {
     /// chelis#260 Site 2: the same provenance for TYPE parameters. Kept
     /// separate from `declared_dim_names` because the two are consumed by
     /// different diagnostics and a signature may declare either alone.
+    ///
+    /// chelis#1486 / [04-INF-6]: the second consumer. Membership is the
+    /// checker's record of which variables in a declaration's scheme are
+    /// AUTHORED binders rather than inference holes, so a hole ([04-INF-5])
+    /// is absent here and is never subject to the rigidity check. Checker
+    /// state only, never serialized.
     #[serde(skip)]
     declared_type_names: UnordMap<String, UnordMap<TypeVar, String>>,
     /// The composed `fresh TypeVar -> source name` map for the definition
@@ -489,6 +495,10 @@ impl Env {
 
     /// chelis#260 Site 2: record the source names of a signature's declared
     /// TYPE parameters, the analogue of [`Self::record_declared_dim_names`].
+    ///
+    /// chelis#1486 / [04-INF-6]: also the record of which variables are
+    /// AUTHORED binders, so the post-body rigidity check can render them and
+    /// an inference hole ([04-INF-5]) is excluded by construction.
     pub(crate) fn record_declared_type_names(
         &mut self,
         name: &str,
@@ -507,6 +517,9 @@ impl Env {
     /// `TypeVar`, so a quantifier instantiated to anything but a bare
     /// variable simply has no fresh variable to name and is skipped: a
     /// concrete type renders itself and needs no provenance.
+    ///
+    /// An empty map means the declaration authored no type binder, so under
+    /// [04-INF-6] nothing in it is rigid.
     pub(crate) fn declared_type_names_for(
         &self,
         name: &str,

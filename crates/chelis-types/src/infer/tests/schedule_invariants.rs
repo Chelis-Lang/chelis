@@ -32,24 +32,62 @@ enum Kind {
     Value,
 }
 
+/// What header the generator says a declaration publishes, which is what
+/// decides whether a reader needs a precedence edge to it (chelis#1486).
+///
+/// Declared, not measured, so a desugarer change that stopped synthesizing a
+/// `defsig` would show up as a disagreement rather than silently changing the
+/// model the invariants are checked against; `reference` asserts each value
+/// against the real flattened `defsig` items.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Header {
+    /// No `defsig` anywhere: `def helper(x) = x`. Nothing is available to a
+    /// reader until the body is inferred, so the mirror edge applies.
+    Absent,
+    /// Every slot annotated: `def anchor() -> int32 = 1`. Honest from the
+    /// first pass under [04-INF-6], so no edge is owed.
+    Complete,
+    /// At least one wildcard slot: `def f(n: int32) = add(v, n)`. Not honest
+    /// until the body fills it ([04-INF-5]), so the hole edge applies.
+    Holed,
+}
+
 /// One named declaration as the generator wrote it.
 #[derive(Clone, Debug)]
 struct Declaration {
     name: &'static str,
     kind: Kind,
+    header: Header,
     source: String,
     references: Vec<&'static str>,
     component: Option<&'static str>,
+}
+
+impl Declaration {
+    fn with_header(self, header: Header) -> Self {
+        Declaration { header, ..self }
+    }
 }
 
 fn function(name: &'static str, source: &str, references: &[&'static str]) -> Declaration {
     Declaration {
         name,
         kind: Kind::Function,
+        header: Header::Absent,
         source: source.to_string(),
         references: references.to_vec(),
         component: None,
     }
+}
+
+/// A function whose signature is complete: no wildcard slot, so no hole edge.
+fn signed_function(name: &'static str, source: &str, references: &[&'static str]) -> Declaration {
+    function(name, source, references).with_header(Header::Complete)
+}
+
+/// A function whose synthesized signature carries a wildcard slot.
+fn holed_function(name: &'static str, source: &str, references: &[&'static str]) -> Declaration {
+    function(name, source, references).with_header(Header::Holed)
 }
 
 fn member(
@@ -64,14 +102,31 @@ fn member(
     }
 }
 
+/// A recursive-component member with a complete signature.
+fn signed_member(
+    name: &'static str,
+    source: &str,
+    references: &[&'static str],
+    component: &'static str,
+) -> Declaration {
+    member(name, source, references, component).with_header(Header::Complete)
+}
+
 fn value(name: &'static str, source: &str, references: &[&'static str]) -> Declaration {
     Declaration {
         name,
         kind: Kind::Value,
+        header: Header::Absent,
         source: source.to_string(),
         references: references.to_vec(),
         component: None,
     }
+}
+
+/// A value with a declaration type (`carried: int32 = 7`), which desugars to a
+/// complete `defsig` beside the `def`.
+fn signed_value(name: &'static str, source: &str, references: &[&'static str]) -> Declaration {
+    value(name, source, references).with_header(Header::Complete)
 }
 
 #[derive(Clone, Debug)]
@@ -107,6 +162,40 @@ struct Measured {
     plan: FunctionInferencePlan,
     flat: Vec<FlatItem>,
     module_fn_indices: BTreeSet<usize>,
+    /// The header each name actually publishes, read off the real flattened
+    /// `defsig` items. Compared against the generator's declared `Header` so a
+    /// mis-annotated call site or a desugarer change is a loud disagreement.
+    headers: BTreeMap<&'static str, Header>,
+}
+
+/// The three wildcard spellings, restated here rather than borrowed from the
+/// implementation, so the model this oracle checks against is independent of
+/// the scanner it is checking (the same reason `reference` rebuilds the hoist
+/// order by hand).
+///
+/// Iterative rather than recursive, so it needs no `stack_guard!`: a walker
+/// with an explicit worklist cannot exhaust the native stack, and a guard in a
+/// test model would only give it a way to answer wrongly.
+fn deep_type_has_hole(root: &chelis_deep::Expr) -> bool {
+    let mut worklist = vec![root];
+    while let Some(expr) = worklist.pop() {
+        if let Some((tag, _, kids)) = stamped_parts(expr) {
+            if matches!(tag, DeepTag::TVar | DeepTag::DVar | DeepTag::DRank)
+                && kids.first().and_then(symbol_name) == Some("_")
+            {
+                return true;
+            }
+            worklist.extend(kids.iter());
+            continue;
+        }
+        match expr {
+            chelis_deep::Expr::List(list, _) => worklist.extend(list.elements.iter()),
+            chelis_deep::Expr::BareList(elements, _) => worklist.extend(elements.iter()),
+            chelis_deep::Expr::MetaExpr(meta, _) => worklist.push(&meta.expr),
+            _ => {}
+        }
+    }
+    false
 }
 
 fn measure(program: &Program) -> Measured {
@@ -141,11 +230,37 @@ fn measure(program: &Program) -> Measured {
         .map(|member| member.item_index)
         .collect::<BTreeSet<_>>();
     let schedule = primary_inference_schedule(&plan, &items);
+    let mut headers: BTreeMap<&'static str, Header> = BTreeMap::new();
+    for declaration in &program.declarations {
+        headers.insert(declaration.name, Header::Absent);
+    }
+    for (_, expr) in &items {
+        let Some((DeepTag::Defsig, _, kids)) = stamped_parts(expr) else {
+            continue;
+        };
+        let Some(name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        let Some(declared) = program
+            .declarations
+            .iter()
+            .find(|declaration| declaration.name == name)
+        else {
+            panic!("a `defsig` for `{name}` has no generator declaration\n{source}");
+        };
+        let header = if kids.get(1).is_some_and(deep_type_has_hole) {
+            Header::Holed
+        } else {
+            Header::Complete
+        };
+        headers.insert(declared.name, header);
+    }
     Measured {
         schedule,
         plan,
         flat,
         module_fn_indices,
+        headers,
     }
 }
 
@@ -154,6 +269,7 @@ enum EdgeKind {
     Read,
     Call,
     Mirror,
+    Hole,
 }
 
 /// The reference graph, derived from the generator's declarations over the
@@ -185,6 +301,19 @@ fn reference(program: &Program, measured: &Measured) -> Reference {
             declaration.name,
             program.source()
         );
+        // chelis#1486: the header decides which precedence edge a reader is
+        // owed, so a wrong declaration would model a different program.
+        assert_eq!(
+            measured
+                .headers
+                .get(declaration.name)
+                .copied()
+                .unwrap_or(Header::Absent),
+            declaration.header,
+            "item {index} `{}`: generator header and desugared signature disagree\n{}",
+            declaration.name,
+            program.source()
+        );
     }
     let mut value_ordinal: BTreeMap<&str, usize> = BTreeMap::new();
     let mut function_index: BTreeMap<&str, usize> = BTreeMap::new();
@@ -213,6 +342,13 @@ fn reference(program: &Program, measured: &Measured) -> Reference {
         })
         .collect::<Vec<_>>();
     let floor = measured.module_fn_indices.first().copied();
+    let header_of = |name: &str| -> Header {
+        program
+            .declarations
+            .iter()
+            .find(|declaration| declaration.name == name)
+            .map_or(Header::Absent, |declaration| declaration.header)
+    };
     let mut edges = BTreeMap::new();
     for index in 0..item_count {
         let Some(declaration) = declared(index) else {
@@ -232,12 +368,26 @@ fn reference(program: &Program, measured: &Measured) -> Reference {
             {
                 if reader_is_module_fn {
                     edges.insert((vertex[function], vertex[index]), EdgeKind::Call);
-                } else if floor.is_some_and(|floor| index >= floor) {
-                    // Unconditional, signed or not: a declared header may be
-                    // partial or generic and is only the function's scheme
-                    // once its body has narrowed it (chelis#1486).
+                } else if floor.is_some_and(|floor| index >= floor)
+                    && header_of(name) == Header::Absent
+                {
+                    // `defsig`-less only (chelis#1486). A complete or
+                    // authored-binder header is honest before its body under
+                    // [04-INF-6], so its reader is owed nothing; a hole header
+                    // is covered by the hole edge below. Only a function with
+                    // no header at all leaves a reader with nothing to use.
                     edges.insert((vertex[function], vertex[index]), EdgeKind::Mirror);
                 }
+            }
+            // The hole edge (chelis#1486 / [04-INF-5]). Bounded by no region:
+            // the dishonest header is global from the first pass, so it holds
+            // below the floor and in a bare unit, for a function reader and a
+            // value reader alike.
+            if header_of(name) == Header::Holed
+                && let Some(&target) = function_index.get(name).or_else(|| value_ordinal.get(name))
+                && vertex[target] != vertex[index]
+            {
+                edges.insert((vertex[target], vertex[index]), EdgeKind::Hole);
             }
         }
     }
@@ -469,7 +619,7 @@ fn round_eight_layouts() -> Vec<Vec<Declaration>> {
     let mut layouts = Vec::new();
     for annotated in [false, true] {
         let carried = if annotated {
-            value("carried", "carried: int32 = tailfn(1)", &["tailfn"])
+            signed_value("carried", "carried: int32 = tailfn(1)", &["tailfn"])
         } else {
             value("carried", "carried = tailfn(1)", &["tailfn"])
         };
@@ -501,16 +651,16 @@ fn matrix_layouts() -> Vec<Vec<Declaration>> {
     let mut layouts = Vec::new();
     for annotated in [false, true] {
         let carried = if annotated {
-            value("carried", "carried: int32 = 7", &[])
+            signed_value("carried", "carried: int32 = 7", &[])
         } else {
             value("carried", "carried = 7", &[])
         };
         for reader in [
-            function("reader", "def reader() -> int32 = carried", &["carried"]),
+            signed_function("reader", "def reader() -> int32 = carried", &["carried"]),
             value("echoed", "echoed = carried", &["carried"]),
         ] {
             let alphabet = vec![
-                function("anchor", "def anchor() -> int32 = 1", &[]),
+                signed_function("anchor", "def anchor() -> int32 = 1", &[]),
                 carried.clone(),
                 reader.clone(),
             ];
@@ -541,13 +691,13 @@ fn recursive_layouts() -> Vec<Vec<Declaration>> {
             value("carried", "carried = 7", &[])
         };
         let alphabet = vec![
-            member(
+            signed_member(
                 "ping",
                 "def ping(n: int32) -> int32 = if (n <= 0) then 0 else pong((n - 1))",
                 &["pong"],
                 "pair",
             ),
-            member(
+            signed_member(
                 "pong",
                 "def pong(n: int32) -> int32 = if (n <= 0) then carried else ping((n - 1))",
                 &["ping", "carried"],
@@ -556,7 +706,7 @@ fn recursive_layouts() -> Vec<Vec<Declaration>> {
             carried,
         ];
         for mut layout in permutations(&alphabet) {
-            layout.insert(0, function("seed", "def seed() -> int32 = 3", &[]));
+            layout.insert(0, signed_function("seed", "def seed() -> int32 = 3", &[]));
             layouts.push(layout);
         }
     }
@@ -627,10 +777,10 @@ fn round_five_hoisted_reader_follows_the_value_it_reads() {
     let program = named(
         true,
         vec![
-            function("seed", "def seed() -> int32 = 3", &[]),
-            function("anchor", "def anchor() -> int32 = 1", &[]),
+            signed_function("seed", "def seed() -> int32 = 3", &[]),
+            signed_function("anchor", "def anchor() -> int32 = 1", &[]),
             value("carried", "carried = seed()", &["seed"]),
-            function(
+            signed_function(
                 "later_reader",
                 "def later_reader() -> int32 = carried",
                 &["carried"],
@@ -655,15 +805,15 @@ fn round_six_recursive_component_follows_the_value_a_member_reads() {
             let program = named(
                 wrapped,
                 vec![
-                    function("seed", "def seed() -> int32 = 3", &[]),
-                    member(
+                    signed_function("seed", "def seed() -> int32 = 3", &[]),
+                    signed_member(
                         "ping",
                         "def ping(n: int32) -> int32 = if (n <= 0) then 0 else pong((n - 1))",
                         &["pong"],
                         "pair",
                     ),
                     carried,
-                    member(
+                    signed_member(
                         "pong",
                         "def pong(n: int32) -> int32 = if (n <= 0) then carried else ping((n - 1))",
                         &["ping", "carried"],
@@ -706,7 +856,7 @@ fn round_eight_stall_free_program_keeps_planner_order() {
         true,
         vec![
             function("caller", "def caller(n) = helper(n)", &["helper"]),
-            value("carried", "carried: int32 = tailfn(1)", &["tailfn"]),
+            signed_value("carried", "carried: int32 = tailfn(1)", &["tailfn"]),
             function("helper", "def helper(x) = carried", &["carried"]),
             function("tailfn", "def tailfn(n) = n", &[]),
         ],
@@ -750,7 +900,7 @@ fn a_textual_chain_would_close_a_cycle_this_graph_does_not_have() {
     let program = named(
         true,
         vec![
-            function("anchor", "def anchor() -> int32 = 1", &[]),
+            signed_function("anchor", "def anchor() -> int32 = 1", &[]),
             value("first", "first = reads()", &["reads"]),
             value("second", "second = 7", &[]),
             function("reads", "def reads() = second", &["second"]),
@@ -764,35 +914,113 @@ fn a_textual_chain_would_close_a_cycle_this_graph_does_not_have() {
     assert_before(&program, &measured, "reads", "first");
 }
 
+/// chelis#1486 / [04-INF-5]: a reader of a hole-signature function follows it
+/// even below the hoist floor and in a bare unit, and a reader of a
+/// complete-header function is not moved at all.
+///
+/// The mirror edge was bounded to the planner's region, so a value declared
+/// before the first module function was inferred first and instantiated the
+/// quantified hole; the layout, not the spelling, decided the verdict. The
+/// hole edge carries no such bound. The control is the half that proves the
+/// edge is a hole edge and not a blunt "every reader waits" rule: with a
+/// complete header the reader keeps the hoist position it had.
+///
+/// Regression test for the two hole rows. Before this change `f` did not
+/// precede `r` in either layout, because no edge existed to move it; the
+/// complete-header row is a disposition lock and was green in both states.
+#[test]
+fn a_below_floor_reader_of_a_hole_signature_function_follows_it() {
+    let holed_wrapped = named(
+        true,
+        vec![
+            value("r", "r = f(2)", &["f"]),
+            signed_function("anchor", "def anchor() -> int32 = 1", &[]),
+            holed_function("f", "def f(n: int32) = n", &[]),
+        ],
+    );
+    assert!(
+        violations(&holed_wrapped).is_empty(),
+        "{}",
+        holed_wrapped.source()
+    );
+    let measured = measure(&holed_wrapped);
+    assert_before(&holed_wrapped, &measured, "f", "r");
+
+    // A bare unit has no planner region at all, so the mirror edge could never
+    // have reached this layout; the hole edge still does.
+    let holed_bare = named(
+        false,
+        vec![
+            value("r", "r = f(2)", &["f"]),
+            holed_function("f", "def f(n: int32) = n", &[]),
+        ],
+    );
+    assert!(
+        violations(&holed_bare).is_empty(),
+        "{}",
+        holed_bare.source()
+    );
+    let measured = measure(&holed_bare);
+    assert_before(&holed_bare, &measured, "f", "r");
+
+    // Control: a complete header is honest before its body ([04-INF-6]), so
+    // its reader is owed no edge and keeps its hoist slot ahead of the
+    // function.
+    let complete = named(
+        true,
+        vec![
+            value("r", "r = g(2)", &["g"]),
+            signed_function("anchor", "def anchor() -> int32 = 1", &[]),
+            signed_function("g", "def g(n: int32) -> int32 = n", &[]),
+        ],
+    );
+    assert!(violations(&complete).is_empty(), "{}", complete.source());
+    let measured = measure(&complete);
+    assert_before(&complete, &measured, "r", "g");
+}
+
+/// chelis#1485/#1486 ratchet, restated for the narrowed mirror edge.
+///
+/// `carried` names `f` without applying it and `f` reads `carried`. The read
+/// edge `carried -> f` exists either way; whether the graph closes a cycle now
+/// depends on `f`'s header, which is exactly what PP6 item 2 changed. A
+/// `defsig`-less `f` still earns the mirror edge `f -> carried` and still
+/// stalls; a signed `f` publishes a header that is honest before its body
+/// under [04-INF-6], earns no mirror edge, and leaves an acyclic graph. The
+/// verdict half of both spellings is ratcheted in the parity suite and the CLI
+/// oracle.
+///
+/// Disposition lock. Before this change the reference graph was cyclic for
+/// BOTH spellings, so the signed row is the half that reddened; it reddens
+/// again if either the mirror rule or the header classification moves.
 #[test]
 fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
-    // chelis#1485: `carried` names `f` without applying it and `f` reads
-    // `carried`. Every reference is legal and there is no runtime cycle, but
-    // the mirror edge `f -> carried` and the read edge `carried -> f` point
-    // both ways, so the reference graph is cyclic and the schedule stalls.
-    // The mirror cannot be dropped for a signed `f` (chelis#1486), so this
-    // pins the stall: the reference graph must be cyclic and the schedule
-    // total with callees first. It reddens when the reference's mirror rule
-    // changes; the implementation is pinned by the verdict ratchets in the
-    // parity suite and the CLI oracle, which redden when #1485 closes.
-    for f in [
-        "def f(n: int32) -> int32 = if (n <= 0) then 0 else carried((n - 1))",
-        "def f(n) = if (n <= 0) then 0 else carried((n - 1))",
+    for (header, f) in [
+        (
+            Header::Complete,
+            "def f(n: int32) -> int32 = if (n <= 0) then 0 else carried((n - 1))",
+        ),
+        (
+            Header::Absent,
+            "def f(n) = if (n <= 0) then 0 else carried((n - 1))",
+        ),
     ] {
         let program = named(
             true,
             vec![
-                function("anchor", "def anchor() -> int32 = 1", &[]),
+                signed_function("anchor", "def anchor() -> int32 = 1", &[]),
                 value("carried", "carried = wrap(f)", &["wrap", "f"]),
                 function("wrap", "def wrap(g) = g", &[]),
-                function("f", f, &["carried"]),
+                function("f", f, &["carried"]).with_header(header),
             ],
         );
         let measured = measure(&program);
         let stall_reference = reference(&program, &measured);
-        assert!(
+        assert_eq!(
             !is_acyclic(&stall_reference),
-            "chelis#1485 is closed for this spelling; retire the ratchet\n{}",
+            header == Header::Absent,
+            "the mirror edge must close this cycle for a `defsig`-less `f`, and only \
+             for that spelling\n{}",
             program.source()
         );
         assert!(violations(&program).is_empty(), "{}", program.source());
@@ -810,7 +1038,7 @@ fn a_genuine_binding_cycle_stays_total_with_callees_first() {
         true,
         vec![
             function("caller", "def caller(n) = helper(n)", &["helper"]),
-            value("carried", "carried: int32 = caller(1)", &["caller"]),
+            signed_value("carried", "carried: int32 = caller(1)", &["caller"]),
             function("helper", "def helper(x) = carried", &["carried"]),
         ],
     );
@@ -821,20 +1049,24 @@ fn a_genuine_binding_cycle_stays_total_with_callees_first() {
     assert_eq!(measured.schedule.len(), measured.flat.len());
     assert_before(&three, &measured, "helper", "caller");
 
-    // `C1_mirror_cycle.ch`: the same runtime cycle through a signed pair.
-    // The mirror edge is unconditional, so the reference graph is cyclic
-    // here too; the schedule stays total and the detector owns the verdict.
+    // `C1_mirror_cycle.ch`: the same runtime cycle through a SIGNED pair.
+    // Narrowing the mirror edge to `defsig`-less functions (chelis#1486)
+    // removes `ping -> carried`, so this graph is no longer cyclic: the read
+    // edge `carried -> pong` is all that remains and the component follows the
+    // value. The runtime cycle is unchanged and
+    // `detect_top_level_binding_cycles` still owns that verdict; the schedule's
+    // job here is to stay total and to respect the one remaining edge.
     let mirror = named(
         true,
         vec![
-            member(
+            signed_member(
                 "ping",
                 "def ping(n: int32) -> int32 = if (n <= 0) then 0 else pong((n - 1))",
                 &["pong"],
                 "pair",
             ),
             value("carried", "carried = ping(1)", &["ping"]),
-            member(
+            signed_member(
                 "pong",
                 "def pong(n: int32) -> int32 = if (n <= 0) then carried else ping((n - 1))",
                 &["ping", "carried"],
@@ -844,9 +1076,11 @@ fn a_genuine_binding_cycle_stays_total_with_callees_first() {
     );
     let measured = measure(&mirror);
     let mirror_reference = reference(&mirror, &measured);
-    assert!(!is_acyclic(&mirror_reference), "{}", mirror.source());
+    assert!(is_acyclic(&mirror_reference), "{}", mirror.source());
     assert!(violations(&mirror).is_empty(), "{}", mirror.source());
     assert_eq!(measured.schedule.len(), measured.flat.len());
+    assert_before(&mirror, &measured, "carried", "ping");
+    assert_before(&mirror, &measured, "carried", "pong");
 }
 
 #[test]

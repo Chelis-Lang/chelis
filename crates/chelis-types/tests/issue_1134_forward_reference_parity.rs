@@ -138,21 +138,32 @@ fn a_malformed_external_input_type_reports_identically_at_both_ingresses() {
     }
 }
 
-/// chelis#1485, recorded rather than repaired: a header-less value that names
-/// a function which reads the value back. Every reference is legal under
-/// [04-INF-4] and there is no runtime cycle, but the schedule's mirror edge and
-/// read edge point both ways, the stall releases the function first, and its
-/// backward read reports unbound. The mirror cannot be dropped for a signed
-/// function without instantiating a partial header early (chelis#1486).
+/// chelis#1485, still recorded rather than repaired, restated for the narrowed
+/// mirror edge.
 ///
-/// A ratchet, not a mute: the Surf spellings must still reject identically and
-/// the stamped spelling must still split, so the shape cannot grow silently
-/// and the test reddens the moment #1485 closes.
+/// A value that names a function which reads the value back. Narrowing the
+/// mirror edge to `defsig`-less module functions (chelis#1486) removes the
+/// back edge for the two SIGNED spellings, so their schedules are acyclic and
+/// they now check clean; the `defsig`-less spelling keeps its mirror edge,
+/// still stalls, and still reports the backward read as unbound. The stamped
+/// spelling still splits between the two ingresses.
+///
+/// These acceptances are an intermediate state, not the disposition. Under
+/// [04-INF-7] every one of these three programs is an eager value cycle, and
+/// the cycle detector does not yet see a reference nested in a lambda body or
+/// a call edge onto a value under evaluation (chelis#1487). When that lands
+/// each row becomes `CycleDetected`; the rows are spelled out one per line so
+/// that transition is visible rather than hidden in a loop.
+///
+/// Disposition lock. Every row's expectation moved with this change or moves
+/// with the next one, and the test reddens whenever a row's verdict does.
 #[test]
 fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
-    for (label, source) in [
+    // `None` means the program is accepted at both ingresses today.
+    for (label, expected, source) in [
         (
             "signed reader",
+            None,
             "module MirrorEscape\n\n\
              def anchor() -> int32 = 1\n\n\
              carried = wrap(f)\n\n\
@@ -161,6 +172,7 @@ fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
         ),
         (
             "lambda naming a signed reader",
+            None,
             "module PickEscape\n\n\
              def anchor() -> int32 = 1\n\n\
              carried = pick(fn (x: int32) -> f(x))\n\n\
@@ -169,6 +181,7 @@ fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
         ),
         (
             "defsig-less reader",
+            Some("UnboundVariable"),
             "module WrapEscape\n\n\
              def anchor() -> int32 = 1\n\n\
              carried = wrap(g)\n\n\
@@ -179,10 +192,16 @@ fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
         let program = surf_program(source);
         let (ir, typed) = diagnostics(&program);
         assert_eq!(ir, typed, "{label}: ingress diagnostics diverged");
-        assert!(
-            ir.iter().any(|(kind, _)| kind == "UnboundVariable"),
-            "{label}: chelis#1485 is closed for this spelling; retire the ratchet: {ir:#?}"
-        );
+        match expected {
+            Some(kind) => assert!(
+                ir.iter().any(|(reported, _)| reported == kind),
+                "{label}: expected {kind}, got {ir:#?}"
+            ),
+            None => assert!(
+                ir.is_empty(),
+                "{label}: this spelling is accepted at this stage, got {ir:#?}"
+            ),
+        }
     }
     let stamped = deep_file_program(
         "(module {} MirrorEscapeStamped\n  \
@@ -196,39 +215,166 @@ fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
                (lit {type: (t-prim {} int32)} 0)\n      \
                (app {} (var {} carried) (app {} (var {} sub) (var {} n) (lit {type: (t-prim {} int32)} 1)))))))\n",
     );
+    // The stamped spelling declares `f` with an explicit `defsig`, so it loses
+    // its mirror edge with the Surf signed spelling and the two ingresses now
+    // agree. chelis#1485's ingress SPLIT is therefore closed here; the
+    // remaining half of its disposition is the `CycleDetected` verdict
+    // [04-INF-7] owes this program, which chelis#1487 delivers.
     let (ir, typed) = diagnostics(&stamped);
+    assert_eq!(ir, typed, "stamped reader: ingress diagnostics diverged");
     assert!(
-        ir.is_empty() && typed.iter().any(|(kind, _)| kind == "UnboundVariable"),
-        "stamped reader: chelis#1485's ingress split has moved; retire or update the \
-         ratchet\n  ir:    {ir:#?}\n  typed: {typed:#?}"
+        ir.is_empty(),
+        "stamped reader: this spelling is accepted at this stage, got {ir:#?}"
     );
 }
 
+/// Assemble one unit from ordered declarations, with or without the module
+/// wrapper that gives the planner a region.
+fn layout_source(module: Option<&str>, declarations: &[&str]) -> String {
+    let mut source = String::new();
+    if let Some(name) = module {
+        source.push_str(&format!("module {name}\n\n"));
+    }
+    for declaration in declarations {
+        source.push_str(declaration);
+        source.push_str("\n\n");
+    }
+    source
+}
+
 /// A partial or generic header must not be instantiated before its body
-/// narrows it (round 11, chelis#1486). `def f(n: int32) = ...` synthesizes a
-/// `defsig` with a wildcard result and `def f(x: a) -> a` an implicit binder;
-/// both are generalized over fresh variables until the body is inferred. A
-/// reader scheduled ahead of that body would accept a mismatched ascription
-/// and compile a wrong answer, so the schedule keeps the mirror edge for a
-/// signed function and these must reject identically at both ingresses.
+/// narrows it (chelis#1486). `def f(n: int32) = ...` synthesizes a `defsig`
+/// with a wildcard result, which [04-INF-5] makes an inference hole whose type
+/// is whatever the body determines; `def f(x: a) -> a` declares an authored
+/// binder, which [04-INF-6] makes rigid. The two atoms close the defect at
+/// opposite ends: the hole edge defers the READER past the body, and the rigid
+/// check rejects the DECLARATION.
+///
+/// The three layouts matter because the mirror edge that used to defer the
+/// reader was bounded to the planner's region. Below the hoist floor and in a
+/// bare unit it never applied, so the same spelling was accepted or rejected
+/// by position alone. The hole edge carries no such bound, so every layout now
+/// rejects, identically at both ingresses.
+///
+/// Regression test. Before this change the two below-floor layouts and the two
+/// bare layouts of the partial program were ACCEPTED, and the generic program
+/// rejected at the reader rather than at the declaration.
 #[test]
 fn a_partial_or_generic_header_is_not_instantiated_before_its_body_narrows_it() {
-    let partial = surf_program(
-        "module PartialHeader\n\n\
-         def anchor() -> int32 = 1\n\n\
-         r: f32 = f(2)\n\n\
-         v: int32 = 1\n\n\
-         def f(n: int32) = add(v, n)\n",
-    );
-    assert_rejects_identically(&partial, "TypeMismatch", "partial header read early");
-    let generic = surf_program(
-        "module GenericHeader\n\n\
-         def anchor() -> int32 = 1\n\n\
-         r: f32 = f(1.5)\n\n\
-         v: int32 = 1\n\n\
-         def f(x: a) -> a = add(x, v)\n",
-    );
-    assert_rejects_identically(&generic, "PrecisionMismatch", "generic header read early");
+    let partial_reader = "r: f32 = f(2)";
+    let partial_fn = "def f(n: int32) = add(v, n)";
+    let generic_reader = "r: f32 = f(1.5)";
+    // [04-INF-6]: the body pins the authored `a` to `int32`, so `f` itself is
+    // the rejection and the reader never gets to matter.
+    let generic_fn = "def f(x: a) -> a = add(x, v)";
+    let anchor = "def anchor() -> int32 = 1";
+    let carried = "v: int32 = 1";
+
+    for (program, reader, function) in [
+        ("PartialHeader", partial_reader, partial_fn),
+        ("GenericHeader", generic_reader, generic_fn),
+    ] {
+        for (layout, declarations) in [
+            // Today's layout: the reader sits at or after the hoist floor.
+            ("after the floor", vec![anchor, reader, carried, function]),
+            // Below the floor: no mirror edge ever reached this reader.
+            ("below the floor", vec![reader, carried, anchor, function]),
+        ] {
+            let source = layout_source(Some(program), &declarations);
+            assert_rejects_identically(
+                &surf_program(&source),
+                "TypeMismatch",
+                &format!("{program} {layout}\n{source}"),
+            );
+        }
+        // A bare unit has no planner region at all.
+        let source = layout_source(None, &[reader, carried, function]);
+        assert_rejects_identically(
+            &surf_program(&source),
+            "TypeMismatch",
+            &format!("{program} bare unit\n{source}"),
+        );
+    }
+}
+
+/// [04-INF-6]: an authored type binder is rigid in the body, so a body that
+/// pins it to a concrete type or collapses it onto a sibling binder is a type
+/// error AT THE DECLARATION. No reader is present in any of these programs:
+/// the rejection is a property of the declaration alone, which is what
+/// separates this atom from the scheduling half of chelis#1486.
+///
+/// Both spellings of an authored binder are covered: the explicit binder list
+/// (`def f[a](..)`) and §5.8.1's implicit quantification (`def f(x: a) -> a`),
+/// which the resolver records identically.
+///
+/// Regression test. Every row was ACCEPTED before this change, and the first
+/// two compiled a body typed at `int32` behind a signature promising `forall
+/// a. (a) -> a`.
+#[test]
+fn a_body_that_narrows_an_authored_type_binder_rejects_at_the_declaration() {
+    for (label, source) in [
+        (
+            "explicit binder pinned to int32",
+            "module ExplicitRigid\n\n\
+             def f[a](x: a) -> a = add(x, 1)\n",
+        ),
+        (
+            "implicit binder pinned to int32",
+            "module ImplicitRigid\n\n\
+             def f(x: a) -> a = add(x, 1)\n",
+        ),
+        (
+            "two binders collapsed onto each other",
+            "module CollapsedBinders\n\n\
+             def g[a, b](x: a, y: b) -> a = y\n",
+        ),
+        (
+            "bounded binder pinned by an unsuffixed literal",
+            "module BoundedRigid\n\n\
+             def scale[p: Float](x: p) -> p = mul(x, 0.0)\n",
+        ),
+    ] {
+        assert_rejects_identically(&surf_program(source), "TypeMismatch", label);
+    }
+}
+
+/// The failure twin of the rigid-binder rejections: a body that leaves every
+/// authored binder unconstrained, or constrains it only through the §P10
+/// `cast(<literal>, <binder>)` override, stays accepted.
+///
+/// The bounded row is the shape the ten stdlib repairs took. Without it the
+/// rejection above could be satisfied by rejecting every bounded binder, which
+/// would be a different and much worse rule.
+///
+/// Disposition lock. Every row was green before this change too; the job is to
+/// bound the rejection so it cannot grow into the polymorphic bodies the
+/// language is for.
+#[test]
+fn a_body_that_keeps_its_authored_type_binders_polymorphic_stays_accepted() {
+    for (label, source) in [
+        (
+            "identity with an explicit result",
+            "module PolyIdentity\n\n\
+             def id(x: a) -> a = x\n",
+        ),
+        (
+            "identity whose result slot is a hole",
+            "module PolyHoleResult\n\n\
+             def k(x: a) = x\n",
+        ),
+        (
+            "bounded binder written with the cast override",
+            "module PolyBounded\n\n\
+             def scale[p: Float](x: p) -> p = mul(x, cast(0.0, p))\n",
+        ),
+        (
+            "two binders kept distinct",
+            "module DistinctBinders\n\n\
+             def pick[a, b](x: a, y: b) -> a = x\n",
+        ),
+    ] {
+        assert_accepts_at_both_ingresses(&surf_program(source), label);
+    }
 }
 
 #[test]

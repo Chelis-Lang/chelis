@@ -870,17 +870,21 @@ pub(super) fn resolve_type_aliases(ty: &Type, adt_reg: &AdtRegistry, vg: &mut Va
     AliasExpansionSession::new(adt_reg, vg).resolve(ty)
 }
 
-/// A declaration's resolved type together with the two binder facts the
+/// A declaration's resolved type together with the three binder facts the
 /// declaration carries: the dtype-family bounds its metadata declared
-/// (chelis#1474) and the source spelling of every dimension parameter it
-/// introduced (chelis#260).
-/// A declaration's resolved type together with the binder facts the
-/// declaration carries.
+/// (chelis#1474), the source spelling of every dimension parameter it
+/// introduced (chelis#260), and the source spelling of every authored TYPE
+/// binder it introduced (chelis#260 Site 2 and chelis#1486, [04-INF-6]).
 ///
 /// A struct rather than a tuple because this has now grown twice: chelis#1474
 /// added the dtype-family bounds and chelis#260 added the dimension names,
-/// each time making an unnamed tuple harder to read at the call sites. The
-/// type names are chelis#260 Site 2's addition.
+/// each time making an unnamed tuple harder to read at the call sites.
+///
+/// `dim_names` and `type_names` are the same fact on the two binder kinds,
+/// and both exist for the same reason: the names are in scope only while the
+/// declaration's signature is being resolved, and the diagnostics that need
+/// them, the borrow report and the [04-INF-6] rigidity check, both run after
+/// instantiation, where only the internal ids survive.
 pub(super) struct ResolvedDeclaredType {
     pub(super) ty: Type,
     pub(super) bounds: Vec<(TypeVar, TypeVarRestriction)>,
@@ -910,7 +914,8 @@ pub(super) fn resolve_deep_type(
 
 /// Resolve a declaration's type expression under declared dtype-family bounds
 /// (`spec/04-type-system.md` §5.9), additionally returning the source name
-/// bound to each dimension variable the resolution minted (chelis#260).
+/// bound to each dimension variable (chelis#260) and to each authored type
+/// binder (chelis#1486) the resolution minted.
 ///
 /// The bounds arrive from the declaration node's `dtype_bounds` metadata and
 /// leave as `(variable, family)` pairs the caller installs on the
@@ -1814,6 +1819,12 @@ pub(super) fn collect_declarations(
                     // and type parameters. This is the only point where `n`,
                     // `m` and `t` are still associated with their variables.
                     env.record_declared_dim_names(name, resolved.dim_names);
+                    // chelis#1486 / [04-INF-6]: the type-name recording has a
+                    // second consumer. It covers authored binders, explicit
+                    // (`def f[a](..)`) and implicit (`def f(x: a) -> a`)
+                    // alike, so the post-body rigidity check can name `a`
+                    // rather than `t44`. An inference hole never reaches this
+                    // map ([04-INF-5]).
                     env.record_declared_type_names(name, resolved.type_names);
                 }
             }
@@ -2273,39 +2284,35 @@ pub(super) fn infer_top_level(
         // when the signature was never recorded, in which case the collapse
         // diagnostic falls back to the internal id.
         let mut declared_dim_names: UnordMap<DimVar, String> = UnordMap::new();
-        // chelis#260 Site 2: the same provenance for type parameters. The
-        // deferred-borrow drain reports on these fresh variables long after
-        // this instantiation, so the composed map is parked on `Env` below.
+        // chelis#260 Site 2 and chelis#1486 / [04-INF-6]: the names of this
+        // signature's AUTHORED type binders, keyed by the fresh variables the
+        // instantiation below mints. Empty when the signature authored none,
+        // in which case nothing in the declaration is rigid; an inference hole
+        // is never a member. The deferred-borrow drain reports on these fresh
+        // variables long after this instantiation, so the composed map is
+        // parked on `Env` below.
         let mut declared_type_names: UnordMap<TypeVar, String> = UnordMap::new();
         let declared_ty = if provisional_recursive_type.is_none() {
             env.lookup(&name).map(|s| {
                 let s = s.clone();
+                // All three renamings: the type mapping validates in-group
+                // recursive calls and names this signature's authored type
+                // binders, and the dim mapping names its declared dimension
+                // parameters. A recursive `def` can collapse two rigid dims or
+                // two rigid type binders exactly like a non-recursive one, so
+                // neither branch may be the one that falls back to the internal
+                // id (spec/04 [04-FIT-9], [04-INF-6]).
+                let (ty, mapping, dvar_mapping) = env.instantiate_scheme(&s, vg, subst);
+                declared_dim_names = env.declared_dim_names_for(&name, &dvar_mapping);
+                declared_type_names = env.declared_type_names_for(&name, &mapping);
                 if recursion::group_member(&name) {
-                    // Both renamings: the type mapping validates in-group
-                    // recursive calls, and the dim mapping names this
-                    // signature's declared parameters. A recursive `def` can
-                    // collapse two rigid dims exactly like a non-recursive
-                    // one, so it may not be the branch that falls back to
-                    // the internal id (spec/04 [04-FIT-9]).
-                    let (ty, mapping, dvar_mapping) = env.instantiate_scheme(&s, vg, subst);
-                    declared_dim_names = env.declared_dim_names_for(&name, &dvar_mapping);
-                    declared_type_names = env.declared_type_names_for(&name, &mapping);
                     recursion_caller_guard = recursion::begin_caller(
                         &name,
                         declared_signatures.get(&name).map(|m| &m.binders),
                         &mapping,
                     );
-                    ty
-                } else {
-                    // chelis#260 Site 2 needs the TYPE mapping as well, so
-                    // this branch takes the full instantiation rather than
-                    // the dim-only projection. Both renamings come from one
-                    // call, so they cannot describe different instantiations.
-                    let (ty, mapping, dvar_mapping) = env.instantiate_scheme(&s, vg, subst);
-                    declared_dim_names = env.declared_dim_names_for(&name, &dvar_mapping);
-                    declared_type_names = env.declared_type_names_for(&name, &mapping);
-                    ty
                 }
+                ty
             })
         } else {
             if recursion::group_member(&name) {
@@ -2321,7 +2328,12 @@ pub(super) fn infer_top_level(
         // chelis#260 Site 2: park the composed map on the OUTER env, which
         // is what the per-def deferred-borrow drain reads. `body_env` below
         // is a clone, so parking there would not survive to the drain.
-        env.set_active_declared_type_names(declared_type_names);
+        // chelis#260 Site 2 parks the map here and chelis#1486 checks
+        // rigidity from it after body inference, so the two consumers
+        // each take their own copy. The rigidity check keeps the value
+        // THIS declaration computed rather than reading the parked one
+        // back, which body inference could have replaced.
+        env.set_active_declared_type_names(declared_type_names.clone());
         let mut body_env = env.clone();
         body_env.set_type_resolution_binders(
             declared_signatures
@@ -2460,6 +2472,12 @@ pub(super) fn infer_top_level(
                 }
             }
             check_declared_dvars_rigid(&declared_dvars, &declared_dim_names, subst, errors);
+            // chelis#1486 / [04-INF-6]: the type-binder twin of the check
+            // above. `declared_type_names`' key set is exactly this
+            // declaration's authored binders, explicit and implicit alike, so
+            // the check needs no separate walk of the declared type and an
+            // inference hole ([04-INF-5]) is excluded by construction.
+            check_declared_tvars_rigid(&name, &declared_type_names, subst, errors);
             // chelis#273: the param-position guard above never sees a dim
             // parameter that occurs only in the return type, so a body
             // could silently pin a return-only rigid dim. Reject the
