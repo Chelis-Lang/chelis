@@ -2209,7 +2209,10 @@ it is honest**, where a complete or authored-binder header is honest by
    asserts that the reference graph is cyclic, that the schedule emits the
    component contiguously, and that no `UnboundVariable` reaches the
    verdict. `a_genuine_binding_cycle_stays_total_with_callees_first` is
-   restated over component contiguity. The `--lib` oracle's stall
+   restated over component contiguity. A paired control checks the same later
+   value outside the active component and must still report
+   `UnboundVariable`, proving provisional visibility cannot leak past the one
+   co-inference scope. The `--lib` oracle's stall
    mutations (release by lowest ordinal) become inexpressible and are
    deleted from the receipt table; a new receipt restores the stall
    release and shows the ratchet reddening.
@@ -2283,7 +2286,8 @@ second the order oracle, the third the public-surface oracle. Before
 pushing, the implementer also runs the complete `chelis-types` corpus,
 `issue_1124_ir_defsig_unification_parity`,
 `rt800_append_only_cycle_resolution`, `recursive_generic_monomorphization`,
-the `issue_1339_*` CLI tests, `scripts/compiled_value_ownership_oracle.py
+the `issue_1339_top_level_initialization` CLI oracle,
+`scripts/compiled_value_ownership_oracle.py
 --phase 0`, `scripts/unrepresentable_domain_oracle.py`,
 `scripts/dtype_phase4b_oracle.py`, and a differential `chelis check` over
 every tracked `.ch` and `.dp` file against a control binary built from the
@@ -2292,9 +2296,10 @@ base, expecting the stdlib list above and no other score change.
 **Exclusions.** PP6 does not absorb [#1512] (an early return on an
 unresolved `expand` operand skipping validation, owned by the [#1277]
 stream; PP6 touches header-versus-body typing in the schedule, not deferral
-settlement); [#1339]'s indirect shape (an earlier initializer that calls a
-function reading a later-assigned value obeys [04-INF-4] and [04-INF-7]
-alike and stays with the compiled-value ownership plan); [#874]/[#887]'s
+settlement). PP6 supplies [#1339]'s required complete eager-reference graph,
+but does not decide that issue's distinct acyclic later-value verdict;
+[04-INF-8] and the [#1339] implementation below own it. It is not part of the
+compiled-value ownership plan. PP6 also does not absorb [#874]/[#887]'s
 tag-keyed vacuity; [#1125]'s reader audit; the `defsig`-less floor bound on
 function visibility; and any change to `spec/02` §P10's literal rule.
 
@@ -3084,12 +3089,42 @@ schedule, stall release, separate cycle-detector graph, or pending
 [#1485]/[#1486]/[#1487] work in this residue. PP6's paired-ingress, schedule,
 and public CLI commands are its standing acceptance oracles.
 
-The remaining top-level initialization frontier is [#1339], which PP6
-explicitly excludes: the current checker accepts an acyclic initializer that
-calls a function which reads a later file-scope value before the compiled lane
-has assigned it. That issue owns the controlling decision and the matching
-checker, evaluator, and generated-C behavior; it is not part of [#1134]'s
-delivered scope or PP6's eager-cycle closure.
+#### Top-level initialization frontier ([#1339])
+
+**Decision.** [04-INF-8] rejects an acyclic eager reference set that contains a
+later non-function value as `UnboundVariable`. Reordering compiled globals was
+rejected: top-level expressions may perform `IO` or trap, eval forces a missing
+dependency from inside the earlier initializer, and moving the later whole
+initializer ahead of it would choose a different observable order. Matching
+eval instead would require per-global state, forcing accessors, memoization,
+runtime cycle handling, and owned cached heap values. That is a new runtime
+model, not an emitter ordering repair.
+
+**Dependency order.** PR [#1457] supplied the direct rejection and PR [#1516]
+decided [04-INF-7]. PP6 Slice A ([#1486]) lands first; Slices B/C ([#1487] and
+[#1485]) then provide the lambda-complete graph and ingress-identical cycle
+precedence. The [#1339] slice reuses that graph, adds declaration ordinals, and
+checks every eager root's acyclic closure against the root's own ordinal.
+Imported library values are already available and are excluded. A cycle is
+diagnosed first as `CycleDetected`; the later-value diagnostic never replaces
+it.
+
+**Deliverable and oracle.** One CLI integration target owns both checker
+ingresses and the public lanes:
+
+```sh
+cargo nextest run -p chelis-cli --test issue_1339_top_level_initialization --no-fail-fast
+```
+
+Its negatives are scalar, `List`, tensor, multi-function, nested-lambda, and
+later-external-input dependencies. Its controls are the direct-forward rows,
+backward scalar/heap dependencies, an independent later value, legal forward
+and recursive functions whose value closure is already available, and exact
+eval-versus-compiled-C output including root order. `check`, `eval`, and
+`build` reject before execution or artifact creation. The compiled-value
+ownership launch oracle invokes this complete target after it lands; its
+current direct rows alone are not evidence that [#1339] is closed.
+
 
 ### Adjacent ledger rows delivered with the class change
 
@@ -3215,6 +3250,7 @@ delivered scope or PP6's eager-cycle closure.
 | PP7 | [#1125]'s carrier axis: the seven probed divergences receive the same verdict from `check_ir_program` and `check_typed_program`, and one shared total accessor plus the lint make a carrier a reader cannot decode a diagnostic rather than an absent subtree. Axis B (`validate_ir_program` runs on the serialized-IR entry only), owned by [#1537], and the unswept guarded-arm inventory are named residue, not claims |
 | [#1134] forward-reference parity | both checker ingresses reject eager forward values, accept backward values from value initializers and function bodies where allowed, accept declaration-local explicitly typed external inputs, retain sequential local scope, and reject bare self-reference and every [04-INF-7] eager value cycle identically; the schedule's order invariants are asserted directly |
 | PP8 | [#874]'s class statement, restated as coverage rather than tag-keying, and [#887]'s Tier 1 residue. Seven named programs over `vmap`'s axis, `pat-ctor`/`pat-record` heads, and `grad`'s operand are rejected instead of scoring 1.0, and `kv`'s unreadable key reports its own form instead of an `internal:` stamp violation naming a different node; the selector-read seam makes a silently-defaulted slot unspellable, and `infer_expr` reaches it from either Deep carrier. The `Selector` role is enumerated and all eight of its slots are claimed; the other roles are spot-checked only, and converting them into a claim needs an enumerator this item does not deliver (decision row 18) |
+| [#1339] top-level initialization frontier | an eager value whose acyclic closure reaches a later non-function value rejects as `UnboundVariable` under [04-INF-8]; cycles retain [04-INF-7]'s `CycleDetected`, while backward and independent controls preserve source-ordered manifest output; `issue_1339_top_level_initialization` is the authoritative oracle |
 
 ## Decisions and remaining questions
 
@@ -3238,6 +3274,7 @@ delivered scope or PP6's eager-cycle closure.
 | 16 | whether positional `expand` is one operation or two | DECIDED 2026-09-03 by the user: "I don't want ambiguity that is resolved at runtime. Make expand canonically only insert or increase the number of dimension (whichever is more canonical). Use something else (e.g. insert) for alternative. I don't want overloaded uses like this." Confirmed as: `expand` keeps only the same-rank singleton broadcast (rank unchanged; the operand's extent at `axis` must be 1; a literal violation is a check-time type error; a symbolic extent is a §4.7 runtime `Domain` guard, per [#1523]); a new primitive `insert` adds an axis of extent `size` at `axis`; `spec/04` §4.7.2's two-candidate deferred model is deleted. Recorded in PR [#1532], merged as `b8e08e5b9` (`spec/02`, `spec/03`, `spec/04`, `spec/05`, `spec/06`, `spec/08`, `runtime_extents.md`; `spec/05` §2.4 rows and adjoints for both primitives under `[05-AXIS-1]`/`[05-MOV-1]`, §4.7.2 without the two-candidate model, §4.5.3's named forms as `insert`; no new `[05-OP-N]`). PP5 consumes the decision and adds nothing to it | [#1532] + PP5 D2 |
 | 17 | whether the source-coverage obligation is a new atom or a tightening of an existing one, and whether [#887] closes | DECIDED 2026-09-03: a new atom that EXTENDS [04-TOT-3] rather than replacing it. [04-TOT-3] already governs the live instances and the shipped `access`/`record` rejections cite it, so R1 through R3 are unimplemented [04-TOT-3] cases and an implementer fixing them cites [04-TOT-3]. [04-TOT-4] carries that obligation from the form to each of the form's slots and adds the two sentences no earlier atom states: an omitted optional child and a present unreadable one are distinct inputs with only the omission permitted to default, and coverage quantifies over the submitted program rather than the checked result. The second is the one [04-TOT-2] structurally cannot express, and R1 proves it by satisfying [04-TOT-2] completely while being wrong. [#887] is RE-SCOPED, not closed: its Tier 2 shipped via [#998]/[#1019]/[#1041], and its Tier 1 consumption-boundary residue is this item's Slice 2 | [04-TOT-4] + PP8 |
 | 18 | whether a parsed-vs-checked coverage census belongs at `finalize_checked_program` | OPEN, recorded 2026-09-03, no deliverable attached. It closes none of PP8's five named instances, which Slices 1 and 2 close between them, and its three candidate justifications do not survive a necessity trace: the roles it would guard have no demonstrated defect, `child_stamp_role` already makes an unclassified tag a compile error, and the cancellation route it would subsume is closed at the surface [#874] named. It is also the only proposal here touching the public fitness surface. Revisit if a coverage-keyed instance appears that the selector-read seam does not reach | PP8 + [#874] |
+| 19 | whether an eager value may initialize through a function or nested lambda that reaches a later non-function value | DECIDED 2026-09-04: no. Every non-function value in the initiating value's [04-INF-7] eager-reference set is compared with the initiating value's source position; an acyclic later member is `UnboundVariable`, while a return to the origin is `CycleDetected`. Dependency-ordering whole initializers was rejected because top-level effects and traps make it observably different from eval's demand forcing; the implementation follows PP6 B/C and reuses their single graph | [04-INF-8] + [#1339] frontier section |
 
 ## Contract summary
 

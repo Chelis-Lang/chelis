@@ -4506,6 +4506,32 @@ class FrozenContractChangeTests(unittest.TestCase):
                 finally:
                     path.write_text(original, encoding="utf-8")
 
+    def test_transitive_top_level_initialization_frontier_is_frozen(self) -> None:
+        mutations = (
+            (
+                "every non-function\n> top-level value in `V`'s eager reference set ([04-INF-7]) SHALL be available",
+                "every non-function\n> top-level value in `V`'s eager reference set ([04-INF-7]) MAY be available",
+            ),
+            (
+                "If `V` itself occurs in the set,\n> [04-INF-7]'s `CycleDetected` verdict takes precedence",
+                "If `V` itself occurs in the set,\n> `UnboundVariable` MAY take precedence",
+            ),
+        )
+        relative = "spec/04-type-system.md"
+        for old, new in mutations:
+            with self.subTest(message=old[:60]):
+                path = self.root / relative
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_fails(
+                        "unacknowledged frozen contract change: "
+                        + re.escape(relative)
+                    )
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
     def test_spec06_additive_count_grad_contradiction_fails(self) -> None:
         self.append(
             "spec/06-transformations.md",
