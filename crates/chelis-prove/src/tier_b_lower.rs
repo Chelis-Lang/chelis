@@ -37,20 +37,28 @@ const MAX_INLINE_DEPTH: usize = 3;
 // Deep helpers
 // ===========================================================================
 
+// chelis#1125 PP7 / spec/04-type-system.md §10 [04-TOT-5]: these two are the
+// whole module's view of a Deep node, and they were `Expr::List`-only. The CLI
+// `chelis prove foo.dp` path hands `run_module_obligations` the stamped exprs
+// from `parse_and_stamp_file` without normalizing, so every read here returned
+// nothing, the obligation could not lower, and `run_one` fell through to
+// Tier C. The same module submitted as `.ch` proved at Tier B: one program,
+// two proof tiers, distinguished only by which spelling was submitted, with
+// both reporting `passed` and exit 0.
+
 fn tag(expr: &Expr) -> Option<DeepTag> {
     match expr {
+        Expr::Node(node, _) => Some(node.tag()),
         Expr::List(list, _) => list.tag(),
         _ => None,
     }
 }
 
 fn children(expr: &Expr) -> &[Expr] {
-    if let Expr::List(list, _) = expr
-        && list.elements.len() >= 2
-    {
-        &list.elements[2..]
-    } else {
-        &[]
+    match expr {
+        Expr::Node(node, _) => node.children_slice(),
+        Expr::List(list, _) if list.elements.len() >= 2 => &list.elements[2..],
+        _ => &[],
     }
 }
 
@@ -77,6 +85,17 @@ fn app_parts(expr: &Expr) -> Option<(&str, &[Expr])> {
     None
 }
 
+/// The element sequence of an inline-annotated param `(name {type: T})`, on
+/// either carrier it can arrive in: a tagless `Expr::List` on the normalizing
+/// tide route and an `Expr::BareList` on the stamped CLI route.
+fn inline_param_elements(expr: &Expr) -> &[Expr] {
+    match expr {
+        Expr::List(list, _) => &list.elements,
+        Expr::BareList(elements, _) => elements,
+        _ => &[],
+    }
+}
+
 /// A producer def found in the program: param names and body.
 struct ProducerBody<'a> {
     params: Vec<String>,
@@ -96,11 +115,14 @@ fn lookup_producer<'a>(exprs: &'a [Expr], name: &str) -> Option<ProducerBody<'a>
                 let params_node = fkids.first()?;
                 let mut params = Vec::new();
                 for p in children(params_node) {
-                    // `(name {type: ...})` or bare symbol.
+                    // `(name {type: ...})` or bare symbol. chelis#1125 PP7
+                    // finding 1: an inline-annotated param is a TAGLESS list,
+                    // so the stamp pass produces `Expr::BareList` rather than
+                    // `Expr::Node`; both spellings put the name atom first.
                     if let Some(n) = symbol_text(p) {
                         params.push(n.to_string());
-                    } else if let Expr::List(list, _) = p
-                        && let Some(Expr::Atom(Atom::Name(s), _)) = list.elements.first()
+                    } else if let Some(Expr::Atom(Atom::Name(s), _)) =
+                        inline_param_elements(p).first()
                     {
                         params.push(s.clone());
                     }
@@ -108,9 +130,9 @@ fn lookup_producer<'a>(exprs: &'a [Expr], name: &str) -> Option<ProducerBody<'a>
                 let body = fkids.get(1)?;
                 return Some(ProducerBody { params, body });
             }
-            if let Expr::List(list, _) = expr
-                && let Some(found) = find(&list.elements[2.min(list.elements.len())..], name)
-            {
+            // Descend into a `module` wrapper (or any other decoded form) on
+            // either carrier; `children` drops the tag and metadata for both.
+            if let Some(found) = find(children(expr), name) {
                 return Some(found);
             }
         }
@@ -241,6 +263,10 @@ fn rewrite_opaque_field_access(
             return make_var(&format!("{pname}.{field}"));
         }
     }
+    // chelis#1125 PP7: recurse on BOTH carriers, rebuilding each as itself.
+    // The `Expr::List`-only recursion cloned a stamped `Expr::Node` whole, so
+    // no opaque field access inside it was rewritten and the obligation could
+    // not lower.
     match expr {
         Expr::List(list, span) => {
             let elements = list
@@ -249,6 +275,23 @@ fn rewrite_opaque_field_access(
                 .map(|e| rewrite_opaque_field_access(e, opaque_params))
                 .collect();
             Expr::List(chelis_deep::ast::List { elements }, *span)
+        }
+        Expr::Node(node, span) => {
+            let children = node
+                .children_slice()
+                .iter()
+                .map(|e| rewrite_opaque_field_access(e, opaque_params))
+                .collect();
+            let mut rewritten = node.clone();
+            // The rewrite replaces one runtime expression (`access`) with
+            // another (`var`) and touches no binder or selector child, so the
+            // node's role contract still holds. A failure here would be a
+            // compiler bug, which is what `Node`'s own panicking constructor
+            // is documented for.
+            rewritten
+                .try_replace_children(children)
+                .expect("opaque field-access rewrite preserves every child role");
+            Expr::Node(rewritten, *span)
         }
         other => other.clone(),
     }
@@ -604,11 +647,14 @@ fn float_lit_node(value: f64) -> Expr {
 fn rebuild(template: &Expr, new_children: Vec<Expr>) -> Expr {
     use chelis_deep::Span;
     use chelis_deep::ast::List;
-    let tag_sym = match template {
-        Expr::List(list, _) => list.elements.first().cloned(),
-        _ => None,
-    }
-    .unwrap_or_else(|| Expr::Atom(Atom::Name("?".to_string()), Span::new(0, 0)));
+    // chelis#1125 PP7: take the DECODED tag rather than copying element 0,
+    // which exists only on the list carrier. A stamped `Expr::Node` template
+    // fell to the `?` placeholder, and every downstream `tag()` read of the
+    // rebuilt form then failed, so the obligation could not lower.
+    let tag_sym = match tag(template) {
+        Some(decoded) => Expr::Atom(Atom::Tag(decoded), Span::new(0, 0)),
+        None => Expr::Atom(Atom::Name("?".to_string()), Span::new(0, 0)),
+    };
     let mut elements = vec![tag_sym, Expr::Map(Default::default(), Span::new(0, 0))];
     elements.extend(new_children);
     Expr::List(List { elements }, Span::new(0, 0))
