@@ -454,12 +454,72 @@ fn an_op_declared_witness_reaches_the_hip_prologue_without_panicking() {
         !stderr.contains("op-declared runtime dim"),
         "the prologue must not reach chelis#616's backstop: {stderr}"
     );
-    assert!(build.status.success(), "the HIP build must succeed: {stderr}");
+    assert!(
+        build.status.success(),
+        "the HIP build must succeed: {stderr}"
+    );
     let emitted = fs::read_to_string(out_dir.join("transformer_block_hip.cpp"))
         .expect("HIP host source is written");
     assert!(
         emitted.contains("int64_t seq = chelis_tensor_shape("),
         "and the interface binding is declared from its Load axis: {}",
         &emitted[..emitted.len().min(400)]
+    );
+}
+
+/// The same example on the C lane, for the LOCAL half of section 4.7.
+///
+/// `seq` is one class with sixteen members: `x`'s own axis, seven extents
+/// operations compute, and eight folded reads of computed tensors. The last
+/// group is the guard set, and on `main` only FOUR of the eight are guarded,
+/// because chelis#616's `runtime_dim_sites` finds sites by walking
+/// occurrences for an op-declared name rather than by asking which members a
+/// class has. The derivation finds all eight, and each renders [04-NUM-9]
+/// instead of `chelis: runtime dim `seq` mismatch at node N axis A` followed
+/// by `abort()`.
+///
+/// The eight is this example's measured count, not a property of the rule; an
+/// edit to the example is expected to change it, and a reader updating it
+/// should re-derive rather than relax the assertion, because the count is the
+/// only thing here that distinguishes finding every member from finding the
+/// four the walk already found.
+///
+/// EVIDENTIARY STATUS: regression test on both halves - four guards and the
+/// legacy rendering on `main`, eight and [04-NUM-9] here.
+#[test]
+fn every_local_member_of_one_class_is_guarded_at_its_operation_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let example = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root")
+        .join("examples/transformer_block.ch");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out_dir = dir.path().join("c-out");
+    let build = build_c(&example, &out_dir);
+    assert!(
+        build.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let emitted =
+        fs::read_to_string(out_dir.join("transformer_block.c")).expect("C source is written");
+    assert!(
+        !emitted.contains("chelis: runtime dim `seq` mismatch"),
+        "no local guard keeps the legacy rendering"
+    );
+    assert_eq!(
+        emitted.matches("extent `seq`: claimed = ").count(),
+        8,
+        "every folded read of a computed tensor under this claim is guarded"
+    );
+    assert_eq!(
+        emitted
+            .matches(&format!("{}\");", domain_trap_line("expand")))
+            .count(),
+        8,
+        "and each renders [04-NUM-9] naming the operation"
     );
 }

@@ -125,6 +125,14 @@ mod verify;
 pub use error::OwnershipError;
 pub use ir::{HostSiteId, HostSiteKind};
 
+/// A local guard's position: the node that introduces the extent, and the
+/// output axis carrying the claim.
+pub type LocalGuardSite = (usize, usize);
+
+/// What a local guard compares against: the claim's binder name, and the
+/// operation [04-NUM-9]'s `<op>` slot names.
+pub type LocalGuardClaim = (String, &'static str);
+
 /// Immutable cursor over the exact verified DAG payload. The raw [`Dag`]
 /// remains private so a backend can inspect only the payload whose ownership
 /// plan was verified, without recovering an unchecked sibling graph.
@@ -183,6 +191,48 @@ impl<'a> VerifiedDagView<'a> {
     /// operand is an input tensor's axis, a scalar parameter, or a computed
     /// value, and an emitter doing that itself would be reaching behind this
     /// façade to re-derive what the view already knows.
+    /// C1.3's local guard sites: `(node id, axis)` paired with the claim each
+    /// site guards against.
+    ///
+    /// A `Local` class's guard "takes the source position of the operation
+    /// that introduces the guarded extent" (`spec/04-type-system.md` section
+    /// 4.7), so unlike the entry classes these are keyed by node. Only
+    /// `InputAxis` members are sites: an `ExternalAxis` member is the
+    /// prologue's canonical declaration, and an `OpComputed` member's guard
+    /// needs the derivation narrowed first, because the claim over a
+    /// statically determined operation output (a matmul's `Literal(64)` axis)
+    /// would guard a value against itself.
+    pub fn local_dim_guard_sites(self) -> Vec<(LocalGuardSite, LocalGuardClaim)> {
+        let mut sites = Vec::new();
+        for class in crate::axis_sources::derive_runtime_dim_classes(self.dag) {
+            if class.placement(self.dag) != crate::axis_sources::GuardPlacement::Local {
+                continue;
+            }
+            let crate::axis_sources::DimClaim::Name(name) = &class.claim else {
+                continue;
+            };
+            for member in &class.members {
+                if !matches!(
+                    member.source,
+                    crate::axis_sources::AxisSource::InputAxis { .. }
+                ) {
+                    continue;
+                }
+                let Some(node) = self.dag.get(member.node) else {
+                    continue;
+                };
+                // [04-NUM-9]'s `<op>` names the operation that introduces the
+                // guarded extent, in the same vocabulary every other trap on
+                // this lane uses.
+                sites.push((
+                    (member.node.0, member.axis),
+                    (name.clone(), crate::grad::risc_op_name(&node.op)),
+                ));
+            }
+        }
+        sites
+    }
+
     pub fn entry_dim_classes(self) -> Vec<crate::axis_sources::RuntimeDimClass> {
         crate::axis_sources::derive_runtime_dim_classes(self.dag)
             .into_iter()

@@ -4998,3 +4998,134 @@ int main() {{
         "and produce the declared shape: {out}"
     );
 }
+
+// ---- chelis#1277 b2.4: the LOCAL half of section 4.7's placement ----
+
+/// A class whose operands are not all interface values takes "the source
+/// position of the operation that introduces the guarded extent". Here the
+/// claim `n` is witnessed by `x`'s own axis (an interface value) and by the
+/// `expand` size's read of a STRIDED tensor, whose extent does not exist
+/// until the stride runs. So the class is Local, its guard belongs at the
+/// `expand`, and it renders [04-NUM-9] like the entry guards do.
+///
+/// EVIDENTIARY STATUS: regression test for the RENDERING - `main` emits
+/// `chelis: runtime dim `n` mismatch at node 3 axis 0` followed by `abort()`
+/// at this site, which [04-NUM-9] does not permit - and a disposition lock
+/// for the position, which `main` already gets right through chelis#616's
+/// `runtime_dim_sites`.
+fn local_class_dag() -> chelis_ir::dag::Dag {
+    use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
+    let named = |name: &str| TensorType {
+        dims: vec![DimInfo::Named(name.into(), None)],
+        precision: Prim::F32,
+    };
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], named("n"), None);
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        TensorType {
+            dims: vec![],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let strided = dag.add_node(
+        RiscOp::Stride {
+            strides: vec![RtDim::Lit(2)],
+        },
+        vec![x],
+        named("s"),
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+        },
+        vec![b, strided],
+        named("n"),
+        None,
+    );
+    dag.add_root(out);
+    dag
+}
+
+#[test]
+fn a_local_class_guards_at_its_operation_and_renders_the_numeric_trap() {
+    let dag = local_class_dag();
+    let result = codegen_with_options(
+        &dag,
+        "local_guard",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .expect("codegen");
+    assert!(
+        !result.c_source.contains("chelis: runtime dim `n` mismatch"),
+        "the legacy rendering is gone: {}",
+        result.c_source
+    );
+    assert!(
+        result
+            .c_source
+            .contains("chelis_numeric_trap(\"numeric trap: domain in expand at int64\")"),
+        "and `<op>` names the operation introducing the extent: {}",
+        result.c_source
+    );
+
+    let run = |name: &str, extent: usize| {
+        let values = (0..extent)
+            .map(|i| format!("{}.0f", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let harness = format!(
+            r#"{HARNESS_HEADER}
+extern void local_guard(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float xd[{extent}] = {{{values}}};
+    float bd[1] = {{7.0f}};
+    int64_t scalar_shape[1] = {{1}};
+    chelis_tensor* b = chelis_tensor_entry_borrow(0, scalar_shape, CHELIS_DTYPE_F32, bd, sizeof(float));
+    chelis_tensor* inputs[2] = {{make_view_1d(xd, {extent}), b}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    local_guard(inputs, 2, outputs, 1);
+    printf("RAN %lld\n", (long long)chelis_tensor_shape(outputs[0], 0));
+    return 0;
+}}
+"#
+        );
+        compile_and_run_kernel_capturing(name, &result.c_source, &harness)
+    };
+
+    // `stride(x, 2)` yields `ceil(n / 2)`, so the claim `n` and the extent
+    // the `expand` actually reads agree only at n = 1.
+    let (ok, out) = run("local_guard", 3);
+    assert!(!ok, "ceil(3/2) = 2 is not the claimed 3: {out}");
+    assert!(
+        out.contains("numeric trap: domain in expand at int64"),
+        "the local guard renders [04-NUM-9]: {out}"
+    );
+    assert!(
+        out.contains("extent `n`: claimed = 3,"),
+        "with the claim and its observed value: {out}"
+    );
+    assert!(
+        !out.contains("NO TRAP") && !out.contains("RAN "),
+        "and preempts the operation it guards: {out}"
+    );
+
+    let (ok, out) = run("local_guard_ok", 1);
+    assert!(ok, "ceil(1/2) = 1 agrees and must execute: {out}");
+    assert!(
+        out.contains("RAN 1"),
+        "and produce the claimed shape: {out}"
+    );
+}

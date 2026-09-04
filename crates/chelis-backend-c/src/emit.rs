@@ -41,6 +41,12 @@ pub struct CEmitter {
     /// the already-declared value when false (the symbol is Load-declared in
     /// the prologue, or an earlier op already declared it).
     runtime_dim_sites: chelis_unord::UnordMap<(usize, usize), (String, bool)>,
+    /// chelis#1277 C1.3: `(node, axis)` -> the claim a local guard compares
+    /// against, and the operation [04-NUM-9]'s `<op>` slot names.
+    local_dim_guard_sites: chelis_unord::UnordMap<
+        chelis_ir::ownership::LocalGuardSite,
+        chelis_ir::ownership::LocalGuardClaim,
+    >,
     /// Node descriptors whose exclusive runtime write lease remains live
     /// while the generated kernel fills and consumes its private storage.
     /// All leases are ended before any descriptor is returned or released.
@@ -159,6 +165,25 @@ impl CEmitter {
             }
         }
 
+        // chelis#1277 b2.4: which sites GUARD is now the derivation's answer,
+        // not the string walk's. `spec/04-type-system.md` section 4.7 places a
+        // class whose operands are not all interface values at "the source
+        // position of the operation that introduces the guarded extent", and
+        // `VerifiedDagView::local_dim_guard_sites` is that set.
+        //
+        // Which site DECLARES still comes from the walk above, and that is a
+        // recorded limit rather than an oversight: the lowerer stamps a fresh
+        // synthesized name on every runtime movement output
+        // (`_rt_stride_dim_1_0`, `_anon_dim_2_1`), so a declaring axis is
+        // frequently a claim with ONE witness, which C2.4 does not make a
+        // class. Reading the declaration through the axis SOURCE rather than
+        // through the stamped name is C4.4's remaining half and is what closes
+        // chelis#665; it is not this change.
+        let local_dim_guard_sites: chelis_unord::UnordMap<
+            chelis_ir::ownership::LocalGuardSite,
+            chelis_ir::ownership::LocalGuardClaim,
+        > = dag.local_dim_guard_sites().into_iter().collect();
+
         let mut e = CEmitter {
             lines: Vec::new(),
             indent: 0,
@@ -171,6 +196,7 @@ impl CEmitter {
                 .collect(),
             memory_plan,
             runtime_dim_sites,
+            local_dim_guard_sites,
             write_nodes: chelis_unord::UnordSet::new(),
         };
 
@@ -6565,7 +6591,13 @@ impl CEmitter {
         // An op-declared expanded axis is bound from the exact structural
         // size carrier. This keeps the value edge explicit and makes
         // `shape_deps` unnecessary for Expand.
-        if self.runtime_dim_sites.contains_key(&(id, axis)) {
+        // A site is emitted when EITHER map names it: the legacy walk still
+        // owns declarations, and the derivation owns guards, so gating on the
+        // walk alone would let the derivation find a guard site the walk
+        // cannot see and emit nothing.
+        if self.runtime_dim_sites.contains_key(&(id, axis))
+            || self.local_dim_guard_sites.contains_key(&(id, axis))
+        {
             let extent = Self::bound_c_expr(size, inputs, a, axis, dag);
             self.emit_runtime_dim_site(id, axis, &extent);
         }
@@ -6661,19 +6693,33 @@ impl CEmitter {
     /// Load-declared in the prologue or declared by an earlier op — the
     /// checker unified them, so a disagreement is a real shape error).
     fn emit_runtime_dim_site(&mut self, id: usize, axis: usize, extent_expr: &str) {
-        let Some((name, declares)) = self.runtime_dim_sites.get(&(id, axis)) else {
+        if let Some((name, true)) = self.runtime_dim_sites.get(&(id, axis)) {
+            let name = name.clone();
+            self.line(&format!("int64_t {name} = {extent_expr};"));
+            return;
+        }
+        // The guard site and the claim it compares against are the
+        // derivation's, and the rendering is [04-NUM-9]'s: the complete
+        // user-facing line is `numeric trap: domain in <op> at int64` with no
+        // prefix and no suffix, `<op>` naming the operation that introduces
+        // the extent, and `<prim>` always `int64` because the guard finalizes
+        // an extent under [05-DIM-1]. Section 4.7's required context - the
+        // disagreeing names, the axis and each observed value - is its own
+        // `fprintf`, so the trap line stays exactly one line.
+        let Some((name, op)) = self.local_dim_guard_sites.get(&(id, axis)).cloned() else {
             return;
         };
-        let (name, declares) = (name.clone(), *declares);
-        if declares {
-            self.line(&format!("int64_t {name} = {extent_expr};"));
-        } else {
-            let name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(&name);
-            self.line(&format!(
-                "if (({extent_expr}) != {name}) {{ fprintf(stderr, \"chelis: runtime dim \
-                 `{name_fmt}` mismatch at node {id} axis {axis}\\n\"); abort(); }}"
-            ));
-        }
+        let name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(&name);
+        self.line(&format!("if (({extent_expr}) != {name}) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "fprintf(stderr, \"extent `{name_fmt}`: claimed = %lld, node {id} axis {axis} = %lld\\n\", (long long)({name}), (long long)({extent_expr}));"
+        ));
+        self.line(&format!(
+            "chelis_numeric_trap(\"numeric trap: domain in {op} at int64\");"
+        ));
+        self.indent -= 1;
+        self.line("}");
     }
 
     /// chelis#616 (defense in depth): a RUNTIME axis whose output dim
