@@ -470,7 +470,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/05-risc-primitives.md",
         "### 2.1 Elementwise Binary",
         "### 2.4 Movement",
-        "33af3defc0608036857bb29aba75b0ee7626e5de8ba41ae7f90ddfde0fc45e54",
+        "a8fc522c8db143bce747512c7c64c52f62b2fb40c18e1e7906bf03ebcf027cf0",
     ),
     "logical builtin contract": (
         "spec/05-risc-primitives.md",
@@ -2754,6 +2754,10 @@ def validate_normative_contract(
                 "A reduction axis, `expand`'s broadcast axis, and `insert`'s"
                 "\n> new-axis position SHALL be",
                 "axis atom names both movement primitives",
+            ),
+            (
+                "names the\n> dimension it creates, which is by construction not a dimension of the\n> operand; that name SHALL be statically resolvable in the same sense",
+                "insert names a dimension absent from the operand",
             ),
             (
                 "> `insert(g / divisor, axis, original_extent)` at the "

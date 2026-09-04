@@ -441,7 +441,11 @@ the formula examples below already use (`axis=-1` for the last axis).
 > wrapped in an integer cast) or as a named dimension of the operand. A
 > runtime integer expression and an unknown dimension name are type errors at
 > the call site; no lowering or backend SHALL substitute axis zero or another
-> axis.
+> axis. `insert`'s named-axis form (`spec/04-type-system.md` §4.5.3) names the
+> dimension it creates, which is by construction not a dimension of the
+> operand; that name SHALL be statically resolvable in the same sense and is a
+> type error when it already names an operand dimension. Its optional anchor
+> is a named dimension of the operand and follows the operand rule above.
 
 The reduction axis must resolve statically: a literal, a
 `cast(N, int32)`-wrapped literal, or a named operand dimension as specified by

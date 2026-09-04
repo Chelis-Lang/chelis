@@ -2482,6 +2482,12 @@ class ContractValidationTests(unittest.TestCase):
             ),
             (
                 Path("spec/05-risc-primitives.md"),
+                "names the\n> dimension it creates, which is by construction not a dimension of the\n> operand; that name SHALL be statically resolvable in the same sense",
+                "names any\n> dimension",
+                "insert names a dimension absent from the operand",
+            ),
+            (
+                Path("spec/05-risc-primitives.md"),
                 "> `insert(g / divisor, axis, original_extent)` at the "
                 "operand dtype.",
                 "> `expand(g / divisor, original_shape, axis)` at the "

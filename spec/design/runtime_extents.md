@@ -7,8 +7,8 @@ evidence in this document was rechecked on `main` at `53607a64`;
 function and type names are the durable anchors and line numbers are a
 convenience of that commit.
 **Owning specs:** `spec/04-type-system.md` §4.7 (admissibility, identity,
-zero and negative extents, the runtime extent guard placement rule, and the
-§4.7.2 settlement order), `spec/05-risc-primitives.md` §2.4.1 (the `RtDim`
+zero and negative extents, and the runtime extent guard placement rule),
+`spec/05-risc-primitives.md` §2.4.1 (the `RtDim`
 carrier set including `InputAxis`), §2.5.1 and [05-OP-7] (the folded direct
 read), [05-MOV-1], and [05-DIM-1..3]; `spec/06-transformations.md` §3.7
 (runtime extents under `vmap`) and §8.6 (`batch_varying_extent`);
@@ -199,7 +199,6 @@ Later sections cite the clause labels.
 | C1.1 | Admissibility is typing, not provenance: any `int64` expression is an `expand` size; a `reshape` target is a `List[int64]` of static arity | `spec/04` §4.7.2, §4.7.3, §4.7.4, §4.7.6 |
 | C1.2 | Identity is proof-gated and equality is guarded; an unproved claim over a runtime extent adds a guard, never a rejection; every symbolic `shrink` axis is fresh | `spec/04` §4.7, §4.7.2, §4.7.3, §4.7.6 |
 | C1.3 | Guard placement is a partial order: once, after operands, before the first dependent allocation or access; interface guards at entry in signature order; local guards at the introducing operation's source position; an equality guard traps `Domain` under the introducing operation (the same-rank `expand` form's unit-extent claim of `spec/05` §2.4.1 is an equality guard on the operand's axis and follows that rule), a non-negativity guard under the owning movement operation, and both render as [04-NUM-9] typed operation-precondition guards at `int64` | `spec/04` §4.7, the runtime extent guard paragraph; `spec/05` §2.4.1 |
-| C1.4 | Coupled positional defaults settle in the order their results are introduced into the checked program | `spec/04` §4.7.2 |
 | C1.5 | Zero is legal; a static negative is a type error; a runtime negative traps `Domain` | `spec/04` §4.7.2 |
 | C1.6 | Extents are `int64`, axes are `int32` | [05-DIM-1..3] |
 | C1.7 | One carrier per owner: `expand` admits `Lit`, `Node`, `InputAxis`; `reshape` additionally `Sym` (a bystander named dimension); `pad`/`shrink`/`stride` admit `Lit`, `Node`, and `ToEnd` for a `shrink` end; a direct `shape()` extent argument to `expand`/`reshape` is the folded `InputAxis`; an in-scope binder instantiated by a tensor axis is `InputAxis` in an `expand` size and `Sym` in a `reshape` target; the same read bound elsewhere is a rank-0 `Node` | `spec/05` §2.4.1, §2.5.1 |
@@ -450,11 +449,12 @@ assigning semantic labels by intuition:
   field, a closure capture, a fresh generic field or parameter, a singleton
   `List`, the seed element of an inferred `List`, and an undeclared closure
   return. It adds no evidence and cannot select or clone the choice.
-- **`Freeze`** applies only at a freeze point §4.7.2 names, when a concrete
-  tensor shape is required and no independent constraint selected a
-  candidate: an axis within the input rank selects same-rank replacement and
-  `axis == rank(input)` selects trailing insertion. When several results
-  freeze together they settle in source order (C1.4), which the stores
+- **`Freeze`** is superseded: see the Slice C paragraph below. It applied
+  only at a freeze point §4.7.2 named, when a concrete
+  tensor shape was required and no independent constraint selected a
+  candidate: an axis within the input rank selected same-rank replacement and
+  `axis == rank(input)` selected trailing insertion. When several results
+  froze together they settled in source order, which the stores
   realize by keying deferred constraints by the result's source-introduction
   position (a library result at its instantiation site) in a `Vec`, never a
   `HashMap`; `TypeVar` allocation order is dependency order under the
@@ -484,8 +484,9 @@ the three actions above, because enumerating the surface found behavior they do
 not describe. Beyond `Constrains`, `Propagates` and `Freezes`, a builtin may
 declare `NoTensorOperand`, meaning no operand slot admits a tensor, or
 `RejectsUnresolved`, meaning it refuses an unresolved operand outright rather
-than considering its candidate forms. `RejectsUnresolved` is not conforming:
-§4.7.2 enumerates rejection as the outcome of admitting no candidate form,
+than considering its candidate forms. That non-conformance is superseded: see
+the Slice C paragraph below. It held while
+§4.7.2 enumerated rejection as the outcome of admitting no candidate form,
 while these routes reject before looking at the forms at all. The class is any
 checked route whose first act is a positive test on the operand, because an
 unresolved variable satisfies no positive test; it is tracked as [#1489] and
