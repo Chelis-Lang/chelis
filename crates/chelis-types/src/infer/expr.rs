@@ -1076,13 +1076,19 @@ pub(super) fn infer_lit(
     // int8 (range [-128, 127]) and silently wraps to -56 if not
     // diagnosed here. Mirror the i32 check for the i8 and i16 rows.
     let value_atom = kids.first();
+    // chelis#1125 PP7 / [04-TOT-5]: read the `type:` metadata VALUE through
+    // the carrier-preserving `stamped_parts`. `Node::to_list` clones the
+    // metadata map verbatim, so on the stamped ingress this value is still an
+    // `Expr::Node` even though the enclosing `lit` arrived here as a rebuilt
+    // `List`. The old `Expr::List`-only destructure therefore selected no
+    // range-check row at all, and `(lit {type: (t-prim {} int8)} 200)` was
+    // accepted by `check_typed_program` while `check_ir_program` rejected it.
     let meta_prim_name = meta.and_then(|m| {
         m.entries.iter().find_map(|(k, v)| {
             if k == "type"
-                && let deep::Expr::List(inner, _) = v
-                && get_tag(inner) == Some(DeepTag::TPrim)
+                && let Some((DeepTag::TPrim, _, prim_kids)) = stamped_parts(v)
             {
-                children(inner).first().and_then(symbol_name)
+                prim_kids.first().and_then(symbol_name)
             } else {
                 None
             }

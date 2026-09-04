@@ -393,10 +393,18 @@ pub(super) fn walk_for_tensor_precision(
             // Check t-tensor nodes at this level.
             if get_tag(list) == Some(DeepTag::TTensor) {
                 let kids = children(list);
+                // chelis#1125 PP7 / [04-TOT-5]: read the trailing `t-prim`
+                // through the carrier-preserving `stamped_parts`. The
+                // `Expr::Node` arm below bridges through `Node::to_list`, so
+                // this walker LOOKS carrier-complete to a grep for `Expr::Node`
+                // coverage -- but `to_list` copies children verbatim, so the
+                // rebuilt list's trailing precision child is still a `Node` and
+                // the old `Expr::List`-only destructure failed on it. The whole
+                // tensor-precision check was therefore skipped on the stamped
+                // ingress, by a walker with a `Node` arm (PP7 finding 3).
                 if let Some(last) = kids.last()
-                    && let deep::Expr::List(prec_list, _) = last
-                    && get_tag(prec_list) == Some(DeepTag::TPrim)
-                    && let Some(name) = children(prec_list).first().and_then(symbol_name)
+                    && let Some((DeepTag::TPrim, _, prec_kids)) = stamped_parts(last)
+                    && let Some(name) = prec_kids.first().and_then(symbol_name)
                 {
                     let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
                     // A1 (WS-A0 RT-1 fixup): unsigned dtype names, plus
@@ -665,6 +673,24 @@ pub(super) fn build_def_param_scope(
     scope
 }
 
+/// The `[name, {type: T}]` element sequence shared by the two carriers an
+/// inline-annotated param can arrive in: a tagless `Expr::List` on the
+/// serialized-IR ingress and an `Expr::BareList` on the stamped one.
+fn inline_param_parts(elements: &[deep::Expr]) -> Option<(String, Option<deep::Expr>)> {
+    let Some(deep::Expr::Atom(deep::Atom::Name(name), _)) = elements.first() else {
+        return None;
+    };
+    let ty = match elements.get(1) {
+        Some(deep::Expr::Map(meta, _)) => meta
+            .entries
+            .iter()
+            .find(|(k, _)| k == "type")
+            .map(|(_, v)| v.clone()),
+        _ => None,
+    };
+    Some((name.clone(), ty))
+}
+
 /// Extract `(name {type: T} ...)` shape's name+type from a single param
 /// expression. Returns `None` for plain `(name {})` shape (no inline
 /// type) — the surrounding sig fills those in.
@@ -673,20 +699,17 @@ pub(super) fn param_name_and_inline_type(
 ) -> Option<(String, Option<deep::Expr>)> {
     match param {
         deep::Expr::Atom(deep::Atom::Name(name), _) => Some((name.clone(), None)),
-        deep::Expr::List(list, _) => {
-            let Some(deep::Expr::Atom(deep::Atom::Name(name), _)) = list.elements.first() else {
-                return None;
-            };
-            let ty = match list.elements.get(1) {
-                Some(deep::Expr::Map(meta, _)) => meta
-                    .entries
-                    .iter()
-                    .find(|(k, _)| k == "type")
-                    .map(|(_, v)| v.clone()),
-                _ => None,
-            };
-            Some((name.clone(), ty))
-        }
+        deep::Expr::List(list, _) => inline_param_parts(&list.elements),
+        // chelis#1125 PP7 finding 1 / [04-TOT-5]: an inline-annotated param
+        // `(x {type: T})` is a TAGLESS list, so the stamp pass produces an
+        // `Expr::BareList`, not an `Expr::Node`. `build_def_param_scope` was
+        // migrated to `stamped_parts` by chelis#1126 and stayed inert anyway,
+        // because `stamped_parts` reads `Node` and `List` and returns `None`
+        // for `BareList` and this last step was `List`-only. With no param
+        // scope, the WS-A8 cross-row pass could not resolve a body `(var x)`,
+        // so a def with inline param types and no `defsig` skipped the
+        // chelis#724 capability rejection on the stamped ingress.
+        deep::Expr::BareList(elements, _) => inline_param_parts(elements),
         deep::Expr::MetaExpr(meta, _) => {
             let deep::Expr::Atom(deep::Atom::Name(name), _) = meta.expr.as_ref() else {
                 return None;
