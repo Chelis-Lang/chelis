@@ -1606,6 +1606,34 @@ fn append_tensor_abi_helpers(out: &mut Vec<String>) {
     );
     out.push("    return chelis_alloc(rank, rank > 0 ? shape : NULL, dtype);".to_string());
     out.push("}".to_string());
+    out.push(
+        "static void chelis_host_require_elementwise_agreement(const chelis_tensor *lhs, const chelis_tensor *rhs, const char *target_label, const char *lhs_label, const char *rhs_label) {"
+            .to_string(),
+    );
+    out.push("    int32_t lhs_rank = chelis_tensor_rank(lhs);".to_string());
+    out.push("    int32_t rhs_rank = chelis_tensor_rank(rhs);".to_string());
+    out.push("    if (lhs_rank > 0 && rhs_rank > 0 && lhs_rank != rhs_rank) {".to_string());
+    out.push(
+        "        fprintf(stderr, \"chelis: elementwise operand rank mismatch at host value %s (%s vs %s): %d vs %d\\n\", target_label, lhs_label, rhs_label, lhs_rank, rhs_rank);"
+            .to_string(),
+    );
+    out.push("        abort();".to_string());
+    out.push("    }".to_string());
+    out.push("    if (lhs_rank == rhs_rank) {".to_string());
+    out.push("        for (int32_t axis = 0; axis < lhs_rank; ++axis) {".to_string());
+    out.push(
+        "            if (chelis_tensor_shape(lhs, axis) != chelis_tensor_shape(rhs, axis)) {"
+            .to_string(),
+    );
+    out.push(
+        "                fprintf(stderr, \"chelis: elementwise operand shape mismatch at host value %s (%s vs %s) axis %d\\n\", target_label, lhs_label, rhs_label, axis);"
+            .to_string(),
+    );
+    out.push("                abort();".to_string());
+    out.push("            }".to_string());
+    out.push("        }".to_string());
+    out.push("    }".to_string());
+    out.push("}".to_string());
 }
 
 /// Render a tensor element by first recovering the exact tagged scalar.
@@ -4952,33 +4980,10 @@ impl<'a> HostEmitter<'a> {
     /// finds either lane; the emitted result and operand variable names
     /// locate the site inside a generated translation unit.
     fn emit_elementwise_operand_guard(&mut self, target: &str, lhs: &str, rhs: &str) {
-        let ind = &self.indent;
         self.lines.push(format!(
-            "{ind}if (chelis_tensor_rank({lhs}) > 0 && chelis_tensor_rank({rhs}) > 0 && chelis_tensor_rank({lhs}) != chelis_tensor_rank({rhs})) {{"
+            "{}chelis_host_require_elementwise_agreement({lhs}, {rhs}, \"{target}\", \"{lhs}\", \"{rhs}\");",
+            self.indent
         ));
-        self.lines.push(format!(
-            "{ind}    fprintf(stderr, \"chelis: elementwise operand rank mismatch at host \
-             value {target} ({lhs} vs {rhs}): %d vs %d\\n\", chelis_tensor_rank({lhs}), chelis_tensor_rank({rhs}));"
-        ));
-        self.lines.push(format!("{ind}    abort();"));
-        self.lines.push(format!("{ind}}}"));
-        self.lines.push(format!(
-            "{ind}if (chelis_tensor_rank({lhs}) == chelis_tensor_rank({rhs})) {{"
-        ));
-        self.lines.push(format!(
-            "{ind}    for (int32_t __axis = 0; __axis < chelis_tensor_rank({lhs}); __axis++) {{"
-        ));
-        self.lines.push(format!(
-            "{ind}        if (chelis_tensor_shape({lhs}, __axis) != chelis_tensor_shape({rhs}, __axis)) {{"
-        ));
-        self.lines.push(format!(
-            "{ind}            fprintf(stderr, \"chelis: elementwise operand shape mismatch \
-             at host value {target} ({lhs} vs {rhs}) axis %d\\n\", __axis);"
-        ));
-        self.lines.push(format!("{ind}            abort();"));
-        self.lines.push(format!("{ind}        }}"));
-        self.lines.push(format!("{ind}    }}"));
-        self.lines.push(format!("{ind}}}"));
     }
 
     fn assign_tensor_binary_elementwise(&mut self, target: &str, lhs: &str, rhs: &str, op: &str) {

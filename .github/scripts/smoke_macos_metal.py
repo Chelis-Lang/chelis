@@ -34,6 +34,7 @@ The smoke is **intentionally compile-and-link only, no execution**.
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 import tempfile
@@ -68,6 +69,57 @@ DEEP_PROGRAM = """\
 # pin the exact count because optimizer changes can legitimately move
 # it; we just lock that the count is non-zero.
 MIN_DEEP_SPAN_COUNT = 1
+
+
+_OUTPUT_WRITE_BEGIN = re.compile(
+    r"chelis_tensor_write\s+\*(?P<prefix>root|store)_guard_(?P<guard_index>\d+)\s*=\s*"
+    r"chelis_tensor_begin_write\(outputs\[(?P<output_index>\d+)\]\);"
+)
+
+
+def guarded_output_writeback_indices(mm_text: str) -> set[int]:
+    """Return outputs initialized through one complete opaque-ABI write lease.
+
+    A device-to-host call alone is not evidence that an output was initialized:
+    it must follow allocation, begin-write, and the matching write-view, then be
+    followed by the matching end-write. Matching the generated root/store stem
+    and numeric suffix binds all five operations to the same output.
+    """
+
+    initialized: set[int] = set()
+    for begin in _OUTPUT_WRITE_BEGIN.finditer(mm_text):
+        prefix = begin.group("prefix")
+        guard_index = int(begin.group("guard_index"))
+        output_index = int(begin.group("output_index"))
+        if guard_index != output_index:
+            continue
+        allocation = f"outputs[{output_index}] = chelis_alloc("
+        if mm_text.rfind(allocation, 0, begin.start()) < 0:
+            continue
+        guard = f"{prefix}_guard_{output_index}"
+        view = f"{prefix}_view_{output_index}"
+        view_match = re.search(
+            rf"chelis_write_view\s+{re.escape(view)}\s*=\s*"
+            rf"chelis_tensor_write_view\({re.escape(guard)}\);",
+            mm_text[begin.end() :],
+        )
+        if view_match is None:
+            continue
+        after_view = begin.end() + view_match.end()
+        transfer_match = re.search(
+            rf"chelis_metal_device_to_host\({re.escape(view)}\.data\s*,",
+            mm_text[after_view:],
+        )
+        if transfer_match is None:
+            continue
+        after_transfer = after_view + transfer_match.end()
+        if mm_text.find(
+            f"chelis_tensor_end_write({guard});",
+            after_transfer,
+        ) < 0:
+            continue
+        initialized.add(output_index)
+    return initialized
 
 
 def run(cmd, **kwargs):
@@ -134,11 +186,11 @@ def smoke_one(
                 file=sys.stderr,
             )
             return 4
-    if "chelis_metal_device_to_host(outputs[" not in mm_text:
+    if 0 not in guarded_output_writeback_indices(mm_text):
         print(
-            f"smoke_macos_metal[{label}]: emitted .mm does not write any output via "
-            "chelis_metal_device_to_host(outputs[...]); function returns "
-            "with uninitialized outputs",
+            f"smoke_macos_metal[{label}]: emitted .mm does not initialize outputs[0] "
+            "through allocation + begin-write + matching write-view + device copy + "
+            "matching end-write in order",
             file=sys.stderr,
         )
         return 4

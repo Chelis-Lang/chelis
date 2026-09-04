@@ -3414,8 +3414,8 @@ fn host_lane_positive_rank_mismatch_traps_before_indexing() {
         "host-lane codegen omitted the positive-rank mismatch guard:\n{src}"
     );
     assert!(
-        src.contains("chelis_tensor_rank(__arg0_"),
-        "host-lane rank guard must use the opaque tensor accessor:\n{src}"
+        src.contains("chelis_host_require_elementwise_agreement(__arg0_"),
+        "host-lane rank guard must call the shared opaque-tensor guard:\n{src}"
     );
     assert!(
         !src.contains("->rank"),
@@ -3506,8 +3506,8 @@ fn host_lane_equal_rank_shape_mismatch_traps_before_indexing() {
         "host-lane codegen omitted the equal-rank shape guard:\n{src}"
     );
     assert!(
-        src.contains("chelis_tensor_shape(__arg0_") && src.contains(", __axis)"),
-        "host-lane shape guard must use the opaque tensor accessor:\n{src}"
+        src.contains("chelis_host_require_elementwise_agreement(__arg0_"),
+        "host-lane shape guard must call the shared opaque-tensor guard:\n{src}"
     );
     assert!(
         !src.contains("->shape"),
