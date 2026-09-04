@@ -806,7 +806,86 @@ recursive binding group, whether the recursion is direct or mutual.
 > inference groups remain governed by [04-INF-2] and [04-INF-3], and an eager
 > value cycle remains a type error reported as `CycleDetected`.
 
-(Not fully implemented; see chelis#1485.)
+(Not fully implemented; see chelis#1485, chelis#1486, and chelis#1487.)
+
+#### 3.1.3 Signature holes and authored binders
+
+A signature's type expression can carry two kinds of variable. A wildcard,
+`(t-var {} _)` or its dimension and rank spellings, is an inference hole
+(`spec/03-deep-syntax.md` §2.5); the desugarer synthesizes one for every
+omitted parameter or result annotation of a `def` that carries at least one
+annotation (`spec/02-surf-syntax.md` §5.2). A named type variable is a
+binder: it is listed in the declaration's binder list, or §5.8.1 quantifies
+it implicitly. The two are different objects and the checker treats them
+differently.
+
+> **[04-INF-5]** A wildcard slot in a declaration's signature, whether
+> written or synthesized for an omitted annotation, is an inference hole and
+> not a type binder. It SHALL NOT be quantified, and it confers no type on
+> the declaration: the declaration's type at that slot is the type its body
+> determines, generalized together with the body under §3.1. Every reference
+> to the declaration SHALL be typed at that body-determined signature,
+> whichever checker entry receives the program and wherever the reference
+> sits relative to the declaration, so no reference can observe the hole
+> before the body has filled it. A reference whose use disagrees with the
+> body-determined slot is a type error at the reference; a body is never
+> narrowed to satisfy a reference. Inside a group of declarations inferred
+> as one unit, whether a recursive binding group of §3.1.1 or a component
+> that the reference graph closes through a top-level value, an in-group
+> reference is typed at the member's provisional monomorphic type, as
+> [04-INF-2] provides for a recursive call.
+
+(Not fully implemented; see chelis#1486.)
+
+> **[04-INF-6]** An authored type variable of a declaration's signature,
+> whether listed in its binder list or introduced by §5.8.1's implicit
+> quantification, is a universally quantified binder and is rigid within the
+> declaration's body: the body SHALL type-check for every admissible
+> instantiation of the binder. A body constraint that identifies an authored
+> binder with a concrete type, with another authored binder of the same
+> signature, or with a type containing either is a type error reported at
+> the declaration, and the declaration's scheme is its declared signature,
+> never a narrowing of it. A wildcard slot that the body resolves to an
+> authored binder takes that binder's type. A dtype-family bound
+> ([04-DTYPE-2]) restricts the admissible instantiations without making the
+> binder concrete. The dimension parameter rule of §4.4 is this rule for
+> dimension binders.
+
+(Not fully implemented; see chelis#1486.)
+
+An unsuffixed literal binds at its default primitive type
+(`spec/02-surf-syntax.md` §P10), so `lt(x, 0.0)` with `x: p` identifies the
+binder `p` with `f32` and is rejected under [04-INF-6]; the polymorphic
+spelling is the `cast(0.0, p)` override that §P10 names.
+
+#### 3.1.4 Eager initialization references
+
+> **[04-INF-7]** The eager reference set of a top-level eager value is the
+> least set that contains every free reference in the value's initializer,
+> including a reference inside a lambda body nested anywhere in the
+> initializer, and, for every top-level `def` whose name is in the set,
+> every free reference in that `def` (a function's body or a value's
+> initializer), likewise including references inside nested lambda bodies.
+> For this rule and for [04-INF-4], a top-level `def` whose initializer is
+> a lambda expression is a function declaration, not an eager value. A
+> reference is free when
+> it names a top-level declaration rather than a parameter, `let` binding,
+> or pattern binder in scope at the reference. The eager value cycle that
+> [04-INF-4] reports as `CycleDetected` exists exactly when the value's own
+> name occurs in its eager reference set, as a read or as an application,
+> other than as the value's own explicitly typed self-reference. The set is
+> a syntactic over-approximation: a lambda or a function value that reaches
+> an initializer is treated as applied during that initialization whether
+> or not the receiving callee applies it. The rule depends only on the
+> program's declarations, never on the checker entry that receives the
+> program or on the order in which declaration bodies are inferred.
+
+(Not fully implemented; see chelis#1487 and chelis#1485.)
+
+A program rejected only by the over-approximation, one whose initializer
+stores a function value that reads the initialized binding and that no
+initializer ever applies, is written so the function receives that value as
+an argument instead of reading the top-level binding.
 
 ### 3.2 Inference Rules
 
