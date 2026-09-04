@@ -282,12 +282,16 @@ fn analyze_app(
 }
 
 fn movement_operation(name: &str) -> Option<&str> {
-    matches!(name, "expand" | "reshape" | "shrink" | "pad" | "stride").then_some(name)
+    matches!(
+        name,
+        "expand" | "insert" | "reshape" | "shrink" | "pad" | "stride"
+    )
+    .then_some(name)
 }
 
 fn movement_bound_dependencies(operation: &str, args: &[ParamDeps]) -> ParamDeps {
     let selected: Box<dyn Iterator<Item = &ParamDeps> + '_> = match operation {
-        "expand" => Box::new(args.get(2).into_iter()),
+        "expand" | "insert" => Box::new(args.get(2).into_iter()),
         "reshape" => Box::new(args.get(1).into_iter()),
         "shrink" | "pad" | "stride" => Box::new(args.iter().skip(1)),
         _ => Box::new(std::iter::empty()),

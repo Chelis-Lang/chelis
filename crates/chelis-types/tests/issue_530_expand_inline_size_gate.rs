@@ -57,7 +57,7 @@ fn assert_form3_reject_message(source: &str, label: &str) {
         .unwrap_or_else(|| panic!("{label}: sourceless inline `expand` size must reject at check"));
     let msgs = messages(&rep);
     assert!(
-        msgs.iter().any(|m| m.contains("expand")
+        msgs.iter().any(|m| m.contains("insert")
             && m.contains("no tensor in scope carries it")
             && m.contains("chelis#469")),
         "{label}: expected the Form-3 sourceless-size reject diagnostic citing #469, got {msgs:?}"

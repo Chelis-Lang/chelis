@@ -290,7 +290,7 @@ fn expand_error_inline_size_still_fires_form3_gate_once() {
     let form3: Vec<_> = msgs
         .iter()
         .filter(|m| {
-            m.contains("expand")
+            m.contains("insert")
                 && m.contains("no tensor in scope carries it")
                 && m.contains("chelis#469")
         })

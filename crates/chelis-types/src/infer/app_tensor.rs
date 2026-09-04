@@ -1098,7 +1098,10 @@ pub(super) fn check_expand_signature(
         // bare-`var`, `cast(var, _)`, `let`-bound, and arithmetic.
         None => {
             if size_class == SizeClass::Sourceless {
-                return report(errors, sourceless_expand_size_error(arg_exprs.get(2)));
+                return report(
+                    errors,
+                    sourceless_expand_size_error(builtin, arg_exprs.get(2)),
+                );
             }
             // A bare `var` naming a genuine §4.7.2 Form-2 symbolic dim — a
             // declared dim parameter (not a value binding) or a dim carried

@@ -159,10 +159,10 @@ def go[n](x: tensor[n, f32], ax: int32) -> tensor[4, n, f32] = {
         check_ir_program(&deep).expect_err("non-literal expand axis must be rejected at infer");
     let msgs = messages(&rep);
     assert!(
-        msgs.iter().any(|m| m.contains("expand")
+        msgs.iter().any(|m| m.contains("insert")
             && m.contains("axis")
             && m.contains("compile-time constant")),
-        "expected an `expand` compile-time-constant-axis diagnostic, got {msgs:?}"
+        "expected an `insert` compile-time-constant-axis diagnostic, got {msgs:?}"
     );
     assert!(
         !msgs

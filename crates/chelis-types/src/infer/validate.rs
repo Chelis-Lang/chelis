@@ -1830,6 +1830,7 @@ pub(super) fn is_ir_shape_sensitive_builtin(name: &str) -> bool {
             | "reshape"
             | "permute"
             | "expand"
+            | "insert"
             | "pad"
             | "shrink"
             | "stride"
@@ -2495,7 +2496,7 @@ pub(super) fn derive_ir_builtin_output_type(
     match func_name {
         "conv2d" => derive_conv2d_output_type(list, type_env).map(ShapeTypeFact::Exact),
         "stride" => derive_movement_rank_output_type(list, type_env, static_env, 0),
-        "expand" => derive_movement_rank_output_type(list, type_env, static_env, 1),
+        "expand" | "insert" => derive_movement_rank_output_type(list, type_env, static_env, 1),
         // softmax takes a (tensor, axis) tuple but its output shape
         // equals the input tensor's shape, but it is intentionally not in the
         // rank-polymorphism Identity class because its axis is positional.

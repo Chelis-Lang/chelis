@@ -207,7 +207,10 @@ pub(super) enum SizeClass {
 /// Factored out so the diagnostic text has a single source of truth.
 /// `size_expr` is the size sub-expression (used only to name a symbolic
 /// dimension when the size is a bare `var`).
-pub(super) fn sourceless_expand_size_error(size_expr: Option<&deep::Expr>) -> CheckError {
+pub(super) fn sourceless_expand_size_error(
+    builtin: &'static str,
+    size_expr: Option<&deep::Expr>,
+) -> CheckError {
     let described = size_expr
         .and_then(symbolic_dim_ref_name)
         .map(|name| format!("the symbolic dimension `{name}`"))
@@ -215,7 +218,7 @@ pub(super) fn sourceless_expand_size_error(size_expr: Option<&deep::Expr>) -> Ch
     CheckError::new(
         CheckErrorKind::DimensionMismatch,
         format!(
-            "`expand` size resolves to {described}, but no tensor in scope carries \
+            "`{builtin}` size resolves to {described}, but no tensor in scope carries \
              it. Runtime extents use exact `int64`; source the value from an in-scope \
              tensor dimension or a `shape(tensor, int32-axis)` read. A bare runtime \
              scalar has no shape identity to attach to the result yet. Tracked by \

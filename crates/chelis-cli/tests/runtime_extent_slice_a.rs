@@ -132,7 +132,7 @@ fn negative_extent_remains_a_static_type_error() {
     let report = check("out = insert(scalar_to_tensor(1.0f32), 0, -1i64)\n");
     let joined = errors(&report).join("\n");
     assert!(
-        joined.contains("expand") && joined.contains("-1"),
+        joined.contains("insert") && joined.contains("-1"),
         "{report}"
     );
 }
@@ -146,7 +146,7 @@ fn shape_sourced_expand_rejects_wrong_rank_ascription() {
     let report = check(source);
     let joined = errors(&report).join("\n");
     assert!(
-        joined.contains("expand") && joined.contains("rank"),
+        joined.contains("insert") && joined.contains("rank"),
         "wrong-rank ascription must reject at check: {report}"
     );
 }
