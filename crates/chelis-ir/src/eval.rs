@@ -2392,12 +2392,11 @@ where
                 // the C backend's runtime numel abort), never a panic.
                 let input = &values[&node.inputs[0]];
                 let expected: usize = shape.iter().product();
+                // The phrase is the interpreter's and the C runtime's
+                // (`host_emit.rs`), so every lane reports the mismatch alike.
                 if expected != input.len() {
                     return Err(format!(
-                        "reshape at node {}: target shape {:?} has {} elements but the \
-                         input has {}",
-                        node.id.0,
-                        shape,
+                        "reshape expects {} elements but tensor has {}",
                         expected,
                         input.len()
                     ));
@@ -2449,6 +2448,17 @@ where
             RiscOp::Shrink { bounds } => {
                 let input = &values[&node.inputs[0]];
                 let resolved = resolve_eval_pairs(bounds, node, &values, &input.shape)?;
+                // chelis#616 on the eval lane: a runtime bound that selects
+                // nothing is rejected as the interpreter rejects it and as
+                // the C runtime aborts it, never returned as an empty tensor.
+                for (axis, (start, end)) in resolved.iter().enumerate() {
+                    if start >= end {
+                        return Err(format!(
+                            "shrink axis {axis} bound [{start}, {end}] is empty or inverted \
+                             (start >= end)"
+                        ));
+                    }
+                }
                 shrink(input, &resolved)
             }
             RiscOp::Stride { strides } => {

@@ -62,3 +62,45 @@ fn an_elementwise_operand_shape_disagreement_is_a_typed_error_not_a_panic() {
         "the interpreter's phrase, so both eval paths and the tests agree: {err}"
     );
 }
+
+#[test]
+fn a_runtime_shrink_that_selects_nothing_is_rejected_not_emptied() {
+    let mut dag = Dag::new();
+    let x = load(&mut dag, "x", 4);
+    // A runtime bound: `end` comes from a rank-0 int64 scalar input, as
+    // `k = n - 4` lowers.
+    let k = dag.add_node(
+        RiscOp::Load { name: "k".into() },
+        vec![],
+        TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        },
+        None,
+    );
+    let shrunk = dag.add_node(
+        RiscOp::Shrink {
+            bounds: vec![(RtDim::Lit(0), RtDim::Node(1))],
+        },
+        vec![x, k],
+        TensorType {
+            dims: vec![DimInfo::Named("u".into(), None)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    dag.add_root(shrunk);
+    let err = eval_tensor_roots_with_strict(&dag, &[shrunk], |name| match name {
+        "x" => Some(f32_tensor(&[4], &[1.0, 2.0, 3.0, 4.0])),
+        "k" => Some(
+            TensorValue::finalize_from_wide_int("test", Prim::Int64, vec![], vec![0])
+                .expect("finalize"),
+        ),
+        _ => None,
+    })
+    .expect_err("bounds [0, 0) select nothing and must be rejected");
+    assert!(
+        err.contains("is empty or inverted"),
+        "the interpreter's phrase for an empty bound: {err}"
+    );
+}
