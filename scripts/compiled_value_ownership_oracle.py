@@ -1271,28 +1271,38 @@ def validate_active_mutation_contracts(phase: str) -> None:
 
     if phase in {"0", "1"}:
         return
-    source = (REPO_ROOT / "crates/chelis-backend-c/src/host_emit.rs").read_text()
-    forbidden = (
-        "ReturnsArg",
-        "ParamAlias",
-        "analyze_returns_arg",
-        "result_alias_set",
-        "retain_call_escaped_args",
-        "is_definitely_fresh_heap_expr",
-        "scope_releases",
+    host_source = (REPO_ROOT / "crates/chelis-backend-c/src/host_emit.rs").read_text()
+    ownership_source = (REPO_ROOT / "crates/chelis-ir/src/ownership/mod.rs").read_text()
+    owner_view = re.search(
+        r"impl<'a> VerifiedOwnerView<'a> \{(?P<body>.*?)\n\}\n\n/// A binder spelling",
+        ownership_source,
+        flags=re.DOTALL,
     )
-    restored = tuple(name for name in forbidden if name in source)
-    if restored:
+    if owner_view is None:
         raise OracleFailure(
             "backend-local-ownership-predicate-restored: "
-            f"C host emitter contains forbidden ownership inference {restored!r}"
+            "the sealed VerifiedOwnerView capability boundary is missing"
+        )
+    owner_capabilities = tuple(
+        re.findall(r"pub fn ([a-zA-Z0-9_]+)\(", owner_view.group("body"))
+    )
+    if owner_capabilities != ("id", "ty", "is_heap"):
+        raise OracleFailure(
+            "backend-local-ownership-predicate-restored: generic verified owner "
+            f"capabilities drifted from (id, ty, is_heap): {owner_capabilities!r}"
+        )
+    if ".names()" in host_source:
+        raise OracleFailure(
+            "backend-local-ownership-predicate-restored: C host emission reads a "
+            "generic owner binder spelling outside a certified binding projection"
         )
     required = (
         "VerifiedHostAction::Operation",
         "VerifiedHostTerminator::Return",
         "emit_expression_site",
+        "binding_name",
     )
-    missing = tuple(name for name in required if name not in source)
+    missing = tuple(name for name in required if name not in host_source)
     if missing:
         raise OracleFailure(
             "backend-local-ownership-predicate-restored: "

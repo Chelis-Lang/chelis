@@ -197,11 +197,17 @@ emission contracts.
 The host payload assigns an opaque `HostSiteId` by structural traversal, never
 from an identifier's spelling. Every binding, expression, argument, branch or
 match edge, loop edge, function entry and return, and manifested root has one
-site and one directive-list entry. Ownership operations reference those sites,
-and verification proves the payload-site and directive-site universes are
-bijective before a backend can observe them. Host ABI projection preserves the
-site identities and consumes one verified payload if it must produce another;
-it cannot clone or rebuild a raw sibling program after verification.
+site and one directive-list entry. The independent payload census derives both
+the structural kind and owning unit; every attached action must name that same
+unit. Ownership operations reference those sites, and verification proves the
+payload-site and directive-site universes are bijective before a backend can
+observe them. Generic owner operands expose identity, type, and heap class but
+no binder spelling. Name projection is a separate sealed capability on the
+exact verified binding action or function-parameter association that emits it,
+so a clone/drop operand cannot seed backend-local lifetime reconstruction. Host
+ABI projection preserves the site identities and parameter associations and
+consumes one verified payload if it must produce another; it cannot clone or
+rebuild a raw sibling program after verification.
 
 The DAG specialization uses the existing stable `NodeId` identity. Loads are
 borrowed entries; producers mint owners; and `Copy` clones. A `Drop` over an

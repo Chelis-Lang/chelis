@@ -273,23 +273,14 @@ fn recursive_calls_target_the_consuming_body_not_the_external_clone_adapter() {
 #[test]
 fn backend_local_host_ownership_inference_cannot_return() {
     let source = include_str!("host_emit.rs");
-    for forbidden in [
-        concat!("Returns", "Arg"),
-        concat!("Param", "Alias"),
-        concat!("analyze_", "returns_arg"),
-        concat!("result_", "alias_set"),
-        concat!("retain_", "call_escaped_args"),
-        concat!("is_definitely_", "fresh_heap_expr"),
-        concat!("scope_", "releases"),
-    ] {
-        assert!(
-            !source.contains(forbidden),
-            "backend-local ownership inference `{forbidden}` returned"
-        );
-    }
+    assert!(
+        !source.contains(".names()"),
+        "generic verified owners must not expose binder spelling to C ownership emission"
+    );
     assert!(source.contains("VerifiedHostAction::Operation"));
     assert!(source.contains("VerifiedHostTerminator::Return"));
     assert!(source.contains("emit_expression_site"));
+    assert!(source.contains("binding_name"));
 }
 
 #[test]

@@ -82,6 +82,7 @@ pub(crate) struct ProjectedHostProgram<'a> {
     sites: Vec<ProjectedHostSite<'a>>,
     root_sites: Vec<ProjectedHostSite<'a>>,
     function_sites: Vec<Vec<ProjectedHostSite<'a>>>,
+    function_owner_bindings: Vec<Vec<(chelis_ir::ownership::VerifiedOwnerId, String)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +127,13 @@ impl<'a> ProjectedHostProgram<'a> {
 
     pub(crate) fn function_sites(&self, index: usize) -> Option<&[ProjectedHostSite<'a>]> {
         self.function_sites.get(index).map(Vec::as_slice)
+    }
+
+    pub(crate) fn function_owner_bindings(
+        &self,
+        index: usize,
+    ) -> Option<&[(chelis_ir::ownership::VerifiedOwnerId, String)]> {
+        self.function_owner_bindings.get(index).map(Vec::as_slice)
     }
 }
 
@@ -284,12 +292,24 @@ pub(crate) fn project_program(
                 .collect()
         })
         .collect();
+    let function_owner_bindings = (0..emission.function_count())
+        .map(|index| {
+            emission
+                .function(index)
+                .expect("verified function census")
+                .body_bindings()
+                .into_iter()
+                .map(|binding| (binding.owner().id(), binding.name().to_string()))
+                .collect()
+        })
+        .collect();
     Ok(ProjectedHostProgram {
         program,
         emission,
         sites,
         root_sites,
         function_sites,
+        function_owner_bindings,
     })
 }
 

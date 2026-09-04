@@ -14,7 +14,10 @@ use super::ir::{
     OwnershipProgram as RawProgram, OwnershipUse, ParamMode, Terminator, Unit, UnitKind,
 };
 use super::{DagDirective, DagOwnershipPlan};
-use crate::host::{ConcreteHostProgram, HostBinding, HostDisplayRoot, HostExpr, HostExprKind};
+use crate::host::{
+    ConcreteHostFunction, ConcreteHostProgram, HostBinding, HostDisplayRoot, HostExpr,
+    HostExprKind, HostFunctionOrigin,
+};
 use crate::host_type_state::ConcreteHostType;
 use crate::{Dag, DimInfo, RiscOp, TensorType};
 
@@ -599,6 +602,95 @@ fn payload_census_rejects_a_missing_match_option_binding_and_wrong_kind() {
     wrong_kind.records[5].kind = HostSiteKind::Argument;
     assert!(matches!(
         super::verify::verify_host_payload_sites(&host, &manifest, &wrong_kind),
+        Err(OwnershipError::HostSiteMap { .. })
+    ));
+}
+
+#[test]
+fn host_payload_sites_and_actions_are_bound_to_their_structural_unit() {
+    let host = ConcreteHostProgram {
+        functions: vec![ConcreteHostFunction {
+            name: "identity".into(),
+            params: Vec::new(),
+            ret_ty: ConcreteHostType::Unit,
+            body: HostExpr::new(HostExprKind::Unit),
+            tensor_helpers: Vec::new(),
+            origin: HostFunctionOrigin::Authored,
+            specialization: None,
+            summary_rejections: Vec::new(),
+        }],
+        ..ConcreteHostProgram::default()
+    };
+    let manifest = RootManifest { entries: vec![] };
+    let record = |index, unit, kind, actions| HostSiteRecord {
+        id: HostSiteId::from_index(index),
+        unit,
+        kind,
+        actions,
+    };
+    let structural = HostSiteMap {
+        records: vec![
+            record(0, 0, HostSiteKind::FunctionReturn, vec![]),
+            record(1, 1, HostSiteKind::FunctionEntry, vec![]),
+            record(2, 1, HostSiteKind::FunctionReturn, vec![]),
+            record(3, 1, HostSiteKind::Expression, vec![]),
+        ],
+    };
+    super::verify::verify_host_payload_sites(&host, &manifest, &structural).unwrap();
+
+    let mut wrong_payload_unit = structural;
+    wrong_payload_unit.records[3].unit = 0;
+    assert!(matches!(
+        super::verify::verify_host_payload_sites(&host, &manifest, &wrong_payload_unit),
+        Err(OwnershipError::HostSiteMap { .. })
+    ));
+
+    let program = RawProgram {
+        units: vec![
+            Unit {
+                name: "roots".into(),
+                kind: UnitKind::Roots,
+                entry: BlockId(0),
+                blocks: vec![block(0, vec![], vec![], Terminator::Exit)],
+                owners: BTreeMap::new(),
+            },
+            Unit {
+                name: "identity".into(),
+                kind: UnitKind::Function,
+                entry: BlockId(0),
+                blocks: vec![block(0, vec![], vec![], Terminator::Exit)],
+                owners: BTreeMap::new(),
+            },
+        ],
+    };
+    let actions = HostSiteMap {
+        records: vec![
+            record(
+                0,
+                0,
+                HostSiteKind::Expression,
+                vec![HostSiteAction::Terminator {
+                    unit: 0,
+                    block: BlockId(0),
+                }],
+            ),
+            record(
+                1,
+                1,
+                HostSiteKind::Expression,
+                vec![HostSiteAction::Terminator {
+                    unit: 1,
+                    block: BlockId(0),
+                }],
+            ),
+        ],
+    };
+    super::verify::verify_host_actions(&program, &manifest, &actions).unwrap();
+
+    let mut wrong_action_unit = actions;
+    wrong_action_unit.records[1].unit = 0;
+    assert!(matches!(
+        super::verify::verify_host_actions(&program, &manifest, &wrong_action_unit),
         Err(OwnershipError::HostSiteMap { .. })
     ));
 }

@@ -77,6 +77,17 @@
 //! use chelis_ir::ownership::HostSiteId;
 //! fn forge() -> HostSiteId { HostSiteId::from_index(7) }
 //! ```
+//!
+//! Generic owner operands expose no binder spelling from which a backend
+//! could reconstruct lifetime or alias state. Name projection is a distinct
+//! capability carried only by the verified operations that bind payloads:
+//!
+//! ```compile_fail
+//! use chelis_ir::ownership::VerifiedOwnerView;
+//! fn reconstruct(owner: VerifiedOwnerView<'_>) -> bool {
+//!     !owner.names().is_empty()
+//! }
+//! ```
 
 use std::collections::BTreeMap;
 
@@ -265,12 +276,43 @@ impl<'a> VerifiedOwnerView<'a> {
         &self.info.ty
     }
 
-    pub fn names(self) -> &'a [String] {
-        &self.info.names
-    }
-
     pub fn is_heap(self) -> bool {
         self.info.class.is_heap()
+    }
+}
+
+/// A binder spelling projected by one exact, verified binding operation.
+///
+/// This capability is intentionally separate from [`VerifiedOwnerView`]: a
+/// clone, drop, return, or edge operand cannot expose source spelling to a
+/// backend and therefore cannot seed backend-local lifetime reconstruction.
+#[derive(Debug, Clone, Copy)]
+pub struct VerifiedBindingName<'a> {
+    name: &'a str,
+}
+
+impl<'a> VerifiedBindingName<'a> {
+    pub fn as_str(self) -> &'a str {
+        self.name
+    }
+}
+
+/// Exact association between one verified function-body owner and the
+/// retained payload spelling that binds it. This includes declared parameters
+/// and verifier-certified captured globals.
+#[derive(Debug, Clone, Copy)]
+pub struct VerifiedHostBodyBinding<'a> {
+    owner: VerifiedOwnerView<'a>,
+    name: &'a str,
+}
+
+impl<'a> VerifiedHostBodyBinding<'a> {
+    pub fn owner(self) -> VerifiedOwnerView<'a> {
+        self.owner
+    }
+
+    pub fn name(self) -> &'a str {
+        self.name
     }
 }
 
@@ -327,6 +369,7 @@ pub enum VerifiedHostOperation<'a> {
     Apply {
         block: VerifiedBlockId,
         dest: Option<VerifiedOwnerView<'a>>,
+        binding_name: Option<VerifiedBindingName<'a>>,
         label: &'a str,
         args: Vec<VerifiedOperandView<'a>>,
     },
@@ -511,15 +554,22 @@ fn verified_host_action<'a>(
                 },
                 ir::Op::Apply {
                     dest, label, args, ..
-                } => VerifiedHostOperation::Apply {
-                    block,
-                    dest: dest.and_then(|owner| verified_owner(program, unit, owner)),
-                    label,
-                    args: args
-                        .iter()
-                        .map(|operand| verified_operand(program, unit, operand))
-                        .collect::<Option<Vec<_>>>()?,
-                },
+                } => {
+                    let binding_name = dest
+                        .and_then(|owner| program.units.get(unit)?.owners.get(&owner))
+                        .and_then(|info| info.names.first())
+                        .map(|name| VerifiedBindingName { name });
+                    VerifiedHostOperation::Apply {
+                        block,
+                        dest: dest.and_then(|owner| verified_owner(program, unit, owner)),
+                        binding_name,
+                        label,
+                        args: args
+                            .iter()
+                            .map(|operand| verified_operand(program, unit, operand))
+                            .collect::<Option<Vec<_>>>()?,
+                    }
+                }
                 ir::Op::Copy { dest, source } => VerifiedHostOperation::Clone {
                     block,
                     dest: verified_owner(program, unit, *dest)?,
@@ -661,6 +711,68 @@ impl<'a> VerifiedHostFunctionView<'a> {
 
     pub fn params(self) -> &'a [ConcreteHostParam] {
         &self.function().params
+    }
+
+    /// Function-body owner identities paired with their exact payload
+    /// parameters or captured globals. Authored entry-adapter owners are
+    /// deliberately excluded: their verified jump transfers into these
+    /// consuming body owners.
+    pub fn body_bindings(self) -> Vec<VerifiedHostBodyBinding<'a>> {
+        let unit_index = self.index + 1;
+        let unit = &self.emission.ownership_program().units[unit_index];
+        let entry = unit
+            .blocks
+            .iter()
+            .find(|block| block.id == unit.entry)
+            .expect("verified function entry block");
+        let body_id = if self.origin() == HostFunctionOrigin::Authored {
+            match &entry.terminator {
+                ir::Terminator::Jump(edge) => edge.target,
+                _ => unreachable!("verified authored function entry adapter"),
+            }
+        } else {
+            unit.entry
+        };
+        let body = unit
+            .blocks
+            .iter()
+            .find(|block| block.id == body_id)
+            .expect("verified function body block");
+        assert!(
+            body.params.len() >= self.function().params.len(),
+            "verified function body omits declared parameters"
+        );
+        body.params
+            .iter()
+            .enumerate()
+            .map(|(index, param)| {
+                let owner =
+                    verified_owner(self.emission.ownership_program(), unit_index, param.owner)
+                        .expect("verified function body owner");
+                let name = if let Some(payload) = self.function().params.get(index) {
+                    payload.name.as_str()
+                } else {
+                    let captured = owner
+                        .info
+                        .names
+                        .iter()
+                        .filter(|name| {
+                            self.emission
+                                .payload
+                                .program
+                                .globals
+                                .iter()
+                                .any(|binding| binding.name == name.as_str())
+                        })
+                        .collect::<Vec<_>>();
+                    let [name] = captured.as_slice() else {
+                        unreachable!("verified capture names exactly one retained global")
+                    };
+                    name.as_str()
+                };
+                VerifiedHostBodyBinding { owner, name }
+            })
+            .collect()
     }
 
     pub fn ret_ty(self) -> &'a crate::host_type_state::ConcreteHostType {

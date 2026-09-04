@@ -634,10 +634,37 @@ class ManifestContractTests(unittest.TestCase):
         oracle.validate_active_mutation_contracts("2")
         source_path = oracle.REPO_ROOT / "crates/chelis-backend-c/src/host_emit.rs"
         source = source_path.read_text()
-        with mock.patch.object(Path, "read_text", return_value=source + "\nstruct ReturnsArg;\n"):
+        exact_clone_entry = (
+            "        let source_var = self.owner_var(source.owner())?;"
+        )
+        self.assertIn(exact_clone_entry, source)
+        renamed_inference = """        enum RecoveredLifetime {
+            Named,
+            Temporary,
+        }
+        let recovered = if source.owner().names().is_empty() {
+            RecoveredLifetime::Temporary
+        } else {
+            RecoveredLifetime::Named
+        };
+        let source_var = match recovered {
+            RecoveredLifetime::Named | RecoveredLifetime::Temporary => {
+                self.owner_var(source.owner())?
+            }
+        };"""
+        mutated = source.replace(exact_clone_entry, renamed_inference, 1)
+        self.assertNotEqual(mutated, source)
+        original_read_text = Path.read_text
+
+        def read_mutated_host(path: Path, *args: object, **kwargs: object) -> str:
+            if path == source_path:
+                return mutated
+            return original_read_text(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", new=read_mutated_host):
             with self.assertRaisesRegex(
                 oracle.OracleFailure,
-                "backend-local-ownership-predicate-restored",
+                "backend-local-ownership-predicate-restored: C host emission reads a generic owner binder spelling",
             ):
                 oracle.validate_active_mutation_contracts("2")
 

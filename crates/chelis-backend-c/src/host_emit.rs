@@ -348,6 +348,9 @@ pub(crate) fn emit_host_abi_program(
             projected
                 .function_sites(function_index)
                 .expect("projected function retains verified sites"),
+            projected
+                .function_owner_bindings(function_index)
+                .expect("projected function retains verified body-owner bindings"),
             &helper_output_counts,
         ) {
             Ok(()) => {
@@ -1717,6 +1720,7 @@ fn emit_function(
     function_specializations: &UnordMap<String, HostFunctionSpecialization>,
     internal_linkage: bool,
     ownership_sites: &[ProjectedHostSite<'_>],
+    owner_bindings: &[(VerifiedOwnerId, String)],
     helper_output_counts: &[usize],
 ) -> Result<(), Unsupported> {
     let params = function
@@ -1749,6 +1753,34 @@ fn emit_function(
         helper_output_counts,
         ownership_sites,
     );
+    if owner_bindings.len() < function.params.len()
+        || function
+            .params
+            .iter()
+            .zip(owner_bindings)
+            .any(|(param, (_, name))| param.name != *name)
+    {
+        return Err(invalid_abi_shape(
+            format!(
+                "verified function's {} payload parameters disagree with {} body-owner bindings",
+                function.params.len(),
+                owner_bindings.len()
+            ),
+            "verified C host ownership emission",
+        ));
+    }
+    for (owner, name) in owner_bindings {
+        if emitter
+            .owner_vars
+            .insert(*owner, c_ident(name).into_owned())
+            .is_some()
+        {
+            return Err(invalid_abi_shape(
+                format!("verified function repeats parameter owner {owner:?}"),
+                "verified C host ownership emission",
+            ));
+        }
+    }
     emitter.emit_expr_to_var(&function.body, "__result", &function.ret_ty)?;
     let terminal = ownership_sites
         .iter()
@@ -2469,18 +2501,21 @@ impl<'a> HostEmitter<'a> {
                 }
                 VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
                     dest: Some(dest),
+                    binding_name,
                     label,
                     ..
                 }) => {
-                    let value = dest
-                        .names()
-                        .first()
+                    let value = binding_name
+                        .as_ref()
                         .filter(|_| {
                             label.starts_with("option_payload")
                                 || label.starts_with("adt_payload")
                                 || *label == "loop_item"
                         })
-                        .map_or_else(|| target.to_string(), |name| c_ident(name).into_owned());
+                        .map_or_else(
+                            || target.to_string(),
+                            |name| c_ident(name.as_str()).into_owned(),
+                        );
                     self.owner_vars.insert(dest.id(), value);
                 }
                 VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
@@ -2653,18 +2688,21 @@ impl<'a> HostEmitter<'a> {
                 VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
                     block: owner_block,
                     dest: Some(dest),
+                    binding_name,
                     label,
                     ..
                 }) if *owner_block == block => {
-                    let value = dest
-                        .names()
-                        .first()
+                    let value = binding_name
+                        .as_ref()
                         .filter(|_| {
                             label.starts_with("option_payload")
                                 || label.starts_with("adt_payload")
                                 || *label == "loop_item"
                         })
-                        .map_or_else(|| target.to_string(), |name| c_ident(name).into_owned());
+                        .map_or_else(
+                            || target.to_string(),
+                            |name| c_ident(name.as_str()).into_owned(),
+                        );
                     self.owner_vars.insert(dest.id(), value);
                 }
                 VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
@@ -2759,14 +2797,14 @@ impl<'a> HostEmitter<'a> {
             VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
                 block: owner_block,
                 dest: Some(dest),
+                binding_name: projected_name,
                 label,
                 ..
             }) if *owner_block == block
                 && label.starts_with(label_prefix)
-                && dest
-                    .names()
-                    .first()
-                    .is_some_and(|name| name == binding_name) =>
+                && projected_name
+                    .as_ref()
+                    .is_some_and(|name| name.as_str() == binding_name) =>
             {
                 Some(*dest)
             }
@@ -2866,20 +2904,15 @@ impl<'a> HostEmitter<'a> {
         &self,
         owner: chelis_ir::ownership::VerifiedOwnerView<'_>,
     ) -> Result<String, Unsupported> {
-        self.owner_vars
-            .get(&owner.id())
-            .cloned()
-            .or_else(|| owner.names().last().map(|name| c_ident(name).into_owned()))
-            .ok_or_else(|| {
-                invalid_abi_shape(
-                    format!(
-                        "verified ownership action names emitted owner {:?} ({:?}) with no value binding",
-                        owner.id(),
-                        owner.names()
-                    ),
-                    "verified C host ownership emission",
-                )
-            })
+        self.owner_vars.get(&owner.id()).cloned().ok_or_else(|| {
+            invalid_abi_shape(
+                format!(
+                    "verified ownership action names emitted owner {:?} with no value binding",
+                    owner.id()
+                ),
+                "verified C host ownership emission",
+            )
+        })
     }
 
     fn owner_abi_type(
@@ -6777,6 +6810,47 @@ impl<'a> HostEmitter<'a> {
             c_type(&params[0].ty)?,
             acc_arg
         ));
+        let (body_edge, exit_edge) = site
+            .directives
+            .iter()
+            .find_map(|action| match action {
+                VerifiedHostAction::Terminator(VerifiedHostTerminator::Loop {
+                    body_edge,
+                    exit_edge,
+                    ..
+                }) => Some((body_edge, exit_edge)),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                invalid_abi_shape(
+                    "verified fold site has no loop terminator".to_string(),
+                    "verified C host ownership emission",
+                )
+            })?;
+        let [body_acc] = body_edge.params() else {
+            return Err(invalid_abi_shape(
+                format!(
+                    "verified fold body edge carries {} parameters, expected one accumulator",
+                    body_edge.params().len()
+                ),
+                "verified C host ownership emission",
+            ));
+        };
+        let [exit_acc] = exit_edge.params() else {
+            return Err(invalid_abi_shape(
+                format!(
+                    "verified fold exit edge carries {} parameters, expected one accumulator",
+                    exit_edge.params().len()
+                ),
+                "verified C host ownership emission",
+            ));
+        };
+        // The body consumes the per-iteration accumulator copy, while the exit
+        // owner remains represented by the expression result.  Bind both from
+        // the verified loop edges before the callback's ownership actions run;
+        // a later name-derived recovery would reintroduce backend inference.
+        self.owner_vars.insert(body_acc.id(), acc_arg.clone());
+        self.owner_vars.insert(exit_acc.id(), target.to_string());
         let item_arg = self.next_temp("fold_item");
         self.lines.push(format!(
             "{}{} {};",

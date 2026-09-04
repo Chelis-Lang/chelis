@@ -66,17 +66,25 @@ pub(super) fn verify_host_payload_sites(
             ),
         });
     }
-    for (index, (expected_kind, site)) in expected.iter().zip(&sites.records).enumerate() {
+    for (index, (expected_site, site)) in expected.iter().zip(&sites.records).enumerate() {
         if site.id.index() != index {
             return Err(OwnershipError::HostSiteMap {
                 detail: format!("site at position {index} has a different opaque identity"),
             });
         }
-        if site.kind != *expected_kind {
+        if site.unit != expected_site.unit {
             return Err(OwnershipError::HostSiteMap {
                 detail: format!(
-                    "payload site {index} has kind {expected_kind:?}, directive map has {:?}",
-                    site.kind
+                    "payload site {index} belongs to unit {}, directive map routes it to unit {}",
+                    expected_site.unit, site.unit
+                ),
+            });
+        }
+        if site.kind != expected_site.kind {
+            return Err(OwnershipError::HostSiteMap {
+                detail: format!(
+                    "payload site {index} has kind {:?}, directive map has {:?}",
+                    expected_site.kind, site.kind
                 ),
             });
         }
@@ -105,6 +113,18 @@ pub(super) fn verify_host_actions(
             });
         }
         for action in &site.actions {
+            let action_unit = match action {
+                HostSiteAction::Operation { unit, .. }
+                | HostSiteAction::Terminator { unit, .. }
+                | HostSiteAction::ControlEdge { unit, .. }
+                | HostSiteAction::Root { unit, .. } => *unit,
+            };
+            if action_unit != site.unit {
+                return Err(site_error(
+                    index,
+                    "action unit differs from its enclosing structural site",
+                ));
+            }
             match *action {
                 HostSiteAction::Operation {
                     unit,
@@ -410,21 +430,31 @@ fn site_error(index: usize, detail: &'static str) -> OwnershipError {
 /// ownership IR or the site builder. This is deliberately a second traversal
 /// over the retained emission payload: verification would be circular if it
 /// derived its expected sites from the lowering result it is checking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExpectedHostSite {
+    unit: usize,
+    kind: super::ir::HostSiteKind,
+}
+
+fn expected_site(unit: usize, kind: super::ir::HostSiteKind) -> ExpectedHostSite {
+    ExpectedHostSite { unit, kind }
+}
+
 fn census_host_payload(
     host: &ConcreteHostProgram,
     manifest: &RootManifest,
-) -> Result<Vec<super::ir::HostSiteKind>, OwnershipError> {
+) -> Result<Vec<ExpectedHostSite>, OwnershipError> {
     let mut sites = Vec::new();
     for binding in &host.globals {
-        sites.push(super::ir::HostSiteKind::Binding);
-        census_host_expr(&binding.value, &host.global_tensor_helpers, &mut sites)?;
+        sites.push(expected_site(0, super::ir::HostSiteKind::Binding));
+        census_host_expr(&binding.value, &host.global_tensor_helpers, 0, &mut sites)?;
     }
     sites.extend(
         manifest
             .entries
             .iter()
             .filter(|entry| entry.lane == Lane::Host)
-            .map(|_| super::ir::HostSiteKind::ManifestRoot),
+            .map(|_| expected_site(0, super::ir::HostSiteKind::ManifestRoot)),
     );
     sites.extend(
         host.globals
@@ -447,28 +477,29 @@ fn census_host_payload(
                     .then_some(());
                 unmatched.map(|_| ()).chain(legacy)
             })
-            .map(|_| super::ir::HostSiteKind::ManifestRoot),
+            .map(|_| expected_site(0, super::ir::HostSiteKind::ManifestRoot)),
     );
-    sites.push(super::ir::HostSiteKind::FunctionReturn);
+    sites.push(expected_site(0, super::ir::HostSiteKind::FunctionReturn));
 
-    for function in &host.functions {
+    for (function_index, function) in host.functions.iter().enumerate() {
+        let unit = function_index + 1;
         sites.extend(
             function
                 .params
                 .iter()
-                .map(|_| super::ir::HostSiteKind::Binding),
+                .map(|_| expected_site(unit, super::ir::HostSiteKind::Binding)),
         );
-        sites.push(super::ir::HostSiteKind::FunctionEntry);
+        sites.push(expected_site(unit, super::ir::HostSiteKind::FunctionEntry));
         if function.origin == HostFunctionOrigin::Authored {
             sites.extend(
                 function
                     .params
                     .iter()
-                    .map(|_| super::ir::HostSiteKind::Argument),
+                    .map(|_| expected_site(unit, super::ir::HostSiteKind::Argument)),
             );
         }
-        sites.push(super::ir::HostSiteKind::FunctionReturn);
-        census_host_expr(&function.body, &function.tensor_helpers, &mut sites)?;
+        sites.push(expected_site(unit, super::ir::HostSiteKind::FunctionReturn));
+        census_host_expr(&function.body, &function.tensor_helpers, unit, &mut sites)?;
     }
     Ok(sites)
 }
@@ -476,11 +507,12 @@ fn census_host_payload(
 fn census_host_expr(
     expr: &ConcreteHostExpr,
     helpers: &[HostTensorHelper],
-    sites: &mut Vec<super::ir::HostSiteKind>,
+    unit: usize,
+    sites: &mut Vec<ExpectedHostSite>,
 ) -> Result<(), OwnershipError> {
     use super::ir::HostSiteKind;
 
-    sites.push(HostSiteKind::Expression);
+    sites.push(expected_site(unit, HostSiteKind::Expression));
     match &expr.kind {
         ConcreteHostExprKind::Int(_)
         | ConcreteHostExprKind::Float(_)
@@ -494,12 +526,12 @@ fn census_host_expr(
         | ConcreteHostExprKind::Call { args: items, .. }
         | ConcreteHostExprKind::Builtin { args: items, .. } => {
             for item in items {
-                sites.push(HostSiteKind::Argument);
-                census_host_expr(item, helpers, sites)?;
+                sites.push(expected_site(unit, HostSiteKind::Argument));
+                census_host_expr(item, helpers, unit, sites)?;
             }
         }
         ConcreteHostExprKind::AdtFieldAccess { base, .. } => {
-            census_host_expr(base, helpers, sites)?;
+            census_host_expr(base, helpers, unit, sites)?;
         }
         ConcreteHostExprKind::If {
             cond,
@@ -507,11 +539,11 @@ fn census_host_expr(
             else_expr,
             ..
         } => {
-            census_host_expr(cond, helpers, sites)?;
-            sites.push(HostSiteKind::BranchEdge);
-            sites.push(HostSiteKind::BranchEdge);
-            census_host_expr(then_expr, helpers, sites)?;
-            census_host_expr(else_expr, helpers, sites)?;
+            census_host_expr(cond, helpers, unit, sites)?;
+            sites.push(expected_site(unit, HostSiteKind::BranchEdge));
+            sites.push(expected_site(unit, HostSiteKind::BranchEdge));
+            census_host_expr(then_expr, helpers, unit, sites)?;
+            census_host_expr(else_expr, helpers, unit, sites)?;
         }
         ConcreteHostExprKind::MatchOption {
             scrutinee,
@@ -519,12 +551,12 @@ fn census_host_expr(
             none_expr,
             ..
         } => {
-            census_host_expr(scrutinee, helpers, sites)?;
-            sites.push(HostSiteKind::MatchArm);
-            sites.push(HostSiteKind::MatchArm);
-            sites.push(HostSiteKind::Binding);
-            census_host_expr(some_expr, helpers, sites)?;
-            census_host_expr(none_expr, helpers, sites)?;
+            census_host_expr(scrutinee, helpers, unit, sites)?;
+            sites.push(expected_site(unit, HostSiteKind::MatchArm));
+            sites.push(expected_site(unit, HostSiteKind::MatchArm));
+            sites.push(expected_site(unit, HostSiteKind::Binding));
+            census_host_expr(some_expr, helpers, unit, sites)?;
+            census_host_expr(none_expr, helpers, unit, sites)?;
         }
         ConcreteHostExprKind::MatchAdt {
             scrutinee,
@@ -532,35 +564,39 @@ fn census_host_expr(
             default_expr,
             ..
         } => {
-            census_host_expr(scrutinee, helpers, sites)?;
+            census_host_expr(scrutinee, helpers, unit, sites)?;
             sites.extend(
                 (0..arms.len() + usize::from(default_expr.is_some()))
-                    .map(|_| HostSiteKind::MatchArm),
+                    .map(|_| expected_site(unit, HostSiteKind::MatchArm)),
             );
             for arm in arms {
-                sites.extend(arm.bindings.iter().map(|_| HostSiteKind::Binding));
-                census_host_expr(&arm.expr, helpers, sites)?;
+                sites.extend(
+                    arm.bindings
+                        .iter()
+                        .map(|_| expected_site(unit, HostSiteKind::Binding)),
+                );
+                census_host_expr(&arm.expr, helpers, unit, sites)?;
             }
             if let Some(default_expr) = default_expr {
-                census_host_expr(default_expr, helpers, sites)?;
+                census_host_expr(default_expr, helpers, unit, sites)?;
             }
         }
         ConcreteHostExprKind::Let { bindings, body, .. } => {
             for binding in bindings {
-                sites.push(HostSiteKind::Binding);
-                census_host_expr(&binding.value, helpers, sites)?;
+                sites.push(expected_site(unit, HostSiteKind::Binding));
+                census_host_expr(&binding.value, helpers, unit, sites)?;
             }
-            census_host_expr(body, helpers, sites)?;
+            census_host_expr(body, helpers, unit, sites)?;
         }
         ConcreteHostExprKind::Map { callback, list, .. }
         | ConcreteHostExprKind::Filter { callback, list, .. }
         | ConcreteHostExprKind::Partition { callback, list, .. }
         | ConcreteHostExprKind::FlatMap { callback, list, .. } => {
-            census_host_expr(list, helpers, sites)?;
-            sites.push(HostSiteKind::LoopEdge);
-            sites.push(HostSiteKind::LoopEdge);
-            sites.push(HostSiteKind::Binding);
-            census_host_callback(callback, helpers, sites)?;
+            census_host_expr(list, helpers, unit, sites)?;
+            sites.push(expected_site(unit, HostSiteKind::LoopEdge));
+            sites.push(expected_site(unit, HostSiteKind::LoopEdge));
+            sites.push(expected_site(unit, HostSiteKind::Binding));
+            census_host_callback(callback, helpers, unit, sites)?;
         }
         ConcreteHostExprKind::Fold {
             callback,
@@ -568,13 +604,13 @@ fn census_host_expr(
             list,
             ..
         } => {
-            census_host_expr(init, helpers, sites)?;
-            census_host_expr(list, helpers, sites)?;
-            sites.push(HostSiteKind::Binding);
-            sites.push(HostSiteKind::LoopEdge);
-            sites.push(HostSiteKind::LoopEdge);
-            sites.push(HostSiteKind::Binding);
-            census_host_callback(callback, helpers, sites)?;
+            census_host_expr(init, helpers, unit, sites)?;
+            census_host_expr(list, helpers, unit, sites)?;
+            sites.push(expected_site(unit, HostSiteKind::Binding));
+            sites.push(expected_site(unit, HostSiteKind::LoopEdge));
+            sites.push(expected_site(unit, HostSiteKind::LoopEdge));
+            sites.push(expected_site(unit, HostSiteKind::Binding));
+            census_host_callback(callback, helpers, unit, sites)?;
         }
         ConcreteHostExprKind::Scan {
             callback,
@@ -582,19 +618,19 @@ fn census_host_expr(
             list,
             ..
         } => {
-            census_host_expr(init, helpers, sites)?;
-            census_host_expr(list, helpers, sites)?;
-            sites.push(HostSiteKind::Binding);
-            sites.push(HostSiteKind::LoopEdge);
-            sites.push(HostSiteKind::LoopEdge);
-            sites.push(HostSiteKind::Binding);
-            census_host_callback(callback, helpers, sites)?;
+            census_host_expr(init, helpers, unit, sites)?;
+            census_host_expr(list, helpers, unit, sites)?;
+            sites.push(expected_site(unit, HostSiteKind::Binding));
+            sites.push(expected_site(unit, HostSiteKind::LoopEdge));
+            sites.push(expected_site(unit, HostSiteKind::LoopEdge));
+            sites.push(expected_site(unit, HostSiteKind::Binding));
+            census_host_callback(callback, helpers, unit, sites)?;
         }
         ConcreteHostExprKind::WithSeed { seed, body, .. } => {
-            sites.push(HostSiteKind::Argument);
-            census_host_expr(seed, helpers, sites)?;
-            sites.push(HostSiteKind::Argument);
-            census_host_expr(body, helpers, sites)?;
+            sites.push(expected_site(unit, HostSiteKind::Argument));
+            census_host_expr(seed, helpers, unit, sites)?;
+            sites.push(expected_site(unit, HostSiteKind::Argument));
+            census_host_expr(body, helpers, unit, sites)?;
         }
         ConcreteHostExprKind::TensorCall { helper, args, .. } => {
             let Some(helper) = helpers.get(*helper) else {
@@ -603,11 +639,11 @@ fn census_host_expr(
                 });
             };
             if independent_identity_helper(helper) && args.len() == 1 {
-                census_host_expr(&args[0], helpers, sites)?;
+                census_host_expr(&args[0], helpers, unit, sites)?;
             } else {
                 for arg in args {
-                    sites.push(HostSiteKind::Argument);
-                    census_host_expr(arg, helpers, sites)?;
+                    sites.push(expected_site(unit, HostSiteKind::Argument));
+                    census_host_expr(arg, helpers, unit, sites)?;
                 }
             }
         }
@@ -618,11 +654,14 @@ fn census_host_expr(
 fn census_host_callback(
     callback: &ConcreteHostCallback,
     helpers: &[HostTensorHelper],
-    sites: &mut Vec<super::ir::HostSiteKind>,
+    unit: usize,
+    sites: &mut Vec<ExpectedHostSite>,
 ) -> Result<(), OwnershipError> {
     match &callback.kind {
         ConcreteHostCallbackKind::Named { .. } => Ok(()),
-        ConcreteHostCallbackKind::Inline { body, .. } => census_host_expr(body, helpers, sites),
+        ConcreteHostCallbackKind::Inline { body, .. } => {
+            census_host_expr(body, helpers, unit, sites)
+        }
     }
 }
 

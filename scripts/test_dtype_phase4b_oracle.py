@@ -1514,7 +1514,12 @@ class ContractValidationTests(unittest.TestCase):
             with self.subTest(message=message):
                 original = path.read_text(encoding="utf-8")
                 self.assertIn(old, original)
-                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                count = original.count(old)
+                self.assertGreater(count, 0)
+                replacement_count = count if message == "launch ownership oracle success line" else 1
+                path.write_text(
+                    original.replace(old, new, replacement_count), encoding="utf-8"
+                )
                 try:
                     self.assert_contract_fails(message)
                 finally:
@@ -1566,16 +1571,16 @@ class ContractValidationTests(unittest.TestCase):
     def test_implicit_linearity_distinguishes_current_and_successor_drop(self) -> None:
         mutations = (
             (
-                "The current C/HIP emitters still\n"
-                "treat the IR node as an emission no-op and reconstruct host "
-                "releases from backend-local\nstate",
-                "The current C/HIP emitters release every heap value at Drop",
+                "The verified `OwnershipProgram` makes `RiscOp::Copy` and "
+                "`RiscOp::Drop` real\nownership operations",
+                "The ownership program may treat copy and drop as emission no-ops",
                 "current Drop implementation status",
             ),
             (
-                "the successor verified-ownership lanes emit the matching heap "
-                "release at the\nterminal operation",
-                "the successor lanes may defer release until function exit",
+                "C and HIP emit the exact\ndescriptor release selected by the "
+                "verified directive; Metal consumes the same\ndirective as a typed "
+                "no-device-owner disposition",
+                "Backends may reconstruct a terminal release after verification",
                 "successor Drop release",
             ),
         )
@@ -1633,8 +1638,8 @@ class ContractValidationTests(unittest.TestCase):
                 "Phase 1 exact ownership row map",
             ),
             (
-                "This phase promotes exactly five oracle rows: the [#1346] fold row",
-                "This phase promotes six oracle rows, including a [#543] temporary",
+                "This phase promotes exactly six oracle rows: the [#1346] fold row",
+                "This phase promotes five oracle rows and leaves depth one unresolved",
                 "Phase 2 exact ownership row map",
             ),
         )
