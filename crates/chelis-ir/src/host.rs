@@ -3191,9 +3191,12 @@ fn cached_def_effect_rows(
 }
 
 /// A form the kernel lowering cannot carry, found before lowering by walking
-/// the body and every inlined callee with lexical scoping (chelis#1277 B2h,
-/// ruling 1(a): each class is one the byte-identity corpus found the lowerer
-/// rejecting after a kernel decision, named with the lowerer's own reason).
+/// the body and every inlined callee with lexical scoping (chelis#1277 B2h:
+/// each class is one the byte-identity corpus found the lowerer rejecting
+/// after a kernel decision, named with the lowerer's own reason). An `if` is
+/// deliberately not a class: the kernel lowering's `lower_if` accepts more
+/// than the syntactic `if_expr_is_dag_lowerable` does, and treating the
+/// latter as the rule flipped three corpus kernels to host code on C.
 /// `Some(reason)` keeps the def in host code on both lanes; on C that is the
 /// lane the non-fatal fall-through (chelis#1515) already chose, so the emitted
 /// program is unchanged, which the corpus capture proves rather than assumes.
@@ -3243,11 +3246,11 @@ impl UncarriableWalk<'_> {
             Expr::Node(node, span) => self.expr(&Expr::List(node.to_list(*span), *span)),
             Expr::BareList(elems, _) => elems.iter().find_map(|elem| self.expr(elem)),
             Expr::UnknownForm(data) => data.children.iter().find_map(|child| self.expr(child)),
-            Expr::List(list, _) => self.list(expr, list),
+            Expr::List(list, _) => self.list(list),
         }
     }
 
-    fn list(&mut self, expr: &Expr, list: &List) -> Option<String> {
+    fn list(&mut self, list: &List) -> Option<String> {
         let kids = children(list);
         match tag(list) {
             Some(DeepTag::Var) => {
@@ -3341,9 +3344,7 @@ impl UncarriableWalk<'_> {
                 found
             }
             Some(DeepTag::Match) => {
-                let Some(scrutinee) = kids.first() else {
-                    return None;
-                };
+                let scrutinee = kids.first()?;
                 if let Some(found) = self.expr(scrutinee) {
                     return Some(found);
                 }
@@ -3380,17 +3381,6 @@ impl UncarriableWalk<'_> {
                     }
                 }
                 None
-            }
-            Some(DeepTag::If) => {
-                if !crate::lower::if_expr_is_dag_lowerable(expr) {
-                    return Some(
-                        "an `if` whose branches are not a float tensor selected by a \
-                         matching-shape bool condition, which IR lowering does not \
-                         represent"
-                            .to_string(),
-                    );
-                }
-                kids.iter().find_map(|kid| self.expr(kid))
             }
             _ => kids.iter().find_map(|kid| self.expr(kid)),
         }

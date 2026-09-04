@@ -3515,7 +3515,7 @@ fn expr_type_metadata(expr: &Expr) -> Option<&Expr> {
         .map(|(_, value)| value)
 }
 
-pub(crate) fn if_expr_is_dag_lowerable(expr: &Expr) -> bool {
+fn if_expr_is_dag_lowerable(expr: &Expr) -> bool {
     let Some((DeepTag::If, meta, kids)) = stamped_parts(expr) else {
         return false;
     };
