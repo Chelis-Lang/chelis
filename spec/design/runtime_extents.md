@@ -920,6 +920,46 @@ naming here rather than leaving to the corpus file:
   in different changes, which C2.7 forbids. The `Literal(1)` claim machinery
   they need is already in the class derivation.
 
+- **A CLI-rooted program is not the exported kernel, and three C rows turn on
+  that.** Measured at b2.4 against a current binary. `def main() = f(...)`
+  over literal tensors inlines `f` into the root: every extent becomes a
+  literal, the classes disappear, and a violation is a static type error
+  nobody raises rather than a runtime guard anything can observe. So C-lane
+  guard placement and rendering are proved by DRIVEN rows that compile the
+  exported kernel and call it with runtime inputs
+  (`crates/chelis-backend-c/tests/exec_compile.rs`), and the CLI file keeps
+  only the order controls, which need a caller. This is the same shape as the
+  eval-lane finding above: the lane that can observe the guard is not the lane
+  a `.ch` fixture reaches.
+
+  Three rows do not move with this slice's guards, for reasons upstream of
+  placement.
+
+  - [#1374] and [#1376] stay at baseline and belong to their own issues. In
+    both, the exported kernel does not contain the disagreement: nothing in
+    the body reads the parameter whose extent the result claims, so lowering
+    never passes it, and the checker had already unified the surviving
+    input's binder with the declared result's. What reaches the derivation is
+    a DAG whose claim and source are the same axis. The contract the issues
+    are about - the result matches the CALLER's argument - is erased before
+    any class exists, and restoring it means retaining that parameter or
+    rejecting the call, neither of which is Slice B's.
+  - [#1377]'s `.c` row is `lane_divergent` and splits. The runtime half moves
+    with this slice: the exported kernel traps at entry under [04-NUM-9], and
+    the input preamble's static-dim check, which emitted the identical
+    comparison and aborted first, is narrowed away for exactly that overlap.
+    The rooted half is S2b's static rejection.
+  - [#665]'s `.c` row stays at `ice`. b2.3 routed the interface BINDING
+    consumers through the derived witnesses; `symbolic_occurrences` has a
+    second consumer it did not route, the C emitter's `runtime_dim_sites`,
+    which is the chelis#616 declare-or-guard map deciding where an
+    op-computed extent is DECLARED, and its bucket-4c sweep still panics. The
+    row closes with C4.4's declaration-consumer replacement, not with a guard.
+
+  [#597]'s `.c` row likewise stays at baseline and belongs to S2b, with the
+  three unit-source rows below: it fails at lowering with a RANK mismatch,
+  which is `fallback_expand_type` having no replacement branch.
+
 **Frozen at exit:** the `RuntimeDimClass` shape, canonical class and member
 order, the guard placement realization per lane, the `AxisSource` variant
 set, the one derivation point for both, the removal of string searches for

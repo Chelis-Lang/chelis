@@ -4832,3 +4832,169 @@ fn one_axis_reached_by_two_member_spellings_is_guarded_once() {
     let guard = format!("if (chelis_tensor_shape(inputs[{slot}], 0) != n)");
     assert_eq!(src.matches(&guard).count(), 1, "one axis, one guard: {src}");
 }
+
+/// Two all-interface classes, both mismatching, whose claim names sort in the
+/// OPPOSITE order from their assigned slots. `spec/04-type-system.md` section
+/// 4.7 runs interface guards "at function entry, in declared signature
+/// order", and never "by binding name, hash iteration, or node identity";
+/// the legacy `symbolic_bindings` grouped in a `BTreeMap<String, _>` and
+/// would report `adim` first.
+///
+/// This row is driven rather than CLI-rooted for the reason the block header
+/// above gives, and the CLI form is worse than merely unobservable here:
+/// `def main() = f(...)` over literal tensors inlines `f` into the root, so
+/// every extent becomes a literal, the classes disappear, and the program
+/// runs to completion printing a tensor. That is a static type error nobody
+/// raises, which is S2b's rejection to add, not a guard this slice can place.
+///
+/// EVIDENTIARY STATUS: regression test. On `main` neither class exists.
+#[test]
+fn entry_guards_run_in_assigned_slot_order_not_claim_name_order() {
+    use chelis_ir::dag::{Dag, RiscOp, TensorType};
+    let dim = |name: &str| TensorType {
+        dims: vec![DimInfo::Named(name.into(), None)],
+        precision: Prim::F32,
+    };
+    let mut dag = Dag::new();
+    let zz = dag.add_node(
+        RiscOp::Load { name: "zz".into() },
+        vec![],
+        dim("zdim"),
+        None,
+    );
+    let _aa = dag.add_node(
+        RiscOp::Load { name: "aa".into() },
+        vec![],
+        dim("adim"),
+        None,
+    );
+    let _p = dag.add_node(RiscOp::Load { name: "p".into() }, vec![], dim("zdim"), None);
+    let _q = dag.add_node(RiscOp::Load { name: "q".into() }, vec![], dim("adim"), None);
+    let out = dag.add_node(RiscOp::Neg, vec![zz], dim("zdim"), None);
+    dag.add_root(out);
+
+    let result = codegen_with_options(
+        &dag,
+        "entry_order",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .expect("codegen");
+
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+extern void entry_order(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float zd[2] = {{1.0f, 2.0f}};
+    float ad[2] = {{1.0f, 2.0f}};
+    float pd[3] = {{1.0f, 2.0f, 3.0f}};
+    float qd[1] = {{1.0f}};
+    chelis_tensor* inputs[4] = {{
+        make_view_1d(zd, 2), make_view_1d(ad, 2),
+        make_view_1d(pd, 3), make_view_1d(qd, 1)
+    }};
+    chelis_tensor* outputs[1] = {{NULL}};
+    entry_order(inputs, 4, outputs, 1);
+    printf("NO TRAP\n");
+    return 0;
+}}
+"#
+    );
+
+    let (ok, out) = compile_and_run_kernel_capturing("entry_order", &result.c_source, &harness);
+    assert!(!ok, "both classes mismatch: {out}");
+    assert!(
+        out.contains("extent `zdim`"),
+        "`zdim` occupies the earlier slot and is reported first: {out}"
+    );
+    assert!(
+        !out.contains("adim"),
+        "`adim` sorts first by name but its guard runs second: {out}"
+    );
+    assert!(
+        out.contains("numeric trap: domain in load at int64"),
+        "an all-interface class renders [04-NUM-9]: {out}"
+    );
+}
+
+/// chelis#1377's C row, driven. A declared `tensor[4, f32]` result over an
+/// `expand` sized by a runtime read of an input axis: when that axis is not
+/// 4, section 4.7 owes an [04-NUM-9] trap at entry, and until b2.4 the
+/// legacy ABI static-dim check aborted first with a rendering the atom does
+/// not permit.
+///
+/// The issue's own reproducer is `def main() = f(...)` over literal tensors,
+/// and that half does NOT reach this guard: the root inlines `f`, every
+/// extent becomes a literal, and the kernel allocates `{5}` for a
+/// `tensor[4]` result with no guard and no rejection. The runtime half is
+/// this row; the static half is S2b's rejection, and the two are why the row
+/// is recorded `lane_divergent` rather than `silent_unguarded`.
+///
+/// EVIDENTIARY STATUS: regression test for the rendering and the position -
+/// on `main` the same input produces `input `x` axis 0 expected 4, got 5`
+/// and `abort()`. The positive twin is a disposition lock.
+#[test]
+fn a_literal_claim_over_a_runtime_read_traps_at_entry_on_c() {
+    let dag = expand_reading_own_axis_dag(DimInfo::Named("n".into(), Some(4)), DimInfo::Lit(4));
+    let result = codegen_with_options(
+        &dag,
+        "lit_entry",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .expect("codegen");
+
+    let run = |name: &str, extent: usize| {
+        let values = (0..extent)
+            .map(|i| format!("{}.0f", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let harness = format!(
+            r#"{HARNESS_HEADER}
+extern void lit_entry(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float bd[1] = {{7.0f}};
+    float xd[{extent}] = {{{values}}};
+    int64_t scalar_shape[1] = {{1}};
+    chelis_tensor* b = chelis_tensor_entry_borrow(0, scalar_shape, CHELIS_DTYPE_F32, bd, sizeof(float));
+    chelis_tensor* inputs[2] = {{b, make_view_1d(xd, {extent})}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    lit_entry(inputs, 2, outputs, 1);
+    printf("RAN %lld\n", (long long)chelis_tensor_shape(outputs[0], 0));
+    return 0;
+}}
+"#
+        );
+        compile_and_run_kernel_capturing(name, &result.c_source, &harness)
+    };
+
+    let (ok, out) = run("lit_entry", 5);
+    assert!(!ok, "a declared tensor[4] over a read of 5: {out}");
+    assert!(
+        out.contains("numeric trap: domain in load at int64"),
+        "section 4.7 renders this [04-NUM-9], not the ABI check's abort: {out}"
+    );
+    assert!(
+        out.contains("extent `4`: claimed = 4, x axis 0 = 5"),
+        "with the claim, the axis and each observed value: {out}"
+    );
+    assert!(
+        !out.contains("expected 4, got"),
+        "and the legacy static-dim check no longer preempts it: {out}"
+    );
+
+    let (ok, out) = run("lit_entry_ok", 4);
+    assert!(ok, "the agreeing extent must execute: {out}");
+    assert!(
+        out.contains("RAN 4"),
+        "and produce the declared shape: {out}"
+    );
+}
