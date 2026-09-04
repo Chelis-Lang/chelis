@@ -78,6 +78,16 @@
 //! fn forge() -> HostSiteId { HostSiteId::from_index(7) }
 //! ```
 //!
+//! The live-set result is produced only by ownership verification; callers
+//! cannot forge a smaller bound:
+//!
+//! ```compile_fail
+//! use chelis_ir::ownership::VerifiedLiveSetBound;
+//! fn forge() -> VerifiedLiveSetBound {
+//!     VerifiedLiveSetBound { max_live_heap_owners: 0 }
+//! }
+//! ```
+//!
 //! Generic owner operands expose no binder spelling from which a backend
 //! could reconstruct lifetime or alias state. Name projection is a distinct
 //! capability carried only by the verified operations that bind payloads:
@@ -225,6 +235,7 @@ pub enum VerifiedDagAction<'a> {
 pub struct VerifiedHostSiteView<'a> {
     record: &'a ir::HostSiteRecord,
     program: &'a ir::OwnershipProgram,
+    verification: &'a verify::HostVerification,
 }
 
 /// Closed classification for a verified ownership directive attached to a
@@ -252,12 +263,40 @@ pub struct VerifiedBlockId {
     key: u32,
 }
 
+/// Opaque identity for one verified ownership unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VerifiedUnitId {
+    key: u32,
+}
+
+/// Opaque stable identity for one operation within a verified unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VerifiedOperationId {
+    key: u32,
+}
+
 /// Closed operand disposition exported by the verified boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerifiedOwnershipUse {
     Borrow,
     Move,
     Clone,
+}
+
+/// Closed application class exported by the verified boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifiedApplyKind {
+    Intrinsic,
+    IndirectCall,
+    DirectCall { callee: VerifiedUnitId, tail: bool },
+}
+
+/// Closed edge-local terminal domain. No definition, application, or clone
+/// can be smuggled into a selected control-flow edge.
+#[derive(Debug, Clone, Copy)]
+pub enum VerifiedTerminalView<'a> {
+    Drop(VerifiedOwnerView<'a>),
+    Discard(VerifiedOwnerView<'a>),
 }
 
 /// Read-only metadata for one verified logical owner.
@@ -330,6 +369,7 @@ pub struct VerifiedEdgeView<'a> {
     target: VerifiedBlockId,
     params: Vec<VerifiedOwnerView<'a>>,
     args: Vec<VerifiedOperandView<'a>>,
+    terminals: Vec<VerifiedTerminalView<'a>>,
 }
 
 impl<'a> VerifiedEdgeView<'a> {
@@ -343,6 +383,10 @@ impl<'a> VerifiedEdgeView<'a> {
 
     pub fn args(&self) -> &[VerifiedOperandView<'a>] {
         &self.args
+    }
+
+    pub fn terminals(&self) -> &[VerifiedTerminalView<'a>] {
+        &self.terminals
     }
 }
 
@@ -362,18 +406,22 @@ impl<'a> VerifiedOperandView<'a> {
 #[derive(Debug, Clone)]
 pub enum VerifiedHostOperation<'a> {
     Define {
+        operation: VerifiedOperationId,
         block: VerifiedBlockId,
         dest: VerifiedOwnerView<'a>,
         label: &'a str,
     },
     Apply {
+        operation: VerifiedOperationId,
         block: VerifiedBlockId,
         dest: Option<VerifiedOwnerView<'a>>,
         binding_name: Option<VerifiedBindingName<'a>>,
         label: &'a str,
+        kind: VerifiedApplyKind,
         args: Vec<VerifiedOperandView<'a>>,
     },
     Clone {
+        operation: VerifiedOperationId,
         block: VerifiedBlockId,
         dest: VerifiedOwnerView<'a>,
         source: VerifiedOperandView<'a>,
@@ -381,19 +429,28 @@ pub enum VerifiedHostOperation<'a> {
     /// A non-owning projection of a logical owner into the host payload slot
     /// at this exact site.
     Project {
+        operation: VerifiedOperationId,
         block: VerifiedBlockId,
         source: VerifiedOperandView<'a>,
     },
     LoopItem {
+        operation: VerifiedOperationId,
         block: VerifiedBlockId,
         dest: VerifiedOwnerView<'a>,
         list: VerifiedOperandView<'a>,
     },
     Drop {
+        operation: VerifiedOperationId,
         block: VerifiedBlockId,
         owner: VerifiedOperandView<'a>,
     },
+    Discard {
+        operation: VerifiedOperationId,
+        block: VerifiedBlockId,
+        owner: VerifiedOwnerView<'a>,
+    },
     RootConsume {
+        operation: VerifiedOperationId,
         block: VerifiedBlockId,
         root: &'a str,
         owner: VerifiedOperandView<'a>,
@@ -440,7 +497,7 @@ pub enum VerifiedHostAction<'a> {
     Terminator(VerifiedHostTerminator<'a>),
     ControlEdge {
         source: VerifiedBlockId,
-        target: VerifiedBlockId,
+        edge: VerifiedEdgeView<'a>,
     },
     ManifestRoot {
         manifest_index: Option<usize>,
@@ -468,7 +525,7 @@ impl<'a> VerifiedHostSiteView<'a> {
 
     pub fn actions(self) -> impl ExactSizeIterator<Item = VerifiedHostAction<'a>> + 'a {
         self.record.actions.iter().map(move |action| {
-            verified_host_action(self.program, action)
+            verified_host_action(self.program, self.verification, action)
                 .expect("verified host site action references checked ownership IR")
         })
     }
@@ -524,11 +581,24 @@ fn verified_edge<'a>(
             .iter()
             .map(|operand| verified_operand(program, unit, operand))
             .collect::<Option<Vec<_>>>()?,
+        terminals: edge
+            .terminals
+            .iter()
+            .map(|terminal| match *terminal {
+                ir::Terminal::Drop(owner) => {
+                    verified_owner(program, unit, owner).map(VerifiedTerminalView::Drop)
+                }
+                ir::Terminal::Discard(owner) => {
+                    verified_owner(program, unit, owner).map(VerifiedTerminalView::Discard)
+                }
+            })
+            .collect::<Option<Vec<_>>>()?,
     })
 }
 
 fn verified_host_action<'a>(
     program: &'a ir::OwnershipProgram,
+    verification: &'a verify::HostVerification,
     action: &'a ir::HostSiteAction,
 ) -> Option<VerifiedHostAction<'a>> {
     let block_id = |block: ir::BlockId| VerifiedBlockId { key: block.0 };
@@ -544,26 +614,42 @@ fn verified_host_action<'a>(
                 .blocks
                 .get(block.0 as usize)?
                 .ops
-                .get(operation)?;
+                .iter()
+                .find(|candidate| candidate.id == operation)?;
             let block = block_id(block);
-            Some(VerifiedHostAction::Operation(match op {
+            let operation_id = VerifiedOperationId { key: op.id.0 };
+            Some(VerifiedHostAction::Operation(match &op.kind {
                 ir::Op::Define { dest, label } => VerifiedHostOperation::Define {
+                    operation: operation_id,
                     block,
                     dest: verified_owner(program, unit, *dest)?,
                     label,
                 },
                 ir::Op::Apply {
-                    dest, label, args, ..
+                    dest,
+                    label,
+                    kind,
+                    args,
+                    ..
                 } => {
                     let binding_name = dest
                         .and_then(|owner| program.units.get(unit)?.owners.get(&owner))
                         .and_then(|info| info.names.first())
                         .map(|name| VerifiedBindingName { name });
                     VerifiedHostOperation::Apply {
+                        operation: operation_id,
                         block,
                         dest: dest.and_then(|owner| verified_owner(program, unit, owner)),
                         binding_name,
                         label,
+                        kind: match kind {
+                            ir::ApplyKind::Intrinsic => VerifiedApplyKind::Intrinsic,
+                            ir::ApplyKind::IndirectCall => VerifiedApplyKind::IndirectCall,
+                            ir::ApplyKind::DirectCall { callee } => VerifiedApplyKind::DirectCall {
+                                callee: VerifiedUnitId { key: callee.0 },
+                                tail: verification.is_tail_call(program.units.get(unit)?.id, op.id),
+                            },
+                        },
                         args: args
                             .iter()
                             .map(|operand| verified_operand(program, unit, operand))
@@ -571,24 +657,34 @@ fn verified_host_action<'a>(
                     }
                 }
                 ir::Op::Copy { dest, source } => VerifiedHostOperation::Clone {
+                    operation: operation_id,
                     block,
                     dest: verified_owner(program, unit, *dest)?,
                     source: verified_operand(program, unit, source)?,
                 },
                 ir::Op::Project { source } => VerifiedHostOperation::Project {
+                    operation: operation_id,
                     block,
                     source: verified_operand(program, unit, source)?,
                 },
                 ir::Op::LoopItem { dest, list } => VerifiedHostOperation::LoopItem {
+                    operation: operation_id,
                     block,
                     dest: verified_owner(program, unit, *dest)?,
                     list: verified_operand(program, unit, list)?,
                 },
                 ir::Op::Drop { owner } => VerifiedHostOperation::Drop {
+                    operation: operation_id,
                     block,
                     owner: verified_operand(program, unit, owner)?,
                 },
+                ir::Op::Discard { owner } => VerifiedHostOperation::Discard {
+                    operation: operation_id,
+                    block,
+                    owner: verified_owner(program, unit, *owner)?,
+                },
                 ir::Op::RootConsume { root, owner } => VerifiedHostOperation::RootConsume {
+                    operation: operation_id,
                     block,
                     root,
                     owner: verified_operand(program, unit, owner)?,
@@ -643,10 +739,42 @@ fn verified_host_action<'a>(
                 ir::Terminator::Exit => VerifiedHostTerminator::Exit { block },
             }))
         }
-        ir::HostSiteAction::ControlEdge { source, target, .. } => {
+        ir::HostSiteAction::ControlEdge {
+            unit,
+            source,
+            target,
+        } => {
+            let terminator = &program
+                .units
+                .get(unit)?
+                .blocks
+                .iter()
+                .find(|block| block.id == source)?
+                .terminator;
+            let edge = match terminator {
+                ir::Terminator::Jump(edge) if edge.target == target => edge,
+                ir::Terminator::Branch {
+                    then_edge,
+                    else_edge,
+                    ..
+                }
+                | ir::Terminator::Loop {
+                    body_edge: then_edge,
+                    exit_edge: else_edge,
+                    ..
+                } => [then_edge, else_edge]
+                    .into_iter()
+                    .find(|edge| edge.target == target)?,
+                ir::Terminator::Match { arms, .. } => {
+                    arms.iter().find(|edge| edge.target == target)?
+                }
+                ir::Terminator::Return { .. } | ir::Terminator::Jump(_) | ir::Terminator::Exit => {
+                    return None;
+                }
+            };
             Some(VerifiedHostAction::ControlEdge {
                 source: block_id(source),
-                target: block_id(target),
+                edge: verified_edge(program, unit, edge)?,
             })
         }
         ir::HostSiteAction::Root {
@@ -825,7 +953,11 @@ impl<'a> VerifiedHostFunctionView<'a> {
             .records
             .iter()
             .filter(move |record| record.unit == unit)
-            .map(move |record| VerifiedHostSiteView { record, program })
+            .map(move |record| VerifiedHostSiteView {
+                record,
+                program,
+                verification: self.emission.verification,
+            })
     }
 }
 
@@ -835,6 +967,7 @@ impl<'a> VerifiedHostFunctionView<'a> {
 pub struct VerifiedHostEmission<'a> {
     payload: &'a HostEmissionPayload,
     program: &'a ir::OwnershipProgram,
+    verification: &'a verify::HostVerification,
     sites: &'a ir::HostSiteMap,
     nested_dags: &'a [NestedDagProof],
 }
@@ -894,7 +1027,11 @@ impl<'a> VerifiedHostEmission<'a> {
         self.sites
             .records
             .iter()
-            .map(move |record| VerifiedHostSiteView { record, program })
+            .map(move |record| VerifiedHostSiteView {
+                record,
+                program,
+                verification: self.verification,
+            })
     }
 
     pub fn root_sites(self) -> impl Iterator<Item = VerifiedHostSiteView<'a>> + 'a {
@@ -903,7 +1040,11 @@ impl<'a> VerifiedHostEmission<'a> {
             .records
             .iter()
             .filter(|record| record.unit == 0)
-            .map(move |record| VerifiedHostSiteView { record, program })
+            .map(move |record| VerifiedHostSiteView {
+                record,
+                program,
+                verification: self.verification,
+            })
     }
 }
 
@@ -914,6 +1055,21 @@ impl<'a> VerifiedHostEmission<'a> {
 pub enum PayloadKind {
     Host,
     Dag,
+}
+
+/// Sealed verifier-derived live-set summary. Milestone 1 records the maximum
+/// simultaneous heap-owner count; the Phase 3 scheduler extends this proof to
+/// exact byte costs and recursive call-graph composition before the oracle can
+/// consume it.
+#[derive(Debug)]
+pub struct VerifiedLiveSetBound {
+    max_live_heap_owners: usize,
+}
+
+impl VerifiedLiveSetBound {
+    pub fn max_live_heap_owners(&self) -> usize {
+        self.max_live_heap_owners
+    }
 }
 
 mod sealed {
@@ -981,7 +1137,13 @@ pub struct OwnershipProgram<P: EmissionPayload> {
 
 /// Verified host or DAG payload. Only [`verify_ownership`] constructs it.
 #[derive(Debug)]
-pub struct VerifiedOwnershipProgram<P: EmissionPayload>(OwnershipProgram<P>);
+pub struct VerifiedOwnershipProgram<P: EmissionPayload>(OwnershipProgram<P>, VerificationProof);
+
+#[derive(Debug)]
+enum VerificationProof {
+    Host(verify::HostVerification),
+    Dag,
+}
 
 pub type HostOwnershipProgram = OwnershipProgram<HostEmissionPayload>;
 pub type DagOwnershipProgram = OwnershipProgram<DagEmissionPayload>;
@@ -1031,7 +1193,7 @@ pub fn lower_dag_ownership(dag: Dag) -> Result<DagOwnershipProgram, OwnershipErr
 pub fn verify_ownership<P: EmissionPayload>(
     program: OwnershipProgram<P>,
 ) -> Result<VerifiedOwnershipProgram<P>, OwnershipError> {
-    match (&program.proof, P::KIND) {
+    let verification = match (&program.proof, P::KIND) {
         (
             OwnershipProof::Host {
                 program: ir_program,
@@ -1040,15 +1202,17 @@ pub fn verify_ownership<P: EmissionPayload>(
             },
             PayloadKind::Host,
         ) => {
-            verify::verify(ir_program)?;
+            let verification = verify::verify(ir_program)?;
             let payload = host_payload(&program)?;
             verify::verify_host_sites(&payload.program, &payload.manifest, ir_program, sites)?;
             verify_manifest_sinks(payload, ir_program, sites)?;
             verify_nested_dags(&program, nested_dags)?;
+            VerificationProof::Host(verification)
         }
         (OwnershipProof::Dag(plan), PayloadKind::Dag) => {
             let dag = dag_payload(&program)?;
             plan.verify(dag)?;
+            VerificationProof::Dag
         }
         _ => {
             return Err(OwnershipError::LoweringInvariant {
@@ -1056,8 +1220,8 @@ pub fn verify_ownership<P: EmissionPayload>(
                 detail: "payload specialization does not match its private proof".to_string(),
             });
         }
-    }
-    Ok(VerifiedOwnershipProgram(program))
+    };
+    Ok(VerifiedOwnershipProgram(program, verification))
 }
 
 fn verify_manifest_sinks(
@@ -1097,7 +1261,8 @@ fn verify_manifest_sinks(
                 .units
                 .get(unit)
                 .and_then(|unit| unit.blocks.iter().find(|candidate| candidate.id == block))
-                .and_then(|block| block.ops.get(operation)),
+                .and_then(|block| block.ops.iter().find(|candidate| candidate.id == operation))
+                .map(|operation| &operation.kind),
             _ => None,
         })
         .filter_map(|op| match op {
@@ -1130,12 +1295,23 @@ impl VerifiedHostProgram {
         let payload = (&self.0.payload as &dyn std::any::Any)
             .downcast_ref::<HostEmissionPayload>()
             .expect("sealed host payload specialization");
+        let VerificationProof::Host(verification) = &self.1 else {
+            unreachable!("sealed host verification specialization")
+        };
         VerifiedHostEmission {
             payload,
             program,
+            verification,
             sites,
             nested_dags,
         }
+    }
+
+    pub fn live_set_bound(&self) -> &VerifiedLiveSetBound {
+        let VerificationProof::Host(verification) = &self.1 else {
+            unreachable!("sealed host verification specialization")
+        };
+        verification.live_set_bound()
     }
 
     pub fn render(&self) -> String {

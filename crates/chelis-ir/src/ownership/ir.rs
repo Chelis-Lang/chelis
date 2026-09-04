@@ -10,6 +10,17 @@ pub(crate) struct OwnerId(pub(crate) u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct BlockId(pub(crate) u32);
 
+/// Stable identity for one ownership unit. Unlike the diagnostic unit name,
+/// this identity is assigned structurally and is the only admissible direct-
+/// call target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct UnitId(pub(crate) u32);
+
+/// Stable identity for one operation within an ownership unit. Scheduling may
+/// reorder operations without invalidating host-site associations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct OpId(pub(crate) u32);
+
 /// Opaque identity for one structurally selected host-emission site. The
 /// numeric key is private: downstream code can compare identities but cannot
 /// manufacture a carrier from an integer or derive ownership from spelling.
@@ -127,6 +138,15 @@ pub(crate) struct OperationSchema {
     pub(crate) result: Option<ValueClass>,
 }
 
+/// Closed semantic class for an application. A free-form diagnostic label
+/// cannot create a direct call or select its callee.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApplyKind {
+    Intrinsic,
+    IndirectCall,
+    DirectCall { callee: UnitId },
+}
+
 impl OperationSchema {
     pub(crate) fn new(operands: Vec<OwnershipUse>, result: Option<ValueClass>) -> Self {
         Self { operands, result }
@@ -144,6 +164,7 @@ pub(crate) enum Op {
     Apply {
         dest: Option<OwnerId>,
         label: String,
+        kind: ApplyKind,
         schema: OperationSchema,
         args: Vec<Operand>,
     },
@@ -165,6 +186,12 @@ pub(crate) enum Op {
     Drop {
         owner: Operand,
     },
+    /// A typed terminal for an owned nonheap identity. This is deliberately
+    /// distinct from Apply: diagnostic spelling cannot turn an arbitrary
+    /// operation into a discard.
+    Discard {
+        owner: OwnerId,
+    },
     RootConsume {
         root: String,
         owner: Operand,
@@ -172,9 +199,35 @@ pub(crate) enum Op {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Operation {
+    pub(crate) id: OpId,
+    pub(crate) kind: Op,
+}
+
+/// The only operations admissible on a selected control-flow edge.
+#[allow(
+    dead_code,
+    reason = "the Phase 3 scheduler populates typed edge terminals in the next milestone"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Terminal {
+    Drop(OwnerId),
+    Discard(OwnerId),
+}
+
+impl Terminal {
+    pub(crate) fn owner(self) -> OwnerId {
+        match self {
+            Self::Drop(owner) | Self::Discard(owner) => owner,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Edge {
     pub(crate) target: BlockId,
     pub(crate) args: Vec<Operand>,
+    pub(crate) terminals: Vec<Terminal>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -209,7 +262,7 @@ pub(crate) enum Terminator {
 pub(crate) struct Block {
     pub(crate) id: BlockId,
     pub(crate) params: Vec<BlockParam>,
-    pub(crate) ops: Vec<Op>,
+    pub(crate) ops: Vec<Operation>,
     pub(crate) terminator: Terminator,
 }
 
@@ -221,8 +274,10 @@ pub(crate) enum UnitKind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Unit {
+    pub(crate) id: UnitId,
     pub(crate) name: String,
     pub(crate) kind: UnitKind,
+    pub(crate) function_schema: Option<OperationSchema>,
     pub(crate) entry: BlockId,
     pub(crate) blocks: Vec<Block>,
     pub(crate) owners: BTreeMap<OwnerId, OwnerInfo>,
@@ -251,7 +306,7 @@ pub(crate) enum HostSiteAction {
     Operation {
         unit: usize,
         block: BlockId,
-        operation: usize,
+        operation: OpId,
     },
     Terminator {
         unit: usize,

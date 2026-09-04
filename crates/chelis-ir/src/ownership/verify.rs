@@ -11,14 +11,39 @@ use crate::host::{
 use super::classify::{classify, render_type};
 use super::error::OwnershipError;
 use super::ir::{
-    Block, BlockId, Edge, HostSiteAction, HostSiteMap, Op, Operand, OwnerId, OwnerOrigin,
-    OwnershipProgram, OwnershipUse, ParamMode, Terminator, Unit, UnitKind,
+    ApplyKind, Block, BlockId, Edge, HostSiteAction, HostSiteMap, Op, OpId, Operand, OwnerId,
+    OwnerOrigin, OwnershipProgram, OwnershipUse, ParamMode, Terminal, Terminator, Unit, UnitId,
+    UnitKind,
 };
 
-pub(super) fn verify(program: &OwnershipProgram) -> Result<(), OwnershipError> {
+#[derive(Debug)]
+pub(super) struct HostVerification {
+    tail_calls: BTreeSet<(UnitId, OpId)>,
+    live_set_bound: super::VerifiedLiveSetBound,
+}
+
+impl HostVerification {
+    pub(super) fn is_tail_call(&self, unit: UnitId, operation: OpId) -> bool {
+        self.tail_calls.contains(&(unit, operation))
+    }
+
+    pub(super) fn live_set_bound(&self) -> &super::VerifiedLiveSetBound {
+        &self.live_set_bound
+    }
+}
+
+pub(super) fn verify(program: &OwnershipProgram) -> Result<HostVerification, OwnershipError> {
     let mut names = BTreeSet::new();
+    let mut units = BTreeMap::new();
     let mut roots = 0;
     for unit in &program.units {
+        if units.insert(unit.id, unit).is_some() {
+            return Err(OwnershipError::DuplicateIdentity {
+                unit: unit.name.clone(),
+                kind: "unit",
+                id: unit.id.0,
+            });
+        }
         if !names.insert(&unit.name) {
             return Err(OwnershipError::DuplicateIdentity {
                 unit: unit.name.clone(),
@@ -27,13 +52,21 @@ pub(super) fn verify(program: &OwnershipProgram) -> Result<(), OwnershipError> {
             });
         }
         roots += usize::from(unit.kind == UnitKind::Roots);
-        verify_unit(unit)?;
     }
-    if roots == 1 {
-        Ok(())
-    } else {
-        Err(OwnershipError::RootUnitCount { actual: roots })
+    let mut max_live_heap_owners = 0;
+    for unit in &program.units {
+        max_live_heap_owners = max_live_heap_owners.max(verify_unit(unit, &units)?);
     }
+    if roots != 1 {
+        return Err(OwnershipError::RootUnitCount { actual: roots });
+    }
+    let tail_calls = program.units.iter().flat_map(classify_tail_calls).collect();
+    Ok(HostVerification {
+        tail_calls,
+        live_set_bound: super::VerifiedLiveSetBound {
+            max_live_heap_owners,
+        },
+    })
 }
 
 /// Prove that the exact payload-site universe and the ownership-directive
@@ -147,8 +180,12 @@ pub(super) fn verify_host_actions(
                     else {
                         return Err(site_error(index, "operation names missing block"));
                     };
-                    if block_ref.ops.get(operation).is_none() {
-                        return Err(site_error(index, "operation index is outside its block"));
+                    if !block_ref
+                        .ops
+                        .iter()
+                        .any(|candidate| candidate.id == operation)
+                    {
+                        return Err(site_error(index, "operation identity is outside its block"));
                     }
                     if !operations.insert((unit, block, operation)) {
                         return Err(site_error(index, "operation belongs to two sites"));
@@ -252,7 +289,10 @@ pub(super) fn verify_host_actions(
         .enumerate()
         .flat_map(|(unit, value)| {
             value.blocks.iter().flat_map(move |block| {
-                (0..block.ops.len()).map(move |operation| (unit, block.id, operation))
+                block
+                    .ops
+                    .iter()
+                    .map(move |operation| (unit, block.id, operation.id))
             })
         })
         .collect::<BTreeSet<_>>();
@@ -304,7 +344,8 @@ pub(super) fn verify_host_actions(
                     .units
                     .get(unit)
                     .and_then(|unit| unit.blocks.iter().find(|candidate| candidate.id == block))
-                    .and_then(|block| block.ops.get(operation)),
+                    .and_then(|block| block.ops.iter().find(|candidate| candidate.id == operation))
+                    .map(|operation| &operation.kind),
                 _ => None,
             })
             .filter_map(|op| match op {
@@ -337,7 +378,8 @@ pub(super) fn verify_host_actions(
                     .units
                     .get(unit)
                     .and_then(|unit| unit.blocks.iter().find(|candidate| candidate.id == block))
-                    .and_then(|block| block.ops.get(operation)),
+                    .and_then(|block| block.ops.iter().find(|candidate| candidate.id == operation))
+                    .map(|operation| &operation.kind),
                 _ => None,
             })
             .filter_map(|op| match op {
@@ -791,12 +833,22 @@ fn independent_display_root(root: &RootEntry) -> HostDisplayRoot {
     }
 }
 
-fn verify_unit(unit: &Unit) -> Result<(), OwnershipError> {
+fn verify_unit(unit: &Unit, units: &BTreeMap<UnitId, &Unit>) -> Result<usize, OwnershipError> {
+    if !matches!(
+        (unit.kind, &unit.function_schema),
+        (UnitKind::Roots, None) | (UnitKind::Function, Some(_))
+    ) {
+        return Err(OwnershipError::LoweringInvariant {
+            unit: unit.name.clone(),
+            detail: "ownership unit kind and function signature disagree".to_string(),
+        });
+    }
     let blocks = blocks(unit)?;
     if !blocks.contains_key(&unit.entry) {
         return Err(missing_block(unit, unit.entry));
     }
     let definitions = definitions(unit)?;
+    check_operation_ids(unit)?;
     for owner in unit.owners.keys() {
         if !definitions.contains(owner) {
             return Err(incomplete(unit, *owner, "definition"));
@@ -832,12 +884,22 @@ fn verify_unit(unit: &Unit) -> Result<(), OwnershipError> {
     let initial: BTreeSet<_> = entry.params.iter().map(|p| p.owner).collect();
     let mut incoming = BTreeMap::from([(unit.entry, initial)]);
     let mut queue = VecDeque::from([unit.entry]);
+    let mut max_live_heap_owners = 0;
     while let Some(id) = queue.pop_front() {
         let block = blocks[&id];
         let mut live = incoming[&id].clone();
         check_borrows(unit, block.id, &live)?;
-        for op in &block.ops {
-            verify_op(unit, block, op, &definitions, &mut live)?;
+        max_live_heap_owners = max_live_heap_owners.max(live_heap_count(unit, &live));
+        for operation in &block.ops {
+            if let Some(dest) = destination(&operation.kind)
+                && unit.owners[&dest].class.is_heap()
+            {
+                // Account for the transient point after result allocation and
+                // before moved inputs receive their post-operation terminal.
+                max_live_heap_owners = max_live_heap_owners.max(live_heap_count(unit, &live) + 1);
+            }
+            verify_op(unit, block, &operation.kind, &definitions, units, &mut live)?;
+            max_live_heap_owners = max_live_heap_owners.max(live_heap_count(unit, &live));
         }
         verify_terminator(
             unit,
@@ -849,7 +911,29 @@ fn verify_unit(unit: &Unit) -> Result<(), OwnershipError> {
             &mut queue,
         )?;
     }
+    Ok(max_live_heap_owners)
+}
+
+fn check_operation_ids(unit: &Unit) -> Result<(), OwnershipError> {
+    let mut operations = BTreeSet::new();
+    for operation in unit.blocks.iter().flat_map(|block| &block.ops) {
+        if !operations.insert(operation.id) {
+            return Err(OwnershipError::DuplicateIdentity {
+                unit: unit.name.clone(),
+                kind: "operation",
+                id: operation.id.0,
+            });
+        }
+    }
     Ok(())
+}
+
+fn live_heap_count(unit: &Unit, live: &BTreeSet<OwnerId>) -> usize {
+    live.iter()
+        .filter(|owner| {
+            unit.owners[owner].origin == OwnerOrigin::Owned && unit.owners[owner].class.is_heap()
+        })
+        .count()
 }
 
 fn blocks(unit: &Unit) -> Result<BTreeMap<BlockId, &Block>, OwnershipError> {
@@ -869,12 +953,12 @@ fn blocks(unit: &Unit) -> Result<BTreeMap<BlockId, &Block>, OwnershipError> {
 fn definitions(unit: &Unit) -> Result<BTreeSet<OwnerId>, OwnershipError> {
     let mut result = BTreeSet::new();
     for block in &unit.blocks {
-        for owner in block
-            .params
-            .iter()
-            .map(|p| p.owner)
-            .chain(block.ops.iter().filter_map(destination))
-        {
+        for owner in block.params.iter().map(|p| p.owner).chain(
+            block
+                .ops
+                .iter()
+                .filter_map(|operation| destination(&operation.kind)),
+        ) {
             if !result.insert(owner) {
                 return Err(OwnershipError::DuplicateIdentity {
                     unit: unit.name.clone(),
@@ -891,7 +975,156 @@ fn destination(op: &Op) -> Option<OwnerId> {
     match op {
         Op::Define { dest, .. } | Op::Copy { dest, .. } | Op::LoopItem { dest, .. } => Some(*dest),
         Op::Apply { dest, .. } => *dest,
-        Op::Project { .. } | Op::Drop { .. } | Op::RootConsume { .. } => None,
+        Op::Project { .. } | Op::Drop { .. } | Op::Discard { .. } | Op::RootConsume { .. } => None,
+    }
+}
+
+fn classify_tail_calls(unit: &Unit) -> Vec<(UnitId, OpId)> {
+    if unit.kind != UnitKind::Function {
+        return Vec::new();
+    }
+    unit.blocks
+        .iter()
+        .flat_map(|block| &block.ops)
+        .filter_map(|operation| match &operation.kind {
+            Op::Apply {
+                dest: Some(owner),
+                kind: ApplyKind::DirectCall { .. },
+                ..
+            } if owner_reaches_return(unit, *owner, &mut BTreeSet::new()) => {
+                Some((unit.id, operation.id))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Recognize only ownership-transparent result chains. This is deliberately
+/// independent of the Apply label and of lowering's lexical `tail` hint.
+fn owner_reaches_return(unit: &Unit, owner: OwnerId, visiting: &mut BTreeSet<OwnerId>) -> bool {
+    if !visiting.insert(owner) {
+        return false;
+    }
+    let mut reaches_terminal = false;
+    for block in &unit.blocks {
+        for operation in &block.ops {
+            match &operation.kind {
+                Op::Project { source } if source.owner == owner => {
+                    if source.use_ != OwnershipUse::Borrow {
+                        visiting.remove(&owner);
+                        return false;
+                    }
+                }
+                Op::Apply { args, .. } if args.iter().any(|arg| arg.owner == owner) => {
+                    visiting.remove(&owner);
+                    return false;
+                }
+                Op::Copy { source, .. } if source.owner == owner => {
+                    visiting.remove(&owner);
+                    return false;
+                }
+                Op::LoopItem { list, .. } if list.owner == owner => {
+                    visiting.remove(&owner);
+                    return false;
+                }
+                Op::Drop { owner: operand } if operand.owner == owner => {
+                    visiting.remove(&owner);
+                    return false;
+                }
+                Op::Discard { owner: discarded } if *discarded == owner => {
+                    visiting.remove(&owner);
+                    return false;
+                }
+                Op::RootConsume { owner: operand, .. } if operand.owner == owner => {
+                    visiting.remove(&owner);
+                    return false;
+                }
+                Op::Define { .. }
+                | Op::Apply { .. }
+                | Op::Copy { .. }
+                | Op::Project { .. }
+                | Op::LoopItem { .. }
+                | Op::Drop { .. }
+                | Op::Discard { .. }
+                | Op::RootConsume { .. } => {}
+            }
+        }
+        match &block.terminator {
+            Terminator::Return { result } if result.owner == owner => {
+                if result.use_ != OwnershipUse::Move {
+                    visiting.remove(&owner);
+                    return false;
+                }
+                reaches_terminal = true;
+            }
+            Terminator::Branch { condition, .. } if condition.owner == owner => {
+                visiting.remove(&owner);
+                return false;
+            }
+            Terminator::Match { scrutinee, .. } if scrutinee.owner == owner => {
+                visiting.remove(&owner);
+                return false;
+            }
+            Terminator::Loop { list, .. } if list.owner == owner => {
+                visiting.remove(&owner);
+                return false;
+            }
+            Terminator::Return { .. }
+            | Terminator::Jump(_)
+            | Terminator::Branch { .. }
+            | Terminator::Match { .. }
+            | Terminator::Loop { .. }
+            | Terminator::Exit => {}
+        }
+        for edge in terminator_edges(&block.terminator) {
+            if edge
+                .terminals
+                .iter()
+                .any(|terminal| terminal.owner() == owner)
+            {
+                visiting.remove(&owner);
+                return false;
+            }
+            for (arg, param) in edge.args.iter().zip(
+                unit.blocks
+                    .iter()
+                    .find(|candidate| candidate.id == edge.target)
+                    .into_iter()
+                    .flat_map(|target| &target.params),
+            ) {
+                if arg.owner != owner {
+                    continue;
+                }
+                if arg.use_ != OwnershipUse::Move
+                    || param.mode != ParamMode::Owned
+                    || !owner_reaches_return(unit, param.owner, visiting)
+                {
+                    visiting.remove(&owner);
+                    return false;
+                }
+                reaches_terminal = true;
+            }
+        }
+    }
+    visiting.remove(&owner);
+    reaches_terminal
+}
+
+fn terminator_edges(terminator: &Terminator) -> Vec<&Edge> {
+    match terminator {
+        Terminator::Return { .. } | Terminator::Exit => Vec::new(),
+        Terminator::Jump(edge) => vec![edge],
+        Terminator::Branch {
+            then_edge,
+            else_edge,
+            ..
+        }
+        | Terminator::Loop {
+            body_edge: then_edge,
+            exit_edge: else_edge,
+            ..
+        } => vec![then_edge, else_edge],
+        Terminator::Match { arms, .. } => arms.iter().collect(),
     }
 }
 
@@ -965,6 +1198,7 @@ fn verify_op(
     block: &Block,
     op: &Op,
     definitions: &BTreeSet<OwnerId>,
+    units: &BTreeMap<UnitId, &Unit>,
     live: &mut BTreeSet<OwnerId>,
 ) -> Result<(), OwnershipError> {
     match op {
@@ -972,9 +1206,33 @@ fn verify_op(
         Op::Apply {
             dest,
             label,
+            kind,
             schema,
             args,
         } => {
+            if let ApplyKind::DirectCall { callee } = kind {
+                match units.get(callee) {
+                    None => {
+                        return Err(OwnershipError::MissingUnit {
+                            caller: unit.name.clone(),
+                            unit: callee.0,
+                        });
+                    }
+                    Some(target) if target.kind != UnitKind::Function => {
+                        return Err(OwnershipError::NonFunctionCallee {
+                            caller: unit.name.clone(),
+                            unit: callee.0,
+                        });
+                    }
+                    Some(target) if target.function_schema.as_ref() != Some(schema) => {
+                        return Err(OwnershipError::DirectCallSchema {
+                            caller: unit.name.clone(),
+                            unit: callee.0,
+                        });
+                    }
+                    Some(_) => {}
+                }
+            }
             if args.len() != schema.operands.len() {
                 return Err(OwnershipError::OperationArity {
                     unit: unit.name.clone(),
@@ -1064,6 +1322,26 @@ fn verify_op(
                 unit,
                 block.id,
                 owner,
+                Some(OwnershipUse::Move),
+                definitions,
+                live,
+            )
+        }
+        Op::Discard { owner } => {
+            if !definitions.contains(owner) {
+                return Err(incomplete(unit, *owner, "definition"));
+            }
+            if unit.owners[owner].class.is_heap() {
+                return Err(OwnershipError::HeapDiscard {
+                    unit: unit.name.clone(),
+                    owner: owner.0,
+                    block: block.id.0,
+                });
+            }
+            use_operand(
+                unit,
+                block.id,
+                &Operand::move_(*owner),
                 Some(OwnershipUse::Move),
                 definitions,
                 live,
@@ -1290,6 +1568,9 @@ fn transfer(
             next.remove(&param.owner);
         }
     }
+    for terminal in &edge.terminals {
+        verify_edge_terminal(unit, block.id, *terminal, definitions, &mut next)?;
+    }
     next.extend(target.params.iter().map(|p| p.owner));
     check_borrows(unit, target.id, &next)?;
     if let Some(expected) = incoming.get(&target.id) {
@@ -1306,6 +1587,44 @@ fn transfer(
         queue.push_back(target.id);
     }
     Ok(())
+}
+
+fn verify_edge_terminal(
+    unit: &Unit,
+    block: BlockId,
+    terminal: Terminal,
+    definitions: &BTreeSet<OwnerId>,
+    live: &mut BTreeSet<OwnerId>,
+) -> Result<(), OwnershipError> {
+    let owner = terminal.owner();
+    if !definitions.contains(&owner) {
+        return Err(incomplete(unit, owner, "definition"));
+    }
+    match terminal {
+        Terminal::Drop(_) if !unit.owners[&owner].class.is_heap() => {
+            return Err(OwnershipError::NonHeapDrop {
+                unit: unit.name.clone(),
+                owner: owner.0,
+                block: block.0,
+            });
+        }
+        Terminal::Discard(_) if unit.owners[&owner].class.is_heap() => {
+            return Err(OwnershipError::HeapDiscard {
+                unit: unit.name.clone(),
+                owner: owner.0,
+                block: block.0,
+            });
+        }
+        Terminal::Drop(_) | Terminal::Discard(_) => {}
+    }
+    use_operand(
+        unit,
+        block,
+        &Operand::move_(owner),
+        Some(OwnershipUse::Move),
+        definitions,
+        live,
+    )
 }
 
 fn check_mixed_uses(

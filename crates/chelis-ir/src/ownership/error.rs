@@ -37,6 +37,12 @@ pub enum OwnershipError {
     },
     #[error("missing block b{block} in `{unit}`")]
     MissingBlock { unit: String, block: u32 },
+    #[error("direct call in `{caller}` names missing ownership unit u{unit}")]
+    MissingUnit { caller: String, unit: u32 },
+    #[error("direct call in `{caller}` targets non-function ownership unit u{unit}")]
+    NonFunctionCallee { caller: String, unit: u32 },
+    #[error("direct call in `{caller}` does not match ownership signature of u{unit}")]
+    DirectCallSchema { caller: String, unit: u32 },
     #[error("unreachable block b{block} in `{unit}`")]
     UnreachableBlock { unit: String, block: u32 },
     #[error("owner %{owner} in `{unit}` has no {missing}")]
@@ -121,6 +127,12 @@ pub enum OwnershipError {
     },
     #[error("nonheap owner %{owner} is dropped in `{unit}` b{block}")]
     NonHeapDrop {
+        unit: String,
+        owner: u32,
+        block: u32,
+    },
+    #[error("heap owner %{owner} is discarded in `{unit}` b{block}")]
+    HeapDiscard {
         unit: String,
         owner: u32,
         block: u32,

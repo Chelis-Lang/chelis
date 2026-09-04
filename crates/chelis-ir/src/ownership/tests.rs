@@ -9,9 +9,10 @@ use chelis_types::types::Prim;
 use super::OwnershipError;
 use super::classify::{HeapKind, NonHeapKind, Placement, ValueClass, classify};
 use super::ir::{
-    Block, BlockId, BlockParam, Edge, HostSiteAction, HostSiteId, HostSiteKind, HostSiteMap,
-    HostSiteRecord, Op, Operand, OperationSchema, OwnerId, OwnerInfo, OwnerOrigin,
-    OwnershipProgram as RawProgram, OwnershipUse, ParamMode, Terminator, Unit, UnitKind,
+    ApplyKind, Block, BlockId, BlockParam, Edge, HostSiteAction, HostSiteId, HostSiteKind,
+    HostSiteMap, HostSiteRecord, Op, OpId, Operand, Operation, OperationSchema, OwnerId, OwnerInfo,
+    OwnerOrigin, OwnershipProgram as RawProgram, OwnershipUse, ParamMode, Terminal, Terminator,
+    Unit, UnitId, UnitKind,
 };
 use super::{DagDirective, DagOwnershipPlan};
 use crate::host::{
@@ -40,7 +41,14 @@ fn block(id: u32, params: Vec<BlockParam>, ops: Vec<Op>, terminator: Terminator)
     Block {
         id: BlockId(id),
         params,
-        ops,
+        ops: ops
+            .into_iter()
+            .enumerate()
+            .map(|(index, kind)| Operation {
+                id: OpId((id << 16) | u32::try_from(index).unwrap()),
+                kind,
+            })
+            .collect(),
         terminator,
     }
 }
@@ -48,12 +56,22 @@ fn block(id: u32, params: Vec<BlockParam>, ops: Vec<Op>, terminator: Terminator)
 fn roots(blocks: Vec<Block>, owners: BTreeMap<OwnerId, OwnerInfo>) -> RawProgram {
     RawProgram {
         units: vec![Unit {
+            id: UnitId(0),
             name: "roots".into(),
             kind: UnitKind::Roots,
+            function_schema: None,
             entry: BlockId(0),
             blocks,
             owners,
         }],
+    }
+}
+
+fn edge(target: u32, args: Vec<Operand>) -> Edge {
+    Edge {
+        target: BlockId(target),
+        args,
+        terminals: Vec::new(),
     }
 }
 
@@ -142,6 +160,7 @@ fn clone_disposition_outside_copy_is_rejected() {
                 Op::Apply {
                     dest: None,
                     label: "bad".into(),
+                    kind: ApplyKind::Intrinsic,
                     schema: OperationSchema::new(vec![OwnershipUse::Borrow], None),
                     args: vec![Operand {
                         owner: OwnerId(0),
@@ -172,6 +191,7 @@ fn typed_apply_schema_accepts_its_exact_mode_and_rejects_a_forged_one() {
                     Op::Apply {
                         dest: None,
                         label: "diagnostic spelling is not semantics".into(),
+                        kind: ApplyKind::Intrinsic,
                         schema: OperationSchema::new(vec![OwnershipUse::Move], None),
                         args: vec![Operand {
                             owner: OwnerId(0),
@@ -206,20 +226,337 @@ fn every_owned_identity_needs_a_terminal_even_when_nonheap() {
         vec![block(
             0,
             vec![],
-            vec![
-                define(0),
-                Op::Apply {
-                    dest: None,
-                    label: "discard".into(),
-                    schema: OperationSchema::new(vec![OwnershipUse::Move], None),
-                    args: vec![Operand::move_(OwnerId(0))],
-                },
-            ],
+            vec![define(0), Op::Discard { owner: OwnerId(0) }],
             Terminator::Exit,
         )],
         BTreeMap::from([(OwnerId(0), info(Prim::Int64, OwnerOrigin::Owned))]),
     );
     verify_raw(good).unwrap();
+
+    let heap_discard = roots(
+        vec![block(
+            0,
+            vec![],
+            vec![define(0), Op::Discard { owner: OwnerId(0) }],
+            Terminator::Exit,
+        )],
+        BTreeMap::from([(OwnerId(0), info(Prim::String, OwnerOrigin::Owned))]),
+    );
+    assert!(matches!(
+        verify_raw(heap_discard),
+        Err(OwnershipError::HeapDiscard { owner: 0, .. })
+    ));
+}
+
+#[test]
+fn stable_operation_ids_survive_reordering_and_duplicates_are_rejected() {
+    let mut program = roots(
+        vec![block(
+            0,
+            vec![],
+            vec![
+                define(0),
+                define(1),
+                Op::Discard { owner: OwnerId(1) },
+                Op::Discard { owner: OwnerId(0) },
+            ],
+            Terminator::Exit,
+        )],
+        BTreeMap::from([
+            (OwnerId(0), info(Prim::Int64, OwnerOrigin::Owned)),
+            (OwnerId(1), info(Prim::Int64, OwnerOrigin::Owned)),
+        ]),
+    );
+    let record = |index, action| HostSiteRecord {
+        id: HostSiteId::from_index(index),
+        unit: 0,
+        kind: HostSiteKind::Expression,
+        actions: vec![action],
+    };
+    let sites = HostSiteMap {
+        records: vec![
+            record(
+                0,
+                HostSiteAction::Operation {
+                    unit: 0,
+                    block: BlockId(0),
+                    operation: OpId(0),
+                },
+            ),
+            record(
+                1,
+                HostSiteAction::Operation {
+                    unit: 0,
+                    block: BlockId(0),
+                    operation: OpId(1),
+                },
+            ),
+            record(
+                2,
+                HostSiteAction::Operation {
+                    unit: 0,
+                    block: BlockId(0),
+                    operation: OpId(2),
+                },
+            ),
+            record(
+                3,
+                HostSiteAction::Operation {
+                    unit: 0,
+                    block: BlockId(0),
+                    operation: OpId(3),
+                },
+            ),
+            HostSiteRecord {
+                id: HostSiteId::from_index(4),
+                unit: 0,
+                kind: HostSiteKind::FunctionReturn,
+                actions: vec![HostSiteAction::Terminator {
+                    unit: 0,
+                    block: BlockId(0),
+                }],
+            },
+        ],
+    };
+    super::verify::verify_host_actions(&program, &RootManifest { entries: vec![] }, &sites)
+        .unwrap();
+
+    program.units[0].blocks[0].ops.swap(0, 1);
+    let verification = super::verify::verify(&program).unwrap();
+    super::verify::verify_host_actions(&program, &RootManifest { entries: vec![] }, &sites)
+        .unwrap();
+    let action =
+        super::verified_host_action(&program, &verification, &sites.records[0].actions[0]).unwrap();
+    assert!(matches!(
+        action,
+        super::VerifiedHostAction::Operation(super::VerifiedHostOperation::Define {
+            dest,
+            ..
+        }) if dest.id().key == 0
+    ));
+
+    program.units[0].blocks[0].ops[1].id = OpId(1);
+    assert!(matches!(
+        super::verify::verify(&program),
+        Err(OwnershipError::DuplicateIdentity {
+            kind: "operation",
+            id: 1,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn edge_terminals_are_closed_path_local_consumes() {
+    let make = |else_terminals| {
+        roots(
+            vec![
+                block(
+                    0,
+                    vec![BlockParam {
+                        owner: OwnerId(0),
+                        mode: ParamMode::EntryBorrow,
+                    }],
+                    vec![define(1), define(2)],
+                    Terminator::Branch {
+                        condition: Operand::borrow(OwnerId(0)),
+                        then_edge: Edge {
+                            target: BlockId(1),
+                            args: Vec::new(),
+                            terminals: vec![
+                                Terminal::Drop(OwnerId(1)),
+                                Terminal::Discard(OwnerId(2)),
+                            ],
+                        },
+                        else_edge: Edge {
+                            target: BlockId(1),
+                            args: Vec::new(),
+                            terminals: else_terminals,
+                        },
+                    },
+                ),
+                block(1, vec![], vec![], Terminator::Exit),
+            ],
+            BTreeMap::from([
+                (OwnerId(0), info(Prim::Bool, OwnerOrigin::ExternalBorrow)),
+                (OwnerId(1), info(Prim::String, OwnerOrigin::Owned)),
+                (OwnerId(2), info(Prim::Int64, OwnerOrigin::Owned)),
+            ]),
+        )
+    };
+
+    verify_raw(make(vec![
+        Terminal::Drop(OwnerId(1)),
+        Terminal::Discard(OwnerId(2)),
+    ]))
+    .unwrap();
+    assert!(matches!(
+        verify_raw(make(Vec::new())),
+        Err(OwnershipError::JoinMismatch { block: 1, .. })
+    ));
+}
+
+fn direct_call_program(transform_result: bool, callee: UnitId) -> RawProgram {
+    let direct_call = Op::Apply {
+        dest: Some(OwnerId(0)),
+        label: "diagnostic spelling cannot select a callee".into(),
+        kind: ApplyKind::DirectCall { callee },
+        schema: OperationSchema::new(
+            Vec::new(),
+            Some(ValueClass::NonHeap(NonHeapKind::Scalar(Prim::Int64))),
+        ),
+        args: Vec::new(),
+    };
+    let caller_blocks = if transform_result {
+        vec![block(
+            0,
+            vec![],
+            vec![
+                direct_call,
+                Op::Apply {
+                    dest: Some(OwnerId(1)),
+                    label: "ordinary value operation".into(),
+                    kind: ApplyKind::Intrinsic,
+                    schema: OperationSchema::new(
+                        vec![OwnershipUse::Move],
+                        Some(ValueClass::NonHeap(NonHeapKind::Scalar(Prim::Int64))),
+                    ),
+                    args: vec![Operand::move_(OwnerId(0))],
+                },
+            ],
+            Terminator::Return {
+                result: Operand::move_(OwnerId(1)),
+            },
+        )]
+    } else {
+        vec![
+            block(
+                0,
+                vec![],
+                vec![direct_call],
+                Terminator::Jump(edge(1, vec![Operand::move_(OwnerId(0))])),
+            ),
+            block(
+                1,
+                vec![BlockParam {
+                    owner: OwnerId(1),
+                    mode: ParamMode::Owned,
+                }],
+                vec![],
+                Terminator::Return {
+                    result: Operand::move_(OwnerId(1)),
+                },
+            ),
+        ]
+    };
+    let caller_owners = BTreeMap::from([
+        (OwnerId(0), info(Prim::Int64, OwnerOrigin::Owned)),
+        (OwnerId(1), info(Prim::Int64, OwnerOrigin::Owned)),
+    ]);
+    RawProgram {
+        units: vec![
+            Unit {
+                id: UnitId(0),
+                name: "roots".into(),
+                kind: UnitKind::Roots,
+                function_schema: None,
+                entry: BlockId(0),
+                blocks: vec![block(0, vec![], vec![], Terminator::Exit)],
+                owners: BTreeMap::new(),
+            },
+            Unit {
+                id: UnitId(1),
+                name: "caller".into(),
+                kind: UnitKind::Function,
+                function_schema: Some(OperationSchema::new(
+                    Vec::new(),
+                    Some(ValueClass::NonHeap(NonHeapKind::Scalar(Prim::Int64))),
+                )),
+                entry: BlockId(0),
+                blocks: caller_blocks,
+                owners: caller_owners,
+            },
+            Unit {
+                id: UnitId(2),
+                name: "callee".into(),
+                kind: UnitKind::Function,
+                function_schema: Some(OperationSchema::new(
+                    Vec::new(),
+                    Some(ValueClass::NonHeap(NonHeapKind::Scalar(Prim::Int64))),
+                )),
+                entry: BlockId(0),
+                blocks: vec![block(
+                    0,
+                    vec![],
+                    vec![define(0)],
+                    Terminator::Return {
+                        result: Operand::move_(OwnerId(0)),
+                    },
+                )],
+                owners: BTreeMap::from([(OwnerId(0), info(Prim::Int64, OwnerOrigin::Owned))]),
+            },
+        ],
+    }
+}
+
+#[test]
+fn resolved_direct_call_identity_drives_tail_chain_classification() {
+    let direct = direct_call_program(false, UnitId(2));
+    let verification = super::verify::verify(&direct).unwrap();
+    assert!(verification.is_tail_call(UnitId(1), OpId(0)));
+
+    let transformed = direct_call_program(true, UnitId(2));
+    let verification = super::verify::verify(&transformed).unwrap();
+    assert!(!verification.is_tail_call(UnitId(1), OpId(0)));
+
+    let missing = direct_call_program(false, UnitId(99));
+    assert!(matches!(
+        super::verify::verify(&missing),
+        Err(OwnershipError::MissingUnit { unit: 99, .. })
+    ));
+
+    let roots_target = direct_call_program(false, UnitId(0));
+    assert!(matches!(
+        super::verify::verify(&roots_target),
+        Err(OwnershipError::NonFunctionCallee { unit: 0, .. })
+    ));
+
+    let mut wrong_schema = direct_call_program(false, UnitId(2));
+    let Op::Apply { schema, .. } = &mut wrong_schema.units[1].blocks[0].ops[0].kind else {
+        unreachable!()
+    };
+    schema.result = None;
+    assert!(matches!(
+        super::verify::verify(&wrong_schema),
+        Err(OwnershipError::DirectCallSchema { unit: 2, .. })
+    ));
+}
+
+#[test]
+fn verifier_derives_a_sealed_live_heap_owner_bound() {
+    let program = roots(
+        vec![block(
+            0,
+            vec![],
+            vec![
+                define(0),
+                define(1),
+                Op::Drop {
+                    owner: Operand::move_(OwnerId(1)),
+                },
+                Op::Drop {
+                    owner: Operand::move_(OwnerId(0)),
+                },
+            ],
+            Terminator::Exit,
+        )],
+        BTreeMap::from([
+            (OwnerId(0), info(Prim::String, OwnerOrigin::Owned)),
+            (OwnerId(1), info(Prim::String, OwnerOrigin::Owned)),
+        ]),
+    );
+    let verification = super::verify::verify(&program).unwrap();
+    assert_eq!(verification.live_set_bound().max_live_heap_owners(), 2);
 }
 
 #[test]
@@ -270,6 +607,7 @@ fn owned_edges_join_through_one_fresh_block_parameter() {
             owner: OwnerId(1),
             use_: OwnershipUse::Move,
         }],
+        terminals: Vec::new(),
     };
     let owners = BTreeMap::from([
         (OwnerId(0), info(Prim::Bool, OwnerOrigin::Owned)),
@@ -296,15 +634,7 @@ fn owned_edges_join_through_one_fresh_block_parameter() {
                 owner: OwnerId(2),
                 mode: ParamMode::Owned,
             }],
-            vec![
-                Op::Apply {
-                    dest: None,
-                    label: "discard condition".into(),
-                    schema: OperationSchema::new(vec![OwnershipUse::Move], None),
-                    args: vec![Operand::move_(OwnerId(0))],
-                },
-                root(2),
-            ],
+            vec![Op::Discard { owner: OwnerId(0) }, root(2)],
             Terminator::Exit,
         ),
     ];
@@ -319,6 +649,7 @@ fn owned_edge_rejects_a_borrow_disposition() {
             owner: OwnerId(1),
             use_,
         }],
+        terminals: Vec::new(),
     };
     let owners = BTreeMap::from([
         (OwnerId(0), info(Prim::Bool, OwnerOrigin::Owned)),
@@ -457,7 +788,7 @@ fn host_payload_site_and_directive_universes_are_bijective() {
                 vec![HostSiteAction::Operation {
                     unit: 0,
                     block: BlockId(0),
-                    operation: 0,
+                    operation: OpId(0),
                 }],
             ),
             record(
@@ -472,7 +803,7 @@ fn host_payload_site_and_directive_universes_are_bijective() {
                     HostSiteAction::Operation {
                         unit: 0,
                         block: BlockId(0),
-                        operation: 1,
+                        operation: OpId(1),
                     },
                 ],
             ),
@@ -523,7 +854,7 @@ fn host_payload_site_and_directive_universes_are_bijective() {
     extra.records[3].actions.push(HostSiteAction::Operation {
         unit: 0,
         block: BlockId(0),
-        operation: 1,
+        operation: OpId(1),
     });
     assert!(matches!(
         super::verify::verify_host_sites(&host, &manifest, &program, &extra),
@@ -648,15 +979,22 @@ fn host_payload_sites_and_actions_are_bound_to_their_structural_unit() {
     let program = RawProgram {
         units: vec![
             Unit {
+                id: UnitId(0),
                 name: "roots".into(),
                 kind: UnitKind::Roots,
+                function_schema: None,
                 entry: BlockId(0),
                 blocks: vec![block(0, vec![], vec![], Terminator::Exit)],
                 owners: BTreeMap::new(),
             },
             Unit {
+                id: UnitId(1),
                 name: "identity".into(),
                 kind: UnitKind::Function,
+                function_schema: Some(OperationSchema::new(
+                    Vec::new(),
+                    Some(ValueClass::NonHeap(NonHeapKind::Unit)),
+                )),
                 entry: BlockId(0),
                 blocks: vec![block(0, vec![], vec![], Terminator::Exit)],
                 owners: BTreeMap::new(),
@@ -708,10 +1046,12 @@ fn control_and_root_actions_are_complete_unique_and_kind_checked() {
                     then_edge: Edge {
                         target: BlockId(1),
                         args: vec![],
+                        terminals: Vec::new(),
                     },
                     else_edge: Edge {
                         target: BlockId(2),
                         args: vec![],
+                        terminals: Vec::new(),
                     },
                 },
             ),

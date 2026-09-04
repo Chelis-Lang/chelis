@@ -23,9 +23,9 @@ use crate::host_type_state::ConcreteHostType;
 use super::classify::{ClassifyError, Placement, ValueClass, classify, render_type};
 use super::error::OwnershipError;
 use super::ir::{
-    Block, BlockId, BlockParam, Edge, HostSiteAction, HostSiteBuilder, HostSiteId, HostSiteKind,
-    Op, Operand, OperationSchema, OwnerId, OwnerInfo, OwnerOrigin, OwnershipProgram, ParamMode,
-    Terminator, Unit, UnitKind,
+    ApplyKind, Block, BlockId, BlockParam, Edge, HostSiteAction, HostSiteBuilder, HostSiteId,
+    HostSiteKind, Op, OpId, Operand, Operation, OperationSchema, OwnerId, OwnerInfo, OwnerOrigin,
+    OwnershipProgram, ParamMode, Terminator, Unit, UnitId, UnitKind,
 };
 
 const ROOTS_UNIT: &str = "roots";
@@ -62,6 +62,12 @@ pub(super) fn lower(
             .functions
             .iter()
             .map(|function| function.name.clone())
+            .collect(),
+        function_units: host
+            .functions
+            .iter()
+            .enumerate()
+            .map(|(index, function)| (function.name.clone(), UnitId((index + 1) as u32)))
             .collect(),
     };
     let mut units = vec![lower_roots(&ctx, manifest, root_bindings, sites, 0)?];
@@ -165,6 +171,7 @@ struct Context<'a> {
     signatures: BTreeMap<String, Signature>,
     global_names: BTreeSet<String>,
     function_names: BTreeSet<String>,
+    function_units: BTreeMap<String, UnitId>,
 }
 
 #[derive(Clone, Copy)]
@@ -189,7 +196,7 @@ struct Scope {
 struct BlockBuilder {
     id: BlockId,
     params: Vec<BlockParam>,
-    ops: Vec<Op>,
+    ops: Vec<Operation>,
     terminator: Option<Terminator>,
 }
 
@@ -208,6 +215,7 @@ struct UnitLowerer<'a, 'sites> {
     owner_depth: BTreeMap<OwnerId, usize>,
     callback_modes: BTreeMap<OwnerId, Vec<ParamMode>>,
     next_owner: u32,
+    next_operation: u32,
     current: BlockId,
     scopes: Vec<Scope>,
     moved: BTreeSet<OwnerId>,
@@ -235,6 +243,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             owner_depth: BTreeMap::new(),
             callback_modes: BTreeMap::new(),
             next_owner: 0,
+            next_operation: 0,
             current: BlockId(0),
             scopes: Vec::new(),
             moved: BTreeSet::new(),
@@ -278,7 +287,11 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
 
     fn emit(&mut self, op: Op) {
         let block = self.current;
-        let operation = self.blocks[block.0 as usize].ops.len();
+        let operation = OpId(self.next_operation);
+        self.next_operation = self
+            .next_operation
+            .checked_add(1)
+            .expect("ownership operation census exceeds u32");
         let site = self
             .active_site
             .expect("every ownership operation is emitted inside a host site");
@@ -290,7 +303,10 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 operation,
             },
         );
-        self.blocks[block.0 as usize].ops.push(op);
+        self.blocks[block.0 as usize].ops.push(Operation {
+            id: operation,
+            kind: op,
+        });
     }
 
     fn record_edge(&mut self, kind: HostSiteKind, target: BlockId) {
@@ -552,12 +568,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                     owner: Operand::move_(owner),
                 });
             } else {
-                self.emit(Op::Apply {
-                    dest: None,
-                    label: "discard".to_string(),
-                    schema: OperationSchema::new(vec![super::ir::OwnershipUse::Move], None),
-                    args: vec![Operand::move_(owner)],
-                });
+                self.emit(Op::Discard { owner });
             }
             self.moved.insert(owner);
         }
@@ -586,7 +597,12 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         }
     }
 
-    fn finish(self, kind: UnitKind, entry: BlockId) -> Result<Unit, OwnershipError> {
+    fn finish(
+        self,
+        kind: UnitKind,
+        function_schema: Option<OperationSchema>,
+        entry: BlockId,
+    ) -> Result<Unit, OwnershipError> {
         let mut blocks = Vec::with_capacity(self.blocks.len());
         for builder in self.blocks {
             let terminator =
@@ -604,8 +620,10 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             });
         }
         Ok(Unit {
+            id: UnitId(self.unit_index as u32),
             name: self.unit_name,
             kind,
+            function_schema,
             entry,
             blocks,
             owners: self.owners,
@@ -677,6 +695,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                     self.emit(Op::Apply {
                         dest: None,
                         label: format!("builtin:{name}"),
+                        kind: ApplyKind::Intrinsic,
                         schema: OperationSchema::new(vec![super::ir::OwnershipUse::Borrow], None),
                         args: vec![operand],
                     });
@@ -815,12 +834,24 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         expected: Vec<super::ir::OwnershipUse>,
         args: Vec<Operand>,
     ) -> Result<Value, OwnershipError> {
+        self.apply_kind(ty, label, ApplyKind::Intrinsic, expected, args)
+    }
+
+    fn apply_kind(
+        &mut self,
+        ty: &ConcreteHostType,
+        label: String,
+        kind: ApplyKind,
+        expected: Vec<super::ir::OwnershipUse>,
+        args: Vec<Operand>,
+    ) -> Result<Value, OwnershipError> {
         let dest = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
         let class = self.info(dest)?.class;
         let schema = OperationSchema::new(expected, Some(class));
         self.emit(Op::Apply {
             dest: Some(dest),
             label,
+            kind,
             schema,
             args,
         });
@@ -962,7 +993,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 args,
             );
         }
-        let (label, specs) = match self.lookup(function) {
+        let (label, kind, specs) = match self.lookup(function) {
             Some(Place::Callback(owner)) => {
                 let params = match &self.info(owner)?.ty {
                     ConcreteHostType::Function(params, _) => params.clone(),
@@ -992,10 +1023,30 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                         callback_modes: None,
                     })
                     .collect();
-                (format!("call_callback:%{}", owner.0), specs)
+                (
+                    format!("call_callback:%{}", owner.0),
+                    ApplyKind::IndirectCall,
+                    specs,
+                )
             }
             Some(Place::Owner(_)) | None => match self.ctx.signatures.get(function) {
-                Some(signature) => (format!("call:{function}"), signature.params.clone()),
+                Some(signature) => {
+                    let callee =
+                        self.ctx
+                            .function_units
+                            .get(function)
+                            .copied()
+                            .ok_or_else(|| {
+                                self.invariant(format!(
+                                    "resolved function `{function}` has no structural unit identity"
+                                ))
+                            })?;
+                    (
+                        format!("call:{function}"),
+                        ApplyKind::DirectCall { callee },
+                        signature.params.clone(),
+                    )
+                }
                 None => {
                     return Err(OwnershipError::UnknownCallee {
                         unit: self.unit_name.clone(),
@@ -1046,7 +1097,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 super::ir::OwnershipUse::Clone => unreachable!("parameter modes never clone"),
             });
         }
-        self.apply(ty, label, expected, args)
+        self.apply_kind(ty, label, kind, expected, args)
     }
 
     fn lower_join_arm(
@@ -1061,6 +1112,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.set_terminator(Terminator::Jump(Edge {
             target: join,
             args: vec![result],
+            terminals: Vec::new(),
         }))
     }
 
@@ -1085,10 +1137,12 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             then_edge: Edge {
                 target: then_block,
                 args: Vec::new(),
+                terminals: Vec::new(),
             },
             else_edge: Edge {
                 target: else_block,
                 args: Vec::new(),
+                terminals: Vec::new(),
             },
         })?;
         self.record_edge(HostSiteKind::BranchEdge, then_block);
@@ -1135,10 +1189,12 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 Edge {
                     target: some,
                     args: Vec::new(),
+                    terminals: Vec::new(),
                 },
                 Edge {
                     target: none,
                     args: Vec::new(),
+                    terminals: Vec::new(),
                 },
             ],
         })?;
@@ -1156,6 +1212,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.emit(Op::Apply {
             dest: Some(payload),
             label: "option_payload".to_string(),
+            kind: ApplyKind::Intrinsic,
             schema: OperationSchema::new(
                 vec![super::ir::OwnershipUse::Borrow],
                 Some(self.info(payload)?.class),
@@ -1197,12 +1254,14 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             .map(|target| Edge {
                 target: *target,
                 args: Vec::new(),
+                terminals: Vec::new(),
             })
             .collect::<Vec<_>>();
         if let Some(target) = default_block {
             edges.push(Edge {
                 target,
                 args: Vec::new(),
+                terminals: Vec::new(),
             });
         }
         if edges.is_empty() {
@@ -1229,6 +1288,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 self.emit(Op::Apply {
                     dest: Some(owner),
                     label: format!("adt_payload:{}:{}", arm.ctor, binding.field_index),
+                    kind: ApplyKind::Intrinsic,
                     schema: OperationSchema::new(
                         vec![super::ir::OwnershipUse::Borrow],
                         Some(self.info(owner)?.class),
@@ -1316,6 +1376,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.set_terminator(Terminator::Jump(Edge {
             target: header,
             args: vec![init],
+            terminals: Vec::new(),
         }))?;
         self.push_scope();
         self.sites.add(self.unit_index, HostSiteKind::Binding);
@@ -1344,10 +1405,12 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             body_edge: Edge {
                 target: body,
                 args: vec![Operand::move_(header_owner)],
+                terminals: Vec::new(),
             },
             exit_edge: Edge {
                 target: exit,
                 args: vec![Operand::move_(header_owner)],
+                terminals: Vec::new(),
             },
         })?;
         self.record_edge(HostSiteKind::LoopEdge, body);
@@ -1375,6 +1438,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.set_terminator(Terminator::Jump(Edge {
             target: header,
             args: vec![next],
+            terminals: Vec::new(),
         }))?;
         self.current = exit;
         Ok(Value::Fresh(exit_owner))
@@ -1421,6 +1485,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.set_terminator(Terminator::Jump(Edge {
             target: header,
             args: vec![Operand::move_(seed)],
+            terminals: Vec::new(),
         }))?;
         self.push_scope();
         let acc = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
@@ -1440,10 +1505,12 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             body_edge: Edge {
                 target: body,
                 args: vec![Operand::move_(header_owner)],
+                terminals: Vec::new(),
             },
             exit_edge: Edge {
                 target: exit,
                 args: vec![Operand::move_(header_owner)],
+                terminals: Vec::new(),
             },
         })?;
         self.record_edge(HostSiteKind::LoopEdge, body);
@@ -1472,6 +1539,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.emit(Op::Apply {
             dest: Some(next),
             label: step.to_string(),
+            kind: ApplyKind::Intrinsic,
             schema: OperationSchema::new(
                 vec![super::ir::OwnershipUse::Move, super::ir::OwnershipUse::Move],
                 Some(self.info(next)?.class),
@@ -1483,6 +1551,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.set_terminator(Terminator::Jump(Edge {
             target: header,
             args: vec![Operand::move_(next)],
+            terminals: Vec::new(),
         }))?;
         self.current = exit;
         Ok(Value::Fresh(exit_owner))
@@ -1520,6 +1589,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.set_terminator(Terminator::Jump(Edge {
             target: header,
             args: vec![Operand::move_(seed)],
+            terminals: Vec::new(),
         }))?;
         self.push_scope();
         let acc = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
@@ -1539,10 +1609,12 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             body_edge: Edge {
                 target: body,
                 args: vec![Operand::move_(header_owner)],
+                terminals: Vec::new(),
             },
             exit_edge: Edge {
                 target: exit,
                 args: vec![Operand::move_(header_owner)],
+                terminals: Vec::new(),
             },
         })?;
         self.record_edge(HostSiteKind::LoopEdge, body);
@@ -1573,6 +1645,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.emit(Op::Apply {
             dest: Some(next),
             label: step.to_string(),
+            kind: ApplyKind::Intrinsic,
             schema: OperationSchema::new(
                 vec![
                     super::ir::OwnershipUse::Move,
@@ -1588,6 +1661,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.set_terminator(Terminator::Jump(Edge {
             target: header,
             args: vec![Operand::move_(next)],
+            terminals: Vec::new(),
         }))?;
         self.current = exit;
         Ok(Value::Fresh(exit_owner))
@@ -1647,6 +1721,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.set_terminator(Terminator::Jump(Edge {
             target: header,
             args: vec![init, Operand::move_(output_seed)],
+            terminals: Vec::new(),
         }))?;
         self.push_scope();
         let body_state = self.mint(
@@ -1687,10 +1762,12 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             body_edge: Edge {
                 target: body,
                 args: vec![Operand::move_(header_state), Operand::move_(header_output)],
+                terminals: Vec::new(),
             },
             exit_edge: Edge {
                 target: exit,
                 args: vec![Operand::move_(header_state), Operand::move_(header_output)],
+                terminals: Vec::new(),
             },
         })?;
         self.record_edge(HostSiteKind::LoopEdge, body);
@@ -1725,6 +1802,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.emit(Op::Apply {
             dest: Some(next_output),
             label: "list_push".to_string(),
+            kind: ApplyKind::Intrinsic,
             schema: OperationSchema::new(
                 vec![super::ir::OwnershipUse::Move, super::ir::OwnershipUse::Move],
                 Some(output_class),
@@ -1736,6 +1814,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         self.set_terminator(Terminator::Jump(Edge {
             target: header,
             args: vec![next_state, Operand::move_(next_output)],
+            terminals: Vec::new(),
         }))?;
         self.current = exit;
         if self.info(exit_state)?.class.is_heap() {
@@ -1743,12 +1822,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 owner: Operand::move_(exit_state),
             });
         } else {
-            self.emit(Op::Apply {
-                dest: None,
-                label: "discard scan state".to_string(),
-                schema: OperationSchema::new(vec![super::ir::OwnershipUse::Move], None),
-                args: vec![Operand::move_(exit_state)],
-            });
+            self.emit(Op::Discard { owner: exit_state });
         }
         self.moved.insert(exit_state);
         Ok(Value::Fresh(exit_output))
@@ -2054,7 +2128,7 @@ fn lower_roots(
         lowerer.exit_scope()?;
         lowerer.set_terminator(Terminator::Exit)
     })?;
-    lowerer.finish(UnitKind::Roots, entry)
+    lowerer.finish(UnitKind::Roots, None, entry)
 }
 
 fn lower_function(
@@ -2152,7 +2226,11 @@ fn lower_function(
                     }
                 });
             }
-            lowerer.set_terminator(Terminator::Jump(Edge { target: body, args }))
+            lowerer.set_terminator(Terminator::Jump(Edge {
+                target: body,
+                args,
+                terminals: Vec::new(),
+            }))
         })?;
         (entry, body)
     } else {
@@ -2187,5 +2265,13 @@ fn lower_function(
         lowerer.exit_scope()?;
         lowerer.set_terminator(Terminator::Return { result })
     })?;
-    lowerer.finish(UnitKind::Function, entry)
+    let function_schema = OperationSchema::new(
+        signature
+            .params
+            .iter()
+            .map(|param| param.mode.use_())
+            .collect(),
+        Some(lowerer.classify_or_reject(&function.ret_ty, Placement::Value, None)?),
+    );
+    lowerer.finish(UnitKind::Function, Some(function_schema), entry)
 }

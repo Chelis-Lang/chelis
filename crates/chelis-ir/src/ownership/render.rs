@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 
-use super::ir::{Edge, Op, Operand, OwnerId, OwnershipProgram, Terminator, Unit};
+use super::ir::{Edge, Op, Operand, OwnerId, OwnershipProgram, Terminal, Terminator, Unit};
 
 pub(crate) fn render(program: &OwnershipProgram) -> String {
     let mut out = String::new();
@@ -15,7 +15,7 @@ pub(crate) fn render(program: &OwnershipProgram) -> String {
                 .join(", ");
             let _ = writeln!(out, "  b{} ({params}):", block.id.0);
             for op in &block.ops {
-                let _ = writeln!(out, "    {}", render_op(unit, op));
+                let _ = writeln!(out, "    {}", render_op(unit, &op.kind));
             }
             let _ = writeln!(out, "    {}", render_terminator(&block.terminator));
         }
@@ -28,7 +28,16 @@ fn operand(value: &Operand) -> String {
 }
 
 fn edge(value: &Edge) -> String {
-    format!(
+    let terminals = value
+        .terminals
+        .iter()
+        .map(|terminal| match terminal {
+            Terminal::Drop(owner) => format!("drop %{}", owner.0),
+            Terminal::Discard(owner) => format!("discard %{}", owner.0),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let edge = format!(
         "b{} [{}]",
         value.target.0,
         value
@@ -37,7 +46,12 @@ fn edge(value: &Edge) -> String {
             .map(operand)
             .collect::<Vec<_>>()
             .join(", ")
-    )
+    );
+    if terminals.is_empty() {
+        edge
+    } else {
+        format!("{edge} terminals [{terminals}]")
+    }
 }
 
 fn owner(unit: &Unit, id: OwnerId) -> String {
@@ -67,6 +81,7 @@ fn render_op(unit: &Unit, op: &Op) -> String {
             format!("%{} = loop-item {}", dest.0, operand(list))
         }
         Op::Drop { owner } => format!("drop {}", operand(owner)),
+        Op::Discard { owner } => format!("discard %{}", owner.0),
         Op::RootConsume { root, owner } => format!("root {root} {}", operand(owner)),
     }
 }
