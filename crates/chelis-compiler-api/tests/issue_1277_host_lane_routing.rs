@@ -103,9 +103,11 @@ fn bound_parameterized_entry_does_not_reach_the_dag_evaluator() {
 /// the host lane, so the application of `f` is interpreted and the declared
 /// claim on `f`'s result is never compared against the value.
 ///
-/// EVIDENTIARY STATUS on `801f92c02`: disposition lock for the lane; the
-/// shape assertion is the chelis#1376 `silent_unguarded` baseline that B2h
-/// moves.
+/// EVIDENTIARY STATUS on `801f92c02`: disposition lock for the lane and for
+/// the shape. The `[2, 2]` value is chelis#1376's `silent_unguarded`
+/// baseline; the routing alone does not move it (the kernel has no guard for
+/// the claim until B2a's DAG-evaluator guard is underneath), so this
+/// assertion holds on this head and flips only at the rebase onto B2a.
 #[test]
 fn host_applied_def_main_is_a_host_lane_root() {
     let result = eval(EvalRequest {

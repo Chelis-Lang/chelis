@@ -3103,9 +3103,16 @@ pub fn host_def_kernel(
     name: &str,
     random: Option<RandomLoweringState>,
 ) -> Result<Option<HostDefKernel>, crate::lower::LowerDiagnostic> {
-    let Some(body) = find_top_level_def_expr(program.exprs(), name) else {
+    // The declaration's own name is the key for every per-def fact (the
+    // effect row, the call graph); a caller may hand in a shorter spelling
+    // that `find_top_level_def_named` resolves.
+    let Some((canonical, body)) = find_top_level_def_named(program.exprs(), name) else {
         return Ok(None);
     };
+    let name = canonical;
+    // `ty_expr` is redundant with the lookup `host_def_signature` performs
+    // first (the C caller passes that same lookup's result), so `None` here
+    // yields the identical signature.
     let Some(signature) = host_def_signature(name, body, None, program) else {
         return Ok(None);
     };
