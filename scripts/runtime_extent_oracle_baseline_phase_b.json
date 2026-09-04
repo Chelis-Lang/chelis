@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "6f2733498c92be76dcdf5da9ee1ef931e085641d639152774af3dd921e9dcd91",
+  "corpus_sha256": "51861333a1cd0ac66e92b70cf4b12f07e4d8b5584b9b69ed91a3c5bab1766bcd",
   "rows": [
     {
       "id": "class.load_load.c",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
-      "receipt": "cli_slice_b.load_load_named_class_guards_every_non_canonical_member_on_c"
+      "phase_b": "executes_exactly",
+      "receipt": "exec_c.an_all_interface_class_traps_at_entry_when_its_witnesses_disagree"
     },
     {
       "id": "class.load_load.eval",
@@ -123,6 +123,12 @@
       "receipt": "cli_slice_b.a_literal_claim_over_a_cross_tensor_read_guards_on_every_lane_on_eval"
     },
     {
+      "id": "expand.literal_claim.exported_kernel.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "exec_c.a_literal_claim_over_a_runtime_read_traps_at_entry_on_c"
+    },
+    {
       "id": "expand.literal_claim.inlined_root.c",
       "baseline": "lane_divergent",
       "phase_b": "lane_divergent",
@@ -149,7 +155,7 @@
     {
       "id": "expand.op_declared_source.hip_prologue",
       "baseline": "ice",
-      "phase_b": "ice",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.an_op_declared_witness_reaches_the_hip_prologue_without_panicking"
     },
     {
@@ -233,7 +239,7 @@
     {
       "id": "guard_order.trap_after.c",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.c_independent_trap_after_a_mismatch_loses"
     },
     {
@@ -245,7 +251,7 @@
     {
       "id": "guard_order.trap_before.c",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.c_independent_trap_before_a_mismatch_wins"
     },
     {

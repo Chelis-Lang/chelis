@@ -337,8 +337,8 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "class.load_load.c",
             "silent_unguarded",
-            "silent_unguarded",
-            "cli_slice_b.load_load_named_class_guards_every_non_canonical_member_on_c",
+            EXECUTES,
+            "exec_c.an_all_interface_class_traps_at_entry_when_its_witnesses_disagree",
         ),
         _row(
             "class.load_load.eval",
@@ -461,6 +461,12 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "cli_slice_b.issue_1377_literal_claim_traps_at_the_inlined_root_on_c",
         ),
         _row(
+            "expand.literal_claim.exported_kernel.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "exec_c.a_literal_claim_over_a_runtime_read_traps_at_entry_on_c",
+        ),
+        _row(
             "expand.literal_claim.inlined_root.eval",
             "lane_divergent",
             "lane_divergent",
@@ -481,7 +487,7 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "expand.op_declared_source.hip_prologue",
             "ice",
-            "ice",
+            EXECUTES,
             "cli_slice_b.an_op_declared_witness_reaches_the_hip_prologue_without_panicking",
         ),
         _row(
@@ -565,7 +571,7 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "guard_order.trap_after.c",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.c_independent_trap_after_a_mismatch_loses",
         ),
         _row(
@@ -577,7 +583,7 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "guard_order.trap_before.c",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.c_independent_trap_before_a_mismatch_wins",
         ),
         _row(
@@ -860,8 +866,29 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
                 "runtime_extent_slice_b", "--", "--nocapture",
             ),
             (
+                "an_op_declared_witness_reaches_the_hip_prologue_without_panicking",
+                "c_independent_trap_after_a_mismatch_loses",
+                "c_independent_trap_before_a_mismatch_wins",
                 "runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt",
                 "runtime_bound_shrink_relu_builds_and_matches_eval_exactly",
+            ),
+        ),
+        # A CLI-rooted program is not the exported kernel: `def main() =
+        # f(...)` over literal tensors inlines the def, every extent becomes a
+        # literal, and the classes disappear, so guard placement and rendering
+        # on C are proved by DRIVEN rows that compile the exported kernel and
+        # call it with runtime inputs. This target is where those rows live.
+        TestTarget(
+            "exec_c",
+            (
+                "cargo", "test", "-p", "chelis-backend-c", "--test",
+                "exec_compile", "--", "--nocapture",
+            ),
+            (
+                "a_literal_claim_over_a_runtime_read_traps_at_entry_on_c",
+                "an_all_interface_class_runs_when_its_witnesses_agree",
+                "an_all_interface_class_traps_at_entry_when_its_witnesses_disagree",
+                "entry_guards_run_in_assigned_slot_order_not_claim_name_order",
             ),
         ),
     )
