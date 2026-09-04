@@ -214,6 +214,11 @@ mod imp {
             if lock.write_all(&bytes).is_err() || lock.flush().is_err() {
                 std::process::exit(5);
             }
+            if std::env::var_os("CHELIS_PROVE_WORKER_CRASH").as_deref()
+                == Some(std::ffi::OsStr::new("abort-after-result"))
+            {
+                std::process::abort();
+            }
             std::process::exit(0);
         }
 
@@ -360,6 +365,23 @@ mod imp {
             return TierBResult::Unknown;
         }
 
+        // A result frame is authoritative only when the worker completed the
+        // protocol successfully. Never deserialize first: a worker can flush
+        // a valid-looking frame and still die before clean completion.
+        match status {
+            Some(status) if status.success() => {}
+            Some(status) => {
+                return TierBResult::Error(format!(
+                    "prove isolation: worker exited abnormally ({status}) (routes to Tier C)"
+                ));
+            }
+            None => {
+                return TierBResult::Error(
+                    "prove isolation: worker did not exit (routes to Tier C)".to_string(),
+                );
+            }
+        }
+
         // The worker has exited, so its stdout write-end is closed and the
         // reader reaches EOF promptly -- but bound the wait anyway so a stray
         // inherited write-end can never hang us.
@@ -369,14 +391,10 @@ mod imp {
 
         match bincode::deserialize::<WireResult>(&output) {
             Ok(wire) => wire.into_tier_b(),
-            Err(_) => {
-                let detail = match status {
-                    Some(s) if s.success() => "worker produced no decodable result".to_string(),
-                    Some(s) => format!("worker exited abnormally ({s})"),
-                    None => "worker did not exit".to_string(),
-                };
-                TierBResult::Error(format!("prove isolation: {detail} (routes to Tier C)"))
-            }
+            Err(_) => TierBResult::Error(
+                "prove isolation: worker produced no decodable result (routes to Tier C)"
+                    .to_string(),
+            ),
         }
     }
 
@@ -444,6 +462,32 @@ mod imp {
                 other => {
                     panic!("a signalled cvc5 worker must fail closed with Error, got {other:?}")
                 }
+            }
+        }
+
+        /// A decodable proof frame is not authoritative unless its worker
+        /// also exits successfully. This closes the ordering case where the
+        /// solver emits bytes and then dies before completing the protocol.
+        #[test]
+        fn issue_1333_test_worker_abort_after_result_fails_closed() {
+            let result = with_test_worker_crash("abort-after-result", || {
+                crate::tier_b::solve_property(&trivially_true_property(), 5_000)
+            });
+            match result {
+                TierBResult::Error(reason) => {
+                    assert!(
+                        !reason.trim().is_empty(),
+                        "failure reason must be non-empty"
+                    );
+                    assert!(
+                        reason.contains("worker exited abnormally")
+                            && reason.contains("routes to Tier C"),
+                        "unexpected containment diagnostic: {reason}"
+                    );
+                }
+                other => panic!(
+                    "a cvc5 worker that aborts after writing a result must fail closed, got {other:?}"
+                ),
             }
         }
 
