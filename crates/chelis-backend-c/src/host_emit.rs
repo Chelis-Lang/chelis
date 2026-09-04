@@ -706,6 +706,7 @@ fn append_activation_helpers(
     literal_suffix: &str,
     exp: &str,
     finalizer: Option<&str>,
+    stored_relu_decoder: Option<&str>,
 ) {
     let literal = |value: &str| match suffix {
         "f16" => format!("chelis_f16_to_f32(chelis_host_f64_to_f16({value}))"),
@@ -717,14 +718,24 @@ fn append_activation_helpers(
         None => expr,
     };
 
-    out.push(format!(
-        "static inline {c_type} chelis_host_relu_{suffix}({c_type} x) {{"
-    ));
-    out.push(format!(
-        "    return x < {} ? {} : x;",
-        literal("0.0"),
-        literal("0.0")
-    ));
+    if let Some(decoder) = stored_relu_decoder {
+        // [05-OP-43]: reduced-float host scalars are raw stored uint16_t
+        // values. Decode only for the strict-negative predicate; selecting
+        // the raw argument preserves both zeros and every NaN payload/sign.
+        out.push(format!(
+            "static inline uint16_t chelis_host_relu_{suffix}(uint16_t x) {{"
+        ));
+        out.push(format!("    return {decoder}(x) < 0.0f ? UINT16_C(0) : x;"));
+    } else {
+        out.push(format!(
+            "static inline {c_type} chelis_host_relu_{suffix}({c_type} x) {{"
+        ));
+        out.push(format!(
+            "    return x < {} ? {} : x;",
+            literal("0.0"),
+            literal("0.0")
+        ));
+    }
     out.push("}".to_string());
 
     out.push(format!(
@@ -846,6 +857,7 @@ fn append_tensor_math_helpers(out: &mut Vec<String>) {
         "f",
         "expf",
         Some("chelis_host_finalize_f16"),
+        Some("chelis_f16_to_f32"),
     );
     append_activation_helpers(
         out,
@@ -854,9 +866,10 @@ fn append_tensor_math_helpers(out: &mut Vec<String>) {
         "f",
         "expf",
         Some("chelis_host_finalize_bf16"),
+        Some("chelis_bf16_to_f32"),
     );
-    append_activation_helpers(out, "f32", "float", "f", "expf", None);
-    append_activation_helpers(out, "f64", "double", "", "exp", None);
+    append_activation_helpers(out, "f32", "float", "f", "expf", None, None);
+    append_activation_helpers(out, "f64", "double", "", "exp", None, None);
 }
 
 /// Private scalar-cast helpers for the generated translation unit.
@@ -4742,19 +4755,28 @@ impl<'a> HostEmitter<'a> {
                         "C host scalar activation emission",
                     ));
                 }
-                CExpressionBuiltin::Relu => finalize_scalar_expr(
-                    EmittedExpr::call(
-                        activation_math_function(
-                            ty,
-                            "chelis_host_relu_f16",
-                            "chelis_host_relu_bf16",
-                            "chelis_host_relu_f32",
-                            "chelis_host_relu_f64",
-                        ),
-                        [numeric_arg(0)],
-                    ),
-                    ty,
-                ),
+                CExpressionBuiltin::Relu => {
+                    let helper = activation_math_function(
+                        ty,
+                        "chelis_host_relu_f16",
+                        "chelis_host_relu_bf16",
+                        "chelis_host_relu_f32",
+                        "chelis_host_relu_f64",
+                    );
+                    match ty {
+                        // Reduced-float host ABI values are their exact stored
+                        // bits. The helper decodes only for comparison and
+                        // selects this raw argument or raw +0 without a
+                        // decode/re-encode round trip.
+                        HostType::Float16 | HostType::BFloat16 => {
+                            EmittedExpr::call(helper, [arg(0)])
+                        }
+                        HostType::Float32 | HostType::Float64 => {
+                            EmittedExpr::call(helper, [numeric_arg(0)])
+                        }
+                        _ => unreachable!("non-float ReLU rejected above"),
+                    }
+                }
                 CExpressionBuiltin::Sigmoid => finalize_scalar_expr(
                     EmittedExpr::call(
                         activation_math_function(
@@ -8700,7 +8722,7 @@ mod expression_dispatch_tests {
                 );
             }
         }
-        for width in ["f16", "bf16", "f32", "f64"] {
+        for width in ["f32", "f64"] {
             let start = emitted
                 .find(&format!("chelis_host_relu_{width}"))
                 .expect("ReLU helper start");
@@ -8709,6 +8731,32 @@ mod expression_dispatch_tests {
             let body = &body[..end];
             assert!(body.contains("return x <"), "{width}: {body}");
             assert!(!body.contains("fmax"), "{width}: {body}");
+        }
+        for (width, decoder) in [("f16", "chelis_f16_to_f32"), ("bf16", "chelis_bf16_to_f32")] {
+            let start = emitted
+                .find(&format!(
+                    "static inline uint16_t chelis_host_relu_{width}(uint16_t x)"
+                ))
+                .expect("stored-bit ReLU helper start");
+            let body = &emitted[start..];
+            let end = body.find("}\n").expect("stored-bit ReLU helper end");
+            let body = &body[..end];
+            assert!(
+                body.contains(&format!("return {decoder}(x) < 0.0f ? UINT16_C(0) : x;")),
+                "{width}: {body}"
+            );
+            assert!(!body.contains("chelis_f32_to_"), "{width}: {body}");
+            assert!(!body.contains("fmax"), "{width}: {body}");
+        }
+        for op in ["sigmoid", "tanh", "silu", "gelu"] {
+            for width in ["f16", "bf16"] {
+                assert!(
+                    emitted.contains(&format!(
+                        "static inline float chelis_host_{op}_{width}(float x)"
+                    )),
+                    "non-ReLU activation ABI changed for {op}/{width}"
+                );
+            }
         }
         assert!(emitted.contains("chelis_host_finalize_f16"));
         assert!(emitted.contains("chelis_host_finalize_bf16"));

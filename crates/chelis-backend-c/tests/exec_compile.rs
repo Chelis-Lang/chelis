@@ -4186,6 +4186,110 @@ fn direct_extrema_adjoints_copy_exact_gradient_bits_for_ties_and_nan_selection()
     );
 }
 
+fn host_scalar_relu_program(ty: HostType) -> HostProgram {
+    let body = HostExpr::new(HostExprKind::Builtin {
+        name: "relu".to_string(),
+        args: vec![HostExpr::new(HostExprKind::Var(
+            "x".to_string(),
+            ty.clone(),
+        ))],
+        ty: ty.clone(),
+    });
+    HostProgram {
+        globals: Vec::new(),
+        global_tensor_helpers: Vec::new(),
+        functions: vec![HostFunction {
+            name: "the_fn".to_string(),
+            params: vec![HostParam {
+                name: "x".to_string(),
+                ty: ty.clone(),
+            }],
+            ret_ty: ty,
+            body,
+            tensor_helpers: Vec::new(),
+            origin: HostFunctionOrigin::Authored,
+            specialization: None,
+            summary_rejections: Vec::new(),
+        }],
+        summary_rejections: Vec::new(),
+    }
+}
+
+fn host_scalar_relu_reduced_bits_case(tag: &str, ty: HostType, inputs: &[u16], expected: &[u16]) {
+    assert_eq!(inputs.len(), expected.len());
+    let function = format!("host_scalar_relu_{tag}_bits");
+    let src = emit_host_program(&host_scalar_relu_program(ty), &function)
+        .expect("ownership-verified host ReLU codegen");
+    let format_bits = |bits: &[u16]| {
+        bits.iter()
+            .map(|value| format!("UINT16_C(0x{value:04x})"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+#include <stdint.h>
+#define N {n}
+extern uint16_t the_fn(uint16_t);
+int main(void) {{
+    uint16_t inputs[N] = {{ {inputs} }};
+    uint16_t expected[N] = {{ {expected} }};
+    for (int i = 0; i < N; ++i) {{
+        uint16_t got = the_fn(inputs[i]);
+        if (got != expected[i]) {{
+            fprintf(stderr, "{tag} ReLU bit mismatch at %d: got 0x%04x expected 0x%04x\n",
+                    i, (unsigned)got, (unsigned)expected[i]);
+            return 1;
+        }}
+    }}
+    return 0;
+}}
+"#,
+        n = inputs.len(),
+        inputs = format_bits(inputs),
+        expected = format_bits(expected),
+    );
+    let run = compile_and_capture_run(&function, &src, &harness);
+    assert!(
+        run.status.success(),
+        "{tag} host scalar ReLU changed selected stored bits: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+/// [05-OP-43] / chelis#1313: the reduced-float HostProgram ABI carries f16
+/// as stored `uint16_t` bits. ReLU selects that exact carrier for nonnegative
+/// values and every NaN; only a strictly negative numeric input becomes +0.
+#[test]
+fn host_scalar_relu_f16_preserves_selected_stored_bits() {
+    host_scalar_relu_reduced_bits_case(
+        "f16",
+        HostType::Scalar(Prim::F16),
+        &[
+            0xbc00, 0x8000, 0x0000, 0x3c00, 0x7e11, 0xfe11, 0x7c01, 0xfc01,
+        ],
+        &[
+            0x0000, 0x8000, 0x0000, 0x3c00, 0x7e11, 0xfe11, 0x7c01, 0xfc01,
+        ],
+    );
+}
+
+/// [05-OP-43] / chelis#1313: bf16 has the same exact selected-stored-value
+/// rule, including payload/sign preservation for quiet and signaling NaNs.
+#[test]
+fn host_scalar_relu_bf16_preserves_selected_stored_bits() {
+    host_scalar_relu_reduced_bits_case(
+        "bf16",
+        HostType::Scalar(Prim::Bf16),
+        &[
+            0xbf80, 0x8000, 0x0000, 0x3f80, 0x7fc1, 0xffc1, 0x7f91, 0xff91,
+        ],
+        &[
+            0x0000, 0x8000, 0x0000, 0x3f80, 0x7fc1, 0xffc1, 0x7f91, 0xff91,
+        ],
+    );
+}
+
 fn direct_relu_bit_case(case: DirectExtremaBitCase<'_>, expected: [&[u64]; 2]) {
     let DirectExtremaBitCase {
         tag,

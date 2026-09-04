@@ -96,6 +96,19 @@ class SourceContractMutationTests(unittest.TestCase):
         with self.assertRaisesRegex(oracle.OracleFailure, "scalar stored-value"):
             oracle.validate_source_contracts(self.repo)
 
+    def test_reduced_scalar_decode_reencode_mutation_fails(self) -> None:
+        path = self.repo / "crates/chelis-backend-c/src/host_emit.rs"
+        source = path.read_text()
+        path.write_text(
+            source.replace(
+                '"    return {decoder}(x) < 0.0f ? UINT16_C(0) : x;"',
+                '"    return chelis_f32_to_f16({decoder}(x));"',
+                1,
+            )
+        )
+        with self.assertRaisesRegex(oracle.OracleFailure, "scalar stored-value"):
+            oracle.validate_source_contracts(self.repo)
+
     def test_relu_registration_mutation_fails(self) -> None:
         path = self.repo / "crates/chelis-cli/tests/capacity_census_tripwire.rs"
         source = path.read_text()

@@ -88,6 +88,9 @@ def source_contracts() -> tuple[SourceContract, ...]:
             "crates/chelis-backend-c/src/host_emit.rs",
             (
                 "chelis_host_relu_{suffix}",
+                '"static inline uint16_t chelis_host_relu_{suffix}(uint16_t x) {{"',
+                '"    return {decoder}(x) < 0.0f ? UINT16_C(0) : x;"',
+                "HostType::Float16 | HostType::BFloat16 => {",
                 '"    return x < {} ? {} : x;"',
                 'assert!(!body.contains("fmax")',
             ),
@@ -190,7 +193,7 @@ def oracle_legs(python: str) -> tuple[OracleLeg, ...]:
                 "-p",
                 "chelis-backend-c",
                 "-E",
-                "test(direct_relu_) | test(scalar_activation_names_have_closed_expression_identities_and_all_width_helpers)",
+                "test(direct_relu_) | test(host_scalar_relu_) | test(scalar_activation_names_have_closed_expression_identities_and_all_width_helpers)",
             ),
         ),
         OracleLeg(
