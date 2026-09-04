@@ -2,7 +2,7 @@
 //! eager value through a function call or nested lambda during initialization.
 //!
 //! This is the issue's authoritative acceptance suite. It exercises both
-//! public checker ingresses and the `check`, `eval`, and C-build commands over
+//! public checker ingresses and the `check`, `prove`, `eval`, and C-build commands over
 //! the same corpus. The positive control also compiles, links, and runs so a
 //! checker-only repair cannot hide a remaining evaluator/backend divergence.
 //!
@@ -111,6 +111,15 @@ const CYCLE_SOURCE: &str = "module Issue1339.Cycle\n\
                             root = read_cycle()\n\
                             later: int32 = root\n\
                             def read_cycle() -> int32 = later\n";
+
+const CYCLIC_ROOT_WITH_LATER_SOURCE: &str = "module Issue1339.CycleWithLater\n\
+                                            root = add(read_root(), later)\n\
+                                            later = 5i32\n\
+                                            def read_root() -> int32 = root\n";
+
+const CYCLIC_ROOT_WITH_UNKNOWN_SOURCE: &str = "module Issue1339.CycleWithUnknown\n\
+                                              root = add(read_root(), missing)\n\
+                                              def read_root() -> int32 = root\n";
 
 const POSITIVE_SOURCE: &str = "module Issue1339.Positive\n\
                                base = 5i32\n\
@@ -311,6 +320,67 @@ fn assert_eval_and_build_unbound(case: RejectCase, must_name_root: bool) {
     );
 }
 
+fn prove_output(source: &str, name: &str) -> std::process::Output {
+    let directory = tempdir().expect("tempdir");
+    let path = directory.path().join(format!("{name}.ch"));
+    write_file(&path, source);
+    Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "prove",
+            path.to_str().expect("UTF-8 fixture path"),
+            "--json",
+        ])
+        .output()
+        .expect("chelis prove must run")
+}
+
+fn prove_records(output: &std::process::Output, name: &str) -> Vec<serde_json::Value> {
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap_or_else(|error| {
+                panic!("{name}: prove must emit NDJSON: {error}; line={line:?}")
+            })
+        })
+        .collect()
+}
+
+fn assert_prove_unbound(case: RejectCase, must_name_root: bool) {
+    let output = prove_output(case.source, case.name);
+    let records = prove_records(&output, case.name);
+    let errors = records
+        .iter()
+        .filter(|record| record["kind"] == "error" && record["stage"] == "check")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "{}: prove must reject during checking: {records:#?}; stderr={}",
+        case.name,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        errors.len(),
+        1,
+        "{}: prove must emit one check error: {records:#?}",
+        case.name
+    );
+    let rendered = errors[0].to_string();
+    assert!(
+        rendered.contains(case.later) && (!must_name_root || rendered.contains(case.root)),
+        "{}: prove diagnostic must name later `{}`{}: {records:#?}",
+        case.name,
+        case.later,
+        if must_name_root {
+            format!(" and initiating root `{}`", case.root)
+        } else {
+            String::new()
+        }
+    );
+}
+
 #[test]
 fn indirect_forward_values_reject_identically_at_both_checker_ingresses() {
     for &case in REJECT_CASES {
@@ -335,6 +405,55 @@ fn eval_and_build_reject_before_execution_lowering_or_artifact_emission() {
 }
 
 #[test]
+fn prove_rejects_scalar_list_and_tensor_before_proof_work() {
+    for &case in &REJECT_CASES[..3] {
+        let output = prove_output(case.source, case.name);
+        let records = prove_records(&output, case.name);
+        assert_eq!(
+            output.status.code(),
+            Some(3),
+            "{}: prove must reject during checking: {records:#?}; stderr={}",
+            case.name,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let check_errors = records
+            .iter()
+            .filter(|record| record["kind"] == "error" && record["stage"] == "check")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            check_errors.len(),
+            1,
+            "{}: prove must emit exactly one check-error record: {records:#?}",
+            case.name
+        );
+        let diagnostics = check_errors[0]["diagnostics"]
+            .as_array()
+            .expect("prove check error carries diagnostics");
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "{}: prove must preserve the one checker diagnostic: {records:#?}",
+            case.name
+        );
+        let diagnostic = diagnostics[0].as_str().expect("diagnostic is text");
+        assert!(
+            diagnostic.contains(case.root)
+                && diagnostic.contains(case.later)
+                && diagnostic.contains("[04-INF-8]"),
+            "{}: prove must expose the exact initialization failure: {records:#?}",
+            case.name
+        );
+        assert!(
+            records.iter().all(|record| {
+                !matches!(record["kind"].as_str(), Some("property" | "obligation"))
+            }),
+            "{}: proof work must not begin after the check failure: {records:#?}",
+            case.name
+        );
+    }
+}
+
+#[test]
 fn direct_forward_value_remains_an_unbound_variable_control() {
     let case = DIRECT_FORWARD_CONTROL;
     let (ir, typed) = ingress_diagnostics(case.source);
@@ -346,6 +465,7 @@ fn direct_forward_value_remains_an_unbound_variable_control() {
         "direct control must name later binding: {ir:#?}"
     );
     assert_cli_unbound(case, false);
+    assert_prove_unbound(case, false);
     assert_eval_and_build_unbound(case, false);
 }
 
@@ -370,63 +490,106 @@ fn bare_deep_carrier_rejects_identically_at_both_checker_ingresses_and_check() {
 
 #[test]
 fn eager_cycle_keeps_exact_cycle_detected_precedence_on_every_surface() {
-    let (ir, typed) = ingress_diagnostics(CYCLE_SOURCE);
-    assert_eq!(ir, typed, "cycle: checker ingresses diverged");
-    assert_eq!(
-        ir.iter().map(|(kind, _)| kind.as_str()).collect::<Vec<_>>(),
-        ["CycleDetected"],
-        "cycle must not be reclassified as a forward-reference error: {ir:#?}"
-    );
-
-    let (status, report) = check_report(CYCLE_SOURCE, "cycle", "ch");
-    assert!(
-        !status.success(),
-        "cycle check exited successfully: {report:#}"
-    );
-    let errors = report["errors"].as_array().expect("errors array");
-    assert_eq!(errors.len(), 1, "cycle: {report:#}");
-    assert_eq!(errors[0]["kind"], "CycleDetected", "cycle: {report:#}");
-
-    let directory = tempdir().expect("tempdir");
-    let path = directory.path().join("cycle.ch");
-    let out_dir = directory.path().join("cycle-out");
-    write_file(&path, CYCLE_SOURCE);
-    for (lane, args) in [
-        (
-            "eval",
-            vec!["eval", "--file", path.to_str().expect("UTF-8 path")],
-        ),
-        (
-            "build",
-            vec![
-                "build",
-                path.to_str().expect("UTF-8 path"),
-                "--target",
-                "c",
-                "--output",
-                out_dir.to_str().expect("UTF-8 path"),
-            ],
-        ),
+    for (source, name) in [
+        (CYCLE_SOURCE, "cycle"),
+        (CYCLIC_ROOT_WITH_LATER_SOURCE, "cycle_with_later"),
     ] {
-        let output = Command::cargo_bin("chelis")
-            .expect("chelis binary")
-            .env("CHELIS_STYLE_GATE_DISABLE", "1")
-            .args(args)
-            .output()
-            .expect("chelis command must run");
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let (ir, typed) = ingress_diagnostics(source);
+        assert_eq!(ir, typed, "{name}: checker ingresses diverged");
+        assert_eq!(
+            ir.iter().map(|(kind, _)| kind.as_str()).collect::<Vec<_>>(),
+            ["CycleDetected"],
+            "{name}: cycle must suppress forward-reference errors: {ir:#?}"
+        );
+
+        let (status, report) = check_report(source, name, "ch");
+        assert!(!status.success(), "{name}: check succeeded: {report:#}");
+        let errors = report["errors"].as_array().expect("errors array");
+        assert_eq!(errors.len(), 1, "{name}: {report:#}");
+        assert_eq!(errors[0]["kind"], "CycleDetected", "{name}: {report:#}");
+
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join(format!("{name}.ch"));
+        let out_dir = directory.path().join(format!("{name}-out"));
+        write_file(&path, source);
+        for (lane, args) in [
+            (
+                "eval",
+                vec!["eval", "--file", path.to_str().expect("UTF-8 path")],
+            ),
+            (
+                "build",
+                vec![
+                    "build",
+                    path.to_str().expect("UTF-8 path"),
+                    "--target",
+                    "c",
+                    "--output",
+                    out_dir.to_str().expect("UTF-8 path"),
+                ],
+            ),
+        ] {
+            let output = Command::cargo_bin("chelis")
+                .expect("chelis binary")
+                .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                .args(args)
+                .output()
+                .expect("chelis command must run");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !output.status.success()
+                    && stderr.contains("binding cycle")
+                    && !stderr.contains("unbound variable"),
+                "{name}: {lane} lost CycleDetected precedence; stdout={} stderr={stderr}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
         assert!(
-            !output.status.success()
-                && stderr.contains("binding cycle")
-                && !stderr.contains("unbound variable"),
-            "cycle: {lane} lost CycleDetected precedence; stdout={} stderr={stderr}",
-            String::from_utf8_lossy(&output.stdout)
+            !out_dir.join(format!("{name}.c")).exists(),
+            "{name}: cycle rejection must precede C artifact emission"
+        );
+
+        let prove = prove_output(source, name);
+        let records = prove_records(&prove, name);
+        let check_errors = records
+            .iter()
+            .filter(|record| record["kind"] == "error" && record["stage"] == "check")
+            .collect::<Vec<_>>();
+        assert!(
+            prove.status.code() == Some(3)
+                && check_errors.len() == 1
+                && check_errors[0].to_string().contains("binding cycle")
+                && !check_errors[0].to_string().contains("unbound variable"),
+            "{name}: prove lost CycleDetected precedence; records={records:#?}; stderr={}",
+            String::from_utf8_lossy(&prove.stderr)
         );
     }
-    assert!(
-        !out_dir.join("cycle.c").exists(),
-        "cycle rejection must precede C artifact emission"
+}
+
+#[test]
+fn cycle_precedence_does_not_hide_an_unknown_name() {
+    let (ir, typed) = ingress_diagnostics(CYCLIC_ROOT_WITH_UNKNOWN_SOURCE);
+    assert_eq!(ir, typed, "cycle-with-unknown: checker ingresses diverged");
+    assert_eq!(
+        ir.iter().map(|(kind, _)| kind.as_str()).collect::<Vec<_>>(),
+        ["UnboundVariable", "CycleDetected"],
+        "CycleDetected may suppress only graph-known later values: {ir:#?}"
     );
+    assert!(
+        ir[0].1.contains("missing"),
+        "the unrelated unknown name must remain attributable: {ir:#?}"
+    );
+
+    let (status, report) =
+        check_report(CYCLIC_ROOT_WITH_UNKNOWN_SOURCE, "cycle_with_unknown", "ch");
+    assert!(!status.success(), "cycle-with-unknown passed: {report:#}");
+    let kinds = report["errors"]
+        .as_array()
+        .expect("errors array")
+        .iter()
+        .map(|error| error["kind"].as_str().expect("diagnostic kind"))
+        .collect::<Vec<_>>();
+    assert_eq!(kinds, ["UnboundVariable", "CycleDetected"], "{report:#}");
 }
 
 #[test]
@@ -468,6 +631,21 @@ fn backward_independent_and_forward_function_controls_agree_across_lanes() {
         compiled.as_bytes(),
         eval.stdout,
         "positive controls must have byte-identical eval and compiled-C observations"
+    );
+
+    let prove = prove_output(POSITIVE_SOURCE, "positive_controls");
+    let prove_records = prove_records(&prove, "positive_controls");
+    assert_ne!(
+        prove.status.code(),
+        Some(3),
+        "positive controls must not fail prove's check gate: {prove_records:#?}; stderr={}",
+        String::from_utf8_lossy(&prove.stderr)
+    );
+    assert!(
+        prove_records
+            .iter()
+            .all(|record| record["stage"] != "check"),
+        "positive controls must emit no prove check error: {prove_records:#?}"
     );
 }
 

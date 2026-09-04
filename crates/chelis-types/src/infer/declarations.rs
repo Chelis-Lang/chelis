@@ -653,6 +653,56 @@ impl TopLevelReferenceGraph {
         }
     }
 
+    /// Later eager values whose inferred schemes must be available while one
+    /// cyclic full-reference component is co-inferred.
+    ///
+    /// [04-INF-8] gives `CycleDetected` precedence when an eager root occurs
+    /// in its own reachable closure. If a member of that exact SCC also reads
+    /// a value declared after one of its eager roots, ordinary [04-INF-4]
+    /// visibility would emit `UnboundVariable` before the cycle reporter can
+    /// publish the owning verdict. These targets are not cycle members: the
+    /// scheduler infers them first and the component scope grants their
+    /// already-established bindings temporary visibility. The source-order
+    /// rule remains unchanged everywhere else.
+    pub(super) fn cycle_precedence_targets(&self, component_items: &[usize]) -> Vec<usize> {
+        if !self.complete {
+            return Vec::new();
+        }
+        let member_vertices = component_items
+            .iter()
+            .filter_map(|item| self.definition_vertex_by_item.get(*item).copied().flatten())
+            .collect::<UnordSet<_>>();
+        let Some(earliest_eager_root) = member_vertices
+            .to_sorted()
+            .into_iter()
+            .filter_map(|vertex| {
+                let definition = &self.definitions[*vertex];
+                (definition.kind == TopLevelDefinitionKind::EagerValue)
+                    .then_some(definition.item_index)
+            })
+            .min()
+        else {
+            return Vec::new();
+        };
+
+        let mut targets = BTreeSet::new();
+        for &item in component_items {
+            let Some(references) = self.item_references.get(item) else {
+                continue;
+            };
+            for reference in references {
+                let target = &self.definitions[reference.target];
+                if target.kind == TopLevelDefinitionKind::EagerValue
+                    && target.item_index > earliest_eager_root
+                    && !member_vertices.contains(&reference.target)
+                {
+                    targets.insert(reference.target);
+                }
+            }
+        }
+        targets.into_iter().collect()
+    }
+
     fn adjacency(&self) -> Vec<Vec<usize>> {
         self.outgoing
             .iter()

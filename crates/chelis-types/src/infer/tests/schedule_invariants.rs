@@ -269,6 +269,7 @@ enum EdgeKind {
     Call,
     Mirror,
     Hole,
+    CyclePrecedence,
 }
 
 /// The reference graph, derived from the generator's declarations over the
@@ -449,6 +450,37 @@ fn reference(program: &Program, measured: &Measured) -> Reference {
                 && vertex[target] != vertex[index]
             {
                 edges.insert((vertex[target], vertex[index]), EdgeKind::Hole);
+            }
+        }
+    }
+    // [04-INF-8] cycle precedence adds one availability edge for each later
+    // eager target read by a cyclic component containing an eager root. This
+    // independent model derives the set from the generator's own reference
+    // declarations and transitive-closure SCCs, not the implementation graph.
+    for &component in &cyclic_components {
+        let eager_members = (0..item_count)
+            .filter(|index| vertex[*index] == component)
+            .filter(|index| {
+                declared(*index).is_some_and(|declaration| declaration.kind == Kind::Value)
+            })
+            .collect::<Vec<_>>();
+        let Some(&earliest_eager_root) = eager_members.iter().min() else {
+            continue;
+        };
+        for member in 0..item_count {
+            if vertex[member] != component {
+                continue;
+            }
+            let Some(declaration) = declared(member) else {
+                continue;
+            };
+            for name in &declaration.references {
+                if let Some(&target) = value_ordinal.get(name)
+                    && target > earliest_eager_root
+                    && vertex[target] != component
+                {
+                    edges.insert((vertex[target], component), EdgeKind::CyclePrecedence);
+                }
             }
         }
     }
@@ -1239,5 +1271,45 @@ fn a_mixed_bare_and_module_component_follows_the_value_a_member_reads() {
         (position[0] as isize - position[2] as isize).abs(),
         1,
         "{schedule:?}"
+    );
+}
+
+/// [04-INF-8]: when an eager root is itself cyclic, CycleDetected owns the
+/// verdict even if that root also reads a later eager value. The later value's
+/// body must therefore be inferred before the rejected cyclic component so
+/// its exact type can be made temporarily visible without deleting the
+/// ordinary [04-INF-4] diagnostic after it has been produced.
+#[test]
+fn cycle_precedence_value_is_available_before_the_cyclic_component() {
+    let source = "module CyclePrecedence\n\n\
+                  root = add(read_root(), later)\n\n\
+                  later = 5i32\n\n\
+                  def read_root() -> int32 = root\n";
+    let declarations = chelis_surf::parser::parse_str(source).expect("fixture parses");
+    let exprs = chelis_surf::desugar::desugar_program(&declarations);
+    let items = top_level_decl_items_with_modules(&exprs);
+    let plan = FunctionInferencePlan::build(&items);
+    let schedule = primary_inference_schedule(&plan, &items);
+    let item_named = |name: &str| {
+        items
+            .iter()
+            .position(|(_, expr)| {
+                matches!(stamped_parts(expr), Some((DeepTag::Def, _, _)))
+                    && top_level_decl_name(expr) == Some(name)
+            })
+            .unwrap_or_else(|| panic!("missing `{name}` item"))
+    };
+    let root = item_named("root");
+    let later = item_named("later");
+    let read_root = item_named("read_root");
+    let position = positions(&schedule);
+    assert!(
+        position[later] < position[root] && position[later] < position[read_root],
+        "the exact later value must precede both cyclic members: {schedule:?}"
+    );
+    assert_eq!(
+        (position[root] as isize - position[read_root] as isize).abs(),
+        1,
+        "the cyclic component must remain contiguous: {schedule:?}"
     );
 }

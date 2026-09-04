@@ -3115,7 +3115,12 @@ precedence. The [#1339] implementation reuses that graph and checks every
 eager root's acyclic closure against the graph's declaration ordinals.
 Imported library values are already available and are excluded. A cycle is
 diagnosed first as `CycleDetected`; the later-value diagnostic never replaces
-it.
+it. For a cyclic component that also references a later eager value, the same
+graph adds a checker-only availability edge that infers the later value first;
+the component's transactional visibility capability then exposes that exact
+binding only while the already-rejected component is co-inferred. This is not
+runtime initialization reordering, and an unrelated unknown name remains an
+`UnboundVariable` beside the cycle.
 
 **Deliverable and oracle.** One CLI integration target owns both checker
 ingresses and the public lanes:
@@ -3128,9 +3133,9 @@ Its negatives are scalar, `List`, tensor, multi-function, nested-lambda, and
 later-external-input dependencies. Its controls are the direct-forward rows,
 backward scalar/heap dependencies, an independent later value, legal forward
 and recursive functions whose value closure is already available, and exact
-eval-versus-compiled-C output including root order. `check`, `eval`, and
-`build` reject before execution or artifact creation. [#1362]'s launch gate
-runs this complete target beside the ownership launch
+eval-versus-compiled-C output including root order. `check`, `prove`, `eval`,
+and `build` reject before proof work, execution, lowering, or artifact
+creation. [#1362]'s launch gate runs this complete target beside the ownership launch
 subset; the ownership oracle's direct rows alone are not evidence that [#1339]
 is closed.
 
@@ -3259,7 +3264,7 @@ is closed.
 | PP7 | [#1125]'s carrier axis: the seven probed divergences receive the same verdict from `check_ir_program` and `check_typed_program`, and one shared total accessor plus the lint make a carrier a reader cannot decode a diagnostic rather than an absent subtree. Axis B (`validate_ir_program` runs on the serialized-IR entry only), owned by [#1537], and the unswept guarded-arm inventory are named residue, not claims |
 | [#1134] forward-reference parity | both checker ingresses reject eager forward values, accept backward values from value initializers and function bodies where allowed, accept declaration-local explicitly typed external inputs, retain sequential local scope, and reject bare self-reference and every [04-INF-7] eager value cycle identically; the schedule's order invariants are asserted directly |
 | PP8 | [#874]'s class statement, restated as coverage rather than tag-keying, and [#887]'s Tier 1 residue. Seven named programs over `vmap`'s axis, `pat-ctor`/`pat-record` heads, and `grad`'s operand are rejected instead of scoring 1.0, and `kv`'s unreadable key reports its own form instead of an `internal:` stamp violation naming a different node; the selector-read seam makes a silently-defaulted slot unspellable, and `infer_expr` reaches it from either Deep carrier. The `Selector` role is enumerated and all eight of its slots are claimed; the other roles are spot-checked only, and converting them into a claim needs an enumerator this item does not deliver (decision row 18) |
-| [#1339] top-level initialization frontier | an eager value whose acyclic closure reaches a later non-function value rejects as `UnboundVariable` under [04-INF-8]; cycles retain [04-INF-7]'s `CycleDetected`, while backward and independent controls preserve source-ordered manifest output; `issue_1339_top_level_initialization` is the authoritative oracle |
+| [#1339] top-level initialization frontier | an eager value whose acyclic closure reaches a later non-function value rejects as `UnboundVariable` under [04-INF-8]; cycles retain [04-INF-7]'s `CycleDetected`, while backward and independent controls preserve source-ordered manifest output; `issue_1339_top_level_initialization` covers both checker ingresses plus `check`, `prove`, `eval`, and C `build` as the authoritative oracle |
 
 ## Decisions and remaining questions
 
