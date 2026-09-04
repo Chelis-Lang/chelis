@@ -200,35 +200,29 @@ fn an_undeclared_cast_target_is_still_rejected_on_both_lanes() {
     }
 }
 
-/// Round 1 F1, partially dispositioned; this row records what IS decided and
-/// names what is not.
+/// Round 1 F1, regression test. An unsuffixed FLOAT literal cast to an
+/// UNBOUNDED binder is rejected on both lanes.
 ///
-/// An UNBOUNDED binder `[p]` names no dtype family, so §P10b position 4 gives
-/// its literal nothing to adopt. It keeps the `t-prim` cast-target spelling,
-/// which is the same predicate the adoption uses; at the reviewed head the two
-/// were keyed differently, the unbounded case took the new `t-var` spelling
-/// with an f32-stamped literal, and `chelis build` stopped rejecting it. The
-/// build lane's chelis#744 / [04-DTYPE-1] rejection is restored and pinned
-/// here.
+/// `spec/04-type-system.md` [04-DTYPE-2] makes an unbounded binder an
+/// unconstrained type variable admitting every type, not a dtype, so §P10b
+/// position 4's "the literals bind at `p`" has no meaning here: there is no
+/// family to bind at. The literal therefore took the §P10 f32 default, and
+/// casting that to an f64 instantiation is not the same value as binding at
+/// f64. At the reviewed head `f124ce7f8` the program returned
+/// `0.30000000447034836` from `chelis eval` while `chelis build` rejected the
+/// same source.
 ///
-/// `chelis eval` ACCEPTS the same program and returns the f32-rounded value.
-/// That is not a spelling defect and is not fixed here. The interpreter has
-/// always resolved an unbounded binder cast target through the call frame,
-/// deliberately and with tests
-/// (`chelis-compiler-api runtime::tests::generic_cast_target_uses_*` pin that
-/// each call actualizes at its own concrete precision); narrowing it broke all
-/// three. What changed is which lane sees these programs: the standalone-skip
-/// reader routes a polymorphic template to the interpreter instead of the DAG,
-/// so base's DAG rejection no longer fires first.
+/// This is a PARTIAL enforcement of [04-DTYPE-1], which constrains the cast
+/// TARGET and not the source; the general enforcement is chelis#1558 and the
+/// readings are recorded in chelis#1553.
 ///
-/// The residue is the reserved language question: what family, if any, an
-/// unsuffixed literal adopts under an unbounded binder. §P10b position 4
-/// conditions on the cast rather than on the bound, so answering it is a
-/// language decision and not this pull request's to make. Until it is
-/// answered, this row pins the two lanes as they actually behave rather than
-/// asserting an agreement that does not exist.
+/// This row has now been written three times, which is worth knowing before
+/// changing it a fourth. It first asserted both-lane rejection, right against
+/// base's measurement. It was restated to record a lane split, right once
+/// three interpreter tests showed that premise false. Both were wrong against
+/// the numbered spec, which settles the question the measurements could not.
 #[test]
-fn an_unbounded_binder_cast_keeps_the_build_lane_rejection() {
+fn an_unbounded_binder_float_literal_cast_is_rejected_on_both_lanes() {
     let (_dir, root) = make_package(
         "unbounded-binder",
         "module Bind.Main\n\
@@ -239,32 +233,58 @@ fn an_unbounded_binder_cast_keeps_the_build_lane_rejection() {
     let check = run(&root, &["check", "src/main.ch"]);
     assert!(
         check.status.success(),
-        "the program type-checks; the rejection is a lowering one"
+        "the program type-checks; the rejection is a lowering one until chelis#1558"
     );
-    let build = run(
-        &root,
-        &["build", "src/main.ch", "--target", "c", "--output", "out"],
+    for command in [
+        vec!["eval", "--file", "src/main.ch"],
+        vec!["build", "src/main.ch", "--target", "c", "--output", "out"],
+    ] {
+        let label = command[0];
+        let output = run(&root, &command);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "{label} must reject it; stdout={stdout} stderr={stderr}"
+        );
+        assert!(
+            !stdout.contains(ROUNDED_VIA_F32),
+            "{label} must not return the f32-rounded value: {stdout}"
+        );
+    }
+}
+
+/// The positive control that pins the narrowness, so it is deliberate rather
+/// than incidental. A VARIABLE source under an unbounded binder still
+/// actualizes at the call site, exactly as it does today: there is no literal
+/// taking a default, so there is no wrong value to prevent, and
+/// `chelis-compiler-api runtime::tests::generic_cast_target_uses_*` pin that
+/// capability directly. An INTEGER literal is left alone too, for the reason
+/// the eval-lane comment gives: its default is exact at every integer width
+/// that fits, and out of range it traps loudly under [04-NUM-14] rather than
+/// returning a wrong value.
+///
+/// Disposition lock: green before this change and after it.
+#[test]
+fn an_unbounded_binder_keeps_variable_and_integer_sources() {
+    let (_dir, root) = make_package(
+        "unbounded-binder-controls",
+        "module Bind.Main\n\
+         export (main)\n\
+         def recast[p](value: p) -> p = cast(value, p)\n\
+         def addk[p](x: p) -> p = add(x, cast(1, p))\n\
+         def at_i32() -> int32 = recast(41i32)\n\
+         def at_i8() -> int8 = addk(recast(41i8))\n\
+         def main() -> int32 = at_i32()\n",
     );
-    let build_stderr = String::from_utf8_lossy(&build.stderr);
+    let stdout = check_then_eval(&root);
     assert!(
-        !build.status.success() && build_stderr.contains("[04-DTYPE-1]"),
-        "build must keep rejecting an unbounded binder cast: {build_stderr}"
-    );
-    // Recorded, not endorsed: eval computes, and the value carries the f32
-    // rounding because no adoption was possible. This assertion exists so the
-    // split is visible and reddens the day the language question is answered.
-    let eval = run(&root, &["eval", "--file", "src/main.ch"]);
-    let eval_stdout = String::from_utf8_lossy(&eval.stdout);
-    assert!(
-        eval.status.success() && eval_stdout.contains(ROUNDED_VIA_F32),
-        "eval's current behaviour for an unbounded binder is the f32-rounded \
-         value; if this changed, the reserved language question was answered \
-         and this row needs restating: {eval_stdout}{}",
-        String::from_utf8_lossy(&eval.stderr)
+        stdout.contains("at_i32 = 41") && stdout.contains("at_i8 = 42"),
+        "a variable source and an integer literal must keep working: {stdout}"
     );
 }
 
-/// Round 1 F2, regression test. An INTEGER literal adopting an `Int`-bounded
+/// Round 1 F2, regression test./// Round 1 F2, regression test. An INTEGER literal adopting an `Int`-bounded
 /// binder checks clean and computes at the instantiated integer width.
 ///
 /// This is `arange_values` in `packages/chelis-std/src/tensor/construct.ch`,
