@@ -2720,17 +2720,24 @@ impl<'a> EvalContext<'a> {
                 }
                 tensor_permute_host(&tensor, &axes).map(RuntimeValue::Tensor)
             }
+            // The match scrutinee `name` carries the spelling the program
+            // actually used, so this shared arm reports it without binding a
+            // new alternative. A `callee @ (...)` binder would say the same
+            // thing and would stop the host-runtime dispatch invariant, which
+            // reads arm names off a leading `"`, from seeing an arm here at
+            // all -- for either name.
             "expand" | "insert" => {
                 let tensor = expect_tensor_arg(args, 0)?;
                 let axis = expect_int_arg(args, 1)?;
                 let count = expect_int_arg(args, 2)?;
                 if axis < 0 {
-                    return Err(format!("expand requires non-negative axis, got {axis}"));
+                    return Err(format!("{name} requires non-negative axis, got {axis}"));
                 }
                 if count < 0 {
-                    return Err(format!("expand requires non-negative extent, got {count}"));
+                    return Err(format!("{name} requires non-negative extent, got {count}"));
                 }
-                tensor_expand_host(&tensor, axis as usize, count as usize).map(RuntimeValue::Tensor)
+                tensor_expand_host(name, &tensor, axis as usize, count as usize)
+                    .map(RuntimeValue::Tensor)
             }
             "softmax" => {
                 let tensor = expect_tensor_arg(args, 0)?;

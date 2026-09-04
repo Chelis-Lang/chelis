@@ -112,7 +112,7 @@ pub(super) fn validate_identity_builtin_rank_requirements(
                         "IR elementwise builtin `{func_name}` requires matching positive-rank tensor operands, got ranks {expected} and {rank}"
                     ),
                     vec![
-                        "Make every tensor operand's dimension list identical; use `expand` explicitly when a rank change is intended"
+                        "Make every tensor operand's dimension list identical; use `insert` explicitly when a rank change is intended"
                             .to_string(),
                     ],
                 ));

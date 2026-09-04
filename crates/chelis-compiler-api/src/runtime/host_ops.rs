@@ -1423,6 +1423,7 @@ pub(super) fn tensor_matmul_host(
 /// accepted the `[count, 1]` annotation, leaving `chelis test`/`chelis
 /// eval` disagreeing with `chelis check` on `examples/linreg.ch`.
 pub(super) fn tensor_expand_host(
+    builtin: &str,
     tensor: &RuntimeTensorValue,
     axis: usize,
     count: usize,
@@ -1431,7 +1432,7 @@ pub(super) fn tensor_expand_host(
     let in_rank = in_shape.len();
     if axis > in_rank {
         return Err(format!(
-            "expand axis {axis} out of bounds for rank-{in_rank} tensor (insert position must be <= rank)"
+            "{builtin} axis {axis} out of bounds for rank-{in_rank} tensor (insert position must be <= rank)"
         ));
     }
 

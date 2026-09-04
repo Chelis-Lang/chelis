@@ -99,7 +99,7 @@ pub(super) fn infer_expand_app(
             CheckError::new(
                 CheckErrorKind::ArityMismatch,
                 format!(
-                    "expand expects (tensor, axis, size) or the named-axis form \
+                    "{callee} expects (tensor, axis, size) or the named-axis form \
                  (tensor, name, size, anchor), got {} arguments",
                     kids.len() - 1
                 ),

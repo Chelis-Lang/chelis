@@ -2041,7 +2041,7 @@ y = insert(b, cast(0, int32), negative_count)
     let err = evaluate_host_program(&checked, &UnordMap::new())
         .expect_err("expand with negative count must fail");
     assert!(
-        err.contains("expand") && err.contains("extent") && err.contains("-1"),
+        err.contains("insert") && err.contains("extent") && err.contains("-1"),
         "expected exact negative-extent diagnostic, got: {err}"
     );
 }

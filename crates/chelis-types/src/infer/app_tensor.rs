@@ -1368,7 +1368,7 @@ pub(super) fn check_named_expand_signature(
                         CheckError::new(
                             CheckErrorKind::DimensionMismatch,
                             format!(
-                                "expand: anchor `{anchor}` is ambiguous; it appears more than \
+                                "{builtin}: anchor `{anchor}` is ambiguous; it appears more than \
                              once in the operand shape (spec/04-type-system.md \u{00a7}4.5.3)"
                             ),
                             vec![],
