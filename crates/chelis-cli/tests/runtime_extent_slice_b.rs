@@ -397,6 +397,14 @@ fn c_independent_trap_after_a_mismatch_loses() {
 // name, hash iteration, or node identity".
 // ---------------------------------------------------------------------------
 
+/// The body returns `zz` and combines nothing. An earlier draft used
+/// `add(zz, p)`, which trips the elementwise operand-shape guard BEFORE any
+/// extent guard runs, so the row reported a different mechanism's failure and
+/// could not have observed guard order at all. Returning `zz` also makes this
+/// row test C2.4 rule 2 - "an all-interface class runs its guard at entry
+/// regardless of data use" - since `p` and `q` are then read by nothing and
+/// only the guard keeps them live.
+///
 /// Two interface classes both mismatch. The class whose declaring witness sits
 /// in the earlier assigned slot must trap first. The claim names are chosen so
 /// alphabetical order is the OPPOSITE of slot order: today's
@@ -414,7 +422,7 @@ fn c_independent_trap_after_a_mismatch_loses() {
 ///
 /// EVIDENTIARY STATUS: regression tests. Watched passing-for-the-wrong-reason
 /// at b2.1, then failing once the trap-line assertion was added.
-const TWO_ENTRY_CLASSES: &str = "def f(zz: tensor[zdim, f32], aa: tensor[adim, f32], p: tensor[zdim, f32], q: tensor[adim, f32]) -> tensor[zdim, f32] = add(zz, p)\n\
+const TWO_ENTRY_CLASSES: &str = "def f(zz: tensor[zdim, f32], aa: tensor[adim, f32], p: tensor[zdim, f32], q: tensor[adim, f32]) -> tensor[zdim, f32] = zz\n\
 def main() = f(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([1.0f32]))\n";
 
 #[test]
@@ -459,7 +467,13 @@ fn issue_1374_cross_tensor_read_traps_on_c() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (ok, out) = c_run_result(&dir, "r1374_c", REPRO_1374);
     assert!(!ok, "n = 2 and m = 3 must not execute silently: {out}");
-    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    // NOT `load`. This class is not all-interface: its second member is the
+    // `Expand`'s set axis, sourced from a folded read of `y`, which is a
+    // locally computed value, so section 4.7 places the guard at the
+    // introducing operation and names THAT operation. An earlier draft
+    // asserted `load` by applying the all-interface sentence without
+    // checking that this class qualifies for it.
+    assert!(out.contains(&domain_trap_line("expand")), "{out}");
 }
 
 /// chelis#1376, baseline `silent_unguarded`: the inserted axis is claimed as

@@ -1394,16 +1394,34 @@ impl CEmitter {
                 let slot = input_slots[input_label];
                 let occ_label_fmt =
                     chelis_ir::span_sanitize::sanitize_for_format_string(input_label);
+                // `spec/04-type-system.md` section 4.7: a runtime extent
+                // guard IS a typed operation-precondition guard under
+                // [04-NUM-9], so the user-facing line is exactly
+                // `numeric trap: domain in <op> at int64` with no prefix and
+                // no suffix. `<op>` is the `load` primitive of the later
+                // witness in signature order, and `<prim>` is `int64`
+                // because the guard finalizes an extent ([05-DIM-1]) rather
+                // than a tensor element. Routing through
+                // `chelis_numeric_trap` keeps the line byte-identical to
+                // every other numeric trap this lane emits.
+                //
+                // Section 4.7 also requires the disagreeing source names, the
+                // axis and each observed value to be conveyed "on separate
+                // lines accompanying that trap", binding the information and
+                // not the bytes, so the context is its own `fprintf` and the
+                // trap line stays exactly one line.
+                let canonical_label_fmt =
+                    chelis_ir::span_sanitize::sanitize_for_format_string(canonical_label);
                 self.line(&format!(
                     "if (chelis_tensor_shape(inputs[{slot}], {axis}) != {}) {{",
                     binding.name
                 ));
                 self.indent += 1;
                 self.line(&format!(
-                    "fprintf(stderr, \"{func_name_fmt}: symbolic dim `{binding_name_fmt}` mismatch: {occ_label_fmt}[{axis}]=%lld but {binding_name_fmt}=%lld\\n\", (long long)chelis_tensor_shape(inputs[{slot}], {axis}), (long long){});",
+                    "fprintf(stderr, \"extent `{binding_name_fmt}`: {canonical_label_fmt} axis {canonical_axis} = %lld, {occ_label_fmt} axis {axis} = %lld\\n\", (long long){}, (long long)chelis_tensor_shape(inputs[{slot}], {axis}));",
                     binding.name
                 ));
-                self.line("abort();");
+                self.line("chelis_numeric_trap(\"numeric trap: domain in load at int64\");");
                 self.indent -= 1;
                 self.line("}");
             }
