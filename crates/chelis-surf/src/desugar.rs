@@ -1923,10 +1923,21 @@ impl DesugarCtx {
                     }
                     other => self.desugar_expr_with_scope(other, local_fn_params),
                 };
-                // The target is `t-var` exactly when it names a declared
-                // binder. Anything else stays `t-prim`, so a typo still
-                // reaches the chelis#744 / [04-DTYPE-1] rejection unchanged.
-                let target = if self.current_type_binders.borrow().contains_key(prec) {
+                // The target is `t-var` exactly when the literal can adopt the
+                // binder, which is the same predicate: a declared binder that
+                // carries a dtype-family bound. Keying the two separately was
+                // a P0 (round 1 F1): an UNBOUNDED `[p]` took the new legal
+                // `t-var` target while its literal kept the §P10 f32 stamp, so
+                // `cast(0.1, p)` stopped being rejected and started returning
+                // the f32-rounded value on both lanes.
+                //
+                // An unbounded binder therefore keeps `t-prim`, which restores
+                // base's [04-DTYPE-1] rejection for it unchanged. What family
+                // an unbounded binder's literal should adopt is a language
+                // question, not one to settle here: §P10b position 4 conditions
+                // on the cast rather than on the bound, and it is tracked
+                // separately.
+                let target = if binder_bound.is_some() {
                     node(DeepTag::TVar, vec![sym(prec)])
                 } else {
                     node(DeepTag::TPrim, vec![sym(prec)])
@@ -2285,9 +2296,14 @@ fn desugar_literal(lit: &Literal) -> deep::Expr {
 /// The family split mirrors [`scalar_literal_adopts_cast_target`] exactly,
 /// because it exists for a reason that does not change here: a float literal
 /// cannot bind at an integer type, so under an `Int`-bounded binder it keeps
-/// its float source and the checked cast applies [04-NUM-14]. An UNBOUNDED
-/// binder names no family, so no adoption is possible and the literal keeps
-/// its §P10 default; that case is unchanged by this rule.
+/// its float source and the checked cast applies [04-NUM-14].
+///
+/// An UNBOUNDED binder names no family, so no adoption is possible. The cast
+/// TARGET is keyed on this same predicate for that reason: giving an unbounded
+/// binder the `t-var` spelling while its literal kept the §P10 f32 stamp
+/// removed base's [04-DTYPE-1] rejection and replaced it with an f32-rounded
+/// value on both lanes (round 1 F1). An unbounded binder keeps `t-prim` and
+/// keeps that rejection.
 fn scalar_literal_adopts_binder_target(lit: &Literal, bound: Option<DtypeFamily>) -> bool {
     let Some(bound) = bound else {
         return false;
@@ -2308,12 +2324,21 @@ fn adopted_scalar_literal_at_binder(lit: &Literal, binder: &str, negate: bool) -
     match lit {
         Literal::Int(n) => {
             let value = if negate { fold_unary_minus_int(*n) } else { *n };
-            // An integer literal under a binder may still land at a float
-            // instantiation, so it carries the same integer-valued-float
-            // metadata the concrete float-target path uses.
+            // NO `literal_source: integer` marker, unlike the concrete
+            // float-target path. That marker records "an integer was written
+            // where a float is wanted", and the checker requires it to
+            // accompany a primitive FLOAT type; a `t-var` is not one, so
+            // stamping it made `cast(1, p)` under `[p: Int]` fail `chelis
+            // check` with a compiler-internal diagnostic that named no span
+            // and no action a Chelis author could take (round 1 F2). That
+            // shape is `arange_values` in the shipped standard library.
+            //
+            // An integer literal adopting a binder is not that situation: the
+            // binder's own bound decides the family, and the instantiation
+            // decides the width.
             node_meta(
                 DeepTag::Lit,
-                meta_with_integer_float_type(ty, Some("unsuffixed")),
+                numeric_literal_meta(ty, "unsuffixed"),
                 vec![deep::Expr::Atom(deep::Atom::Int(value), sp())],
             )
         }
@@ -3640,6 +3665,65 @@ mod tests {
             !printed.contains("(t-prim {} p)"),
             "no `t-prim` may name a binder: {printed}"
         );
+    }
+
+    /// chelis#1544 / round 1 R1: a binder cast survives the §0.1 retraction
+    /// law. `resugar(desugar(source))` prints the binder name back, and the
+    /// result re-desugars to the same Deep.
+    ///
+    /// Regression test. At the reviewed head the resugaring boundary rejected
+    /// the new spelling outright (`Deep 'cast' child 1 must be a
+    /// '(t-prim {} precision)'`), which failed the repository corpus law on
+    /// `packages/chelis-std/src/tensor/construct.ch`. Three consumers had to
+    /// admit the binder: the `cast` arm, the literal validator, and the
+    /// literal-suffix reader.
+    #[test]
+    fn a_binder_cast_survives_the_resugaring_retraction_law() {
+        for source in [
+            "def scale[p: Float](x: p) -> p = mul(x, cast(0.1, p))\n",
+            "def addk[p: Int](x: p) -> p = add(x, cast(1, p))\n",
+        ] {
+            let decls = crate::parser::parse_str(source).expect("fixture parses");
+            let deep = desugar_program(&decls);
+            let resugared = crate::resugar::resugar_program(&deep)
+                .unwrap_or_else(|error| panic!("resugar must accept a binder cast: {error}"));
+            let printed = crate::format::format_program(&resugared);
+            assert!(
+                printed.contains(", p)"),
+                "the binder must print back as its own name: {printed}"
+            );
+            let redesugared = desugar_program(
+                &crate::parser::parse_str(&printed).expect("resugared source parses"),
+            );
+            // Up to span metadata, which is what the repository corpus law
+            // means by "normalized": the resugared text is a different byte
+            // string, so every offset shifts even when the structure is
+            // identical.
+            let without_spans = |program: &[deep::Expr]| {
+                program
+                    .iter()
+                    .map(|expr| {
+                        let printed = print_expr(expr);
+                        printed
+                            .split("span: \"")
+                            .enumerate()
+                            .map(|(index, piece)| {
+                                if index == 0 {
+                                    piece.to_string()
+                                } else {
+                                    piece[piece.find('"').map_or(0, |end| end + 1)..].to_string()
+                                }
+                            })
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                without_spans(&redesugared),
+                without_spans(&deep),
+                "desugar(resugar(deep)) must be the identity for a binder cast"
+            );
+        }
     }
 
     /// The failure twin: a target that is NOT a declared binder keeps its
