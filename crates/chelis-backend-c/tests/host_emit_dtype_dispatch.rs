@@ -43,6 +43,8 @@ use chelis_ir::host::{
 use chelis_types::types::Prim;
 use support::emit_host_program;
 
+mod common;
+
 fn vec_ty(n: usize, prim: Prim) -> TensorType {
     TensorType {
         dims: vec![DimInfo::Lit(n)],
@@ -380,9 +382,8 @@ int main(void) {{
 "#
     );
 
-    let temp_dir =
-        std::env::temp_dir().join(format!("chelis_host_emit_{op_name}_{}", std::process::id()));
-    fs::create_dir_all(&temp_dir).unwrap();
+    let probe = common::probe_dir(&format!("host_emit_{op_name}"));
+    let temp_dir = probe.path().to_path_buf();
     let source_path = temp_dir.join("probe.c");
     let binary_path = temp_dir.join("probe");
     fs::write(&source_path, c_source).unwrap();
@@ -406,13 +407,11 @@ int main(void) {{
         "generated int32 assignment failed to run:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let value = String::from_utf8(output.stdout)
+    String::from_utf8(output.stdout)
         .unwrap()
         .trim()
         .parse()
-        .unwrap();
-    let _ = fs::remove_dir_all(temp_dir);
-    value
+        .unwrap()
 }
 
 // ---- L1587 binary operator ---------------------------------------------

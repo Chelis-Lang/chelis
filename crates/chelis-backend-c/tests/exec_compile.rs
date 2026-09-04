@@ -25,6 +25,8 @@ use std::process::Command;
 use std::sync::OnceLock;
 use support::{codegen, codegen_with_options, emit_host_program};
 
+mod common;
+
 fn vec_f32(n: usize) -> TensorType {
     TensorType {
         dims: vec![DimInfo::Lit(n)],
@@ -180,8 +182,8 @@ fn runtime_lib_path() -> PathBuf {
 
 /// Write generated C + harness, compile, run, return stdout. None = compile/run failure.
 fn compile_and_run_kernel(test_name: &str, c_source: &str, harness: &str) -> Option<String> {
-    let dir = std::env::temp_dir().join(format!("chelis_exec_{test_name}"));
-    fs::create_dir_all(&dir).unwrap();
+    let probe = common::probe_dir(&format!("exec_{test_name}"));
+    let dir = probe.path().to_path_buf();
 
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();
@@ -1195,8 +1197,8 @@ fn exec_floor_div_int64_rounds_toward_neg_inf() {
 /// binary aborts. Panics if COMPILATION fails — a zero-divisor trap is a
 /// runtime abort, not a compile error.
 fn compile_and_capture_run(test_name: &str, c_source: &str, harness: &str) -> std::process::Output {
-    let dir = std::env::temp_dir().join(format!("chelis_exec_{test_name}"));
-    fs::create_dir_all(&dir).unwrap();
+    let probe = common::probe_dir(&format!("exec_{test_name}"));
+    let dir = probe.path().to_path_buf();
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();
 
@@ -1468,8 +1470,8 @@ int main() {{
 #[test]
 fn exec_simd_nan_propagation_inconsistency_probe() {
     let include_dir = runtime_include_dir();
-    let dir = std::env::temp_dir().join("chelis_exec_nan_probe");
-    fs::create_dir_all(&dir).unwrap();
+    let probe = common::probe_dir("exec_nan_probe");
+    let dir = probe.path().to_path_buf();
 
     for hdr in &[
         "chelis_runtime.h",
@@ -1577,8 +1579,8 @@ int main() {
 #[test]
 fn exec_simd_header_compiles_as_cxx() {
     let include_dir = runtime_include_dir();
-    let dir = std::env::temp_dir().join("chelis_cxx_probe");
-    fs::create_dir_all(&dir).unwrap();
+    let probe = common::probe_dir("cxx_probe");
+    let dir = probe.path().to_path_buf();
 
     // Copy simd header
     let simd_src = fs::read_to_string(include_dir.join("chelis_simd.h")).unwrap();
@@ -1708,8 +1710,8 @@ fn compile_and_run_kernel_with_blas(
     c_source: &str,
     harness: &str,
 ) -> Option<String> {
-    let dir = std::env::temp_dir().join(format!("chelis_exec_{test_name}"));
-    fs::create_dir_all(&dir).unwrap();
+    let probe = common::probe_dir(&format!("exec_{test_name}"));
+    let dir = probe.path().to_path_buf();
 
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();

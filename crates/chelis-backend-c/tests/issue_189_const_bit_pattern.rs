@@ -21,6 +21,8 @@ use chelis_ir::dag::{Dag, RiscOp, TensorType};
 use chelis_types::types::Prim;
 use support::emit_dag;
 
+mod common;
+
 fn scalar(p: Prim) -> TensorType {
     TensorType {
         dims: vec![],
@@ -277,8 +279,8 @@ fn runtime_lib_path() -> PathBuf {
 }
 
 fn compile_and_run(test_name: &str, c_source: &str, harness: &str) -> Option<String> {
-    let dir = std::env::temp_dir().join(format!("chelis_issue189_{test_name}"));
-    fs::create_dir_all(&dir).unwrap();
+    let probe = common::probe_dir(&format!("issue189_{test_name}"));
+    let dir = probe.path().to_path_buf();
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();
     let include_dir = runtime_include_dir();

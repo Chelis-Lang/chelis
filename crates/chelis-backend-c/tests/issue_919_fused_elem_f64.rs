@@ -28,6 +28,8 @@ use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
 use support::codegen;
 
+mod common;
+
 fn vec_ty(n: usize, precision: Prim) -> TensorType {
     TensorType {
         dims: vec![DimInfo::Lit(n)],
@@ -128,8 +130,8 @@ fn f64_fused_chain_compiles() {
     let dag = exp_times_x_dag(Prim::F64);
     let result = codegen(&dag, "f64_fused_compile").expect("f64 fused codegen");
 
-    let dir = std::env::temp_dir().join("chelis_issue_919_f64_fused");
-    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let probe = common::probe_dir("issue_919_f64_fused");
+    let dir = probe.path().to_path_buf();
     std::fs::write(dir.join("f64_fused_compile.c"), &result.c_source).expect("write c");
     std::fs::write(dir.join("f64_fused_compile.h"), &result.h_header).expect("write h");
 

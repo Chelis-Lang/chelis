@@ -6,6 +6,8 @@ use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
 use support::codegen;
 
+mod common;
+
 fn vec_f32(n: usize) -> TensorType {
     TensorType {
         dims: vec![DimInfo::Lit(n)],
@@ -36,8 +38,8 @@ fn c_fused_codegen_compiles() {
     let result = codegen(&fused, "test_fused").unwrap();
 
     // Write to temp file and syntax-check with gcc
-    let dir = std::env::temp_dir().join("chelis_redteam_c_fused");
-    std::fs::create_dir_all(&dir).unwrap();
+    let probe = common::probe_dir("redteam_c_fused");
+    let dir = probe.path().to_path_buf();
 
     std::fs::write(dir.join("test_fused.c"), &result.c_source).unwrap();
     std::fs::write(dir.join("test_fused.h"), &result.h_header).unwrap();
@@ -246,8 +248,8 @@ fn c_fused_reduce_compiles() {
     let fused = fuse(&dag);
     let result = codegen(&fused, "test_fused_reduce_compile").unwrap();
 
-    let dir = std::env::temp_dir().join("chelis_redteam_c_fused_reduce");
-    std::fs::create_dir_all(&dir).unwrap();
+    let probe = common::probe_dir("redteam_c_fused_reduce");
+    let dir = probe.path().to_path_buf();
 
     std::fs::write(dir.join("test.c"), &result.c_source).unwrap();
     std::fs::write(dir.join("test.h"), &result.h_header).unwrap();

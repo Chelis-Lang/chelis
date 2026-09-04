@@ -27,6 +27,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use support::emit_host_program;
 
+mod common;
+
 /// Wrap a single-expression body into a minimal `HostProgram`. The function
 /// takes one scalar param so the emitted signature is well-formed; the body
 /// expression determines what construction code is emitted.
@@ -194,8 +196,8 @@ fn gcc_available() -> bool {
 /// Compile `c_source` (host C) under strict ISO-C with `-pedantic-errors -Werror`.
 /// Returns the compiler stderr on failure, or `None` on success.
 fn pedantic_compile_error(test_name: &str, c_source: &str) -> Option<String> {
-    let dir = std::env::temp_dir().join(format!("chelis_issue310_{test_name}"));
-    std::fs::create_dir_all(&dir).unwrap();
+    let probe = common::probe_dir(&format!("issue310_{test_name}"));
+    let dir = probe.path().to_path_buf();
     std::fs::write(dir.join("host.c"), c_source).unwrap();
 
     let include_dir = runtime_include_dir();
