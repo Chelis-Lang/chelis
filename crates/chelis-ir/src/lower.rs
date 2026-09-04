@@ -2388,14 +2388,17 @@ pub fn top_level_lowering_map(
     let top_level_defs = collect_top_level_defs(exprs);
     let top_level_sigs = collect_top_level_sigs(exprs);
     let dtype_bound_names = collect_top_level_dtype_bound_names(exprs);
+    let types = LowerabilityTypes {
+        signatures: &top_level_sigs,
+        dtype_bound_names: &dtype_bound_names,
+    };
     let mut cache = BTreeMap::new();
     let mut visiting = UnordSet::new();
     for name in top_level_defs.keys() {
         let lowered = def_is_lowered(
             name,
             &top_level_defs,
-            &top_level_sigs,
-            &dtype_bound_names,
+            &types,
             type_env,
             &mut cache,
             &mut visiting,
@@ -2432,6 +2435,10 @@ pub fn top_level_lowering_map_with_context(
             .entry(name.clone())
             .or_insert_with(|| ty_expr_to_deep(ty_expr));
     }
+    let types = LowerabilityTypes {
+        signatures: &top_level_sigs,
+        dtype_bound_names: &dtype_bound_names,
+    };
     let mut cache = library.lowered_names.clone();
     let mut visiting = UnordSet::new();
     for name in top_level_defs.keys() {
@@ -2441,8 +2448,7 @@ pub fn top_level_lowering_map_with_context(
         let lowered = def_is_lowered(
             name,
             &top_level_defs,
-            &top_level_sigs,
-            &dtype_bound_names,
+            &types,
             new_type_env,
             &mut cache,
             &mut visiting,
@@ -2530,13 +2536,16 @@ pub fn expr_is_dag_lowerable(expr: &Expr, program: &CheckedProgram) -> bool {
     let top_level_defs = collect_top_level_defs(program.exprs());
     let top_level_sigs = collect_top_level_sigs(program.exprs());
     let dtype_bound_names = collect_top_level_dtype_bound_names(program.exprs());
+    let types = LowerabilityTypes {
+        signatures: &top_level_sigs,
+        dtype_bound_names: &dtype_bound_names,
+    };
     let mut cache = BTreeMap::new();
     let mut visiting = UnordSet::new();
     !expr_depends_on_nonlowerable_name(
         expr,
         &top_level_defs,
-        &top_level_sigs,
-        &dtype_bound_names,
+        &types,
         program.type_env(),
         &mut cache,
         &mut visiting,
@@ -3112,11 +3121,15 @@ fn collect_top_level_sigs_from_expr(expr: &Expr, sigs: &mut BTreeMap<String, Exp
     }
 }
 
+struct LowerabilityTypes<'a> {
+    signatures: &'a BTreeMap<String, Expr>,
+    dtype_bound_names: &'a BTreeMap<String, UnordSet<String>>,
+}
+
 fn def_is_lowered(
     name: &str,
     top_level_defs: &BTreeMap<String, Expr>,
-    top_level_sigs: &BTreeMap<String, Expr>,
-    dtype_bound_names: &BTreeMap<String, UnordSet<String>>,
+    types: &LowerabilityTypes<'_>,
     type_env: &BTreeMap<String, Expr>,
     cache: &mut BTreeMap<String, bool>,
     visiting: &mut UnordSet<String>,
@@ -3125,8 +3138,8 @@ fn def_is_lowered(
         return *lowered;
     }
     if !visiting.insert(name.to_string()) {
-        return !lookup_declared_type_expr(top_level_sigs, type_env, name)
-            .is_some_and(|ty| type_is_never_lowerable(ty, dtype_bound_names.get(name)));
+        return !lookup_declared_type_expr(types.signatures, type_env, name)
+            .is_some_and(|ty| type_is_never_lowerable(ty, types.dtype_bound_names.get(name)));
     }
 
     let lowered = top_level_defs.get(name).is_some_and(|body| {
@@ -3140,15 +3153,14 @@ fn def_is_lowered(
             && !expr_depends_on_nonlowerable_name(
                 body,
                 top_level_defs,
-                top_level_sigs,
-                dtype_bound_names,
+                types,
                 type_env,
                 cache,
                 visiting,
                 &UnordSet::new(),
             )
-            && !lookup_declared_type_expr(top_level_sigs, type_env, name)
-                .is_some_and(|ty| type_is_never_lowerable(ty, dtype_bound_names.get(name)))
+            && !lookup_declared_type_expr(types.signatures, type_env, name)
+                .is_some_and(|ty| type_is_never_lowerable(ty, types.dtype_bound_names.get(name)))
     });
 
     visiting.remove(name);
@@ -3195,8 +3207,7 @@ fn unique_terminal_match<'a>(map: &'a BTreeMap<String, Expr>, name: &str) -> Opt
 fn expr_depends_on_nonlowerable_name(
     expr: &Expr,
     top_level_defs: &BTreeMap<String, Expr>,
-    top_level_sigs: &BTreeMap<String, Expr>,
-    dtype_bound_names: &BTreeMap<String, UnordSet<String>>,
+    types: &LowerabilityTypes<'_>,
     type_env: &BTreeMap<String, Expr>,
     cache: &mut BTreeMap<String, bool>,
     visiting: &mut UnordSet<String>,
@@ -3208,15 +3219,7 @@ fn expr_depends_on_nonlowerable_name(
             && !bound_names.contains(name)
             && top_level_defs.contains_key(name)
         {
-            return !def_is_lowered(
-                name,
-                top_level_defs,
-                top_level_sigs,
-                dtype_bound_names,
-                type_env,
-                cache,
-                visiting,
-            );
+            return !def_is_lowered(name, top_level_defs, types, type_env, cache, visiting);
         }
         if tag == DeepTag::Fn {
             let mut scoped = bound_names.clone();
@@ -3231,8 +3234,7 @@ fn expr_depends_on_nonlowerable_name(
                 expr_depends_on_nonlowerable_name(
                     body,
                     top_level_defs,
-                    top_level_sigs,
-                    dtype_bound_names,
+                    types,
                     type_env,
                     cache,
                     visiting,
@@ -3250,8 +3252,7 @@ fn expr_depends_on_nonlowerable_name(
                     if expr_depends_on_nonlowerable_name(
                         &binding_kids[index + 1],
                         top_level_defs,
-                        top_level_sigs,
-                        dtype_bound_names,
+                        types,
                         type_env,
                         cache,
                         visiting,
@@ -3269,8 +3270,7 @@ fn expr_depends_on_nonlowerable_name(
                 expr_depends_on_nonlowerable_name(
                     body,
                     top_level_defs,
-                    top_level_sigs,
-                    dtype_bound_names,
+                    types,
                     type_env,
                     cache,
                     visiting,
@@ -3283,8 +3283,7 @@ fn expr_depends_on_nonlowerable_name(
                 expr_depends_on_nonlowerable_name(
                     scrutinee,
                     top_level_defs,
-                    top_level_sigs,
-                    dtype_bound_names,
+                    types,
                     type_env,
                     cache,
                     visiting,
@@ -3305,8 +3304,7 @@ fn expr_depends_on_nonlowerable_name(
                     expr_depends_on_nonlowerable_name(
                         guard,
                         top_level_defs,
-                        top_level_sigs,
-                        dtype_bound_names,
+                        types,
                         type_env,
                         cache,
                         visiting,
@@ -3316,8 +3314,7 @@ fn expr_depends_on_nonlowerable_name(
                     expr_depends_on_nonlowerable_name(
                         body,
                         top_level_defs,
-                        top_level_sigs,
-                        dtype_bound_names,
+                        types,
                         type_env,
                         cache,
                         visiting,
@@ -3333,8 +3330,7 @@ fn expr_depends_on_nonlowerable_name(
             expr_depends_on_nonlowerable_name(
                 value,
                 top_level_defs,
-                top_level_sigs,
-                dtype_bound_names,
+                types,
                 type_env,
                 cache,
                 visiting,
@@ -3344,8 +3340,7 @@ fn expr_depends_on_nonlowerable_name(
             expr_depends_on_nonlowerable_name(
                 child,
                 top_level_defs,
-                top_level_sigs,
-                dtype_bound_names,
+                types,
                 type_env,
                 cache,
                 visiting,
@@ -3360,8 +3355,7 @@ fn expr_depends_on_nonlowerable_name(
             expr_depends_on_nonlowerable_name(
                 value,
                 top_level_defs,
-                top_level_sigs,
-                dtype_bound_names,
+                types,
                 type_env,
                 cache,
                 visiting,
@@ -3372,8 +3366,7 @@ fn expr_depends_on_nonlowerable_name(
             expr_depends_on_nonlowerable_name(
                 &meta.expr,
                 top_level_defs,
-                top_level_sigs,
-                dtype_bound_names,
+                types,
                 type_env,
                 cache,
                 visiting,
@@ -3382,8 +3375,7 @@ fn expr_depends_on_nonlowerable_name(
                 expr_depends_on_nonlowerable_name(
                     value,
                     top_level_defs,
-                    top_level_sigs,
-                    dtype_bound_names,
+                    types,
                     type_env,
                     cache,
                     visiting,
@@ -3399,8 +3391,7 @@ fn expr_depends_on_nonlowerable_name(
             expr_depends_on_nonlowerable_name(
                 child,
                 top_level_defs,
-                top_level_sigs,
-                dtype_bound_names,
+                types,
                 type_env,
                 cache,
                 visiting,
@@ -3412,8 +3403,7 @@ fn expr_depends_on_nonlowerable_name(
                 expr_depends_on_nonlowerable_name(
                     value,
                     top_level_defs,
-                    top_level_sigs,
-                    dtype_bound_names,
+                    types,
                     type_env,
                     cache,
                     visiting,
@@ -3423,8 +3413,7 @@ fn expr_depends_on_nonlowerable_name(
                 expr_depends_on_nonlowerable_name(
                     child,
                     top_level_defs,
-                    top_level_sigs,
-                    dtype_bound_names,
+                    types,
                     type_env,
                     cache,
                     visiting,
@@ -3436,8 +3425,7 @@ fn expr_depends_on_nonlowerable_name(
             expr_depends_on_nonlowerable_name(
                 child,
                 top_level_defs,
-                top_level_sigs,
-                dtype_bound_names,
+                types,
                 type_env,
                 cache,
                 visiting,
@@ -3448,8 +3436,7 @@ fn expr_depends_on_nonlowerable_name(
             expr_depends_on_nonlowerable_name(
                 child,
                 top_level_defs,
-                top_level_sigs,
-                dtype_bound_names,
+                types,
                 type_env,
                 cache,
                 visiting,
