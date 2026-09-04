@@ -2143,7 +2143,7 @@ it is honest**, where a complete or authored-binder header is honest by
    external-input self edge. A lambda initializer classifies its top-level
    `def` as a function while the references in its body remain graph edges,
    which is [04-INF-7]'s stored-closure rule. The resulting graph supplies the
-   function plan, mixed-component schedule, and `report_eager_cycle_errors`;
+   function plan, mixed-component schedule, and `report_initialization_errors`;
    both production drivers retain that same instance through validation, so
    cycle reporting performs no second reference walk.
 4. *Mixed groups.* `TopLevelReferenceGraph::inference_components` projects

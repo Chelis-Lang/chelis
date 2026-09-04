@@ -1119,7 +1119,7 @@ pub(crate) fn check_typed_program_in_session(
     // `CycleDetected`.
     product
         .top_level_references
-        .report_eager_cycle_errors(errors);
+        .report_initialization_errors(errors);
     let stats = product.stats();
     if errors.is_empty() {
         let annotated_exprs = annotate_ir_program(exprs, &product, errors);
