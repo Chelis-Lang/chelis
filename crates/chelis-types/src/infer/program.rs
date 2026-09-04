@@ -447,6 +447,7 @@ pub(super) fn infer_program_with_product_in_session(
     // surface it as a hard located failure (covered-or-rejected).
     stack_scope.drain_into(errors);
 
+    product.top_level_references = top_level_references;
     product
 }
 
@@ -516,7 +517,12 @@ pub(crate) fn build_type_env_from_library_in_session(
     if cancellation_gate(errors) {
         return Err(stats);
     }
-    validate_ir_program(library_exprs, &library_ir, errors);
+    validate_ir_program(
+        library_exprs,
+        &library_ir,
+        &product.top_level_references,
+        errors,
+    );
     log_sub("validate_ir_program", &mut sub_t);
     validate_tensor_precisions_in_program(library_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
@@ -657,7 +663,12 @@ pub(crate) fn build_compiled_library_context_in_session(
     if cancellation_gate(errors) {
         return Err(stats);
     }
-    validate_ir_program(library_exprs, &library_ir, errors);
+    validate_ir_program(
+        library_exprs,
+        &library_ir,
+        &product.top_level_references,
+        errors,
+    );
     validate_tensor_precisions_in_program(library_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
     validate_polymorphic_op_constraints(library_exprs, &library_ir, errors);
@@ -815,7 +826,12 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
     if cancellation_gate(errors) {
         return Err(stats);
     }
-    validate_ir_program(library_exprs, &combined_ir, errors);
+    validate_ir_program(
+        library_exprs,
+        &combined_ir,
+        &product.top_level_references,
+        errors,
+    );
     validate_tensor_precisions_in_program(library_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
     validate_polymorphic_op_constraints(library_exprs, &combined_ir, errors);
@@ -1020,7 +1036,12 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     // Run cycle / shape / precision validators on new_exprs only. The
     // combined IR env is supplied so `(var libfoo)` references
     // resolve to the library's declared type during shape validation.
-    validate_ir_program(new_exprs, &combined_ir, errors);
+    validate_ir_program(
+        new_exprs,
+        &combined_ir,
+        &product.top_level_references,
+        errors,
+    );
     log_sub("validate_ir_program", &mut sub_t);
     validate_tensor_precisions_in_program(new_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(new_exprs, errors);
@@ -1092,13 +1113,13 @@ pub(crate) fn check_typed_program_in_session(
     let stack_scope = StackExhaustionScope::enter();
     let product = infer_program_with_product_in_session(exprs, errors);
     // [04-INF-4] makes eager value cycles an ingress-independent checker
-    // error. The serialized-IR ingress runs this detector from
-    // `validate_ir_program`; the stamped typed ingress reaches inference
-    // directly, so run the same detector here after normalizing the carrier.
-    // Keep it after inference to preserve the shared diagnostic order:
-    // body-inference errors first, then `CycleDetected`.
-    let normalized = normalize_nodes_to_lists(exprs);
-    detect_top_level_binding_cycles(&normalized, errors);
+    // error. Reuse the canonical graph that scheduled inference rather than
+    // repeating its lexical walk. Keep reporting after inference to preserve
+    // the shared diagnostic order: body-inference errors first, then
+    // `CycleDetected`.
+    product
+        .top_level_references
+        .report_eager_cycle_errors(errors);
     let stats = product.stats();
     if errors.is_empty() {
         let annotated_exprs = annotate_ir_program(exprs, &product, errors);
@@ -1146,7 +1167,8 @@ pub(crate) fn infer_ir_program_in_session(
     let exprs = &normalized;
     let stack_scope = StackExhaustionScope::enter();
     let type_env = build_ir_type_env(exprs);
-    let stats = infer_ir_program_with_env(exprs, &type_env, errors);
+    let product = infer_ir_program_with_env(exprs, &type_env, errors);
+    let stats = product.stats();
     // chelis#930 review: this was the one `*_in_session` entry with no gate.
     // Without it, a tripped token let every pass below stop early and the
     // walk's truncated counts flow into a clean-looking report -- compiler::
@@ -1158,7 +1180,7 @@ pub(crate) fn infer_ir_program_in_session(
         stack_scope.drain_into(errors);
         return stats;
     }
-    validate_ir_program(exprs, &type_env, errors);
+    validate_ir_program(exprs, &type_env, &product.top_level_references, errors);
     validate_tensor_precisions_in_program(exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(exprs, errors);
     validate_polymorphic_op_constraints(exprs, &type_env, errors);
@@ -1171,7 +1193,7 @@ pub(super) fn infer_ir_program_with_env(
     exprs: &[deep::Expr],
     type_env: &IrTypeEnv,
     errors: &mut DiagnosticSink<'_>,
-) -> InferStats {
+) -> InferenceProduct {
     // Backwards-compat wrapper. Callers (like `infer_ir_program` and
     // `check_typed_program` callers) run `validate_ir_program`
     // separately, so we pass `None` here to skip the embedded validate.
@@ -1180,7 +1202,6 @@ pub(super) fn infer_ir_program_with_env(
     infer_ir_program_with_state(
         exprs, &mut state, type_env, /* run_validate_passes_on = */ None, errors,
     )
-    .stats()
 }
 
 /// Run the inference / IR binding / shape-validation passes against
@@ -1494,9 +1515,10 @@ pub(super) fn infer_ir_program_with_state(
     }
 
     if let Some(target_exprs) = run_validate_passes_on {
-        validate_ir_program(target_exprs, combined_ir, errors);
+        validate_ir_program(target_exprs, combined_ir, &top_level_references, errors);
     }
 
+    product.top_level_references = top_level_references;
     product
 }
 

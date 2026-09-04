@@ -65,6 +65,35 @@ fn assert_only_cycle_report(name: &str, source: &str) {
     );
 }
 
+fn assert_check_eval_build_cycle(name: &str, source: &str) {
+    assert_only_cycle_report(name, source);
+    let directory = tempdir().expect("tempdir");
+    let path = directory.path().join(format!("{name}.ch"));
+    write_file(&path, source);
+    let path = path.to_str().expect("UTF-8 fixture path");
+    for (command, arguments) in [
+        ("eval", vec!["eval", "--file", path]),
+        ("build", vec!["build", path, "--target", "c"]),
+    ] {
+        let output = Command::cargo_bin("chelis")
+            .expect("chelis binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(arguments)
+            .output()
+            .unwrap_or_else(|error| panic!("chelis {command} must run: {error}"));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success() && stderr.contains("binding cycle:"),
+            "{name}: {command} must reject before execution/lowering; stdout={} stderr={stderr}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            !stderr.contains("unbound variable"),
+            "{name}: {command} leaked scheduling-order UnboundVariable: {stderr}"
+        );
+    }
+}
+
 #[test]
 fn check_rejects_forward_values_on_deep_and_surf_surfaces() {
     assert_failed_report(
@@ -191,6 +220,42 @@ fn eval_and_build_reject_forward_values_before_execution_or_lowering() {
         "C build must reject the forward value as unbound; stdout={} stderr={build_stderr}",
         String::from_utf8_lossy(&build.stdout)
     );
+}
+
+#[test]
+fn check_eval_and_build_reject_higher_order_lambda_cycles() {
+    for (name, source) in [
+        (
+            "returned_lambda_annotated",
+            "module ReturnedLambdaAnnotatedCli\n\n\
+             result: int32 = (make_reader())(1)\n\n\
+             def make_reader() = fn (x: int32) -> read_result(x)\n\n\
+             def read_result(n: int32) -> int32 = add(n, result)\n",
+        ),
+        (
+            "returned_lambda_unannotated",
+            "module ReturnedLambdaInferredCli\n\n\
+             result = (make_reader())(1)\n\n\
+             def make_reader() = fn (x: int32) -> read_result(x)\n\n\
+             def read_result(n: int32) -> int32 = add(n, result)\n",
+        ),
+        (
+            "stored_lambda_annotated",
+            "module StoredLambdaAnnotatedCli\n\n\
+             stored = fn (x: int32) -> read_result(x)\n\n\
+             result: int32 = stored(1)\n\n\
+             def read_result(n: int32) -> int32 = add(n, result)\n",
+        ),
+        (
+            "stored_lambda_unannotated",
+            "module StoredLambdaInferredCli\n\n\
+             stored = fn (x: int32) -> read_result(x)\n\n\
+             result = stored(1)\n\n\
+             def read_result(n: int32) -> int32 = add(n, result)\n",
+        ),
+    ] {
+        assert_check_eval_build_cycle(name, source);
+    }
 }
 
 #[test]

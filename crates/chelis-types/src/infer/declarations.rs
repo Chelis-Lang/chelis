@@ -439,6 +439,7 @@ pub(super) struct TopLevelReferenceComponents {
 
 impl TopLevelReferenceGraph {
     pub(super) fn build(items: &[(Option<String>, &deep::Expr)]) -> Self {
+        profile_reference_graph_build();
         let cancel = crate::cancel::current_cancel_token();
         let cancelled = || cancel.as_ref().is_some_and(CancelToken::is_cancelled);
         let mut graph = Self {
@@ -1174,6 +1175,7 @@ fn scc_vertex_components(
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct FunctionPlanProfile {
     pub(super) plan_builds: usize,
+    pub(super) reference_graph_builds: usize,
     pub(super) graph_vertices: usize,
     pub(super) graph_edges: usize,
     pub(super) scc_vertex_entries: usize,
@@ -1190,6 +1192,11 @@ thread_local! {
 fn profile_plan_build() {
     #[cfg(test)]
     FUNCTION_PLAN_PROFILE.with(|profile| profile.borrow_mut().plan_builds += 1);
+}
+
+fn profile_reference_graph_build() {
+    #[cfg(test)]
+    FUNCTION_PLAN_PROFILE.with(|profile| profile.borrow_mut().reference_graph_builds += 1);
 }
 
 fn profile_graph(vertices: usize, edges: usize) {
@@ -2205,20 +2212,6 @@ pub(super) fn body_is_literal_self_ref_shape(body: &deep::Expr, name: &str) -> b
             _ => return false,
         }
     }
-}
-
-/// Detect cycles among top-level `def` bindings.
-///
-/// An explicitly typed external-input pattern (`x: T = x` or `x = (x : T)`)
-/// is permitted: its literal self-loop declares an input rather than reading
-/// an eager value. An untyped `x = x`, or any cycle with an intermediate hop,
-/// is a real binding cycle and is reported as a `CycleDetected` error.
-pub(super) fn detect_top_level_binding_cycles(
-    exprs: &[deep::Expr],
-    errors: &mut DiagnosticSink<'_>,
-) {
-    let items = top_level_decl_items_with_modules(exprs);
-    TopLevelReferenceGraph::build(&items).report_eager_cycle_errors(errors);
 }
 
 pub(super) fn param_name_for_refs(param: &deep::Expr) -> Option<String> {

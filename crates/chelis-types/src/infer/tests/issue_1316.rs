@@ -288,6 +288,7 @@ fn issue_1316_planner_work_is_linear_on_generated_graph_axes() {
             let profile = take_function_plan_profile();
             assert!(plan.complete);
             assert_eq!(profile.plan_builds, 1);
+            assert_eq!(profile.reference_graph_builds, 1);
             assert_eq!(profile.graph_vertices, definitions);
             assert_eq!(profile.graph_edges, expected_edges);
             assert_eq!(profile.scc_vertex_entries, definitions);
@@ -302,11 +303,15 @@ fn issue_1316_each_public_driver_builds_one_shared_plan() {
 
     reset_function_plan_profile();
     check_typed_program(&program).expect("primary driver accepts generated DAG");
-    assert_eq!(take_function_plan_profile().plan_builds, 1);
+    let primary_profile = take_function_plan_profile();
+    assert_eq!(primary_profile.plan_builds, 1);
+    assert_eq!(primary_profile.reference_graph_builds, 1);
 
     reset_function_plan_profile();
     check_ir_program(&program).expect("IR driver accepts generated DAG");
-    assert_eq!(take_function_plan_profile().plan_builds, 1);
+    let ir_profile = take_function_plan_profile();
+    assert_eq!(ir_profile.plan_builds, 1);
+    assert_eq!(ir_profile.reference_graph_builds, 1);
 }
 
 #[test]

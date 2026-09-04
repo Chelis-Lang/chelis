@@ -292,6 +292,10 @@ pub(super) struct InferenceProduct {
     pub(super) type_headers: TypeResolutionEnv,
     pub(super) adt_registry: AdtRegistry,
     pub(super) function_inference_plan: FunctionInferencePlan,
+    /// The canonical declaration-reference graph built for this inference
+    /// run. Scheduling and initialization-cycle diagnostics consume this same
+    /// instance so the two policies cannot drift or repeat the lexical walk.
+    pub(super) top_level_references: TopLevelReferenceGraph,
     /// Canonical whole-program preorder, computed before dependency/SCC
     /// scheduling. Deferred constraints must never derive their order from
     /// allocation or hash-table traversal.

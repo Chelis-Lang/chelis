@@ -1129,8 +1129,9 @@ fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
 fn a_genuine_binding_cycle_stays_total_as_one_component() {
     // `F1_three.ch`: `carried` reads the `defsig`-less `caller`, which needs
     // `helper`, which reads `carried`. A real reference cycle, which
-    // `detect_top_level_binding_cycles` reports; the schedule must emit every
-    // item once with the whole reference component contiguous.
+    // `TopLevelReferenceGraph::report_eager_cycle_errors` reports; the
+    // schedule must emit every item once with the whole reference component
+    // contiguous.
     let three = named(
         true,
         vec![
