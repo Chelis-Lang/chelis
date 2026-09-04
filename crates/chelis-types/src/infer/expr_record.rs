@@ -45,14 +45,20 @@ pub(super) fn infer_tuple(
 /// Returns `None` for any other shape or a negative literal, which the
 /// sole caller maps to `Type::Error`.
 pub(super) fn tuple_get_index(expr: &deep::Expr) -> Option<usize> {
-    match expr {
-        deep::Expr::Atom(deep::Atom::Int(n), _) => usize::try_from(*n).ok(),
-        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Lit) => {
-            match children(list).first() {
-                Some(deep::Expr::Atom(deep::Atom::Int(n), _)) => usize::try_from(*n).ok(),
-                _ => None,
-            }
-        }
+    // chelis#1125 PP7 / [04-TOT-5]: read the `lit` wrapper through the
+    // carrier-preserving `stamped_parts`. The `Expr::List`-only arm returned
+    // `None` for a stamped index node, and the sole caller turned that into
+    // `invalid tuple index: ... found a non-literal expression` -- so
+    // `check_typed_program` REJECTED a well-formed projection that
+    // `check_ir_program` accepted. This is the set's one fail-closed row.
+    if let deep::Expr::Atom(deep::Atom::Int(n), _) = expr {
+        return usize::try_from(*n).ok();
+    }
+    match stamped_parts(expr) {
+        Some((DeepTag::Lit, _, lit_kids)) => match lit_kids.first() {
+            Some(deep::Expr::Atom(deep::Atom::Int(n), _)) => usize::try_from(*n).ok(),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -61,9 +67,15 @@ pub(super) fn tuple_get_index(expr: &deep::Expr) -> Option<usize> {
 /// diagnostic the sole caller pushes when `tuple_get_index` returns
 /// `None`. Peeks through a `lit` wrapper to the payload atom.
 pub(super) fn describe_tuple_index(expr: &deep::Expr) -> String {
-    let atom = match expr {
-        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Lit) => children(list).first(),
-        other => Some(other),
+    // chelis#1125 PP7 / [04-TOT-5]: peek through the `lit` wrapper on either
+    // carrier. The `Expr::List`-only match made every stamped index -- valid
+    // or not -- describe as "a non-literal expression", so the two ingresses
+    // rejected a malformed index with DIFFERENT text. A verdict includes its
+    // diagnostic, so an agreeing rejection with disagreeing reasons is still
+    // a divergence.
+    let atom = match stamped_parts(expr) {
+        Some((DeepTag::Lit, _, lit_kids)) => lit_kids.first(),
+        _ => Some(expr),
     };
     match atom {
         Some(deep::Expr::Atom(deep::Atom::Int(n), _)) => format!("integer literal {n}"),

@@ -525,3 +525,257 @@ fn uniform_like_literal_bounds_are_accepted_on_both_ingresses() {
         );
     }
 }
+
+// ── chelis#1125 PP7 E5a: the four in-checker carrier divergences ───────────
+//
+// Spec authority for this block: spec/04-type-system.md §10 [04-TOT-5] --
+// a program's checker verdict does not depend on which entry receives it,
+// nor on which admitted representation carries it, and a representation the
+// checker admits but a check cannot read is a silent exemption under
+// [04-TOT-1] rather than an absent subtree. Design:
+// spec/design/checker_totality.md §"PP7. Stamped-ingress reader parity".
+//
+// PP7 measured these six programs through both shipped surfaces of the same
+// file (`chelis check`, the serialized-IR ingress, and `chelis prove`, the
+// stamped typed ingress). Four diverged; two agreed and are kept here as
+// disposition locks, because they are what makes the other four "a missed
+// check" rather than "an absent checker": the stamped ingress does bind
+// names and does range-check an in-range literal.
+//
+// Every row below runs the SAME six programs through `agreed_diagnostics`,
+// which drives `check_typed_program` (stamped) and `check_ir_program`
+// (normalizing) over one stamped parse and asserts the diagnostic sets are
+// equal.
+
+/// PP7 row 1, REGRESSION TEST (red before the `infer/expr.rs` repair, green
+/// after): `infer_lit`'s `type:` metadata reader destructured the metadata
+/// VALUE as `Expr::List`. `Node::to_list` clones the metadata map verbatim,
+/// so on the stamped ingress the `(t-prim {} int8)` under `type:` is still an
+/// `Expr::Node` and the per-prim range check never selected a row. The §5.6
+/// out-of-range literal was accepted by `chelis prove` (exit 0) and rejected
+/// by `chelis check` (exit 2) -- the fail-open direction.
+#[test]
+fn out_of_range_int8_literal_is_rejected_on_both_ingresses() {
+    assert_agree_and_reject(
+        "(def {} x (lit {type: (t-prim {} int8)} 200))",
+        "literal 200 out of range for context-inferred int8",
+        "int8 literal 200",
+    );
+}
+
+/// PP7 row 2, DISPOSITION LOCK (green before and after the repair). Its job
+/// is to keep the row above from being satisfied by rejecting every `int8`
+/// literal: an in-range value must still check clean on both ingresses, so
+/// the repair reads the metadata rather than assuming the worst about it.
+#[test]
+fn in_range_int8_literal_is_accepted_on_both_ingresses() {
+    assert_agree_and_accept(
+        "(def {} x (lit {type: (t-prim {} int8)} 100))",
+        "int8 literal 100",
+    );
+}
+
+/// PP7 row 3, DISPOSITION LOCK (green before and after the repair). Its job
+/// is to hold the premise the four divergence rows rest on: the stamped
+/// ingress really does bind and resolve names, so a check it does not run is
+/// a missed check rather than an absent checker.
+#[test]
+fn unbound_variable_is_reported_on_both_ingresses() {
+    assert_agree_and_reject(
+        "(def {} x (var {} nope))",
+        "unbound variable: nope",
+        "unbound variable control",
+    );
+}
+
+/// The PP7 `deftype` row's program: an `invariant:` with no `opaque: true`,
+/// inside a module wrapper. The module descent is part of the defect -- the
+/// D-WF pass reaches a `deftype` only through `flatten_with_modules`.
+const INVARIANT_WITHOUT_OPAQUE: &str = "(module {} m.wf \
+   (deftype {invariant: (fn {} (params {} p) \
+       (app {} (var {} gte) (access {} (var {} p) value) \
+         (lit {type: (t-prim {} f32)} 0.0))), \
+     invariant_amenability: \"linear\"} \
+     T () (variant {} T (field {} value (t-prim {} f32)))))";
+
+/// PP7 row 4, REGRESSION TEST (red before the `invariants.rs` repair, green
+/// after): the whole D-WF opaque-invariant pass was inert on the stamped
+/// ingress. Its private `tag`, `children`, and `meta_map` helpers are
+/// `Expr::List`-only, so `flatten_with_modules` did not recognize the
+/// `module` wrapper, never descended into it, and no `deftype` was ever
+/// validated. `chelis prove` accepted an invariant on a forgeable type
+/// (exit 0) that `chelis check` rejected (exit 2) -- fail-open.
+///
+/// This is the pass PP7 finding "axis A, not axis B" is about: the pass IS
+/// invoked from the typed entry; its readers could not decode the carrier.
+#[test]
+fn invariant_without_opaque_is_rejected_on_both_ingresses() {
+    assert_agree_and_reject(
+        INVARIANT_WITHOUT_OPAQUE,
+        "requires `@opaque`",
+        "deftype with invariant and no opaque",
+    );
+}
+
+/// PP7 row 4's over-rejection control, DISPOSITION LOCK (green before and
+/// after): the same declaration WITH `opaque: true` is well-formed, so the
+/// repair must not turn a newly-readable carrier into a new rejection.
+#[test]
+fn invariant_with_opaque_checks_clean_on_both_ingresses() {
+    assert_agree_and_accept(
+        &INVARIANT_WITHOUT_OPAQUE
+            .replace("(deftype {invariant:", "(deftype {opaque: true, invariant:"),
+        "deftype with invariant and opaque",
+    );
+}
+
+/// PP7 row 5, REGRESSION TEST (red before the `infer/validate.rs` repair,
+/// green after): `walk_for_tensor_precision` has an `Expr::Node` arm, so it
+/// reads as migrated -- but that arm rebuilds through `Node::to_list`, which
+/// copies children verbatim, and the arm's own
+/// `let deep::Expr::List(prec_list, _) = last` then fails on the trailing
+/// `t-prim`, which is still a `Node`. The §1.1.1 deferred-dtype rejection
+/// was therefore skipped entirely on the stamped ingress: `chelis prove`
+/// accepted `tensor[2, f8e4m3]` (exit 0) and `chelis check` rejected it
+/// (exit 2) -- fail-open, through a walker with a `Node` arm.
+#[test]
+fn deferred_tensor_precision_is_rejected_on_both_ingresses() {
+    assert_agree_and_reject(
+        "(def {} f (fn {} (params {} (x {type: (t-tensor {} (d-lit {} 2) \
+           (t-prim {} f8e4m3))})) (var {} x)))",
+        "tensor element precision `f8e4m3` is deferred",
+        "t-tensor with f8e4m3 element precision",
+    );
+}
+
+/// PP7 row 5's over-rejection control, DISPOSITION LOCK (green before and
+/// after): the same inline-annotated parameter at an ACTIVE precision must
+/// keep checking clean on both ingresses. Without it, "reject every
+/// `t-tensor` whose precision the reader cannot decode" would satisfy the
+/// row above.
+#[test]
+fn active_tensor_precision_is_accepted_on_both_ingresses() {
+    assert_agree_and_accept(
+        "(def {} f (fn {} (params {} (x {type: (t-tensor {} (d-lit {} 2) \
+           (t-prim {} f32))})) (var {} x)))",
+        "t-tensor with f32 element precision",
+    );
+}
+
+/// PP7 row 6, REGRESSION TEST (red before the `infer/expr_record.rs` repair,
+/// green after) and the one FAIL-CLOSED direction in the set:
+/// `tuple_get_index` read the `lit` index wrapper as `Expr::List`, so a
+/// stamped index returned `None` and the sole caller pushed
+/// `invalid tuple index: ... found a non-literal expression`. A well-formed
+/// projection that `chelis check` accepted at score 1.0 was REJECTED by
+/// `chelis prove` (exit 3).
+#[test]
+fn well_formed_tuple_get_is_accepted_on_both_ingresses() {
+    assert_agree_and_accept(
+        "(def {} x (tuple-get {} (tuple {} (lit {type: (t-prim {} f32)} 1.0) \
+           (lit {type: (t-prim {} f32)} 2.0)) (lit {type: (t-prim {} int32)} 0)))",
+        "well-formed tuple-get with a literal index",
+    );
+}
+
+/// PP7 row 6's NEGATIVE TWIN, REGRESSION TEST (red before the
+/// `describe_tuple_index` repair, green after). A verdict includes its
+/// diagnostic, so a malformed index has to be rejected with the SAME text on
+/// both ingresses, not merely rejected on both: the stamped ingress said
+/// "found a non-literal expression" for an index that is plainly the integer
+/// literal -1. Without this row, "reject every index carrier I cannot decode"
+/// would still satisfy the accepted-projection row above.
+#[test]
+fn negative_tuple_get_index_is_rejected_alike_on_both_ingresses() {
+    assert_agree_and_reject(
+        "(def {} x (tuple-get {} (tuple {} (lit {type: (t-prim {} f32)} 1.0) \
+           (lit {type: (t-prim {} f32)} 2.0)) (lit {type: (t-prim {} int32)} -1)))",
+        "expected a non-negative integer literal, found integer literal -1",
+        "tuple-get with a negative literal index",
+    );
+}
+
+/// The PP7 finding-1 program: a def with an inline-annotated parameter and
+/// NO `defsig`, calling a polymorphic-precision def. `build_def_param_scope`
+/// takes its inline-annotation fallback only in exactly this shape.
+fn inline_param_poly_program(call_precision: &str) -> String {
+    format!(
+        "(defsig {{}} my_mean (t-fn {{}} (t-tensor {{}} (d-lit {{}} 4) (t-var {{}} p)) \
+           (t-tensor {{}} (t-var {{}} p))))\n\
+         (def {{}} my_mean (fn {{}} (params {{}} x) \
+           (app {{}} (var {{}} mean) (var {{}} x) (lit {{type: (t-prim {{}} int32)}} 0))))\n\
+         (def {{}} call (fn {{}} (params {{}} \
+           (y {{type: (t-tensor {{}} (d-lit {{}} 4) (t-prim {{}} {call_precision}))}})) \
+           (app {{}} (var {{}} my_mean) (var {{}} y))))"
+    )
+}
+
+/// PP7 finding 1, REGRESSION TEST (red before the `param_name_and_inline_type`
+/// repair, green after). An inline-annotated param stamps to `Expr::BareList`,
+/// which `stamped_parts` does not read, so `build_def_param_scope` returned an
+/// empty scope, the WS-A8 cross-row pass could not resolve the body's
+/// `(var y)`, and the chelis#724 integer-`mean` rejection never fired on the
+/// stamped ingress. Fail-open, at a site chelis#1126 had already "migrated to
+/// `stamped_parts`" -- which is why PP7 rejects "route it through
+/// `stamped_parts`" as a sufficient instruction.
+#[test]
+fn inline_param_polymorphic_integer_mean_is_rejected_on_both_ingresses() {
+    assert_agree_and_reject(
+        &inline_param_poly_program("int64"),
+        "mean on operand precision `int64` is not admitted",
+        "inline-annotated int64 param through a polymorphic mean",
+    );
+}
+
+/// The over-rejection control for the row above, DISPOSITION LOCK (green
+/// before and after): the same shape at a float precision must keep checking
+/// clean on both ingresses.
+#[test]
+fn inline_param_polymorphic_float_mean_is_accepted_on_both_ingresses() {
+    assert_agree_and_accept(
+        &inline_param_poly_program("f32"),
+        "inline-annotated f32 param through a polymorphic mean",
+    );
+}
+
+/// The `with seed(...)` handler program, at a chosen seed-literal width. The
+/// §P10a rule is that an integer-literal seed must carry the `i64` suffix,
+/// which Deep spells as `type: (t-prim {} int64)` on the seed `lit`.
+fn seeded_handler_program(seed_prim: &str) -> String {
+    format!(
+        "(def {{}} f (handle-effect {{effect: random}} \
+           (lit {{type: (t-prim {{}} {seed_prim})}} 42) \
+           (lit {{type: (t-prim {{}} f32)}} 1.0)))"
+    )
+}
+
+/// PP7's EIGHTH in-checker divergence, found while delivering E5a and folded
+/// into it: REGRESSION TEST (red before the `seed_literal_form` repair, green
+/// after). `seed_literal_form` sits ten lines from `infer_lit`'s `type:`
+/// reader in the same file and had the same defect twice over -- an
+/// `Expr::List`-only match on the seed `lit` itself, and an `Expr::List`-only
+/// read of the `t-prim` under its `type:` metadata. On the stamped ingress
+/// the handler is an `Expr::Node`, so the outer match fell to `_ => None`, the
+/// seed classified as `NotIntLiteral`, and the §P10a int64-suffix rejection
+/// never fired: `chelis check` exited 2 and `chelis prove` exited 0 for the
+/// same file. Fail-open.
+#[test]
+fn unsuffixed_seed_literal_is_rejected_on_both_ingresses() {
+    assert_agree_and_reject(
+        &seeded_handler_program("int32"),
+        "requires an int64-suffixed integer literal seed",
+        "with seed at an unsuffixed int32 literal",
+    );
+}
+
+/// The over-rejection control for the row above, DISPOSITION LOCK (green
+/// before and after): a correctly suffixed non-negative seed must still check
+/// clean on both ingresses. Without it, "classify every seed carrier I cannot
+/// decode as unsuffixed" would satisfy the regression row.
+#[test]
+fn int64_suffixed_seed_literal_is_accepted_on_both_ingresses() {
+    assert_agree_and_accept(
+        &seeded_handler_program("int64"),
+        "with seed at an int64-suffixed literal",
+    );
+}

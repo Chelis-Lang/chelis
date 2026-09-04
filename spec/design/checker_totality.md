@@ -2510,11 +2510,19 @@ enum a traversal must exhaust, not an `Option` it may drop.
 
 #### You deliver
 
-- **E5a, the reproducers (lands first).** The six programs above - the four
+- **E5a, the reproducers (lands first). Delivered by PR [#1543].** The six programs above - the four
   in-checker divergences and their two controls - as rows in
   `crates/chelis-types/tests/issue_1107_stamped_node_ingress_parity.rs`, whose
-  `agreed_diagnostics` helper already asserts the exact invariant. Each row
-  proved red on the pre-fix tree before its site is touched. The three
+  `agreed_diagnostics` helper already asserts the exact invariant. The
+  delivered slice carries thirteen rows rather than six: the `deftype` and
+  `t-tensor` programs each took an over-rejection control, because their
+  repairs newly enable a rejection; `describe_tuple_index` took the negative
+  twin that proves it, its accepted control being the well-formed `tuple-get`
+  program already in the set; `param_name_and_inline_type` took its own
+  rejection row and control, none of the six programs reaching it; and the
+  seed-literal `type:` reader in `infer/expr.rs` was found during the slice to
+  be an eighth in-checker divergence and took the same pair. Each row proved
+  red on the pre-fix tree before its site is touched. The three
   divergences outside the checker are E5c's rows, in E5c's crates. Then the
   sites the rows cover: the `type:` metadata reader in `infer/expr.rs`, the `t-prim`
   read and `param_name_and_inline_type` in `infer/validate.rs`, the four
@@ -3479,6 +3487,7 @@ silent exemption to be diagnosed rather than an empty subtree to be skipped.
 [#1320]: https://github.com/Chelis-Lang/chelis/issues/1320
 [#1362]: https://github.com/Chelis-Lang/chelis/issues/1362
 [#1537]: https://github.com/Chelis-Lang/chelis/issues/1537
+[#1543]: https://github.com/Chelis-Lang/chelis/pull/1543
 [#1134]: https://github.com/Chelis-Lang/chelis/issues/1134
 [#887]: https://github.com/Chelis-Lang/chelis/issues/887
 [#930]: https://github.com/Chelis-Lang/chelis/issues/930
