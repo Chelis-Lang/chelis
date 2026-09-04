@@ -20,9 +20,10 @@
 //! declared in `chelis_runtime.h`, symmetric with PR #243's
 //! `chelis_fill_f32_bits` mechanism.
 
-use chelis_backend_c::emit::CEmitter;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
+use support::emit_dag;
 
 fn tensor(precision: Prim, size: usize) -> TensorType {
     TensorType {
@@ -54,7 +55,7 @@ fn build_uniform_like_dag_for(precision: Prim, low: f64, high: f64, seed: u64) -
 
 #[test]
 fn issue_937_uniform_like_emits_dtype_specific_sampler_and_storage() {
-    let f64_src = CEmitter::emit_dag(
+    let f64_src = emit_dag(
         &build_uniform_like_dag_for(Prim::F64, 0.1, 0.9, 17),
         "uniform_f64",
     )
@@ -73,7 +74,7 @@ fn issue_937_uniform_like_emits_dtype_specific_sampler_and_storage() {
         (Prim::F16, "chelis_f32_to_f16"),
         (Prim::Bf16, "chelis_f32_to_bf16"),
     ] {
-        let src = CEmitter::emit_dag(
+        let src = emit_dag(
             &build_uniform_like_dag_for(precision, 0.1, 0.9, 17),
             "uniform_reduced",
         )
@@ -92,7 +93,7 @@ fn issue_248_uniform_like_low_arg_emits_exact_bit_pattern() {
     let low: f64 = 1.0e-40;
     let high: f64 = 0.5;
     let dag = build_uniform_like_dag(low, high, 42);
-    let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+    let src = emit_dag(&dag, "test_fn").unwrap();
 
     let low_bits = (low as f32).to_bits();
     let high_bits = (high as f32).to_bits();
@@ -124,7 +125,7 @@ fn issue_248_uniform_like_does_not_use_lossy_format() {
     ];
     for &(low, high) in cases {
         let dag = build_uniform_like_dag(low, high, 7);
-        let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        let src = emit_dag(&dag, "test_fn").unwrap();
         let low_bits = (low as f32).to_bits();
         let high_bits = (high as f32).to_bits();
         assert!(
@@ -164,8 +165,6 @@ fn issue_248_uniform_like_does_not_use_lossy_format() {
 // ---------------------------------------------------------------
 
 #[cfg(target_os = "linux")]
-use chelis_backend_c::codegen;
-#[cfg(target_os = "linux")]
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
@@ -173,6 +172,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(target_os = "linux")]
 use std::sync::OnceLock;
+#[cfg(target_os = "linux")]
+use support::codegen;
 
 #[cfg(target_os = "linux")]
 fn runtime_include_dir() -> PathBuf {

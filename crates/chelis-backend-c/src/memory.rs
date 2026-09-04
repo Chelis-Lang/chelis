@@ -12,7 +12,8 @@
 
 use chelis_unord::{UnordMap, UnordSet};
 
-use chelis_ir::dag::{Dag, DimExpr, DimExprKey, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_ir::dag::{DimExpr, DimExprKey, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_ir::ownership::VerifiedDagView;
 use chelis_types::types::Prim;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,7 +53,11 @@ struct OwnerRequirement {
 }
 
 impl MemoryPlan {
-    pub fn build(dag: &Dag, output_ids: &[NodeId], skipped: &UnordSet<NodeId>) -> Self {
+    pub fn build(
+        dag: VerifiedDagView<'_>,
+        output_ids: &[NodeId],
+        skipped: &UnordSet<NodeId>,
+    ) -> Self {
         let mut node_kinds = classify_nodes(dag, skipped);
         let owner_of = compute_owner_map(dag, &node_kinds);
         let requirements = owner_requirements(dag, &node_kinds, &owner_of, output_ids);
@@ -101,10 +106,19 @@ impl MemoryPlan {
     }
 
     pub fn emit_cleanup(&self, output_ids: &[NodeId]) -> Vec<String> {
+        self.emit_cleanup_with_drops(output_ids, &[])
+    }
+
+    pub fn emit_cleanup_with_drops(
+        &self,
+        output_ids: &[NodeId],
+        dropped_sources: &[NodeId],
+    ) -> Vec<String> {
         let mut lines = Vec::new();
         for (idx, kind) in self.node_kinds.iter().enumerate() {
             let id = NodeId(idx);
             if output_ids.contains(&id)
+                || dropped_sources.contains(&id)
                 || matches!(
                     kind,
                     NodeMemoryKind::BorrowedLoad
@@ -120,7 +134,7 @@ impl MemoryPlan {
     }
 }
 
-fn classify_nodes(dag: &Dag, skipped: &UnordSet<NodeId>) -> Vec<NodeMemoryKind> {
+fn classify_nodes(dag: VerifiedDagView<'_>, skipped: &UnordSet<NodeId>) -> Vec<NodeMemoryKind> {
     let mut kinds = Vec::with_capacity(dag.len());
     for node in dag.nodes() {
         let kind = if skipped.contains(&node.id) {
@@ -202,7 +216,10 @@ fn classify_nodes(dag: &Dag, skipped: &UnordSet<NodeId>) -> Vec<NodeMemoryKind> 
     kinds
 }
 
-fn compute_owner_map(dag: &Dag, node_kinds: &[NodeMemoryKind]) -> Vec<Option<NodeId>> {
+fn compute_owner_map(
+    dag: VerifiedDagView<'_>,
+    node_kinds: &[NodeMemoryKind],
+) -> Vec<Option<NodeId>> {
     let mut owners = vec![None; dag.len()];
     for node in dag.nodes() {
         owners[node.id.0] = match &node_kinds[node.id.0] {
@@ -218,7 +235,7 @@ fn compute_owner_map(dag: &Dag, node_kinds: &[NodeMemoryKind]) -> Vec<Option<Nod
 }
 
 fn owner_requirements(
-    dag: &Dag,
+    dag: VerifiedDagView<'_>,
     node_kinds: &[NodeMemoryKind],
     owner_of: &[Option<NodeId>],
     output_ids: &[NodeId],
@@ -386,7 +403,7 @@ fn dim_size(dim: &DimInfo) -> DimExpr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chelis_ir::dag::RtDim;
+    use chelis_ir::dag::{Dag, RtDim};
 
     fn vec_f32(n: usize) -> TensorType {
         TensorType {
@@ -410,7 +427,9 @@ mod tests {
     }
 
     fn build_plan(dag: &Dag, output_ids: &[NodeId]) -> MemoryPlan {
-        MemoryPlan::build(dag, output_ids, &UnordSet::new())
+        let verified = crate::testing::verified_dag(dag, crate::CodegenOptions::default())
+            .expect("memory-planner unit-test DAG must verify ownership");
+        MemoryPlan::build(verified.emission(), output_ids, &UnordSet::new())
     }
 
     #[test]
@@ -590,9 +609,10 @@ mod tests {
             None,
         );
         let c = dag.add_node(RiscOp::Neg, vec![v], vec_f32(4), None);
+        dag.add_root(b);
         dag.add_root(c);
 
-        let plan = build_plan(&dag, &[c]);
+        let plan = build_plan(&dag, &[b, c]);
         assert_eq!(
             plan.node_kind(v),
             &NodeMemoryKind::MetadataView { source: a }
@@ -683,15 +703,15 @@ mod tests {
             sym_f32("m"),
             None,
         );
-        let _b = mismatch.add_node(RiscOp::Neg, vec![a], sym_f32("m"), None);
+        let b = mismatch.add_node(RiscOp::Neg, vec![a], sym_f32("m"), None);
         let c = mismatch.add_node(
             RiscOp::synth_const(sym_f32("n").precision, 2.0),
             vec![],
             sym_f32("n"),
             None,
         );
-        mismatch.add_root(c);
-        assert_eq!(build_plan(&mismatch, &[c]).slots().len(), 3);
+        mismatch.set_roots(vec![b, c]);
+        assert_eq!(build_plan(&mismatch, &[b, c]).slots().len(), 3);
     }
 
     #[test]

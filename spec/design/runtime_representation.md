@@ -616,6 +616,12 @@ Moving a freeze requires changing this document, the owning numbered spec when
 semantics move, the oracle's integrity digest, and a mutation that would have
 accepted the forbidden behavior.
 
+The chelis#1286 private ownership-IR boundary extends the Phase 0 source
+universe by eight `chelis-ir/src/ownership/` files without adding or
+reclassifying a representation-seam row. That source-list-only freeze move is
+covered by the existing `unregistered-inventory-source` mutation; no numbered
+representation rule changes with it.
+
 ## B2. Invariants at every phase boundary
 
 1. The public C ABI remains [05-OP-31]/[05-OP-44]-exact and

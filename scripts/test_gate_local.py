@@ -193,8 +193,9 @@ class WorkspaceMemberPackagesTests(unittest.TestCase):
 class LocalCommandListTests(unittest.TestCase):
     def test_static_subset_has_the_exact_compile_time_contracts(self):
         # `cargo nextest` does not execute doctests. The static subset
-        # drives the chelis#731 `ErrorWitness` contracts, the compiler
-        # pipeline artifact contracts, the raw-checkpoint fixture, the
+        # drives the chelis#731 `ErrorWitness` contracts, chelis#1286's
+        # ownership-boundary contracts, the compiler pipeline artifact
+        # contracts, the raw-checkpoint fixture, the
         # two cheap pipeline-core boundary guards (dependency + no_std doc),
         # the canonical chelis-std generated-artifact currency check, and the
         # chelis#908 unrepresentable-domain oracle, and chelis#893's
@@ -226,6 +227,7 @@ class LocalCommandListTests(unittest.TestCase):
                 "<managed-python> scripts/regenerate_chelis_std_bundle.py "
                 "--debug --check",
                 "cargo test -p chelis-types --doc",
+                "cargo test -p chelis-ir --doc",
                 "cargo test -p chelis-compiler-api --doc",
                 "cargo test -p chelis-pipeline-core --doc",
                 "<managed-python> scripts/check_checkpoint_compile_fail.py",

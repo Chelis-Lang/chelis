@@ -28,10 +28,11 @@
 //!   construction; the detector returns `None` and matmul never reaches
 //!   codegen.
 
-use chelis_backend_metal::codegen_metal;
+mod support;
 use chelis_backend_metal::dtype;
 use chelis_ir::dag::{Dag, DagNode, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
+use support::codegen_metal;
 
 fn vec_prec(n: usize, p: Prim) -> TensorType {
     TensorType {
@@ -181,10 +182,25 @@ fn build_matmul_dag(prec: Prim) -> Dag {
             accumulator: acc,
         },
         vec![mul],
-        mat(m, n),
+        TensorType {
+            dims: vec![DimInfo::Lit(m), DimInfo::Lit(n)],
+            precision: acc,
+        },
         None,
     );
-    dag.add_root(sum);
+    let root = if acc == prec {
+        sum
+    } else {
+        dag.add_node(
+            RiscOp::Cast {
+                new_precision: prec,
+            },
+            vec![sum],
+            mat(m, n),
+            None,
+        )
+    };
+    dag.add_root(root);
     dag
 }
 

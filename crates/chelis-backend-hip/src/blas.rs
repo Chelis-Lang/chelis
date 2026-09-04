@@ -3,7 +3,8 @@
 //! Mirrors the CPU backend's expand+mul+sum detector so the HIP backend can
 //! specialize the same lowered matmul subgraph to `hipblasSgemm`.
 
-use chelis_ir::dag::{Dag, DagNode, DimInfo, NodeId, RiscOp};
+use chelis_ir::dag::{DagNode, DimInfo, NodeId, RiscOp};
+use chelis_ir::ownership::VerifiedDagView;
 
 /// Information about a detected matmul pattern.
 #[derive(Debug, Clone, PartialEq)]
@@ -21,7 +22,7 @@ pub struct MatmulInfo {
 }
 
 /// Try to detect a matmul pattern rooted at the given Sum node.
-pub fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
+pub fn detect_matmul_pattern(dag: VerifiedDagView<'_>, sum_id: NodeId) -> Option<MatmulInfo> {
     let sum_node = dag.get(sum_id)?;
     let axis = match &sum_node.op {
         RiscOp::Sum { axis, .. } => *axis,
@@ -108,6 +109,15 @@ mod tests {
     use chelis_ir::dag::{Dag, DimInfo, TensorType};
     use chelis_types::types::Prim;
 
+    fn detect(dag: &Dag, sum: NodeId) -> Option<MatmulInfo> {
+        let verified = chelis_ir::ownership::verify_ownership(
+            chelis_ir::ownership::lower_dag_ownership(dag.clone())
+                .expect("BLAS detector unit-test DAG must lower ownership"),
+        )
+        .expect("BLAS detector unit-test DAG must verify ownership");
+        super::detect_matmul_pattern(verified.emission(), sum)
+    }
+
     fn mat_f32(r: usize, c: usize) -> TensorType {
         TensorType {
             dims: vec![DimInfo::Lit(r), DimInfo::Lit(c)],
@@ -166,7 +176,7 @@ mod tests {
             None,
         );
 
-        let info = detect_matmul_pattern(&dag, sum).expect("matmul should be detected");
+        let info = detect(&dag, sum).expect("matmul should be detected");
         assert_eq!(info.a, a);
         assert_eq!(info.b, b);
         assert_eq!(info.m, 2);

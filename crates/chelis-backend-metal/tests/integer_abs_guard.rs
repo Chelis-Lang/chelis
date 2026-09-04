@@ -1,6 +1,7 @@
-use chelis_backend_metal::emit::emit_dag;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, FusedInput, FusedStep, FusedStepOp, RiscOp, TensorType};
 use chelis_types::types::Prim;
+use support::codegen_metal;
 
 fn vec_i64(n: usize) -> TensorType {
     TensorType {
@@ -17,11 +18,9 @@ fn integer_abs_is_rejected_before_the_float_unary_template() {
     let x = direct.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
     let out = direct.add_node(RiscOp::Abs, vec![x], ty.clone(), None);
     direct.set_roots(vec![out]);
-    let err = match emit_dag(&direct, "integer_abs") {
-        Err(error) => error,
-        Ok(_) => panic!("integer abs must not enter the Metal fabs template"),
-    };
-    assert!(err.contains("unsupported: op `Abs`"));
+    let generated = codegen_metal(&direct, "integer_abs");
+    assert!(generated.mm_source.contains("unsupported: op `Abs`"));
+    assert!(generated.mm_source.contains("M1 fallback stub"));
 
     let mut fused = Dag::new();
     let x = fused.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
@@ -37,9 +36,7 @@ fn integer_abs_is_rejected_before_the_float_unary_template() {
         None,
     );
     fused.set_roots(vec![out]);
-    let err = match emit_dag(&fused, "fused_integer_abs") {
-        Err(error) => error,
-        Ok(_) => panic!("fused integer abs must not bypass the Metal guard"),
-    };
-    assert!(err.contains("unsupported: op `Abs`"));
+    let generated = codegen_metal(&fused, "fused_integer_abs");
+    assert!(generated.mm_source.contains("unsupported: op `Abs`"));
+    assert!(generated.mm_source.contains("M1 fallback stub"));
 }

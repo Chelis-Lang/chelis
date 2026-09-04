@@ -471,7 +471,15 @@ fn runtime_library_path() -> std::path::PathBuf {
 
 fn compile_and_run_dag(dag: &Dag, func_name: &str) -> String {
     assert!(gcc_available(), "gcc not available -- skipping");
-    let result = chelis_backend_c::codegen(dag, func_name).unwrap();
+    let selected = chelis_backend_c::prepare_dag_for_codegen(
+        dag.clone(),
+        chelis_backend_c::CodegenOptions::default(),
+    );
+    let verified = chelis_ir::ownership::verify_ownership(
+        chelis_ir::ownership::lower_dag_ownership(selected).unwrap(),
+    )
+    .unwrap();
+    let result = chelis_backend_c::codegen(&verified, func_name).unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let rt_dir = runtime_src_dir();
     let write = |name: &str, content: &str| {
@@ -570,7 +578,15 @@ fn spec_generated_c_compiles() {
     let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
     dag.add_root(c);
 
-    let result = chelis_backend_c::codegen(&dag, "spec_test").unwrap();
+    let selected = chelis_backend_c::prepare_dag_for_codegen(
+        dag.clone(),
+        chelis_backend_c::CodegenOptions::default(),
+    );
+    let verified = chelis_ir::ownership::verify_ownership(
+        chelis_ir::ownership::lower_dag_ownership(selected).unwrap(),
+    )
+    .unwrap();
+    let result = chelis_backend_c::codegen(&verified, "spec_test").unwrap();
     assert!(
         !result.c_source.is_empty(),
         "codegen should produce non-empty C source"

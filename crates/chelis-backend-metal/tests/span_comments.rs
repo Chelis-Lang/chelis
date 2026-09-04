@@ -16,9 +16,10 @@
 //! `m6_span_attributed_program_compiles_and_matches_evaluator` for the
 //! span-bearing case added in S4.3.
 
-use chelis_backend_metal::codegen_metal;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_types::types::Prim;
+use support::codegen_metal;
 
 fn vec_f32(n: usize) -> TensorType {
     TensorType {

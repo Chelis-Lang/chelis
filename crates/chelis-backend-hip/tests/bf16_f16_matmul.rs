@@ -19,13 +19,14 @@
 //!
 //! The codegen-only tests do not need a GPU and are not `#[ignore]`d.
 
-use chelis_backend_hip::codegen_hip;
+mod support;
 use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use support::codegen_hip;
 
 // -----------------------------------------------------------------------------
 // Shape helpers

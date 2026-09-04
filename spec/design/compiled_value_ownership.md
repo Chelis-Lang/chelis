@@ -152,33 +152,86 @@ The verifier enforces for every path:
 
 ## C2. The ownership IR boundary
 
-`chelis-ir` gains an ownership-lowered host/control-flow form with private
-constructors:
+`chelis-ir` gains a sealed, payload-typed ownership boundary with private
+constructors. Host emission and tensor-DAG emission are distinct
+specializations of the same verified transition:
 
 ```rust
-pub struct OwnershipProgram { /* private blocks, owners, uses, roots */ }
-pub struct VerifiedOwnershipProgram(OwnershipProgram);
+pub struct OwnershipProgram<P: EmissionPayload> {
+    /* private exact payload, owners, uses, roots, and directives */
+}
+pub struct VerifiedOwnershipProgram<P: EmissionPayload>(OwnershipProgram<P>);
 
-pub fn lower_ownership(
-    checked: &CheckedProgram,
-    host: &HostProgram,
-    manifest: &RootManifest,
-) -> Result<OwnershipProgram, OwnershipError>;
+pub struct HostEmissionPayload { /* private post-selection host program */ }
+pub struct DagEmissionPayload { /* private post-optimization DAG */ }
 
-pub fn verify_ownership(
-    program: OwnershipProgram,
-) -> Result<VerifiedOwnershipProgram, OwnershipError>;
+pub type VerifiedHostProgram =
+    VerifiedOwnershipProgram<HostEmissionPayload>;
+pub type VerifiedDagProgram =
+    VerifiedOwnershipProgram<DagEmissionPayload>;
+
+pub fn lower_host_ownership(
+    manifested: &ManifestedProgram,
+    host: ConcreteHostProgram,
+) -> Result<OwnershipProgram<HostEmissionPayload>, OwnershipError>;
+
+pub fn lower_dag_ownership(
+    dag: Dag,
+) -> Result<OwnershipProgram<DagEmissionPayload>, OwnershipError>;
+
+pub fn verify_ownership<P: EmissionPayload>(
+    program: OwnershipProgram<P>,
+) -> Result<VerifiedOwnershipProgram<P>, OwnershipError>;
 ```
 
-The exact crate may use references rather than owned arguments, but the type
-boundary is fixed: only `verify_ownership` constructs
-`VerifiedOwnershipProgram`, its fields are private, and every compiled backend
-entry point takes that verified type. `HostProgram` remains an earlier logical
-form and is not itself an emission contract.
+`EmissionPayload` is sealed inside `chelis-ir`; downstream crates cannot add a
+payload kind: only `verify_ownership` constructs
+`VerifiedOwnershipProgram`. Its host and DAG specializations own the exact
+post-entry-selection, post-optimization payload together with its directives:
+a caller cannot retain a mutable sibling payload, extract the raw payload, or
+reorder it after lowering. Backends receive read-only verified views and every
+compiled backend entry point takes the specialization for its lane.
+`HostProgram` and `Dag` remain earlier logical forms and are not themselves
+emission contracts.
+
+The host payload assigns an opaque `HostSiteId` by structural traversal, never
+from an identifier's spelling. Every binding, expression, argument, branch or
+match edge, loop edge, function entry and return, and manifested root has one
+site and one directive-list entry. The independent payload census derives both
+the structural kind and owning unit; every attached action must name that same
+unit. Ownership operations reference those sites, and verification proves the
+payload-site and directive-site universes are bijective before a backend can
+observe them. Generic owner operands expose identity, type, and heap class but
+no binder spelling. Name projection is a separate sealed capability on the
+exact verified binding action or function-parameter association that emits it,
+so a clone/drop operand cannot seed backend-local lifetime reconstruction. Host
+ABI projection preserves the site identities and parameter associations and
+consumes one verified payload if it must produce another; it cannot clone or
+rebuild a raw sibling program after verification.
+
+The DAG specialization uses the existing stable `NodeId` identity. Loads are
+borrowed entries; producers mint owners; and `Copy` clones. A `Drop` over an
+owned producer is an explicit terminal, while a `Drop` over a borrowed `Load`
+is a typed logical discard that neither releases nor terminates the external
+owner. `Realize` clones a borrowed or still-needed owner and moves a last-use
+owned source; `Store` likewise clones an entry borrow but consumes an owned
+source. Roots and stores remain explicit sinks. Standalone DAGs and every
+nested `HostTensorHelper` run the same DAG ownership verifier. The host payload
+keeps each nested helper and its proof inseparable, so a backend cannot route a
+raw helper DAG around verification. Phase 2 adds no reusable-storage proof.
+
+An ownership `Apply` carries a closed typed operation schema containing its
+resolved operand modes and result class. Its free-form label exists only for
+diagnostics and stable rendering. Verification compares every operand and
+result against the schema; lowering output is not accepted merely because its
+label or self-selected disposition looks plausible.
 
 The representation contains:
 
 - stable `OwnerId` and `BlockId` identities;
+- opaque, non-spelling host-site identities and existing DAG `NodeId`s;
+- a total payload-site/directive-site bijection;
+- typed operation schemas independent of diagnostic labels;
 - explicit borrow/move/clone operands;
 - owned block parameters for joins and loops;
 - terminal consumes and drops;
@@ -305,9 +358,11 @@ stored in `Option`, `List`, tuple, dictionary, or ADT is a `FirstClassValue`,
 not a contextual callback. Until [#879] supplies the general closure carrier,
 the C-host projection rejects the complete recursively containing type with
 `UnsupportedKind::HostAbi`, `Stage::Codegen("c")`, and
-`Unimplemented { issue: #879 }` before ownership verification constructs a
-plan. The same rule applies to HIP or Metal builds that select the C-host
-fallback. It is a target capability result, not a language type error, scalar
+`Unimplemented { issue: #879 }` after the sealed ownership boundary certifies
+the exact selected payload and before backend emission. The ownership plan
+tracks the opaque logical function identity as non-heap without inventing a
+runtime representation. The same rule applies to HIP or Metal builds that
+select the C-host fallback. It is a target capability result, not a language type error, scalar
 substitution, empty value, or permission to omit the type from the registry.
 This plan neither defines the closure ABI nor closes [#879] or its [#909]
 tracker.
@@ -729,12 +784,27 @@ and fast-gate checks pass on the same committed head.
 - `OwnershipProgram`, private construction, and the total verifier;
 - explicit use dispositions, owner joins, loop parameters, and root sinks;
 - backend signatures that accept only `VerifiedOwnershipProgram`;
+- payload-owning host and DAG verified specializations, including verified
+  nested tensor-helper DAGs;
 - owned return behavior for arguments, captures, and fresh values;
 - ownership-directed releases for heap-valued host code; and
 - deletion of C emitter ownership inference for converted forms.
 
-This phase promotes exactly five oracle rows: the [#1346] fold row, the two
-[#1352] mixed fresh-arm rows, and the two [#1356] fresh-argument rows. It
+Phase 2 owns the closed disposition for every `RiscOp::Drop` consumer. For an
+owned source, C and HIP emit the same single release selected by the verified
+DAG directive and exclude that owner from epilogue cleanup. For a borrowed
+`Load`, both consume a distinct borrowed-discard directive and emit no release;
+the external owner remains live. Metal consumes both verified directives
+through its typed no-reuse/no-device-owner plan and never invents a device
+owner or a reuse decision. The backend emission mechanics land after the
+sealed boundary and DAG verifier exist, but remain part of this phase's exit
+contract.
+
+This phase promotes exactly six oracle rows: the [#1346] fold row, the two
+[#1352] mixed fresh-arm rows, the two [#1356] fresh-argument rows, and
+`recursive-depth-1-control`. Real scope-exit `Drop` balances the depth-one
+recursive frame completely; Phase 3 still owns the last-use peak bound for
+depths 32, 128, and 288. The launch subset remains the same four rows. Phase 2
 preserves [#1222] and [#1344] as ordinary regressions.
 
 **Not this phase:** moving terminal operations earlier than the verifier's
@@ -745,6 +815,14 @@ initial correct placement or enabling in-place reuse.
 **Authoritative oracle:**
 `.venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 2`;
 exit zero and final line `COMPILED VALUE OWNERSHIP PHASE 2: PASS`.
+
+**Phase 2 delivery receipt:** the committed transition removes the six Phase 2
+expected-failure receipts, consumes the sealed host and DAG ownership actions
+in C/HIP/Metal, and deletes the parallel C-host ownership inference. The same
+head must also pass `--phase launch`, whose final line is
+`COMPILED VALUE OWNERSHIP LAUNCH SUBSET: PASS`. The three remaining [#1206]
+peak receipts record conservative scope-exit placement and retain Phase 3 as
+their promotion phase.
 
 ## Phase 3 — last-use reclamation and shared reuse proof
 
@@ -807,7 +885,7 @@ exit zero and final line `COMPILED VALUE OWNERSHIP ORACLE: PASS`.
 |---|---|
 | [#543] | Phase 1 adds tensor heap cloning/finalization and closes all five aggregate-tensor rows, including the function-internal tensor-literal temporary. The top-level tuple missing-`main` observation is [#545], not an ownership-oracle row |
 | [#544] | Phase 1 makes aggregate child clone/release balance independent of count, capacity growth, and nesting |
-| [#1206] | Phase 3 moves dead frame releases before tail calls and proves peak live bytes independent of recursion depth. Runtime-valued `with seed` remains [#735] syntax/semantics work; recursive-host operation support remains [#729]/[#730] capability work |
+| [#1206] | Phase 2 balances the depth-one recursive frame with real scope-exit `Drop`; Phase 3 moves dead frame releases before tail calls and proves the depths 32/128/288 peak live bytes independent of recursion depth. Runtime-valued `with seed` remains [#735] syntax/semantics work; recursive-host operation support remains [#729]/[#730] capability work |
 | [#1214] | Phase 3 removes backend-local eligibility and executes the shared caller-storage negative on HIP hardware. [#1172] owns the span-key cause that can over-broaden hints; Surf reachability is exposure evidence, not another ownership mechanism |
 | [#1222] | closed instance; Phase 0 onward retains teardown/alias regressions |
 | [#1344] | closed instance; Phase 0 onward retains captured-borrow regressions |

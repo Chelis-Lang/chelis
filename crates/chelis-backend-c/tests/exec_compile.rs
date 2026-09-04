@@ -6,8 +6,8 @@
 //! The kernel allocates output tensors internally via chelis_alloc.
 //! We link against the chelis_runtime .a to resolve those symbols.
 
-use chelis_backend_c::host_emit::emit_host_program;
-use chelis_backend_c::{CodegenOptions, MathLib, codegen_with_options};
+use chelis_backend_c::{CodegenOptions, MathLib};
+mod support;
 use chelis_ir::ConcreteHostType as HostType;
 use chelis_ir::dag::{
     Dag, DimInfo, ExtremaKind, ExtremaOperand, ReduceWindowKind, RiscOp, TensorType,
@@ -23,6 +23,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+use support::{codegen, codegen_with_options, emit_host_program};
 
 fn vec_f32(n: usize) -> TensorType {
     TensorType {
@@ -436,7 +437,7 @@ fn exec_reduce_sum_correct_output() {
     );
     let dag = fuse(&dag);
 
-    let result = chelis_backend_c::codegen(&dag, "test_reduce_sum").unwrap();
+    let result = codegen(&dag, "test_reduce_sum").unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -643,7 +644,7 @@ fn reduce_window_3x3_dag(reducer: ReduceWindowKind, kernel: &str) -> String {
         out_ty,
         None,
     );
-    chelis_backend_c::codegen(&dag, kernel).unwrap().c_source
+    codegen(&dag, kernel).unwrap().c_source
 }
 
 // Build a contiguous 1x1x3x3 input view holding [[1..9]] row-major.
@@ -764,7 +765,7 @@ fn reduce_window_grad_dag(reducer: ReduceWindowKind, kernel: &str) -> String {
         x_ty,
         None,
     );
-    chelis_backend_c::codegen(&dag, kernel).unwrap().c_source
+    codegen(&dag, kernel).unwrap().c_source
 }
 
 const RW_GRAD_HARNESS_HEADER: &str = r#"
@@ -1354,7 +1355,7 @@ fn exec_reduce_sum_issue_163_repro_is_bit_exact_with_evaluator() {
         None,
     );
     let dag = fuse(&dag);
-    let result = chelis_backend_c::codegen(&dag, "test_issue_163_sum").unwrap();
+    let result = codegen(&dag, "test_issue_163_sum").unwrap();
 
     let harness = format!(
         r#"{HARNESS_HEADER}
@@ -1798,7 +1799,7 @@ fn ws_a1_exec_f64_reduce_sum_matches_reference() {
     );
     let dag = fuse(&dag);
 
-    let result = chelis_backend_c::codegen(&dag, "test_reduce_sum_f64").unwrap();
+    let result = codegen(&dag, "test_reduce_sum_f64").unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -1889,7 +1890,7 @@ fn ws_a1_exec_i32_reduce_sum_produces_integer_result_no_float_cast() {
     );
     let dag = fuse(&dag);
 
-    let result = chelis_backend_c::codegen(&dag, "test_reduce_sum_i32").unwrap();
+    let result = codegen(&dag, "test_reduce_sum_i32").unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -2168,7 +2169,7 @@ fn ws_a1_exec_mixed_f64_tensors_and_i32_indices_compile_and_run() {
         None,
     );
 
-    let result = chelis_backend_c::codegen(&dag, "test_mixed").unwrap();
+    let result = codegen(&dag, "test_mixed").unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -2385,7 +2386,7 @@ fn exec_i8_add_correct_output() {
     dag.add_node(RiscOp::Add, vec![a, b], vec_i8(8), None);
     let dag = fuse(&dag);
 
-    let result = chelis_backend_c::codegen(&dag, "test_i8_add").unwrap();
+    let result = codegen(&dag, "test_i8_add").unwrap();
     let src = &result.c_source;
 
     // The kernel must emit `int8_t*` access against `chelis_tensor_read_view(t).data` (not float*).
@@ -2447,7 +2448,7 @@ fn exec_i8_add_overflow_traps() {
     dag.add_node(RiscOp::Add, vec![a, b], vec_i8(2), None);
     let dag = fuse(&dag);
 
-    let result = chelis_backend_c::codegen(&dag, "test_i8_add_wrap").unwrap();
+    let result = codegen(&dag, "test_i8_add_wrap").unwrap();
     let src = &result.c_source;
 
     let harness = format!(
@@ -2490,7 +2491,7 @@ fn exec_i8_mul_overflow_traps() {
     dag.add_node(RiscOp::Mul, vec![a, b], vec_i8(2), None);
     let dag = fuse(&dag);
 
-    let result = chelis_backend_c::codegen(&dag, "test_i8_mul").unwrap();
+    let result = codegen(&dag, "test_i8_mul").unwrap();
     let src = &result.c_source;
 
     let harness = format!(
@@ -2534,7 +2535,7 @@ fn exec_i16_add_correct_output() {
     dag.add_node(RiscOp::Add, vec![a, b], vec_i16(4), None);
     let dag = fuse(&dag);
 
-    let result = chelis_backend_c::codegen(&dag, "test_i16_add").unwrap();
+    let result = codegen(&dag, "test_i16_add").unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -2598,7 +2599,7 @@ fn exec_i8_reduce_sum_promotes_to_i32() {
     dag.add_node(sum_op, vec![a], scalar_i32(), None);
     let dag = fuse(&dag);
 
-    let result = chelis_backend_c::codegen(&dag, "test_i8_reduce_sum").unwrap();
+    let result = codegen(&dag, "test_i8_reduce_sum").unwrap();
     let src = &result.c_source;
 
     // The accumulator type in the emitted C must be int32_t — pinning
@@ -2660,7 +2661,7 @@ fn exec_i16_reduce_sum_promotes_to_i32() {
     dag.add_node(sum_op, vec![a], scalar_i32(), None);
     let dag = fuse(&dag);
 
-    let result = chelis_backend_c::codegen(&dag, "test_i16_reduce_sum").unwrap();
+    let result = codegen(&dag, "test_i16_reduce_sum").unwrap();
     let src = &result.c_source;
 
     assert!(
@@ -2916,7 +2917,7 @@ fn direct_int_sub_case(
     let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
     dag.add_node(RiscOp::Sub, vec![a, b], ty, None);
     let function = format!("direct_sub_{tag}");
-    let src = chelis_backend_c::codegen(&dag, &function)
+    let src = codegen(&dag, &function)
         .expect("direct subtraction codegen")
         .c_source;
     assert!(src.contains("chelis_int_checked_sub"), "{tag}: {src}");
@@ -3028,7 +3029,7 @@ fn direct_checked_subtraction_traps_true_overflow_at_every_signed_width() {
         let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
         dag.add_node(RiscOp::Sub, vec![a, b], ty, None);
         let function = format!("direct_sub_overflow_{tag}");
-        let src = chelis_backend_c::codegen(&dag, &function).unwrap().c_source;
+        let src = codegen(&dag, &function).unwrap().c_source;
         let harness = format!(
             r#"{HARNESS_HEADER}
 #include <stdint.h>
@@ -3082,7 +3083,7 @@ fn direct_signed_integer_extrema_chains_survive_fusion_and_execute_at_every_widt
             "{tag}: signed-integer extrema must stay materialized"
         );
         let function = format!("direct_integer_extrema_chain_{tag}");
-        let src = chelis_backend_c::codegen(&fused, &function)
+        let src = codegen(&fused, &function)
             .unwrap_or_else(|error| panic!("{tag}: fused direct extrema codegen failed: {error}"))
             .c_source;
         let harness = format!(
@@ -3123,7 +3124,7 @@ fn direct_bool_max_elem_compiles_without_float_classification() {
     dag.add_root(maximum);
 
     let function = "direct_bool_max_elem";
-    let src = chelis_backend_c::codegen(&dag, function)
+    let src = codegen(&dag, function)
         .expect("Bool max_elem codegen")
         .c_source;
     let harness = format!(
@@ -3191,7 +3192,7 @@ fn direct_fused_runtime_shape_mismatch_traps_before_indexing() {
         "float Sub -> MinElem must exercise the fused path"
     );
     let function = "direct_fused_runtime_shape_guard";
-    let src = chelis_backend_c::codegen(&fused, function)
+    let src = codegen(&fused, function)
         .expect("fused runtime-shape codegen")
         .c_source;
     assert!(
@@ -3247,25 +3248,23 @@ fn direct_positive_rank_mismatch_traps_before_indexing() {
         dims: vec![DimInfo::Named("n".into(), None)],
         precision: Prim::F32,
     };
-    let matrix = TensorType {
-        dims: vec![
-            DimInfo::Named("n".into(), None),
-            DimInfo::Named("m".into(), None),
-        ],
-        precision: Prim::F32,
-    };
     let a = dag.add_node(
         RiscOp::Load { name: "a".into() },
         vec![],
         vector.clone(),
         None,
     );
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], matrix, None);
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        vector.clone(),
+        None,
+    );
     let out = dag.add_node(RiscOp::Add, vec![a, b], vector, None);
     dag.add_root(out);
 
     let function = "direct_positive_rank_shape_guard";
-    let src = chelis_backend_c::codegen(&dag, function)
+    let src = codegen(&dag, function)
         .expect("rank-divergent codegen must stay defensive")
         .c_source;
     assert!(
@@ -3306,7 +3305,7 @@ int main(void) {{
         String::from_utf8_lossy(&run.stdout)
     );
     assert!(
-        String::from_utf8_lossy(&run.stderr).contains("elementwise operand rank mismatch"),
+        String::from_utf8_lossy(&run.stderr).contains("input `b` expected rank 1, got 2"),
         "rank guard emitted the wrong diagnostic: {}",
         String::from_utf8_lossy(&run.stderr)
     );
@@ -3662,7 +3661,7 @@ fn direct_fused_reduction_runtime_shape_guard_case(reduce_kind: &str) {
     );
 
     let function = format!("direct_fused_{reduce_kind}_runtime_shape_guard");
-    let src = chelis_backend_c::codegen(&fused, &function)
+    let src = codegen(&fused, &function)
         .expect("fused reduction runtime-shape codegen")
         .c_source;
     let function_body = src
@@ -3832,7 +3831,7 @@ fn direct_extrema_bit_case(
         let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
         dag.add_node(op, vec![a, b], ty, None);
         let function = format!("direct_{op_name}_{tag}");
-        let src = chelis_backend_c::codegen(&dag, &function).unwrap().c_source;
+        let src = codegen(&dag, &function).unwrap().c_source;
         assert!(!src.contains("fmaxf("), "{tag}/{op_name}: {src}");
         assert!(!src.contains("fminf("), "{tag}/{op_name}: {src}");
 
@@ -4003,7 +4002,7 @@ fn direct_extrema_adjoint_bit_case(
         dag.add_root(node);
     }
     let function = format!("direct_extrema_adjoint_{tag}");
-    let src = chelis_backend_c::codegen(&dag, &function).unwrap().c_source;
+    let src = codegen(&dag, &function).unwrap().c_source;
     assert!(
         src.contains("UINT16_C(0)") || src.contains("0.0"),
         "{tag}: {src}"

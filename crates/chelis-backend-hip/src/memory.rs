@@ -9,7 +9,8 @@
 
 use chelis_unord::{UnordMap, UnordSet};
 
-use chelis_ir::dag::{Dag, DimExpr, DimExprKey, DimInfo, NodeId, RiscOp};
+use chelis_ir::dag::{DimExpr, DimExprKey, DimInfo, NodeId, RiscOp};
+use chelis_ir::ownership::VerifiedDagView;
 use chelis_types::types::Prim;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,7 +51,11 @@ struct OwnerRequirement {
 }
 
 impl MemoryPlan {
-    pub fn build(dag: &Dag, output_ids: &[NodeId], reduction_inlined: &UnordSet<NodeId>) -> Self {
+    pub fn build(
+        dag: VerifiedDagView<'_>,
+        output_ids: &[NodeId],
+        reduction_inlined: &UnordSet<NodeId>,
+    ) -> Self {
         let mut node_kinds = classify_nodes(dag, reduction_inlined);
         let owner_of = compute_owner_map(dag, &node_kinds);
         let requirements = owner_requirements(dag, &node_kinds, &owner_of, output_ids);
@@ -97,12 +102,18 @@ impl MemoryPlan {
     }
 
     pub fn emit_cleanup(&self) -> Vec<String> {
+        self.emit_cleanup_with_drops(&[])
+    }
+
+    pub fn emit_cleanup_with_drops(&self, dropped_sources: &[NodeId]) -> Vec<String> {
         let mut lines = Vec::new();
         for (idx, kind) in self.node_kinds.iter().enumerate() {
-            if matches!(
-                kind,
-                NodeMemoryKind::TerminalDrop { .. } | NodeMemoryKind::Skipped
-            ) {
+            if dropped_sources.contains(&NodeId(idx))
+                || matches!(
+                    kind,
+                    NodeMemoryKind::TerminalDrop { .. } | NodeMemoryKind::Skipped
+                )
+            {
                 continue;
             }
             lines.push(format!("    chelis_gpu_free_view(d_t{idx});"));
@@ -114,7 +125,10 @@ impl MemoryPlan {
     }
 }
 
-fn classify_nodes(dag: &Dag, reduction_inlined: &UnordSet<NodeId>) -> Vec<NodeMemoryKind> {
+fn classify_nodes(
+    dag: VerifiedDagView<'_>,
+    reduction_inlined: &UnordSet<NodeId>,
+) -> Vec<NodeMemoryKind> {
     let mut kinds = Vec::with_capacity(dag.len());
     let mut first_load_by_name: UnordMap<String, NodeId> = UnordMap::new();
 
@@ -209,7 +223,10 @@ fn classify_nodes(dag: &Dag, reduction_inlined: &UnordSet<NodeId>) -> Vec<NodeMe
     kinds
 }
 
-fn compute_owner_map(dag: &Dag, node_kinds: &[NodeMemoryKind]) -> Vec<Option<NodeId>> {
+fn compute_owner_map(
+    dag: VerifiedDagView<'_>,
+    node_kinds: &[NodeMemoryKind],
+) -> Vec<Option<NodeId>> {
     let mut owners = vec![None; dag.len()];
     for node in dag.nodes() {
         owners[node.id.0] = match &node_kinds[node.id.0] {
@@ -226,7 +243,7 @@ fn compute_owner_map(dag: &Dag, node_kinds: &[NodeMemoryKind]) -> Vec<Option<Nod
 }
 
 fn owner_requirements(
-    dag: &Dag,
+    dag: VerifiedDagView<'_>,
     node_kinds: &[NodeMemoryKind],
     owner_of: &[Option<NodeId>],
     output_ids: &[NodeId],
@@ -479,7 +496,12 @@ mod tests {
     }
 
     fn build_plan(dag: &Dag, output_ids: &[NodeId]) -> MemoryPlan {
-        MemoryPlan::build(dag, output_ids, &UnordSet::new())
+        let verified = chelis_ir::ownership::verify_ownership(
+            chelis_ir::ownership::lower_dag_ownership(dag.clone())
+                .expect("memory-planner unit-test DAG must lower ownership"),
+        )
+        .expect("memory-planner unit-test DAG must verify ownership");
+        MemoryPlan::build(verified.emission(), output_ids, &UnordSet::new())
     }
 
     #[test]
@@ -656,6 +678,7 @@ mod tests {
             None,
         );
         let add = dag.add_node(RiscOp::Add, vec![a, b], symbolic.clone(), None);
+        dag.add_node(RiscOp::Drop, vec![add], symbolic.clone(), None);
         let two = dag.add_node(
             RiscOp::synth_const(symbolic.precision, 2.0),
             vec![],

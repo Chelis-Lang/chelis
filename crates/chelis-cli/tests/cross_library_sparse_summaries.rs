@@ -102,6 +102,11 @@ fn build_to_c(source: &str, name: &str) -> String {
 /// header up to the matching closing `}`. Panics if the function
 /// definition is not present in `c`.
 fn function_body(c: &str, function: &str) -> String {
+    // Phase 2 gives every externally callable owned-formal function a
+    // borrowing artifact adapter plus a consuming implementation body. Sparse
+    // lowering belongs to the latter; inspecting the adapter would only test
+    // its required retain-and-forward boundary.
+    let function = format!("{function}__chelis_owned_body");
     let needle = format!("chelis_tensor* {function}(");
     // Find the definition: the prototype ends with `;`, the
     // definition with `{`. Scan candidate positions.
@@ -228,7 +233,7 @@ fn body_contains_tensor_helper_call(body: &str) -> bool {
 /// via `__result = <callee>(...);` — the C call-site fallback used
 /// when no function-level summary is registered.
 fn body_contains_host_function_call(body: &str, callee: &str) -> bool {
-    body.contains(&format!("= {callee}("))
+    body.contains(&format!("= {callee}__chelis_owned_body("))
 }
 
 // =========================================================================

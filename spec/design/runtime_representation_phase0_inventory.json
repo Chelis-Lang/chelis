@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "c6344fe269292868cec76b595d1ac82381cf6f8460af9c6d4884c717248dc33e",
+  "freeze_sha256": "bd1213b13aa1de1cb0b3f524c05bf200656f14838e63db3171548b69c5c12855",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -48,10 +48,6 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_count",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_dag_with_options",
       "deletion_phase": 4
     },
     {
@@ -199,6 +195,10 @@
       "deletion_phase": 4
     },
     {
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_verified_dag_with_options",
+      "deletion_phase": 4
+    },
+    {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::integer_abs_expr",
       "deletion_phase": 4
     },
@@ -243,7 +243,7 @@
       "deletion_phase": 4
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_expr",
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_expr_at_site",
       "deletion_phase": 4
     },
     {
@@ -1163,7 +1163,7 @@
       "deletion_phase": 1
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/verify.rs|owner=verify",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/verify.rs|owner=verify_with_dangling_policy",
       "deletion_phase": 1
     },
     {
@@ -1461,10 +1461,6 @@
       "sample": "const uint8_t* restrict __count_in_{id} = (const uint8_t*)t{a}_data;"
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_dag_with_options",
-      "sample": "static inline float chelis_uniform_sample_f32(uint64_t seed, uint64_t index, float low, float hig..."
-    },
-    {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_expand",
       "sample": "for (int64_t i = 0; i < t{id}_size; i++) {{"
     },
@@ -1609,6 +1605,10 @@
       "sample": "uint64_t t{id}_seed = t{id}_active ? CHELIS_EFFECTIVE_UNIFORM_SEED({seed}ULL) : {seed}ULL;"
     },
     {
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_verified_dag_with_options",
+      "sample": "static inline float chelis_uniform_sample_f32(uint64_t seed, uint64_t index, float low, float hig..."
+    },
+    {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::integer_abs_expr",
       "sample": "({})chelis_int_abs_guard((int64_t)({value}), {}, {message:?})"
     },
@@ -1653,7 +1653,7 @@
       "sample": "{}for (int64_t {flat_index} = 0; {flat_index} < {view}.count; {flat_index}++) {{"
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_expr",
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_expr_at_site",
       "sample": "{}chelis_rng_current.seed = (uint64_t){seed_var};"
     },
     {
@@ -2573,7 +2573,7 @@
       "sample": "x_ty . dims . len () . saturating_sub (1)"
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/verify.rs|owner=verify",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/verify.rs|owner=verify_with_dangling_policy",
       "sample": "input . output_type . dims . len () . saturating_sub (1)"
     },
     {
@@ -2826,7 +2826,7 @@
       "artifact": "the frozen INVENTORY_SOURCES file list",
       "enumerator": "chelis-repr-inventory: syn for Rust; clang's front end under fixed target lanes, a committed stub SDK, and a scrubbed environment for C and Objective-C headers, classified with the capacity census's closed type-word lists",
       "universe": {
-        "registered_sources": 57,
+        "registered_sources": 65,
         "roots": [
           "crates/chelis-runtime/src/**/*.rs",
           "crates/chelis-runtime/include/**/*.h",

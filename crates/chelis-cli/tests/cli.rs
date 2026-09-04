@@ -3032,8 +3032,8 @@ fn build_c_recursive_tensor_function_stays_on_host_path() {
         "expected externally linked recursive tensor helper to stay in the host lane:\n{source}"
     );
     assert!(
-        source.contains("__result = recur("),
-        "expected recursive call to remain a C function call rather than DAG helper expansion:\n{source}"
+        source.contains("__result = recur__chelis_owned_body("),
+        "expected recursive call to target the consuming C body rather than the external borrow adapter or a DAG helper:\n{source}"
     );
 
     let status = gcc_link_generated(&out_dir, "recursive_tensor.c", "recursive_tensor");

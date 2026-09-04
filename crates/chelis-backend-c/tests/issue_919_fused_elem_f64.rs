@@ -22,10 +22,11 @@
 //!   - `emit_fused_reduce`, which is still f32-only, likewise rejects
 //!     rather than panics
 
-use chelis_backend_c::codegen;
+mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
+use support::codegen;
 
 fn vec_ty(n: usize, precision: Prim) -> TensorType {
     TensorType {
