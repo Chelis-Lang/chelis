@@ -131,9 +131,18 @@ fn a_tensor_binder_cast_binds_the_literal_at_every_instantiation() {
     );
 }
 
-/// Regression test. The C lane must agree with `eval` on the same program;
-/// pinning only `eval` would let the two lanes drift on the value that is the
-/// whole subject of this issue.
+/// Regression test. The C lane must materialize the literal at the
+/// instantiated dtype.
+///
+/// Asserted on the emitted constant's exact bit pattern rather than on the
+/// absence of a decimal substring: `0x3fb999999999999a` IS f64 `0.1`, and the
+/// f32 rounding this issue is about would emit `0x3fb99999a0000000`. An
+/// absence assertion would pass on any reformatting of the wrong value.
+///
+/// Verified by compiling and running the emitted C by hand at this head:
+/// `at_f64 = 0.30000000000000004`. `chelis eval` on the same program still
+/// prints `0.30000000447034836`, so the two lanes DISAGREE and the eval row
+/// above is the one still red.
 #[test]
 fn the_build_lane_agrees_with_eval_on_a_binder_cast() {
     let (_dir, root) = make_package("scalar-scale-build", SCALAR_SCALE);
@@ -151,8 +160,8 @@ fn the_build_lane_agrees_with_eval_on_a_binder_cast() {
     );
     let emitted = fs::read_to_string(root.join("out/main.c")).expect("emitted C");
     assert!(
-        !emitted.contains("0.30000000447034836"),
-        "the emitted C must not carry the f32-rounded constant"
+        emitted.contains("0x3fb999999999999a"),
+        "the emitted C must carry f64 0.1 exactly, not an f32 rounding of it"
     );
 }
 
