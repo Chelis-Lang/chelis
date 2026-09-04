@@ -1426,6 +1426,73 @@ impl CEmitter {
                 self.line("}");
             }
         }
+
+        // chelis#1277 b2.4: the loop above carries only the members the
+        // binding view models - a `Name` claim witnessed by a `Load` axis.
+        // Two more member kinds place at ENTRY under `spec/04` section 4.7 and
+        // are guarded here.
+        //
+        // A `Literal` claim's canonical value is the literal itself (C2.4), so
+        // every member is one guard against it rather than against a first
+        // member; that is chelis#1377, a declared `tensor[4, f32]` over a read
+        // that yields 5. And an `InputAxis`-sourced member reads an input
+        // tensor's axis directly, which section 4.7 lists as an interface
+        // value, so its guard belongs at entry too; that is chelis#1376.
+        for class in chelis_ir::axis_sources::derive_runtime_dim_classes(dag) {
+            if class.placement(dag) != chelis_ir::axis_sources::GuardPlacement::Entry {
+                continue;
+            }
+            let (canonical_expr, claim_text) = match &class.claim {
+                chelis_ir::axis_sources::DimClaim::Literal(value) => {
+                    (value.to_string(), value.to_string())
+                }
+                chelis_ir::axis_sources::DimClaim::Name(name) => (
+                    name.clone(),
+                    chelis_ir::span_sanitize::sanitize_for_format_string(name).to_string(),
+                ),
+            };
+            for member in &class.members {
+                // An `ExternalAxis` member is already guarded above, and a
+                // `Literal` member is the statically proved case the
+                // derivation excludes.
+                let chelis_ir::axis_sources::AxisSource::InputAxis { input, axis } = member.source
+                else {
+                    continue;
+                };
+                // `RtAxis` carries only `Lit` on this head; the node-valued
+                // axis the plan describes arrives with chelis#1298, and adding
+                // that variant will make this destructuring fail to compile,
+                // which is where its handling belongs.
+                let RtAxis::Lit(read_axis) = axis;
+                // The slot is an index into the OWNING NODE's inputs; the
+                // guard needs the kernel input slot of the tensor it names.
+                let Some(label) = dag
+                    .get(member.node)
+                    .and_then(|node| node.inputs.get(input))
+                    .and_then(|id| dag.get(*id))
+                    .and_then(|producer| match &producer.op {
+                        RiscOp::Load { name } => Some(name.as_str().to_string()),
+                        _ => None,
+                    })
+                else {
+                    continue;
+                };
+                let Some(slot) = input_slots.get(label.as_str()) else {
+                    continue;
+                };
+                let label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(&label);
+                self.line(&format!(
+                    "if (chelis_tensor_shape(inputs[{slot}], {read_axis}) != {canonical_expr}) {{"
+                ));
+                self.indent += 1;
+                self.line(&format!(
+                    "fprintf(stderr, \"extent `{claim_text}`: claimed = %lld, {label_fmt} axis {read_axis} = %lld\\n\", (long long)({canonical_expr}), (long long)chelis_tensor_shape(inputs[{slot}], {read_axis}));"
+                ));
+                self.line("chelis_numeric_trap(\"numeric trap: domain in load at int64\");");
+                self.indent -= 1;
+                self.line("}");
+            }
+        }
     }
 
     fn shape_literal(ty: &TensorType) -> String {
