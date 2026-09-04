@@ -1754,6 +1754,30 @@ vacuity, or [#1076]/[#672]'s independently owned name-precedence work.
   literal extent is still admitted against a named one, because `unify_dim`
   accepts `Name` against `Lit` under [#219]'s Option A, which is
   dimension-unification policy rather than diagonal's extent rule.
+- **[#1494].** A literal pattern is now a typing constraint on the scrutinee.
+  `pattern_bindings` did nothing at `pat-lit`, so an `f32` pattern against an
+  `int32` scrutinee scored 1.0 and `chelis eval` printed a result from an arm
+  that can never match. The numbered spec had not decided the rule: §3's Match
+  rule never defined `bindings` for `pat-lit`, and [04-LIT-1]'s closed
+  atom-to-primitive matrix is scoped to a literal's declared `lit` metadata,
+  which a `pat-lit` structurally cannot carry. [04-PAT-1] and a `bindings`
+  definition at the Match rule were authored first, then implemented. The rule
+  is family agreement rather than unification, because a `pat-lit` admits no
+  suffix: unifying with §5.3's `int32` default would reject a `| 1 =>` arm over
+  an `int64` scrutinee and leave no spelling for an `int64` literal pattern.
+  Two sub-clauses are errors because each arm is provably dead: a non-primitive
+  scrutinee admits no literal pattern, and an integer pattern outside the
+  scrutinee width's range is rejected under §5.3's and §5.6's range rule. The
+  check sits in the one recursive walk both ingresses share, so the tuple,
+  record, and constructor nestings are the same finding at depth, and the tests
+  assert ingress parity rather than assuming it. The evidence is
+  `crates/chelis-types/tests/issue_1494_literal_pattern_scrutinee.rs` and
+  `crates/chelis-cli/tests/issue_1494_literal_pattern_cli.rs`, whose rejections
+  were proved red on the pre-fix tree, with the score-1 inputs also in §C4.4 as
+  the float-versus-`int32` and out-of-range-`int8` members beside a
+  matching-family positive control. One boundary is recorded rather than moved:
+  a `pat-lit` whose child is not a scalar atom still scores 1.0, because that is
+  Deep well-formedness rather than typing, and it is tracked as [#1525].
 
 ---
 
@@ -1902,3 +1926,5 @@ cycles remain errors.
 [#1355]: https://github.com/Chelis-Lang/chelis/issues/1355
 [#219]: https://github.com/Chelis-Lang/chelis/issues/219
 [#1484]: https://github.com/Chelis-Lang/chelis/issues/1484
+[#1494]: https://github.com/Chelis-Lang/chelis/issues/1494
+[#1525]: https://github.com/Chelis-Lang/chelis/issues/1525
