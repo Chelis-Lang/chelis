@@ -11386,14 +11386,18 @@ fn expr_host_type(
 /// spelling. Exact identity wins; a terminal fallback is valid only when it
 /// identifies one alias, matching the other linked-name lookups in this lane.
 fn resolve_host_type_alias<'a>(registry: &'a AdtRegistry, name: &str) -> Option<&'a TypeAliasDef> {
-    registry.resolve_alias(name).or_else(|| {
-        let mut matches = registry
-            .aliases
-            .iter()
-            .filter_map(|(key, alias)| terminal_name_matches(key, name).then_some(alias));
-        let first = matches.next()?;
-        matches.next().is_none().then_some(first)
-    })
+    if let Some(alias) = registry.resolve_alias(name) {
+        return Some(alias);
+    }
+    if registry.lookup(name).is_some() {
+        return None;
+    }
+    let mut matches = registry
+        .aliases
+        .iter()
+        .filter_map(|(key, alias)| terminal_name_matches(key, name).then_some(alias));
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
 }
 
 /// Expand checker-validated aliases before a host type drives layout,
@@ -14518,6 +14522,36 @@ mod tests {
         assert!(
             resolve_host_type_alias(&registry, "Adep__PairAlias").is_some(),
             "an exact linked alias identity remains authoritative"
+        );
+    }
+
+    #[test]
+    fn linked_alias_resolution_preserves_an_exact_adt_identity() {
+        let mut registry = AdtRegistry::new();
+        registry.defs.insert(
+            "Pkg__collidelib__Demo__Main__Wrapped".to_string(),
+            AdtDef {
+                name: "Pkg__collidelib__Demo__Main__Wrapped".to_string(),
+                type_params: Vec::new(),
+                param_kinds: Vec::new(),
+                param_vars: Vec::new(),
+                param_args: Vec::new(),
+                variants: Vec::new(),
+                opaque: false,
+                defining_module: None,
+            },
+        );
+        registry.register_alias(
+            "Pkg__collidedep__Demo__Main__Wrapped".to_string(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Type::Tuple(vec![Type::Prim(Prim::F32), Type::Prim(Prim::F32)]),
+        );
+
+        assert!(
+            resolve_host_type_alias(&registry, "Pkg__collidelib__Demo__Main__Wrapped").is_none(),
+            "an exact ADT identity must not be reinterpreted as another package's alias"
         );
     }
 
