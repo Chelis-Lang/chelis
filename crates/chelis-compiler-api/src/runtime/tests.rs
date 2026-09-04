@@ -215,9 +215,9 @@ y = index(drop([cast(10, int64), cast(20, int64)], cast(1, int64)), cast(0, int6
 fn generic_cast_target_uses_each_calls_concrete_precision() {
     let checked = checked_surf(
         r#"
-sig recast_int: p_int -> List[p_int] -> p_int
+sig recast_int[p_int: Int]: p_int -> List[p_int] -> p_int
 def recast_int(value, witness) = cast(value, p_int)
-sig recast_float: p_float -> List[p_float] -> p_float
+sig recast_float[p_float: Float]: p_float -> List[p_float] -> p_float
 def recast_float(value, witness) = cast(value, p_float)
 i16_value = recast_int(cast(257, int16), [cast(0, int16)])
 i64_value = recast_int(cast(4294967297, int64), [cast(0, int64)])
@@ -244,7 +244,7 @@ f64_value = recast_float(cast(1.5, f64), [cast(0.0, f64)])
 #[test]
 fn generic_cast_target_does_not_accept_conflicting_precisions() {
     let source = r#"
-def choose_and_cast[p_int](left: p_int, right: p_int) -> p_int = cast(left, p_int)
+def choose_and_cast[p_int: Int](left: p_int, right: p_int) -> p_int = cast(left, p_int)
 value = choose_and_cast(cast(1, int16), cast(2, int64))
 "#;
     let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
@@ -266,8 +266,8 @@ value = choose_and_cast(cast(1, int16), cast(2, int64))
 fn generic_cast_target_uses_fresh_specialization_for_nested_calls() {
     let checked = checked_surf(
         r#"
-def inner[p_int](value: p_int, witness: List[p_int]) -> p_int = cast(value, p_int)
-def outer[p_int](witness: List[p_int]) -> int64 =
+def inner[p_int: Int](value: p_int, witness: List[p_int]) -> p_int = cast(value, p_int)
+def outer[p_int: Int](witness: List[p_int]) -> int64 =
   inner(cast(4294967297, int64), [cast(0, int64)])
 value = outer([cast(7, int16)])
 "#,
@@ -284,7 +284,7 @@ value = outer([cast(7, int16)])
 fn generic_cast_target_uses_contextual_specialization_for_empty_container() {
     let checked = checked_surf(
         r#"
-def empty_witness[p_int](items: List[p_int], value: int64) -> p_int =
+def empty_witness[p_int: Int](items: List[p_int], value: int64) -> p_int =
   cast(value, p_int)
 def make_i16() -> int16 = empty_witness([], cast(257, int64))
 value = make_i16()
@@ -303,7 +303,7 @@ value = make_i16()
 fn generic_cast_target_uses_checked_adt_specialization() {
     let checked = checked_surf(
         r#"
-def option_witness[p_int](item: Option[p_int], value: int64) -> p_int =
+def option_witness[p_int: Int](item: Option[p_int], value: int64) -> p_int =
   cast(value, p_int)
 value = option_witness(Some(cast(0, int16)), cast(257, int64))
 "#,
@@ -321,7 +321,7 @@ value = option_witness(Some(cast(0, int16)), cast(257, int64))
 fn generic_cast_target_survives_map_callback_specialization() {
     let checked = checked_surf(
         r#"
-def recast[p_int](value: p_int) -> p_int = cast(value, p_int)
+def recast[p_int: Int](value: p_int) -> p_int = cast(value, p_int)
 values = map(recast, [cast(127, int8)])
 value = index(values, cast(0, int64))
 "#,
@@ -339,7 +339,7 @@ value = index(values, cast(0, int64))
 fn generic_cast_target_survives_fold_callback_specialization() {
     let checked = checked_surf(
         r#"
-def keep_left[p_int](left: p_int, right: p_int) -> p_int = cast(left, p_int)
+def keep_left[p_int: Int](left: p_int, right: p_int) -> p_int = cast(left, p_int)
 value = fold(keep_left, cast(127, int8), [cast(1, int8)])
 "#,
     );
@@ -356,12 +356,12 @@ value = fold(keep_left, cast(127, int8), [cast(1, int8)])
 fn generic_cast_target_survives_every_higher_order_callback_edge() {
     let checked = checked_surf(
         r#"
-def nonnegative[p_int](value: p_int) -> bool =
+def nonnegative[p_int: Int](value: p_int) -> bool =
   gte(cast(value, p_int), cast(0, p_int))
-def keep_left_hof[p_int](left: p_int, right: p_int) -> p_int =
+def keep_left_hof[p_int: Int](left: p_int, right: p_int) -> p_int =
   cast(left, p_int)
-def singleton[p_int](value: p_int) -> List[p_int] = [cast(value, p_int)]
-def keep_state[p_int](state: p_int, index: int64) -> p_int = cast(state, p_int)
+def singleton[p_int: Int](value: p_int) -> List[p_int] = [cast(value, p_int)]
+def keep_state[p_int: Int](state: p_int, index: int64) -> p_int = cast(state, p_int)
 
 filtered = filter(nonnegative, [cast(-1, int8), cast(2, int8)])
 scanned = scan(keep_left_hof, cast(7, int8), [cast(1, int8)])

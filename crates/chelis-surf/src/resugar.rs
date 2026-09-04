@@ -7,7 +7,7 @@
 //! code.
 
 use chelis_deep::ast::{Atom, Expr as DeepExpr, MetaMap};
-use chelis_deep::{DeepTag, LiteralSuffix, Span, cast_mode_of, decode_dtype_bounds};
+use chelis_deep::{DeepTag, DtypeFamily, LiteralSuffix, Span, cast_mode_of, decode_dtype_bounds};
 use chelis_unord::UnordMap;
 use chelis_vocab::{EffectKind, EffectKindInput};
 use std::collections::BTreeMap;
@@ -67,6 +67,11 @@ pub enum ResugarError {
     NonFiniteFloat,
 
     #[error(
+        "[04-INF-6] Deep literal type variable `{binder}` is not the operand of an exact cast to the same declared dtype-family binder"
+    )]
+    InvalidBinderLiteralAdoption { binder: String },
+
+    #[error(
         "Deep property `{name}` carries `{key}` = {value:?}, which canonical Surf cannot represent without changing property provenance"
     )]
     UnrepresentablePropertyProvenance {
@@ -91,6 +96,7 @@ struct NodeRef<'a> {
 /// path to invent a second spelling for an AST construct.
 pub fn resugar_expression(expr: &DeepExpr) -> Result<Expr, ResugarError> {
     validate_surface_metadata_tree(expr, SurfaceMetadataContext::default())?;
+    validate_binder_literal_adoption(expr, &[], &[], None)?;
     resugar_expression_inner(expr)
 }
 
@@ -965,6 +971,30 @@ fn resugar_definition(
     }
     let declared_type = outer_type.or(function_type);
 
+    // chelis#1544 / [04-INF-6]: a `(t-var)`-typed literal is not an
+    // independently printable ascription. It is provenance for the one
+    // syntax position that can create it: the direct literal operand of
+    // `cast(literal, p)`, where `p` is declared with a dtype-family bound.
+    // Validate that parent/definition relation before the context-free
+    // expression resugarer can erase it into ordinary Surf text.
+    let bound_source = signature.map_or(definition.meta, |signature| signature.meta);
+    let dtype_bounds = decode_resugar_dtype_bounds(bound_source)?;
+    let mut declared_binders = Vec::new();
+    if let Some(declared_type) = declared_type {
+        collect_quantified_variables(declared_type, &mut declared_binders)?;
+    }
+    for (binder, _) in &dtype_bounds {
+        if !declared_binders.contains(binder) {
+            declared_binders.push(binder.clone());
+        }
+    }
+    validate_binder_literal_adoption(
+        &definition.children[1],
+        &declared_binders,
+        &dtype_bounds,
+        None,
+    )?;
+
     if meta_string(definition.meta, "chelis_role") == Some("property") {
         return resugar_property(declared_type, definition, name);
     }
@@ -1019,7 +1049,6 @@ fn resugar_definition(
         // A def's bound rides on its `defsig`; the `def` node carries one only
         // when a standalone `sig` already owns the binders, which the checker
         // rejects (`spec/03-deep-syntax.md` §2.2).
-        let bound_source = signature.map_or(definition.meta, |signature| signature.meta);
         let type_binders = resugar_dtype_bound_binders(bound_source, &quantifiers)?;
         return Ok(Decl::FunDef {
             name,
@@ -3698,11 +3727,7 @@ fn resugar_dtype_bound_binders(
     meta: &MetaMap,
     quantifiers: &[String],
 ) -> Result<Vec<TypeBinder>, ResugarError> {
-    let bounds = decode_dtype_bounds(meta).map_err(|_| ResugarError::InvalidChild {
-        tag: "defsig",
-        index: 1,
-        expected: "a well-formed `dtype_bounds` metadata map",
-    })?;
+    let bounds = decode_resugar_dtype_bounds(meta)?;
     let mut binders: Vec<TypeBinder> = quantifiers
         .iter()
         .map(|name| TypeBinder {
@@ -3719,6 +3744,136 @@ fn resugar_dtype_bound_binders(
         }
     }
     Ok(binders)
+}
+
+fn decode_resugar_dtype_bounds(meta: &MetaMap) -> Result<Vec<(String, DtypeFamily)>, ResugarError> {
+    decode_dtype_bounds(meta).map_err(|_| ResugarError::InvalidChild {
+        tag: "defsig",
+        index: 1,
+        expected: "a well-formed `dtype_bounds` metadata map",
+    })
+}
+
+/// Reject a Deep tree that would lose type-binder provenance when printed as
+/// Surf. The only producer of a literal whose `type` is `(t-var {} p)` is the
+/// direct operand of `cast(literal, p)` under a dtype-family-bounded `p`.
+fn validate_binder_literal_adoption(
+    expr: &DeepExpr,
+    declared_binders: &[String],
+    dtype_bounds: &[(String, DtypeFamily)],
+    adopting_binder: Option<&str>,
+) -> Result<(), ResugarError> {
+    if let Ok(node) = node_ref(expr) {
+        if node.tag == DeepTag::Lit
+            && let Some(literal_type) = meta_value(node.meta, "type")
+            && let Some(binder) = type_variable_name(literal_type)
+        {
+            let family = dtype_bounds
+                .iter()
+                .find_map(|(name, family)| (name == binder).then_some(*family));
+            let compatible = family.is_some_and(|family| match node.children.first() {
+                Some(DeepExpr::Atom(Atom::Float(_), _)) => {
+                    matches!(family, DtypeFamily::Float | DtypeFamily::Numeric)
+                }
+                Some(DeepExpr::Atom(Atom::Int(_), _)) => {
+                    matches!(
+                        family,
+                        DtypeFamily::Float | DtypeFamily::Int | DtypeFamily::Numeric
+                    )
+                }
+                _ => false,
+            });
+            if adopting_binder != Some(binder) || !compatible {
+                return Err(ResugarError::InvalidBinderLiteralAdoption {
+                    binder: binder.to_string(),
+                });
+            }
+        }
+
+        for (_, value) in &node.meta.entries {
+            validate_binder_literal_adoption(value, declared_binders, dtype_bounds, None)?;
+        }
+
+        if node.tag == DeepTag::Cast
+            && node.children.len() >= 2
+            && let Some(binder) = type_variable_name(&node.children[1])
+        {
+            if !declared_binders.iter().any(|name| name == binder) {
+                return Err(ResugarError::InvalidBinderLiteralAdoption {
+                    binder: binder.to_string(),
+                });
+            }
+            let direct_literal =
+                node_ref(&node.children[0]).is_ok_and(|operand| operand.tag == DeepTag::Lit);
+            validate_binder_literal_adoption(
+                &node.children[0],
+                declared_binders,
+                dtype_bounds,
+                direct_literal.then_some(binder),
+            )?;
+            for child in &node.children[1..] {
+                validate_binder_literal_adoption(child, declared_binders, dtype_bounds, None)?;
+            }
+            return Ok(());
+        }
+
+        for child in node.children {
+            validate_binder_literal_adoption(child, declared_binders, dtype_bounds, None)?;
+        }
+        return Ok(());
+    }
+
+    match expr {
+        DeepExpr::Atom(..) => Ok(()),
+        DeepExpr::List(list, _) => {
+            for child in &list.elements {
+                validate_binder_literal_adoption(child, declared_binders, dtype_bounds, None)?;
+            }
+            Ok(())
+        }
+        DeepExpr::Map(meta, _) => {
+            for (_, value) in &meta.entries {
+                validate_binder_literal_adoption(value, declared_binders, dtype_bounds, None)?;
+            }
+            Ok(())
+        }
+        DeepExpr::MetaExpr(meta, _) => {
+            validate_binder_literal_adoption(
+                &meta.expr,
+                declared_binders,
+                dtype_bounds,
+                adopting_binder,
+            )?;
+            for (_, value) in &meta.entries {
+                validate_binder_literal_adoption(value, declared_binders, dtype_bounds, None)?;
+            }
+            Ok(())
+        }
+        DeepExpr::Node(..) => unreachable!("canonical nodes are handled above"),
+        DeepExpr::BareList(items, _) => {
+            for child in items {
+                validate_binder_literal_adoption(child, declared_binders, dtype_bounds, None)?;
+            }
+            Ok(())
+        }
+        DeepExpr::UnknownForm(data) => {
+            for (_, value) in &data.meta.entries {
+                validate_binder_literal_adoption(value, declared_binders, dtype_bounds, None)?;
+            }
+            for child in &data.children {
+                validate_binder_literal_adoption(child, declared_binders, dtype_bounds, None)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn type_variable_name(expr: &DeepExpr) -> Option<&str> {
+    let node = node_ref(expr).ok()?;
+    (node.tag == DeepTag::TVar && node.children.len() == 1)
+        .then(|| atom_name(&node.children[0]))
+        .flatten()
+        .filter(|name| *name != "_")
 }
 
 fn collect_quantified_variables(

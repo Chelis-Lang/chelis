@@ -182,6 +182,7 @@ fn desugar_of_resugar_is_the_identity_on_bounded_declarations() {
         "sig arange[p: Int]: p -> p -> tensor[n, p]",
         "def arange_values[p: Int](current: p, stop: p) -> p = current",
         "def scale[n, p: Float](x: tensor[n, p], k: p) -> tensor[n, p] = x",
+        "def scale[p: Float](x: p) -> p = mul(x, cast(0.1, p))",
     ] {
         let decls = surf_parse(source).expect("parse");
         let deep = desugar_program(&decls);
@@ -228,4 +229,31 @@ fn a_malformed_deep_bound_fails_resugaring_closed() {
     let deep = deep_parse_strict("(defsig {dtype_bounds: {p: signed}} f (t-var {} p))")
         .expect("Deep parses; the family name is a resugaring concern");
     resugar_program(&deep).expect_err("an unknown family must not resugar");
+}
+
+#[test]
+fn an_undeclared_binder_cast_cannot_resugar_to_different_deep() {
+    let deep = deep_parse_strict(
+        "(defsig {} scale (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n\
+         (def {} scale\n\
+           (fn {} (params {} (x {type: (t-prim {} f32)}))\n\
+             (cast {}\n\
+               (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)\n\
+               (t-var {} p))))",
+    )
+    .expect("the malformed binder relation is a resugaring concern");
+    resugar_program(&deep).expect_err("an undeclared t-var cast target must not resugar");
+}
+
+#[test]
+fn a_binder_typed_literal_is_valid_only_under_its_adopting_cast() {
+    let deep = deep_parse_strict(
+        "(defsig {dtype_bounds: {p: float}} scale (t-fn {} (t-var {} p) (t-var {} p)))\n\
+         (def {} scale\n\
+           (fn {} (params {} (x {type: (t-var {} p)}))\n\
+             (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)))",
+    )
+    .expect("the direct t-var literal is a resugaring concern");
+    resugar_program(&deep)
+        .expect_err("a direct ascription must not masquerade as cast-literal adoption");
 }

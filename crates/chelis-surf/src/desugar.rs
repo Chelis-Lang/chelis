@@ -165,19 +165,19 @@ struct DesugarCtx {
 }
 
 impl DesugarCtx {
-    /// chelis#1544: the dtype family declared for `name` in the declaration
-    /// currently being desugared, or `None` when `name` is not one of its
-    /// binders or was declared without a bound.
-    ///
-    /// The two `None`s are deliberately merged: an unbounded binder cannot say
-    /// which family a literal would adopt at, so it takes the same path as a
-    /// non-binder and the literal keeps its §P10 default.
+    /// The dtype family declared for `name` in the current declaration.
+    /// Unbounded and undeclared names both return `None` because neither can
+    /// authorize literal adoption.
     fn current_type_binder_bound(&self, name: &str) -> Option<DtypeFamily> {
         self.current_type_binders
             .borrow()
             .get(name)
             .copied()
             .flatten()
+    }
+
+    fn is_current_type_binder(&self, name: &str) -> bool {
+        self.current_type_binders.borrow().contains_key(name)
     }
 
     fn new(decls: &[Decl]) -> Self {
@@ -980,18 +980,18 @@ fn collect_declared_type_binders(
     decl: &Decl,
     out: &mut UnordMap<String, UnordMap<String, Option<DtypeFamily>>>,
 ) {
-    let (name, type_binders) = match decl {
+    let (name, type_binders, signature_type) = match decl {
         Decl::FunDef {
             name, type_binders, ..
-        }
-        | Decl::Sig {
-            name, type_binders, ..
-        } => (name, type_binders),
+        } => (name, type_binders, None),
+        Decl::Sig {
+            name,
+            type_binders,
+            ty,
+            ..
+        } => (name, type_binders, Some(ty)),
         _ => return,
     };
-    if type_binders.is_empty() {
-        return;
-    }
     let entry = out.entry(name.clone()).or_default();
     for binder in type_binders {
         // A bound declared on either carrier wins over an unbounded mention of
@@ -1001,6 +1001,56 @@ fn collect_declared_type_binders(
         if slot.is_none() {
             *slot = binder.bound;
         }
+    }
+    if let Some(signature_type) = signature_type {
+        let declared = type_binders
+            .iter()
+            .map(|binder| binder.name.clone())
+            .collect();
+        let deep_type = desugar_sig_type(signature_type, &declared);
+        collect_deep_type_variable_names(&deep_type, entry);
+    }
+    if entry.is_empty() {
+        out.remove(name);
+    }
+}
+
+fn collect_deep_type_variable_names(
+    expr: &deep::Expr,
+    out: &mut UnordMap<String, Option<DtypeFamily>>,
+) {
+    match expr {
+        deep::Expr::Node(node, _) => {
+            if node.tag() == DeepTag::TVar
+                && let Some(deep::Expr::Atom(deep::Atom::Name(name), _)) =
+                    node.children_slice().first()
+                && name != "_"
+            {
+                out.entry(name.clone()).or_insert(None);
+            }
+            for child in node.children_slice() {
+                collect_deep_type_variable_names(child, out);
+            }
+        }
+        deep::Expr::List(list, _) => {
+            for child in &list.elements {
+                collect_deep_type_variable_names(child, out);
+            }
+        }
+        deep::Expr::MetaExpr(meta, _) => {
+            collect_deep_type_variable_names(&meta.expr, out);
+        }
+        deep::Expr::BareList(children, _) => {
+            for child in children {
+                collect_deep_type_variable_names(child, out);
+            }
+        }
+        deep::Expr::UnknownForm(data) => {
+            for child in &data.children {
+                collect_deep_type_variable_names(child, out);
+            }
+        }
+        deep::Expr::Atom(_, _) | deep::Expr::Map(_, _) => {}
     }
 }
 
@@ -1923,21 +1973,11 @@ impl DesugarCtx {
                     }
                     other => self.desugar_expr_with_scope(other, local_fn_params),
                 };
-                // The target is `t-var` exactly when the literal can adopt the
-                // binder, which is the same predicate: a declared binder that
-                // carries a dtype-family bound. Keying the two separately was
-                // a P0 (round 1 F1): an UNBOUNDED `[p]` took the new legal
-                // `t-var` target while its literal kept the §P10 f32 stamp, so
-                // `cast(0.1, p)` stopped being rejected and started returning
-                // the f32-rounded value on both lanes.
-                //
-                // An unbounded binder therefore keeps `t-prim`, which restores
-                // base's [04-DTYPE-1] rejection for it unchanged. What family
-                // an unbounded binder's literal should adopt is a language
-                // question, not one to settle here: §P10b position 4 conditions
-                // on the cast rather than on the bound, and it is tracked
-                // separately.
-                let target = if binder_bound.is_some() {
+                // Spelling and capability are distinct. Every declared binder
+                // is a `t-var`; only a dtype-family bound lets its literal
+                // adopt. The checker rejects an unbounded binder in this dtype
+                // position under [04-DTYPE-1]/[04-DTYPE-2].
+                let target = if self.is_current_type_binder(prec) {
                     node(DeepTag::TVar, vec![sym(prec)])
                 } else {
                     node(DeepTag::TPrim, vec![sym(prec)])
@@ -2298,19 +2338,19 @@ fn desugar_literal(lit: &Literal) -> deep::Expr {
 /// cannot bind at an integer type, so under an `Int`-bounded binder it keeps
 /// its float source and the checked cast applies [04-NUM-14].
 ///
-/// An UNBOUNDED binder names no family, so no adoption is possible. The cast
-/// TARGET is keyed on this same predicate for that reason: giving an unbounded
-/// binder the `t-var` spelling while its literal kept the §P10 f32 stamp
-/// removed base's [04-DTYPE-1] rejection and replaced it with an f32-rounded
-/// value on both lanes (round 1 F1). An unbounded binder keeps `t-prim` and
-/// keeps that rejection.
+/// An unbounded binder names no family, so no adoption is possible. It still
+/// has the `t-var` spelling; the checker rejects it as a cast target because
+/// [04-DTYPE-2] permits it to instantiate to non-dtype types.
 fn scalar_literal_adopts_binder_target(lit: &Literal, bound: Option<DtypeFamily>) -> bool {
     let Some(bound) = bound else {
         return false;
     };
     match lit {
-        Literal::Float(_) => matches!(bound, DtypeFamily::Float),
-        Literal::Int(_) => matches!(bound, DtypeFamily::Float | DtypeFamily::Int),
+        Literal::Float(_) => matches!(bound, DtypeFamily::Float | DtypeFamily::Numeric),
+        Literal::Int(_) => matches!(
+            bound,
+            DtypeFamily::Float | DtypeFamily::Int | DtypeFamily::Numeric
+        ),
         _ => false,
     }
 }
@@ -3753,6 +3793,36 @@ mod tests {
             !printed.contains("(t-var {} flt32)"),
             "an undeclared name is not a binder: {printed}"
         );
+    }
+
+    #[test]
+    fn an_unbounded_binder_keeps_its_type_variable_spelling_without_literal_adoption() {
+        for source in [
+            "def scale[p](x: p) -> p = mul(x, cast(0.1, p))\n",
+            "sig scale: p -> p\ndef scale(x) = mul(x, cast(0.1, p))\n",
+        ] {
+            let decls = crate::parser::parse_str(source).expect("fixture parses");
+            let printed = desugar_program(&decls)
+                .iter()
+                .map(print_expr)
+                .collect::<Vec<_>>()
+                .join("\n")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                printed.contains("type: (t-prim {} f32)} 0.1)"),
+                "an unbounded binder cannot adopt the literal: {printed}"
+            );
+            assert!(
+                printed.contains("(t-var {} p))"),
+                "a declared binder remains a t-var even when [04-DTYPE-1] rejects it as a cast target: {printed}"
+            );
+            assert!(
+                !printed.contains("(t-prim {} p)"),
+                "a binder may never be serialized as a primitive: {printed}"
+            );
+        }
     }
 
     /// A binder declared on a standalone `sig` rather than inline is the same
