@@ -262,6 +262,30 @@ variable/binder name (cvc5-rs `CString::new(...).unwrap()` PANICS); and an
 stack -> SIGABRT), bounded by an ITERATIVE check at the entry that cannot
 itself overflow.
 
+Partial solver kinds also require a semantic domain gate, not only a
+sort/arity gate. Before Tier B constructs any cvc5 `SQRT`, it collects every
+distinct exact argument and proves their conjunction non-negative from the
+user's other sqrt-free, top-level conjunctive preconditions. The proof fragment
+is deliberately total algebraic arithmetic (`+`, `-`, `*`, unary negation and
+comparisons): division, applications, conditionals, nested `sqrt`, and
+quantified evidence cannot authorize the partial kind. Only a proved auxiliary
+obligation authorizes the exact arguments in the private builder context;
+SAT, timeout, unknown, or lowering error routes the original property to Tier
+C. The proved domain facts are then asserted in the main query as redundant
+facts already implied by the user's assumptions. The public unguarded builder
+has no authorization context and therefore rejects `sqrt`. This is the
+chelis#1475 soundness boundary: Tier B may lose reach, but it never adds
+`arg >= 0` as an unproved assumption.
+
+The solve timeout is a request-wide solver budget. A `sqrt` request divides it
+between the auxiliary domain proof and the main query (the odd-millisecond
+remainder stays with the main query), so their aggregate cvc5 `tlimit-per`
+budgets never exceed the requested timeout. A timeout smaller than two
+milliseconds cannot give both phases a positive cvc5 limit and therefore
+routes to Tier C rather than using `tlimit-per=0`, which cvc5 treats as
+unlimited. A property without `sqrt` retains the entire original budget and
+the worker watchdog retains its existing grace period above that bound.
+
 ### Layer 2 -- process isolation (the residual)
 
 cvc5 fails by PROCESS ABORT, which cannot be caught in-process, so Layer 1
@@ -298,6 +322,17 @@ also be green. The RT6 process-isolation acceptance is the
 run above): the baseline proves obligations at the SMT tier through the
 worker, and a worker forced to abort / panic / overflow on every solve must
 leave the parent alive with obligations fallen to Tier C.
+
+The focused chelis#1475 regression oracle is:
+
+```sh
+cargo nextest run -p chelis-prove --features smt --test issue_1475_sqrt_domain
+```
+
+Success is exit zero with all cases passing: both reported unsafe shapes and
+unguarded/nested/quantified/partial-evidence forms fail closed, while guarded
+and algebraically non-negative arguments remain in Tier B, a false in-domain
+property still disproves, and the `exp`/`abs` controls retain their results.
 
 ## Test matrix (union of all three reviews)
 
