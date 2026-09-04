@@ -118,7 +118,7 @@ float upcast (their default `divide`); use a `cast` first for that.
 
 | Name | Signature | AD adjoint |
 |---|---|---|
-| `sum` | `(&tensor[..,p], axis: int32, accumulator: prec = default(p)) -> tensor[..,acc]` | `expand(g, axis)` |
+| `sum` | `(&tensor[..,p], axis: int32, accumulator: prec = default(p)) -> tensor[..,acc]` | `insert(g, axis)` |
 | `count` | `(&tensor[..,bool], axes: int32...) -> tensor[..,int64]` | **non-differentiable** (`IntegerReductionOutput`) |
 | `max_reduce` | `(&tensor[..,p], axis: int32) -> tensor[..,p]` | `g * one_hot(argmax)` |
 | `min_reduce` | `(&tensor[..,p], axis: int32) -> tensor[..,p]` | `g * one_hot(argmin)` |

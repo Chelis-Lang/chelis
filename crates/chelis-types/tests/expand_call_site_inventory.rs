@@ -53,6 +53,61 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         4,
         "four rows declare tensor[8, 4, f32] or tensor[n, 4, f32] from tensor[1, 4, f32]",
     ),
+    // Markdown. `spec/` is skipped above; these are the rest.
+    //
+    // Two `openspec/` captures still carry a rank-increasing call. They mirror
+    // `spec/04-type-system.md` §4.5.3 and have been stale since chelis#1532
+    // renamed it there. A capture is not authority and is not this pull
+    // request's to edit: the OpenSpec migration owns re-capturing them, so
+    // they are listed, not renamed.
+    (
+        "openspec/specs/type-system/spec.md",
+        1,
+        "captured capability mirroring spec/04 \u{00a7}4.5.3; the OpenSpec migration owns re-capture",
+    ),
+    (
+        "openspec/changes/capture-type-system/specs/type-system/spec.md",
+        1,
+        "the same capture, in its originating change",
+    ),
+    // Investigation records. Each describes a program or an IR transcript as
+    // it stood when it was diagnosed. Renaming the recorded text would make
+    // the record disagree with the compiler output printed beside it.
+    (
+        "docs/investigations/implicit_copy_fanout_v3_diagnosis.md",
+        2,
+        "a recorded IR transcript, quoted as diagnosed",
+    ),
+    (
+        "docs/investigations/issue_206_runtime_dim_reshape_diagnosis.md",
+        1,
+        "a recorded neighbour program, quoted as diagnosed",
+    ),
+    (
+        "docs/investigations/specialize_and_backend_emit.md",
+        2,
+        "`emit_expand()`, a Rust backend function name in prose, not program text",
+    ),
+    // Gap analyses: elided sketches (`expand(a, ...)`) in tables whose subject
+    // is which programs the checker admitted at the time. No rank is stated,
+    // and the tables are historical.
+    (
+        "docs/gap_synthesis.md",
+        2,
+        "elided sketch in a historical admitted-programs table",
+    ),
+    (
+        "docs/identified_gaps.md",
+        2,
+        "elided sketch in a historical admitted-programs table",
+    ),
+    // The one genuine same-rank line in the book: `expand` documented as the
+    // size-1 broadcast that leaves the rank alone, beside `insert`.
+    (
+        "docs/book/src/stdlib.md",
+        1,
+        "the stdlib entry for the same-rank broadcast, correct after the split",
+    ),
     // Deferral files: their subject is the choice between the two candidate
     // forms, which `insert` does not have. The removal slices delete them, and
     // these rows come out with them.
@@ -123,6 +178,16 @@ fn program_sites(text: &str, suffix: &str) -> usize {
         return text.matches("expand(").count();
     }
     if suffix == "ch" {
+        return text.matches("expand(").count();
+    }
+    // Markdown was the scan's last blind spot: a rank-increasing call in a
+    // fenced example or an inline span is program text a reader can copy, and
+    // two such calls survived the migration in the `openspec/` captures
+    // because nothing looked at `.md` at all. Counting the whole call spelling
+    // is coarse in the same way the Python rule is -- it also catches a Rust
+    // function name such as `emit_expand()` written in prose -- and coarse in
+    // the same direction, which is the one that cannot miss a real site.
+    if suffix == "md" {
         return text.matches("expand(").count();
     }
     if suffix == "dp" {
@@ -218,7 +283,7 @@ fn every_surviving_expand_program_site_is_inventoried() {
             continue;
         }
         let suffix = match rel.rsplit_once('.') {
-            Some((_, s)) if matches!(s, "ch" | "dp" | "rs" | "py") => s,
+            Some((_, s)) if matches!(s, "ch" | "dp" | "rs" | "py" | "md") => s,
             _ => continue,
         };
         let Ok(text) = std::fs::read_to_string(root.join(rel)) else {
