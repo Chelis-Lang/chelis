@@ -3173,8 +3173,11 @@ fn stage_kernel_argument(
             vec![i64::from(*flag)],
         )?
         .value),
+        // Rendered through the runtime's one diagnostic renderer, never a
+        // Debug format (faithful_observation.md B2.4).
         other => Err(format!(
-            "kernel `{def}` parameter `{param}` expects a tensor or scalar argument, got {other:?}"
+            "kernel `{def}` parameter `{param}` expects a tensor or scalar argument, got {}",
+            describe_value(other)
         )),
     }
 }
