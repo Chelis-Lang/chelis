@@ -3089,6 +3089,14 @@ schedule, stall release, separate cycle-detector graph, or pending
 [#1485]/[#1486]/[#1487] work in this residue. PP6's paired-ingress, schedule,
 and public CLI commands are its standing acceptance oracles.
 
+[04-INF-8] closes [#1339]'s indirect form at the same checker boundary: an
+earlier eager value may not call through a function or nested lambda whose
+eager closure reaches a later non-function value. The dedicated [#1339]
+oracle owns this indirect frontier; the compiled-value ownership oracle keeps
+its direct rows, and [#1362] invokes both. No dependency-ordered global
+initialization is introduced, and the compiled-value ownership class is not
+enlarged.
+
 #### Top-level initialization frontier ([#1339])
 
 **Decision.** [04-INF-8] rejects an acyclic eager reference set that contains a
@@ -3103,8 +3111,8 @@ model, not an emitter ordering repair.
 **Dependency order.** PR [#1457] supplied the direct rejection and PR [#1516]
 decided [04-INF-7]. PP6 Slice A ([#1486]) lands first; Slices B/C ([#1487] and
 [#1485]) then provide the lambda-complete graph and ingress-identical cycle
-precedence. The [#1339] slice reuses that graph, adds declaration ordinals, and
-checks every eager root's acyclic closure against the root's own ordinal.
+precedence. The [#1339] implementation reuses that graph and checks every
+eager root's acyclic closure against the graph's declaration ordinals.
 Imported library values are already available and are excluded. A cycle is
 diagnosed first as `CycleDetected`; the later-value diagnostic never replaces
 it.
@@ -3121,9 +3129,10 @@ later-external-input dependencies. Its controls are the direct-forward rows,
 backward scalar/heap dependencies, an independent later value, legal forward
 and recursive functions whose value closure is already available, and exact
 eval-versus-compiled-C output including root order. `check`, `eval`, and
-`build` reject before execution or artifact creation. The compiled-value
-ownership launch oracle invokes this complete target after it lands; its
-current direct rows alone are not evidence that [#1339] is closed.
+`build` reject before execution or artifact creation. [#1362]'s launch gate
+runs this complete target beside the ownership launch
+subset; the ownership oracle's direct rows alone are not evidence that [#1339]
+is closed.
 
 
 ### Adjacent ledger rows delivered with the class change

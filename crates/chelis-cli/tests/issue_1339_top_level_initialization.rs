@@ -248,6 +248,9 @@ fn assert_cli_unbound(case: RejectCase, must_name_root: bool) {
 }
 
 fn assert_eval_and_build_unbound(case: RejectCase, must_name_root: bool) {
+    let is_unbound = |diagnostic: &str| {
+        diagnostic.contains("UnboundVariable") || diagnostic.contains("unbound variable")
+    };
     let directory = tempdir().expect("tempdir");
     let path = directory.path().join(format!("{}.ch", case.name));
     let out_dir = directory.path().join(format!("{}-out", case.name));
@@ -262,7 +265,7 @@ fn assert_eval_and_build_unbound(case: RejectCase, must_name_root: bool) {
     let eval_stderr = String::from_utf8_lossy(&eval.stderr);
     assert!(
         !eval.status.success()
-            && eval_stderr.contains("unbound variable")
+            && is_unbound(&eval_stderr)
             && eval_stderr.contains(case.later)
             && (!must_name_root || eval_stderr.contains(case.root)),
         "{}: eval must reject before execution; stdout={} stderr={eval_stderr}",
@@ -286,7 +289,7 @@ fn assert_eval_and_build_unbound(case: RejectCase, must_name_root: bool) {
     let build_stderr = String::from_utf8_lossy(&build.stderr);
     assert!(
         !build.status.success()
-            && build_stderr.contains("unbound variable")
+            && is_unbound(&build_stderr)
             && build_stderr.contains(case.later)
             && (!must_name_root || build_stderr.contains(case.root)),
         "{}: C build must reject before lowering; stdout={} stderr={build_stderr}",

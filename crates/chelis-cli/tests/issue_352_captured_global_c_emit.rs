@@ -20,9 +20,9 @@
 //! the same object, mirroring eval's call-time load-closure semantics.
 //! [04-INF-4] rejects a direct forward reference from a compiled function
 //! to a later binding at check time, so a captured binding a function names
-//! is initialized before any user call reads it. The indirect shape, where an
-//! earlier binding's initializer calls a function that reads a later binding,
-//! is still assigned in binding order and remains chelis#1339.
+//! is initialized before any user call reads it. [04-INF-8] rejects the
+//! indirect shape, where an earlier binding's initializer calls a function
+//! that reaches a later value, before this source-ordered backend runs.
 //!
 //! This file is the closing oracle for #352: build --target c, compile with
 //! the native cc, run, and assert exact output plus `chelis eval` agreement.

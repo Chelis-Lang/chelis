@@ -896,8 +896,6 @@ an argument instead of reading the top-level binding.
 > are available before the current unit and do not participate in this
 > source-position comparison.
 
-(Not fully implemented; see chelis#1339.)
-
 ### 3.2 Inference Rules
 
 Standard notation: Γ ⊢ e : τ means "in environment Γ, expression e has type τ."
