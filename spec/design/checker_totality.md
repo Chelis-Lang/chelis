@@ -1959,8 +1959,14 @@ enum a traversal must exhaust, not an `Option` it may drop.
 - **E5a, the reproducers (lands first). Delivered by PR [#1543].** The six programs above - the four
   in-checker divergences and their two controls - as rows in
   `crates/chelis-types/tests/issue_1107_stamped_node_ingress_parity.rs`, whose
-  `agreed_diagnostics` helper already asserts the exact invariant. Each row
-  proved red on the pre-fix tree before its site is touched. The three
+  `agreed_diagnostics` helper already asserts the exact invariant. The
+  delivered slice carries twelve rows rather than six, because
+  `param_name_and_inline_type` and `describe_tuple_index` are reached by none
+  of the six programs and each took the row that proves it plus its accepted
+  control, and because the seed-literal `type:` reader in `infer/expr.rs` was
+  found during the slice to be an eighth in-checker divergence and was
+  repaired with the same pair. Each row proved red on the pre-fix tree before
+  its site is touched. The three
   divergences outside the checker are E5c's rows, in E5c's crates. Then the
   sites the rows cover: the `type:` metadata reader in `infer/expr.rs`, the `t-prim`
   read and `param_name_and_inline_type` in `infer/validate.rs`, the four

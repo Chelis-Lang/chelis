@@ -737,3 +737,45 @@ fn inline_param_polymorphic_float_mean_is_accepted_on_both_ingresses() {
         "inline-annotated f32 param through a polymorphic mean",
     );
 }
+
+/// The `with seed(...)` handler program, at a chosen seed-literal width. The
+/// §P10a rule is that an integer-literal seed must carry the `i64` suffix,
+/// which Deep spells as `type: (t-prim {} int64)` on the seed `lit`.
+fn seeded_handler_program(seed_prim: &str) -> String {
+    format!(
+        "(def {{}} f (handle-effect {{effect: random}} \
+           (lit {{type: (t-prim {{}} {seed_prim})}} 42) \
+           (lit {{type: (t-prim {{}} f32)}} 1.0)))"
+    )
+}
+
+/// PP7's EIGHTH in-checker divergence, found while delivering E5a and folded
+/// into it: REGRESSION TEST (red before the `seed_literal_form` repair, green
+/// after). `seed_literal_form` sits ten lines from `infer_lit`'s `type:`
+/// reader in the same file and had the same defect twice over -- an
+/// `Expr::List`-only match on the seed `lit` itself, and an `Expr::List`-only
+/// read of the `t-prim` under its `type:` metadata. On the stamped ingress
+/// the handler is an `Expr::Node`, so the outer match fell to `_ => None`, the
+/// seed classified as `NotIntLiteral`, and the §P10a int64-suffix rejection
+/// never fired: `chelis check` exited 2 and `chelis prove` exited 0 for the
+/// same file. Fail-open.
+#[test]
+fn unsuffixed_seed_literal_is_rejected_on_both_ingresses() {
+    assert_agree_and_reject(
+        &seeded_handler_program("int32"),
+        "requires an int64-suffixed integer literal seed",
+        "with seed at an unsuffixed int32 literal",
+    );
+}
+
+/// The over-rejection control for the row above, DISPOSITION LOCK (green
+/// before and after): a correctly suffixed non-negative seed must still check
+/// clean on both ingresses. Without it, "classify every seed carrier I cannot
+/// decode as unsuffixed" would satisfy the regression row.
+#[test]
+fn int64_suffixed_seed_literal_is_accepted_on_both_ingresses() {
+    assert_agree_and_accept(
+        &seeded_handler_program("int64"),
+        "with seed at an int64-suffixed literal",
+    );
+}

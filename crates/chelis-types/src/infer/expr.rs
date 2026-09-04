@@ -840,31 +840,34 @@ pub(super) enum SeedLiteralForm {
 /// unsuffixed by construction, a `(lit ...)` carries its width in the `type`
 /// metadata.
 pub(super) fn seed_literal_form(expr: &deep::Expr) -> SeedLiteralForm {
+    // chelis#1125 PP7 / [04-TOT-5]: both reads below are carrier-preserving.
+    // This function had the `infer_lit` defect twice over -- an
+    // `Expr::List`-only match on the seed `lit` itself, and an
+    // `Expr::List`-only read of the `t-prim` under its `type:` metadata -- so
+    // on the stamped ingress the handler `Expr::Node` fell straight to the
+    // default arm, the seed classified as `NotIntLiteral`, and the §P10a
+    // int64-suffix rejection never fired at all.
     let int_lit = match expr {
         // A bare integer atom has no suffix metadata: unsuffixed by construction.
         deep::Expr::Atom(deep::Atom::Int(value), _) => Some((false, *value)),
-        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Lit) => {
-            match list.elements.get(2) {
+        _ => match stamped_parts(expr) {
+            Some((DeepTag::Lit, meta, lit_kids)) => match lit_kids.first() {
                 Some(deep::Expr::Atom(deep::Atom::Int(value), _)) => {
-                    let is_int64 = get_meta(list).is_some_and(|meta| {
-                        meta.entries.iter().any(|(key, meta_value)| {
-                            key == "type"
-                                && matches!(
-                                    meta_value,
-                                    deep::Expr::List(inner, _)
-                                        if get_tag(inner) == Some(DeepTag::TPrim)
-                                            && children(inner).first().and_then(symbol_name)
-                                                == Some("int64")
-                                )
-                        })
+                    let is_int64 = meta.entries.iter().any(|(key, meta_value)| {
+                        key == "type"
+                            && matches!(
+                                stamped_parts(meta_value),
+                                Some((DeepTag::TPrim, _, prim_kids))
+                                    if prim_kids.first().and_then(symbol_name) == Some("int64")
+                            )
                     });
                     Some((is_int64, *value))
                 }
                 // A `(lit ...)` wrapping a non-int value is not an int seed.
                 _ => None,
-            }
-        }
-        _ => None,
+            },
+            _ => None,
+        },
     };
     match int_lit {
         None => SeedLiteralForm::NotIntLiteral,
