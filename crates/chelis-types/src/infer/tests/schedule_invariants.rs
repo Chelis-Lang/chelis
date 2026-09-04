@@ -351,21 +351,22 @@ fn reference(program: &Program, measured: &Measured) -> Reference {
         }
     }
     for intermediate in 0..item_count {
-        for from in 0..item_count {
-            if !reaches[from][intermediate] {
+        let through_intermediate = reaches[intermediate].clone();
+        for row in &mut reaches {
+            if !row[intermediate] {
                 continue;
             }
-            for to in 0..item_count {
-                reaches[from][to] |= reaches[intermediate][to];
+            for (reachable, &through) in row.iter_mut().zip(&through_intermediate) {
+                *reachable |= through;
             }
         }
     }
     let mut vertex = (0..item_count).collect::<Vec<_>>();
-    for index in 0..item_count {
+    for (index, representative) in vertex.iter_mut().enumerate() {
         if declared(index).is_none() {
             continue;
         }
-        vertex[index] = (0..item_count)
+        *representative = (0..item_count)
             .filter(|other| declared(*other).is_some())
             .filter(|other| reaches[index][*other] && reaches[*other][index])
             .min()
@@ -389,16 +390,14 @@ fn reference(program: &Program, measured: &Measured) -> Reference {
     // Every such pair must remain in one full-reference component, though an
     // eager value may now join it.
     let mut representative_by_label = BTreeMap::new();
-    for index in 0..item_count {
+    for (index, &component) in vertex.iter().enumerate() {
         let Some(label) = declared(index).and_then(|declaration| declaration.component) else {
             continue;
         };
-        let prior = representative_by_label
-            .entry(label)
-            .or_insert(vertex[index]);
+        let prior = representative_by_label.entry(label).or_insert(component);
         assert_eq!(
             *prior,
-            vertex[index],
+            component,
             "function component `{label}` was split by the full-reference model\n{}",
             program.source()
         );
