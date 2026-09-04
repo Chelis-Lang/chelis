@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "51861333a1cd0ac66e92b70cf4b12f07e4d8b5584b9b69ed91a3c5bab1766bcd",
+  "corpus_sha256": "b0fc5d2a4966a4b099f4ecb725685ce24416881f1a05a79215a2fc50e8ff754d",
   "rows": [
     {
       "id": "class.load_load.c",
@@ -17,14 +17,20 @@
     {
       "id": "class.load_op_output.c",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
-      "receipt": "cli_slice_b.load_and_op_output_members_share_one_guarded_class_on_c"
+      "phase_b": "executes_exactly",
+      "receipt": "exec_c.a_local_class_guards_at_its_operation_and_renders_the_numeric_trap"
     },
     {
       "id": "class.load_op_output.eval",
       "baseline": "silent_unguarded",
       "phase_b": "silent_unguarded",
       "receipt": "cli_slice_b.load_and_op_output_members_share_one_guarded_class_on_eval"
+    },
+    {
+      "id": "class.local_members.all_guarded.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.every_local_member_of_one_class_is_guarded_at_its_operation_on_c"
     },
     {
       "id": "class.no_movement_consumer.c",

@@ -349,8 +349,14 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "class.load_op_output.c",
             "silent_unguarded",
+            EXECUTES,
+            "exec_c.a_local_class_guards_at_its_operation_and_renders_the_numeric_trap",
+        ),
+        _row(
+            "class.local_members.all_guarded.c",
             "silent_unguarded",
-            "cli_slice_b.load_and_op_output_members_share_one_guarded_class_on_c",
+            EXECUTES,
+            "cli_slice_b.every_local_member_of_one_class_is_guarded_at_its_operation_on_c",
         ),
         _row(
             "class.load_op_output.eval",
@@ -869,6 +875,7 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
                 "an_op_declared_witness_reaches_the_hip_prologue_without_panicking",
                 "c_independent_trap_after_a_mismatch_loses",
                 "c_independent_trap_before_a_mismatch_wins",
+                "every_local_member_of_one_class_is_guarded_at_its_operation_on_c",
                 "runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt",
                 "runtime_bound_shrink_relu_builds_and_matches_eval_exactly",
             ),
@@ -889,12 +896,14 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
                 "cargo", "test", "-p", "chelis-backend-c", "--test",
                 "exec_compile", "--", "--nocapture", "--exact",
                 "a_literal_claim_over_a_runtime_read_traps_at_entry_on_c",
+                "a_local_class_guards_at_its_operation_and_renders_the_numeric_trap",
                 "an_all_interface_class_runs_when_its_witnesses_agree",
                 "an_all_interface_class_traps_at_entry_when_its_witnesses_disagree",
                 "entry_guards_run_in_assigned_slot_order_not_claim_name_order",
             ),
             (
                 "a_literal_claim_over_a_runtime_read_traps_at_entry_on_c",
+                "a_local_class_guards_at_its_operation_and_renders_the_numeric_trap",
                 "an_all_interface_class_runs_when_its_witnesses_agree",
                 "an_all_interface_class_traps_at_entry_when_its_witnesses_disagree",
                 "entry_guards_run_in_assigned_slot_order_not_claim_name_order",
