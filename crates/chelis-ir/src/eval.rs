@@ -477,12 +477,32 @@ impl ElementwiseBinOp {
     }
 }
 
+/// chelis#664 on the eval lane: an elementwise op indexes every operand
+/// through the output's shape, so operands that disagree at run time are a
+/// typed error, never an assertion. The routing of host-lane def applications
+/// through this evaluator (chelis#1277 B2h) made a runtime disagreement user
+/// input; the phrase is the one the host interpreter reports.
+fn require_same_shape(lhs: &TensorValue, rhs: &TensorValue) -> Result<(), String> {
+    if lhs.shape == rhs.shape {
+        return Ok(());
+    }
+    let render = |shape: &[usize]| {
+        let extents = shape.iter().map(usize::to_string).collect::<Vec<_>>();
+        format!("[{}]", extents.join(", "))
+    };
+    Err(format!(
+        "tensor shapes must match for elementwise op, got {} vs {}",
+        render(&lhs.shape),
+        render(&rhs.shape)
+    ))
+}
+
 fn binary_elementwise(
     op: ElementwiseBinOp,
     lhs: &TensorValue,
     rhs: &TensorValue,
 ) -> Result<TensorValue, String> {
-    assert_eq!(lhs.shape, rhs.shape);
+    require_same_shape(lhs, rhs)?;
     let storage = if lhs.prim() == Prim::Bool && rhs.prim() == Prim::Bool {
         let lhs_values = lhs
             .storage()
@@ -642,7 +662,7 @@ fn compare_elementwise(
     lhs: &TensorValue,
     rhs: &TensorValue,
 ) -> Result<TensorValue, String> {
-    assert_eq!(lhs.shape, rhs.shape);
+    require_same_shape(lhs, rhs)?;
     let storage =
         compare_tensors(op, lhs.storage(), rhs.storage()).map_err(|error| error.to_string())?;
     Ok(TensorValue::from_storage(lhs.shape.clone(), storage))
