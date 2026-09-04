@@ -4640,3 +4640,195 @@ int main() {{
     assert!(ok, "agreeing witnesses must execute: {out}");
     assert!(out.contains("RAN -1.0"), "and produce neg(x): {out}");
 }
+
+// ---- chelis#1277 b2.4: one guard per axis, and the ABI check narrowed ----
+//
+// Two spellings of one axis reach the prologue: the binding view sees a
+// `Load`'s own axis as an `ExternalAxis` member, and the class view sees a
+// folded `shape(t, k)` read of that same tensor as an `InputAxis` member.
+// Before the dedupe both were emitted, so an axis could be guarded twice or,
+// where the claim's other witness is dropped as unused, compared with itself.
+// A tautology and a duplicate are the two ways a guard can be present in the
+// text and absent in effect, which is why both directions are pinned here
+// rather than only the count.
+
+fn expand_reading_own_axis_dag(x_dim: DimInfo, out_dim: DimInfo) -> chelis_ir::dag::Dag {
+    use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
+    let mut dag = Dag::new();
+    let scalar = TensorType {
+        dims: vec![],
+        precision: Prim::F32,
+    };
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], scalar, None);
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        TensorType {
+            dims: vec![x_dim],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+        },
+        vec![b, x],
+        TensorType {
+            dims: vec![out_dim],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    dag.add_root(out);
+    dag
+}
+
+/// The claim's only other witness is the axis the canonical value was read
+/// from, so the comparison is `n != n`. chelis#1374's emitted kernel carried
+/// exactly this: `int64_t n = chelis_tensor_shape(inputs[1], 0);` followed by
+/// `if (chelis_tensor_shape(inputs[1], 0) != n)`.
+///
+/// EVIDENTIARY STATUS: regression test. Measured failing on the emitted C
+/// before the dedupe.
+#[test]
+fn a_member_reading_the_canonical_axis_emits_no_guard() {
+    let dag = expand_reading_own_axis_dag(
+        DimInfo::Named("n".into(), None),
+        DimInfo::Named("n".into(), None),
+    );
+    let src = codegen(&dag, "selfcmp").expect("codegen").c_source;
+    assert!(
+        src.contains("int64_t n = chelis_tensor_shape(inputs[1], 0);"),
+        "the canonical value is still declared: {src}"
+    );
+    assert!(
+        !src.contains("if (chelis_tensor_shape(inputs[1], 0) != n)"),
+        "and nothing compares it with itself: {src}"
+    );
+}
+
+/// A `Literal` claim over an input axis whose static size the checker
+/// resolved to the same literal. The legacy ABI static-dim check and the
+/// class guard are then the identical comparison, and the ABI one runs first
+/// and `abort()`s, so `spec/04-type-system.md` section 4.7's [04-NUM-9] trap
+/// is unreachable. chelis#1377's shape.
+///
+/// EVIDENTIARY STATUS: regression test. `main` emits both lines in this
+/// order; measured before the narrowing.
+#[test]
+fn a_literal_class_guard_replaces_the_abi_static_dim_check_on_that_axis() {
+    let dag = expand_reading_own_axis_dag(DimInfo::Named("n".into(), Some(4)), DimInfo::Lit(4));
+    let src = codegen(&dag, "litclaim").expect("codegen").c_source;
+    assert!(
+        !src.contains("input `x` axis 0 expected 4"),
+        "the ABI check no longer preempts the extent guard: {src}"
+    );
+    assert!(
+        src.contains("if (chelis_tensor_shape(inputs[1], 0) != 4)"),
+        "the class guards the same axis against the same literal: {src}"
+    );
+    assert!(
+        src.contains("chelis_numeric_trap(\"numeric trap: domain in load at int64\")"),
+        "and renders [04-NUM-9]: {src}"
+    );
+}
+
+/// The narrowing's exact complement, in two directions. Without these the
+/// change above could have deleted the ABI check outright and still passed:
+/// an axis no class guards keeps it, and a `Name` claim - whose guard
+/// compares against another input's RUNTIME extent rather than against the
+/// declared size - keeps it too, because dropping it there would lose a
+/// comparison rather than rename one.
+///
+/// EVIDENTIARY STATUS: disposition lock, and measured as one. Reverting the
+/// narrowing leaves this row green, because `main` already emits both lines;
+/// what it pins is that the narrowing did not widen into a deletion. Its
+/// three siblings above are regression tests, measured red on the same
+/// revert.
+#[test]
+fn the_abi_static_dim_check_survives_where_no_literal_class_guards_the_axis() {
+    use chelis_ir::dag::{Dag, RiscOp, TensorType};
+    let mut dag = Dag::new();
+    let ty = TensorType {
+        dims: vec![DimInfo::Lit(4)],
+        precision: Prim::F32,
+    };
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+    let out = dag.add_node(RiscOp::Neg, vec![x], ty, None);
+    dag.add_root(out);
+    let src = codegen(&dag, "noclass").expect("codegen").c_source;
+    assert!(
+        src.contains("input `x` axis 0 expected 4"),
+        "a program with no runtime extent keeps the C ABI boundary check: {src}"
+    );
+
+    // A `Name` claim over a statically sized axis: the class guards
+    // `inputs[1]` axis 0 against `n`, which is read from another input, so
+    // the static comparison is not the same comparison and stays.
+    let named = expand_reading_own_axis_dag(
+        DimInfo::Named("n".into(), Some(4)),
+        DimInfo::Named("n".into(), Some(4)),
+    );
+    let src = codegen(&named, "nameclaim").expect("codegen").c_source;
+    assert!(
+        src.contains("input `x` axis 0 expected 4"),
+        "a Name claim does not license dropping the static check: {src}"
+    );
+}
+
+/// Three witnesses of one claim, two of which name the same axis through
+/// different sources: `y`'s `Load` axis (an `ExternalAxis` member) and the
+/// `expand` size's folded read of `y` (an `InputAxis` member). The axis is
+/// guarded once. chelis#1374's fixture with its `x` parameter kept alive,
+/// which is the form whose emitted kernel carried the duplicate.
+///
+/// EVIDENTIARY STATUS: regression test, measured at two occurrences before
+/// the dedupe.
+#[test]
+fn one_axis_reached_by_two_member_spellings_is_guarded_once() {
+    use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
+    let named = || TensorType {
+        dims: vec![DimInfo::Named("n".into(), None)],
+        precision: Prim::F32,
+    };
+    let mut dag = Dag::new();
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        TensorType {
+            dims: vec![],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], named(), None);
+    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], named(), None);
+    let widened = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+        },
+        vec![b, y],
+        named(),
+        None,
+    );
+    let out = dag.add_node(RiscOp::Add, vec![widened, x], named(), None);
+    dag.add_root(out);
+
+    let src = codegen(&dag, "dedupe").expect("codegen").c_source;
+    let marker = "input `y` at slot ";
+    let slot = src
+        .find(marker)
+        .and_then(|at| src[at + marker.len()..].chars().next())
+        .expect("y has an assigned slot");
+    let guard = format!("if (chelis_tensor_shape(inputs[{slot}], 0) != n)");
+    assert_eq!(src.matches(&guard).count(), 1, "one axis, one guard: {src}");
+}
