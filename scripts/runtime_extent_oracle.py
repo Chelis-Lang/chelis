@@ -458,6 +458,9 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "silent_unguarded",
             "cli_slice_b.a_node_valued_reshape_target_under_a_named_claim_is_guarded",
         ),
+        # Chelis#1313 removes the synthesized zero only from ReLU. Sigmoid
+        # retains the same sourceless-Const class and therefore keeps #1482's
+        # typed receipt live rather than falsely closing the broader issue.
         _row(
             "shrink.elementwise_const.build",
             "ice",
@@ -704,7 +707,10 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
                 "cargo", "test", "-p", "chelis-cli", "--test",
                 "runtime_extent_slice_b", "--", "--nocapture",
             ),
-            ("runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt",),
+            (
+                "runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt",
+                "runtime_bound_shrink_relu_builds_and_matches_eval_exactly",
+            ),
         ),
     )
 

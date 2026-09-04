@@ -26,9 +26,10 @@ use chelis_types::dtype_semantics::{
     ArgReduceOp, CheckedCastPlan, CompareOp, ExtremaOperand as KernelExtremaOperand, FloatBinOp,
     FloatExtremaOp, FloatUnOp, IndexedTrapCandidate, IntBinOp, IntUnOp, RawTensor,
     ReduceWindowGradOp, TensorReduceOp, TensorStorage, arg_reduce_tensor_groups, compare_tensors,
-    count_tensor_groups, finalize_tensor, float_extrema_adjoint, float_tensor_binop,
-    float_tensor_unop, int_tensor_binop, int_tensor_unop, integer_is_exactly_representable,
-    reduce_tensor_groups, reduce_window_grad_tensor_groups, tensor_from_scalars, uniform_sample,
+    count_tensor_groups, finalize_tensor, float_extrema_adjoint, float_relu, float_relu_adjoint,
+    float_tensor_binop, float_tensor_unop, int_tensor_binop, int_tensor_unop,
+    integer_is_exactly_representable, reduce_tensor_groups, reduce_window_grad_tensor_groups,
+    tensor_from_scalars, uniform_sample,
 };
 use chelis_types::types::Prim;
 
@@ -2194,6 +2195,18 @@ where
                 )
                 .map_err(|error| error.to_string())?;
                 TensorValue::from_storage(lhs.shape.clone(), storage)
+            }
+            RiscOp::Relu => {
+                let input = &values[&node.inputs[0]];
+                let storage = float_relu(input.storage()).map_err(|error| error.to_string())?;
+                TensorValue::from_storage(input.shape.clone(), storage)
+            }
+            RiscOp::ReluAdjoint => {
+                let input = &values[&node.inputs[0]];
+                let cotangent = &values[&node.inputs[1]];
+                let storage = float_relu_adjoint(input.storage(), cotangent.storage())
+                    .map_err(|error| error.to_string())?;
+                TensorValue::from_storage(input.shape.clone(), storage)
             }
             RiscOp::CmpLt => compare_elementwise(
                 CompareOp::Lt,

@@ -43,6 +43,15 @@ preserve its stored bits; a raw JSON number, an untagged payload, a string-mode
 fill, or a mismatched dtype is a decode error before IR construction. No v5
 numeric-fill migration or inferred fill dtype exists.
 
+Version 7 includes the distinct `WireRiscOp::Relu` and
+`WireRiscOp::ReluAdjoint` identities required by [05-OP-43]. `Relu` has
+exactly one input; `ReluAdjoint` has exactly two, ordered as the forward input
+and incoming cotangent. Every input has the output's exact float dtype and
+dimensions. An unknown identity, a non-float dtype, wrong cardinality,
+unresolved input, or shape/dtype mismatch is a decode error before IR
+construction; the decoder does not replace either identity with an extrema
+operation.
+
 Version 7 represents every runtime movement bound and reshape target with the
 tagged `WireRtDim` carrier defined by [05-MOV-1]. In particular,
 `WireRiscOp::Expand.size` is a `WireRtDim`, never a display string.

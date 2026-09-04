@@ -43,19 +43,23 @@ NOT be published as a frozen low-level guarantee while the implementation evolve
 - **WHEN** documenting `.chb`
 - **THEN** the project does not publish a frozen low-level layout guarantee while the format is still expected to evolve
 
-### Requirement: Exact WireDag schema version 6
+### Requirement: Exact WireDag schema version 7
 
-The compiler-API JSON WireDag surface SHALL carry explicit schema version 6,
-and version 6 SHALL be the only accepted version. Missing, versionless,
-versions 1 through 5, future, unknown-variant, and best-effort payloads SHALL
+The compiler-API JSON WireDag surface SHALL carry explicit schema version 7,
+and version 7 SHALL be the only accepted version. Missing, versionless,
+versions 1 through 6, future, unknown-variant, and best-effort payloads SHALL
 fail before IR construction. `Count.axes` SHALL already be the complete
 non-empty unique normalized original-axis vector in strictly descending order;
 encoder and decoder both reject a noncanonical vector. `Pad.fill` SHALL be a
 tagged `ScalarValue` whose dtype and bits exactly match the padded tensor.
+Runtime movement and reshape metadata SHALL use the structural `WireRtDim`
+carrier. [05-OP-43]'s `Relu` and `ReluAdjoint` SHALL cross the wire as distinct
+identities with one and two inputs respectively; every input SHALL have the
+output's exact float dtype and dimensions.
 
 #### Scenario: Unknown or older schema fails before IR construction
 
-- **WHEN** a consumer receives a versionless, v1-v5, future-version, or unknown-variant WireDag payload
+- **WHEN** a consumer receives a versionless, v1-v6, future-version, or unknown-variant WireDag payload
 - **THEN** decoding fails before any IR node is materialized
 
 #### Scenario: Noncanonical Count axes are not rewritten
@@ -67,6 +71,11 @@ tagged `ScalarValue` whose dtype and bits exactly match the padded tensor.
 
 - **WHEN** `WireRiscOp::Pad` crosses the wire
 - **THEN** its fill is a dtype-tagged `ScalarValue` matching the tensor, never a raw number or inferred dtype
+
+#### Scenario: ReLU identities survive the wire
+
+- **WHEN** a `Relu` or `ReluAdjoint` node crosses the compiler-API boundary
+- **THEN** its dedicated identity, exact arity, float dtype, and dimensions are validated before IR construction rather than reconstructed as an extrema operation
 
 ### Requirement: Decode-boundary invariant revalidation
 

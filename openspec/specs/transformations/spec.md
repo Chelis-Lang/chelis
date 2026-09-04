@@ -101,7 +101,10 @@ float-to-integer/bool casts structurally reject with
 Float-to-float casts use `cast(g, source_dtype)`. [05-OP-42]
 `stop_gradient` SHALL be the differentiation barrier: its argument's
 subgraph is outside adjoint construction and structural rejection analysis,
-and the argument receives the shape-preserving exact zero cotangent. An
+and the argument receives the shape-preserving exact zero cotangent.
+[05-OP-43] `relu` SHALL retain its dedicated identity through AD and select
+the complete incoming cotangent exactly where `0 < x`, producing exact
+positive zero at both signed zeros and NaN. An
 explicit `wrt` target
 must contain a differentiable float leaf; mixed List/tuple/ADT targets are
 legal and preserve discrete fields as `unit`.
@@ -117,6 +120,11 @@ legal and preserve discrete fields as `unit`.
 
 - **WHEN** `grad` is applied to a function whose `wrt` parameter is `bool`
 - **THEN** it is a `non_differentiable` type error naming the parameter
+
+#### Scenario: ReLU does not inherit the direct-maximum tie rule
+
+- **WHEN** `grad` reaches `relu(x)` at `x = +0`, `x = -0`, or a NaN input
+- **THEN** the input cotangent is exact positive zero, while a direct `max_elem` application keeps its first-operand-on-equality adjoint
 
 #### Scenario: A structural rejection inside the barrier does not reject
 

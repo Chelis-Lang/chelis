@@ -209,7 +209,15 @@ REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
         "agreement_mul": "ba21fed3999506c32eb163bcdaaa10a135c744008f7b908e5f7fc98c0338fc97",
         "agreement_neg": "71fb3152676dbfbbd06487b493cc2201e3730163b7cceff01801b930bc003a30",
         "agreement_operation_identity_is_derived_from_ir": "b35dd2f9eac4362f5c38639c8a882b38872d5400d2399d8963cfe2427340dec6",
-        "agreement_relu": "51c6c9b881398cff2f1e7c263e7ccb919641bb014d2b4ac0853e97a6c9c25d61",
+        # Chelis#1313 intentionally replaces only this row's generic
+        # `MaxElem(x, synth_const(0))` spelling with the dedicated
+        # `RiscOp::Relu(x)` identity. Its negative and positive cases retain
+        # the same labels, comparator calls, and exact expected outputs. The
+        # independent dtype ReLU oracle proves the dedicated identity's exact
+        # per-width semantic/bit contract and evaluator/C agreement (with HIP
+        # and Metal structural coverage), while this row preserves both
+        # negative-input and positive-input parity.
+        "agreement_relu": "d8bfd8d952bcac571f5e7f8b028bf12b367c642b329c9ad22ecc3854727c1659",
         "agreement_sin": "7d1c26bc002402b089c6c035eb756dedd70de05f06c2253ad362462d8243a170",
         "agreement_sqrt_is_exact": "63ee422b92eef85a5635892c57282dbd9cec0154bd3d79ae4c57ca1744f0ac6a",
         "agreement_tan": "33480e20e37c50cbd1ba8ae7864b77f860831c1ecce8577dcf22b28640e0116e",

@@ -597,6 +597,7 @@ impl CEmitter {
                 | RiscOp::MaxElem
                 | RiscOp::MinElem
                 | RiscOp::ExtremaAdjoint { .. }
+                | RiscOp::ReluAdjoint
                 | RiscOp::CmpLt
                 | RiscOp::FusedElem { .. }
         ) {
@@ -629,6 +630,8 @@ impl CEmitter {
             RiscOp::ExtremaAdjoint { kind, operand } => {
                 self.emit_extrema_adjoint(id, *kind, *operand, &node.inputs, &node.output_type)
             }
+            RiscOp::Relu => self.emit_relu(id, &node.inputs, &node.output_type),
+            RiscOp::ReluAdjoint => self.emit_relu_adjoint(id, &node.inputs, &node.output_type),
             RiscOp::CmpLt => self.emit_cmplt(id, &node.inputs, &node.output_type, dag),
             RiscOp::Neg => self.emit_unary(id, "-", &node.inputs, &node.output_type),
             RiscOp::Recip => self.emit_recip(id, &node.inputs, &node.output_type),
@@ -2046,6 +2049,8 @@ impl CEmitter {
         let a = inputs[0].0;
         let b = inputs[1].0;
         let et = Self::elem_type(ty);
+        let is_relu_adjoint = op == "chelis_relu_adjoint";
+        let zero = if Self::is_f64(ty) { "0.0" } else { "0.0f" };
         // #387: an INTEGER `div` (`op == "/"` on an integer dtype) must trap
         // portably on a zero divisor. Hardware behavior is not portable --
         // x86 raises SIGFPE on integer #DE, but ARM64 (macOS arm64) defines
@@ -2056,6 +2061,12 @@ impl CEmitter {
         // is never guarded; `+`/`*`/`fmaxf` never divide.
         let checked_int = ty.precision.is_integer() && matches!(op, "+" | "-" | "*" | "/");
         let elem_expr = |lhs: String, rhs: String| -> String {
+            if is_relu_adjoint {
+                // [05-OP-43]: select g only for +0 < x. Selection preserves
+                // the exact stored cotangent bits and emits exact +0 for
+                // both zeros and NaN without multiplying by a mask.
+                return format!("{zero} < ({lhs}) ? ({rhs}) : {zero}");
+            }
             if !checked_int {
                 return format!("{lhs} {op} {rhs}");
             }
@@ -2319,6 +2330,16 @@ impl CEmitter {
         let b = inputs[1].0;
         let load = Self::reduced_to_f32_fn(ty.precision);
         let store = Self::f32_to_reduced_fn(ty.precision);
+        let is_relu_adjoint = op == "chelis_relu_adjoint";
+        let elem_expr = |g_raw: String| -> String {
+            if is_relu_adjoint {
+                // Decode x only for the predicate and select the original
+                // f16/bf16 cotangent storage word unchanged.
+                format!("0.0f < __av ? {g_raw} : UINT16_C(0)")
+            } else {
+                format!("{store}(__av {op} __bv)")
+            }
+        };
         self.emit_slot_wrapper(id, ty);
         self.line(&format!(
             "if (chelis_is_contiguous(t{a}) && chelis_is_contiguous(t{b}) && t{a}_size == t{id}_size && t{b}_size == t{id}_size) {{"
@@ -2339,7 +2360,10 @@ impl CEmitter {
         self.indent += 1;
         self.line(&format!("float __av = {load}(__in_a_{id}[i]);"));
         self.line(&format!("float __bv = {load}(__in_b_{id}[i]);"));
-        self.line(&format!("__out_{id}[i] = {store}(__av {op} __bv);"));
+        self.line(&format!(
+            "__out_{id}[i] = {};",
+            elem_expr(format!("__in_b_{id}[i]"))
+        ));
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -2367,7 +2391,8 @@ impl CEmitter {
             "float __bv = {load}(((uint16_t*)t{b}_data)[idx_b]);"
         ));
         self.line(&format!(
-            "((uint16_t*)t{id}_data)[i] = {store}(__av {op} __bv);"
+            "((uint16_t*)t{id}_data)[i] = {};",
+            elem_expr(format!("((uint16_t*)t{b}_data)[idx_b]"))
         ));
         self.indent -= 1;
         self.line("}");
@@ -2755,10 +2780,21 @@ impl CEmitter {
         let a = inputs[0].0;
         let et = Self::elem_type(ty);
         let is_f64 = Self::is_f64(ty);
-        let f = if is_f64 {
+        let is_relu = func == "chelis_relu";
+        let f = if is_f64 && !is_relu {
             Self::double_math_fn(func)
         } else {
             func
+        };
+        let zero = if is_f64 { "0.0" } else { "0.0f" };
+        let elem_expr = |value: String| -> String {
+            if is_relu {
+                // [05-OP-43] is selection, not fmax: retain the input's exact
+                // stored bits for NaN and -0 and replace only x < +0.
+                format!("({value}) < {zero} ? {zero} : ({value})")
+            } else {
+                format!("{f}({value})")
+            }
         };
         self.emit_slot_wrapper(id, ty);
         self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
@@ -2792,7 +2828,10 @@ impl CEmitter {
                 self.line("#pragma omp parallel for simd");
                 self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
                 self.indent += 1;
-                self.line(&format!("__out_{id}[i] = {f}(__in_a_{id}[i]);"));
+                self.line(&format!(
+                    "__out_{id}[i] = {};",
+                    elem_expr(format!("__in_a_{id}[i]"))
+                ));
                 self.indent -= 1;
                 self.line("}");
                 self.indent -= 1;
@@ -2801,7 +2840,10 @@ impl CEmitter {
                 self.line("#pragma omp parallel for simd");
                 self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
                 self.indent += 1;
-                self.line(&format!("__out_{id}[i] = {f}(__in_a_{id}[i]);"));
+                self.line(&format!(
+                    "__out_{id}[i] = {};",
+                    elem_expr(format!("__in_a_{id}[i]"))
+                ));
                 self.indent -= 1;
                 self.line("}");
             }
@@ -2827,7 +2869,8 @@ impl CEmitter {
                 self.line(&format!("for (; __i_{id} < t{id}_size; __i_{id}++) {{"));
                 self.indent += 1;
                 self.line(&format!(
-                    "__out_{id}[__i_{id}] = {f}(__in_a_{id}[__i_{id}]);"
+                    "__out_{id}[__i_{id}] = {};",
+                    elem_expr(format!("__in_a_{id}[__i_{id}]"))
                 ));
                 self.indent -= 1;
                 self.line("}");
@@ -2837,7 +2880,10 @@ impl CEmitter {
                 self.line("#pragma omp parallel for simd");
                 self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
                 self.indent += 1;
-                self.line(&format!("__out_{id}[i] = {f}(__in_a_{id}[i]);"));
+                self.line(&format!(
+                    "__out_{id}[i] = {};",
+                    elem_expr(format!("__in_a_{id}[i]"))
+                ));
                 self.indent -= 1;
                 self.line("}");
                 self.line("#endif");
@@ -2845,7 +2891,10 @@ impl CEmitter {
                 self.line("#pragma omp parallel for simd");
                 self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
                 self.indent += 1;
-                self.line(&format!("__out_{id}[i] = {f}(__in_a_{id}[i]);"));
+                self.line(&format!(
+                    "__out_{id}[i] = {};",
+                    elem_expr(format!("__in_a_{id}[i]"))
+                ));
                 self.indent -= 1;
                 self.line("}");
             }
@@ -2853,7 +2902,10 @@ impl CEmitter {
             self.line("#pragma omp parallel for simd");
             self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
             self.indent += 1;
-            self.line(&format!("__out_{id}[i] = {f}(__in_a_{id}[i]);"));
+            self.line(&format!(
+                "__out_{id}[i] = {};",
+                elem_expr(format!("__in_a_{id}[i]"))
+            ));
             self.indent -= 1;
             self.line("}");
         }
@@ -2873,7 +2925,8 @@ impl CEmitter {
             "int64_t idx = chelis_indices_to_flat(indices, t{a}_strides, t{a}_rank);"
         ));
         self.line(&format!(
-            "(({et}*)t{id}_data)[i] = {f}((({et}*)t{a}_data)[idx]);"
+            "(({et}*)t{id}_data)[i] = {};",
+            elem_expr(format!("(({et}*)t{a}_data)[idx]"))
         ));
         self.indent -= 1;
         self.line("}");
@@ -3190,6 +3243,16 @@ impl CEmitter {
         self.line("}");
     }
 
+    /// Route [05-OP-43] through the existing unary emission template so
+    /// numeric representation ownership stays with that classified template.
+    fn emit_relu(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType) {
+        self.emit_unary_func(id, "chelis_relu", inputs, ty);
+    }
+
+    /// Route the dedicated adjoint through the classified binary template.
+    fn emit_relu_adjoint(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType) {
+        self.emit_binary(id, "chelis_relu_adjoint", inputs, ty);
+    }
     /// WS-1: bf16 / f16 unary func (Exp, Log, Sin, Sqrt, Abs, ...).
     /// Single convert-compute-convert loop; no math-lib batched
     /// fast path (the math-lib hooks emit f32 batch calls and would
@@ -3204,6 +3267,16 @@ impl CEmitter {
         let a = inputs[0].0;
         let load = Self::reduced_to_f32_fn(ty.precision);
         let store = Self::f32_to_reduced_fn(ty.precision);
+        let is_relu = func == "chelis_relu";
+        let elem_expr = |raw: String| -> String {
+            if is_relu {
+                // Decode only for the predicate; preserve the selected f16
+                // or bf16 storage word exactly, including NaN payload/-0.
+                format!("__av < 0.0f ? UINT16_C(0) : {raw}")
+            } else {
+                format!("{store}({func}(__av))")
+            }
+        };
         self.emit_slot_wrapper(id, ty);
         self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
         self.indent += 1;
@@ -3217,7 +3290,10 @@ impl CEmitter {
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
         self.line(&format!("float __av = {load}(__in_a_{id}[i]);"));
-        self.line(&format!("__out_{id}[i] = {store}({func}(__av));"));
+        self.line(&format!(
+            "__out_{id}[i] = {};",
+            elem_expr(format!("__in_a_{id}[i]"))
+        ));
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -3239,7 +3315,8 @@ impl CEmitter {
             "float __av = {load}(((uint16_t*)t{a}_data)[idx]);"
         ));
         self.line(&format!(
-            "((uint16_t*)t{id}_data)[i] = {store}({func}(__av));"
+            "((uint16_t*)t{id}_data)[i] = {};",
+            elem_expr(format!("((uint16_t*)t{a}_data)[idx]"))
         ));
         self.indent -= 1;
         self.line("}");

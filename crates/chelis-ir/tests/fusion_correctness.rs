@@ -105,7 +105,7 @@ fn f1_add_neg_fuses() {
 }
 
 // ===========================================================================
-// F2: add→relu→mul 3-way fuses
+// F2: add→max_elem→mul 3-way fuses
 // ===========================================================================
 
 #[test]
@@ -114,7 +114,8 @@ fn f2_three_way_chain_fuses() {
     let a = const_vec(&mut dag, 1.0, 4);
     let b = const_vec(&mut dag, 2.0, 4);
     let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
-    // relu = max_elem(x, 0)
+    // A direct max-element chain remains fusible; dedicated ReLU is tested
+    // separately because [05-OP-43] requires its identity to survive.
     let zero = dag.add_node(
         RiscOp::synth_const(vec_f32(4).precision, 0.0),
         vec![],

@@ -32,20 +32,22 @@
 //! | term | bytes | dominant source |
 //! |---|---|---|
 //! | `c2` (× seq²) | 788 B | attention score/probs and unfused per-head intermediates |
-//! | `c1` (× seq) | 34,104 B | Q/K/V/O, residual/LN, and FFN intermediates after symbolic BLAS removes generic matmul product buffers |
+//! | `c1` (× seq) | 30,008 B | Q/K/V/O, residual/LN, and FFN intermediates after symbolic BLAS and dedicated ReLU remove generic product/zero buffers |
 //! | `c0` | 0 | none — every allocation has at least one `seq` factor |
 //!
 //! Projected peak working set:
 //!
 //! | seq | peak | dominant term |
 //! |---|---|---|
-//! | 128 | 16.5 MiB | owned Phase 1 intermediates |
-//! | 512 | 213.7 MiB | `c2 × seq²` |
+//! | 128 | 15.98 MiB | owned Phase 1 intermediates |
+//! | 512 | 211.65 MiB | `c2 × seq²` |
 //! | 2048 | **3.14 GiB** | `c2 × seq²` |
-//! | 4096 | 12.44 GiB | `c2 × seq²` |
+//! | 4096 | 12.42 GiB | `c2 × seq²` |
 //!
 //! **Why this is still high:** symbolic BLAS removes the cubic generic matmul
-//! product buffers, but Phase 1 deliberately keeps all 50 produced tensors as
+//! product buffers, and [05-OP-43]'s dedicated ReLU identity removes the old
+//! `[seq, 1024]` f32 zero tensor (4096 × `seq` bytes). Phase 1 deliberately
+//! keeps the remaining 49 produced tensors as
 //! independent owners until epilogue. Shared-storage reuse returns only after
 //! Phase 3's cross-backend proof. Vanilla attention also materializes
 //! `seq × seq` score/probability tensors.
@@ -234,9 +236,10 @@ fn transformer_block_traceability_state_is_locked() {
          MHA+FFN block; got {fused_kernels}"
     );
     assert_eq!(
-        owned_allocations, 50,
-        "expected 50 independently owned tN allocations in the Phase 1 \
-         transformer baseline; got {owned_allocations}"
+        owned_allocations, 49,
+        "expected 49 independently owned tN allocations after dedicated ReLU \
+         removed one synthesized `[seq, 1024]` f32 zero buffer; got \
+         {owned_allocations}"
     );
     assert_eq!(
         (slot_allocations, legacy_view_allocations),
@@ -293,9 +296,10 @@ fn transformer_block_traceability_state_is_locked() {
     );
     assert_eq!(
         (alloc_count, c0, c1, c2),
-        (50, 0, 34_104, 788),
-        "unexpected transformer_block working-set polynomial; update the \
-         locked cost profile only after inspecting the emitted C"
+        (49, 0, 30_008, 788),
+        "unexpected transformer_block working-set polynomial; the ReLU identity \
+         must account for exactly one fewer 4096-byte-per-seq zero tensor. Update \
+         the locked cost profile only after inspecting the emitted C"
     );
 
     let final_owned_allocation = source

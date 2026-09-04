@@ -56,16 +56,11 @@ pub fn lower_sub(
     add_synth(dag, RiscOp::Sub, vec![a, b], ty.clone(), parent_span)
 }
 
-/// `relu(x)` = `max_elem(x, const(0))`
+/// Preserve the [05-OP-43] `relu` identity through AD. Its forward value is
+/// `max_elem(x, const(0))`, but MaxElem's first-operand tie adjoint is not the
+/// ReLU convention at zero.
 pub fn lower_relu(dag: &mut Dag, x: NodeId, ty: &TensorType, parent_span: Option<&str>) -> NodeId {
-    let zero = add_synth(
-        dag,
-        RiscOp::synth_const(ty.precision, 0.0),
-        vec![],
-        ty.clone(),
-        parent_span,
-    );
-    add_synth(dag, RiscOp::MaxElem, vec![x, zero], ty.clone(), parent_span)
+    add_synth(dag, RiscOp::Relu, vec![x], ty.clone(), parent_span)
 }
 
 /// `sigmoid(x)` = `1 / (1 + exp(-x))`
@@ -1499,7 +1494,7 @@ mod tests {
     }
 
     #[test]
-    fn relu_produces_max_elem_const_zero() {
+    fn relu_produces_dedicated_identity() {
         let mut dag = Dag::new();
         let x = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, -1.0),
@@ -1510,15 +1505,10 @@ mod tests {
         let result = lower_relu(&mut dag, x, &scalar_f32(), None);
         assert!(verify::verify(&dag).is_empty());
 
-        // Const(-1), Const(0), MaxElem
-        assert_eq!(dag.len(), 3);
+        assert_eq!(dag.len(), 2);
         let result_node = dag.get(result).unwrap();
-        assert_eq!(result_node.op, RiscOp::MaxElem);
-        let zero_id = result_node.inputs[1];
-        assert_eq!(
-            dag.get(zero_id).unwrap().op,
-            RiscOp::synth_const(Prim::F32, 0.0)
-        );
+        assert_eq!(result_node.op, RiscOp::Relu);
+        assert_eq!(result_node.inputs, vec![x]);
     }
 
     #[test]

@@ -1888,7 +1888,7 @@ callable from bypassing review while the capability tables are built.
 
 **Delivered:**
 
-1. This slice freezes the complete timeless [05-OP-1..41] authority set,
+1. This slice freezes the complete timeless [05-OP-1..43] authority set,
    including exact decimal rounding; source-faithful JSON/CSV boundaries;
    checked, truncating, saturating, and wrapping casts; runtime shape and
    movement values; all-active-dtype random and dropout parameters; recursive
@@ -1902,7 +1902,9 @@ callable from bypassing review while the capability tables are built.
    public C; canonical gradient consumer-edge order by forward node ordinal
    and input slot; the 84-definition stdlib manifest; legal compiled host
    effects with the exact language spelling `IO`; and target-independent
-   runtime reduction windows. Logical
+   runtime reduction windows, the [05-OP-42] `stop_gradient` transformation
+   barrier, and [05-OP-43]'s dedicated ReLU identity and zero-boundary
+   adjoint. Logical
    operations are bool-only and do not alias numeric primitives; arithmetic
    reductions reject bool and `count` is the dedicated bool-tensor reduction.
    The exact scalar, container, tensor-runtime, exported numeric ADT, and
@@ -1947,6 +1949,25 @@ and adjoints, f32/f64 subtraction agreement, fused direct subtraction followed
 by minimum, and signed-i32 extrema. A host without `hipcc`, the documented ROCm
 wheel paths, or a compatible device records this leg as **BLOCKED**, never as a
 pass; it does not weaken or remove the ignored hardware tests.
+
+**Authoritative ReLU oracle ([#1313]):** `.venv/bin/python
+scripts/dtype_relu_oracle.py`; exit 0 and final line `DTYPE RELU ORACLE:
+PASS`. It runs the sealed own-width kernels, dedicated lowering/evaluation/AD,
+exact current WireDag validation, compiled-C exact-bit cases, HIP all-width
+kernel structure, Metal f32/f16/bf16 kernel structure, rejection-registry
+agreement, and standing anti-surrogate mutations. [#1296] consumes this exact
+child command and success line. The device execution evidence is separate:
+
+```text
+scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness direct_relu_and_adjoint_preserve_exact_bits_at_every_float_width_on_gpu -- --ignored --test-threads=1
+```
+
+Expected HIP success is one test passed and zero failed after exercising
+f16/bf16/f32/f64 raw-bit inputs and outputs. Metal implements every float
+width admitted by [04-TGT-1]; f64 is deliberately rejected because Apple
+Silicon has no FP64 ALU, and [#737] remains the project-wide owner of the
+macOS runtime-execution evidence boundary rather than an unimplemented ReLU
+cell.
 
 **Frozen at exit:** the numbered-spec atoms authored or amended by this slice
 and the capability schema. This is not a claim that every older builtin already

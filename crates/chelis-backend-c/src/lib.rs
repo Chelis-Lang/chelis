@@ -1892,7 +1892,7 @@ int main(void) {{
         let relu = tier2::lower_relu(&mut dag, x, &scalar_f32(), None);
         let out = compile_and_run(&dag, "test_relu");
         assert_float_eq(&out, 0.0);
-        assert!(matches!(dag.get(relu).unwrap().op, RiscOp::MaxElem));
+        assert!(matches!(dag.get(relu).unwrap().op, RiscOp::Relu));
     }
 
     #[test]

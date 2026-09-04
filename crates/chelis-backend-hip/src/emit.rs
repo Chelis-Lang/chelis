@@ -357,7 +357,7 @@ impl HipEmitter {
 
         e.line("");
 
-        e.emit_input_shape_preamble(dag, &input_slots, func_name);
+        e.emit_input_shape_preamble(dag, &input_slots, func_name, &output_specs);
         e.line("");
 
         // Emit static kernel module caches
@@ -417,10 +417,9 @@ impl HipEmitter {
                 // Allocate host tensor and transfer from device
                 let ty = &dag.get(output.id).unwrap().output_type;
                 let ndim = Self::ndim(ty);
-                let shape = Self::shape_literal(ty);
                 let dtype = Self::dtype_macro(ty);
                 e.line(&format!(
-                    "outputs[{slot}] = chelis_alloc({ndim}, {shape}, {dtype});"
+                    "outputs[{slot}] = chelis_alloc({ndim}, chelis_output_shape_{slot}, {dtype});"
                 ));
                 e.line(&format!("chelis_device_to_host(outputs[{slot}], d_t{id});"));
             }
@@ -679,6 +678,7 @@ impl HipEmitter {
         dag: VerifiedDagView<'_>,
         input_slots: &chelis_unord::UnordMap<String, usize>,
         func_name: &str,
+        output_specs: &[OutputSpec],
     ) {
         // Iteration order over `input_types` (a UnordMap) must be
         // deterministic so the emitted host code is byte-identical
@@ -760,6 +760,33 @@ impl HipEmitter {
                 self.indent -= 1;
                 self.line("}");
             }
+        }
+
+        // Host allocation consumes the published runtime ABI's int64_t shape
+        // carrier. Keep these declarations in the already-classified shape
+        // preamble; device allocations below deliberately retain int[].
+        for (slot, output) in output_specs.iter().enumerate() {
+            let node = dag
+                .get(output.id)
+                .expect("every output spec must reference a DAG node");
+            if matches!(node.op, RiscOp::Load { .. }) {
+                continue;
+            }
+            let dims: Vec<String> = node
+                .output_type
+                .dims
+                .iter()
+                .map(Self::emit_dim_info)
+                .collect();
+            let shape = if dims.is_empty() {
+                "1".to_string()
+            } else {
+                dims.join(", ")
+            };
+            self.line(&format!(
+                "int64_t chelis_output_shape_{slot}[{}] = {{ {shape} }};",
+                Self::ndim(&node.output_type)
+            ));
         }
     }
 
@@ -1032,6 +1059,14 @@ impl HipEmitter {
                     kind_for_node(node)?.suffix()
                 ))
             }
+            RiscOp::Relu => Some(format!(
+                "kernel_relu{}",
+                Self::dtype_kernel_suffix(operand_prec())
+            )),
+            RiscOp::ReluAdjoint => Some(format!(
+                "kernel_relu_adjoint{}",
+                Self::dtype_kernel_suffix(operand_prec())
+            )),
             RiscOp::CmpLt => {
                 // CmpLt has bool output but operand-precision storage;
                 // dispatch on the operand precision so the kernel name
@@ -1351,6 +1386,16 @@ impl HipEmitter {
                 matches!(operand, ExtremaOperand::Left),
                 elem_for_unary()?,
             ),
+            RiscOp::Relu => match operand_prec() {
+                Prim::F16 => kernels::relu_reduced(name, 0x7c00, 0x03ff),
+                Prim::Bf16 => kernels::relu_reduced(name, 0x7f80, 0x007f),
+                _ => kernels::relu(name, elem_for_unary()?),
+            },
+            RiscOp::ReluAdjoint => match operand_prec() {
+                Prim::F16 => kernels::relu_adjoint_reduced(name, 0x7c00, 0x03ff),
+                Prim::Bf16 => kernels::relu_adjoint_reduced(name, 0x7f80, 0x007f),
+                _ => kernels::relu_adjoint(name, elem_for_unary()?),
+            },
             RiscOp::CmpLt => {
                 let operand_ty = &dag.get(node.inputs[0]).unwrap().output_type;
                 Self::require_result_width_matches_operand(node, operand_ty)?;
@@ -1644,6 +1689,18 @@ impl HipEmitter {
                 &node.output_type,
             ),
             RiscOp::ExtremaAdjoint { .. } => self.emit_ternary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::Relu => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::ReluAdjoint => self.emit_binary_launch(
                 id,
                 &resolved_kernel_name()?,
                 &node.inputs,
@@ -3693,6 +3750,8 @@ impl HipEmitter {
             | RiscOp::MaxElem
             | RiscOp::MinElem
             | RiscOp::ExtremaAdjoint { .. }
+            | RiscOp::Relu
+            | RiscOp::ReluAdjoint
             | RiscOp::CmpLt
             | RiscOp::Neg
             | RiscOp::Recip
@@ -3898,6 +3957,8 @@ impl HipEmitter {
         match p {
             Prim::F32 => "",
             Prim::F64 => "_f64",
+            Prim::F16 => "_f16",
+            Prim::Bf16 => "_bf16",
             Prim::Bool => "_bool",
             Prim::Int8 => "_i8",
             Prim::Int16 => "_i16",
@@ -3905,9 +3966,7 @@ impl HipEmitter {
             Prim::Int64 => "_i64",
             other => panic!(
                 "HIP kernel suffix not defined for `{}` (active dtype set per \
-                 spec/04-type-system.md §1.1: f32/f64/bool/int8/int16/int32/int64). \
-                 bf16/f16 dispatch is matmul-only (WS-A3) and does not flow \
-                 through this suffix path.",
+                 spec/04-type-system.md §1.1: f32/f64/bf16/f16/bool/int8/int16/int32/int64).",
                 other.name()
             ),
         }

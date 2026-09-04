@@ -98,6 +98,27 @@ fn build_mul_dag(prec: Prim) -> Dag {
     dag
 }
 
+fn build_relu_dag(prec: Prim) -> Dag {
+    let mut dag = Dag::new();
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_prec(6, prec),
+        None,
+    );
+    let g = dag.add_node(
+        RiscOp::Load { name: "g".into() },
+        vec![],
+        vec_prec(6, prec),
+        None,
+    );
+    let relu = dag.add_node(RiscOp::Relu, vec![x], vec_prec(6, prec), None);
+    let adjoint = dag.add_node(RiscOp::ReluAdjoint, vec![x, g], vec_prec(6, prec), None);
+    dag.add_root(relu);
+    dag.add_root(adjoint);
+    dag
+}
+
 fn build_reduce_sum_dag(prec: Prim) -> Dag {
     let mut dag = Dag::new();
     let a = dag.add_node(
@@ -240,6 +261,34 @@ fn add_bf16_wraps_kernel_in_msl_320_guard() {
         src.contains("#if __METAL_VERSION__ >= 320"),
         "bf16 add kernel must wrap body in the MSL 3.2+ guard (Apple7+ requirement): {src}"
     );
+}
+
+#[test]
+fn relu_and_adjoint_emit_exact_selection_at_every_metal_float_width() {
+    for (prec, msl) in [
+        (Prim::F32, "float"),
+        (Prim::F16, "half"),
+        (Prim::Bf16, "bfloat"),
+    ] {
+        let src = codegen_metal(&build_relu_dag(prec), &format!("relu_{}", prec.name())).mm_source;
+        assert_real_kernel(&src, &format!("relu({prec:?})"));
+        assert!(
+            src.contains(&format!(
+                "out[tid] = a[tid] < ({msl})0 ? ({msl})0 : a[tid];"
+            )),
+            "{src}"
+        );
+        assert!(
+            src.contains(&format!(
+                "out[tid] = ({msl})0 < a[tid] ? b[tid] : ({msl})0;"
+            )),
+            "{src}"
+        );
+        assert!(!src.contains("fmax"), "{src}");
+        if prec == Prim::Bf16 {
+            assert!(src.contains("#if __METAL_VERSION__ >= 320"), "{src}");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
