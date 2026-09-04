@@ -122,10 +122,16 @@ mod ir;
 mod last_use;
 mod lower;
 mod render;
+#[expect(
+    dead_code,
+    reason = "Phase 3 storage proof construction waits for chelis#893 CapacityKey"
+)]
+mod storage;
 mod verify;
 
 pub use error::OwnershipError;
 pub use ir::{HostSiteId, HostSiteKind};
+pub use storage::ReusableOwnedStorage;
 
 /// Whether a class member's own output dim carries an extent the checker
 /// already resolved.
