@@ -1,1 +1,1 @@
-(def {} answer (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 97) (t-prim {} int64))})) (app {} (var {} insert) (var {} ta) (lit {type: (t-prim {} int32)} 0) (var {} seq))))
+(def {} answer (fn {} (params {} (ta {type: (t-tensor {} (d-lit {} 97) (t-prim {} int64))})) (app {} (var {} expand) (var {} ta) (lit {type: (t-prim {} int32)} 0) (var {} seq))))

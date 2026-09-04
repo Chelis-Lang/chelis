@@ -22,6 +22,17 @@ use std::process::Command;
 /// Files that may still contain `expand` program text, with the exact count and
 /// the reason the sites are there.
 const ALLOWED: &[(&str, usize, &str)] = &[
+    // The vendored Hull conformance corpus. Hull is the upstream type and
+    // effect REFERENCE, and this corpus is a frozen snapshot pinned to Hull
+    // commit 653be94e with its verdicts recorded per program. Renaming these
+    // asks the compiler to typecheck a builtin Hull never verdicted, which the
+    // gate reports as unexplained disagreements. The corpus is upstream's to
+    // rename, not this repository's, so these 35 keep the pinned name.
+    (
+        "tests/conformance/hull/programs",
+        35,
+        "vendored upstream Hull corpus, frozen at hull_commit 653be94e",
+    ),
     // A deliberate mutant: the oracle's anchor test replaces the real spec
     // line with a wrong one to prove the anchor catches it. Renaming a mutant
     // is churn that can only weaken it.
@@ -194,6 +205,7 @@ fn every_surviving_expand_program_site_is_inventoried() {
     let listed = String::from_utf8(listed.stdout).expect("git ls-files emits utf-8");
 
     let mut measured: Vec<(String, usize)> = Vec::new();
+    let mut hull_sites = 0usize;
     for rel in listed.lines() {
         // `spec/` is the language definition, not a program corpus, and
         // chelis#1532 owns what it says.
@@ -216,9 +228,20 @@ fn every_surviving_expand_program_site_is_inventoried() {
             continue;
         }
         let count = program_sites(&text, suffix);
-        if count > 0 {
-            measured.push((rel.to_string(), count));
+        if count == 0 {
+            continue;
         }
+        // The Hull corpus is one directory row, not 35 file rows: its
+        // disposition is a single upstream fact, and a per-file list would
+        // churn whenever upstream regenerates the corpus.
+        if rel.starts_with("tests/conformance/hull/programs/") {
+            hull_sites += count;
+            continue;
+        }
+        measured.push((rel.to_string(), count));
+    }
+    if hull_sites > 0 {
+        measured.push(("tests/conformance/hull/programs".to_string(), hull_sites));
     }
     measured.sort();
 
