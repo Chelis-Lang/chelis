@@ -881,6 +881,7 @@ impl FunctionInferencePlan {
     /// Build the one canonical function dependency plan for an inference run.
     /// SCCs are constructed in O(vertices + edges), returned callee-first,
     /// and retain source order within each component.
+    #[cfg(test)]
     pub(super) fn build(items: &[(Option<String>, &deep::Expr)]) -> Self {
         let references = TopLevelReferenceGraph::build(items);
         Self::build_from_reference_graph(&references)
@@ -1293,132 +1294,6 @@ pub(super) fn collect_authored_signature_types(
         }
     }
     signatures
-}
-
-pub(super) fn collect_top_level_calls(
-    expr: &deep::Expr,
-    def_names: &UnordSet<String>,
-    bound: &mut Vec<UnordSet<String>>,
-    calls: &mut UnordSet<String>,
-) {
-    // Bail before this walker's own unbounded recursion exhausts the native
-    // stack on a deeply-nested `app` body. This pass accumulates into
-    // `calls`/`bound` and carries no error vector, so it cannot push a
-    // diagnostic itself; the guard records the bail in `STACK_EXHAUSTED` so
-    // the check entry boundary still turns it into a hard located failure
-    // (never a silent partial collection). See `STACK_RED_ZONE_BYTES`.
-    stack_guard!("collect_top_level_calls", expr);
-    match expr {
-        deep::Expr::Atom(_, _) => {}
-        deep::Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                collect_top_level_calls(value, def_names, bound, calls);
-            }
-        }
-        deep::Expr::MetaExpr(meta, _) => {
-            collect_top_level_calls(&meta.expr, def_names, bound, calls)
-        }
-        deep::Expr::List(list, _) => match get_tag(list) {
-            Some(DeepTag::App) => {
-                let kids = children(list);
-                if let Some(callee) = kids.first().and_then(var_name_expr)
-                    && def_names.contains(callee)
-                    && !is_bound_name(callee, bound)
-                {
-                    calls.insert(callee.to_string());
-                }
-                for child in kids {
-                    collect_top_level_calls(child, def_names, bound, calls);
-                }
-            }
-            // A bare reference (alias binding, argument position, returned
-            // value) is a dependency edge too: an aliased in-group call is
-            // still recursion, and the §3.1.1 uniformity check only sees a
-            // group the SCC planner reports (spec/04 §3.1.1).
-            Some(DeepTag::Var) => {
-                if let Some(name) = children(list).first().and_then(symbol_name)
-                    && def_names.contains(name)
-                    && !is_bound_name(name, bound)
-                {
-                    calls.insert(name.to_string());
-                }
-            }
-            Some(DeepTag::Fn) => {
-                let kids = children(list);
-                if kids.len() >= 2 {
-                    bound.push(
-                        param_source_infos(&kids[0])
-                            .into_iter()
-                            .map(|(n, _)| n)
-                            .collect(),
-                    );
-                    collect_top_level_calls(&kids[1], def_names, bound, calls);
-                    bound.pop();
-                }
-            }
-            Some(DeepTag::Let) => {
-                let kids = children(list);
-                if kids.len() < 2 {
-                    return;
-                }
-                let mut let_names = UnordSet::new();
-                if let Some(bind_kids) = kids
-                    .first()
-                    .and_then(|bind| tagged_children(bind, DeepTag::Bind))
-                {
-                    let mut index = 0;
-                    while index + 1 < bind_kids.len() {
-                        collect_top_level_calls(&bind_kids[index + 1], def_names, bound, calls);
-                        if let Some(name) = symbol_name(&bind_kids[index]) {
-                            let_names.insert(name.to_string());
-                        }
-                        index += 2;
-                    }
-                }
-                bound.push(let_names);
-                collect_top_level_calls(&kids[1], def_names, bound, calls);
-                bound.pop();
-            }
-            Some(DeepTag::Match) => {
-                let kids = children(list);
-                if let Some(scrutinee) = kids.first() {
-                    collect_top_level_calls(scrutinee, def_names, bound, calls);
-                }
-                for arm in kids.iter().skip(1) {
-                    let Some(arm_kids) = tagged_children(arm, DeepTag::Arm) else {
-                        continue;
-                    };
-                    if arm_kids.len() < 3 {
-                        continue;
-                    }
-                    bound.push(pattern_names_for_signature(&arm_kids[0]));
-                    collect_top_level_calls(&arm_kids[1], def_names, bound, calls);
-                    collect_top_level_calls(&arm_kids[2], def_names, bound, calls);
-                    bound.pop();
-                }
-            }
-            _ => {
-                for child in children(list) {
-                    collect_top_level_calls(child, def_names, bound, calls);
-                }
-            }
-        },
-        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-        deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
-            collect_top_level_calls(&bridged, def_names, bound, calls);
-        }
-        deep::Expr::BareList(elems, _) => {
-            for child in elems {
-                collect_top_level_calls(child, def_names, bound, calls);
-            }
-        }
-        deep::Expr::UnknownForm(data) => {
-            for child in &data.children {
-                collect_top_level_calls(child, def_names, bound, calls);
-            }
-        }
-    }
 }
 
 pub(crate) fn param_has_consuming_use(
