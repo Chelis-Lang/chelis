@@ -1076,9 +1076,11 @@ nothing reports either total. Meter both at the spawn, which is where the decisi
 actually made. [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §3
 has the fleet run these numbers come from.
 
-- At most five subagents may be live at once under one orchestrator. A wider fan-out
-  needs the user's explicit approval and a stated reason. This is a separate budget
-  from the CPU one in
+- Spawning more than five subagents live at once under one orchestrator needs the
+  user's explicit approval and a stated reason. Five is not a certified safe width. It
+  is the widest fan-out measured working here, against seven as the width that broke,
+  and the threshold exists to force the decision into the open rather than to bless
+  anything under it. This is a separate budget from the CPU one in
   [Build Concurrency And Process Hygiene](#build-concurrency-and-process-hygiene): a
   fan-out the workstation can schedule comfortably can still exhaust a usage window in
   minutes.

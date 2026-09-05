@@ -65,9 +65,13 @@ context across seven concurrent agents sixteen minutes after launch. Four
 sessions running that wide exhausted a shared usage window about twenty minutes
 after launch.
 
-The cap is five rather than seven because the same run showed where the knee is:
-three explorers plus two planners ran comfortably, and the failure appeared at
-seven.
+The threshold is five rather than seven because those are the two widths the run
+actually exercised: three explorers plus two planners ran comfortably, and the failure
+appeared at seven. Nothing here establishes that five is a safe boundary, and the rule
+does not claim it is. Six was never tried. The rule also counts agents while this
+section measures tokens, which do not convert: five orchestrators at the figures above
+would exceed the total that broke at seven. Headcount is used because it is the only
+quantity observable at the moment of the spawn.
 
 Two supporting figures. Orchestrators reached 200,000 to 265,000 tokens before
 writing a line of plan; no rule is attached to that number, and it is recorded
@@ -197,3 +201,11 @@ inside the same run: one pull request spent three attempts to obtain one result,
 two whole runs of the machine's time. A run that takes nearly the whole budget on a warm
 target has no margin at all on a cold one, so the detached form is the default rather
 than the fallback.
+
+The pull request that added this section committed the same defect while describing it.
+Its conformance evidence was taken on a commit that a later autosquash removed from the
+branch, so the tests had never run on any ancestor of the candidate, and the diff
+between the two heads touched exactly the files those tests read. What made it hard to
+see is that the hosted checks did not look wrong: the conformance job skipped while the
+workflow still reported success, so the pull request page showed green for tests that
+never ran. Read the job, not the workflow.
