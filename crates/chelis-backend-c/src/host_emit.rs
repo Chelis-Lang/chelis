@@ -2393,14 +2393,13 @@ pub(crate) fn direct_call_action_index(site: &ProjectedHostSite<'_>) -> Result<u
                 kind: VerifiedApplyKind::DirectCall { .. },
                 ..
             })
-        ) {
-            if direct_call.replace(index).is_some() {
-                return Err(invalid_abi_shape(
-                    "verified user-function call site contains multiple direct-call authorities"
-                        .to_string(),
-                    "verified C host ownership emission",
-                ));
-            }
+        ) && direct_call.replace(index).is_some()
+        {
+            return Err(invalid_abi_shape(
+                "verified user-function call site contains multiple direct-call authorities"
+                    .to_string(),
+                "verified C host ownership emission",
+            ));
         }
     }
     direct_call.ok_or_else(|| {
