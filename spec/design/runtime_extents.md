@@ -335,8 +335,11 @@ the defect class this slice removes.
 
   The DAG does not carry signature scope, and `root_reach` approximates it by
   reachability from the graph's results. The approximation is exact across
-  independent results and approximate under inlining, since a callee inlined
-  into one result brings its binders with it. **It is also blind to an
+  independent results. Under inlining it is unproved either way: a callee
+  inlined into one result might bring its binders with it, but two attempts to
+  construct that collision found call-site substitution (`k := m` at the call)
+  prevented it, so this section records the inlined case as untested rather
+  than as a known false positive. **It is also blind to an
   interface witness no result reaches, whose claim forms no class and gets no
   guard.** That contradicts `spec/04` §4.7, which exempts no parameter:
   `f(x: tensor[n, f32], p: tensor[n, f32])` declares that `p`'s axis is `n`
