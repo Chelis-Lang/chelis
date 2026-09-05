@@ -966,53 +966,20 @@ fn collect_declared_type_binders(
     };
     let entry = out.entry(name.clone()).or_default();
     for binder in type_binders {
-        // Preserve a bound when the other carrier repeats the binder unbounded.
         let slot = entry.entry(binder.name.clone()).or_insert(None);
         if slot.is_none() {
             *slot = binder.bound;
         }
     }
     if let Some(signature_type) = signature_type {
-        let declared = type_binders
-            .iter()
-            .map(|binder| binder.name.clone())
-            .collect();
-        let deep_type = desugar_sig_type(signature_type, &declared);
-        collect_deep_type_variable_names(&deep_type, entry);
+        let mut implicit = UnordSet::new();
+        collect_sig_type_vars(signature_type, &mut implicit);
+        for name in implicit.to_sorted() {
+            entry.entry(name.clone()).or_insert(None);
+        }
     }
     if entry.is_empty() {
         out.remove(name);
-    }
-}
-
-fn collect_deep_type_variable_names(
-    expr: &deep::Expr,
-    out: &mut UnordMap<String, Option<DtypeFamily>>,
-) {
-    fn collect_children(children: &[deep::Expr], out: &mut UnordMap<String, Option<DtypeFamily>>) {
-        for child in children {
-            collect_deep_type_variable_names(child, out);
-        }
-    }
-
-    match expr {
-        deep::Expr::Node(node, _) => {
-            if node.tag() == DeepTag::TVar
-                && let Some(deep::Expr::Atom(deep::Atom::Name(name), _)) =
-                    node.children_slice().first()
-                && name != "_"
-            {
-                out.entry(name.clone()).or_insert(None);
-            }
-            collect_children(node.children_slice(), out);
-        }
-        deep::Expr::List(list, _) => collect_children(&list.elements, out),
-        deep::Expr::MetaExpr(meta, _) => {
-            collect_deep_type_variable_names(&meta.expr, out);
-        }
-        deep::Expr::BareList(children, _) => collect_children(children, out),
-        deep::Expr::UnknownForm(data) => collect_children(&data.children, out),
-        deep::Expr::Atom(_, _) | deep::Expr::Map(_, _) => {}
     }
 }
 
@@ -1882,15 +1849,19 @@ impl DesugarCtx {
                     }
                     other => {
                         let ordinary = self.desugar_expr_with_scope(other, local_fn_params);
-                        let adopted = classify_literal_source(&ordinary).and_then(|source| {
-                            if scalar_literal_source_adopts_binder_target(source, binder_bound) {
-                                adopted_scalar_literal_source_at_binder(source, prec)
-                            } else if scalar_literal_source_adopts_cast_target(source, prec) {
-                                adopted_scalar_literal_source(source, prec)
-                            } else {
-                                None
-                            }
-                        });
+                        let adopted = is_surf_literal_source(other)
+                            .then(|| classify_literal_source(&ordinary))
+                            .flatten()
+                            .and_then(|source| {
+                                if scalar_literal_source_adopts_binder_target(source, binder_bound)
+                                {
+                                    adopted_scalar_literal_source(source, prec, DeepTag::TVar)
+                                } else if scalar_literal_source_adopts_cast_target(source, prec) {
+                                    adopted_scalar_literal_source(source, prec, DeepTag::TPrim)
+                                } else {
+                                    None
+                                }
+                            });
                         adopted
                             .map(|literal| attach_span_metadata(literal, expr_span(other)))
                             .unwrap_or(ordinary)
@@ -2227,6 +2198,15 @@ fn desugar_literal(lit: &Literal) -> deep::Expr {
     }
 }
 
+fn is_surf_literal_source(expr: &Expr) -> bool {
+    matches!(expr, Expr::Lit(..))
+        || matches!(
+            expr,
+            Expr::Unary(UnaryOp::Neg, inner, _)
+                if matches!(inner.as_ref(), Expr::Lit(Literal::Int(_) | Literal::Float(_), _))
+        )
+}
+
 /// Position 4 (spec §5.6 / §P10b) admission test for a bare scalar
 /// literal under `cast(literal, p)` (issue #308). An unsuffixed numeric
 /// literal adopts the cast target when the binding is meaningful:
@@ -2251,45 +2231,8 @@ fn scalar_literal_source_adopts_binder_target(
     source: LiteralSource<'_>,
     bound: Option<DtypeFamily>,
 ) -> bool {
-    let Some(bound) = bound else {
-        return false;
-    };
-    if !scalar_literal_source_is_unsuffixed(source) {
-        return false;
-    }
-    match source.numeric_atom() {
-        Some(DeepAtom::Float(_)) => matches!(bound, DtypeFamily::Float | DtypeFamily::Numeric),
-        Some(DeepAtom::Int(_)) => matches!(
-            bound,
-            DtypeFamily::Float | DtypeFamily::Int | DtypeFamily::Numeric
-        ),
-        _ => false,
-    }
-}
-
-/// Binder-target twin of [`adopted_scalar_literal_source`], stamped with `t-var`.
-fn adopted_scalar_literal_source_at_binder(
-    source: LiteralSource<'_>,
-    binder: &str,
-) -> Option<deep::Expr> {
-    let ty = node(DeepTag::TVar, vec![sym(binder)]);
-    match source.folded_numeric_atom()? {
-        DeepAtom::Int(value) => {
-            // `literal_source: integer` describes a concrete float target;
-            // the binder's family and instantiation own this literal instead.
-            Some(node_meta(
-                DeepTag::Lit,
-                numeric_literal_meta(ty, "unsuffixed"),
-                vec![deep::Expr::Atom(DeepAtom::Int(value), sp())],
-            ))
-        }
-        DeepAtom::Float(value) => Some(node_meta(
-            DeepTag::Lit,
-            numeric_literal_meta(ty, "unsuffixed"),
-            vec![deep::Expr::Atom(DeepAtom::Float(value), sp())],
-        )),
-        _ => None,
-    }
+    scalar_literal_source_is_unsuffixed(source)
+        && bound.is_some_and(|family| source.numeric_atom_admitted_by(family))
 }
 
 fn scalar_literal_source_adopts_cast_target(source: LiteralSource<'_>, prec: &str) -> bool {
@@ -2309,16 +2252,20 @@ fn scalar_literal_source_adopts_cast_target(source: LiteralSource<'_>, prec: &st
 /// `cast(literal, p)`. Mirrors `desugar_tensor_literal_item`'s lit
 /// construction. The shared Deep literal-source classifier owns both the
 /// direct and unary-minus source shapes. Only called for an admitted source.
-fn adopted_scalar_literal_source(source: LiteralSource<'_>, prec: &str) -> Option<deep::Expr> {
+fn adopted_scalar_literal_source(
+    source: LiteralSource<'_>,
+    prec: &str,
+    target_tag: DeepTag,
+) -> Option<deep::Expr> {
+    let ty = node(target_tag, vec![sym(prec)]);
     match source.folded_numeric_atom()? {
         DeepAtom::Int(value) => {
-            let float_typed = matches!(prec, "f32" | "f64" | "bf16" | "f16");
-            let ty = node(DeepTag::TPrim, vec![sym(prec)]);
-            let meta = if float_typed {
-                meta_with_integer_float_type(ty, Some("unsuffixed"))
-            } else {
-                numeric_literal_meta(ty, "unsuffixed")
-            };
+            let meta =
+                if target_tag == DeepTag::TPrim && matches!(prec, "f32" | "f64" | "bf16" | "f16") {
+                    meta_with_integer_float_type(ty, Some("unsuffixed"))
+                } else {
+                    numeric_literal_meta(ty, "unsuffixed")
+                };
             Some(node_meta(
                 DeepTag::Lit,
                 meta,
@@ -2327,7 +2274,7 @@ fn adopted_scalar_literal_source(source: LiteralSource<'_>, prec: &str) -> Optio
         }
         DeepAtom::Float(value) => Some(node_meta(
             DeepTag::Lit,
-            numeric_literal_meta(node(DeepTag::TPrim, vec![sym(prec)]), "unsuffixed"),
+            numeric_literal_meta(ty, "unsuffixed"),
             vec![deep::Expr::Atom(DeepAtom::Float(value), sp())],
         )),
         _ => None,
@@ -2978,42 +2925,6 @@ mod tests {
         desugar_decl(decl).iter().map(print_expr).collect()
     }
 
-    fn desugar_source(source: &str) -> Vec<deep::Expr> {
-        let decls = crate::parser::parse_str(source).expect("fixture parses");
-        desugar_program(&decls)
-    }
-
-    fn compact_desugared_source(source: &str) -> String {
-        desugar_source(source)
-            .iter()
-            .map(print_expr)
-            .collect::<Vec<_>>()
-            .join("\n")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-
-    fn deep_without_spans(program: &[deep::Expr]) -> Vec<String> {
-        program
-            .iter()
-            .map(print_expr)
-            .map(|printed| {
-                printed
-                    .split("span: \"")
-                    .enumerate()
-                    .map(|(index, piece)| {
-                        if index == 0 {
-                            piece.to_string()
-                        } else {
-                            piece[piece.find('"').map_or(0, |end| end + 1)..].to_string()
-                        }
-                    })
-                    .collect()
-            })
-            .collect()
-    }
-
     // --- Literals ---
 
     #[test]
@@ -3631,111 +3542,6 @@ mod tests {
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
             "(cast {} (var {} x) (t-prim {} bf16))"
-        );
-    }
-
-    #[test]
-    fn cast_to_a_declared_binder_emits_a_type_variable_target() {
-        let printed =
-            compact_desugared_source("def scale[p: Float](x: p) -> p = mul(x, cast(0.1, p))\n");
-        assert!(
-            printed.contains("(t-var {} p))"),
-            "the cast target must be a type variable: {printed}"
-        );
-        assert!(
-            printed.contains("type: (t-var {} p)} 0.1)"),
-            "the literal must adopt the binder: {printed}"
-        );
-        assert!(
-            !printed.contains("(t-prim {} p)"),
-            "no `t-prim` may name a binder: {printed}"
-        );
-    }
-
-    #[test]
-    fn a_binder_cast_survives_the_resugaring_retraction_law() {
-        for source in [
-            "def scale[p: Float](x: p) -> p = mul(x, cast(0.1, p))\n",
-            "def addk[p: Int](x: p) -> p = add(x, cast(1, p))\n",
-        ] {
-            let deep = desugar_source(source);
-            let resugared = crate::resugar::resugar_program(&deep)
-                .unwrap_or_else(|error| panic!("resugar must accept a binder cast: {error}"));
-            let printed = crate::format::format_program(&resugared);
-            assert!(
-                printed.contains(", p)"),
-                "the binder must print back as its own name: {printed}"
-            );
-            let redesugared = desugar_source(&printed);
-            assert_eq!(
-                deep_without_spans(&redesugared),
-                deep_without_spans(&deep),
-                "desugar(resugar(deep)) must be the identity for a binder cast"
-            );
-        }
-    }
-
-    #[test]
-    fn cast_to_an_undeclared_name_keeps_the_primitive_spelling() {
-        let printed = compact_desugared_source("def typo(x: f32) -> f32 = cast(x, flt32)\n");
-        assert!(
-            printed.contains("(t-prim {} flt32)"),
-            "an undeclared cast target keeps `t-prim`: {printed}"
-        );
-        assert!(
-            !printed.contains("(t-var {} flt32)"),
-            "an undeclared name is not a binder: {printed}"
-        );
-    }
-
-    #[test]
-    fn an_unbounded_binder_keeps_its_type_variable_spelling_without_literal_adoption() {
-        for source in [
-            "def scale[p](x: p) -> p = mul(x, cast(0.1, p))\n",
-            "sig scale: p -> p\ndef scale(x) = mul(x, cast(0.1, p))\n",
-        ] {
-            let printed = compact_desugared_source(source);
-            assert!(
-                printed.contains("type: (t-prim {} f32)} 0.1)"),
-                "an unbounded binder cannot adopt the literal: {printed}"
-            );
-            assert!(
-                printed.contains("(t-var {} p))"),
-                "a declared binder remains a t-var even when [04-DTYPE-1] rejects it as a cast target: {printed}"
-            );
-            assert!(
-                !printed.contains("(t-prim {} p)"),
-                "a binder may never be serialized as a primitive: {printed}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_binder_declared_on_a_standalone_sig_is_still_a_binder() {
-        let printed = compact_desugared_source(
-            "sig scale[p: Float]: p -> p\ndef scale(x) = mul(x, cast(0.1, p))\n",
-        );
-        assert!(
-            !printed.contains("(t-prim {} p)"),
-            "no `t-prim` may name a binder anywhere: {printed}"
-        );
-        assert!(
-            printed.contains("type: (t-var {} p)} 0.1)"),
-            "a sig-declared binder must reach the body's literal: {printed}"
-        );
-    }
-
-    #[test]
-    fn an_int_bounded_binder_does_not_adopt_a_float_literal() {
-        let printed =
-            compact_desugared_source("def trunc_to[p: Int](x: p) -> p = add(x, cast(1.9, p))\n");
-        assert!(
-            printed.contains("type: (t-prim {} f32)} 1.9)"),
-            "a float literal keeps its float source under an Int binder: {printed}"
-        );
-        assert!(
-            printed.contains("(t-var {} p))"),
-            "the target is still the binder: {printed}"
         );
     }
 

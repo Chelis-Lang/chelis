@@ -549,7 +549,9 @@ pub fn install_chelis_panic_hook() {
 }
 
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
-use chelis_deep::{DeepTag, Span, decode_dtype_bounds, decode_effect_kind};
+use chelis_deep::{
+    DeepTag, Span, decode_dtype_bounds, decode_effect_kind, exact_type_variable_name,
+};
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_types::{
     BUILTIN_NAMES, CheckedProgram, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp,
@@ -1898,13 +1900,7 @@ fn extract_scalar_precision_var_name(expr: &Expr) -> Option<String> {
     } else {
         expr
     };
-    let (DeepTag::TVar, _, kids) = stamped_parts(stripped)? else {
-        return None;
-    };
-    kids.first()
-        .and_then(symbol_name)
-        .filter(|name| *name != "_")
-        .map(str::to_string)
+    exact_type_variable_name(stripped).map(str::to_string)
 }
 
 /// issue #319: the renamed type-variable name carried by a formal-
@@ -3020,43 +3016,25 @@ fn collect_top_level_sigs(exprs: &[Expr]) -> BTreeMap<String, Expr> {
 /// Exact dtype-family-bounded binder names on each `defsig`.
 fn collect_top_level_dtype_bound_names(exprs: &[Expr]) -> BTreeMap<String, UnordSet<String>> {
     let mut bounds = BTreeMap::new();
-    for expr in exprs {
-        collect_top_level_dtype_bound_names_from_expr(expr, &mut bounds);
-    }
+    for_each_top_level_item(exprs, &mut |expr| {
+        if let Some((DeepTag::Defsig, meta, kids)) = stamped_parts(expr)
+            && let Some(name) = kids.first().and_then(symbol_name)
+        {
+            let names = decode_dtype_bounds(meta)
+                .unwrap_or_else(|error| {
+                    raise_lowering_error(
+                        format!("malformed dtype_bounds reached IR lowering: {error}"),
+                        Some(expr.span()),
+                        expr.span_id().map(ToOwned::to_owned),
+                    )
+                })
+                .into_iter()
+                .map(|(binder, _)| binder)
+                .collect();
+            bounds.insert(name.to_string(), names);
+        }
+    });
     bounds
-}
-
-fn collect_top_level_dtype_bound_names_from_expr(
-    expr: &Expr,
-    bounds: &mut BTreeMap<String, UnordSet<String>>,
-) {
-    let Some((tag, meta, kids)) = stamped_parts(expr) else {
-        return;
-    };
-    match tag {
-        DeepTag::Module => {
-            for child in kids.iter().skip(1) {
-                collect_top_level_dtype_bound_names_from_expr(child, bounds);
-            }
-        }
-        DeepTag::Defsig => {
-            let Some(name) = kids.first().and_then(symbol_name) else {
-                return;
-            };
-            let decoded = decode_dtype_bounds(meta).unwrap_or_else(|error| {
-                raise_lowering_error(
-                    format!("malformed dtype_bounds reached IR lowering: {error}"),
-                    Some(expr.span()),
-                    expr.span_id().map(ToOwned::to_owned),
-                )
-            });
-            bounds.insert(
-                name.to_string(),
-                decoded.into_iter().map(|(binder, _)| binder).collect(),
-            );
-        }
-        _ => {}
-    }
 }
 
 fn for_each_top_level_item(exprs: &[Expr], f: &mut impl FnMut(&Expr)) {

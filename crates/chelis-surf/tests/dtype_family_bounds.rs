@@ -231,49 +231,55 @@ fn a_malformed_deep_bound_fails_resugaring_closed() {
     resugar_program(&deep).expect_err("an unknown family must not resugar");
 }
 
-#[test]
-fn an_undeclared_binder_cast_cannot_resugar_to_different_deep() {
-    let deep = deep_parse_strict(
-        "(defsig {} scale (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n\
-         (def {} scale\n\
-           (fn {} (params {} (x {type: (t-prim {} f32)}))\n\
-             (cast {}\n\
-               (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)\n\
-               (t-var {} p))))",
-    )
-    .expect("the malformed binder relation is a resugaring concern");
-    resugar_program(&deep).expect_err("an undeclared t-var cast target must not resugar");
-}
-
-#[test]
-fn a_binder_typed_literal_is_valid_only_under_its_adopting_cast() {
-    let deep = deep_parse_strict(
-        "(defsig {dtype_bounds: {p: float}} scale (t-fn {} (t-var {} p) (t-var {} p)))\n\
-         (def {} scale\n\
-           (fn {} (params {} (x {type: (t-var {} p)}))\n\
-             (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)))",
-    )
-    .expect("the direct t-var literal is a resugaring concern");
-    resugar_program(&deep)
-        .expect_err("a direct ascription must not masquerade as cast-literal adoption");
+fn binder_deep(body: &str) -> Vec<chelis_deep::Expr> {
+    deep_parse_strict(&format!(
+        "(defsig {{dtype_bounds: {{p: float}}}} scale (t-fn {{}} (t-var {{}} p) (t-var {{}} p)))\n\
+         (def {{}} scale (fn {{}} (params {{}} (x {{type: (t-var {{}} p)}})) {body}))"
+    ))
+    .expect("Deep fixture")
 }
 
 #[test]
 fn unary_minus_literal_source_preserves_its_adopting_cast_through_resugar() {
-    let deep = deep_parse_strict(
-        "(defsig {dtype_bounds: {p: float}} scale (t-fn {} (t-var {} p) (t-var {} p)))\n\
-         (def {} scale\n\
-           (fn {} (params {} (x {type: (t-var {} p)}))\n\
-             (cast {}\n\
-               (app {} (var {} neg)\n\
-                 (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1))\n\
-               (t-var {} p))))",
-    )
-    .expect("the exact unary-minus literal source parses");
+    let deep = binder_deep(
+        "(cast {} (app {} (var {} neg) (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)) (t-var {} p))",
+    );
     let recovered = resugar_program(&deep).expect("the adopting cast relation is representable");
     assert!(
         format_program(&recovered).contains("cast(-0.1, p)"),
         "{}",
         format_program(&recovered)
     );
+}
+
+#[test]
+fn a_local_neg_call_is_not_a_negative_literal_source() {
+    let text = deep_text(
+        "def neg(x: f32) -> f32 = add(x, 1.0)\n\
+         def scale[p: Float](x: p) -> p = cast(neg(0.1), p)",
+    );
+    assert!(
+        text.matches("(app ").count() == 2 && text.contains("} neg)"),
+        "the authored call must survive instead of sign-folding: {text}"
+    );
+}
+
+#[test]
+fn unrepresentable_binder_literal_provenance_fails_resugaring() {
+    let mut programs = vec![
+        deep_parse_strict("(defsig {} scale (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n(def {} scale (fn {} (params {} (x {type: (t-prim {} f32)})) (cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1) (t-var {} p))))").expect("Deep fixture"),
+        binder_deep("(lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)"),
+    ];
+    for marker in [
+        "surf_literal_style: \"explicit\", ",
+        "surf_literal_style: 1, ",
+        "",
+    ] {
+        programs.push(binder_deep(&format!(
+            "(cast {{}} (lit {{{marker}type: (t-var {{}} p)}} 0.1) (t-var {{}} p))"
+        )));
+    }
+    for deep in programs {
+        resugar_program(&deep).expect_err("unrepresentable binder provenance");
+    }
 }

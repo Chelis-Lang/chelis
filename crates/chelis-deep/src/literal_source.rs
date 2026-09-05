@@ -1,15 +1,8 @@
-//! Structural classification of the language's scalar literal-source form.
-//!
-//! Surf represents a negative numeral as unary minus applied to a literal
-//! (`spec/02-surf-syntax.md` P10 and section 6.3). After desugaring, that is
-//! the exact Deep shape `(app {} (var {} neg) (lit ...))`. Consumers deciding
-//! whether an expression is the literal source named by P10b must use this
-//! classifier rather than independently recognizing only one polarity.
+//! Structural classification of scalar literal sources and binder adoption.
 
-use crate::{Atom, DeepTag, Expr, MetaMap};
+use crate::{Atom, DeepTag, DtypeFamily, Expr, MetaMap};
 
-/// The two exact expression shapes that can carry a scalar literal source
-/// from Surf into Deep.
+/// The two exact Deep shapes produced for a Surf scalar literal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiteralSourceShape {
     /// A direct `(lit ...)` node.
@@ -28,19 +21,12 @@ pub struct LiteralSource<'a> {
 }
 
 impl<'a> LiteralSource<'a> {
-    /// The exact `lit` node carrying the source atom and its type metadata.
-    pub fn literal(self) -> &'a Expr {
-        self.literal
-    }
-
     /// Metadata carried by the exact `lit` node.
     pub fn metadata(self) -> &'a MetaMap {
         self.metadata
     }
 
-    /// The numeric atom stored by the `lit` node, when this is a numeric
-    /// literal. For [`LiteralSourceShape::UnaryMinus`], the wrapper owns the
-    /// negation. Boolean, string, and unit literals return `None`.
+    /// The numeric atom; unary minus remains represented by [`Self::shape`].
     pub fn numeric_atom(self) -> Option<&'a Atom> {
         self.numeric_atom
     }
@@ -50,8 +36,7 @@ impl<'a> LiteralSource<'a> {
         self.shape
     }
 
-    /// Fold the source form to the signed atom that an adopting context
-    /// materializes. Integer negation that is not representable fails closed.
+    /// Materialize the signed atom; unrepresentable integer negation fails.
     pub fn folded_numeric_atom(self) -> Option<Atom> {
         match (self.shape, self.numeric_atom?) {
             (LiteralSourceShape::Direct, atom) => Some(atom.clone()),
@@ -62,13 +47,48 @@ impl<'a> LiteralSource<'a> {
             (LiteralSourceShape::UnaryMinus, _) => None,
         }
     }
+
+    /// Whether this source atom can bind at a dtype-family-bounded target.
+    pub fn admitted_by(self, family: DtypeFamily) -> bool {
+        let mut styles = self
+            .metadata
+            .entries
+            .iter()
+            .filter_map(|(key, value)| (key == "surf_literal_style").then_some(value));
+        let exact_unsuffixed = matches!(
+            styles.next(),
+            Some(Expr::Atom(Atom::Str(style), _)) if style == "unsuffixed"
+        ) && styles.next().is_none();
+        exact_unsuffixed && self.numeric_atom_admitted_by(family)
+    }
+
+    /// Whether the atom kind is compatible with a dtype family.
+    pub fn numeric_atom_admitted_by(self, family: DtypeFamily) -> bool {
+        match self.numeric_atom {
+            Some(Atom::Float(_)) => matches!(family, DtypeFamily::Float | DtypeFamily::Numeric),
+            Some(Atom::Int(_)) => true,
+            _ => false,
+        }
+    }
 }
 
-/// Classify the complete scalar literal-source form admitted by Surf.
-///
-/// This accepts any exact direct `lit`, plus one unary-minus application whose
-/// operand is a numeric `lit`. Computed operands, nested negation, negated
-/// nonnumeric literals, and malformed arities fail closed.
+/// A binder-sensitive literal relation found in a Deep expression.
+#[derive(Debug, Clone, Copy)]
+pub enum BinderLiteralUse<'a> {
+    /// A cast whose target is exactly `(t-var {} <binder>)`.
+    CastTarget {
+        binder: &'a str,
+        source: Option<LiteralSource<'a>>,
+    },
+    /// A literal stamped with exactly `(t-var {} <binder>)`.
+    Literal {
+        binder: &'a str,
+        source: Option<LiteralSource<'a>>,
+        adopting_binder: Option<&'a str>,
+    },
+}
+
+/// Classify a direct `lit` or one exact `app(var neg, numeric-lit)` wrapper.
 pub fn classify_literal_source(expr: &Expr) -> Option<LiteralSource<'_>> {
     if let Some((literal, metadata, numeric_atom)) = direct_literal(expr) {
         return Some(LiteralSource {
@@ -98,6 +118,74 @@ pub fn classify_literal_source(expr: &Expr) -> Option<LiteralSource<'_>> {
     })
 }
 
+/// Visit binder-target casts and binder-stamped literals without recursion.
+pub fn visit_binder_literal_uses<'a>(
+    expr: &'a Expr,
+    visitor: &mut impl FnMut(BinderLiteralUse<'a>),
+) {
+    let mut stack = vec![(expr, None)];
+    while let Some((expr, adopting_binder)) = stack.pop() {
+        if let Some((tag, meta, children)) = node_parts(expr) {
+            if tag == DeepTag::Cast
+                && let [operand, target, rest @ ..] = children
+                && let Some(binder) = exact_type_variable_name(target)
+            {
+                let source = classify_literal_source(operand);
+                visitor(BinderLiteralUse::CastTarget { binder, source });
+                stack.extend(rest.iter().rev().map(|child| (child, None)));
+                stack.push((target, None));
+                stack.push((
+                    source.map_or(operand, |source| source.literal),
+                    source.map(|_| binder),
+                ));
+            } else {
+                if tag == DeepTag::Lit
+                    && let Some(binder) = meta.entries.iter().find_map(|(key, ty)| {
+                        (key == "type")
+                            .then(|| exact_type_variable_name(ty))
+                            .flatten()
+                    })
+                {
+                    visitor(BinderLiteralUse::Literal {
+                        binder,
+                        source: classify_literal_source(expr),
+                        adopting_binder,
+                    });
+                }
+                stack.extend(children.iter().rev().map(|child| (child, None)));
+            }
+            stack.extend(meta.entries.iter().rev().map(|(_, value)| (value, None)));
+            continue;
+        }
+        match expr {
+            Expr::MetaExpr(meta, _) => {
+                stack.extend(meta.entries.iter().rev().map(|(_, value)| (value, None)));
+                stack.push((&meta.expr, adopting_binder));
+            }
+            Expr::Map(meta, _) => {
+                stack.extend(meta.entries.iter().rev().map(|(_, value)| (value, None)));
+            }
+            Expr::List(list, _) => {
+                stack.extend(list.elements.iter().rev().map(|child| (child, None)));
+            }
+            Expr::BareList(children, _) => {
+                stack.extend(children.iter().rev().map(|child| (child, None)));
+            }
+            Expr::UnknownForm(data) => {
+                stack.extend(data.children.iter().rev().map(|child| (child, None)));
+                stack.extend(
+                    data.meta
+                        .entries
+                        .iter()
+                        .rev()
+                        .map(|(_, value)| (value, None)),
+                );
+            }
+            Expr::Node(..) | Expr::Atom(..) => {}
+        }
+    }
+}
+
 fn direct_literal(expr: &Expr) -> Option<(&Expr, &MetaMap, Option<&Atom>)> {
     let (DeepTag::Lit, metadata, children) = node_parts(expr)? else {
         return None;
@@ -120,6 +208,17 @@ fn exact_var_name(expr: &Expr) -> Option<&str> {
         return None;
     };
     Some(name)
+}
+
+/// Name carried by an exact, non-hole `t-var` node.
+pub fn exact_type_variable_name(expr: &Expr) -> Option<&str> {
+    let (DeepTag::TVar, _, children) = node_parts(expr)? else {
+        return None;
+    };
+    let [Expr::Atom(Atom::Name(name), _)] = children else {
+        return None;
+    };
+    (name != "_").then_some(name)
 }
 
 fn node_parts(expr: &Expr) -> Option<(DeepTag, &MetaMap, &[Expr])> {

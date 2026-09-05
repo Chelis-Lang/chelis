@@ -1002,18 +1002,7 @@ fn lit_meta_prim(meta: &MetaMap) -> Option<Prim> {
 /// Binder name from a `(lit {type: (t-var {} p)} ...)` stamp (#1544).
 fn lit_meta_type_var_name(meta: &MetaMap) -> Option<&str> {
     let (_, ty_expr) = meta.entries.iter().find(|(k, _)| k == "type")?;
-    // Accept both parsed `List` and stamped `Node` carriers.
-    let (node_tag, kids) = match ty_expr {
-        Expr::List(list, _) => (tag(list)?, children(list)),
-        Expr::Node(node, _) => (node.tag(), node.children_slice()),
-        _ => return None,
-    };
-    if node_tag != DeepTag::TVar {
-        return None;
-    }
-    kids.first()
-        .and_then(symbol_name)
-        .filter(|name| *name != "_")
+    chelis_deep::exact_type_variable_name(ty_expr)
 }
 
 fn children(list: &List) -> &[Expr] {
