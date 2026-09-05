@@ -145,10 +145,20 @@ not drift.
   inventories, mechanisms, or promises merely to absorb a finding. When a correction
   would require that expansion, reduce the claim and track the additional work outside
   the pull request.
-- Keep a pull request under about 1,000 hand-written changed lines; regenerated
-  artifacts, such as embedded skill copies and generated registries, do not count.
-  Slices that ship together are commits inside one pull request; slices that can ship
-  apart are separate pull requests.
+- Separability sizes a pull request. Slices that must ship together are commits
+  inside one pull request; slices that can ship apart are separate pull requests. A
+  line count does not decide it. About 1,000 hand-written changed lines, excluding
+  regenerated artifacts such as embedded skill copies and generated registries, is the
+  point at which you owe a sentence justifying that the work is still one shippable
+  slice. It is not a threshold the next line breaches, and arguing it as one argues
+  about the wrong quantity: a pull request already past the figure invites the
+  sunk-cost reading that finishing is cheaper than splitting, which is not a judgement.
+- The sharper signal is the ratio of cases a claim covers to cases its tests prove.
+  A pull request whose oracle proves a small fraction of what its claim asserts is too
+  big for that oracle at any line count, and the repair is to narrow the claim or
+  extend the oracle. This is the measurable form of the claim-granularity rule above.
+  Put size inside the reviewing round's scope and invite the reviewer to disagree with
+  it; a reviewer told that size is settled cannot raise the finding that matters here.
 - A finding class is the underlying defect category or unmet obligation, not its file,
   line, or wording instance. Every round record names the class of each finding; when a
   report leaves one unlabeled, the orchestrator assigns it while recording the round.

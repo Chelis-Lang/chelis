@@ -153,9 +153,12 @@ Deliver by: <SendMessage to <name> | final report>.
   patching witnesses: change the representation, the oracle, the claim, or the brief
   before another round. Do not keep expanding the pull request to satisfy a moving
   brief.
-- Keep a pull request under about 1,000 hand-written changed lines; regenerated
-  artifacts do not count. Slices that ship together are commits inside one pull
-  request, and slices that ship apart are separate pull requests.
+- Separability sizes a pull request. Slices that must ship together are commits
+  inside one pull request, and slices that can ship apart are separate pull requests.
+  About 1,000 hand-written changed lines, regenerated artifacts excluded, is the point
+  at which the author owes a sentence justifying one shippable slice, not a threshold.
+  Size is in scope for the round: the ratio of cases a claim covers to cases its tests
+  prove is the reportable signal, and a low one is a finding whatever the line count.
 
 ## Minimum Deliverable
 
