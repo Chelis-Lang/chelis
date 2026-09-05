@@ -159,6 +159,8 @@ not drift.
   extend the oracle. This is the measurable form of the claim-granularity rule above.
   Put size inside the reviewing round's scope and invite the reviewer to disagree with
   it; a reviewer told that size is settled cannot raise the finding that matters here.
+  [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §6 has the
+  branches that outgrew the figure and the ratio that caught it.
 - A finding class is the underlying defect category or unmet obligation, not its file,
   line, or wording instance. Every round record names the class of each finding; when a
   report leaves one unlabeled, the orchestrator assigns it while recording the round.
@@ -601,6 +603,8 @@ When a public surface has an implicit invariant, make it explicit and test it.
   paired `pop` then takes whatever a peer session left on top, and `pop` says nothing
   about whose work it just applied to your tree. To discard your own changes use
   `git checkout -- <paths>`. To park them, copy the files to task-owned scratch space.
+  [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §5 records the
+  incident.
 - Do not repurpose an unrelated worktree because it appears idle. Reuse is allowed only
   for the same PR or immediate follow-up work after checking ownership, exact head,
   status, and active processes.
@@ -1032,7 +1036,8 @@ output. That failure looks like a code regression and is not one.
 
 A fleet's running cost is the sum of its live contexts plus a shared usage window, and
 nothing reports either total. Meter both at the spawn, which is where the decision is
-actually made.
+actually made. [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §3
+has the fleet run these numbers come from.
 
 - At most five subagents may be live at once under one orchestrator. A wider fan-out
   needs the user's explicit approval and a stated reason. This is a separate budget
@@ -1081,6 +1086,9 @@ actually made.
   report to a file and replies with the absolute path and a one-line summary, and that
   reply is the delivery. Writing the file and saying nothing is not delivery, as the
   first rule in this section already says.
+
+[`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §4 has the measured cost of
+re-derivation, and the kills and cut-offs that file-based briefs were resumed from.
 
 ## Style Gate
 
