@@ -120,9 +120,15 @@ not drift.
 
 - Every pull request, documentation-only work included, gets at least one compliant
   red-team round before merge. Push first, after `python3 scripts/gate.py --fast`: the
-  round reviews the pushed head while CI runs on it. The full `--local` gate runs at
-  most once per pull request, on the committed candidate, immediately before
-  ready-for-review.
+  round reviews the pushed head while CI runs on it. The full `--local` gate covers the
+  head that goes ready-for-review. Run it late, on the committed candidate you intend
+  to ship, so one run normally suffices; when a review round changes that candidate the
+  earlier run stops describing it and you run it again. Evidence that predates the
+  repairs describes a head nobody is merging. The pull request records which head each
+  run covered, so a reader can check the evidence against the merged commit instead of
+  assuming the two match. A rebase that preserves the candidate's content is exempt per
+  [Worktree And Branch Discipline](#worktree-and-branch-discipline), and the record says
+  that the covered head differs from the merged one.
 - Classify every finding against the pull request's stated scope. A finding is in scope
   only when the pull request introduces it, worsens it, or claims to correct it. Mere
   discovery during review, including a pre-existing spec/implementation mismatch in an
@@ -635,8 +641,8 @@ When a public surface has an implicit invariant, make it explicit and test it.
 - A non-trivial rebase or hand-resolved conflict requires review of the resolution
   before any history rewrite is published. Run `python3 scripts/gate.py --fast` on the
   result for a non-documentation change or the focused documentation checks for a
-  docs-only change; the once-per-pull-request `--local` run is not repeated for a
-  rebase. Never force-push a red gate. Obtain approval, then use an exact-head
+  docs-only change; a content-preserving rebase does not oblige a fresh `--local` run,
+  and the record notes that the covered head is not the merged one. Never force-push a red gate. Obtain approval, then use an exact-head
   `--force-with-lease`. A clean mechanical rebase needs no resolution review, and
   neither does one whose only hand-resolved conflicts are generated or digest lines:
   regenerate `rejection_registry_generated.rs` with
@@ -755,14 +761,15 @@ Agent gates for non-documentation changes:
 
 ```sh
 python3 scripts/gate.py --fast    # before every push: fixes in place, then checks
-python3 scripts/gate.py --local   # once per PR, on the committed candidate
+python3 scripts/gate.py --local   # covers the head that goes ready-for-review
+python3 scripts/gate.py --detach --local   # same run, detached
+python3 scripts/gate.py --status [HANDLE]  # the detached run's real verdict
 ```
 
 `scripts/gate.py` is the single source of truth for the per-PR gate. `--fast` is the
-pre-push gate: fix-in-place, run before every push. `--local` is the
-once-per-pull-request gate: run on the committed candidate immediately before
-ready-for-review, after the draft is pushed and CI has started. The bare full gate is
-CI-owned for routine PR validation. CI calls `python3 scripts/gate.py <stage>` for each split job.
+pre-push gate: fix-in-place, run before every push. `--local` runs on the committed
+candidate after the draft is pushed and CI has started, and must cover the head that
+goes ready-for-review. The bare full gate is CI-owned for routine PR validation. CI calls `python3 scripts/gate.py <stage>` for each split job.
 `scripts/test_gate.py` pins the complete ordered set of
 single-line `run:` commands permitted in those gate-owned jobs, so shell syntax
 cannot hide an unreviewed command. To see the canonical full list and the
@@ -843,10 +850,18 @@ resolved from each member's `Cargo.toml`, not the directory name). The derived c
 list is always printed; "no crate changes detected" means the per-crate stage was
 skipped, not silently empty. The workspace nextest stage is CI-owned: run `--fast`
 before every push, push before the review round so the reviewer and CI see the same
-head, run `--local` once on the committed candidate immediately before
-ready-for-review, and let CI (macOS Smoke is the authoritative workspace oracle) run
-the full suite. See [`docs/local_macos_environment.md`](docs/local_macos_environment.md)
+head, run `--local` on the committed candidate that goes ready-for-review, and let CI
+(macOS Smoke is the authoritative workspace oracle) run the full suite. See [`docs/local_macos_environment.md`](docs/local_macos_environment.md)
 for why the workspace suite does not belong in the local loop on macOS.
+
+A cold `--local` run does not fit inside a foreground command budget, so do not start
+it as one. Launch it with `python3 scripts/gate.py --detach --local` and collect the
+result with `python3 scripts/gate.py --status [HANDLE]`. The launcher's exit code is a
+launch verdict and nothing more: the run's own exit code, exit 4 for a lease timeout
+included, arrives through `--status`. Record the `--status` verdict and the head it
+covered, never the launch.
+[`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §8
+has the runs that produced both rules.
 
 `--fast` is the inner-loop pass. It fixes in place and prints what it changed:
 `scripts/regen_all.py --tier 0` (the rejection registry, the embedded conformance

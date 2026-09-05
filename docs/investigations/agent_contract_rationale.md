@@ -175,3 +175,25 @@ The separate-worktree exception has the same source. Sequencing a mutating probe
 a neighbouring build narrows the window in which one agent's inserted variant reaches the
 other's compile. It does not remove the window, and the collision above happened inside
 one.
+
+## 8. A gate run that described a head nobody merged, behind "Pull Request Review Gate"
+
+The rule this replaces said the `--local` gate runs at most once per pull request, on
+the committed candidate, immediately before ready-for-review. Both halves cannot hold at
+once as soon as a review round changes the candidate, and the run's first pull request
+showed it: the `--local` evidence described head `7ea68247`, the round-2 repairs landed
+after that run, and `45b8d640` is what went ready-for-review. The evidence and the
+candidate were never the same commit. Later in the same run a merge shipped with
+`--local` evidence describing a head one commit behind the merged one.
+
+Neither case was a shortcut. Both are what the rule asks for when read literally, which
+is why the fix is to state the obligation as coverage of the shipped head rather than as
+a count of runs.
+
+The second rule is about the invocation rather than the cadence. The three `--local`
+runs that completed took 7m51s, 9m56s and 10m02s, against a ten-minute foreground
+command limit. The documented invocation therefore works by luck, and it stopped working
+inside the same run: one pull request spent three attempts to obtain one result, wasting
+two whole runs of the machine's time. A run that takes nearly the whole budget on a warm
+target has no margin at all on a cold one, so the detached form is the default rather
+than the fallback.
