@@ -217,7 +217,27 @@ fn public_backend_emission_edges_cannot_borrow_raw_payloads() {
     assert!(hip.contains("dag: &chelis_ir::ownership::VerifiedDagProgram"));
 
     let metal = sources[2].1;
-    assert!(metal.contains("dag: &chelis_ir::ownership::VerifiedDagProgram"));
+    let public_signature = |name: &str| {
+        let marker = format!("pub fn {name}(");
+        let start = metal
+            .find(&marker)
+            .unwrap_or_else(|| panic!("Metal public `{name}` boundary is missing"));
+        let rest = &metal[start..];
+        &rest[..rest.find('{').unwrap_or(rest.len())]
+    };
+    let plan = public_signature("plan_metal");
+    assert!(plan.contains("dag: &VerifiedDagProgram"), "{plan}");
+    assert!(plan.contains("-> MetalNeverReuse<'_>"), "{plan}");
+    assert!(!plan.contains("&Dag"), "{plan}");
+
+    let emit = public_signature("codegen_metal");
+    assert!(emit.contains("plan: &MetalNeverReuse<'_>"), "{emit}");
+    assert!(
+        emit.contains("-> Result<MetalCodegenResult, Unsupported>"),
+        "{emit}"
+    );
+    assert!(!emit.contains("VerifiedDagProgram"), "{emit}");
+    assert!(!emit.contains("&Dag"), "{emit}");
 }
 
 fn verified_host_from_source(source: &str) -> chelis_ir::ownership::VerifiedHostProgram {
