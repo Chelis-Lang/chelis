@@ -80,8 +80,9 @@ not drift.
   reviewer read never earns one.
 - Every round runs from an inline brief in the shape the `redteam-exec` skill carries:
   exact head, changed files, the pull request's in-scope claims, the worktree and target
-  it may use with pasted busy-signal output for that target, the deadline (15 minutes
-  unless the brief says otherwise), and the delivery channel. The brief does not open with "read
+  it may use with pasted busy-signal output for that target, the context and
+  report-length budgets, the deadline (15 minutes unless the brief says otherwise), and
+  the delivery channel. The brief does not open with "read
   `AGENTS.md`".
 - Freshness applies to the subagent's review context, not to the filesystem. Hand the
   reviewer an existing worktree and its warm target cache when the worktree is at the
@@ -129,6 +130,8 @@ not drift.
   assuming the two match. A rebase that preserves the candidate's content is exempt per
   [Worktree And Branch Discipline](#worktree-and-branch-discipline), and the record says
   that the covered head differs from the merged one.
+  [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §8
+  has the runs behind this rule.
 - Classify every finding against the pull request's stated scope. A finding is in scope
   only when the pull request introduces it, worsens it, or claims to correct it. Mere
   discovery during review, including a pre-existing spec/implementation mismatch in an
@@ -833,7 +836,8 @@ completion oracle, and the tracker requires every fix in that class to run
 it in a continuous job. Acceptance is exit 0 with a final `ORACLE: PASS`
 line.
 
-`--local` (chelis#360) is the once-per-PR gate on the committed candidate. It runs
+`--local` (chelis#360) is the gate on the committed candidate that goes
+ready-for-review. It runs
 two of the three workspace clippy configurations (`-D warnings`, compile-only): the
 default row and the solver-free-features row. The `--no-default-features` row is
 CI-owned through `gate.py lint-and-unit`, because `check_configuration_closure.py`
@@ -1108,7 +1112,9 @@ has the fleet run these numbers come from.
   file lets one set of verified facts serve every brief in a fleet without being
   retyped into each. And inter-agent messages truncate at roughly four kilobytes,
   silently, so a brief or a report pasted inline costs one round trip to discover the
-  truncation and another to resend.
+  truncation and another to resend. Where this contract calls a brief "inline" it means
+  self-contained, the opposite of "read `AGENTS.md`", and not that the text must sit in
+  the spawn message; a pointer to a self-contained file satisfies it.
 - The brief file outlives both the agent that reads it and the session that wrote it,
   or the resume property above is imaginary. Put it where both parties can still read
   it after either one restarts, and pass an absolute path. A brief parked in a

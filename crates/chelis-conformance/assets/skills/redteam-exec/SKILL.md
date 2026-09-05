@@ -103,6 +103,7 @@ Target: <absolute path>, warm. Busy signal, taken <HH:MM local>, pasted verbatim
 `.venv/bin/python scripts/worktree_status.py --path <target>`:
 <paste the command's output here; do not summarise it>
 Use it as is; do not rebuild cold, and ask before starting any other heavyweight build.
+Budgets: context <N> tokens; report <N> characters.
 Deadline: <HH:MM local>, <15> minutes from now. Report what you have when it arrives;
 an unfinished check is "unvalidated", not a finding.
 Deliver by: <SendMessage to <name> | final report>. Nothing else counts as delivery.
