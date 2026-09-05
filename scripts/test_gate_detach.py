@@ -260,6 +260,43 @@ class LauncherTests(unittest.TestCase):
                 (Path(tmp) / (gate.LEASE_FILE_NAME + ".json")).exists()
             )
 
+    def test_a_handle_that_cannot_be_written_still_names_the_live_child(self):
+        """Red-team round 1 P3. The child is already running and detached; a
+        bare "could not start" would be untrue and would leave it unfindable."""
+        with tempfile.TemporaryDirectory() as tmp:
+            environ = _isolated_environ(tmp)
+            stub = _PopenStub()
+            out, err = io.StringIO(), io.StringIO()
+
+            def spawn(child_argv, **kwargs):
+                payload = gate.spawn_detached(
+                    child_argv,
+                    popen=stub,
+                    now=lambda: FIXED_NOW,
+                    git_facts=lambda: {"head": "a" * 40},
+                    **kwargs,
+                )
+                # Make the handle path unwritable by pointing it at a directory.
+                Path(payload["handle"]).mkdir(parents=True, exist_ok=True)
+                return payload
+
+            code = gate.run_detach(
+                _parse_quietly(["--detach", "--local"]),
+                argv=["--detach", "--local"],
+                environ=environ,
+                executable=Path("/managed/python"),
+                mode="local",
+                repo_root=Path(tmp),
+                output_stream=out,
+                error_stream=err,
+                spawn=spawn,
+            )
+        message = err.getvalue()
+        self.assertEqual(code, gate.EXIT_ENVIRONMENT)
+        self.assertIn("pid 41277", message)
+        self.assertIn("handle could not be written", message)
+        self.assertNotIn("could not start a detached run", message)
+
     def test_a_failed_spawn_exits_environment_and_leaves_no_handle(self):
         def exploding(*_args, **_kwargs):
             raise OSError("no fork for you")
@@ -405,6 +442,68 @@ class StatusTests(unittest.TestCase):
         code, _out, err = self._status(None)
         self.assertEqual(code, gate.EXIT_ENVIRONMENT)
         self.assertIn("no detached run handle", err)
+
+    def test_a_stale_summary_with_the_same_pid_is_not_this_runs_verdict(self):
+        """Red-team round 1 P2. A pid is not unique over time. An older run in
+        the same report directory that happened to get this pid would be the
+        only match for the whole window before this run finishes, so polling
+        would return ITS verdict: a false PASS on the once-per-pull-request
+        gate while the real run is still going."""
+        stale = Path(self.tmp) / f"20260101T120000.0Z-{self.payload['pid']}-local.json"
+        stale.write_text(
+            json.dumps(
+                {"mode": "local", "termination": "pass", "exit_code": 0,
+                 "seconds": 471.2}
+            ),
+            encoding="utf-8",
+        )
+        code, out, _err = self._status(self.handle_path, alive=lambda _pid: True)
+        self.assertEqual(code, gate.EXIT_STILL_RUNNING)
+        self.assertNotIn("PASS", out)
+
+    def test_a_summary_written_after_the_handle_is_this_runs_verdict(self):
+        """The positive twin: the filter must not discard the real summary."""
+        self._summary()
+        code, out, _err = self._status(self.handle_path, alive=lambda _pid: True)
+        self.assertEqual(code, 0)
+        self.assertIn("PASS", out)
+
+    def test_find_summary_discards_only_summaries_older_than_the_handle(self):
+        report = Path(self.tmp)
+        old_path = report / f"20260101T120000.0Z-{self.payload['pid']}-local.json"
+        new_path = report / f"20990101T120000.0Z-{self.payload['pid']}-local.json"
+        for path in (old_path, new_path):
+            path.write_text("{}", encoding="utf-8")
+        started = self.payload["started_at"]
+        self.assertEqual(
+            gate.find_summary(report, self.payload["pid"], "local", not_before=started),
+            new_path,
+        )
+        self.assertEqual(
+            gate.find_summary(report, self.payload["pid"], "local"),
+            new_path,
+        )
+        old_path.unlink()
+        self.assertIsNone(
+            gate.find_summary(
+                report, self.payload["pid"], "local", not_before="2099-06-01T00:00:00Z"
+            )
+        )
+
+    def test_an_unparseable_summary_name_is_kept_rather_than_discarded(self):
+        """Dropping it would hide a real verdict, and a name this filter
+        cannot read has not been shown to be stale."""
+        odd = Path(self.tmp) / f"nostamp-{self.payload['pid']}-local.json"
+        odd.write_text("{}", encoding="utf-8")
+        self.assertEqual(
+            gate.find_summary(
+                Path(self.tmp),
+                self.payload["pid"],
+                "local",
+                not_before=self.payload["started_at"],
+            ),
+            odd,
+        )
 
     def test_find_summary_ignores_another_runs_summary(self):
         self._summary()

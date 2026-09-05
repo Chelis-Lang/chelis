@@ -1413,19 +1413,60 @@ def newest_handle(directory: Path) -> Path | None:
     return handles[-1] if handles else None
 
 
-def find_summary(report_dir: Path, pid: int, mode: str) -> Path | None:
+def _parse_iso(text: str) -> datetime | None:
+    """Parse an `_iso` timestamp. `_iso` emits milliseconds, but accept the
+    second-resolution spelling too so a handle written by any version reads."""
+    for shape in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+        try:
+            return datetime.strptime(text, shape)
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def _summary_stamp(path: Path) -> datetime | None:
+    """The UTC instant `write_summary` encoded in a summary's file name, which
+    is when that run ENDED."""
+    stamp = path.name.split("-", 1)[0]
+    try:
+        return datetime.strptime(stamp, "%Y%m%dT%H%M%S.%f%z")
+    except ValueError:
+        return None
+
+
+def find_summary(
+    report_dir: Path, pid: int, mode: str, *, not_before: str | None = None
+) -> Path | None:
     """The run summary the detached child wrote, if it has finished.
 
     `write_summary` names its file `<stamp>-<pid>-<mode>.json`, so the child's
     own pid is what correlates the handle with the summary. That is why the
     spawn must not re-execute through uv: a grandchild would write a summary
     this glob could never find.
+
+    A pid is not unique over time, so the pid alone is not enough. An older
+    run in the same report directory that happened to get this pid would be
+    the only match for the whole window before this run finishes, and polling
+    would report ITS verdict, which is a false PASS on the once-per-pull-request
+    gate. `not_before` is the handle's `started_at`: a run that ended before
+    this one started cannot be this one, so those candidates are discarded.
     """
     safe_mode = re.sub(r"[^A-Za-z0-9_.-]+", "-", mode).strip("-")
     try:
         matches = sorted(report_dir.glob(f"*-{pid}-{safe_mode}.json"))
     except OSError:
         return None
+    if not_before:
+        floor = _parse_iso(not_before)
+        if floor is not None:
+            kept = []
+            for candidate in matches:
+                ended = _summary_stamp(candidate)
+                # An unparseable name is kept: it cannot be shown to be stale,
+                # and dropping it would hide a real verdict.
+                if ended is None or ended >= floor:
+                    kept.append(candidate)
+            matches = kept
     return matches[-1] if matches else None
 
 
@@ -1530,7 +1571,12 @@ def detached_state(
     """
     pid = int(handle["pid"])
     report_dir = Path(handle["report_dir"])
-    summary_path = find(report_dir, pid, handle.get("mode", "local"))
+    summary_path = find(
+        report_dir,
+        pid,
+        handle.get("mode", "local"),
+        not_before=handle.get("started_at"),
+    )
     if summary_path is not None:
         try:
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -1591,9 +1637,21 @@ def run_detach(
             mode=mode,
             repo_root=repo_root,
         )
-        handle_path = write_handle(payload, Path(payload["handle"]))
     except OSError as exc:
         print(f"gate: could not start a detached run: {exc}", file=error)
+        return EXIT_ENVIRONMENT
+    try:
+        handle_path = write_handle(payload, Path(payload["handle"]))
+    except OSError as exc:
+        # The child is already running and detached. Without the handle it
+        # cannot be found by `--status`, so name it here rather than exiting
+        # with a bare "could not start" that is not even true.
+        print(
+            f"gate: the detached run started as pid {payload['pid']} but its "
+            f"handle could not be written ({exc}); its log is "
+            f"{payload['log']} and it holds the lease at {payload['lease_path']}",
+            file=error,
+        )
         return EXIT_ENVIRONMENT
 
     def shown(path: str) -> str:
@@ -2401,7 +2459,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "Report a detached run's verdict and exit with it: 75 while it is "
             "still running, otherwise the run's own exit code. Omit HANDLE for "
-            "the newest handle in this worktree."
+            "the newest handle in the report directory, which is this "
+            "worktree's unless $CHELIS_GATE_REPORT_DIR points elsewhere."
         ),
     )
     p.add_argument(
