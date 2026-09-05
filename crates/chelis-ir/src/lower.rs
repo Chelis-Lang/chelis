@@ -4471,6 +4471,35 @@ fn unique_metadata_value<'a>(expr: &'a Expr, key: &str) -> Option<Option<&'a Exp
     Some(first)
 }
 
+/// A binder-adopted decimal specialized to an integer keeps its f32 source
+/// default; all other polarities finalize at the substituted target.
+fn binder_float_literal_source_default(
+    meta: &[(String, Expr)],
+    raw: chelis_types::RawScalar,
+    substitutions: &UnordMap<String, Prim>,
+) -> Option<Prim> {
+    let single = |key: &str| {
+        let mut values = meta
+            .iter()
+            .filter_map(|(candidate, value)| (candidate == key).then_some(value));
+        let value = values.next()?;
+        values.next().is_none().then_some(value)
+    };
+    let binder = single("type").and_then(extract_scalar_precision_var_name)?;
+    let exact_unsuffixed = matches!(
+        single("surf_literal_style"),
+        Some(Expr::Atom(Atom::Str(style), _)) if style == "unsuffixed"
+    );
+    if !exact_unsuffixed {
+        return None;
+    }
+    matches!(raw, chelis_types::RawScalar::Float(_))
+        .then(|| substitutions.get(&binder).copied())
+        .flatten()
+        .filter(Prim::is_integer)
+        .map(|_| Prim::F32)
+}
+
 /// Decode one canonical numeric `lit` under [04-LIT-1].
 ///
 /// This is the fold's only literal ingress. It jointly validates the value
@@ -6252,7 +6281,32 @@ impl LowerCtx {
         // atoms travel their exact i64 (no `as f64` laundering, which
         // collapsed int64 above 2^53); an out-of-domain literal at its
         // ascribed dtype is a loud lowering diagnostic, not a wrap.
-        let prim = ty.precision;
+        let raw = if let Some(val_expr) = elems.get(2) {
+            match val_expr {
+                Expr::Atom(Atom::Int(n), _) => chelis_types::RawScalar::Int(*n),
+                Expr::Atom(Atom::Float(f), _) => chelis_types::RawScalar::Float(*f),
+                Expr::Atom(Atom::Bool(true), _) => chelis_types::RawScalar::Int(1),
+                Expr::Atom(Atom::Bool(false), _) => chelis_types::RawScalar::Int(0),
+                _ => chelis_types::RawScalar::Int(0),
+            }
+        } else {
+            chelis_types::RawScalar::Int(0)
+        };
+        // §5.6: a decimal actualized across families keeps the §5.3 f32
+        // source default; the surrounding Cast applies [04-NUM-14]. Integer
+        // atoms and same-family literals still finalize at the call-site
+        // width. The exact metadata carrier makes this value-independent.
+        let prim = elems
+            .get(1)
+            .and_then(|meta| match meta {
+                Expr::Map(meta, _) => binder_float_literal_source_default(
+                    &meta.entries,
+                    raw,
+                    &self.prec_substitutions,
+                ),
+                _ => None,
+            })
+            .unwrap_or(ty.precision);
         // A string literal is not a numeric constant and has no sealed
         // payload to finalize: `finalize_scalar`'s `Prim::String` arm is
         // an unreachable-by-construction PANIC, so reaching it here would
@@ -6269,17 +6323,6 @@ impl LowerCtx {
                 self.current_span_id.clone(),
             )
         }
-        let raw = if let Some(val_expr) = elems.get(2) {
-            match val_expr {
-                Expr::Atom(Atom::Int(n), _) => chelis_types::RawScalar::Int(*n),
-                Expr::Atom(Atom::Float(f), _) => chelis_types::RawScalar::Float(*f),
-                Expr::Atom(Atom::Bool(true), _) => chelis_types::RawScalar::Int(1),
-                Expr::Atom(Atom::Bool(false), _) => chelis_types::RawScalar::Int(0),
-                _ => chelis_types::RawScalar::Int(0),
-            }
-        } else {
-            chelis_types::RawScalar::Int(0)
-        };
         let value = match chelis_types::finalize_scalar("const", prim, raw) {
             Ok(value) => value,
             Err(trap) => raise_lowering_error(
@@ -6293,10 +6336,14 @@ impl LowerCtx {
             ),
         };
 
+        let literal_ty = TensorType {
+            dims: ty.dims,
+            precision: prim,
+        };
         LoweredValue::Node(self.dag.add_node(
             RiscOp::Const { value },
             vec![],
-            ty,
+            literal_ty,
             self.current_span_id.clone(),
         ))
     }
@@ -17202,6 +17249,40 @@ mod regression_tests {
             vec![DimInfo::Lit(2), DimInfo::Lit(3)]
         );
         assert!(verify::verify(&dag).is_empty());
+    }
+
+    #[test]
+    fn binder_float_literal_default_is_structural_not_value_keyed() {
+        for (literal, target) in [
+            ("16777217.0", Prim::Int64),
+            ("-16777217.0", Prim::Int64),
+            ("127.5", Prim::Int8),
+            ("128.0", Prim::Int8),
+        ] {
+            let expr = chelis_deep::parser::parse_str(&format!(
+                "(cast {{}} \
+                    (lit {{surf_literal_style: \"unsuffixed\", type: (t-var {{}} p)}} {literal}) \
+                    (t-var {{}} p))"
+            ))
+            .unwrap_or_else(|error| panic!("parse binder literal {literal}: {error}"))
+            .pop()
+            .expect("one binder cast");
+            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+            ctx.prec_substitutions.insert("p".to_string(), target);
+            let _ = ctx.lower_expr(&expr);
+
+            let nodes = ctx.dag.nodes();
+            assert_eq!(nodes.len(), 2);
+            assert!(matches!(nodes[0].op, RiscOp::Const { .. }));
+            assert_eq!(nodes[0].output_type.precision, Prim::F32, "{literal}");
+            assert_eq!(
+                nodes[1].op,
+                RiscOp::Cast {
+                    new_precision: target
+                },
+                "{literal}"
+            );
+        }
     }
 
     #[test]

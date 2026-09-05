@@ -97,7 +97,10 @@ fn assert_native(name: &str, source: &str, expected: &str) {
         .expect("native");
     success(&output);
     let native = String::from_utf8_lossy(&output.stdout);
-    assert!(interpreted.contains(expected) && native.contains(expected));
+    assert!(
+        interpreted.contains(expected) && native.contains(expected),
+        "expected {expected:?}; eval={interpreted:?}; native={native:?}"
+    );
 }
 
 #[test]
@@ -167,6 +170,30 @@ fn adopted_integer_literals_must_fit_every_family_member() {
             "§5.6",
         );
     }
+}
+
+#[test]
+fn numeric_cross_family_float_literal_preserves_source_default() {
+    for (literal, expected, name) in [
+        ("16777217.0", "16777216", "positive"),
+        ("-16777217.0", "-16777216", "negative"),
+    ] {
+        let source = format!(
+            "module Bind.Main\nexport (main)\n\
+             def addk[p: Numeric](x: p) -> p = add(x, cast({literal}, p))\n\
+             def main() -> int64 = addk(0i64)\n"
+        );
+        assert_native(name, &source, &format!("main = {expected}"));
+    }
+
+    let tensor = "module Bind.Main\nexport (main)\n\
+                  def addk[p: Numeric](x: tensor[1, p]) -> tensor[1, p] = add(x, expand(scalar_to_tensor(cast(16777217.0, p)), cast(0, int32), cast(1, int64)))\n\
+                  def main() -> tensor[1, int64] = addk(to_tensor([0i64]))\n";
+    assert_native(
+        "tensor_cross_family",
+        tensor,
+        "main = tensor(shape=[1], data=[16777216])",
+    );
 }
 
 #[test]

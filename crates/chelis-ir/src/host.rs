@@ -4840,16 +4840,19 @@ fn lower_host_expr_kind(
                     fatal: true,
                 });
             }
-            let value = lower_host_expr(
-                children(list).first().ok_or_else(|| {
-                    host_expr_lowering_error(expr, "a `cast` node has no operand")
-                })?,
-                program,
-                scope,
-                tensor_helpers,
-            )?;
-            let inferred_ty = host_expr_type(&value);
+            let operand = children(list)
+                .first()
+                .ok_or_else(|| host_expr_lowering_error(expr, "a `cast` node has no operand"))?;
             let ty = expr_host_type(expr, program, scope);
+            let mut value = lower_host_expr(operand, program, scope, tensor_helpers)?;
+            if binder_float_literal_keeps_f32_source(operand, &ty) {
+                value = HostExpr::new(HostExprKind::Builtin {
+                    name: "cast".to_string(),
+                    args: vec![value],
+                    ty: HostTypeTerm::Float32,
+                });
+            }
+            let inferred_ty = host_expr_type(&value);
             // The rung travels with the callable name so the host lane
             // and the DAG lane land on the same C guard ([05-OP-6]).
             let name = match chelis_deep::cast_mode_of(children(list)) {
@@ -11815,6 +11818,33 @@ fn expr_scalar_float_precision(expr: &Expr) -> Option<chelis_types::types::Prim>
         return prim.is_float().then_some(prim);
     }
     None
+}
+
+/// The §5.3 source width retained when a binder-adopted decimal is
+/// specialized across families to an integer cast target.
+fn binder_float_literal_keeps_f32_source(operand: &Expr, target: &HostTypeTerm) -> bool {
+    let Some(source) = chelis_deep::classify_literal_source(operand) else {
+        return false;
+    };
+    if !matches!(source.numeric_atom(), Some(Atom::Float(_)))
+        || !source.admitted_by(chelis_deep::DtypeFamily::Numeric)
+    {
+        return false;
+    }
+    let mut types = source
+        .metadata()
+        .entries
+        .iter()
+        .filter_map(|(key, value)| (key == "type").then_some(value));
+    let binder_typed = matches!(
+        (types.next(), types.next()),
+        (Some(ty), None) if chelis_deep::exact_type_variable_name(ty).is_some()
+    );
+    binder_typed
+        && matches!(
+            target,
+            HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(precision)) if precision.is_integer()
+        )
 }
 
 fn should_prefer_inferred_app_type(explicit: &HostTypeTerm, inferred: &HostTypeTerm) -> bool {
