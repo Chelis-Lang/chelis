@@ -2031,8 +2031,13 @@ where
     // load behind an `Option` test.
     let cancel = chelis_types::current_cancel_token();
 
-    // chelis#1277 C1.3: the eval lane's entry guards, from the SAME derivation
-    // the C and HIP lanes read. `spec/04-type-system.md` section 4.7 evaluates
+    // chelis#1277 C1.3: the eval lane's entry guards, from the same scoped
+    // grouping the C and HIP lanes read. Both derivations call
+    // `axis_sources::split_by_scope`: the prologues read
+    // `derive_dim_witnesses`, the guard sites and this lane read
+    // `derive_runtime_dim_classes`, and one scoping serves both. Round 2 found
+    // the scoping in the first alone, which is two derivations that can
+    // disagree. `spec/04-type-system.md` section 4.7 evaluates
     // a class whose operands are all interface values "at function entry, in
     // declared signature order, before any other operation of the function",
     // so they run here, once every input is resolved and before the first

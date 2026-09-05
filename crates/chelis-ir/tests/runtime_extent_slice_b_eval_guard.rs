@@ -67,7 +67,7 @@ fn domain_trap_line(op: &str) -> String {
 fn cross_tensor_claim_dag() -> (Dag, NodeId) {
     let mut dag = Dag::new();
     let base = load(&mut dag, "b", vec![]);
-    let _x = load(&mut dag, "x", vec![named("n")]);
+    let x = load(&mut dag, "x", vec![named("n")]);
     let y = load(&mut dag, "y", vec![named("m")]);
     let expanded = dag.add_node(
         RiscOp::Expand {
@@ -81,8 +81,22 @@ fn cross_tensor_claim_dag() -> (Dag, NodeId) {
         ty(vec![named("n")], Prim::F32),
         None,
     );
-    dag.add_root(expanded);
-    (dag, expanded)
+    // `x` is READ, not merely declared. C2.4 scopes a claim by the results it
+    // reaches, so a witness no root reaches forms no class and gets no guard -
+    // section 4.7's "regardless of data use" case, which this derivation
+    // cannot honour and which C2.4 records as a residual owned by B2b. The
+    // driven C rows in `chelis-backend-c/tests/exec_compile.rs` were rebuilt
+    // the same way and for the same reason. The entry guard runs before any
+    // node evaluates, so consuming `x` does not let the elementwise operand
+    // check preempt it, which the disagreeing rows measure rather than assume.
+    let out = dag.add_node(
+        RiscOp::Add,
+        vec![expanded, x],
+        ty(vec![named("n")], Prim::F32),
+        None,
+    );
+    dag.add_root(out);
+    (dag, out)
 }
 
 fn bind(name: &str, extent: usize) -> Option<TensorValue> {
@@ -189,5 +203,58 @@ fn the_guard_precedes_the_allocation_it_protects() {
             "the guarded node was allocated at {:?} before anything compared it",
             values.get(&root).map(|value| value.shape.clone()),
         ),
+    }
+}
+
+/// Two independent roots whose signatures both spell a binder `seq`, at
+/// different extents. C2.4 scopes a claim by the results it reaches, so these
+/// are two claims sharing a spelling and not one class.
+///
+/// Asserted on the DERIVATION rather than through `eval_tensor_roots_with_strict`,
+/// and the reason is worth recording: this program is already rejected on
+/// `main` by an older mechanism. `infer_symbolic_bindings_from_inputs`
+/// (`eval.rs:1738`) reads the legacy name-grouped `symbolic_bindings` and errs
+/// with `symbolic dimension \`seq\` mismatch: canonical x[0] = 3, but y[1] = 2`
+/// before any guard this slice places can run. That is a pre-existing
+/// same-spelling defect on the eval lane, out of this slice's scope and not
+/// introduced by it, so the eval lane cannot host a row that isolates the
+/// class derivation's behaviour. The derivation is what this slice changed and
+/// is what this row measures.
+///
+/// EVIDENTIARY STATUS: regression test. Round 2 found `root_reach` applied in
+/// `derive_dim_witnesses` alone, so the C prologue's `Name` guards were scoped
+/// while `derive_runtime_dim_classes` - which the entry and local guard sites
+/// and the eval guard all read - was not. Measured on `3a0703027`: one `Entry`
+/// class pairing `x` axis 0 with `y` axis 1.
+#[test]
+fn two_roots_spelling_one_binder_are_two_claims_not_one_class() {
+    let mut dag = Dag::new();
+    let x = load(&mut dag, "x", vec![named("seq")]);
+    let y = load(&mut dag, "y", vec![named("batch"), named("seq")]);
+    let from_x = dag.add_node(
+        RiscOp::Neg,
+        vec![x],
+        ty(vec![named("seq")], Prim::F32),
+        None,
+    );
+    let from_y = dag.add_node(
+        RiscOp::Neg,
+        vec![y],
+        ty(vec![named("batch"), named("seq")], Prim::F32),
+        None,
+    );
+    dag.add_root(from_x);
+    dag.add_root(from_y);
+
+    for class in chelis_ir::axis_sources::derive_runtime_dim_classes(&dag) {
+        let chelis_ir::axis_sources::DimClaim::Name(name) = &class.claim else {
+            continue;
+        };
+        assert_ne!(
+            (name.as_str(), class.members.len()),
+            ("seq", 2),
+            "two signatures spelling `seq` are two claims, not one class: {:?}",
+            class.members,
+        );
     }
 }

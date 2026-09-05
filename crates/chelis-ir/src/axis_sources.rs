@@ -1106,6 +1106,53 @@ fn root_reach(dag: &Dag) -> Vec<u128> {
     reach
 }
 
+/// Split each claim's members by SCOPE, so a name spelled by two signatures
+/// becomes two claims rather than one class.
+///
+/// Two members belong to one scope when their root reach overlaps, and the
+/// merge is transitive so an A-B-C chain stays one scope. This is the ONE
+/// implementation of C2.4's scoping: both `derive_dim_witnesses`, which the C
+/// and HIP prologues read, and `derive_runtime_dim_classes`, which the entry
+/// and local guard sites and the eval lane read, call it. Round 2 found the
+/// scoping applied to the first and not the second, which is two derivations
+/// that can disagree - the defect class this slice exists to remove, in the
+/// slice's own code.
+///
+/// Measured on `rank_poly_tier3::named_axis_eval_parity_corners`, where
+/// `total(x: &tensor[seq, f32])` and `use2(x: &tensor[batch, seq, f32])` are
+/// merged into one global kernel: grouping by name alone identified a
+/// 3-element axis with a 2-element one and made a correct program trap.
+fn split_by_scope(
+    dag: &Dag,
+    grouped: Vec<(DimClaim, Vec<OrderedMember>)>,
+) -> Vec<(DimClaim, Vec<OrderedMember>)> {
+    let reach = root_reach(dag);
+    grouped
+        .into_iter()
+        .flat_map(|(claim, members)| {
+            let mut buckets: Vec<(u128, Vec<OrderedMember>)> = Vec::new();
+            for entry in members {
+                let mask = reach.get(entry.node).copied().unwrap_or(u128::MAX);
+                let mut merged: Vec<OrderedMember> = vec![entry];
+                let mut merged_mask = mask;
+                buckets.retain_mut(|(bucket_mask, bucket)| {
+                    if *bucket_mask & merged_mask != 0 {
+                        merged_mask |= *bucket_mask;
+                        merged.append(bucket);
+                        false
+                    } else {
+                        true
+                    }
+                });
+                buckets.push((merged_mask, merged));
+            }
+            buckets
+                .into_iter()
+                .map(move |(_, members)| (claim.clone(), members))
+        })
+        .collect()
+}
+
 pub fn derive_dim_witnesses(dag: &Dag) -> Vec<RuntimeDimClass> {
     let mut grouped: Vec<(DimClaim, Vec<OrderedMember>)> = Vec::new();
     for node in dag.nodes() {
@@ -1153,43 +1200,7 @@ pub fn derive_dim_witnesses(dag: &Dag) -> Vec<RuntimeDimClass> {
             }
         }
     }
-    // C2.4: split each name by SCOPE before it becomes a class. Two members
-    // belong to one scope when their root reach overlaps, transitively; two
-    // independent roots that happen to spell a binder the same way do not.
-    //
-    // Measured on `rank_poly_tier3::named_axis_eval_parity_corners`, where
-    // `total(x: &tensor[seq, f32])` and `use2(x: &tensor[batch, seq, f32])`
-    // are merged into one global kernel: grouping by name alone identified a
-    // 3-element axis with a 2-element one and made a correct program trap.
-    // That is the defect this slice exists to remove, reappearing one level
-    // up, in the grouping rather than in the backend's walk.
-    let reach = root_reach(dag);
-    let scoped: Vec<(DimClaim, Vec<OrderedMember>)> = grouped
-        .into_iter()
-        .flat_map(|(claim, members)| {
-            let mut buckets: Vec<(u128, Vec<OrderedMember>)> = Vec::new();
-            for entry in members {
-                let mask = reach.get(entry.node).copied().unwrap_or(u128::MAX);
-                // Merge every bucket this member touches, so overlap is
-                // transitive and A-B-C chains stay one scope.
-                let mut merged: Vec<OrderedMember> = vec![entry];
-                let mut merged_mask = mask;
-                buckets.retain_mut(|(bucket_mask, bucket)| {
-                    if *bucket_mask & merged_mask != 0 {
-                        merged_mask |= *bucket_mask;
-                        merged.append(bucket);
-                        false
-                    } else {
-                        true
-                    }
-                });
-                buckets.push((merged_mask, merged));
-            }
-            buckets
-                .into_iter()
-                .map(move |(_, members)| (claim.clone(), members))
-        })
-        .collect();
+    let scoped = split_by_scope(dag, grouped);
     let mut out: Vec<(OrderKey, RuntimeDimClass)> = scoped
         .into_iter()
         .map(|(claim, mut members)| {
@@ -1279,7 +1290,7 @@ pub fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass> {
     }
 
     let mut classes: Vec<(OrderKey, RuntimeDimClass)> = Vec::new();
-    for (claim, mut members) in grouped {
+    for (claim, mut members) in split_by_scope(dag, grouped) {
         members.sort_by_key(OrderedMember::key);
         // A `Name` class needs two witnesses: one has nothing to disagree
         // with. A `Literal` class needs one, because C2.4 makes the literal
