@@ -1,6 +1,7 @@
 //! Exact compiler capacity identity (chelis#893 C2.1).
 
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chelis_unord::UnordSet;
 use num_bigint::BigUint;
@@ -134,9 +135,37 @@ enum CanonicalCapacity {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 enum CapacitySource {
-    ExternalAxis { load: NodeId, axis: usize },
-    ScalarValue { node: NodeId },
-    OpComputed { op: NodeId, axis: usize },
+    ExternalAxis {
+        scope: CapacityScope,
+        load: NodeId,
+        axis: usize,
+    },
+    ScalarValue {
+        scope: CapacityScope,
+        node: NodeId,
+    },
+    OpComputed {
+        scope: CapacityScope,
+        op: NodeId,
+        axis: usize,
+    },
+}
+
+/// Opaque identity for the one verified program in which a dynamic extent
+/// source is meaningful. DAG-local [`NodeId`] values are never compared
+/// without this scope.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct CapacityScope(u64);
+
+static NEXT_CAPACITY_SCOPE: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn fresh_capacity_scope() -> CapacityScope {
+    let scope = NEXT_CAPACITY_SCOPE
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .expect("capacity-scope identity space exhausted");
+    CapacityScope(scope)
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -313,7 +342,9 @@ fn push_product_factor(
     factors: &mut Vec<CanonicalCapacity>,
 ) {
     match factor {
-        CanonicalCapacity::Literal(value) => *literal = &*literal * value,
+        CanonicalCapacity::Literal(value) => {
+            *literal = <BigUint as std::ops::Mul<BigUint>>::mul(literal.clone(), value);
+        }
         CanonicalCapacity::Product(nested) => {
             for factor in nested {
                 push_product_factor(factor, literal, factors);
@@ -377,6 +408,7 @@ fn axis_capacity_expr_inner(
     }
 
     let sources = dag.output_axis_sources(node);
+    let scope = dag.capacity_scope();
     let source = sources.get(axis).ok_or_else(|| {
         CapacityKeyBuildError::MalformedSource(format!(
             "node {} has no checked source for output axis {axis}",
@@ -395,6 +427,7 @@ fn axis_capacity_expr_inner(
         }
         AxisSource::ExternalAxis { load, axis } => {
             Ok(CapacityExpr::Source(CapacitySource::ExternalAxis {
+                scope,
                 load,
                 axis,
             }))
@@ -425,11 +458,13 @@ fn axis_capacity_expr_inner(
                 ))
             })?;
             Ok(CapacityExpr::Source(CapacitySource::ScalarValue {
+                scope,
                 node: source,
             }))
         }
         AxisSource::OpComputed { op, axis } => {
             Ok(CapacityExpr::Source(CapacitySource::OpComputed {
+                scope,
                 op,
                 axis,
             }))
@@ -452,6 +487,7 @@ mod tests {
 
     fn source(node: usize, axis: usize) -> CapacityExpr {
         CapacityExpr::Source(CapacitySource::OpComputed {
+            scope: CapacityScope(0),
             op: crate::dag::NodeId(node),
             axis,
         })
@@ -590,6 +626,34 @@ mod tests {
         let right = capacity_key_for_node(dag.emission(), right)
             .unwrap()
             .into_key_for_test();
+        assert!(left.prove_equal(&right).is_err());
+    }
+
+    #[test]
+    fn exact_source_identity_is_scoped_to_one_verified_program() {
+        fn one_load(name: &str) -> (crate::ownership::VerifiedDagProgram, NodeId) {
+            let mut dag = Dag::new();
+            let load = dag.add_node(
+                RiscOp::Load { name: name.into() },
+                vec![],
+                TensorType {
+                    dims: vec![DimInfo::Named("n".into(), None)],
+                    precision: Prim::F32,
+                },
+                None,
+            );
+            (verified(dag), load)
+        }
+
+        let (left_program, left_node) = one_load("left");
+        let (right_program, right_node) = one_load("right");
+        let left = capacity_key_for_node(left_program.emission(), left_node)
+            .unwrap()
+            .into_key_for_test();
+        let right = capacity_key_for_node(right_program.emission(), right_node)
+            .unwrap()
+            .into_key_for_test();
+
         assert!(left.prove_equal(&right).is_err());
     }
 

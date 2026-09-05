@@ -249,6 +249,46 @@ fn exact_capacity_owner_rejects_the_legacy_key_carrier() {
 }
 
 #[test]
+fn exact_capacity_owner_rejects_an_aliased_legacy_key_carrier() {
+    assert_eq!(
+        kinds(
+            "crates/chelis-ir/src/capacity_key.rs",
+            r#"
+            use crate::dag::DimExpr as LegacyCapacity;
+            fn f(value: &LegacyCapacity) { let _ = value; }
+            "#,
+        ),
+        vec!["legacy-capacity-key-use".to_string()]
+    );
+}
+
+#[test]
+fn exact_capacity_owner_rejects_primitive_products() {
+    assert_eq!(
+        kinds(
+            "crates/chelis-ir/src/capacity_key.rs",
+            "fn bad_capacity(a: u64, b: u64) -> u64 { a * b }",
+        ),
+        vec!["wrapping-capacity-fold".to_string()]
+    );
+}
+
+#[test]
+fn exact_capacity_owner_accepts_only_typed_biguint_products() {
+    assert_eq!(
+        kinds(
+            "crates/chelis-ir/src/capacity_key.rs",
+            r#"
+            fn exact(a: BigUint, b: BigUint) -> BigUint {
+                <BigUint as std::ops::Mul<BigUint>>::mul(a, b)
+            }
+            "#,
+        ),
+        vec!["exact-capacity-arithmetic".to_string()]
+    );
+}
+
+#[test]
 fn element_spellings_and_load_store_templates_stay_disjoint() {
     let spelling = kinds(BACKEND, r#"fn t() -> &'static str { "float" }"#);
     assert_eq!(spelling, vec!["backend-element-spelling".to_string()]);

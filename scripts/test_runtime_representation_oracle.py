@@ -159,17 +159,23 @@ class BaselineTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, oracle.UNCLASSIFIED_FAILURE.code)
         self.assertIn(extra.identity, caught.exception.details)
 
-    def test_only_checked_key_arithmetic_is_final_inside_the_capacity_owner(self) -> None:
+    def test_only_explicit_exact_arithmetic_is_final_inside_the_capacity_owner(self) -> None:
         exact = oracle.InventoryRow(
-            kind="normalized-key-arithmetic",
+            kind="exact-capacity-arithmetic",
             path=oracle.CAPACITY_KEY_OWNER,
-            owner="canonicalize_product",
+            owner="push_product_factor",
             deletion_phase=None,
         )
         saturated = oracle.InventoryRow(
             kind="saturating-capacity-fold",
             path=oracle.CAPACITY_KEY_OWNER,
             owner="bad_fold",
+            deletion_phase=1,
+        )
+        wrapping = oracle.InventoryRow(
+            kind="wrapping-capacity-fold",
+            path=oracle.CAPACITY_KEY_OWNER,
+            owner="bad_product",
             deletion_phase=1,
         )
         sibling = oracle.InventoryRow(
@@ -180,6 +186,7 @@ class BaselineTests(unittest.TestCase):
         )
         self.assertTrue(oracle.owner_module_final_form(exact.kind, exact.path))
         self.assertFalse(oracle.owner_module_final_form(saturated.kind, saturated.path))
+        self.assertFalse(oracle.owner_module_final_form(wrapping.kind, wrapping.path))
         self.assertFalse(oracle.owner_module_final_form(sibling.kind, sibling.path))
         self.assertFalse(
             oracle.owner_module_final_form("legacy-capacity-key-use", oracle.CAPACITY_KEY_OWNER)

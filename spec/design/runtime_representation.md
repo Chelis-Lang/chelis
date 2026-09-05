@@ -230,6 +230,10 @@ opaque proof carrier only through `prove_equal`; they cannot forge a literal or
 symbol, invoke normalization, recover a source by string spelling, or project
 the key into `u64`, `i64`, or `usize`. A crate-private literal accessor may
 borrow the exact `BigUint` only when the complete key is a total literal.
+Every dynamic source atom includes an opaque identity for the verified program
+that owns it. DAG-local node and axis identifiers are meaningful only within
+that scope, so independently verified programs cannot prove equal merely
+because their local identifiers coincide.
 
 Product-only regions flatten, sort, fold arbitrary-precision literals, and
 remove multiplicative identities. They may collapse a zero product only when
@@ -585,6 +589,8 @@ returns:
 - add a fixed-rank device field or narrow one metadata field;
 - handwrite a second ABI field list;
 - register a source file's seam without registering the file;
+- replace the exact arbitrary-precision product with primitive wrapping
+  arithmetic, including through an aliased legacy capacity carrier;
 - use an arithmetic type spelling no vocabulary classifies;
 - change a Bool8 lane spelling to `float`; and
 - make a Bool8 kernel store `1.0f` or omit the device failure flag.

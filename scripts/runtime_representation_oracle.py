@@ -62,7 +62,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "a9361d654a821c124d0c1bc96568c988711a51ff02aa6e42e9e498a7f121872d"
+FREEZE_SHA256 = "7564928f563721b3649a23ba284b5f6f87cf80dc4921e37c6fe7a93777be9d0d"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -165,6 +165,7 @@ DELETION_PHASE_BY_KIND: dict[str, int] = {
     "legacy-capacity-key-use": 1,
     "normalized-key-arithmetic": 1,
     "saturating-capacity-fold": 1,
+    "wrapping-capacity-fold": 1,
     "width-arithmetic": 1,
     "fixed-rank-metadata": 2,
     "narrow-metadata": 2,
@@ -178,7 +179,7 @@ CAPACITY_KEY_OWNER = "crates/chelis-ir/src/capacity_key.rs"
 def owner_module_final_form(kind: str, path: str) -> bool:
     """Whether one scan hit is final by the exact-capacity owner boundary."""
 
-    return kind == "normalized-key-arithmetic" and path == CAPACITY_KEY_OWNER
+    return kind == "exact-capacity-arithmetic" and path == CAPACITY_KEY_OWNER
 
 
 class OracleFailure(RuntimeError):
@@ -546,7 +547,7 @@ def coverage_manifest(probes: Sequence[MutationProbe] | None = None) -> dict[str
             "identity": "kind|path|owner, where owner is the seam's enclosing declaration",
             "expected_success": "every hit is exact active debt from the frozen foundation",
             "owner_module_final_forms": {
-                CAPACITY_KEY_OWNER: ["normalized-key-arithmetic"],
+                CAPACITY_KEY_OWNER: ["exact-capacity-arithmetic"],
             },
             "command": PHASE0_COMMAND,
             "mutations": mutation_manifest(probes),
@@ -798,6 +799,19 @@ def mutate_capacity_owner_saturation(source: str) -> str:
         """#[allow(dead_code)]
 fn runtime_representation_capacity_owner_saturation(value: usize) -> usize {
     value.saturating_mul(2)
+}""",
+    )
+
+
+def mutate_capacity_owner_wrapping_product(source: str) -> str:
+    """Primitive multiplication never becomes exact capacity arithmetic."""
+
+    return _append_probe(
+        source,
+        "runtime_representation_capacity_owner_wrapping_product",
+        """#[allow(dead_code)]
+fn runtime_representation_capacity_owner_wrapping_product(a: u64, b: u64) -> u64 {
+    a * b
 }""",
     )
 
@@ -1236,6 +1250,11 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
             "saturating-capacity-fold",
             CAPACITY_KEY_OWNER,
             mutate_capacity_owner_saturation,
+        ),
+        _probe(
+            "wrapping-capacity-fold",
+            CAPACITY_KEY_OWNER,
+            mutate_capacity_owner_wrapping_product,
         ),
         _probe(
             "legacy-capacity-key-use",

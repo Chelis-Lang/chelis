@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "a9361d654a821c124d0c1bc96568c988711a51ff02aa6e42e9e498a7f121872d",
+  "freeze_sha256": "7564928f563721b3649a23ba284b5f6f87cf80dc4921e37c6fe7a93777be9d0d",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -1103,11 +1103,19 @@
       "deletion_phase": 1
     },
     {
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/eval.rs|owner=dropout_sample",
+      "deletion_phase": 1
+    },
+    {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/eval.rs|owner=eval_tensor_internal",
       "deletion_phase": 1
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/host.rs|owner=infer_app_expr_host_type",
+      "deletion_phase": 1
+    },
+    {
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/host.rs|owner=mono_specialization_symbol",
       "deletion_phase": 1
     },
     {
@@ -2517,12 +2525,20 @@
       "sample": "concrete . saturating_mul (value)"
     },
     {
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/eval.rs|owner=dropout_sample",
+      "sample": "index . wrapping_mul (0x9E37_79B9_7F4A_7C15)"
+    },
+    {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/eval.rs|owner=eval_tensor_internal",
-      "sample": "path_random_counter . saturating_add (1)"
+      "sample": "path_random_counter . wrapping_mul (0x9E37_79B9_7F4A_7C15)"
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/host.rs|owner=infer_app_expr_host_type",
       "sample": "kids . len () . saturating_sub (2)"
+    },
+    {
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/host.rs|owner=mono_specialization_symbol",
+      "sample": "hash . wrapping_mul (0x0000_0100_0000_01b3)"
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/host.rs|owner=try_lower_general_list_grad_app",
@@ -2542,7 +2558,7 @@
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx::lower_builtin_app",
-      "sample": "self . random_counter . saturating_add (1)"
+      "sample": "self . random_counter . wrapping_mul (0x9E37_79B9_7F4A_7C15)"
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx::lower_plain_callable_app",
@@ -2855,7 +2871,7 @@
       "expected_success": "every hit is exact active debt from the frozen foundation",
       "owner_module_final_forms": {
         "crates/chelis-ir/src/capacity_key.rs": [
-          "normalized-key-arithmetic"
+          "exact-capacity-arithmetic"
         ]
       },
       "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
@@ -2973,6 +2989,18 @@
           "expected_kind": "saturating-capacity-fold",
           "path": "crates/chelis-ir/src/capacity_key.rs",
           "implementation_sha256": "1fbfb148c80bfe1048052c9668db73598f585cc0deed9296b1f0666b4ea4bf88",
+          "expected_failure": {
+            "code": "inventory.unclassified",
+            "reason_prefix": "unclassified inventory hit"
+          },
+          "expected_owners": [],
+          "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0"
+        },
+        {
+          "witness_id": "phase0.mutate_capacity_owner_wrapping_product",
+          "expected_kind": "wrapping-capacity-fold",
+          "path": "crates/chelis-ir/src/capacity_key.rs",
+          "implementation_sha256": "b28aae73ac22f89aaf6924078a61397815a8d8618d1e46166724bd71e77c6e31",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"

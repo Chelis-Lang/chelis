@@ -48,6 +48,7 @@ pub const SEAM_KINDS: &[&str] = &[
     "descriptor-field",
     "direct-data-access",
     "dtype-contract",
+    "exact-capacity-arithmetic",
     "fixed-rank-metadata",
     "legacy-capacity-key-use",
     "load-store-template",
@@ -56,6 +57,7 @@ pub const SEAM_KINDS: &[&str] = &[
     "raw-element-pointer",
     "saturating-capacity-fold",
     "width-arithmetic",
+    "wrapping-capacity-fold",
 ];
 
 /// Field names that make a struct a tensor descriptor rather than an ordinary
@@ -142,7 +144,92 @@ const CAPACITY_FOLDS: &[&str] = &[
     "saturating_mul",
     "saturating_pow",
     "saturating_sub",
+    "wrapping_mul",
 ];
+
+fn collect_use_renames(tree: &syn::UseTree, out: &mut Vec<(String, String)>) {
+    match tree {
+        syn::UseTree::Path(path) => collect_use_renames(&path.tree, out),
+        syn::UseTree::Group(group) => {
+            for item in &group.items {
+                collect_use_renames(item, out);
+            }
+        }
+        syn::UseTree::Rename(rename) => {
+            out.push((rename.ident.to_string(), rename.rename.to_string()));
+        }
+        syn::UseTree::Name(_) | syn::UseTree::Glob(_) => {}
+    }
+}
+
+#[derive(Default)]
+struct UseRenameCollector {
+    renames: Vec<(String, String)>,
+}
+
+impl<'ast> Visit<'ast> for UseRenameCollector {
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        collect_use_renames(&item.tree, &mut self.renames);
+        visit::visit_item_use(self, item);
+    }
+}
+
+fn legacy_capacity_aliases(file: &syn::File) -> BTreeSet<String> {
+    let mut collector = UseRenameCollector::default();
+    collector.visit_file(file);
+    let mut aliases = BTreeSet::from(["DimExpr".to_string(), "DimExprKey".to_string()]);
+    loop {
+        let mut changed = false;
+        for (source, alias) in &collector.renames {
+            if aliases.contains(source) {
+                changed |= aliases.insert(alias.clone());
+            }
+        }
+        if !changed {
+            return aliases;
+        }
+    }
+}
+
+fn is_biguint_type(ty: &syn::Type) -> bool {
+    let syn::Type::Path(path) = ty else {
+        return false;
+    };
+    path.qself.is_none()
+        && path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "BigUint")
+}
+
+/// Recognize the deliberately explicit, type-checked exact product spelling.
+/// Any other `Mul::mul` call inside the capacity owner remains a wrapping seam.
+fn explicit_mul_trait_call(call: &syn::ExprCall) -> Option<bool> {
+    let syn::Expr::Path(path) = call.func.as_ref() else {
+        return None;
+    };
+    let mul = path
+        .path
+        .segments
+        .iter()
+        .find(|segment| segment.ident == "Mul")?;
+    if path.path.segments.last()?.ident != "mul" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(arguments) = &mul.arguments else {
+        return Some(false);
+    };
+    let rhs_is_biguint = arguments
+        .args
+        .iter()
+        .any(|argument| matches!(argument, syn::GenericArgument::Type(ty) if is_biguint_type(ty)));
+    let lhs_is_biguint = path
+        .qself
+        .as_ref()
+        .is_some_and(|qself| is_biguint_type(&qself.ty));
+    Some(lhs_is_biguint && rhs_is_biguint)
+}
 
 /// Types whose variants are the dtype/representation contract.
 const DTYPE_CONTRACT_TYPES: &[&str] = &["Repr", "RuntimeDType"];
@@ -454,6 +541,7 @@ struct RustSeamScanner {
     /// The exact-capacity owner admits checked/exact arithmetic but never a
     /// saturating fold.
     exact_capacity_owner: bool,
+    legacy_capacity_aliases: BTreeSet<String>,
     owners: Vec<String>,
     rows: Vec<SeamRow>,
     error: Option<ScanError>,
@@ -825,17 +913,14 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
                 "legacy-capacity-key-use",
                 call.to_token_stream().to_string(),
             );
-        } else if is_fold
-            && self.exact_capacity_owner
-            && matches!(
-                method.as_str(),
-                "saturating_add" | "saturating_mul" | "saturating_pow"
-            )
-        {
+        } else if is_fold && self.exact_capacity_owner && method.starts_with("saturating_") {
             self.push(
                 "saturating-capacity-fold",
                 call.to_token_stream().to_string(),
             );
+        } else if self.exact_capacity_owner && (method == "mul" || method.starts_with("wrapping_"))
+        {
+            self.push("wrapping-capacity-fold", call.to_token_stream().to_string());
         } else if is_fold || method == "normalized_key" {
             self.push(
                 "normalized-key-arithmetic",
@@ -851,7 +936,9 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
     fn visit_path(&mut self, path: &'ast syn::Path) {
         if self.exact_capacity_owner
             && path.segments.iter().any(|segment| {
-                matches!(segment.ident.to_string().as_str(), "DimExpr" | "DimExprKey")
+                let ident = segment.ident.to_string();
+                matches!(ident.as_str(), "DimExpr" | "DimExprKey")
+                    || self.legacy_capacity_aliases.contains(&ident)
             })
         {
             self.push(
@@ -864,6 +951,18 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
 
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
         let rendered = call.func.to_token_stream().to_string();
+        if self.exact_capacity_owner
+            && let Some(exact) = explicit_mul_trait_call(call)
+        {
+            self.push(
+                if exact {
+                    "exact-capacity-arithmetic"
+                } else {
+                    "wrapping-capacity-fold"
+                },
+                call.to_token_stream().to_string(),
+            );
+        }
         if is_width_selecting_path(&rendered) {
             self.push("width-arithmetic", call.to_token_stream().to_string());
         }
@@ -875,9 +974,15 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
         // key. The two surviving bare products live in the module that defines
         // `DimExpr`; gating on that file rather than on a substring of the
         // enclosing function's name keeps the rule structural.
-        if self.defines_capacity_keys && matches!(binary.op, syn::BinOp::Mul(_)) {
+        if self.defines_capacity_keys
+            && matches!(binary.op, syn::BinOp::Mul(_) | syn::BinOp::MulAssign(_))
+        {
             self.push(
-                "normalized-key-arithmetic",
+                if self.exact_capacity_owner {
+                    "wrapping-capacity-fold"
+                } else {
+                    "normalized-key-arithmetic"
+                },
                 binary.to_token_stream().to_string(),
             );
         }
@@ -1147,6 +1252,7 @@ pub fn scan_rust_source(path: &str, source: &str) -> Result<Vec<SeamRow>, ScanEr
         class,
         defines_capacity_keys: path.ends_with("/dag.rs") || path.ends_with("/capacity_key.rs"),
         exact_capacity_owner: path.ends_with("/capacity_key.rs"),
+        legacy_capacity_aliases: legacy_capacity_aliases(&file),
         owners: Vec::new(),
         rows: Vec::new(),
         error: None,
