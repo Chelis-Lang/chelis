@@ -118,6 +118,15 @@ const ALLOWED: &[(&str, usize, &str)] = &[
     // carry a unit extent at the axis, which is what `expand` means under
     // `spec/04-type-system.md` section 4.7.2, so these are same-rank
     // broadcasts and not migration debt.
+    // `expand`'s own runtime behaviour suite. Every row broadcasts a unit
+    // axis, which is what the operation means, and the file exists because
+    // the previous `expand.ch` was entirely rank-increasing and moved to
+    // `insert.ch` (chelis#1277 S2a).
+    (
+        "packages/chelis-std/tests/runtime/expand.ch",
+        6,
+        "the chelis-std runtime suite for the same-rank broadcast",
+    ),
     (
         "crates/chelis-types/tests/issue5_cmp_broadcast_both_forms.rs",
         2,
@@ -125,7 +134,7 @@ const ALLOWED: &[(&str, usize, &str)] = &[
     ),
     (
         "crates/chelis-types/tests/issue_942_inferred_tensor_cast.rs",
-        15,
+        14,
         "unit-extent operands at a legal axis, plus one axis-out-of-range negative row",
     ),
 ];

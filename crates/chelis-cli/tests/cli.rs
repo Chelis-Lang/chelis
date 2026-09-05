@@ -8568,21 +8568,23 @@ fn build_c_to_tensor_2d_nested_literal_matches_eval_output() {
 ///
 /// The typer is canonical and accepts `[count, 1]` (INSERT semantics) for
 /// the linreg-style bias broadcast. The IR evaluator agrees (it consults
-/// the IR node's output type). Previously the host runtime
-/// (`tensor_expand_host` in `chelis-compiler-api`) silently picked the
-/// same-rank "replicate-singleton" branch when `in_shape[axis] == 1`,
-/// producing rank-1 `[count]` instead of the rank-2 `[count, 1]` the
-/// typer accepted — the divergence reproduced from the
-/// `examples/linreg.ch` shape (`expand(b, 0, 64i64)` over a rank-1 bias).
+/// the IR node's output type). Previously one host function served both
+/// spellings and silently picked the same-rank "replicate-singleton"
+/// branch when `in_shape[axis] == 1`, producing rank-1 `[count]` instead
+/// of the rank-2 `[count, 1]` the typer accepted, the divergence
+/// reproduced from the `examples/linreg.ch` shape
+/// (`insert(b, 0, 64i64)` over a rank-1 bias). With one result shape per
+/// operation the two names route to two host functions and neither
+/// guesses (spec/04-type-system.md section 4.7.2).
 #[test]
-fn build_c_linreg_expand_singleton_bias_keeps_rank2_shape() {
+fn build_c_linreg_insert_singleton_bias_keeps_rank2_shape() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("linreg_expand_bias.ch");
     let out_dir = dir.path().join("linreg-expand-bias-out");
-    // Rank-1 [1] bias expanded along axis 0 with count 4 must produce
+    // A rank-1 [1] bias with an axis added at 0 and count 4 must produce
     // rank-2 [4, 1] output. This is the exact shape pattern the
     // `examples/linreg.ch` predict/loss helpers rely on
-    // (`expand(b, 0, 64i64)` where `b: tensor[1, f32]`).
+    // (`insert(b, 0, 64i64)` where `b: tensor[1, f32]`).
     write_file(
         &path,
         "def broadcast_bias(b: tensor[1, f32]) -> tensor[4, 1, f32] = insert(b, 0, 4i64)\n\
@@ -8633,7 +8635,7 @@ fn build_c_linreg_expand_singleton_bias_keeps_rank2_shape() {
     // `chelis test`/`chelis eval` must produce the same shape as the
     // typer (rank-2 [4, 1] with all entries equal to the singleton
     // value). The host-runtime evaluator path is exercised by the
-    // companion test `host_runtime_expand_singleton_input_inserts_not_replicates`
+    // companion test `host_runtime_insert_singleton_input_adds_an_axis`
     // in `chelis-compiler-api`; this CLI test pins the typer + C emit
     // legs of the agreement.
     let status = gcc_compile_generated(&out_dir, "linreg_expand_bias.c");

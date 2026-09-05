@@ -10,8 +10,8 @@ use chelis_types::{
     compare_tensor_scalar, compare_tensors, float_binop, float_scalar_tensor_binop,
     float_tensor_binop, float_tensor_scalar_binop, float_tensor_unop, float_unop, int_binop,
     int_scalar_tensor_binop, int_tensor_binop, int_tensor_scalar_binop, int_tensor_unop, int_unop,
-    reduce_tensor_groups, scalar_from_f64, scalar_from_i64, tensor_from_scalars, types::Prim,
-    uniform_sample,
+    NumericTrap, reduce_tensor_groups, scalar_from_f64, scalar_from_i64, tensor_from_scalars,
+    types::Prim, uniform_sample,
 };
 
 use super::transforms::*;
@@ -1403,26 +1403,21 @@ pub(super) fn tensor_matmul_host(
     RuntimeTensorValue::from_wide("matmul", lhs.precision, vec![m, n], out)
 }
 
-/// Replicate a tensor along a new axis.
+/// `insert`: replicate a tensor along a NEW axis.
 ///
-/// Per the typer (`chelis-types::infer::check_expand_signature`),
-/// `expand(b, axis, count)` is canonically an INSERT operation: it
-/// produces a tensor of shape `[..., count, ...]` with `count` inserted
-/// at position `axis`, where every "slice" along the new axis is a copy
-/// of `b`. The output rank is always `input_rank + 1`.
+/// `insert(b, axis, count)` produces a tensor of shape `[..., count, ...]`
+/// with `count` inserted at position `axis`, where every slice along the new
+/// axis is a copy of `b`. The output rank is always `input_rank + 1`
+/// (`spec/04-type-system.md` section 4.7.2).
 ///
-/// The typer also accepts a same-rank "replace-singleton" interpretation
-/// when the user explicitly annotates the result as same-rank, but the
-/// host runtime has no access to user annotations, so it always picks
-/// the canonical INSERT branch — which is the typer's first-preference
-/// branch at infer.rs:7188 and the only branch synthesized by IR
-/// lowering in `tier2::lower_softmax`/`lower_layer_norm`/`lower_matmul`.
-/// Closes Bucket 4a: previously this function silently picked the
-/// same-rank REPLICATE-singleton branch whenever `in_shape[axis] == 1`,
-/// producing shape `[count]` for `expand([1], 0, count)` while the typer
-/// accepted the `[count, 1]` annotation, leaving `chelis test`/`chelis
-/// eval` disagreeing with `chelis check` on `examples/linreg.ch`.
-pub(super) fn tensor_expand_host(
+/// This function used to serve both names and always inserted, because the
+/// old positional `expand` had two candidate result shapes and the host
+/// runtime cannot see the user annotation that chose between them. Picking
+/// the same-rank branch whenever `in_shape[axis] == 1` is what made
+/// `chelis eval` disagree with `chelis check` on `examples/linreg.ch`
+/// (Bucket 4a). With one shape per operation there is no choice left to guess
+/// at: `insert` lands here and `expand` lands in `tensor_expand_host`.
+pub(super) fn tensor_insert_host(
     builtin: &str,
     tensor: &RuntimeTensorValue,
     axis: usize,
@@ -1449,6 +1444,72 @@ pub(super) fn tensor_expand_host(
         // Drop the inserted axis to recover the input index.
         let mut in_indices = out_indices;
         in_indices.remove(axis);
+        picks.push(indices_to_linear(&in_indices, &in_shape));
+    }
+    // reuse_* contract: expand is element-preserving (section C3).
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+        out_shape,
+        tensor.value.storage().reuse_gather(&picks),
+    )))
+}
+
+/// `expand`: broadcast an existing size-1 axis.
+///
+/// `spec/05-risc-primitives.md` section 2.4.1: "`expand` sets the extent at
+/// `axis` and is well formed only when the operand's extent at `axis` is 1
+/// (the size-1 broadcast of section 2.4's table); the operation is a claim
+/// that the operand's extent at `axis` is 1. [...] A symbolic or runtime
+/// operand extent at `axis` other than 1 fails that claim's runtime extent
+/// guard and traps `Domain`."
+///
+/// The claim is checked here rather than assumed. The host runtime is the
+/// only evaluator a `chelis eval` of a user program reaches, so a claim this
+/// function did not check would execute unguarded on the lane a user is most
+/// likely to run. The guard the compiled and DAG lanes place from the derived
+/// equality classes compares the same values at the same trap kind; this one
+/// fires at the operation because the host interpreter has no entry at which
+/// to hoist it.
+///
+/// The trap renders through [`NumericTrap`], so the line is
+/// `numeric trap: domain in expand at int64` verbatim: the guarded result is
+/// an extent under [05-DIM-1] and not a tensor element, which is why the
+/// dtype slot is `int64` rather than the tensor's precision
+/// (`spec/04-type-system.md` section 4.7).
+pub(super) fn tensor_expand_host(
+    builtin: &str,
+    tensor: &RuntimeTensorValue,
+    axis: usize,
+    count: usize,
+) -> Result<RuntimeTensorValue, String> {
+    let in_shape = tensor.value.shape.clone();
+    let in_rank = in_shape.len();
+    if axis >= in_rank {
+        return Err(format!(
+            "{builtin} axis {axis} out of bounds for rank-{in_rank} tensor (the broadcast \
+             axis must be within the operand's rank)"
+        ));
+    }
+    if in_shape[axis] != 1 {
+        let trap = NumericTrap::Domain {
+            op: "expand",
+            prim: Prim::Int64,
+        };
+        let observed = in_shape[axis];
+        return Err(format!(
+            "{trap}\n  {builtin} claims the operand's extent at axis {axis} is 1, observed \
+             {observed}"
+        ));
+    }
+
+    // BROADCAST: set the size-1 axis to `count`, reading index 0 there.
+    let mut out_shape = in_shape.clone();
+    out_shape[axis] = count;
+
+    let out_numel = tensor_numel(&out_shape);
+    let mut picks = Vec::with_capacity(out_numel);
+    for out_linear in 0..out_numel {
+        let mut in_indices = linear_to_indices(out_linear, &out_shape);
+        in_indices[axis] = 0;
         picks.push(indices_to_linear(&in_indices, &in_shape));
     }
     // reuse_* contract: expand is element-preserving (section C3).

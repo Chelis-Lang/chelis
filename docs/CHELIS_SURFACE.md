@@ -157,14 +157,16 @@ explicitly first. Windowed extents must be statically known on the build path.
 |---|---|---|
 | `reshape` | `(&tensor[D_old,p], shape) -> tensor[D_new,p]` | `reshape(g, old_shape)` |
 | `permute` | `(&tensor[..,p], axes: int32...) -> tensor[..,p]` | `permute(g, inverse_axes)` |
-| `expand` | `(&tensor[D_small,p], axis: int32, size: int64) -> tensor[D_large,p]` | `sum(g, expanded_axes)` |
+| `expand` | `(&tensor[D,p], axis: int32, size: int64) -> tensor[D',p]` | `insert(sum(g, axis), axis, 1i64)` |
 | `insert` | `(&tensor[D,p], axis: int32, size: int64) -> tensor[D_plus,p]` | `sum(g, axis)` |
 | `pad` | `(&tensor[D,p], padding, fill) -> tensor[D',p]` | `shrink(g, inverse_padding)` |
 | `shrink` | `(&tensor[D,p], bounds) -> tensor[D',p]` | `pad(g, inverse_bounds)` |
 | `stride` | `(&tensor[D,p], strides) -> tensor[D',p]` | expand/scatter |
 
-`expand` does not copy data (stride-0 on the expanded axis) and addresses its insert
-point by name; its insert axis must be a compile-time constant.
+`expand` sets an existing size-1 axis to `size` and leaves the rank alone; `insert`
+adds an axis and raises the rank by one. Neither copies data (stride-0 on the
+broadcast axis). The named-axis and four-argument anchored forms belong to `insert`;
+`expand` takes a positional int32 axis, which must be a compile-time constant.
 
 ### 1.6 Memory & effectful — `spec/05` §2.5–2.6
 
