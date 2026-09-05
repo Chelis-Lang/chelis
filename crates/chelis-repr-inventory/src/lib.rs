@@ -191,6 +191,27 @@ fn legacy_capacity_aliases(file: &syn::File) -> BTreeSet<String> {
     }
 }
 
+fn is_multiplicative_ident(ident: &str) -> bool {
+    ident == "mul" || ident == "product" || ident.starts_with("mul_") || ident.ends_with("_mul")
+}
+
+fn multiplication_aliases(file: &syn::File) -> BTreeSet<String> {
+    let mut collector = UseRenameCollector::default();
+    collector.visit_file(file);
+    let mut aliases = BTreeSet::new();
+    loop {
+        let mut changed = false;
+        for (source, alias) in &collector.renames {
+            if is_multiplicative_ident(source) || aliases.contains(source) {
+                changed |= aliases.insert(alias.clone());
+            }
+        }
+        if !changed {
+            return aliases;
+        }
+    }
+}
+
 fn is_biguint_type(ty: &syn::Type) -> bool {
     let syn::Type::Path(path) = ty else {
         return false;
@@ -203,32 +224,41 @@ fn is_biguint_type(ty: &syn::Type) -> bool {
             .is_some_and(|segment| segment.ident == "BigUint")
 }
 
-/// Recognize the deliberately explicit, type-checked exact product spelling.
-/// Any other `Mul::mul` call inside the capacity owner remains a wrapping seam.
-fn explicit_mul_trait_call(call: &syn::ExprCall) -> Option<bool> {
+/// Classify every path-shaped multiplication conservatively. The trait name
+/// may be imported under any alias; only the fully typed `BigUint` UFCS call
+/// can be exact, and every other multiplicative path is a wrapping seam.
+fn multiplicative_call(
+    call: &syn::ExprCall,
+    multiplication_aliases: &BTreeSet<String>,
+) -> Option<bool> {
     let syn::Expr::Path(path) = call.func.as_ref() else {
         return None;
     };
-    let mul = path
-        .path
-        .segments
-        .iter()
-        .find(|segment| segment.ident == "Mul")?;
-    if path.path.segments.last()?.ident != "mul" {
+    let multiplicative = path.path.segments.iter().any(|segment| {
+        let ident = segment.ident.to_string();
+        is_multiplicative_ident(&ident) || multiplication_aliases.contains(&ident)
+    });
+    if !multiplicative {
         return None;
     }
-    let syn::PathArguments::AngleBracketed(arguments) = &mul.arguments else {
-        return Some(false);
-    };
-    let rhs_is_biguint = arguments
-        .args
-        .iter()
-        .any(|argument| matches!(argument, syn::GenericArgument::Type(ty) if is_biguint_type(ty)));
+    let rhs_is_biguint = path.path.segments.iter().any(|segment| {
+        let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+            return false;
+        };
+        arguments.args.iter().any(
+            |argument| matches!(argument, syn::GenericArgument::Type(ty) if is_biguint_type(ty)),
+        )
+    });
     let lhs_is_biguint = path
         .qself
         .as_ref()
         .is_some_and(|qself| is_biguint_type(&qself.ty));
-    Some(lhs_is_biguint && rhs_is_biguint)
+    let calls_trait_mul = path
+        .path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == "mul");
+    Some(calls_trait_mul && lhs_is_biguint && rhs_is_biguint)
 }
 
 /// Types whose variants are the dtype/representation contract.
@@ -542,6 +572,7 @@ struct RustSeamScanner {
     /// saturating fold.
     exact_capacity_owner: bool,
     legacy_capacity_aliases: BTreeSet<String>,
+    multiplication_aliases: BTreeSet<String>,
     owners: Vec<String>,
     rows: Vec<SeamRow>,
     error: Option<ScanError>,
@@ -918,8 +949,12 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
                 "saturating-capacity-fold",
                 call.to_token_stream().to_string(),
             );
-        } else if self.exact_capacity_owner && (method == "mul" || method.starts_with("wrapping_"))
-        {
+        } else if self.exact_capacity_owner && method == "checked_mul" {
+            self.push(
+                "normalized-key-arithmetic",
+                call.to_token_stream().to_string(),
+            );
+        } else if self.exact_capacity_owner && is_multiplicative_ident(&method) {
             self.push("wrapping-capacity-fold", call.to_token_stream().to_string());
         } else if is_fold || method == "normalized_key" {
             self.push(
@@ -946,13 +981,21 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
                 path.to_token_stream().to_string(),
             );
         }
+        if self.exact_capacity_owner
+            && path.segments.iter().any(|segment| {
+                let ident = segment.ident.to_string();
+                is_multiplicative_ident(&ident) || self.multiplication_aliases.contains(&ident)
+            })
+        {
+            self.push("wrapping-capacity-fold", path.to_token_stream().to_string());
+        }
         visit::visit_path(self, path);
     }
 
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
         let rendered = call.func.to_token_stream().to_string();
         if self.exact_capacity_owner
-            && let Some(exact) = explicit_mul_trait_call(call)
+            && let Some(exact) = multiplicative_call(call, &self.multiplication_aliases)
         {
             self.push(
                 if exact {
@@ -962,6 +1005,10 @@ impl<'ast> Visit<'ast> for RustSeamScanner {
                 },
                 call.to_token_stream().to_string(),
             );
+            for argument in &call.args {
+                self.visit_expr(argument);
+            }
+            return;
         }
         if is_width_selecting_path(&rendered) {
             self.push("width-arithmetic", call.to_token_stream().to_string());
@@ -1253,6 +1300,7 @@ pub fn scan_rust_source(path: &str, source: &str) -> Result<Vec<SeamRow>, ScanEr
         defines_capacity_keys: path.ends_with("/dag.rs") || path.ends_with("/capacity_key.rs"),
         exact_capacity_owner: path.ends_with("/capacity_key.rs"),
         legacy_capacity_aliases: legacy_capacity_aliases(&file),
+        multiplication_aliases: multiplication_aliases(&file),
         owners: Vec::new(),
         rows: Vec::new(),
         error: None,

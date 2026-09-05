@@ -62,7 +62,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "7564928f563721b3649a23ba284b5f6f87cf80dc4921e37c6fe7a93777be9d0d"
+FREEZE_SHA256 = "0f235b7fbefce4dda9e360efeb4e83ff8b98b9830e9a92ac89f7152614192d10"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -174,12 +174,17 @@ DELETION_PHASE_BY_KIND: dict[str, int] = {
 }
 
 CAPACITY_KEY_OWNER = "crates/chelis-ir/src/capacity_key.rs"
+CAPACITY_KEY_EXACT_PRODUCT_OWNER = "ExactLiteralProduct::include"
 
 
-def owner_module_final_form(kind: str, path: str) -> bool:
+def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
     """Whether one scan hit is final by the exact-capacity owner boundary."""
 
-    return kind == "exact-capacity-arithmetic" and path == CAPACITY_KEY_OWNER
+    return (
+        kind == "exact-capacity-arithmetic"
+        and path == CAPACITY_KEY_OWNER
+        and owner == CAPACITY_KEY_EXACT_PRODUCT_OWNER
+    )
 
 
 class OracleFailure(RuntimeError):
@@ -420,7 +425,7 @@ def inventory_rows(root: Path) -> tuple[InventoryRow, ...]:
     seen: dict[str, InventoryRow] = {}
     for row in scan_sources(root):
         kind = row["kind"]
-        if owner_module_final_form(kind, row["path"]):
+        if owner_module_final_form(kind, row["path"], row["owner"]):
             continue
         derived = InventoryRow(
             kind=kind,
@@ -547,7 +552,12 @@ def coverage_manifest(probes: Sequence[MutationProbe] | None = None) -> dict[str
             "identity": "kind|path|owner, where owner is the seam's enclosing declaration",
             "expected_success": "every hit is exact active debt from the frozen foundation",
             "owner_module_final_forms": {
-                CAPACITY_KEY_OWNER: ["exact-capacity-arithmetic"],
+                CAPACITY_KEY_OWNER: [
+                    {
+                        "kind": "exact-capacity-arithmetic",
+                        "owner": CAPACITY_KEY_EXACT_PRODUCT_OWNER,
+                    }
+                ],
             },
             "command": PHASE0_COMMAND,
             "mutations": mutation_manifest(probes),
@@ -1522,6 +1532,14 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
         OracleLeg(
             "structural inventory scanner contract",
             ("cargo", "nextest", "run", "-p", "chelis-repr-inventory", "--test", "inventory"),
+        ),
+        OracleLeg(
+            "exact capacity key contract",
+            ("cargo", "test", "--release", "-p", "chelis-ir", "capacity_key::tests::"),
+        ),
+        OracleLeg(
+            "opaque capacity key public surface",
+            ("cargo", "test", "--release", "-p", "chelis-ir", "--doc", "capacity_key"),
         ),
         # [#888] has three witnesses at two levels: the key-level collision in
         # the IR, and the planner-level consequence in each backend that

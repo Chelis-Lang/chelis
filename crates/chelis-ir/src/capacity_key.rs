@@ -34,7 +34,23 @@ use crate::ownership::VerifiedDagView;
 /// use chelis_ir::capacity_key::CapacityKey;
 /// fn narrow(key: CapacityKey) -> usize { key.into() }
 /// ```
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+///
+/// Raw equality would bypass validity-domain proof, so it is not implemented:
+///
+/// ```compile_fail
+/// use chelis_ir::capacity_key::CapacityKey;
+/// fn require_raw_equality<T: PartialEq>() {}
+/// fn bypass() { require_raw_equality::<CapacityKey>(); }
+/// ```
+///
+/// Hashing would provide the same bypass through a map or set key:
+///
+/// ```compile_fail
+/// use chelis_ir::capacity_key::CapacityKey;
+/// fn require_hash<T: std::hash::Hash>() {}
+/// fn bypass() { require_hash::<CapacityKey>(); }
+/// ```
+#[derive(Clone, Debug)]
 pub struct CapacityKey {
     canonical: CanonicalCapacity,
     validity: ValidityDomain,
@@ -208,7 +224,7 @@ enum CapacityExpr {
     Unsupported,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) enum CapacityKeyBuild {
     Exact(CapacityKey),
     NotProven(NotProvenEqual),
@@ -235,6 +251,35 @@ pub(crate) enum CapacityKeyBuildError {
 struct CanonicalParts {
     canonical: CanonicalCapacity,
     obligations: Vec<CapacityPredicate>,
+}
+
+/// Exact arbitrary-precision product state.
+///
+/// Keeping the accumulator behind this type makes the accepted arithmetic
+/// owner explicit: capacity canonicalization can contribute only a `BigUint`
+/// factor, and only this method performs the product.
+struct ExactLiteralProduct(BigUint);
+
+impl ExactLiteralProduct {
+    fn one() -> Self {
+        Self(BigUint::from(1u8))
+    }
+
+    fn include(&mut self, factor: BigUint) {
+        self.0 = <BigUint as std::ops::Mul<BigUint>>::mul(self.0.clone(), factor);
+    }
+
+    fn is_zero(&self) -> bool {
+        self.0 == BigUint::from(0u8)
+    }
+
+    fn is_one(&self) -> bool {
+        self.0 == BigUint::from(1u8)
+    }
+
+    fn into_biguint(self) -> BigUint {
+        self.0
+    }
 }
 
 fn canonicalize(expression: CapacityExpr) -> Result<Option<CanonicalParts>, CapacityKeyBuildError> {
@@ -298,7 +343,7 @@ fn canonicalize(expression: CapacityExpr) -> Result<Option<CanonicalParts>, Capa
 fn canonicalize_product(
     factors: Vec<CapacityExpr>,
 ) -> Result<Option<CanonicalParts>, CapacityKeyBuildError> {
-    let mut literal = BigUint::from(1u8);
+    let mut literal = ExactLiteralProduct::one();
     let mut canonical_factors = Vec::new();
     let mut obligations = Vec::new();
 
@@ -310,21 +355,19 @@ fn canonicalize_product(
         push_product_factor(parts.canonical, &mut literal, &mut canonical_factors);
     }
 
-    let zero = BigUint::from(0u8);
-    let one = BigUint::from(1u8);
-    if literal == zero && obligations.is_empty() {
+    if literal.is_zero() && obligations.is_empty() {
         return Ok(Some(CanonicalParts {
-            canonical: CanonicalCapacity::Literal(zero),
+            canonical: CanonicalCapacity::Literal(literal.into_biguint()),
             obligations,
         }));
     }
-    if literal != one || canonical_factors.is_empty() {
-        canonical_factors.push(CanonicalCapacity::Literal(literal));
+    if !literal.is_one() || canonical_factors.is_empty() {
+        canonical_factors.push(CanonicalCapacity::Literal(literal.into_biguint()));
     }
     canonical_factors.sort();
 
     let canonical = match canonical_factors.len() {
-        0 => CanonicalCapacity::Literal(one),
+        0 => CanonicalCapacity::Literal(BigUint::from(1u8)),
         1 => canonical_factors
             .pop()
             .expect("one canonical capacity factor"),
@@ -338,12 +381,12 @@ fn canonicalize_product(
 
 fn push_product_factor(
     factor: CanonicalCapacity,
-    literal: &mut BigUint,
+    literal: &mut ExactLiteralProduct,
     factors: &mut Vec<CanonicalCapacity>,
 ) {
     match factor {
         CanonicalCapacity::Literal(value) => {
-            *literal = <BigUint as std::ops::Mul<BigUint>>::mul(literal.clone(), value);
+            literal.include(value);
         }
         CanonicalCapacity::Product(nested) => {
             for factor in nested {
@@ -585,10 +628,10 @@ mod tests {
 
     #[test]
     fn static_zero_divisor_is_rejected_and_unsupported_is_conservative() {
-        assert_eq!(
+        assert!(matches!(
             CapacityKey::from_typed_expr(quotient(literal(1), literal(0))),
             Err(CapacityKeyBuildError::StaticZeroDivisor)
-        );
+        ));
         assert!(matches!(
             CapacityKey::from_typed_expr(CapacityExpr::Unsupported).unwrap(),
             CapacityKeyBuild::NotProven(_)

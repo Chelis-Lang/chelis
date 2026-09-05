@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "7564928f563721b3649a23ba284b5f6f87cf80dc4921e37c6fe7a93777be9d0d",
+  "freeze_sha256": "0f235b7fbefce4dda9e360efeb4e83ff8b98b9830e9a92ac89f7152614192d10",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -2871,7 +2871,10 @@
       "expected_success": "every hit is exact active debt from the frozen foundation",
       "owner_module_final_forms": {
         "crates/chelis-ir/src/capacity_key.rs": [
-          "exact-capacity-arithmetic"
+          {
+            "kind": "exact-capacity-arithmetic",
+            "owner": "ExactLiteralProduct::include"
+          }
         ]
       },
       "command": "uv run --managed-python --python 3.11 --no-project python scripts/runtime_representation_oracle.py --phase 0",
@@ -3389,6 +3392,14 @@
       {
         "name": "structural inventory scanner contract",
         "command": "cargo nextest run -p chelis-repr-inventory --test inventory"
+      },
+      {
+        "name": "exact capacity key contract",
+        "command": "cargo test --release -p chelis-ir capacity_key::tests::"
+      },
+      {
+        "name": "opaque capacity key public surface",
+        "command": "cargo test --release -p chelis-ir --doc capacity_key"
       },
       {
         "name": "capacity collision key-level release reproducer",

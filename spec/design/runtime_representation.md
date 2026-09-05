@@ -206,7 +206,7 @@ Neither may use a saturating or wrapping integer.
 complete multiplication/division vocabulary:
 
 ```rust
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct CapacityKey { /* private canonical tree and validity domain */ }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -230,6 +230,9 @@ opaque proof carrier only through `prove_equal`; they cannot forge a literal or
 symbol, invoke normalization, recover a source by string spelling, or project
 the key into `u64`, `i64`, or `usize`. A crate-private literal accessor may
 borrow the exact `BigUint` only when the complete key is a total literal.
+`CapacityKey` implements neither raw equality nor hashing: those traits would
+bypass the validity-domain check and let a pending quotient compare equal to
+itself without a proof. `prove_equal` is the only equality surface.
 Every dynamic source atom includes an opaque identity for the verified program
 that owns it. DAG-local node and axis identifiers are meaningful only within
 that scope, so independently verified programs cannot prove equal merely
@@ -241,6 +244,9 @@ every factor whose key would be discarded is statically total or its validity
 predicates have been discharged. Thus `0 * symbol` may become zero, but
 `0 * (1 / n)` retains the partial quotient and remains distinct from zero
 unless `n != 0` and `n` divides 1 have both been proved.
+The literal fold is owned by one private exact-product carrier whose state and
+input are both `BigUint`; no free primitive accumulator or alternate final-form
+arithmetic owner is admitted.
 Division is a partial exact-integer operation, not rational arithmetic, so an
 `ExactQuotient` remains an ordered tree and is a barrier to product flattening.
 The constructor rejects a statically zero divisor and folds a literal quotient
@@ -590,7 +596,8 @@ returns:
 - handwrite a second ABI field list;
 - register a source file's seam without registering the file;
 - replace the exact arbitrary-precision product with primitive wrapping
-  arithmetic, including through an aliased legacy capacity carrier;
+  arithmetic;
+- recover capacity through a direct or aliased legacy capacity carrier;
 - use an arithmetic type spelling no vocabulary classifies;
 - change a Bool8 lane spelling to `float`; and
 - make a Bool8 kernel store `1.0f` or omit the device failure flag.

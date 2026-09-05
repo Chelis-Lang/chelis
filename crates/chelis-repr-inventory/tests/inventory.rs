@@ -264,13 +264,22 @@ fn exact_capacity_owner_rejects_an_aliased_legacy_key_carrier() {
 
 #[test]
 fn exact_capacity_owner_rejects_primitive_products() {
-    assert_eq!(
-        kinds(
-            "crates/chelis-ir/src/capacity_key.rs",
-            "fn bad_capacity(a: u64, b: u64) -> u64 { a * b }",
-        ),
-        vec!["wrapping-capacity-fold".to_string()]
-    );
+    for source in [
+        "fn binary(a: u64, b: u64) -> u64 { a * b }",
+        "fn associated(a: u64, b: u64) -> u64 { u64::wrapping_mul(a, b) }",
+        r#"
+        fn aliased_trait(a: u64, b: u64) -> u64 {
+            use std::ops::Mul as Product;
+            <u64 as Product<u64>>::mul(a, b)
+        }
+        "#,
+    ] {
+        assert_eq!(
+            kinds("crates/chelis-ir/src/capacity_key.rs", source),
+            vec!["wrapping-capacity-fold".to_string()],
+            "{source}"
+        );
+    }
 }
 
 #[test]

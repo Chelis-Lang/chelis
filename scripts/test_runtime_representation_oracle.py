@@ -163,7 +163,13 @@ class BaselineTests(unittest.TestCase):
         exact = oracle.InventoryRow(
             kind="exact-capacity-arithmetic",
             path=oracle.CAPACITY_KEY_OWNER,
-            owner="push_product_factor",
+            owner="ExactLiteralProduct::include",
+            deletion_phase=None,
+        )
+        exact_wrong_owner = oracle.InventoryRow(
+            kind="exact-capacity-arithmetic",
+            path=oracle.CAPACITY_KEY_OWNER,
+            owner="unreviewed_product",
             deletion_phase=None,
         )
         saturated = oracle.InventoryRow(
@@ -184,12 +190,25 @@ class BaselineTests(unittest.TestCase):
             owner="normalized_key",
             deletion_phase=1,
         )
-        self.assertTrue(oracle.owner_module_final_form(exact.kind, exact.path))
-        self.assertFalse(oracle.owner_module_final_form(saturated.kind, saturated.path))
-        self.assertFalse(oracle.owner_module_final_form(wrapping.kind, wrapping.path))
-        self.assertFalse(oracle.owner_module_final_form(sibling.kind, sibling.path))
+        self.assertTrue(oracle.owner_module_final_form(exact.kind, exact.path, exact.owner))
         self.assertFalse(
-            oracle.owner_module_final_form("legacy-capacity-key-use", oracle.CAPACITY_KEY_OWNER)
+            oracle.owner_module_final_form(
+                exact_wrong_owner.kind, exact_wrong_owner.path, exact_wrong_owner.owner
+            )
+        )
+        self.assertFalse(
+            oracle.owner_module_final_form(saturated.kind, saturated.path, saturated.owner)
+        )
+        self.assertFalse(
+            oracle.owner_module_final_form(wrapping.kind, wrapping.path, wrapping.owner)
+        )
+        self.assertFalse(
+            oracle.owner_module_final_form(sibling.kind, sibling.path, sibling.owner)
+        )
+        self.assertFalse(
+            oracle.owner_module_final_form(
+                "legacy-capacity-key-use", oracle.CAPACITY_KEY_OWNER, "legacy"
+            )
         )
 
 
