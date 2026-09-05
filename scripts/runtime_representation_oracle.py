@@ -62,7 +62,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "0f235b7fbefce4dda9e360efeb4e83ff8b98b9830e9a92ac89f7152614192d10"
+FREEZE_SHA256 = "a54080ea7b158bef9b636db11665d7eebd394471a244968ab0eb9cf4ddf6f79e"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -133,6 +133,7 @@ INVENTORY_SOURCES: tuple[str, ...] = (
     "crates/chelis-ir/src/ownership/lower.rs",
     "crates/chelis-ir/src/ownership/mod.rs",
     "crates/chelis-ir/src/ownership/render.rs",
+    "crates/chelis-ir/src/ownership/storage.rs",
     "crates/chelis-ir/src/ownership/tests.rs",
     "crates/chelis-ir/src/ownership/verify.rs",
     "crates/chelis-ir/src/pipeline.rs",

@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "0f235b7fbefce4dda9e360efeb4e83ff8b98b9830e9a92ac89f7152614192d10",
+  "freeze_sha256": "a54080ea7b158bef9b636db11665d7eebd394471a244968ab0eb9cf4ddf6f79e",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -435,27 +435,27 @@
       "deletion_phase": 4
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_binary",
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan , 'dag >::emit_binary",
       "deletion_phase": 4
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_matmul",
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan , 'dag >::emit_matmul",
       "deletion_phase": 4
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_reduce",
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan , 'dag >::emit_reduce",
       "deletion_phase": 4
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_root_writeback",
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan , 'dag >::emit_root_writeback",
       "deletion_phase": 4
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_store",
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan , 'dag >::emit_store",
       "deletion_phase": 4
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_unary",
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan , 'dag >::emit_unary",
       "deletion_phase": 4
     },
     {
@@ -1015,23 +1015,23 @@
       "deletion_phase": 4
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_binary",
+      "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan , 'dag >::emit_binary",
       "deletion_phase": 4
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_reduce",
+      "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan , 'dag >::emit_reduce",
       "deletion_phase": 4
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_root_writeback",
+      "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan , 'dag >::emit_root_writeback",
       "deletion_phase": 4
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_store",
+      "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan , 'dag >::emit_store",
       "deletion_phase": 4
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_unary",
+      "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan , 'dag >::emit_unary",
       "deletion_phase": 4
     },
     {
@@ -1152,6 +1152,10 @@
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/ownership/last_use.rs|owner=definition_orders",
+      "deletion_phase": 1
+    },
+    {
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/ownership/verify.rs|owner=owner_byte_cost",
       "deletion_phase": 1
     },
     {
@@ -1383,7 +1387,11 @@
       "deletion_phase": 1
     },
     {
-      "identity": "kind=width-arithmetic|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::peak_device_bytes",
+      "identity": "kind=width-arithmetic|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan , 'dag >::peak_device_bytes",
+      "deletion_phase": 1
+    },
+    {
+      "identity": "kind=width-arithmetic|path=crates/chelis-ir/src/ownership/verify.rs|owner=owner_byte_cost",
       "deletion_phase": 1
     },
     {
@@ -1857,27 +1865,27 @@
       "sample": "float"
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_binary",
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan , 'dag >::emit_binary",
       "sample": "uint32_t n_{} = {n}u;"
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_matmul",
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan , 'dag >::emit_matmul",
       "sample": "F1: Metal-backend BlasMatmul currently supports only float precisions (f32/f16/bf16); node {} has..."
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_reduce",
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan , 'dag >::emit_reduce",
       "sample": "uint32_t n_{} = {n}u;"
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_root_writeback",
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan , 'dag >::emit_root_writeback",
       "sample": "(int64_t){d}"
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_store",
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan , 'dag >::emit_store",
       "sample": "(int64_t){d}"
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_unary",
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan , 'dag >::emit_unary",
       "sample": "Metal emit unary node {}: transcendental op {:?} requires float precision; got `{}`. See spec/04-..."
     },
     {
@@ -2437,23 +2445,23 @@
       "sample": "{{ float *p = (float*)[{buf} contents]; for (uint i = 0; i < {n}u; ++i) p[i] = {value_lit}; }}"
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_binary",
+      "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan , 'dag >::emit_binary",
       "sample": "{{ __unsafe_unretained id<MTLBuffer> bufs[3] = {{ {}, {}, {out_buf} }}; chelis_metal_launch({pso_..."
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_reduce",
+      "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan , 'dag >::emit_reduce",
       "sample": "{{ __unsafe_unretained id<MTLBuffer> bufs[2] = {{ {}, {out_buf} }}; chelis_metal_launch({pso_var}..."
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_root_writeback",
+      "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan , 'dag >::emit_root_writeback",
       "sample": "{{ int64_t shape_{idx}[{}] = {{ {shape_lit} }};"
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_store",
+      "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan , 'dag >::emit_store",
       "sample": "{{ int64_t shape_store_{idx}[{}] = {{ {shape_lit} }};"
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::emit_unary",
+      "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan , 'dag >::emit_unary",
       "sample": "{{ __unsafe_unretained id<MTLBuffer> bufs[2] = {{ {}, {out_buf} }}; chelis_metal_launch({pso_var}..."
     },
     {
@@ -2575,6 +2583,10 @@
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/ownership/last_use.rs|owner=definition_orders",
       "sample": "operation . id . 0 . saturating_add (1)"
+    },
+    {
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/ownership/verify.rs|owner=owner_byte_cost",
+      "sample": "elements . checked_mul (value)"
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/specialize.rs|owner=dims_equivalent",
@@ -2805,8 +2817,12 @@
       "sample": "sizeof(families)"
     },
     {
-      "identity": "kind=width-arithmetic|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter::peak_device_bytes",
+      "identity": "kind=width-arithmetic|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan , 'dag >::peak_device_bytes",
       "sample": "p . elem_size ()"
+    },
+    {
+      "identity": "kind=width-arithmetic|path=crates/chelis-ir/src/ownership/verify.rs|owner=owner_byte_cost",
+      "sample": "dtype . byte_width ()"
     },
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-runtime/include/chelis_runtime.h|owner=chelis_bf16_to_f32",
@@ -2850,7 +2866,7 @@
       "artifact": "the frozen INVENTORY_SOURCES file list",
       "enumerator": "chelis-repr-inventory: syn for Rust; clang's front end under fixed target lanes, a committed stub SDK, and a scrubbed environment for C and Objective-C headers, classified with the capacity census's closed type-word lists",
       "universe": {
-        "registered_sources": 67,
+        "registered_sources": 68,
         "roots": [
           "crates/chelis-runtime/src/**/*.rs",
           "crates/chelis-runtime/include/**/*.h",
