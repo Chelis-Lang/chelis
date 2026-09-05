@@ -1311,9 +1311,12 @@ impl LiveByteBound {
 #[derive(Debug)]
 pub struct VerifiedLiveSetBound {
     max_live_heap_owners: usize,
-    #[expect(
-        dead_code,
-        reason = "Phase 3 physical-storage and ledger handoff awaits chelis#893 CapacityKey"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Phase 3 physical-storage and ledger handoff awaits chelis#893 CapacityKey"
+        )
     )]
     max_live_bytes: LiveByteBound,
 }
