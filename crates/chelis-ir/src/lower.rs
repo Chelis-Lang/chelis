@@ -12812,6 +12812,16 @@ impl LowerCtx {
         let new_precision = if let Some(prim) = Self::try_extract_prim(&elems[3]) {
             // Handle (t-prim {} name) form.
             prim
+        } else if let Some(var_name) = Self::scalar_precision_var_name(&elems[3])
+            && let Some(prim) = self.prec_substitutions.get(&var_name).copied()
+        {
+            // [04-NUM-14] / section 5.8.1: an inlined bounded-binder cast
+            // reaches this lane with a concrete call-site substitution even
+            // though its target remains spelled `(t-var {} p)` in Deep. Use
+            // that installed monomorphization instead of misclassifying the
+            // target as a non-primitive expression. An unbound `t-var` still
+            // falls through to the deliberate [04-DTYPE-1] rejection below.
+            prim
         } else if let Expr::Atom(Atom::Name(pname), _) = &elems[3] {
             // Bare-symbol spelling (backward compat): parse or raise.
             match Prim::parse_name(pname) {

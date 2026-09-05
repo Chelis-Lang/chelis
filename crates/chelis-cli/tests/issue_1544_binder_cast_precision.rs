@@ -96,6 +96,12 @@ const TENSOR_SCALE: &str = "module Bind.Main\n\
      def at_f64() -> tensor[1, f64] = scale(to_tensor([3.0f64]))\n\
      def main() -> tensor[1, f64] = at_f64()\n";
 
+const TENSOR_BINDER_SCALE: &str = "module Bind.Main\n\
+     export (main)\n\
+     def scale[p: Float](x: tensor[3, p]) -> tensor[3, p] = mul(x, expand(scalar_to_tensor(cast(0.1, p)), cast(0, int32), cast(3, int64)))\n\
+     def at_f64() -> tensor[3, f64] = scale(to_tensor([3.0f64, 3.0f64, 3.0f64]))\n\
+     def main() -> tensor[3, f64] = at_f64()\n";
+
 #[test]
 fn scalar_binder_cast_computes_at_each_instantiation() {
     for (name, source) in [
@@ -144,6 +150,32 @@ fn compiled_c_executes_the_same_exact_value_as_eval() {
         .expect("run compiled program");
     assert_success(&executed, "compiled program");
     let expected = format!("at_f64 = {EXACT_F64}");
+    let compiled = String::from_utf8_lossy(&executed.stdout);
+    assert!(
+        eval.contains(&expected) && compiled.contains(&expected),
+        "eval={eval} compiled={compiled}"
+    );
+}
+
+#[test]
+fn compiled_c_tensor_binder_cast_executes_the_same_exact_value_as_eval() {
+    let (_dir, root) = make_package("tensor-cast-build", TENSOR_BINDER_SCALE);
+    let eval = check_then_eval(&root);
+    let build = run(
+        &root,
+        &["build", "src/main.ch", "--target", "c", "--output", "out"],
+    );
+    assert_success(&build, "build");
+    let emitted = fs::read_to_string(root.join("out/main.c")).expect("emitted C");
+    assert!(emitted.contains("0x3fb999999999999a"), "{emitted}");
+    let linked = common::link_generated(&root.join("out"), "main.c", "tensor-binder-cast");
+    assert!(linked.success(), "link failed: {linked}");
+    let executed = StdCommand::new(root.join("out/tensor-binder-cast"))
+        .output()
+        .expect("run compiled program");
+    assert_success(&executed, "compiled program");
+    let expected =
+        format!("at_f64 = tensor(shape=[3], data=[{EXACT_F64}, {EXACT_F64}, {EXACT_F64}])");
     let compiled = String::from_utf8_lossy(&executed.stdout);
     assert!(
         eval.contains(&expected) && compiled.contains(&expected),
