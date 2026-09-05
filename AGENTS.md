@@ -1033,6 +1033,35 @@ actually made.
   so the fleet's live total is visible to the user without anyone having to ask for
   it.
 
+### Briefs
+
+- A brief that carries facts the orchestrator has already established says so: that
+  they are verified, what head or artifact they were verified against, and that the
+  agent must not re-derive them. It also names what the agent still has to establish
+  for itself, so "trust the brief" does not read as "trust everything". Without those
+  two lines an agent re-reads the sources behind the brief, and the orchestrator never
+  sees that it happened. Re-spawning is where this bites hardest: a brief reissued
+  byte-identically to a replacement agent has usually lost the exploration the
+  original spawn was built on, and the replacement pays for it again.
+- A brief longer than a few paragraphs is written to a file and passed as a pointer.
+  The prompt itself stays short enough to read: the pointer, the task, and the
+  delivery channel. Three properties follow, and the third is not obvious. A brief
+  that outlives the turn can be re-sent verbatim when an agent is killed or cut off,
+  so the work resumes without being re-authored from memory. A shared common-rules
+  file lets one set of verified facts serve every brief in a fleet without being
+  retyped into each. And inter-agent messages truncate at roughly four kilobytes,
+  silently, so a brief or a report pasted inline costs one round trip to discover the
+  truncation and another to resend.
+- The brief file outlives both the agent that reads it and the session that wrote it,
+  or the resume property above is imaginary. Put it where both parties can still read
+  it after either one restarts, and pass an absolute path. A brief parked in a
+  per-session scratchpad leaves its reader holding a pointer to nothing the moment the
+  author is killed, which is the failure the file was supposed to survive.
+- Reports come back the same way, and "the same way" is specific: the agent writes the
+  report to a file and replies with the absolute path and a one-line summary, and that
+  reply is the delivery. Writing the file and saying nothing is not delivery, as the
+  first rule in this section already says.
+
 ## Style Gate
 
 `chelis build`, `chelis check`, `chelis validate`, and
