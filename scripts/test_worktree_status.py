@@ -73,9 +73,19 @@ def _now():
     return FIXED_NOW
 
 
-def _rev_parse_output(worktree=PROBED, head=HEAD_SHA, branch="agent/x", linked=True):
-    git_dir = f"/repo/.git/worktrees/probed" if linked else "/repo/.git"
-    return "\n".join([git_dir, "/repo/.git", worktree, head, branch]) + "\n"
+def _rev_parse_output(
+    worktree=PROBED, head=HEAD_SHA, branch="agent/x", linked=True, common=None
+):
+    """`--absolute-git-dir`, `--git-common-dir`, `--show-toplevel`, HEAD, branch.
+
+    `common` defaults to the ABSOLUTE spelling, but git answers a bare
+    relative `.git` for a primary checkout probed at its root, which is what
+    `common=".git"` reproduces.
+    """
+    git_dir = "/repo/.git/worktrees/probed" if linked else f"{worktree}/.git"
+    if common is None:
+        common = "/repo/.git" if linked else f"{worktree}/.git"
+    return "\n".join([git_dir, common, worktree, head, branch]) + "\n"
 
 
 def _porcelain(*entries: str) -> str:
@@ -349,11 +359,14 @@ class DirtyStateTests(unittest.TestCase):
 
     def test_index_staleness_failure_does_not_make_the_tree_unknown(self):
         """The dirty verdict does not depend on index freshness, so losing
-        that source must not change it."""
+        that source is recorded as degraded and must not withhold FREE."""
         state = _collect(query=FakeGit(fail={"ls-files": "boom"}))
         self.assertEqual(state["dirty"]["index_stale"], [])
-        self.assertEqual(state["verdict"], status.VERDICT_UNKNOWN)
         self.assertTrue(state["dirty"]["clean"])
+        self.assertEqual(state["verdict"], status.VERDICT_FREE)
+        self.assertEqual(state["unknown"], [])
+        self.assertIn("index-freshness", [i["source"] for i in state["degraded"]])
+        self.assertIn("verdict unaffected", status.render_human(state))
 
 
 class PorcelainParserTests(unittest.TestCase):
@@ -478,6 +491,76 @@ class GitOperationTests(unittest.TestCase):
             self.assertEqual(str(path.parent), "/repo/.git/worktrees/probed")
 
 
+class GitFactsAnchoringTests(unittest.TestCase):
+    """`--git-common-dir` is reported relative to the directory git RAN in.
+
+    Anchoring it to `--absolute-git-dir` instead builds `<root>/.git/.git`,
+    which never equals the git dir, so every primary checkout would be
+    labelled linked and the JSON would carry a path that does not exist.
+    """
+
+    def test_relative_common_dir_is_anchored_to_the_probed_worktree(self):
+        facts = status.git_facts(
+            Path(PROBED),
+            query=FakeGit(
+                rev_parse=_rev_parse_output(linked=False, common=".git")
+            ),
+        )
+        self.assertEqual(facts["git_common_dir"], f"{PROBED}/.git")
+        self.assertFalse(facts["linked"])
+
+    def test_a_primary_checkout_is_not_labelled_linked(self):
+        state = _collect(
+            query=FakeGit(rev_parse=_rev_parse_output(linked=False, common=".git"))
+        )
+        self.assertIn("(main,", status.render_human(state))
+        self.assertNotIn("(linked,", status.render_human(state))
+
+    def test_a_linked_worktree_is_still_labelled_linked(self):
+        state = _collect(query=FakeGit(rev_parse=_rev_parse_output(linked=True)))
+        self.assertIn("(linked,", status.render_human(state))
+
+
+class RootAnchoringTests(unittest.TestCase):
+    """Everything below the git facts is scoped by path, so a caller who
+    passes a subdirectory must be resolved to the repository root rather than
+    trusted. Without this, probing `<root>/subdir` reports FREE while a gate
+    runs at the root."""
+
+    def test_a_subdirectory_is_resolved_to_the_repository_root(self):
+        state = _collect(
+            worktree=Path(f"{PROBED}/scripts"),
+            query=FakeGit(rev_parse=_rev_parse_output(worktree=PROBED)),
+        )
+        self.assertEqual(state["worktree"], PROBED)
+        self.assertEqual(state["probed_path"], f"{PROBED}/scripts")
+        self.assertIn("resolved from the probed path", status.render_human(state))
+
+    def test_a_gate_at_the_root_makes_a_probed_subdirectory_busy(self):
+        state = _collect(
+            worktree=Path(f"{PROBED}/scripts"),
+            query=FakeGit(rev_parse=_rev_parse_output(worktree=PROBED)),
+            snapshot=lambda: [
+                _proc(31, 1, f"python3 {PROBED}/scripts/gate.py --local")
+            ],
+        )
+        self.assertEqual(state["verdict"], status.VERDICT_BUSY)
+
+    def test_the_lease_is_matched_against_the_root_not_the_probed_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lease = _RealLease(Path(tmp), _holder(worktree=PROBED))
+            try:
+                state = _collect(
+                    worktree=Path(f"{PROBED}/scripts"),
+                    environ={gate.LEASE_DIR_ENV: tmp},
+                    query=FakeGit(rev_parse=_rev_parse_output(worktree=PROBED)),
+                )
+            finally:
+                lease.close()
+        self.assertTrue(state["lease"]["held_by_this_worktree"])
+        self.assertEqual(state["verdict"], status.VERDICT_BUSY)
+
+
 class LastGateReportTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -523,13 +606,18 @@ class LastGateReportTests(unittest.TestCase):
         state = _collect(environ=self.environ)
         self.assertEqual(state["verdict"], status.VERDICT_FREE)
 
-    def test_corrupt_report_is_recorded_not_fatal(self):
+    def test_corrupt_report_is_degraded_and_never_withholds_free(self):
+        """A SIGKILLed gate can leave a truncated summary behind and nothing
+        cleans it up, so history that cannot be read must not pin the verdict
+        at UNKNOWN for as long as the file exists."""
         (self.tmp / "20260905T020000.0Z-2-local.json").write_text(
             "{ truncated", encoding="utf-8"
         )
         state = _collect(environ=self.environ)
         self.assertIsNone(state["last_gate_report"])
-        self.assertIn("gate-reports", [item["source"] for item in state["unknown"]])
+        self.assertEqual(state["unknown"], [])
+        self.assertIn("gate-reports", [i["source"] for i in state["degraded"]])
+        self.assertEqual(state["verdict"], status.VERDICT_FREE)
 
 
 class ReadOnlyDisciplineTests(unittest.TestCase):
@@ -701,6 +789,42 @@ class RealRepositoryTests(unittest.TestCase):
         self.assertEqual(state["verdict"], status.VERDICT_FREE)
         self.assertEqual(before, after)
         self.assertIn("a.txt", state["dirty"]["index_stale"])
+
+    def test_a_real_primary_checkout_is_not_labelled_linked(self):
+        """The fakes could drift from what git actually prints, so the
+        anchoring fix is also checked against real `rev-parse` output."""
+        facts = status.git_facts(self.root)
+        self.assertFalse(facts["linked"])
+        self.assertTrue(Path(facts["git_common_dir"]).is_dir())
+        self.assertEqual(
+            Path(facts["git_common_dir"]).resolve(),
+            (self.root / ".git").resolve(),
+        )
+
+    def test_a_real_linked_worktree_is_labelled_linked(self):
+        linked = Path(self._tmp.name) / "linked"
+        self._git("worktree", "add", "-q", "-b", "side", str(linked))
+        self.addCleanup(
+            lambda: subprocess.run(
+                ["git", "-C", str(self.root), "worktree", "remove", "--force", str(linked)],
+                check=False,
+                capture_output=True,
+            )
+        )
+        facts = status.git_facts(linked)
+        self.assertTrue(facts["linked"])
+        self.assertEqual(
+            Path(facts["git_common_dir"]).resolve(), (self.root / ".git").resolve()
+        )
+
+    def test_a_real_subdirectory_resolves_to_the_repository_root(self):
+        sub = self.root / "nested" / "deeper"
+        sub.mkdir(parents=True)
+        (sub / "c.txt").write_text("x\n", encoding="utf-8")
+        state = status.collect(sub, environ=self.environ, now=_now)
+        self.assertEqual(Path(state["worktree"]).resolve(), self.root.resolve())
+        self.assertEqual(state["dirty"]["untracked"], ["nested/deeper/c.txt"])
+        self.assertEqual(state["verdict"], status.VERDICT_NOT_CLEAN)
 
     def test_probing_a_directory_that_is_not_a_repository_is_unknown(self):
         outside = Path(self._tmp.name) / "not-a-repo"

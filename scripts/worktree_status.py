@@ -299,7 +299,13 @@ def git_facts(worktree: Path, *, query: Query = git_query) -> dict:
     git_dir, common_dir, toplevel, head, branch = lines[:5]
     common = Path(common_dir)
     if not common.is_absolute():
-        common = (Path(git_dir) / common).resolve()
+        # `--git-common-dir` is reported relative to the directory git RAN in,
+        # which is the `-C` path, not relative to `--absolute-git-dir`. A
+        # primary checkout probed at its root answers a bare `.git`, so
+        # anchoring to the git dir would build `<root>/.git/.git`, a path that
+        # does not exist, and every primary checkout would then be labelled
+        # linked.
+        common = (worktree / common).resolve()
     return {
         "git_dir": git_dir,
         "git_common_dir": str(common),
@@ -457,11 +463,11 @@ def dirty_state(
 ) -> tuple[dict, list[dict]]:
     """The tracked/untracked/unmerged split, plus the index-freshness note.
 
-    Returns the state and a list of failed evidence sources. A failure to
-    read index freshness does NOT make the dirty verdict unknown, because the
-    dirty verdict does not depend on it.
+    Returns the state and a list of DEGRADED sources. A failure to read index
+    freshness does not make the dirty verdict unknown, because the dirty
+    verdict does not depend on it.
     """
-    unknown: list[dict] = []
+    degraded: list[dict] = []
     entries = parse_porcelain_z(
         query(
             ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
@@ -473,11 +479,11 @@ def dirty_state(
         state["index_stale"] = stale_index_paths(worktree, query=query, stat=stat)
     except GitQueryError as exc:
         state["index_stale"] = []
-        unknown.append({"source": "index-freshness", "error": str(exc)})
+        degraded.append({"source": "index-freshness", "error": str(exc)})
     state["clean"] = not (
         state["modified"] or state["staged"] or state["unmerged"] or state["untracked"]
     )
-    return state, unknown
+    return state, degraded
 
 
 def git_operations_in_progress(
@@ -641,32 +647,34 @@ def last_gate_report(
 
     HISTORY ONLY. `gate.py` writes a summary from its `main`'s `finally`
     block and names the file from the run's end timestamp, so nothing here can
-    say whether a run is in flight. Every caller must label it accordingly.
+    say whether a run is in flight. Every caller must label it accordingly,
+    and a failure to read it is DEGRADED rather than unknown: history that
+    cannot speak about now must not be able to withhold FREE.
     """
-    unknown: list[dict] = []
+    degraded: list[dict] = []
     directory = gate.report_directory(dict(environ), worktree)
     try:
         reports = sorted(
             path for path in directory.glob("*.json") if path.is_file()
         )
     except OSError as exc:
-        unknown.append({"source": "gate-reports", "error": str(exc)})
-        return None, unknown
+        degraded.append({"source": "gate-reports", "error": str(exc)})
+        return None, degraded
     if not reports:
-        return None, unknown
+        return None, degraded
     newest = reports[-1]
     try:
         payload = json.loads(newest.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        unknown.append(
+        degraded.append(
             {"source": "gate-reports", "error": f"{newest.name}: {exc}"}
         )
-        return None, unknown
+        return None, degraded
     if not isinstance(payload, dict):
-        unknown.append(
+        degraded.append(
             {"source": "gate-reports", "error": f"{newest.name}: not an object"}
         )
-        return None, unknown
+        return None, degraded
     return {
         "file": newest.name,
         "mode": payload.get("mode"),
@@ -675,7 +683,7 @@ def last_gate_report(
         "seconds": payload.get("seconds"),
         "ended_at": payload.get("ended_at"),
         "head": (payload.get("git") or {}).get("head"),
-    }, unknown
+    }, degraded
 
 
 def verdict(state: dict) -> tuple[str, list[str]]:
@@ -705,6 +713,12 @@ def verdict(state: dict) -> tuple[str, list[str]]:
     if reasons:
         return VERDICT_BUSY, reasons
     if state.get("unknown"):
+        # Only sources that could have hidden an owner or a modification
+        # withhold FREE. A source that speaks about the past or about index
+        # freshness is recorded in `degraded` instead, because history that
+        # cannot speak about now must not be able to pin the verdict at
+        # UNKNOWN forever: a SIGKILLed gate can leave a truncated report
+        # behind, and nothing would ever clean it up.
         return VERDICT_UNKNOWN, [
             f"{item['source']}: {item['error']}" for item in state["unknown"]
         ]
@@ -732,14 +746,18 @@ def collect(
 ) -> dict:
     """Gather every signal. Writes nothing, anywhere."""
     unknown: list[dict] = []
+    degraded: list[dict] = []
+    probed_path = worktree
     state: dict = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": _iso(now()),
         "worktree": str(worktree),
+        "probed_path": str(probed_path),
         "command": (
             f".venv/bin/python scripts/worktree_status.py --path {worktree}"
         ),
         "git": None,
+        "degraded": degraded,
         "dirty": {
             "modified": [],
             "staged": [],
@@ -756,15 +774,25 @@ def collect(
     }
 
     try:
-        state["git"] = git_facts(worktree, query=query)
+        facts = git_facts(worktree, query=query)
+        state["git"] = facts
+        # Re-anchor to the repository root. Everything below is scoped by path
+        # -- the lease sidecar's worktree, the process matcher, the report
+        # directory, and the index paths, which git reports relative to the
+        # root. Probing `<root>/subdir` without this reports FREE while a gate
+        # runs at the root, which is the exact collision this tool exists to
+        # prevent, so the caller's convenience path is resolved rather than
+        # trusted.
+        worktree = Path(facts["toplevel"])
+        state["worktree"] = str(worktree)
     except GitQueryError as exc:
         unknown.append({"source": "git", "error": str(exc)})
 
     if state["git"] is not None:
         try:
-            dirty, dirty_unknown = dirty_state(worktree, query=query, stat=stat)
+            dirty, dirty_degraded = dirty_state(worktree, query=query, stat=stat)
             state["dirty"] = dirty
-            unknown.extend(dirty_unknown)
+            degraded.extend(dirty_degraded)
         except GitQueryError as exc:
             unknown.append({"source": "git-status", "error": str(exc)})
         state["git_operations"] = git_operations_in_progress(
@@ -781,9 +809,9 @@ def collect(
     state["processes"] = processes
     unknown.extend(process_unknown)
 
-    report, report_unknown = last_gate_report(worktree, environ)
+    report, report_degraded = last_gate_report(worktree, environ)
     state["last_gate_report"] = report
-    unknown.extend(report_unknown)
+    degraded.extend(report_degraded)
 
     name, reasons = verdict(state)
     state["verdict"] = name
@@ -816,6 +844,10 @@ def render_human(state: dict) -> str:
         kind = "linked" if git["linked"] else "main"
         branch = git["branch"] or "detached HEAD"
         lines.append(f"worktree: {state['worktree']}  ({kind}, {branch})")
+        if state.get("probed_path") and state["probed_path"] != state["worktree"]:
+            lines.append(
+                f"  note:   resolved from the probed path {state['probed_path']}"
+            )
         lines.append(f"head:     {git['head']}")
 
     dirty = state["dirty"]
@@ -891,6 +923,8 @@ def render_human(state: dict) -> str:
     if state.get("unknown"):
         for item in state["unknown"]:
             lines.append(f"unknown:  {item['source']}: {item['error']}")
+    for item in state.get("degraded", []):
+        lines.append(f"degraded: {item['source']}: {item['error']} (verdict unaffected)")
 
     lines.append(f"probed:   {state['generated_at']} by {state['command']}")
     return "\n".join(lines)
